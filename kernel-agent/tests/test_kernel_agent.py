@@ -232,7 +232,12 @@ class KernelAgentToolTests(unittest.TestCase):
         # GEAK has a dedicated root so moving it to pod-local storage does not
         # implicitly move TraceLens/OOB via HYPERLOOM_ROOT.
         self.assertIn('GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"', install_text)
-        self.assertIn('OOB_CLI_ROOT="${OOB_CLI_ROOT:-${_open_source_root}/OOB/oob_cli}"', install_text)
+        self.assertIn('OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"', install_text)
+        self.assertIn('run cp -r "$oob_install_src" "${OOB_ROOT}"', install_text)
+        self.assertIn('removing stale OOB install root without pyproject.toml', install_text)
+        self.assertIn('run rm -rf "${OOB_ROOT}"', install_text)
+        self.assertNotIn('${OOB_SRC}/oob_cli/pyproject.toml', install_text)
+        self.assertNotIn('warn "OOB source has no pyproject.toml at $OOB_SRC"\n        return 0', install_text)
         # Override is read but never written into a generated env file.
         self.assertNotIn("export HYPERLOOM_OPEN_SOURCE_ROOT", install_text)
         # Assert the override pattern, not the exact pin, so ref bumps don't break this.
@@ -246,7 +251,7 @@ class KernelAgentToolTests(unittest.TestCase):
             'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_ROOT}"',
             install_text,
         )
-        # GEAK v3.2.0 ships 4 MCP tool folders (metrix-mcp removed; transitive via profiler-mcp).
+        # GEAK v3.2.1 ships 4 MCP tool folders (metrix-mcp removed; transitive via profiler-mcp).
         for _mcp in (
             "rag-mcp",
             "profiler-mcp",
@@ -254,7 +259,7 @@ class KernelAgentToolTests(unittest.TestCase):
             "automated-test-discovery",
         ):
             self.assertIn(_mcp, install_text)
-        # Pin the v3.2.0 install-loop ordering so re-adding metrix-mcp regresses this.
+        # Pin the v3.2.1 install-loop ordering so re-adding metrix-mcp regresses this.
         self.assertIn(
             "for _geak_mcp in rag-mcp profiler-mcp \\\n"
             "                    cross-session-memory-mcp automated-test-discovery; do",

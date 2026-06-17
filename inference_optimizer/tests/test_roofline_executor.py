@@ -172,6 +172,73 @@ async def test_profile_failed_does_not_mutate_shared_state(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_profile_failed_with_trace_continues_to_trace_analyze(tmp_path):
+    """Duplicate stop_profile failures are non-fatal once a trace exists."""
+    state = _state()
+    ctx = _ctx(tmp_path)
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\nRecovered trace\n", encoding="utf-8")
+    ta = _trace_analyze_success()
+    ta["trace_report_path"] = str(md)
+    profile_failed_with_trace = {
+        "status": "failed",
+        "error_class": "subprocess_nonzero",
+        "error": "RuntimeError: Profiling is not in progress. Call /start_profile first.",
+        "main_trace_path": "/tmp/recovered.trace.json.gz",
+        "workspace": "/tmp/workspace",
+    }
+
+    p1, p2 = _patch_subs(profile_failed_with_trace, ta)
+    executor = RooflineExecutor(shared_state=state)
+    with p1, p2:
+        result = await executor(ctx)
+
+    assert result["status"] == "succeeded"
+    assert result["last_profile_trace"] == "/tmp/recovered.trace.json.gz"
+    assert result["profile_recovered"] is True
+    assert result["profile_warning"]["error_class"] == "subprocess_nonzero"
+    assert "Profiling is not in progress" in result["profile_warning"]["error"]
+    assert state.last_profile_trace == "/tmp/recovered.trace.json.gz"
+    assert state.last_profile_status == "succeeded"
+    assert state.last_trace_analyze["analysis_md_path"] == str(md)
+
+
+@pytest.mark.asyncio
+async def test_profile_failed_without_trace_never_calls_trace_analyze(tmp_path):
+    """failed + no trace fields must stay profile_failed, never analyze a trace.
+
+    Contract guard for the recovered-trace path: ProfileExecutor mtime-gates
+    and scopes trace discovery to the current round, so a failed result carries
+    NO stale trace. Here we assert trace_analyze is never reached (it would
+    raise) and the canonical profile_failed shape is returned.
+    """
+    state = _state()
+    state.last_profile_trace = "/old/trace.gz"
+    ctx = _ctx(tmp_path)
+    profile_failed_no_trace = {
+        "status": "failed",
+        "error_class": "no_trace_files",
+        "error": "no .trace.json.gz under /tmp/workspace",
+        "main_trace_path": None,
+        "trace_files": [],
+        "workspace": "/tmp/workspace",
+    }
+    ta_should_not_run = AssertionError("trace_analyze must not run without trace")
+
+    p1, p2 = _patch_subs(profile_failed_no_trace, ta_should_not_run)
+    executor = RooflineExecutor(shared_state=state)
+    with p1, p2:
+        result = await executor(ctx)
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "profile_failed"
+    assert result["phase"] == "profile"
+    assert "profile_recovered" not in result
+    # Failed-without-trace must not promote a (stale) trace into shared state.
+    assert state.last_profile_trace == "/old/trace.gz"
+
+
+@pytest.mark.asyncio
 async def test_profile_no_trace_path(tmp_path):
     """Profile succeeded but result lacks main_trace_path / trace_files."""
     state = _state()

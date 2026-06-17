@@ -46,6 +46,7 @@ def _ns(**overrides) -> argparse.Namespace:
         robustness_backend=None,
         robustness_workload_uid=None,
         robustness_disable_local_probe=None,
+        robustness_disable_server_probe=None,
         robustness_enable_cluster_pod_metrics=None,
         robustness_pod_metrics_categories=None,
     )
@@ -100,6 +101,40 @@ def test_multi_node_bumps_no_levers_floor_to_60_minutes():
     assert multi["progress_no_levers_min_minutes"] == 60.0
     single = _build_robustness_options(_ns(nodes=1))
     assert "progress_no_levers_min_minutes" not in single
+
+
+def test_single_node_disable_server_probe_opt_in():
+    """``--robustness-disable-server-probe`` on single-node turns OFF only the
+    127.0.0.1:8888 probe (auto_probe_inference_server=False) and emits nothing
+    else multi-node (LocalProbe otherwise stays fully active)."""
+    options = _build_robustness_options(
+        _ns(nodes=1, robustness_disable_server_probe=True),
+    )
+    assert options == {"auto_probe_inference_server": False}
+    assert "disable_local_probe" not in options
+    assert "progress_no_levers_min_minutes" not in options
+
+
+def test_single_node_disable_server_probe_absent_by_default():
+    """Without the flag, single-node never touches auto_probe_inference_server."""
+    options = _build_robustness_options(_ns(nodes=1))
+    assert "auto_probe_inference_server" not in options
+
+
+def test_single_node_explicit_keep_server_probe():
+    """``--no-robustness-disable-server-probe`` forces the probe ON explicitly."""
+    options = _build_robustness_options(
+        _ns(nodes=1, robustness_disable_server_probe=False),
+    )
+    assert options["auto_probe_inference_server"] is True
+
+
+def test_multi_node_explicit_keep_server_probe_overrides_default():
+    """Multi-node operator can re-enable the 8888 probe explicitly."""
+    options = _build_robustness_options(
+        _ns(nodes=2, robustness_disable_server_probe=False),
+    )
+    assert options["auto_probe_inference_server"] is True
 
 
 def test_multi_node_respects_explicit_opt_out():

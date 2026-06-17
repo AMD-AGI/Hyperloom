@@ -29,6 +29,7 @@ import yaml
 
 from ...paths import asset_root
 from ._grid_runner import (
+    dedup_vllm_server_args,
     inject_sglang_attention_backend,
     inject_sglang_context_length,
     inject_sglang_moe_runner_backend,
@@ -39,6 +40,7 @@ from ._server_patcher import (
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
 )
+from ...model_config_utils import _load_model_config_dict, _model_is_gemma2
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +64,9 @@ def _visible_gpu_count() -> int:
     tests happy), falls back to ``rocm-smi --showid``. Returns 0 on every
     failure so callers skip the clamp. Override via
     ``$INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT``.
+
+    Returns:
+        The number of visible GPUs, or 0 when none/unknown.
     """
     override = os.environ.get("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "").strip()
     if override:
@@ -107,6 +112,9 @@ def _tracelens_patch_enabled() -> bool:
     Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of vLLM /
     SGLang (keeps today's safe behaviour, no TraceLens-only flags injected).
     Default on because the patches are backward-compatible.
+
+    Returns:
+        True when runtime patching is enabled (default), else False.
     """
     return os.environ.get("HYPERLOOM_ENABLE_PATCH", "1").strip() != "0"
 
@@ -156,7 +164,23 @@ def materialize_config_with_envs(
     ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
     into the framework env; ``extra_envs`` overrides any of the above.
 
-    Returns the materialized YAML path (stable file name across calls).
+    Args:
+        config_path: Path to the source Magpie YAML to render.
+        output_dir: Directory the materialized YAML is written into.
+        extra_server_args: Extra framework server args merged into the env.
+        extra_envs: Overrides applied last over any computed env values.
+        model_path: Model path/id; overrides ``benchmark.model`` when set.
+        gpu_type: GPU type; sets ``runner_type`` and pins the generic script.
+        inferencex_path: Explicit InferenceX checkout to pin into the YAML.
+        benchmark_script: Pre-sanitized benchmark script name to re-pin.
+        out_name: File name for the materialized YAML.
+
+    Returns:
+        The materialized YAML path (stable file name across calls).
+
+    Raises:
+        FrameworkScriptMismatchError: If ``benchmark_script`` targets a
+            different known framework than the run's framework.
     """
     server_args = (extra_server_args or "").strip()
     with config_path.open(encoding="utf-8") as f:
@@ -369,6 +393,31 @@ def materialize_config_with_envs(
             _shape_disc = os.environ.get(
                 "HYPERLOOM_PROFILE_SHAPE_DISCOVERY", "1",
             ).strip().lower() not in {"0", "false", "no", "off"}
+            # Gemma2 + shape-discovery crashes CUDA-graph capture (host
+            # torch.tensor in forward during HIP stream capture). Disable
+            # shape-discovery for Gemma2 so capture/roofline still run.
+            # Escape hatch HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 only skips
+            # the Gemma2 gate (for debugging the TraceLens root-cause fix); it
+            # does NOT override a global HYPERLOOM_PROFILE_SHAPE_DISCOVERY=0.
+            _force_shape_disc = os.environ.get(
+                "HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", "0",
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if _shape_disc and not _force_shape_disc:
+                _model = str(bench.get("model") or "")
+                if _model_is_gemma2(_model):
+                    _shape_disc = False
+                    log.info(
+                        "Gemma2 roofline: disabling shape-discovery to avoid "
+                        "CUDA-graph capture crash (hipErrorStreamCapture"
+                        "Unsupported); CUDA graph + profiling kept. Set "
+                        "HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 to override.",
+                    )
+                    if _load_model_config_dict(_model) is None:
+                        log.warning(
+                            "Gemma2 detected via path heuristic (no readable "
+                            "config.json at %r); shape-discovery skip may be "
+                            "imprecise.", _model,
+                        )
             extra_body["shape_discovery"] = _shape_disc
             extra_body.setdefault("roofline_annotations", True)
             envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
@@ -468,12 +517,48 @@ def materialize_config_with_envs(
         from ._grid_runner import merge_server_args
         _mimo_fw_env = server_args_env_name(bench.get("framework"))
         _mimo_existing = str(envs.get(_mimo_fw_env, "")).strip()
+        _mimo_is_vllm = "vllm" in str(bench.get("framework") or "").lower()
+        # sglang accepts the lowercase backend name `triton`; vLLM's
+        # AttentionBackendEnum (config/attention.py validate_backend_before ->
+        # value.upper()) only knows TRITON_ATTN — plain `triton`/`TRITON` is
+        # rejected as "Unknown attention backend" and the server never boots
+        # -> baseline_failed. Pick the framework-correct spelling.
+        _mimo_attn_backend = "TRITON_ATTN" if _mimo_is_vllm else "triton"
         if "attention-backend" not in _mimo_existing:
             envs[_mimo_fw_env] = (
-                merge_server_args(_mimo_existing, "--attention-backend triton")
+                merge_server_args(
+                    _mimo_existing, f"--attention-backend {_mimo_attn_backend}"
+                )
                 if _mimo_existing
-                else "--attention-backend triton"
+                else f"--attention-backend {_mimo_attn_backend}"
             )
+        # vLLM registers this checkpoint's implementation under the arch name
+        # MiMoV2FlashForCausalLM (model_executor/models/mimo_v2_flash.py), but
+        # the read-only HF config declares architectures=["MiMoV2ForCausalLM"],
+        # which the pod-local vLLM build does not recognize -> ModelConfig
+        # ValidationError "architectures ['MiMoV2ForCausalLM'] are not supported"
+        # at server boot -> baseline_failed (server never comes up). Remap the
+        # arch name via --hf-overrides so every `vllm serve` accepts the
+        # checkpoint untouched. vLLM-only: the sglang/RayJob path uses the dated
+        # image that registers the arch natively. The JSON is kept space-free so
+        # it survives Magpie's unquoted `vllm serve ... $EXTRA_VLLM_ARGS` splice
+        # (a single shell word). Merge (never overwrite) and skip when the
+        # caller already pinned an --hf-overrides so explore variants can
+        # re-test alternative overrides.
+        if "vllm" in str(bench.get("framework") or "").lower():
+            _mimo_hf_existing = str(envs.get(_mimo_fw_env, "")).strip()
+            if (
+                "hf-overrides" not in _mimo_hf_existing
+                and "hf_overrides" not in _mimo_hf_existing
+            ):
+                _mimo_arch_override = (
+                    '--hf-overrides {"architectures":["MiMoV2FlashForCausalLM"]}'
+                )
+                envs[_mimo_fw_env] = (
+                    merge_server_args(_mimo_hf_existing, _mimo_arch_override)
+                    if _mimo_hf_existing
+                    else _mimo_arch_override
+                )
     # sglang server-arg guards, applied at the FINAL framework env (after the
     # server_args + extra_envs merges above) so any operator-pinned flag (via
     # extra_server_args, extra_envs, or the YAML) is honored and never doubled.
@@ -518,6 +603,14 @@ def materialize_config_with_envs(
     resolved_server_args = inject_sglang_moe_runner_backend(
         resolved_server_args, bench.get("framework"), bench.get("model"),
         gpu_type=gpu_type or bench.get("runner_type"),
+    )
+    # 5. vLLM/atom argparse dedup (#520): the YAML EXTRA_VLLM_ARGS base and a
+    #    sweep/kernel variant can each inject --attention-backend, and
+    #    merge_server_args keeps both. vLLM v0.21.0 crashes EngineCoreProc on a
+    #    duplicate. Collapse repeated single-value flags to last-wins (so the
+    #    variant override survives); no-op for sglang.
+    resolved_server_args = dedup_vllm_server_args(
+        resolved_server_args, bench.get("framework"),
     )
     if resolved_server_args:
         envs[framework_env] = resolved_server_args

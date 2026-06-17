@@ -34,10 +34,16 @@ def canonical_fingerprint(
 ) -> str:
     """Return the canonical 16-char fingerprint for a variant.
 
-    Produces the SAME hash as ``_grid_runner.variant_fingerprint`` for the same
-    inputs (lossless legacy → ledger merge); kept separate so call-sites depend
-    on the legacy canonical identity. Normalization: args ``shlex.split`` →
-    sorted tokens; envs ``(str(k), str(v))`` sorted by key; 16-char SHA-1.
+    Single source of truth for the content hash; ``_grid_runner.variant_fingerprint``
+    delegates here for the legacy import path. Normalization: args ``shlex.split``
+    → sorted tokens; envs ``(str(k), str(v))`` sorted by key; 16-char SHA-1.
+
+    Args:
+        extra_args: The variant's extra server args string, or ``None``.
+        extra_envs: The variant's extra env mapping, or ``None``.
+
+    Returns:
+        The canonical 16-char SHA-1 content fingerprint for the variant.
     """
     args_text = str(extra_args or "")
     try:
@@ -70,6 +76,16 @@ def workload_signature(
     cross-workload resume can warn when an old KEEP came from a different
     (CONC, ISL, OSL, precision, TP). Not part of the fingerprint hash today.
     Args default to the corresponding process env vars when omitted.
+
+    Args:
+        conc: Concurrency; defaults to ``$CONC`` when omitted.
+        isl: Input sequence length; defaults to ``$ISL`` when omitted.
+        osl: Output sequence length; defaults to ``$OSL`` when omitted.
+        precision: Precision tag; defaults to ``$PRECISION`` when omitted.
+        tp: Tensor-parallel size; defaults to ``$TP`` when omitted.
+
+    Returns:
+        A stable 12-char SHA-1 digest of the workload contract.
     """
     fields = {
         "conc": str(conc if conc is not None else os.environ.get("CONC", "")).strip(),

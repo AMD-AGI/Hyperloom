@@ -27,16 +27,16 @@ We auto-detect:
 Usage
 -----
     # Single file (writes <input>.v2.json next to it)
-    python scripts/transform_to_session_summary_v2.py session_breakdown.json
+    python ci/transform_to_session_summary_v2.py session_breakdown.json
 
     # Explicit output path
-    python scripts/transform_to_session_summary_v2.py session_breakdown.json -o out.json
+    python ci/transform_to_session_summary_v2.py session_breakdown.json -o out.json
 
     # Batch: every *.json under a directory, output into another directory
-    python scripts/transform_to_session_summary_v2.py --in-dir ./remote_sessions --out-dir ./v2_out
+    python ci/transform_to_session_summary_v2.py --in-dir ./remote_sessions --out-dir ./v2_out
 
     # Stdout (one file only)
-    python scripts/transform_to_session_summary_v2.py session_breakdown.json -o -
+    python ci/transform_to_session_summary_v2.py session_breakdown.json -o -
 
 The output file name in batch mode is `<session_id>.json` when we can read a
 session id, otherwise it mirrors the input file's relative path.
@@ -82,9 +82,17 @@ def safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 # ---------------------------------------------------------------------------
 
 def _patch_baseline(data: Dict) -> List[str]:
-    """Mirror `extra_server_args` / `extra_envs` onto `baseline` (which lacks
-    them) from baseline.invocation. Reads the legacy ``extra_sglang_args`` key
-    but always writes the canonical ``extra_server_args``.
+    """Mirror ``extra_server_args`` / ``extra_envs`` onto ``baseline``.
+
+    Fills the fields from ``baseline.invocation`` when ``baseline`` lacks
+    them. Reads the legacy ``extra_sglang_args`` key but always writes the
+    canonical ``extra_server_args``.
+
+    Args:
+        data: The session summary data dict (mutated in place).
+
+    Returns:
+        Human-readable notes describing each patch applied.
     """
     notes = []
     baseline = data.get("baseline")

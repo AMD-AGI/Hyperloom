@@ -157,6 +157,146 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
     assert '"customApiUrl": "https://gateway.example/api/v1/llm-proxy"' in config_text
 
 
+def test_preflight_preserves_operator_geak_tunnel_url(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """#521: an operator-pinned GEAK/OOB tunnel URL survives preflight.
+
+    GEAK runs in a separate network namespace that cannot reach the gateway
+    directly; the operator points GEAK_BASE_URL at the host-local reverse
+    tunnel. Preflight must NOT clobber it back to the direct gateway URL, while
+    still defaulting the unset LLM_API_BASE to the gateway.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SAFE_API_KEY", "safe-key")
+    monkeypatch.setenv(
+        "OPENAI_BASE_URL",
+        "https://gateway.example/api/v1/llm-proxy/v1",
+    )
+    tunnel = "https://127.0.0.1:18444/api/v1/llm-proxy/v1"
+    monkeypatch.setenv("GEAK_BASE_URL", tunnel)
+    monkeypatch.setenv("OOB_BASE_URL", tunnel)
+    # LLM_API_BASE left unset → should default to the gateway.
+
+    resolved = cli._preflight()
+
+    gateway = resolved[1]
+    # Operator tunnel preserved.
+    assert cli.os.environ["GEAK_BASE_URL"] == tunnel
+    assert cli.os.environ["OOB_BASE_URL"] == tunnel
+    # Unset alias still defaults to the gateway.
+    assert cli.os.environ["LLM_API_BASE"] == gateway
+
+
+def test_preflight_rewrites_stale_proxy_even_when_operator_set(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """A leftover 127.0.0.1:4002 value is force-rewritten, not preserved."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SAFE_API_KEY", "safe-key")
+    monkeypatch.setenv(
+        "OPENAI_BASE_URL",
+        "https://gateway.example/api/v1/llm-proxy/v1",
+    )
+    monkeypatch.setenv(
+        "GEAK_BASE_URL", "http://127.0.0.1:4002/api/v1/llm-proxy/v1",
+    )
+
+    resolved = cli._preflight()
+
+    assert cli.os.environ["GEAK_BASE_URL"] == resolved[1]
+    assert "127.0.0.1:4002" not in cli.os.environ["GEAK_BASE_URL"]
+
+
+def test_is_stale_proxy_url_matches_legacy_only():
+    assert cli._is_stale_proxy_url("http://127.0.0.1:4002/api/v1/llm-proxy/v1")
+    assert not cli._is_stale_proxy_url("https://127.0.0.1:18444/api/v1/llm-proxy/v1")
+    assert not cli._is_stale_proxy_url("https://gateway.example/v1")
+    assert not cli._is_stale_proxy_url("")
+    assert not cli._is_stale_proxy_url(None)
+
+
+# _sync_geak_config_base_url (#521): GEAK reads $GEAK_CONFIG yaml, not env.
+_GEAK_CFG_TEMPLATE = """model:
+  model_class: litellm
+  model_name: openai/claude-opus-4-7
+  api_key: sk-test
+  base_url: {url}
+  model_kwargs:
+    max_tokens: 16384
+run:
+  mode: full
+"""
+
+
+def test_sync_geak_config_rewrites_stale_base_url(tmp_path):
+    """An install-time gateway URL is rewritten to the operator tunnel."""
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text(
+        _GEAK_CFG_TEMPLATE.format(
+            url="https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1",
+        ),
+        encoding="utf-8",
+    )
+    tunnel = "https://127.0.0.1:18444/api/v1/llm-proxy/v1"
+
+    changed = cli._sync_geak_config_base_url(str(cfg), tunnel)
+
+    assert changed is True
+    text = cfg.read_text(encoding="utf-8")
+    assert f"base_url: {tunnel}" in text
+    assert "core42.primus-safe.amd.com" not in text
+    # Other keys untouched.
+    assert "model_class: litellm" in text
+    assert "api_key: sk-test" in text
+
+
+def test_sync_geak_config_noop_when_already_in_sync(tmp_path):
+    cfg = tmp_path / "geak.yaml"
+    url = "https://127.0.0.1:18444/api/v1/llm-proxy/v1"
+    cfg.write_text(_GEAK_CFG_TEMPLATE.format(url=url), encoding="utf-8")
+    before = cfg.read_text(encoding="utf-8")
+
+    assert cli._sync_geak_config_base_url(str(cfg), url) is False
+    assert cfg.read_text(encoding="utf-8") == before
+
+
+def test_sync_geak_config_missing_file_is_safe(tmp_path):
+    missing = tmp_path / "nope.yaml"
+    assert cli._sync_geak_config_base_url(str(missing), "https://x/v1") is False
+
+
+def test_sync_geak_config_no_base_url_line_is_safe(tmp_path):
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text("model:\n  model_class: litellm\n", encoding="utf-8")
+    assert cli._sync_geak_config_base_url(str(cfg), "https://x/v1") is False
+
+
+def test_sync_geak_config_empty_args_are_safe(tmp_path):
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text(_GEAK_CFG_TEMPLATE.format(url="https://x/v1"), encoding="utf-8")
+    assert cli._sync_geak_config_base_url("", "https://y/v1") is False
+    assert cli._sync_geak_config_base_url(str(cfg), "") is False
+
+
+def test_sync_geak_config_preserves_url_with_special_chars(tmp_path):
+    """A replacement URL with regex-special chars must land verbatim."""
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text(
+        _GEAK_CFG_TEMPLATE.format(url="https://old/v1"), encoding="utf-8",
+    )
+    weird = r"https://host/api\g<0>/v1"
+
+    assert cli._sync_geak_config_base_url(str(cfg), weird) is True
+    assert f"base_url: {weird}" in cfg.read_text(encoding="utf-8")
+
+
 # _ensure_python_sdks
 class _RecordingRun:
     """Test double for subprocess.run that records calls and replays a script."""
@@ -314,6 +454,70 @@ def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
     assert "claude-opus-4-5" in err
     assert "claude-opus-4-7" in err
     assert "claude-opus-4-6" in err
+
+
+def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsys):
+    """#340: opt-out lets a non-AMD orchestration model pass when in catalog."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    monkeypatch.setattr(
+        cli, "_probe_llm_catalog",
+        lambda **kw: {"my-org/custom-claude", "gpt-5.4"},
+    )
+    args = _make_args(claude_model="my-org/custom-claude")
+    catalog = cli._validate_and_resolve_claude_model(args, None)
+
+    assert args.claude_model == "my-org/custom-claude"
+    assert "my-org/custom-claude" in catalog
+    out = capsys.readouterr().out
+    assert "confirmed in gateway catalog" in out
+
+
+def test_validate_claude_model_custom_optout_no_amd_fallback(monkeypatch, capsys):
+    """#340: under opt-out a catalog miss errors (no silent opus-4-6 fallback)."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    monkeypatch.setattr(
+        cli, "_probe_llm_catalog",
+        # 4-6 present, but custom id absent → must NOT fall back to 4-6.
+        lambda **kw: {"claude-opus-4-6", "gpt-5.4"},
+    )
+    args = _make_args(claude_model="my-org/custom-claude")
+    with pytest.raises(SystemExit) as exc_info:
+        cli._validate_and_resolve_claude_model(args, None)
+    assert exc_info.value.code == 2
+    assert args.claude_model == "my-org/custom-claude"
+    err = capsys.readouterr().err
+    assert "not present in gateway catalog" in err
+
+
+def test_validate_claude_model_custom_optout_rejects_empty(monkeypatch, capsys):
+    """#340: opt-out with an empty model id aborts before the probe."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+
+    def _no_probe(**kwargs):
+        raise AssertionError("probe should not run on empty-model abort")
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    args = _make_args(claude_model="")
+    with pytest.raises(SystemExit) as exc_info:
+        cli._validate_and_resolve_claude_model(args, None)
+    assert exc_info.value.code == 2
+    assert "is empty" in capsys.readouterr().err
+
+
+def test_validate_claude_model_optout_off_still_hard_gates(monkeypatch, capsys):
+    """Default (opt-out unset): custom model still rejected by static gate."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
+
+    def _no_probe(**kwargs):
+        raise AssertionError("probe should not run on static-gate fail")
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    args = _make_args(claude_model="my-org/custom-claude")
+    with pytest.raises(SystemExit) as exc_info:
+        cli._validate_and_resolve_claude_model(args, None)
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL" in err
 
 
 def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):

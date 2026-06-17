@@ -3,10 +3,10 @@
 """Closed-schema writer for ``reports/trace/llm_calls.jsonl``.
 
 One module owns the canonical field contract for a single LLM call so
-every producer — the orchestration/kernel reactor, dynamic_action and
-specialist sub-agents, the Codex/critic/scorer inference steps, and the
-out-of-process children that write their own ``ext/*.jsonl`` shards — emits
-rows that the collector can join without guessing.
+every producer — the orchestration/kernel reactor, specialist sub-agents,
+the Codex/critic/scorer inference steps, and the out-of-process children
+that write their own ``ext/*.jsonl`` shards — emits rows that the collector
+can join without guessing.
 
 Design contract (FULL_TRACE_DESIGN §3.1, §4):
 
@@ -14,8 +14,7 @@ Design contract (FULL_TRACE_DESIGN §3.1, §4):
   required one — fails fast (:class:`LLMTraceRowError`) so a buggy call
   site cannot silently pollute the audit stream.
 * **Best-effort I/O**: disk failures while appending are logged and
-  swallowed; trace writes must never break the optimization loop. This
-  mirrors :mod:`..dynamic_action_history`.
+  swallowed; trace writes must never break the optimization loop.
 * **Token shape**: the four counters mirror the keys both
   :class:`ClaudeBackend` and :class:`CodexBackend` put on
   ``BackendTurnResult.metadata``. Backends without a prompt-cache split
@@ -147,6 +146,9 @@ class LLMCallRecord:
         Normalizes the identity fields to ``str`` and the four token
         counters via :func:`_coerce_optional_int` so a stray float / numpy
         scalar from an SDK ``usage`` object never lands raw in the ledger.
+
+        Returns:
+            The on-disk LLM-call row dict.
         """
         return {
             "session_id": str(self.session_id),
@@ -191,6 +193,20 @@ class LLMCallRecord:
         orchestration/kernel, A2 dynamic_action, A3 specialist fallback).
         Missing token keys degrade to ``None`` rather than ``0`` so the
         collector can distinguish "unreported" from "reported zero".
+
+        Args:
+            session_id: Cross-process aggregation primary key.
+            component: Producer label; must be in :data:`VALID_COMPONENTS`.
+            metadata: Backend turn metadata carrying model + token counters.
+            role: Reactor role name, when known.
+            task_id: Decision-association task id, when known.
+            dyn_id: Dynamic-action id, when known.
+            tick: Timeline tick, when known.
+            phase: Phase name, when known.
+            turn: Multi-turn sub-agent sequence index, when known.
+
+        Returns:
+            A populated :class:`LLMCallRecord`.
         """
         md = metadata or {}
         return cls(
@@ -231,6 +247,12 @@ def _coerce_optional_int(value: Any) -> int | None:
     Unlike the backends' ``_safe_int`` (which floors to 0), this keeps
     ``None`` distinct from ``0``: a backend that does not report a counter
     must not be indistinguishable from one that genuinely spent zero.
+
+    Args:
+        value: Arbitrary token / index value.
+
+    Returns:
+        The integer value, or ``None`` on a miss or bad type.
     """
     if value is None:
         return None
@@ -241,7 +263,15 @@ def _coerce_optional_int(value: Any) -> int | None:
 
 
 def _validate_row(row: dict[str, Any]) -> None:
-    """Fail fast if ``row`` deviates from the closed schema."""
+    """Fail fast if ``row`` deviates from the closed schema.
+
+    Args:
+        row: A serialized LLM-call row dict.
+
+    Raises:
+        LLMTraceRowError: If the row has extra/missing fields, an empty
+            ``session_id``, or an unknown ``component``.
+    """
     keys = set(row.keys())
     extra = sorted(keys - _ROW_FIELDS)
     missing = sorted(_ROW_FIELDS - keys)
@@ -286,6 +316,15 @@ def append_llm_call(
     :class:`LLMTraceRowError` (schema violation) is *not* swallowed: a
     malformed row is a programming error at the call site, not a runtime
     disk condition, and must surface in tests.
+
+    Args:
+        session_dir: Session directory used to resolve the ledger path.
+        record: The LLM-call record to serialize and append.
+        target: Optional override destination (e.g. an ext shard path);
+            defaults to the session's ``llm_calls.jsonl``.
+
+    Raises:
+        LLMTraceRowError: If the serialized row violates the closed schema.
     """
     row = record.to_row()
     _validate_row(row)
@@ -313,7 +352,11 @@ def append_llm_call(
 
 
 def row_field_set() -> frozenset[str]:
-    """Public accessor for the closed row schema (used by the collector)."""
+    """Public accessor for the closed row schema (used by the collector).
+
+    Returns:
+        The frozenset of canonical row field names.
+    """
     return _ROW_FIELDS
 
 

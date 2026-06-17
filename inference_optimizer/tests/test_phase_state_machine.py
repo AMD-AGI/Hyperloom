@@ -161,20 +161,20 @@ def test_phase_interleave_on_widens_explore_and_kernel():
 
 
 def test_phase_interleave_env_flag_is_picked_up(monkeypatch):
-    """The helpers honour the env flag; interleave is ON by default, only an explicit off value disables it."""
-    # Unset / empty => ON by default.
+    """The helpers honour the env flag; interleave is OFF by default, only an explicit on value enables it."""
+    # Unset / empty => OFF by default.
     monkeypatch.delenv(phase_state.PHASE_INTERLEAVE_ENV, raising=False)
-    assert phase_state.is_phase_interleave_enabled() is True
-    assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
+    assert phase_state.is_phase_interleave_enabled() is False
+    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
         "kernel_opt", "EXPLORE",
     )
-    # Explicit on values stay on.
+    # Explicit on values enable interleave.
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
     assert phase_state.is_phase_interleave_enabled() is True
     assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
         "kernel_opt", "EXPLORE",
     )
-    # Explicit off values are the rollback knob.
+    # Explicit off values stay off.
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "0")
     assert phase_state.is_phase_interleave_enabled() is False
     assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
@@ -376,9 +376,12 @@ def test_policy_gate_phase_strict_denies_kernel_in_prelude():
         shared_state=state,
         strict_phase=True,
     )
+    # ``explore`` is an EXPLORE-phase action; proposing it in PRELUDE is
+    # phase-incompatible. (Kernel-owned names are now denied by the ownership
+    # guard before the phase check, so they no longer exercise this path.)
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "kernel_opt", "predicted_gain_pct": 1.0},
+        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
     )
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_intent("orchestration", intent)
@@ -399,11 +402,11 @@ def test_policy_gate_phase_warn_mode_does_not_raise():
     )
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "kernel_opt", "predicted_gain_pct": 1.0},
+        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
     )
     # Should NOT raise — warn-mode just bumps the audit counter.
     gate.validate_intent("orchestration", intent)
-    assert state.policy_denial_streak.get("kernel_opt:phase_incompatible", 0) >= 1
+    assert state.policy_denial_streak.get("explore:phase_incompatible", 0) >= 1
 
 
 def test_policy_gate_phase_strict_allows_in_phase_action():
@@ -527,7 +530,7 @@ def test_policy_gate_phase_interleave_on_allows_explore_propose_in_kernel(
 
 
 def test_policy_gate_phase_interleave_does_not_widen_other_phases(monkeypatch):
-    """Interleave widening is scoped to EXPLORE/KERNEL; SWEEP still rejects explore/kernel_opt under R1."""
+    """Interleave widening is scoped to EXPLORE/KERNEL; SWEEP still rejects the explore lever under R1."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
     state = SharedState()
     state.record_phase_transition(
@@ -539,9 +542,12 @@ def test_policy_gate_phase_interleave_does_not_widen_other_phases(monkeypatch):
         shared_state=state,
         strict_phase=True,
     )
+    # ``explore`` is not widened into SWEEP by interleave (which only touches
+    # EXPLORE/KERNEL), so R1 still rejects it. (kernel_opt would now be denied
+    # earlier by the kernel-ownership guard, so it no longer probes this path.)
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "kernel_opt", "predicted_gain_pct": 1.0},
+        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
     )
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_intent("orchestration", intent)
@@ -576,7 +582,7 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     row = c.shared_state.phase_history[0]
     assert row["to_phase"] == "PRELUDE"
     assert row["reason"] == "phase_entered"
-    # P3_22 rebalance: EXPLORE/KERNEL carry a larger slice; PRELUDE 3%, SWEEP 12%; sum stays 1.0.
+    # Budget rebalance: EXPLORE/KERNEL carry a larger slice; PRELUDE 3%, SWEEP 12%; sum stays 1.0.
     assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.45
     assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.03
 

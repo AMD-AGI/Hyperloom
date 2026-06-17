@@ -113,7 +113,7 @@ async def test_backend_high_severity_path_passes_gate(tmp_path):
         gate = _gate()
         assert intents
         types_emitted = {i.type.value for i in intents}
-        # Strategic HIGH symptoms emit alert(high) only; escalate/prune/delegate auto-emits dropped in loosen P3_19.
+        # Strategic HIGH symptoms emit alert(high) only; escalate/prune/delegate auto-emits dropped.
         assert "alert" in types_emitted
         assert "escalate_strategy_change" not in types_emitted
         for intent in intents:
@@ -166,7 +166,7 @@ async def test_heartbeat_passes_gate(tmp_path):
 
 @pytest.mark.asyncio
 async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_path):
-    """Full Change A/B round-trip: 2 ticks of leak -> gpu_memory_leaked HIGH -> alert + delegate(recover), each surviving upstream PolicyGate (escalate dropped, loosen P3_19). Feeds SourceData directly since the GpuLeakDetector counter is stateful."""
+    """Full Change A/B round-trip: 2 ticks of leak -> gpu_memory_leaked HIGH -> alert + delegate(recover), each surviving upstream PolicyGate (escalate dropped). Feeds SourceData directly since the GpuLeakDetector counter is stateful."""
     from robustness_agent.config import Config
     from robustness_agent.factory import build_reactor_components
     from robustness_agent.role.prompt_inputs import (

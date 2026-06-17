@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
@@ -35,6 +34,7 @@ from ...compat.payload_aliases import read_extra_server_args
 from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
+from . import _server_lifecycle as _lifecycle
 from ._grid_runner import (
     _kill_stale_servers,
     sanitize_result_dir,
@@ -42,8 +42,6 @@ from ._grid_runner import (
 )
 from ._subprocess_kill import (
     SERVER_DEAD_RETURNCODE,
-    _process_group_alive,
-    _signal_group,
     run_with_session_kill,
     server_log_death_excerpt,
 )
@@ -60,27 +58,6 @@ from .benchmark_result import (
 
 log = logging.getLogger(__name__)
 
-
-# Magpie built-in benchmark scripts that honour ``MAGPIE_RUN_PHASE`` and
-# support the server_lifecycle reuse protocol. Static mirror of Magpie's
-# ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` (duplicated to avoid an import-time
-# Magpie dependency); keep in sync. The cold-start double-run guard only
-# engages for these scripts. ``atom_*`` per AMD-AGI/Magpie#34.
-MAGPIE_BUILTIN_SCRIPTS = frozenset(
-    {
-        "vllm_mi300x.sh",
-        "vllm_mi355x.sh",
-        "sglang_mi300x.sh",
-        "sglang_mi355x.sh",
-        "atom_mi300x.sh",
-        "atom_mi355x.sh",
-    }
-)
-
-# Default HTTP port for the server_lifecycle persistent server when
-# ``benchmark.envs.PORT`` is unset; pinned into the per-round YAML so
-# Magpie's reuse keying and our teardown agree.
-BASELINE_REUSE_PORT_DEFAULT = 8888
 
 # #522: fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
 # should not consume the slow-baseline retry budget.
@@ -104,11 +81,133 @@ _ARG_ERROR_CONTEXT_PATTERNS = (
 )
 
 
+# Strong cuda-graph capture markers: stream-capture incompatibility, reliably
+# recoverable by disabling cuda-graph. Markers live in server.log, not the
+# Magpie stdout/stderr tail.
+_CUDA_GRAPH_STRONG_MARKERS = (
+    "operation not permitted when stream is capturing",
+    "hiperrorstreamcaptureunsupported",
+)
+# Weak marker: bare "Capture cuda graph failed" carries no root cause. Trust it
+# only when the nearby context is neither OOM nor a compile/lowering error,
+# both of which disabling cuda-graph cannot recover.
+_CUDA_GRAPH_WEAK_MARKER = "capture cuda graph failed"
+
+# OOM-rooted capture failures are NOT recoverable by disabling cuda-graph
+# (eager peaks can be higher); compile/lowering errors are not either.
+_OOM_MARKERS = (
+    "out of memory",
+    "outofmemoryerror",
+)
+_NON_RECOVERABLE_MARKERS = (
+    "loweringexception",
+    "assertionerror",
+    "compilationerror",
+)
+# Strong markers are high-confidence stream-capture incompatibilities, so OOM
+# exclusion is scoped tight (±1 line): only an OOM on/adjacent to the marker
+# line demotes it, an unrelated startup OOM warning nearby does not (false
+# negative guard). The bare weak marker is unreliable, so it keeps the
+# whole-blob OOM/compile exclusion to avoid wasting the one-shot retry.
+_STRONG_OOM_CONTEXT_RADIUS = 1
+
+
+def _is_cuda_graph_capture_failure(*texts: str) -> bool:
+    """True when a cuda-graph capture marker is recoverable by disabling graph.
+
+    A strong stream-capture marker arms the fallback unless an OOM sits on its
+    ±1-line context (tight, since the marker itself is high confidence). The
+    bare ``Capture cuda graph failed`` is a weak signal: the WHOLE blob must
+    carry neither OOM nor a compile/lowering error, both unrecoverable by
+    disabling cuda-graph. Strong wins on a line that also matches weak, so the
+    compile/OOM whole-blob gate never demotes a genuine stream-capture failure.
+
+    Args:
+        *texts: Log / stdout / stderr blobs to scan for cuda-graph markers.
+
+    Returns:
+        ``True`` when a cuda-graph capture failure recoverable by disabling
+        cuda-graph capture is detected, else ``False``.
+    """
+    lines = "\n".join(t for t in texts if t).splitlines()
+    lowered = [ln.lower() for ln in lines]
+    blob = "\n".join(lowered)
+    blob_has_oom = any(m in blob for m in _OOM_MARKERS)
+    blob_has_non_recoverable = any(m in blob for m in _NON_RECOVERABLE_MARKERS)
+    saw_pure_weak = False
+    for idx, line in enumerate(lowered):
+        is_strong = any(m in line for m in _CUDA_GRAPH_STRONG_MARKERS)
+        if is_strong:
+            lo = max(0, idx - _STRONG_OOM_CONTEXT_RADIUS)
+            hi = min(len(lowered), idx + _STRONG_OOM_CONTEXT_RADIUS + 1)
+            if not any(m in "\n".join(lowered[lo:hi]) for m in _OOM_MARKERS):
+                return True
+            continue
+        if _CUDA_GRAPH_WEAK_MARKER in line:
+            saw_pure_weak = True
+    if saw_pure_weak and not blob_has_oom and not blob_has_non_recoverable:
+        return True
+    return False
+
+
+# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph
+# (it rejects vLLM's --enforce-eager), vllm uses --enforce-eager.
+_DISABLE_CUDA_GRAPH_FLAGS = {
+    "sglang": "--disable-cuda-graph",
+    "vllm": "--enforce-eager",
+}
+
+
+def _disable_cuda_graph_flag(framework: str) -> str:
+    """Return the framework-correct flag that disables cuda-graph capture.
+
+    Args:
+        framework: Framework name (e.g. ``"sglang"`` or ``"vllm"``); matched
+            case-insensitively.
+
+    Returns:
+        The disable-cuda-graph flag for ``framework``, defaulting to
+        ``--disable-cuda-graph`` for unknown frameworks.
+    """
+    return _DISABLE_CUDA_GRAPH_FLAGS.get(
+        (framework or "").strip().lower(), "--disable-cuda-graph",
+    )
+
+
+def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
+    """Append the framework-correct disable-cuda-graph flag once (idempotent).
+
+    Token-level dedup so a longer flag (e.g. ``--disable-cuda-graph-extra``)
+    is not mistaken for an existing ``--disable-cuda-graph``.
+
+    Args:
+        extra_server_args: Existing extra server args string (may be empty).
+        framework: Framework name used to pick the correct disable flag.
+
+    Returns:
+        ``extra_server_args`` with the framework-correct disable-cuda-graph
+        flag appended once; unchanged when the flag is already present.
+    """
+    flag = _disable_cuda_graph_flag(framework)
+    if flag in (extra_server_args or "").split():
+        return extra_server_args or ""
+    return f"{extra_server_args} {flag}".strip()
+
+
 def _classify_subprocess_error(
     elapsed_sec: float, stderr_tail: str,
 ) -> str:
     """Return 'fast_exit_arg_error' when the subprocess died fast on an arg
-    validation error, else 'subprocess_nonzero'."""
+    validation error, else 'subprocess_nonzero'.
+
+    Args:
+        elapsed_sec: Subprocess wall-clock runtime in seconds.
+        stderr_tail: Tail of the subprocess stderr used for marker matching.
+
+    Returns:
+        ``"fast_exit_arg_error"`` for a fast exit caused by argument
+        validation, else ``"subprocess_nonzero"``.
+    """
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
         return "subprocess_nonzero"
     tail = stderr_tail.lower()
@@ -119,11 +218,6 @@ def _classify_subprocess_error(
     ):
         return "fast_exit_arg_error"
     return "subprocess_nonzero"
-
-# Server-boot budget for the persistent server phase (server_lifecycle).
-# Override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
-BASELINE_SERVER_READY_TIMEOUT_SEC = 2700
-
 
 # Legacy module-level constant kept pointing at the sglang yaml for tests
 # that import it as a fixture path. Runtime sglang/vllm selection goes
@@ -181,6 +275,13 @@ def _path_fstype(path: str) -> str:
     Picks the longest mountpoint that is a prefix of the resolved path.
     Returns ``""`` when it cannot be determined (non-Linux, unreadable
     ``/proc/mounts``, ...), which callers treat as "assume local".
+
+    Args:
+        path: Filesystem path whose backing mount type is resolved.
+
+    Returns:
+        The filesystem type backing ``path``, or ``""`` when it cannot be
+        determined.
     """
     try:
         rp = os.path.realpath(path)
@@ -214,7 +315,14 @@ def _path_fstype(path: str) -> str:
 
 
 def _is_network_fs(path: str) -> bool:
-    """True when ``path`` is backed by a revocable network filesystem."""
+    """True when ``path`` is backed by a revocable network filesystem.
+
+    Args:
+        path: Filesystem path to classify.
+
+    Returns:
+        ``True`` when ``path`` lives on a known network filesystem type.
+    """
     return _path_fstype(path).lower() in _NETWORK_FS_TYPES
 
 
@@ -230,6 +338,13 @@ def _mirror_lock(lock_path: str) -> Iterator[None]:
     wait for the winner and then overwrite a consistent tree. Degrades to no
     exclusion when ``fcntl`` is unavailable (non-Linux) or the lock file
     cannot be opened — the unique staging dir still prevents torn copies.
+
+    Args:
+        lock_path: Path to the lock file used for cross-process exclusion.
+
+    Yields:
+        None: Control is yielded to the caller while the lock is held (or
+        immediately, when no exclusion could be acquired).
     """
     try:
         import fcntl
@@ -280,6 +395,15 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     materialized YAML first) patches the LOCAL mirror in place — the mirror
     therefore ends up carrying the NUM_PROMPTS / PROFILE_EXTRA_BODY patches,
     and Magpie ``cd``-s into the patched local copy.
+
+    Args:
+        src: Source InferenceX checkout path (typically on a network mount).
+        mirror_key: Optional key isolating concurrent tasks that share the
+            same source checkout; folded into the mirror destination name.
+
+    Returns:
+        A local-disk mirror path when relocation succeeds, otherwise ``src``
+        unchanged (relocation disabled, already local, or copy failed).
     """
     src = str(src)
     if os.environ.get(
@@ -367,6 +491,10 @@ def _resolve_aiter_jit_dir_dynamic() -> list[str]:
     pre-built ``.so``); the legacy fixed ``jit/build`` list mis-reports
     every wheel install as COLD. Returns an ordered candidate list
     (``jit`` preferred over ``jit/build``); empty if aiter not found.
+
+    Returns:
+        An ordered list of candidate aiter ``jit/`` directory paths, or an
+        empty list when aiter cannot be located.
     """
     try:
         spec = importlib.util.find_spec("aiter")
@@ -462,6 +590,7 @@ class BaselineExecutor:
         magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
+        shared_state: Any | None = None,
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
@@ -474,6 +603,9 @@ class BaselineExecutor:
                 path; resolved from ``$FRAMEWORK`` at call time when ``None``.
             session_dir (Path | str | None): Canonical session root for
                 per-task workspaces; resolved automatically when ``None``.
+            shared_state: Optional live SharedState object. When provided, the
+                eager-fallback one-shot is consumed in memory before saving so
+                Coordinator cannot later re-persist a stale True value.
             default_timeout_sec (int): Default (warm-start) subprocess timeout.
             cwd (Path | str): Working directory for the Magpie subprocess.
         """
@@ -484,6 +616,7 @@ class BaselineExecutor:
             Path(default_config_path) if default_config_path else None
         )
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
+        self.shared_state = shared_state
         self.default_timeout_sec = default_timeout_sec
         self.cwd = Path(cwd)
 
@@ -500,6 +633,13 @@ class BaselineExecutor:
 
         Order: ``task.params['output_dir']`` → ``ctx.extra['workspace']``
         → ``runs_dir(...)`` (direct-instantiation fallback for tests).
+
+        Args:
+            ctx: Runner context carrying ``task.params`` and ``extra``.
+            action: Action name used when falling back to ``runs_dir(...)``.
+
+        Returns:
+            The resolved per-task workspace directory.
         """
         params = ctx.task.params or {}
         if params.get("output_dir"):
@@ -509,6 +649,64 @@ class BaselineExecutor:
             return Path(extra["workspace"])
         return runs_dir(self.session_dir, action, ctx.task.task_id)
 
+    def _eager_fallback_armed(self, shared_state: Any | None = None) -> bool:
+        """Peek the one-shot eager fallback flag WITHOUT consuming it.
+
+        Used to keep the flag armed when the framework is unknown (cannot pick
+        a safe disable-cuda-graph flag), so the one-shot is not wasted.
+        Best-effort: missing/unreadable state reads as not armed.
+
+        Args:
+            shared_state: Optional live SharedState; falls back to
+                ``self.shared_state`` and then a loaded session state.
+
+        Returns:
+            ``True`` when the one-shot eager-fallback flag is currently armed.
+        """
+        try:
+            state = shared_state or self.shared_state
+            if state is None:
+                from ..shared_state import SharedState
+                state = SharedState.load_or_init(self.session_dir)
+            return bool(getattr(state, "baseline_eager_fallback", False))
+        except Exception:  # noqa: BLE001 — fallback must never break baseline
+            log.debug(
+                "baseline_executor: eager-fallback flag peek failed",
+                exc_info=True,
+            )
+            return False
+
+    def _consume_eager_fallback(self, shared_state: Any | None = None) -> bool:
+        """Consume the one-shot cuda-graph eager fallback flag from SharedState.
+
+        Returns True (and clears the flag) when a prior baseline armed it.
+        Best-effort: missing/unreadable state reads as no fallback.
+
+        Args:
+            shared_state: Optional live SharedState; falls back to
+                ``self.shared_state`` and then a loaded session state.
+
+        Returns:
+            ``True`` when the flag was armed (and is now cleared), else
+            ``False``.
+        """
+        try:
+            state = shared_state or self.shared_state
+            if state is None:
+                from ..shared_state import SharedState
+                state = SharedState.load_or_init(self.session_dir)
+            if not getattr(state, "baseline_eager_fallback", False):
+                return False
+            state.baseline_eager_fallback = False
+            state.save(self.session_dir)
+            return True
+        except Exception:  # noqa: BLE001 — fallback must never break baseline
+            log.debug(
+                "baseline_executor: eager-fallback flag check failed",
+                exc_info=True,
+            )
+            return False
+
     def _resolve_timeout(self, params: dict[str, Any]) -> int:
         """Pick the subprocess timeout for this baseline launch.
 
@@ -516,6 +714,13 @@ class BaselineExecutor:
         when the aiter jit probe reports COLD (env-overridable via
         ``INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC``) → warm default.
         Every path emits one log line for greppability.
+
+        Args:
+            params: Task params; an explicit ``timeout_sec`` overrides the
+                probe-based selection.
+
+        Returns:
+            The subprocess timeout in seconds for this baseline launch.
         """
         explicit = params.get("timeout_sec")
         if explicit:
@@ -566,6 +771,14 @@ class BaselineExecutor:
 
         ProfileExecutor uses this to patch/validate the InferenceX checkout
         named by the rendered YAML. No-op default keeps baseline unchanged.
+
+        Args:
+            config_path: The materialized Magpie YAML config path.
+            output_dir: The per-task workspace directory.
+
+        Returns:
+            An early-return result dict to short-circuit the launch, or
+            ``None`` to proceed with the baseline run.
         """
         return None
 
@@ -600,6 +813,36 @@ class BaselineExecutor:
         )
         if not config_path.exists():
             raise FileNotFoundError(f"baseline config not found: {config_path}")
+
+        # One-shot cuda-graph eager fallback: a prior baseline hit a cuda-graph
+        # capture failure and armed state.baseline_eager_fallback. Inject the
+        # framework-correct disable-cuda-graph flag for this retry and consume
+        # the flag so it fires once. Resolve framework FIRST: an unknown
+        # framework cannot pick a safe flag, so we leave the flag armed (do not
+        # consume) and let a later baseline with a known framework apply it,
+        # instead of burning the one-shot on a no-op retry.
+        effective_extra_server_args = read_extra_server_args(params)
+        extra = getattr(ctx, "extra", None) or {}
+        live_shared_state = extra.get("shared_state") or self.shared_state
+        fw = (
+            str(params.get("framework") or "").strip()
+            or os.environ.get("FRAMEWORK", "").strip()
+        )
+        if not fw and self._eager_fallback_armed(live_shared_state):
+            log.warning(
+                "baseline_executor: eager fallback is armed but framework is "
+                "unknown; leaving the one-shot armed (not consuming) so a "
+                "later baseline with a known framework can apply it",
+            )
+        elif fw and self._consume_eager_fallback(live_shared_state):
+            cg_flag = _disable_cuda_graph_flag(fw)
+            effective_extra_server_args = _with_cuda_graph_disabled(
+                effective_extra_server_args, fw,
+            )
+            log.warning(
+                "baseline_executor: retrying with %s after a prior "
+                "cuda-graph capture failure (framework=%s)", cg_flag, fw,
+            )
 
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -654,7 +897,7 @@ class BaselineExecutor:
             config_path = materialize_config_with_envs(
                 config_path,
                 output_dir,
-                extra_server_args=read_extra_server_args(params),
+                extra_server_args=effective_extra_server_args,
                 extra_envs=dict(params.get("extra_envs") or {}),
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
@@ -697,6 +940,7 @@ class BaselineExecutor:
             "resolved_model": resolved_model,
             "materialized_config_path": materialized_config_path,
             "inferencex_path": effective_inferencex_path,
+            "effective_extra_server_args": effective_extra_server_args,
             "params": params,
             "ctx": ctx,
         }
@@ -823,53 +1067,14 @@ class BaselineExecutor:
     ) -> dict[str, Any]:
         """Inspect the materialized YAML for server_lifecycle eligibility.
 
-        Returns a dict with ``eligible`` (bool), ``framework`` (str),
-        ``port`` (int) and ``reason`` (str, populated when ineligible).
+        Args:
+            materialized_config_path: The materialized Magpie YAML config path.
+
+        Returns:
+            Lifecycle params including eligibility, framework, port and the
+            reason a run is ineligible.
         """
-        info: dict[str, Any] = {
-            "eligible": False,
-            "framework": "",
-            "port": BASELINE_REUSE_PORT_DEFAULT,
-            "reason": "",
-        }
-        try:
-            with Path(materialized_config_path).open(encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-        except (OSError, yaml.YAMLError) as exc:
-            info["reason"] = f"could not read materialized config: {exc}"
-            return info
-        bench = cfg.get("benchmark") or {}
-        info["framework"] = str(bench.get("framework") or "").lower()
-        envs = bench.get("envs") or {}
-        try:
-            info["port"] = int(envs.get("PORT", BASELINE_REUSE_PORT_DEFAULT))
-        except (TypeError, ValueError):
-            info["port"] = BASELINE_REUSE_PORT_DEFAULT
-
-        from ._multi_node_env import is_multi_node
-        if is_multi_node():
-            info["reason"] = "multi-node (server_lifecycle is local-only)"
-            return info
-
-        script_name = Path(str(bench.get("benchmark_script") or "")).name
-        if script_name not in MAGPIE_BUILTIN_SCRIPTS:
-            info["reason"] = (
-                f"benchmark_script={script_name!r} is not a Magpie built-in "
-                f"({sorted(MAGPIE_BUILTIN_SCRIPTS)})"
-            )
-            return info
-
-        profiler_on = bool(
-            (bench.get("profiler") or {})
-            .get("torch_profiler", {})
-            .get("enabled")
-        )
-        if profiler_on:
-            info["reason"] = "torch_profiler enabled (incompatible with reuse)"
-            return info
-
-        info["eligible"] = True
-        return info
+        return _lifecycle.resolve_lifecycle_params(materialized_config_path)
 
     def _write_lifecycle_config(
         self,
@@ -884,24 +1089,24 @@ class BaselineExecutor:
 
         Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches;
         only ``cleanup`` differs (round 1 persists, round 2 tears down).
+
+        Args:
+            base_config_path: Source materialized YAML to clone and patch.
+            dest_dir: Directory the per-round YAML is written into.
+            cleanup: Whether the server should be torn down after the round.
+            pid_dir: Shared pid/metadata directory keying the persistent
+                server across both rounds.
+            port: Server port shared across both rounds.
+
+        Returns:
+            Path to the written per-round lifecycle YAML.
         """
         with Path(base_config_path).open(encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         bench = cfg.setdefault("benchmark", {})
-        ready_timeout = int(os.environ.get(
-            "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC",
-            BASELINE_SERVER_READY_TIMEOUT_SEC,
-        ))
-        bench["server_lifecycle"] = {
-            "enabled": True,
-            "cleanup": bool(cleanup),
-            "force_reuse": False,
-            "pid_dir": str(pid_dir),
-            "server_ready_timeout_s": ready_timeout,
-        }
-        # Pin PORT so Magpie's reuse keying and our teardown agree.
-        envs = bench.setdefault("envs", {})
-        envs["PORT"] = int(port)
+        _lifecycle.inject_lifecycle(
+            bench, cleanup=cleanup, pid_dir=pid_dir, port=port,
+        )
         dest_dir.mkdir(parents=True, exist_ok=True)
         out = Path(dest_dir) / "baseline_lifecycle.yaml"
         with out.open("w", encoding="utf-8") as f:
@@ -910,7 +1115,16 @@ class BaselineExecutor:
 
     @staticmethod
     def _port_healthy(port: int, timeout: float = 3.0) -> bool:
-        """Return True when localhost:{port}/health responds HTTP 200."""
+        """Return True when localhost:{port}/health responds HTTP 200.
+
+        Args:
+            port: Local server port to probe.
+            timeout: Per-request timeout in seconds.
+
+        Returns:
+            ``True`` when the health endpoint responds HTTP 200, else
+            ``False``.
+        """
         import urllib.request
         try:
             r = urllib.request.urlopen(
@@ -931,6 +1145,11 @@ class BaselineExecutor:
         calls _kill_stale_servers() to reap the orphan listener. Stale
         pid/json files are always unlinked (without sending signals to
         potentially-recycled PIDs). Never raises.
+
+        Args:
+            pid_dir: Directory holding the server pid/metadata files.
+            framework: Framework name used to build the server tag.
+            port: Server port used to build the server tag.
         """
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
@@ -973,47 +1192,16 @@ class BaselineExecutor:
         self, *, pid_dir: Path, framework: str, port: int,
     ) -> None:
         """Best-effort teardown of a persistent server left by the
-        double-run rounds. Idempotent and never raises (safe in finally);
-        a no-op on the happy path, real work only on abnormal paths.
-        """
-        base = Path(pid_dir)
-        tag = f"{framework}_{port}"
-        pid_file = base / f"{tag}.pid"
-        meta_file = base / f"{tag}.json"
-        server_pid: int | None = None
-        server_pgid: int | None = None
-        try:
-            if pid_file.exists():
-                parts = pid_file.read_text(encoding="utf-8").split()
-                if parts:
-                    server_pid = int(parts[0])
-                if len(parts) > 1:
-                    server_pgid = int(parts[1])
-        except (OSError, ValueError):
-            # Best-effort: proceed with whatever was parsed; never raise.
-            pass
+        double-run rounds. Idempotent and never raises (safe in finally).
 
-        if server_pid is not None and os.name == "posix":
-            # Server is setsid'd, so pgid == pid unless the pid file gave one.
-            pgid = server_pgid if server_pgid is not None else server_pid
-            _signal_group(pgid, signal.SIGTERM)
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline:
-                if not _process_group_alive(pgid):
-                    break
-                time.sleep(0.1)
-            if _process_group_alive(pgid):
-                _signal_group(pgid, signal.SIGKILL)
-            log.info(
-                "baseline_executor: lifecycle teardown — reaped persistent "
-                "server pgid=%d (%s:%d)", pgid, framework, port,
-            )
-        for p in (pid_file, meta_file):
-            try:
-                p.unlink()
-            except OSError:
-                # Already gone or unremovable; teardown must not raise.
-                pass
+        Args:
+            pid_dir: Directory holding the server pid/metadata files.
+            framework: Framework name used to build the server tag.
+            port: Server port used to build the server tag.
+        """
+        _lifecycle.teardown_lifecycle_server(
+            pid_dir=pid_dir, framework=framework, port=port,
+        )
 
     async def _run_single_benchmark(
         self,
@@ -1025,6 +1213,7 @@ class BaselineExecutor:
         resolved_model: str,
         materialized_config_path: Path,
         inferencex_path: str,
+        effective_extra_server_args: str,
         params: dict[str, Any],
         ctx: RunnerContext,
     ) -> dict[str, Any]:
@@ -1032,6 +1221,28 @@ class BaselineExecutor:
 
         Single-round core extracted from ``__call__`` so the cold-start
         guard can invoke it twice. ``output_dir`` is the per-round slot.
+
+        Args:
+            config_path: The materialized Magpie YAML config for this round.
+            output_dir: The per-round workspace slot.
+            timeout_sec: Subprocess timeout in seconds.
+            override_result_dir: Optional ``$RESULT_DIR`` override for the
+                benchmark wrapper.
+            resolved_model: Resolved model path for the run.
+            materialized_config_path: The canonical materialized YAML, echoed
+                into the result for downstream reuse.
+            inferencex_path: Task-local InferenceX checkout path pinned via
+                ``MAGPIE_INFERENCEX_PATH``.
+            effective_extra_server_args: Extra server args passed to the
+                multi-node restart helper.
+            params: Task params for this launch.
+            ctx: Runner context carrying ``extra`` (e.g. multi-node round
+                state).
+
+        Returns:
+            A result dict: ``status="succeeded"`` with measurements on
+            success, or ``status="failed"`` with an ``error_class`` on
+            failure.
         """
         cmd = [
             self.magpie_python, "-m", "Magpie", "-v", "benchmark",
@@ -1080,7 +1291,7 @@ class BaselineExecutor:
                 # by cli.py), falling back to state.json — call site is
                 # identical between colocated and disaggregated runs.
                 await restart_server_for_round(
-                    extra_server_args=read_extra_server_args(params),
+                    extra_server_args=effective_extra_server_args,
                     framework=os.environ.get("FRAMEWORK") or None,
                     model_path=resolved_model or None,
                     tp=int(os.environ.get("TP") or 0) or None,
@@ -1188,6 +1399,24 @@ class BaselineExecutor:
             "see server.log"
         )
 
+        # Detect cuda-graph capture failures (recoverable by disabling
+        # cuda-graph capture; OOM-rooted ones are excluded).
+        # Markers live in server.log; read a bounded tail for classification.
+        server_log_tail = ""
+        try:
+            slog = output_dir / "server.log"
+            if slog.exists():
+                with open(slog, "rb") as f:
+                    f.seek(0, 2)
+                    sz = f.tell()
+                    f.seek(max(0, sz - 65536))
+                    server_log_tail = f.read().decode("utf-8", "replace")
+        except OSError:
+            server_log_tail = ""
+        cuda_graph_capture_failed = _is_cuda_graph_capture_failure(
+            server_log_tail, proc_stderr or "", proc_stdout or "",
+        )
+
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
         # Always-on artifact harvest: copy wrapper-side leaks hardcoded
@@ -1229,6 +1458,18 @@ class BaselineExecutor:
                     )
             if stderr_log_path:
                 failure_extras["stderr_log_path"] = stderr_log_path
+            # cuda-graph capture failures take priority over server_init_dead:
+            # the marker may co-occur with a server-death marker, but only this
+            # class arms the one-shot disable-cuda-graph retry.
+            if cuda_graph_capture_failed:
+                return {
+                    "status": "failed",
+                    "error_class": "cuda_graph_capture_failed",
+                    "returncode": proc_returncode,
+                    "error": server_init_dead_error if server_init_dead
+                    else (proc_stderr or proc_stdout or "")[-2000:],
+                    **failure_extras,
+                }
             if server_init_dead:
                 return {
                     "status": "failed",
@@ -1239,11 +1480,12 @@ class BaselineExecutor:
                 }
             if proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
+                err_class = _classify_subprocess_error(
+                    subprocess_runtime_sec, tail,
+                )
                 return {
                     "status": "failed",
-                    "error_class": _classify_subprocess_error(
-                        subprocess_runtime_sec, tail,
-                    ),
+                    "error_class": err_class,
                     "returncode": proc_returncode,
                     "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                     "error": tail,
@@ -1278,7 +1520,15 @@ class BaselineExecutor:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
-            if server_init_dead:
+            # cuda-graph capture failure wins over server_init_dead so the
+            # one-shot disable-cuda-graph retry is armed even when both markers
+            # co-occur (see the no_workspace branch above).
+            if cuda_graph_capture_failed:
+                error_class = "cuda_graph_capture_failed"
+                error = server_init_dead_error if server_init_dead else (
+                    (proc_stderr or proc_stdout or "")[-2000:]
+                )
+            elif server_init_dead:
                 error_class = "server_init_dead"
                 error = server_init_dead_error
             elif proc_returncode != 0:

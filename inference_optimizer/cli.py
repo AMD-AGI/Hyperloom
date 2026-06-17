@@ -17,6 +17,7 @@ import re
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -46,6 +47,12 @@ from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
 )
 from .orchestrator.backends import ClaudeBackend
 from .manifest import load_manifest, write_manifest
+from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+    GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
+    _config_architectures,
+    _load_model_config_dict,
+    _model_is_gemma2,
+)
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
 from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS
@@ -124,7 +131,11 @@ class _RetiredFlag(argparse.Action):
 
 
 def _orchestration_rules_fragment_path() -> Path:
-    """Path to the rules-only ``orchestration.md`` fragment consumed by ``prompt_builder``."""
+    """Path to the rules-only ``orchestration.md`` fragment consumed by ``prompt_builder``.
+
+    Returns:
+        Path: The path to the bundled ``orchestration.md`` fragment.
+    """
     return asset_system_prompts_dir() / "orchestration.md"
 
 
@@ -159,17 +170,35 @@ def _build_orchestration_prompt(
     framework: str,
     objective: Objective,
     max_minutes: int,
+    no_explore: bool = False,
+    no_framework: bool = False,
     action_registry: ActionRegistry | None = None,
 ) -> str:
-    """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
+    """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
+
+    Args:
+        no_kernel (bool): When ``True`` the kernel actions are disabled.
+        framework (str): The serving framework name (e.g. ``sglang``).
+        objective (Objective): The run objective summarised into the prompt.
+        max_minutes (int): The wall-clock budget in minutes.
+        no_explore (bool): When ``True`` the EXPLORE phase is disabled.
+        no_framework (bool): When ``True`` the FRAMEWORK_PR phase is disabled.
+        action_registry (ActionRegistry | None): The action registry to use;
+            a fresh loaded registry is built when ``None``.
+
+    Returns:
+        str: The composed Orchestration system prompt.
+    """
     registry = action_registry or ActionRegistry().load()
-    enabled = default_enabled_actions(no_kernel=no_kernel)
+    enabled = default_enabled_actions(no_kernel=no_kernel, no_explore=no_explore)
     kind, value = _objective_summary_for_prompt(objective)
     return build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=enabled,
         framework=framework,
         kernel_enabled=not no_kernel,
+        explore_enabled=not no_explore,
+        framework_phase_enabled=not no_framework,
         objective_kind=kind,
         objective_value=value,
         max_minutes=int(max_minutes),
@@ -225,6 +254,13 @@ def _gpu_runner_type(gpu_type: str) -> str:
 
     MI308X and MI325X share the gfx942 / CDNA3 die with MI300X and reuse
     the same Magpie benchmark scripts (sglang_mi300x.sh / vllm_mi300x.sh).
+
+    Args:
+        gpu_type (str): The resolved real GPU type (e.g. ``mi325x``).
+
+    Returns:
+        str: The Magpie runner label (``mi325x`` / ``mi308x`` collapse to
+            ``mi300x``).
     """
     normalized = str(gpu_type or "").strip().lower()
     if normalized in ("mi325x", "mi308x"):
@@ -252,7 +288,12 @@ _CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
 
 def _resolve_critic_agent_root() -> Path | None:
-    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else sibling ``critic-agent/``), or ``None``."""
+    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else sibling ``critic-agent/``), or ``None``.
+
+    Returns:
+        Path | None: The validated critic-agent root, or ``None`` when no
+            candidate contains ``runtime/cli.py``.
+    """
     override = os.environ.get(_CRITIC_AGENT_ROOT_ENV, "").strip()
     if override:
         p = Path(override).expanduser()
@@ -263,7 +304,15 @@ def _resolve_critic_agent_root() -> Path | None:
 
 
 def _validate_critic_agent_runtime(root: Path) -> None:
-    """Fail fast (SystemExit) if ``python -m runtime.cli --help`` doesn't work."""
+    """Fail fast (SystemExit) if ``python -m runtime.cli --help`` doesn't work.
+
+    Args:
+        root (Path): The critic-agent skill root to validate.
+
+    Raises:
+        SystemExit: With code 2 when the runtime cannot start or exits
+            non-zero.
+    """
     cmd = [sys.executable, "-m", "runtime.cli", "--help"]
     try:
         proc = subprocess.run(
@@ -299,7 +348,12 @@ _ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
 
 
 def _resolve_robustness_agent_root() -> Path | None:
-    """Return robustness-agent skill root (``$ROBUSTNESS_AGENT_ROOT`` else sibling), or ``None``."""
+    """Return robustness-agent skill root (``$ROBUSTNESS_AGENT_ROOT`` else sibling), or ``None``.
+
+    Returns:
+        Path | None: The validated robustness-agent root, or ``None`` when no
+            candidate contains the expected ``runtime/cli.py`` module.
+    """
     override = os.environ.get(_ROBUSTNESS_AGENT_ROOT_ENV, "").strip()
     if override:
         p = Path(override).expanduser()
@@ -362,6 +416,15 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
 
     No auto-tightening is applied; kernel/framework/profile all work on atom. Multi-node TP wiring
     is unimplemented so ``--nodes>=2`` exits 2. Returns the list of auto-disabled flags (always empty).
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``nodes``).
+
+    Returns:
+        list[str]: The auto-disabled flags (always empty).
+
+    Raises:
+        SystemExit: With code 2 when ``--nodes >= 2`` (unsupported on atom).
     """
     auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
@@ -393,6 +456,14 @@ def _resolve_gpu_type(
     Probe always wins on disagreement (wrong --gpu-type corrupts baseline+KB rows); user value kept
     only on probe failure. Returns ``(effective_gpu_type, warnings)``; warnings go to stderr to keep
     the ``HYPERLOOM_LAUNCH`` stdout sentinel clean.
+
+    Args:
+        user_specified (str): The user-supplied ``--gpu-type`` hint.
+        probed (str): The hardware-probed GPU type.
+
+    Returns:
+        tuple[str, list[str]]: ``(effective_gpu_type, warnings)`` — the probe
+            wins on disagreement; ``warnings`` carries any stderr notes.
     """
     warnings: list[str] = []
     if probed and user_specified and probed != user_specified:
@@ -420,6 +491,21 @@ def _emit_launch_info(
     """Print the machine-readable HYPERLOOM_LAUNCH stdout line; optionally JSON-dump to ``launch_info_file``.
 
     Returns the launch_info dict for callers/tests.
+
+    Args:
+        pid (int): The launched process id.
+        session_dir (Path): The session root directory.
+        session_id (str): The session identifier.
+        run_log (str): The run-log path string.
+        gpu_type (str): The resolved GPU type.
+        framework (str): The serving framework name.
+        model (str): The model name / path.
+        launch_info_file (str | None): Optional path to JSON-dump the launch
+            info; skipped when ``None``.
+
+    Returns:
+        dict[str, Any]: The launch-info dict that was printed (and optionally
+            written).
     """
     launch_info: dict[str, Any] = {
         "event": "launch",
@@ -453,6 +539,16 @@ def _clean_stale_aiter_locks(
     Only deletes locks with mtime older than ``stale_minutes`` (default 5; above cold-start MoE build
     time, below the hang-suspicion cliff). Build dir resolution: caller arg → $INFERENCE_OPTIMIZER_AITER_JIT_DIR
     → dynamic <aiter>/jit/build → legacy fallbacks. Returns a stats dict; never raises (errors counted).
+
+    Args:
+        aiter_jit_dir (Path | None): Explicit JIT build dir; when ``None`` it
+            is resolved from env / installed aiter / legacy fallbacks.
+        stale_minutes (int): Minimum lock age in minutes before deletion
+            (default 5).
+
+    Returns:
+        dict[str, Any]: A stats dict (``dir``, ``scanned``, ``deleted``,
+            ``skipped_fresh``, ``errors``).
     """
     stats: dict[str, Any] = {
         "dir": None,
@@ -530,7 +626,11 @@ def _clean_stale_aiter_locks(
 
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort)."""
+    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort).
+
+    Returns:
+        str | None: The detected GPU type, or ``None`` when undetectable.
+    """
     import subprocess
     try:
         out = subprocess.run(
@@ -565,6 +665,14 @@ def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
     callers gate AMD-specific behaviour on real hardware while still honouring
     a launcher/CI-supplied ``gpu_type`` even if ``rocm-smi``/torch probing is
     unavailable at the call site.
+
+    Args:
+        explicit (str | None): An explicit GPU-type hint that takes priority
+            over the ``GPU_TYPE`` env and autodetect.
+
+    Returns:
+        str | None: The resolved AMD runner type, or ``None`` when not on a
+            known AMD GPU.
     """
     for cand in (explicit, os.environ.get("GPU_TYPE")):
         norm = str(cand or "").strip().lower()
@@ -587,6 +695,19 @@ def _resume_safe_flag(
 
     ``invert=True`` handles the ``--no-*`` pattern (args.no_X True == disable; manifest stores positive form).
     Lets robustness_monitor.sh resume preserve original intent without re-passing the flag.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace.
+        arg_name (str): The attribute name to read from ``args``.
+        manifest (dict | None): The resume manifest, or ``None``.
+        manifest_key (str): The manifest key holding the persisted value.
+        default (bool): The fallback value when neither arg nor manifest
+            supplies one.
+        invert (bool): When ``True`` apply the ``--no-*`` inversion to the
+            explicit arg.
+
+    Returns:
+        bool: The resolved boolean flag value.
     """
     raw_arg = getattr(args, arg_name, None)
     if isinstance(raw_arg, bool) and raw_arg:
@@ -606,7 +727,18 @@ def _resume_safe_numeric(
     *,
     default: float,
 ) -> float:
-    """Float-valued analog of :func:`_resume_safe_flag`: explicit non-default arg → manifest → default."""
+    """Float-valued analog of :func:`_resume_safe_flag`: explicit non-default arg → manifest → default.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace.
+        arg_name (str): The attribute name to read from ``args``.
+        manifest (dict | None): The resume manifest, or ``None``.
+        manifest_key (str): The manifest key holding the persisted value.
+        default (float): The fallback value when neither source supplies one.
+
+    Returns:
+        float: The resolved numeric value.
+    """
     raw_arg = getattr(args, arg_name, None)
     if raw_arg is not None:
         try:
@@ -628,6 +760,15 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
 
     Soft-degrades to ``{}`` (never blocks launch) on missing/unreadable/invalid file. Stale-file guard:
     require ``data["model_name"]`` basename to match launched ``--model`` basename, else WARN + ``{}``.
+
+    Args:
+        workspace_root (Path): Directory containing ``model_arch.json``.
+        model_name (str): The launched model name, used for the stale-file
+            freshness check.
+
+    Returns:
+        dict: The advisory architecture profile, or ``{}`` when missing,
+            unreadable, invalid, or stale.
     """
     arch_path = workspace_root / "model_arch.json"
     try:
@@ -665,45 +806,17 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
     return data
 
 
-def _load_model_config_dict(model_path: str) -> dict | None:
-    """Best-effort parse of ``<model_path>/config.json`` into a dict; returns ``None`` on any failure."""
-    if not model_path:
-        return None
-    cfg_path = Path(model_path) / "config.json"
-    try:
-        raw = cfg_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        logging.warning("model_config_unreadable: %s (%s)", cfg_path, exc)
-        return None
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
-        logging.warning("model_config_invalid_json: %s (%s)", cfg_path, exc)
-        return None
-    if not isinstance(data, dict):
-        logging.warning(
-            "model_config_not_a_dict: %s (got %s)", cfg_path, type(data).__name__,
-        )
-        return None
-    return data
-
-
-def _config_architectures(config: dict) -> list[str]:
-    """Normalise ``config["architectures"]`` to a list of non-empty strings (scalar wrapped; absent -> [])."""
-    arches_raw = config.get("architectures")
-    if isinstance(arches_raw, list):
-        return [str(a).strip() for a in arches_raw if str(a or "").strip()]
-    if isinstance(arches_raw, str) and arches_raw.strip():
-        return [arches_raw.strip()]
-    return []
-
-
 def _load_model_config_tags(model_path: str) -> dict:
     """Best-effort loader for KB architecture-identity tags (``architectures`` + ``model_type``) from config.json.
 
     Soft-degrades to ``{}`` (never blocks launch); normalised fields are omitted when empty so callers can .get().
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        dict: Architecture-identity tags (``architectures`` / ``model_type``);
+            empty fields are omitted, ``{}`` when the config is unreadable.
     """
     data = _load_model_config_dict(model_path)
     if data is None:
@@ -819,12 +932,26 @@ _VERDICT_VISION_ONLY = "vision_only"
 _TEXT_COERCIBLE_MODEL_TYPES = frozenset({
     "kimi_k25",
     "qwen3_5_moe",
+    # Gemma-4 ships a vision_config (Gemma4ForConditionalGeneration) but its
+    # text decoder (text_config / gemma4_text) is a standard dense causal LM
+    # that vLLM serves text-only (both Gemma4ForCausalLM and
+    # Gemma4ForConditionalGeneration are registered). Text benchmarks never
+    # exercise the vision tower, so route to the degraded text path.
+    "gemma4",
 })
 
 
 def _arch_is_supported_text_generation(arch: str) -> bool:
     """True when an architecture class name denotes a supported text-generation
-    (decoder-only causal LM) model."""
+    (decoder-only causal LM) model.
+
+    Args:
+        arch (str): The architecture class name to test.
+
+    Returns:
+        bool: ``True`` when ``arch`` contains a supported text-generation
+            marker.
+    """
     a = (arch or "").strip()
     if not a:
         return False
@@ -839,6 +966,15 @@ def _config_declares_text_decoder(config: dict, architectures: list[str], model_
     described under ``text_config`` / ``language_config``. Treat those nested
     text blocks as capability evidence instead of requiring a per-family
     allowlist entry.
+
+    Args:
+        config (dict): The decoded model ``config.json`` mapping.
+        architectures (list[str]): The top-level architecture class names.
+        model_type_l (str): The lowercased top-level ``model_type``.
+
+    Returns:
+        bool: ``True`` when the config positively identifies a usable text
+            decoder.
     """
     if model_type_l in _TEXT_COERCIBLE_MODEL_TYPES:
         return True
@@ -890,6 +1026,15 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
       (e.g. Kimi-K2.6 / Qwen3.6 MoE, or a generic ``ForCausalLM`` arch that
       merely carries a ``vision_config``). Caller proceeds on the text path with
       a degraded-mode warning unless ``--allow-mm-text-fallback`` is off.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        dict | None: ``None`` for a plain text-generation model (or an
+            unreadable config), otherwise a dict with ``architecture``,
+            ``model_type``, ``signal``, and ``verdict``
+            (``vision_only`` / ``text_coercible``).
     """
     config = _load_model_config_dict(model_path)
     if config is None:
@@ -1004,7 +1149,15 @@ _MAX_MODEL_LEN_HEADROOM = 4096
 
 
 def _load_model_max_position_embeddings(model_path: str) -> int | None:
-    """Best-effort read of max sequence length from config.json (first positive among known keys, incl. nested ``text_config``), or None."""
+    """Best-effort read of max sequence length from config.json (first positive among known keys, incl. nested ``text_config``), or None.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        int | None: The first positive max-sequence-length value found, or
+            ``None`` when unavailable.
+    """
     if not model_path:
         return None
     cfg_path = Path(model_path) / "config.json"
@@ -1035,6 +1188,12 @@ def _model_has_dual_chunk_attention(model_path: str) -> bool:
     default aiter attention backend and demands ``dual_chunk_flash_attn``.
     Checks the top level and a nested ``text_config``. Soft-degrades to
     False on any missing / unreadable / invalid config.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        bool: ``True`` when a ``dual_chunk_attention_config`` block is present.
     """
     data = _load_model_config_dict(model_path)
     if data is None:
@@ -1059,6 +1218,12 @@ def _model_is_moe(model_path: str) -> bool:
     callers use this to switch to a ROCm-capable MoE runner. Checks the top
     level and a nested ``text_config``. Soft-degrades to False on any missing
     / unreadable / invalid config.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        bool: ``True`` when the config carries a Mixture-of-Experts signal.
     """
     data = _load_model_config_dict(model_path)
     if data is None:
@@ -1085,7 +1250,12 @@ def _model_is_moe(model_path: str) -> bool:
 
 
 def _context_headroom_tokens() -> int:
-    """Resolve the context headroom (tokens); env override, else default."""
+    """Resolve the context headroom (tokens); env override, else default.
+
+    Returns:
+        int: The configured context headroom in tokens (falls back to the
+            default for unset / invalid / negative env values).
+    """
     raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()
     if not raw:
         return _CONTEXT_HEADROOM_DEFAULT
@@ -1097,7 +1267,17 @@ def _context_headroom_tokens() -> int:
 
 
 def _resolve_max_model_len(isl: int, osl: int, model_path: str) -> int:
-    """Resolve ``MAX_MODEL_LEN`` = ISL+OSL+headroom, clamped to ``max_position_embeddings`` (never stretch context)."""
+    """Resolve ``MAX_MODEL_LEN`` = ISL+OSL+headroom, clamped to ``max_position_embeddings`` (never stretch context).
+
+    Args:
+        isl (int): Input sequence length.
+        osl (int): Output sequence length.
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        int: The resolved ``MAX_MODEL_LEN``, clamped to the model's native
+            max-position window when known.
+    """
     desired = int(isl) + int(osl) + _MAX_MODEL_LEN_HEADROOM
     maxpos = _load_model_max_position_embeddings(model_path)
     if maxpos:
@@ -1110,6 +1290,15 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
 
     Persists a stop reason and returns True (caller should exit) when the workload does NOT fit; False
     when it fits or the model's max length is unknown.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``isl`` / ``osl`` / ``model``).
+        session_dir (Path): The session root directory for the stop report.
+
+    Returns:
+        bool: ``True`` when the workload does not fit (caller should exit),
+            ``False`` when it fits or the max length is unknown.
     """
     isl = int(getattr(args, "isl", 0) or 0)
     osl = int(getattr(args, "osl", 0) or 0)
@@ -1183,14 +1372,43 @@ _ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
 
 # Architectures whose runtime path is not adapted to AMD/ROCm yet.
 # Matched case-insensitively against model_type and architectures.
-_AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32"})
-_AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
+# minimax_m1: its lightning-attention kernel needs 128KB LDS (Required: 131072)
+# but MI300X's per-CU shared-memory limit is 64KB → "out of resource: shared
+# memory" → engine core init failed. Confirmed from MiniMax-M1-80k server.log.
+_AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32", "minimax_m1"})
+_AMD_UNSUPPORTED_ARCHITECTURES = frozenset({
+    "deepseekv32forcausallm", "minimaxm1forcausallm",
+})
 
 # model_type values that ship a custom AutoConfig (auto_map) but aren't
 # registered in sglang/vLLM's config mapping. sglang falls back to
 # PreTrainedConfig (base class), which lacks max_position_embeddings etc.,
 # causing AttributeError deep in engine init.
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
+
+# Architectures Transformers/sglang's ModelConfig does not recognize at all
+# (hardware-agnostic). The pydantic ModelConfig validation raises
+# "model type `X` but Transformers does not recognize this architecture"
+# → ValidationError in engine init regardless of GPU vendor. Matched
+# case-insensitively against model_type and architectures.
+# glm4_moe_lite: confirmed from zai-org-GLM-4.7-Flash server.log.
+# mimo_v2_flash: confirmed from XiaomiMiMo-MiMo-V2-Flash server.log ("model of
+# type mimo_v2_flash to instantiate a model of type ." + Unknown attention
+# backend TRITON) — the unrecognized arch leaves an empty model type.
+# deepseek_v4: confirmed from DeepSeek-V4-Flash server.log ModelConfig
+# validation failure.
+_UNRECOGNIZED_MODEL_TYPES = frozenset({
+    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash",
+})
+_UNRECOGNIZED_ARCHITECTURES = frozenset({
+    "deepseekv4forcausallm", "glm4moeliteforcausallm",
+    "mimov2flashforcausallm",
+})
+# ministral3 only fails inside a Mistral3 multimodal wrapper (Surpem-Supertron2
+# server.log: vLLM registry raises KeyError('ministral3') for text_config.
+# model_type). A bare top-level ministral3 is left to the framework to judge, so
+# this is checked only against the nested text_config scope.
+_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({"ministral3"})
 
 # Phi-3 su/longrope rope_scaling: Phi3Config._rope_scaling_validation() requires
 # rope_scaling to be a dict of EXACTLY 3 keys (type/short_factor/long_factor).
@@ -1203,8 +1421,8 @@ _PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
 # Gemma2 missing hidden_act: sglang's gemma2 runtime reads config.hidden_act
 # unconditionally. Some checkpoints ship only hidden_activation (the HF field
 # name), so config.hidden_act is absent and the model crashes with
-# AttributeError in engine init. Hardware-agnostic.
-_GEMMA2_ARCHITECTURES = frozenset({"gemma2forcausallm"})
+# AttributeError in engine init. Hardware-agnostic. ``_GEMMA2_ARCHITECTURES`` is
+# imported from model_config_utils (single source of truth) at module top.
 
 # Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
 # use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
@@ -1220,6 +1438,14 @@ def _detect_amd_unsupported_quant(model_path: str) -> str | None:
     Reads both ``config.json:quantization_config`` (standard HF) and the
     separate ``hf_quant_config.json`` (NVIDIA ModelOpt). Returns None when the
     format is ROCm-runnable or absent.
+
+    Args:
+        model_path (str): The local model directory containing the quant
+            config files.
+
+    Returns:
+        str | None: A human-readable reason when the quant format is
+            unsupported on ROCm, else ``None``.
     """
     if not model_path:
         return None
@@ -1269,6 +1495,13 @@ def _detect_phi3_rope_scaling_incompatible(data: dict) -> str | None:
     dict, but transformers folds the top-level rope_theta into rope_scaling at
     load, yielding 4 keys and a ValueError. This is hardware-agnostic and the
     su/longrope type triggers it; yarn (the non-longrope path) is left alone.
+
+    Args:
+        data (dict): The decoded model ``config.json`` mapping.
+
+    Returns:
+        str | None: A human-readable reason when the Phi-3 rope_scaling config
+            would crash validation, else ``None``.
     """
     model_type = str(data.get("model_type") or "").strip().lower()
     arches = {a.lower() for a in _config_architectures(data)}
@@ -1301,6 +1534,13 @@ def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
 
     sglang's gemma2 runtime reads config.hidden_act unconditionally; configs
     that only ship hidden_activation crash with AttributeError in engine init.
+
+    Args:
+        data (dict): The decoded model ``config.json`` mapping.
+
+    Returns:
+        str | None: A human-readable reason when a Gemma2 config omits
+            ``hidden_act``, else ``None``.
     """
     model_type = str(data.get("model_type") or "").strip().lower()
     arches = {a.lower() for a in _config_architectures(data)}
@@ -1317,6 +1557,177 @@ def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
         "hidden_activation may be present); sglang's gemma2 runtime reads "
         "config.hidden_act unconditionally and crashes with AttributeError "
         "in engine init."
+    )
+
+
+# Local tokenizer artifacts sglang/HF need to build a real tokenizer. A
+# checkpoint shipping only weights + config (no tokenizer) loads a degraded
+# fallback whose warmup encodes an empty prompt → empty (M=0) batch → aiter
+# rotary_embedding SIGFPE on MI300X. Confirmed by repro: adding the official
+# Qwen2.5 tokenizer to such a model removes the M:0 crash entirely.
+_TOKENIZER_ARTIFACT_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "tokenizer.model",
+    "vocab.json",
+    "merges.txt",
+    "spiece.model",
+)
+
+
+def _detect_unrecognized_architecture(data: dict) -> str | None:
+    """Return a reason when the architecture is unknown to Transformers/sglang.
+
+    Hardware-agnostic: the ModelConfig pydantic validation rejects the unknown
+    model_type with a ValidationError in engine init on any GPU vendor.
+
+    Args:
+        data (dict): The decoded model ``config.json`` mapping.
+
+    Returns:
+        str | None: A human-readable reason when the architecture is
+            unrecognized by Transformers/sglang/vLLM, else ``None``.
+    """
+    scopes = [(data, False)]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        scopes.append((nested, True))
+    for scope, is_nested in scopes:
+        model_type = str(scope.get("model_type") or "").strip().lower()
+        arches = {a.lower() for a in _config_architectures(scope)}
+        unrecognized_types = _UNRECOGNIZED_MODEL_TYPES
+        if is_nested:
+            unrecognized_types = (
+                _UNRECOGNIZED_MODEL_TYPES | _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES
+            )
+        if (
+            model_type in unrecognized_types
+            or arches & _UNRECOGNIZED_ARCHITECTURES
+        ):
+            label = model_type or (next(iter(arches), "") if arches else "?")
+            return (
+                f"model type '{label}' is not recognized by Transformers/"
+                f"sglang/vLLM's ModelConfig or model registry; engine init "
+                f"raises a validation/registry error. Needs a framework "
+                f"upgrade or a registered architecture mapping."
+            )
+    return None
+
+
+_VOCAB_WEIGHT_NAMES = (
+    "embed_tokens.weight",
+    "wte.weight",
+    "word_embeddings.weight",
+    "lm_head.weight",
+)
+_SAFETENSORS_HEADER_LIMIT = 64 * 1024 * 1024
+
+
+def _read_safetensors_header(path: Path) -> dict | None:
+    """Read only the safetensors JSON header; never materialize tensor data.
+
+    Args:
+        path (Path): The ``*.safetensors`` shard to inspect.
+
+    Returns:
+        dict | None: The parsed JSON header, or ``None`` when it cannot be
+            read / parsed within the header size limit.
+    """
+    try:
+        with path.open("rb") as f:
+            raw_len = f.read(8)
+            if len(raw_len) != 8:
+                return None
+            header_len = struct.unpack("<Q", raw_len)[0]
+            if header_len <= 0 or header_len > _SAFETENSORS_HEADER_LIMIT:
+                return None
+            header = json.loads(f.read(header_len))
+    except (OSError, json.JSONDecodeError, ValueError, struct.error):
+        return None
+    return header if isinstance(header, dict) else None
+
+
+def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | None:
+    """Return a reason when config vocab_size disagrees with model weights.
+
+    Best-effort and safetensors-only: reads just the JSON header (never tensor
+    data) of ``*.safetensors`` shards. Legacy ``*.bin``/``pytorch_model.bin``
+    checkpoints are not inspected; truncated/corrupt headers are skipped
+    silently (return None) and left to the downstream loader.
+
+    Args:
+        model_path (str): The local model directory holding the safetensors
+            shards.
+        data (dict): The decoded model ``config.json`` mapping (supplies
+            ``vocab_size``).
+
+    Returns:
+        str | None: A human-readable reason when a vocab dimension disagrees
+            with ``config.json``, else ``None``.
+    """
+    expected = data.get("vocab_size")
+    nested = data.get("text_config")
+    if not isinstance(expected, int) and isinstance(nested, dict):
+        expected = nested.get("vocab_size")
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected <= 0:
+        return None
+
+    mdir = Path(model_path)
+    for st_path in sorted(mdir.glob("*.safetensors")):
+        header = _read_safetensors_header(st_path)
+        if not header:
+            continue
+        for name, meta in header.items():
+            if name == "__metadata__" or not isinstance(meta, dict):
+                continue
+            if not any(name.endswith(suffix) for suffix in _VOCAB_WEIGHT_NAMES):
+                continue
+            shape = meta.get("shape")
+            if not (
+                isinstance(shape, list)
+                and shape
+                and isinstance(shape[0], int)
+                and not isinstance(shape[0], bool)
+            ):
+                continue
+            actual = shape[0]
+            if actual != expected:
+                return (
+                    f"config.json vocab_size={expected} but {st_path.name}:"
+                    f"{name} has vocab dimension {actual}; sglang asserts "
+                    f"loaded_weight.shape[output_dim] matches org_vocab_size "
+                    f"during weight loading."
+                )
+    return None
+
+
+def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
+    """Return a reason when a local checkpoint ships no tokenizer artifacts.
+
+    Conservative: only fires when NONE of the known tokenizer files exist AND
+    the config carries no custom AutoTokenizer (auto_map) that could supply one.
+
+    Args:
+        model_path (str): The local model directory to inspect.
+        data (dict): The decoded model ``config.json`` mapping (checked for a
+            custom ``auto_map`` AutoTokenizer).
+
+    Returns:
+        str | None: A human-readable reason when no tokenizer artifacts are
+            present, else ``None``.
+    """
+    auto_map = data.get("auto_map")
+    if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
+        return None
+    mdir = Path(model_path)
+    if any((mdir / f).is_file() for f in _TOKENIZER_ARTIFACT_FILES):
+        return None
+    return (
+        "model directory ships weights + config but no tokenizer artifacts "
+        f"({', '.join(_TOKENIZER_ARTIFACT_FILES)}); sglang loads a degraded "
+        "fallback tokenizer whose warmup encodes an empty prompt, producing an "
+        "empty (M=0) batch that crashes the aiter rotary_embedding kernel with "
+        "SIGFPE on MI300X (Gensyn-Swarm fine-tune class)."
     )
 
 
@@ -1338,6 +1749,15 @@ def _detect_incompatible_model_config(
 
     A fully absent ``config.json`` is NOT blocked (kept soft-degrade): the
     upstream submission filter + downstream loader still apply.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+        gpu_type (str | None): Optional GPU type; AMD-only checks fire when it
+            resolves to a known AMD runner.
+
+    Returns:
+        str | None: A human-readable reason when a statically-knowable config
+            incompatibility is detected, else ``None``.
     """
     if not model_path:
         return None
@@ -1400,6 +1820,19 @@ def _detect_incompatible_model_config(
     gemma2_reason = _detect_gemma2_missing_hidden_act(data)
     if gemma2_reason is not None:
         return gemma2_reason
+    # Unrecognized architecture (e.g. glm4_moe_lite): hardware-agnostic
+    # ModelConfig ValidationError in engine init.
+    unrecognized_reason = _detect_unrecognized_architecture(data)
+    if unrecognized_reason is not None:
+        return unrecognized_reason
+    vocab_shape_reason = _detect_vocab_weight_shape_mismatch(model_path, data)
+    if vocab_shape_reason is not None:
+        return vocab_shape_reason
+    # Missing tokenizer artifacts: hardware-agnostic; the degraded fallback
+    # tokenizer's empty-prompt warmup triggers an aiter M=0 SIGFPE.
+    tokenizer_reason = _detect_missing_tokenizer_files(model_path, data)
+    if tokenizer_reason is not None:
+        return tokenizer_reason
     # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
     # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
     auto_map = data.get("auto_map")
@@ -1439,6 +1872,15 @@ def _preflight_model_config_compat(
     reason instead of booting a server that dies cryptically in engine init.
 
     Returns True when incompatible (caller should exit); False otherwise.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``model``
+            and ``gpu_type``).
+        session_dir (Path): The session root directory for the stop report.
+
+    Returns:
+        bool: ``True`` when the config is incompatible (caller should exit),
+            ``False`` otherwise.
     """
     model = str(getattr(args, "model", "") or "")
     detail = _detect_incompatible_model_config(
@@ -1505,6 +1947,16 @@ def _preflight_unsupported_model_arch(
       to fail-fast.
     * ``vision_only`` (true VLM / unclassifiable) → persists
       ``stop_reason=unsupported_model_arch`` and returns True (caller exits).
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``model``
+            and ``allow_mm_text_fallback``).
+        session_dir (Path): The session root directory for any stop report /
+            degraded-mode marker.
+
+    Returns:
+        bool: ``True`` when the model is vision-only (caller should exit),
+            ``False`` for plain text or coercible-with-fallback models.
     """
     model = str(getattr(args, "model", "") or "")
     hit = _detect_unsupported_model(model)
@@ -1687,6 +2139,13 @@ def _seed_shared_state(
 
         Ladder: explicit CLI/$FRAMEWORK_VERSION → auto-detect package __version__ → "" (canonical_id
         substitutes unknown_version). Auto-detect runs only when both CLI and env are empty.
+
+        Args:
+            args_in (Any): The parsed CLI namespace (reads ``framework_version``
+                and ``framework``).
+
+        Returns:
+            str: The resolved framework version, or ``""`` when unknown.
         """
         explicit = (
             (getattr(args_in, "framework_version", None) or "").strip()
@@ -1823,7 +2282,16 @@ def _seed_shared_state(
 
 
 def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
-    """Parse ``--conc-sweep-concs '1,2,4,8'`` into a list[int]; non-integers warned+dropped, empty -> 1..128 ladder."""
+    """Parse ``--conc-sweep-concs '1,2,4,8'`` into a list[int]; non-integers warned+dropped, empty -> 1..128 ladder.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``conc_sweep_concs``).
+
+    Returns:
+        list[int]: The parsed concurrency ladder, falling back to the default
+            ``[1, 2, 4, 8, 16, 32, 64, 128]`` when empty.
+    """
     raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
     if not raw:
         return [1, 2, 4, 8, 16, 32, 64, 128]
@@ -1858,7 +2326,13 @@ def _snapshot_system_prompts(
     *,
     prompts: dict[str, str],
 ) -> None:
-    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``."""
+    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``.
+
+    Args:
+        session_dir (Path): The session root directory.
+        prompts (dict[str, str]): Mapping of agent role to effective system
+            prompt body.
+    """
     for role, body in prompts.items():
         target = agent_prompt_snapshot(session_dir, role)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1894,17 +2368,50 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 
-def _print_final_summary(state: SharedState, stop_reason: str) -> None:
+def _read_failure_summary(session_dir: Path) -> dict | None:
+    """Read ``reports/final.json``'s ``failure_summary`` block, if present.
+
+    Best-effort: returns ``None`` when the file is missing/unreadable or the
+    block is absent (e.g. non-failure runs). Used to surface the real terminal
+    root cause in the end-of-run summary on ``baseline_failed`` (#465).
+
+    Args:
+        session_dir (Path): The session root directory holding
+            ``reports/final.json``.
+
+    Returns:
+        dict | None: The ``failure_summary`` block, or ``None`` when missing /
+            unreadable / absent.
+    """
+    try:
+        from .session_paths import reports_dir
+        final_json = reports_dir(session_dir) / "final.json"
+        data = json.loads(final_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    fs = data.get("failure_summary") if isinstance(data, dict) else None
+    return fs if isinstance(fs, dict) else None
+
+
+def _print_final_summary(
+    state: SharedState,
+    stop_reason: str,
+    session_dir: Path | None = None,
+) -> None:
     """Print the end-of-run summary block to stdout.
 
     Reports the stop reason, session id, model, baseline throughput, the
     per-round (informational) cumulative gain, the validated cumulative gain
     (with a staleness warning when the optimization stack grew after the last
     validation), the current best config, pruned families, and crash count.
+    On ``baseline_failed`` it also surfaces the real terminal root cause from
+    ``reports/final.json`` instead of a benign upstream WARN (#465).
 
     Args:
         state (SharedState): The final shared state after the run completes.
         stop_reason (str): Why the run stopped (e.g. ``"target_reached"``).
+        session_dir (Path | None): Session root, used to read the
+            ``failure_summary`` block on failure runs.
 
     Returns:
         None
@@ -1915,6 +2422,19 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print(f"  session_id           : {state.session_id}")
     print(f"  model                : {state.model_name}")
     print(f"  baseline_tput        : {state.baseline_tput:.1f} tok/s/GPU")
+    if session_dir is not None and stop_reason == "baseline_failed":
+        failure_summary = _read_failure_summary(session_dir)
+        if failure_summary and failure_summary.get("root_cause"):
+            print(
+                f"  root_cause           : "
+                f"[{failure_summary.get('root_cause_type', 'unknown')}] "
+                f"{failure_summary.get('root_cause')}"
+            )
+            if failure_summary.get("server_log"):
+                print(
+                    f"  server_log           : "
+                    f"{failure_summary.get('server_log')}"
+                )
     print(
         f"  cumulative_gain      : {state.cumulative_gain:.2f}% "
         f"(per-round sum — informational)"
@@ -1946,6 +2466,12 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
     """Reconcile persisted ``crash_count`` (state.json + final.json) up to the live in-memory value.
 
     Only ever raises the persisted value (max), never lowers it; best-effort, never fatal.
+
+    Args:
+        state (SharedState): The live state carrying the authoritative
+            in-memory ``crash_count``.
+        session_dir (Path): The session root directory holding ``state.json``
+            and ``reports/final.json``.
     """
     live = int(getattr(state, "crash_count", 0) or 0)
 
@@ -1975,7 +2501,12 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
 
 
 def _print_kernel_opt_summary_line(state: SharedState) -> None:
-    """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort)."""
+    """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort).
+
+    Args:
+        state (SharedState): The final shared state used to build the
+            kernel-optimization summary.
+    """
     try:
         from .orchestrator.kernel_attempt_summary import (
             build_kernel_optimization_summary,
@@ -2009,7 +2540,16 @@ def _print_kernel_opt_summary_line(state: SharedState) -> None:
 
 
 def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
-    """Best-effort session_dir lookup ($HYPERLOOM_SESSION_DIR) for the stdout kernel_opt line; ``None`` if unresolved."""
+    """Best-effort session_dir lookup ($HYPERLOOM_SESSION_DIR) for the stdout kernel_opt line; ``None`` if unresolved.
+
+    Args:
+        state (SharedState): The final shared state (accepted for call-site
+            parity; resolution is env-based).
+
+    Returns:
+        Path | None: The resolved session directory, or ``None`` when
+            unresolved.
+    """
     env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
     if env_sd:
         p = Path(env_sd).expanduser()
@@ -2018,8 +2558,88 @@ def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
     return None
 
 
+# Legacy local auth-proxy endpoint. The component was removed; any leftover
+# URL pinned at this host:port is stale and must be force-rewritten to the
+# upstream gateway even when an operator value is otherwise preserved (#521).
+_STALE_PROXY_HOSTPORT = "127.0.0.1:4002"
+
+
+def _is_stale_proxy_url(url: str | None) -> bool:
+    """Return True for a leftover legacy auth-proxy URL (``127.0.0.1:4002``).
+
+    Args:
+        url (str | None): The URL to test.
+
+    Returns:
+        bool: ``True`` when the URL pins the stale legacy proxy host:port.
+    """
+    return _STALE_PROXY_HOSTPORT in str(url or "")
+
+
+# Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
+# written by kernel-agent/scripts/install.sh, but tolerant of any indent).
+_GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
+
+
+def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
+    """Rewrite ``base_url:`` in the GEAK litellm config to match ``base_url`` (#521).
+
+    GEAK reads its endpoint from ``--config $GEAK_CONFIG`` — a yaml written
+    once at install time — not from ``$GEAK_BASE_URL`` at runtime. So when an
+    operator points ``GEAK_BASE_URL`` at a reachable endpoint (e.g. a
+    host-local reverse tunnel) AFTER install, the env override alone is not
+    enough: the stale yaml still sends GEAK at the unreachable gateway and the
+    KERNEL phase burns budget on connection-error retries. Syncing the yaml in
+    place closes that gap so the kernel agent actually dials the operator's
+    endpoint.
+
+    Best-effort: returns ``False`` (never raises) when the path is empty, the
+    file is missing/unreadable/unwritable, it has no ``base_url:`` line, or it
+    is already in sync. Returns ``True`` only when a rewrite was applied.
+
+    Args:
+        geak_config_path (str): Path to the GEAK litellm yaml config.
+        base_url (str): The endpoint to write into the ``base_url:`` line.
+
+    Returns:
+        bool: ``True`` when a rewrite was applied, ``False`` otherwise.
+    """
+    if not geak_config_path or not base_url:
+        return False
+    path = Path(geak_config_path)
+    try:
+        if not path.is_file():
+            return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    match = _GEAK_BASE_URL_RE.search(text)
+    if match is None:
+        return False
+    current = match.group(0)[len(match.group(1)):].strip()
+    if current == base_url:
+        return False
+    # Use a function replacement so a URL containing regex backreference
+    # characters (e.g. ``\g``) cannot corrupt the rewrite.
+    new_text = _GEAK_BASE_URL_RE.sub(
+        lambda m: m.group(1) + base_url, text, count=1,
+    )
+    try:
+        path.write_text(new_text, encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
-    """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it)."""
+    """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it).
+
+    Args:
+        openai_base_url (str): The ``OPENAI_BASE_URL`` value.
+
+    Returns:
+        str: The derived Anthropic base URL with a trailing ``/v1`` removed.
+    """
     from urllib.parse import urlparse, urlunparse
 
     parsed = urlparse(openai_base_url)
@@ -2032,7 +2652,13 @@ def _derive_anthropic_base_url(openai_base_url: str) -> str:
 def _reset_claude_config_to_upstream(
     safe_key: str, anthropic_base_url: str
 ) -> None:
-    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway (stale 127.0.0.1:4002 would fail)."""
+    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway (stale 127.0.0.1:4002 would fail).
+
+    Args:
+        safe_key (str): The primary API key to write; blank leaves any
+            existing key untouched.
+        anthropic_base_url (str): The upstream gateway URL; blank is a no-op.
+    """
     import json as _json
 
     if not anthropic_base_url:
@@ -2099,7 +2725,15 @@ def _validate_credentials() -> None:
 
 
 def _is_placeholder_tracelens_path(value: str) -> bool:
-    """Treat .env.template's bare ``\\`` and whitespace-only values as unset."""
+    """Treat .env.template's bare ``\\`` and whitespace-only values as unset.
+
+    Args:
+        value (str): The candidate TraceLens path value.
+
+    Returns:
+        bool: ``True`` when the value is blank or the bare backslash
+            placeholder.
+    """
     stripped = value.strip()
     return stripped in ("", "\\")
 
@@ -2227,6 +2861,12 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
 
     Avoids first-tick BackendError after baseline burns wall time; same-interpreter install avoids
     cross-interpreter install failures.
+
+    Args:
+        python_exe (str): The interpreter that will import the SDKs (and run
+            the probe / install).
+        pip_extra (list[str]): Extra arguments threaded into the ``pip
+            install`` invocation (e.g. index flags).
     """
     candidates = (
         ("claude_agent_sdk", "claude-agent-sdk>=0.1.65"),
@@ -2398,7 +3038,15 @@ def _emit_preflight_diagnostics(
     anthropic_base_url: str | None,
     args: argparse.Namespace | None = None,
 ) -> None:
-    """One canonical, grep-friendly diagnostics block at the end of preflight."""
+    """One canonical, grep-friendly diagnostics block at the end of preflight.
+
+    Args:
+        magpie_python (str): The Magpie interpreter path to report.
+        anthropic_base_url (str | None): The resolved Anthropic base URL, or
+            ``None`` when unset.
+        args (argparse.Namespace | None): Parsed CLI args; when present, KB /
+            PR-monitor status lines are added.
+    """
     from .orchestrator.action_executors.baseline import (
         BASELINE_COLD_START_TIMEOUT_SEC,
         BASELINE_DEFAULT_TIMEOUT_SEC,
@@ -2436,6 +3084,30 @@ def _emit_preflight_diagnostics(
     print(f"  aiter jit cache     = {cache_line}")
     print(f"  cold_start_timeout  = {cold_cap}s")
     print(f"  warm_timeout        = {BASELINE_DEFAULT_TIMEOUT_SEC}s")
+    # Surface the hard GPU-reset arming state up front: `recover` (robustness-
+    # delegated) may shell out to `rocm-smi --gpureset` on gpu_memory_leaked.
+    # It is opt-in and scoped to ROCR_VISIBLE_DEVICES (never implicit --gpu=all).
+    _gpureset_on = os.environ.get(
+        "HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    _rocr_scope = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if _gpureset_on and _rocr_scope:
+        print(
+            f"  recover_gpureset    = ARMED — robustness may auto "
+            f"`rocm-smi --gpureset --gpu={_rocr_scope}` on gpu_memory_leaked; "
+            f"WARNING: confirm this session exclusively owns those cards"
+        )
+    elif _gpureset_on:
+        print(
+            "  recover_gpureset    = ARMED but UNSCOPED (ROCR_VISIBLE_DEVICES "
+            "unset) — hard reset will be SKIPPED (refuses implicit --gpu=all)"
+        )
+    else:
+        print(
+            "  recover_gpureset    = disabled (opt-in; set "
+            "HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1 to enable, scoped to "
+            "ROCR_VISIBLE_DEVICES)"
+        )
     if anthropic_base_url:
         print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url} (direct to gateway)")
     else:
@@ -2463,7 +3135,12 @@ def _emit_preflight_diagnostics(
 
 
 def _print_cortex_kb_queue_status() -> None:
-    """Emit a one-line summary of the Cortex KB offline NDJSON queue (dead-letter = permanent-reject signal)."""
+    """Emit a one-line summary of the Cortex KB offline NDJSON queue (dead-letter = permanent-reject signal).
+
+    Note:
+        Side-effecting: writes the queue status summary to stdout and returns
+        nothing.
+    """
     from .session_paths import (
         cortex_dead_letter_ndjson,
         cortex_flushed_ndjson,
@@ -2515,6 +3192,15 @@ def _probe_llm_catalog(
     """Probe ``<base_url>/models`` with retry (gateway flakes); return set of model ids or None.
 
     TLS verification is on by default; ``INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1`` skips it (warns).
+
+    Args:
+        base_url (str): The gateway base URL; ``""`` returns ``None``.
+        api_key (str): Optional bearer key sent in the ``Authorization``
+            header.
+
+    Returns:
+        set[str] | None: The set of model ids from ``<base_url>/models``, or
+            ``None`` when the probe is skipped or exhausts its retries.
     """
     import time
 
@@ -2614,14 +3300,48 @@ def _validate_and_resolve_claude_model(
 
     Probes the gateway catalog (retries); falls back 4-7→4-6 with a WARN, else sys.exit(2). Returns the
     catalog id set on success (reused by the codex smoke-test).
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace; ``claude_model``
+            may be mutated to the fallback model.
+        resolved_urls (tuple[str, str] | None): Optional
+            ``(anthropic_base_url, openai_base_url)`` used to resolve the probe
+            base URL when env is unset.
+
+    Returns:
+        set[str] | None: The gateway catalog id set on success.
+
+    Raises:
+        SystemExit: With code 2 when the model is disallowed, the catalog is
+            unreachable, or no acceptable model is present.
     """
     chosen = (args.claude_model or "").strip()
-    if chosen not in _CLAUDE_ALLOWED_MODELS:
+    # #340: non-AMD deployments (Vultr / TensorWave / self-hosted gateways)
+    # may not serve the AMD-blessed opus-4-7/4-6 ids. The static allowlist is
+    # an AMD-network safety default; an operator can opt out via
+    # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1, after which the gateway
+    # catalog probe below is the sole gate (a typo still fails because the id
+    # won't be in the catalog). Default behavior is unchanged.
+    allow_custom = os.environ.get(
+        "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "",
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
             f"Orchestration model must be one of {list(_CLAUDE_ALLOWED_MODELS)} "
             f"(preferred: {_CLAUDE_PREFERRED_MODEL}, "
-            f"fallback: {_CLAUDE_FALLBACK_MODEL}). Refusing to start.",
+            f"fallback: {_CLAUDE_FALLBACK_MODEL}). Refusing to start. "
+            f"For a non-AMD gateway, set "
+            f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 to use a custom "
+            f"orchestration model validated against your gateway catalog.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if allow_custom and not chosen:
+        print(
+            "ERROR: --claude-model is empty but "
+            "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; pass an explicit "
+            "orchestration model id. Refusing to start.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -2653,6 +3373,19 @@ def _validate_and_resolve_claude_model(
         print(f"Preflight: Claude model {chosen!r} confirmed in gateway catalog")
         return catalog_ids
 
+    # #340: under the custom-model opt-out the AMD opus-4-6 fallback is
+    # meaningless (a non-AMD catalog won't carry it); fail clearly on a
+    # catalog miss so the operator fixes the id rather than silently running a
+    # model their gateway doesn't serve.
+    if allow_custom:
+        print(
+            f"ERROR: --claude-model={chosen!r} not present in gateway catalog "
+            f"(INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; catalog has "
+            f"{sorted(catalog_ids)[:20]}). Refusing to start.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     if _CLAUDE_FALLBACK_MODEL in catalog_ids:
         print(
             f"Preflight: WARNING — {chosen!r} not in gateway catalog; "
@@ -2675,7 +3408,15 @@ def _smoke_test_codex_model(
     args: argparse.Namespace,
     catalog_ids: set[str] | None,
 ) -> None:
-    """WARN-only catalog check for ``--codex-model`` (no hard gate); flags typos before Coordinator starts."""
+    """WARN-only catalog check for ``--codex-model`` (no hard gate); flags typos before Coordinator starts.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``codex_model`` / ``critic_backend`` / ``kernel_codex`` /
+            ``no_kernel``).
+        catalog_ids (set[str] | None): The gateway catalog id set; ``None``
+            skips the check.
+    """
     if catalog_ids is None:
         return
     # Codex is needed by the Kernel agent (kernel-codex on) and the critic-agent review path.
@@ -2711,6 +3452,13 @@ def _inferencex_checkout_ok(path: Path | str) -> bool:
     ``git init`` that then failed to fetch/checkout. Magpie sources
     ``benchmarks/benchmark_lib.sh`` at runtime, so require that file to
     exist — a complete checkout always has it, a stub never does.
+
+    Args:
+        path (Path | str): The candidate InferenceX checkout directory.
+
+    Returns:
+        bool: ``True`` when the checkout contains
+            ``benchmarks/benchmark_lib.sh``.
     """
     return (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file()
 
@@ -2726,6 +3474,13 @@ def _clone_inferencex(dest: Path) -> str | None:
     On any failure the partial ``dest`` (e.g. a bare ``git init`` with no
     fetched tree) is removed so a later preflight's detection does not
     mistake the stub for a valid checkout and skip re-cloning.
+
+    Args:
+        dest (Path): The writable destination directory for the checkout.
+
+    Returns:
+        str | None: The checkout path string on success, or ``None`` on
+            failure.
     """
     repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
     ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
@@ -2767,6 +3522,14 @@ def _preflight(
     Credentials fallback → auth aliases → SDK install → ANTHROPIC_BASE_URL resolve + ~/.claude reset →
     ROCm hygiene → ray/Magpie/InferenceX install → CLI presence checks → diagnostics. Returns
     ``(anthropic_base_url, openai_base_url)`` or ``None`` when ``OPENAI_BASE_URL`` is missing.
+
+    Args:
+        args (argparse.Namespace | None): Parsed CLI args, used for the
+            diagnostics block; optional.
+
+    Returns:
+        tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
+            ``None`` when ``OPENAI_BASE_URL`` is missing.
     """
     _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
@@ -2784,16 +3547,45 @@ def _preflight(
             if os.environ.get(alias) != safe_key:
                 os.environ[alias] = safe_key
                 print(f"Preflight: refreshed {alias} from SAFE_API_KEY")
-    # OOB / GEAK / LLM_API_BASE inherit the upstream URL verbatim.
+    # OOB / GEAK / LLM_API_BASE default to the upstream gateway URL, but an
+    # INTENTIONAL operator override is preserved. This matters for #521: GEAK
+    # runs in a separate network namespace that frequently cannot route to the
+    # gateway directly, while the orchestrator reaches it via a host-local
+    # reverse tunnel. Pointing GEAK_BASE_URL (or OOB_BASE_URL) at that tunnel
+    # only works if preflight does NOT clobber the operator's value back to the
+    # direct gateway URL. We still force-rewrite the known-stale legacy
+    # auth-proxy URL (127.0.0.1:4002) so leftovers from a removed component
+    # can never reach the CLIs.
     if base_url:
         for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+            current = os.environ.get(alias, "").strip()
+            if current and current != base_url and not _is_stale_proxy_url(current):
+                # Operator pinned a distinct, non-stale endpoint (e.g. a tunnel
+                # at 127.0.0.1:18444 for #521); respect it.
+                print(
+                    f"Preflight: {alias} kept at {current} "
+                    f"(operator override; not forced to gateway)"
+                )
+                continue
             if os.environ.get(alias) != base_url:
                 prev = os.environ.get(alias, "")
                 os.environ[alias] = base_url
+                why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "direct to gateway"
                 print(
                     f"Preflight: {alias} {prev or '<unset>'} -> {base_url} "
-                    f"(direct to gateway)"
+                    f"({why})"
                 )
+
+    # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
+    # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the resolved
+    # GEAK_BASE_URL above (operator tunnel override, or the gateway default)
+    # actually reaches the kernel agent instead of a stale install-time URL.
+    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
+    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
+    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
+        print(
+            f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})"
+        )
 
     # --- Resolve install interpreters ---
     from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
@@ -2984,6 +3776,10 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
 
     Mutates args: ``cortex_enabled``/``pr_monitor_enabled`` plus
     ``kb_degraded_reason``/``pr_degraded_reason`` (None|"explicit_flag"|"ir3_auto").
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace; mutated in place
+            with the resolved KB / PR-monitor enable flags and reasons.
     """
     explicit_kb = bool(getattr(args, "degraded_kb", False))
     explicit_pr = bool(getattr(args, "degraded_pr", False))
@@ -3060,7 +3856,18 @@ _VALID_CRITIC_BACKENDS = ("mock", "agent")
 
 
 def _resolve_critic_choice(args: argparse.Namespace) -> str:
-    """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid."""
+    """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``critic_backend``).
+
+    Returns:
+        str: The resolved critic backend (one of ``_VALID_CRITIC_BACKENDS``).
+
+    Raises:
+        SystemExit: With code 2 when the chosen backend is invalid.
+    """
     chosen = args.critic_backend
     if chosen is None:
         chosen = DEFAULT_CRITIC_BACKEND
@@ -3088,6 +3895,17 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     Multi-node policy: on ``nodes>=2`` the agent's LocalProbe targets sandbox-local resources that live in
     separate pods (HIGH false positives). Keep ``agent`` only when a robustness-server is configured; else
     auto-downgrade to ``mock`` (explicit --robustness-agent gets a WARN).
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``robustness_backend`` / ``nodes`` and server config).
+
+    Returns:
+        str: The resolved robustness backend (one of
+            ``_VALID_ROBUSTNESS_BACKENDS``).
+
+    Raises:
+        SystemExit: With code 2 when the chosen backend is invalid.
     """
     chosen = getattr(args, "robustness_backend", None)
     explicit = chosen is not None
@@ -3124,7 +3942,11 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
 
 
 def _reset_state_file(session_dir: Path) -> None:
-    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Cortex KB untouched)."""
+    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Cortex KB untouched).
+
+    Args:
+        session_dir (Path): The session root directory holding ``state.json``.
+    """
     state_path = session_dir / "state.json"
     if not state_path.exists():
         return
@@ -3156,6 +3978,13 @@ def _gc_old_profile_traces(
 
     Never blocks startup (errors swallowed). Env knobs: HYPERLOOM_MN_TRACE_RETENTION_DAYS,
     HYPERLOOM_MN_TRACE_GC_DISABLE.
+
+    Args:
+        root (str | None): The trace-root directory to scan; defaults to the
+            multi-node profile-trace root.
+        retention_days (int): Age threshold in days before a trace dir is
+            removed (env-overridable).
+        keep (str | None): A directory name to always preserve (name-matched).
     """
     if os.environ.get("HYPERLOOM_MN_TRACE_GC_DISABLE", "").strip() in (
         "1", "true", "yes",
@@ -3207,7 +4036,18 @@ def _gc_old_profile_traces(
 
 
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
-    """Multi-node backend selector: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
+    """Multi-node backend selector: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``mn_backend``).
+
+    Returns:
+        str: The resolved multi-node backend (``rayjob`` or ``dynamo``).
+
+    Raises:
+        SystemExit: With code 2 when the resolved backend is invalid.
+    """
     backend = (
         (getattr(args, "mn_backend", None) or "").strip()
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
@@ -3232,6 +4072,13 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
     to launch ``dynamo.sglang``/``dynamo.vllm``. Benchmarks target the Dynamo
     frontend (:8000) via ``state.service_url`` — picked up automatically by
     ``_multi_node_env.benchmark_env_for_subprocess``.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``nodes``,
+            ``rayjob_image``, ``rayjob_gpus_per_node``, and PD flags).
+
+    Raises:
+        SystemExit: With code 2 when a required Dynamo image is not resolvable.
     """
     nodes = max(1, int(args.nodes))
     from .multi_node.cli import cmd_create_dynamo, _load_state
@@ -3461,6 +4308,10 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
     """Replay every applied kernel-agent patch (manifest status=applied + multinode block) onto RayJob pods.
 
     Idempotent ``apply-patch`` fan-out, run only when ``--nodes>=2``. Best-effort: per-patch failures warn.
+
+    Args:
+        args: Parsed CLI arguments; reads ``nodes`` and resolves the session
+            workspace to locate applied-patch manifests.
     """
     nodes = max(1, int(getattr(args, "nodes", 1) or 1))
     if nodes < 2:
@@ -3562,6 +4413,11 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         The skip is made **detectable** so a launcher / UI never mistakes the
         run for quantized: a ``QUANTIZATION_SKIPPED:`` marker line on stdout
         plus the ``$HYPERLOOM_QUANTIZATION_SKIPPED`` env var (set to the reason).
+
+    Args:
+        args: Parsed CLI arguments; reads ``quantize`` / ``quantize_scheme`` /
+            ``gpu_type`` / ``resume`` and rewrites ``args.model`` in place to
+            the exported quantized model path on success.
     """
     # Free-text --quantize wins; otherwise resolve the structured
     # --quantize-scheme enum (the UI/backend path) to a prompt.
@@ -3654,7 +4510,17 @@ def _export_workload_envs_for_optimize(
     ep_resolved: int,
     argv: list[str] | None = None,
 ) -> None:
-    """Mirror explicit workload CLI flags (--tp/--conc/--ep) into env so executors' Magpie YAMLs honor them."""
+    """Mirror explicit workload CLI flags (--tp/--conc/--ep) into env so executors' Magpie YAMLs honor them.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``conc``).
+        nodes_resolved (int): The resolved node count; ``>= 2`` forces export
+            of all three knobs regardless of whether they were passed.
+        tp_resolved (int): The resolved tensor-parallel size to export as ``TP``.
+        ep_resolved (int): The resolved expert-parallel size to export as ``EP``.
+        argv (list[str] | None): The argument vector to inspect for explicit
+            flags; defaults to ``sys.argv[1:]`` when ``None``.
+    """
     argv = list(sys.argv[1:] if argv is None else argv)
     if nodes_resolved >= 2 or _argv_has_option(argv, "--tp"):
         os.environ["TP"] = str(tp_resolved)
@@ -3937,10 +4803,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # CRITICAL: clear leftover stop_reason or Orchestration heartbeats forever thinking work is done.
         prior_crash = state.crash_count
 
-        # Issue-G: no_more_leverage / target_reached are intentional terminal states (SKILL Run-time signals);
-        # require --force-resume to push past them. Other reasons (time_exhausted, max_ticks, crash) auto-clear.
+        # Issue-G: target_reached is an intentional terminal state (SKILL Run-time signals);
+        # require --force-resume to push past it. Other reasons (time_exhausted, max_ticks, crash) auto-clear.
         force_resume = bool(getattr(args, "force_resume", False))
-        gated_terminal = {"no_more_leverage", "target_reached"}
+        gated_terminal = {"target_reached"}
         if prior_stop in gated_terminal and not force_resume:
             print(
                 f"\nERROR: --resume blocked by terminal stop_reason="
@@ -4161,6 +5027,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
     no_kernel = getattr(args, "no_kernel", False)
     no_explore = getattr(args, "no_explore", False)
+    no_framework = bool(getattr(args, "no_framework", False))
+    # Unconditional phase-toggle banner lines (mirror the kernel banner so all
+    # three --no-xxx flags surface their ENABLED/DISABLED state at startup).
+    if no_explore:
+        print(
+            "Explore phase   : DISABLED (--no-explore); "
+            f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}"
+        )
+    else:
+        print("Explore phase   : ENABLED")
+    if no_framework:
+        print("Framework phase : DISABLED (--no-framework)")
+    else:
+        print("Framework phase : ENABLED")
     if no_explore and no_kernel:
         print(
             "WARNING: --no-explore and --no-kernel are both set; the run "
@@ -4169,9 +5049,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             "re-validates the baseline recipe. Continuing as requested.",
             file=sys.stderr,
         )
-    elif no_explore:
-        print("Explore phase   : DISABLED (--no-explore); "
-              f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}")
     if bool(getattr(args, "research_scout", True)):
         print(
             "Research scout  : ENABLED at PRELUDE (re-dispatch every "
@@ -4262,6 +5139,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir=session_dir,
         critic_agent_root=critic_agent_root,
         critic_kb_mode=critic_kb_mode,
+        cortex_kb_url=(getattr(args, "cortex_kb_url", None) or "").strip() or None,
         robustness_choice=robustness_choice,
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,
@@ -4371,6 +5249,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt or _build_orchestration_prompt(
             no_kernel=no_kernel,
+            no_explore=no_explore,
+            no_framework=bool(getattr(args, "no_framework", False)),
             framework=framework_for_prompt,
             objective=objective,
             max_minutes=max_minutes_for_prompt,
@@ -4544,17 +5424,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
-    _print_final_summary(coordinator.shared_state, stop_reason)
+    _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
     return 0 if stop_reason in (
         "target_reached",
-        "no_more_leverage",
+        "global_converged",
         "time_exhausted",
         "max_ticks",
     ) else 1
 
 
 def _default_research_lane_capacity() -> int:
-    """Default ``--research-lane-capacity``: $INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY else the GPU ceiling (2×GPU)."""
+    """Default ``--research-lane-capacity``: $INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY else the GPU ceiling (2×GPU).
+
+    Returns:
+        int: The resolved research-lane capacity (env value when set and
+            parseable, otherwise the policy GPU ceiling).
+    """
     env = os.environ.get("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY")
     if env:
         try:
@@ -4839,9 +5724,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force-resume", action="store_true", default=False,
         help=(
             "Allow ``--resume`` to push past a terminal "
-            "``stop_reason='no_more_leverage'`` or ``'target_reached'``. "
+            "``stop_reason='target_reached'``. "
             "Without this flag the resume aborts (Issue-G guard, per "
-            "SKILL.md 'Run-time signals': those terminals require an "
+            "SKILL.md 'Run-time signals': that terminal requires an "
             "operator-side workload / strategy change before resuming). "
             "No-op outside ``--resume``."
         ),
@@ -4909,7 +5794,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--no-kernel", action="store_true", default=False,
                       help="Disable the Kernel agent entirely. The run will "
-                           "only do baseline + params + backends + sweep (pure "
+                           "only do baseline + explore + sweep (pure "
                            "parameter search). Useful when GEAK/OOB/GPU "
                            "compile env is unavailable or you just want the "
                            "quick-win parameter path. Default: kernel enabled.")
@@ -5049,6 +5934,29 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Force disable_local_probe=false (keep the LocalProbe fallback "
              "even in multi-node mode).",
+    )
+    opt.add_argument(
+        "--robustness-disable-server-probe",
+        dest="robustness_disable_server_probe",
+        action="store_true",
+        default=None,
+        help="Force auto_probe_inference_server=false: stop the robustness-agent "
+             "from auto-probing the local inference-server health endpoint "
+             "(http://127.0.0.1:8888/health). Unlike --robustness-disable-local-probe "
+             "this is surgical — the REST of LocalProbe (gpu-leak, gateway 401, "
+             "coordinator-zombie, aiter-JIT, disk/fd) stays active. Use on "
+             "single-node runs where the optimizer restarts the inference server "
+             "between benchmarks: those restart windows otherwise trip "
+             "false-positive local_server_unreachable symptoms (which can escalate "
+             "to a premature skip_to_close / robustness_escalated stop). "
+             "Auto-enabled in multi-node.",
+    )
+    opt.add_argument(
+        "--no-robustness-disable-server-probe",
+        dest="robustness_disable_server_probe",
+        action="store_false",
+        help="Force auto_probe_inference_server=true (keep the 127.0.0.1:8888 "
+             "/health auto-probe even in multi-node mode).",
     )
     opt.add_argument(
         "--robustness-enable-cluster-pod-metrics",
@@ -5802,6 +6710,14 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
     Pure read of state.json / session_breakdown.json / langfuse_receipt.json.
     Returns flags used by :func:`_run_recover_session` to decide whether the
     session still needs a (re)build + Langfuse push.
+
+    Args:
+        session_dir (Path): The session directory to inspect.
+
+    Returns:
+        dict[str, Any]: A status mapping with ``close_done``,
+            ``breakdown_exists``, ``breakdown_recorded``, ``counts_final``,
+            and ``looks_complete`` flags.
     """
     import json
 
@@ -5841,6 +6757,14 @@ def _run_recover_session(args: argparse.Namespace) -> int:
     receipt into the breakdown, and attaches the full breakdown JSON to the
     session's trace. Idempotent across processes (guarded by the persisted
     Langfuse receipt), so re-running is safe.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``session_dir``, ``force``, and ``backfill_trace``).
+
+    Returns:
+        int: The process exit code (``0`` on success, ``2`` when the session
+            dir is missing, ``1`` on breakdown rebuild failure).
     """
     session_dir = args.session_dir.resolve()
     if not session_dir.is_dir():

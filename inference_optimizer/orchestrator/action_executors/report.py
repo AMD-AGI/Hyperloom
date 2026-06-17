@@ -31,7 +31,16 @@ log = logging.getLogger(__name__)
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:
     """Call a zero-arg SharedState helper, returning ``default`` when absent
-    or raising."""
+    or raising.
+
+    Args:
+        state: The object the helper is looked up on.
+        method: Name of the zero-arg method to call.
+        default: Value returned when the method is missing or raises.
+
+    Returns:
+        The method's result, or ``default`` when it is absent or raises.
+    """
     fn = getattr(state, method, None)
     if not callable(fn):
         return default
@@ -41,12 +50,284 @@ def _safe_call(state: Any, method: str, default: Any) -> Any:
         return default
 
 
+# Benign upstream WARN fragments that must never be promoted as the
+# ``baseline_failed`` headline: they do not correlate with the terminal
+# failure (the model still resolves / runs). Suppression is Hyperloom-side
+# only — the full text still appears in the per-attempt logs. See issue #465.
+_BENIGN_FAILURE_PATTERNS: tuple[str, ...] = (
+    "modeling_cohere2.py",
+)
+
+
+def _is_benign_failure_text(text: str) -> bool:
+    """Return True when ``text`` matches a known-benign upstream WARN pattern.
+
+    Args:
+        text: The candidate error/warning text to test.
+
+    Returns:
+        ``True`` when ``text`` contains any known-benign upstream WARN pattern.
+    """
+    blob = str(text or "")
+    return any(pat in blob for pat in _BENIGN_FAILURE_PATTERNS)
+
+
+def _highlight_is_benign(highlight: dict[str, Any]) -> bool:
+    """Return True when a highlight's *headline* is only a benign upstream WARN.
+
+    Judges the one-line ``summary`` (the text that would surface as the
+    headline) exclusively. Payload-buried mentions are intentionally ignored so
+    a highlight whose summary describes a real fault (e.g. ``EngineCore failed
+    to start``) is never suppressed even if its payload also references a benign
+    file (#465).
+
+    Args:
+        highlight: A highlight record whose one-line ``summary`` is judged.
+
+    Returns:
+        ``True`` when the highlight's ``summary`` is only a benign upstream
+        WARN.
+    """
+    return _is_benign_failure_text(str(highlight.get("summary", "")))
+
+
+def _partition_benign_lines(text: str) -> tuple[list[str], list[str]]:
+    """Split an error blob into ``(kept_lines, suppressed_benign_lines)``.
+
+    Drops only the lines matching a benign upstream WARN pattern and preserves
+    every other line, so a mixed blob (benign WARN + real HIP OOM) keeps its
+    real root cause instead of being wiped wholesale (#465).
+
+    Args:
+        text: The raw error blob to partition line-by-line.
+
+    Returns:
+        A ``(kept_lines, suppressed_benign_lines)`` tuple; suppressed lines are
+        stripped and truncated to 200 characters.
+    """
+    kept: list[str] = []
+    suppressed: list[str] = []
+    for line in str(text or "").splitlines():
+        if _is_benign_failure_text(line):
+            stripped = line.strip()
+            if stripped:
+                suppressed.append(stripped[:200])
+        else:
+            kept.append(line)
+    return kept, suppressed
+
+
+def _classify_root_cause_type(error_class: str, error_text: str) -> str:
+    """Map a baseline attempt's ``error_class`` + message to a coarse enum.
+
+    Returns one of ``oom`` / ``benchmark_timeout`` / ``engine_core_init`` /
+    ``worker_crash`` / ``unknown`` for the dashboard / ops contract.
+
+    Args:
+        error_class: The attempt's recorded error class.
+        error_text: The attempt's error message / excerpt.
+
+    Returns:
+        The coarse root-cause enum string for the dashboard / ops contract.
+    """
+    blob = f"{error_class} {error_text}".lower()
+    if "out of memory" in blob or "hip oom" in blob:
+        return "oom"
+    if error_class == "timeout" or "benchmark exceeded" in blob:
+        return "benchmark_timeout"
+    if (
+        error_class == "server_init_dead"
+        or "engine core" in blob
+        or "enginecore" in blob
+        or "workerproc" in blob
+        or "engine process failed" in blob
+    ):
+        return "engine_core_init"
+    if error_class == "subprocess_nonzero" or "nccl" in blob or "worker" in blob:
+        return "worker_crash"
+    return "unknown"
+
+
+def _pick_failure_headline(text: str) -> str:
+    """Pick the most informative single line out of a server.log excerpt.
+
+    Prefers terminal fault lines (OOM / FATAL / engine-core markers) over the
+    last line, so the headline points at the real root cause.
+
+    Args:
+        text: The server.log excerpt to scan.
+
+    Returns:
+        The most informative single line, or ``""`` when ``text`` is empty.
+    """
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    priority = (
+        "out of memory", "fatal", "runtimeerror", "nccl",
+        "engine core", "enginecore", "workerproc", "error:",
+    )
+    for keyword in priority:
+        for ln in lines:
+            if keyword in ln.lower():
+                return ln
+    return lines[-1]
+
+
+def _last_failed_baseline_attempt(state: SharedState) -> dict[str, Any] | None:
+    """Return the most recent *failed* baseline attempt record, or ``None``.
+
+    Prefers ``SharedState.baseline_attempts`` (the per-action audit log written
+    by ``record_action_attempt``) and falls back to the matching
+    ``last_action_failures`` row. Both are persisted in ``state.json`` — there
+    is no on-disk ``runs/baseline/<task_id>/result.json`` to scan.
+
+    Args:
+        state: The session's shared state to read attempt records from.
+
+    Returns:
+        The most recent failed baseline attempt record, or ``None`` when none
+        is found.
+    """
+    attempts = getattr(state, "baseline_attempts", None) or []
+    failed = [
+        a for a in attempts
+        if isinstance(a, dict) and str(a.get("status")) == "failed"
+    ]
+    if failed:
+        return failed[-1]
+    failures = getattr(state, "last_action_failures", None) or []
+    baseline_failures = [
+        f for f in failures
+        if isinstance(f, dict) and str(f.get("action")) == "baseline"
+    ]
+    return baseline_failures[-1] if baseline_failures else None
+
+
+def _resolve_attempt_server_log(attempt: dict[str, Any]) -> Path | None:
+    """Best-effort path to a baseline attempt's ``server.log``.
+
+    The audit row stores the ``benchmark_*`` workspace; ``server.log`` is
+    written one level up (``output_dir/server.log``). Also honours an explicit
+    ``stderr_log_path`` when present.
+
+    Args:
+        attempt: A baseline attempt audit record.
+
+    Returns:
+        The path to an existing ``server.log``, or ``None`` when none of the
+        candidates exist.
+    """
+    candidates: list[Path] = []
+    workspace = attempt.get("workspace")
+    if workspace:
+        ws = Path(str(workspace))
+        candidates.append(ws.parent / "server.log")
+        candidates.append(ws / "server.log")
+    stderr_log = attempt.get("stderr_log_path")
+    if stderr_log:
+        candidates.append(Path(str(stderr_log)))
+    for cand in candidates:
+        try:
+            if cand.is_file():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _build_failure_summary(
+    state: SharedState, session_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    """Surface the real terminal error on ``baseline_failed`` (issue #465).
+
+    Sources the last *failed* baseline attempt from ``SharedState`` (see
+    :func:`_last_failed_baseline_attempt`) and lifts its ``error_excerpt`` /
+    ``error_class`` into a compact ``failure_summary``. Only benign upstream
+    WARN *lines* are stripped (the real error text is kept); when nothing
+    actionable remains, falls back to the attempt workspace's ``server.log``
+    terminal marker via :func:`server_log_death_excerpt`.
+
+    Best-effort: only fires for ``baseline_failed`` and returns ``None`` on any
+    error so the report still writes. ``session_dir`` is used only to render a
+    session-relative ``server_log`` path.
+
+    Args:
+        state: The session's shared state.
+        session_dir: Session root used only to render a session-relative
+            ``server_log`` path; ``None`` leaves the path absolute.
+
+    Returns:
+        A compact ``failure_summary`` dict, or ``None`` when the stop reason is
+        not ``baseline_failed``, no failed attempt exists, or any error occurs.
+    """
+    if str(getattr(state, "stop_reason", "") or "") != "baseline_failed":
+        return None
+    try:
+        attempt = _last_failed_baseline_attempt(state)
+        if attempt is None:
+            return None
+
+        error_class = str(attempt.get("error_class") or "unknown")
+        raw_error = str(attempt.get("error_excerpt") or "")
+        kept_lines, suppressed = _partition_benign_lines(raw_error)
+        error_text = "\n".join(kept_lines).strip()
+
+        server_log_abs = _resolve_attempt_server_log(attempt)
+        # Only the benign WARN (or nothing) survived → dig the real terminal
+        # marker out of server.log when one is available.
+        if not error_text and server_log_abs is not None:
+            try:
+                from ._subprocess_kill import server_log_death_excerpt
+                excerpt = server_log_death_excerpt(str(server_log_abs))
+            except Exception:  # noqa: BLE001
+                excerpt = None
+            if excerpt:
+                error_text = excerpt.strip()
+                if error_class in ("", "unknown"):
+                    error_class = "server_init_dead"
+        if not error_text:
+            error_text = "(no terminal error captured; see logs)"
+
+        root_cause = _pick_failure_headline(error_text)
+        server_log_rel: str | None = None
+        if server_log_abs is not None:
+            if session_dir is not None:
+                try:
+                    server_log_rel = server_log_abs.relative_to(
+                        session_dir
+                    ).as_posix()
+                except ValueError:
+                    server_log_rel = str(server_log_abs)
+            else:
+                server_log_rel = str(server_log_abs)
+
+        summary: dict[str, Any] = {
+            "root_cause": root_cause[:500],
+            "root_cause_type": _classify_root_cause_type(
+                error_class, error_text
+            ),
+            "error_class": error_class,
+            "last_attempt_id": str(attempt.get("task_id") or ""),
+            "server_log": server_log_rel,
+        }
+        if suppressed:
+            summary["suppressed_benign"] = suppressed[:5]
+        return summary
+    except Exception:  # noqa: BLE001 — report must never crash on the summary
+        log.warning(
+            "report_executor: failed to build failure_summary", exc_info=True,
+        )
+        return None
+
+
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
     highlights: list[dict],
     *,
     external_baseline: dict[str, Any] | None = None,
+    session_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Assemble the machine-readable session summary dict.
 
@@ -56,6 +337,8 @@ def _build_summary_dict(
         highlights (list[dict]): Top-N highlighted decisions/verdicts.
         external_baseline (dict[str, Any] | None): Optional external
             baseline comparison block to embed.
+        session_dir (Path | None): Session root; when provided, a
+            ``failure_summary`` block is added on ``baseline_failed`` (#465).
 
     Returns:
         dict[str, Any]: The summary payload written to ``final.json``,
@@ -111,6 +394,13 @@ def _build_summary_dict(
     )
     if cmp:
         summary["roofline_comparison"] = cmp
+    # Real terminal root cause on baseline_failed (#465): promote the last
+    # failed baseline attempt's engine/worker fault over benign upstream WARNs.
+    # Sourced from SharedState (not the filesystem); session_dir only renders a
+    # relative server.log path.
+    failure_summary = _build_failure_summary(state, session_dir)
+    if failure_summary:
+        summary["failure_summary"] = failure_summary
     return summary
 
 
@@ -134,6 +424,17 @@ def _format_md(summary: dict[str, Any]) -> str:
     stop_detail = str(summary.get("stop_detail") or "").strip()
     if stop_detail:
         lines.append(f"- **Stop detail**: {stop_detail}")
+    failure_summary = summary.get("failure_summary")
+    if isinstance(failure_summary, dict) and failure_summary.get("root_cause"):
+        lines.append(
+            f"- **Root cause**: "
+            f"`{failure_summary.get('root_cause_type', 'unknown')}` — "
+            f"{failure_summary.get('root_cause')}"
+        )
+        if failure_summary.get("server_log"):
+            lines.append(
+                f"- **Server log**: `{failure_summary.get('server_log')}`"
+            )
     if summary.get("degraded_mode"):
         lines.append(
             "- **⚠ Degraded mode**: ran on the TEXT path only "
@@ -223,6 +524,13 @@ def _format_degraded_mode_section(summary: dict[str, Any]) -> list[str]:
 
     Empty when the run was not degraded. Lists each recorded model warning so
     the reader knows benchmark numbers reflect the text decoder alone.
+
+    Args:
+        summary: The summary payload built by :func:`_build_summary_dict`.
+
+    Returns:
+        Markdown lines for the degraded-mode section, or ``[]`` when the run
+        was not degraded.
     """
     warnings = summary.get("model_warnings") or []
     if not summary.get("degraded_mode") and not warnings:
@@ -247,7 +555,15 @@ def _format_degraded_mode_section(summary: dict[str, Any]) -> list[str]:
 
 def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
     """Render honesty annotations for work left unfinished (unvalidated
-    KEEPs, untried hot kernels, KEEPs awaiting integrate)."""
+    KEEPs, untried hot kernels, KEEPs awaiting integrate).
+
+    Args:
+        summary: The summary payload built by :func:`_build_summary_dict`.
+
+    Returns:
+        Markdown lines for the completeness annotations, or ``[]`` when nothing
+        is outstanding.
+    """
     unvalidated = bool(summary.get("has_unvalidated_keeps"))
     untried = list(summary.get("untried_hot_reusable_kernels") or [])
     pending_keeps = list(summary.get("pending_keep_kernels") or [])
@@ -277,8 +593,15 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
 def _format_steward_section(summary: dict[str, Any]) -> list[str]:
     """Render any legacy session_steward verdict + history.
 
-    Steward was retired in P3_17; kept for back-compat with older state.json
+    Steward was retired; kept for back-compat with older state.json
     carrying a populated ``last_remaining_gaps_assessment``.
+
+    Args:
+        summary: The summary payload built by :func:`_build_summary_dict`.
+
+    Returns:
+        Markdown lines for the steward assessment section, or ``[]`` when no
+        assessment/history is present.
     """
     assessment = summary.get("remaining_gaps_assessment") or {}
     history = summary.get("remaining_gaps_assessments_history") or []
@@ -315,6 +638,13 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
     """Extract the ``## Executive Summary`` block (up to the next level-2
     heading) from analysis.md. Best-effort: returns a marker string when the
     file is missing / unparseable rather than crashing the report.
+
+    Args:
+        analysis_md_path: Filesystem path to the analysis.md file.
+
+    Returns:
+        The extracted Executive Summary block (capped to ~2KB), or a marker
+        string when the path is empty, unreadable, or lacks the block.
     """
     if not analysis_md_path:
         return "(no analysis.md path recorded)"
@@ -356,6 +686,12 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
     Two modes: ``single_snapshot`` (only the PRELUDE bootstrap ran; one
     Executive Summary + Base metric table) and ``before_after`` (a watermark
     refresh produced a distinct snapshot; two summaries + Base/Opt/Δ table).
+
+    Args:
+        cmp: The roofline-comparison dict built from snapshot history.
+
+    Returns:
+        Markdown lines for the Roofline Comparison section.
     """
     from ..roofline_snapshot import format_roofline_metrics_table
 
@@ -467,6 +803,12 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     gap %, no "should reach" wording) so it never reads as an implicit KPI.
     Heading varies by ``ext['reason']``: ``ok`` (full reference-best),
     ``no_target_gpu_configured`` ("(not requested)"), else "(advisory)".
+
+    Args:
+        ext: The external-baseline dict from :func:`_load_external_baseline`.
+
+    Returns:
+        Markdown lines for the advisory external-baseline section.
     """
     lines: list[str] = []
     status = str(ext.get("status") or "unknown")
@@ -554,7 +896,15 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
 def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
     """Best-effort load of ``target_analysis/target_baseline.json``; ``None``
     when missing / unreadable (errors swallowed so a corrupt JSON never
-    breaks report generation)."""
+    breaks report generation).
+
+    Args:
+        session_dir: The session directory holding the target-analysis JSON.
+
+    Returns:
+        The parsed external-baseline mapping, or ``None`` when missing or
+        unreadable.
+    """
     try:
         from ...session_paths import target_baseline_json
         path = target_baseline_json(session_dir)
@@ -579,6 +929,14 @@ def _write_kernel_opt_summary(
     Best-effort (failure logged, returns ``None`` so the final.json write
     still happens). Aggregates ``kernel_opt_attempts`` with per-kernel
     ``results/<kid>.json`` for the "why no optimized kernel?" view.
+
+    Args:
+        state: The session's shared state.
+        session_dir: The session directory used to locate per-kernel results.
+        output_dir: The reports output directory to write the summary into.
+
+    Returns:
+        The written summary path, or ``None`` on failure.
     """
     try:
         from ..kernel_attempt_summary import build_kernel_optimization_summary
@@ -607,7 +965,15 @@ def _write_kernel_opt_summary(
 def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
     """Build the small ``conc_sweep_summary`` pointer for ``final.json``
     (report_path + status + summary); ``None`` when conc_sweep wrote no
-    summary."""
+    summary.
+
+    Args:
+        session_dir: The session directory holding the conc-sweep summary.
+
+    Returns:
+        A compact pointer dict for ``final.json``, or ``None`` when no
+        conc-sweep summary exists or it is unreadable.
+    """
     from ...session_paths import reports_dir as _reports_dir
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
     if not json_path.exists():
@@ -633,7 +999,15 @@ def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
 
 
 def _read_ko_summary_totals(path: Path) -> dict[str, int]:
-    """Re-read totals so the final.json pointer doesn't drift from disk."""
+    """Re-read totals so the final.json pointer doesn't drift from disk.
+
+    Args:
+        path: Path to the kernel-optimization summary JSON.
+
+    Returns:
+        A mapping of total counts read from disk, or ``{}`` on any read/parse
+        error.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         totals = data.get("totals") or {}
@@ -739,6 +1113,11 @@ class ReportExecutor:
         )
 
         state = SharedState.load_or_init(session_dir)
+        # Only demote benign upstream WARNs from highlights on a baseline
+        # failure (#465); other runs keep every highlight untouched.
+        suppress_benign_highlights = (
+            str(getattr(state, "stop_reason", "") or "") == "baseline_failed"
+        )
 
         # Pull bus stats over a fresh connection (SQLite WAL shares cleanly).
         db = SqliteConnection(db_path_for(session_dir))
@@ -749,7 +1128,13 @@ class ReportExecutor:
             highlights: list[dict] = []
             for m in ev_rows:
                 if m.topic in highlight_topics:
-                    highlights.append(_highlight(m.payload or {}, m.topic, m.from_agent))
+                    h = _highlight(m.payload or {}, m.topic, m.from_agent)
+                    # On baseline_failed, suppress benign upstream WARN
+                    # headlines so they never become the top-level highlight
+                    # (#465); the full text still lives in the per-attempt logs.
+                    if suppress_benign_highlights and _highlight_is_benign(h):
+                        continue
+                    highlights.append(h)
         finally:
             db.close()
 
@@ -760,6 +1145,7 @@ class ReportExecutor:
             dict(ev_counts),
             highlights,
             external_baseline=external_baseline,
+            session_dir=session_dir,
         )
 
         # Kernel-optimization forensic summary in a separate file (pointer
@@ -812,6 +1198,13 @@ class ReportExecutor:
         Order: ``ctx.extra['session_dir']`` → ``task.params['session_dir']``
         → :func:`paths.session_dir` (only if it exists with ``state.json``)
         → None (runner returns failed).
+
+        Args:
+            ctx: Action context carrying ``extra`` / task params.
+
+        Returns:
+            The resolved session directory, or ``None`` when it cannot be
+            resolved.
         """
         extra = getattr(ctx, "extra", None) or {}
         if extra.get("session_dir"):
@@ -827,7 +1220,15 @@ class ReportExecutor:
 
     def _maybe_publish_results(self, session_dir: Path, state: SharedState) -> dict[str, Any]:
         """Best-effort publish hook for code-driven optimizer runs (opt-in
-        unless the results service URL is configured)."""
+        unless the results service URL is configured).
+
+        Args:
+            session_dir: The session directory to publish artifacts from.
+            state: The session's shared state (model/session identifiers).
+
+        Returns:
+            A dict describing whether publishing ran and its outcome.
+        """
         service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
         auto_publish = os.environ.get("HYPERLOOM_RESULTS_AUTO_PUBLISH", "").lower()
         if not service_url and auto_publish not in {"1", "true", "yes"}:

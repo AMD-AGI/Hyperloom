@@ -22,6 +22,7 @@ import pytest
 from inference_optimizer.orchestrator.action_executors.recover import (
     RecoverExecutor,
     _env_gate_allows_gpureset,
+    _session_gpu_ids,
     recover_executor,
 )
 from inference_optimizer.orchestrator.task_registry import Task
@@ -82,6 +83,7 @@ async def test_no_stale_owners_returns_succeeded(tmp_path, monkeypatch):
     """Healthy GPUs + no stale owners -> state=succeeded, no kills."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
+    monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "0")
     exe = RecoverExecutor()
 
     monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _healthy_probe())
@@ -204,10 +206,10 @@ async def test_sigkill_fallthrough_when_pid_still_alive(tmp_path, monkeypatch):
 
 # gpureset env-gate (the "soft_then_hard_gated" choice)
 @pytest.mark.asyncio
-async def test_env_gate_blocks_gpureset_by_default(tmp_path, monkeypatch):
+async def test_env_gate_blocks_gpureset_when_disabled(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    monkeypatch.delenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", raising=False)
+    monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "0")
     exe = RecoverExecutor()
 
     monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _leaked_probe())
@@ -233,6 +235,7 @@ async def test_env_gate_allows_gpureset_and_recovers(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
     workspace.mkdir()
     monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
     exe = RecoverExecutor()
 
     probes = iter([
@@ -241,16 +244,22 @@ async def test_env_gate_allows_gpureset_and_recovers(tmp_path, monkeypatch):
     monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: next(probes))
     monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
 
-    monkeypatch.setattr(
-        exe, "_try_rocm_smi_gpureset",
-        lambda: {"returncode": 0, "stdout": "GPU reset OK", "stderr": ""},
-    )
+    seen_ids: list[list[int]] = []
+
+    def _fake_gpureset(gpu_ids):
+        seen_ids.append(gpu_ids)
+        return {"returncode": 0, "stdout": "GPU reset OK", "stderr": ""}
+
+    monkeypatch.setattr(exe, "_try_rocm_smi_gpureset", _fake_gpureset)
 
     out = await exe(_ctx(workspace, params={"force_gpu_cleanup": True}))
     assert out["state"] == "succeeded"
     assert out["gpureset_attempted"] is True
     assert out["allow_reset_env"] is True
     assert out["gpureset_result"]["returncode"] == 0
+    # Scoped to ROCR_VISIBLE_DEVICES, never --gpu=all.
+    assert seen_ids == [[0, 1, 2, 3]]
+    assert out["gpureset_target_gpus"] == [0, 1, 2, 3]
 
 
 @pytest.mark.asyncio
@@ -258,12 +267,13 @@ async def test_gpureset_returncode_nonzero_persists_failure(tmp_path, monkeypatc
     workspace = tmp_path / "ws"
     workspace.mkdir()
     monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
     exe = RecoverExecutor()
     monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _leaked_probe())
     monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
     monkeypatch.setattr(
         exe, "_try_rocm_smi_gpureset",
-        lambda: {
+        lambda gpu_ids: {
             "returncode": 1,
             "stdout": "",
             "stderr": "ERROR: requires root",
@@ -293,12 +303,35 @@ async def test_gpureset_skipped_when_mid_probe_healthy(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         exe, "_try_rocm_smi_gpureset",
-        lambda: pytest.fail("gpureset should not run when mid-probe healthy"),
+        lambda gpu_ids: pytest.fail("gpureset should not run when mid-probe healthy"),
     )
 
     out = await exe(_ctx(workspace, params={"force_gpu_cleanup": True}))
     assert out["state"] == "succeeded"
     assert out["gpureset_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_gpureset_skipped_when_no_rocr_scope(tmp_path, monkeypatch):
+    """Env gate on + leaked VRAM but ROCR_VISIBLE_DEVICES unset -> refuse the
+    implicit full-node ``--gpu=all``; skip the hard reset and record why."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    exe = RecoverExecutor()
+    monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _leaked_probe())
+    monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
+    monkeypatch.setattr(
+        exe, "_try_rocm_smi_gpureset",
+        lambda gpu_ids: pytest.fail("must not reset without a session GPU scope"),
+    )
+
+    out = await exe(_ctx(workspace, params={"force_gpu_cleanup": True}))
+    assert out["state"] == "needs_review"
+    assert out["gpureset_attempted"] is False
+    assert out["gpureset_skipped_reason"] == "no_session_gpu_scope"
+    assert out["error_class"] == "gpu_unhealthy_after_soft_cleanup"
 
 
 # CSV parser unit tests
@@ -380,7 +413,7 @@ def test_try_rocm_smi_gpureset_handles_missing_binary(monkeypatch):
     exe = RecoverExecutor()
     import inference_optimizer.orchestrator.action_executors.recover as recmod
     monkeypatch.setattr(recmod.shutil, "which", lambda b: None)
-    out = exe._try_rocm_smi_gpureset()
+    out = exe._try_rocm_smi_gpureset([0, 1])
     assert out == {"error": "rocm-smi not on PATH"}
 
 
@@ -396,7 +429,7 @@ def test_try_rocm_smi_gpureset_handles_timeout(monkeypatch):
         raise subprocess.TimeoutExpired(cmd=["rocm-smi"], timeout=30.0)
 
     monkeypatch.setattr(recmod.subprocess, "run", _raise)
-    out = exe._try_rocm_smi_gpureset()
+    out = exe._try_rocm_smi_gpureset([0, 1])
     assert out["error"] == "timeout"
     assert out["timeout_s"] == RecoverExecutor.GPURESET_TIMEOUT_S
 
@@ -415,7 +448,7 @@ def test_try_rocm_smi_gpureset_returns_stdout_stderr(monkeypatch):
         stderr = "permission denied"
 
     monkeypatch.setattr(recmod.subprocess, "run", lambda *a, **kw: _Result())
-    out = exe._try_rocm_smi_gpureset()
+    out = exe._try_rocm_smi_gpureset([0, 1])
     assert out == {
         "returncode": 1,
         "stdout": "tried gpureset",
@@ -458,12 +491,32 @@ class _ProcResult:
 
 class TestEnvGate:
     def test_default_off(self, monkeypatch):
+        # Opt-in: hard GPU reset must NOT arm by default.
         monkeypatch.delenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", raising=False)
+        assert _env_gate_allows_gpureset() is False
+
+    def test_explicit_zero_disables(self, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "0")
         assert _env_gate_allows_gpureset() is False
 
     def test_explicit_one_enables(self, monkeypatch):
         monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
         assert _env_gate_allows_gpureset() is True
+
+
+class TestSessionGpuIds:
+    def test_unset_returns_none(self, monkeypatch):
+        monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+        assert _session_gpu_ids() is None
+
+    def test_subset_parsed_as_physical_ids(self, monkeypatch):
+        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+        assert _session_gpu_ids() == [4, 5, 6, 7]
+
+    def test_non_integer_token_returns_none(self, monkeypatch):
+        # A UUID token can't be safely mapped to a --gpu= index -> skip reset.
+        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "GPU-abc123")
+        assert _session_gpu_ids() is None
 
 
 # ---------------------------------------------------------------------------
@@ -697,7 +750,7 @@ class TestTryRocmSmiGpureset:
             "inference_optimizer.orchestrator.action_executors.recover.shutil.which",
             lambda name: None,
         )
-        out = RecoverExecutor()._try_rocm_smi_gpureset()
+        out = RecoverExecutor()._try_rocm_smi_gpureset([0])
         assert out == {"error": "rocm-smi not on PATH"}
 
     def test_success_truncates_outputs(self, monkeypatch):
@@ -710,7 +763,7 @@ class TestTryRocmSmiGpureset:
             "inference_optimizer.orchestrator.action_executors.recover.subprocess.run",
             lambda *a, **k: _ProcResult(returncode=0, stdout=big_stdout, stderr=""),
         )
-        out = RecoverExecutor()._try_rocm_smi_gpureset()
+        out = RecoverExecutor()._try_rocm_smi_gpureset([0])
         assert out["returncode"] == 0
         assert len(out["stdout"]) <= 2000
 
@@ -729,7 +782,7 @@ class TestTryRocmSmiGpureset:
             "inference_optimizer.orchestrator.action_executors.recover.subprocess.run",
             boom,
         )
-        out = RecoverExecutor()._try_rocm_smi_gpureset()
+        out = RecoverExecutor()._try_rocm_smi_gpureset([0])
         assert out["returncode"] is None
         assert out["error"] == "timeout"
         assert out["timeout_s"] == RecoverExecutor.GPURESET_TIMEOUT_S
@@ -747,7 +800,7 @@ class TestTryRocmSmiGpureset:
             "inference_optimizer.orchestrator.action_executors.recover.subprocess.run",
             boom,
         )
-        out = RecoverExecutor()._try_rocm_smi_gpureset()
+        out = RecoverExecutor()._try_rocm_smi_gpureset([0])
         assert "launch_failed" in out["error"]
 
 

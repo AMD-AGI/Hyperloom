@@ -265,3 +265,50 @@ def test_summarize_change_prefers_variant_args_and_envs():
 def test_summarize_change_falls_back_to_task_kind():
     assert summarize_change("baseline") == "baseline"
     assert summarize_change("") == "(unknown)"
+
+
+def test_operation_kind_for_maps_kind_and_action():
+    from inference_optimizer.orchestrator.optimization_journal import (
+        operation_kind_for,
+    )
+    # Explore sub-kinds pass through.
+    assert operation_kind_for("explore", "backend") == "backend"
+    assert operation_kind_for("explore", "param") == "param"
+    assert operation_kind_for("explore", "env") == "env"
+    # Kernel kinds rename to the action labels dashboards filter on.
+    assert operation_kind_for("kernel_opt", "kernel_file") == "kernel_opt"
+    assert operation_kind_for("integrate", "integrate") == "kernel_integrate"
+    # No / other kind falls back to the action.
+    assert operation_kind_for("roofline", "") == "roofline"
+    assert operation_kind_for("sweep", "other") == "sweep"
+    assert operation_kind_for("", "") == "other"
+
+
+def test_proposer_for_resolves_provenance():
+    from inference_optimizer.orchestrator.optimization_journal import proposer_for
+    assert proposer_for("specialist:serving_specialist") == "specialist:serving_specialist"
+    assert proposer_for("llm_direct") == "orchestration"
+    assert proposer_for("default_grid") == "grid"
+    assert proposer_for("legacy:backends") == "orchestration"
+    assert proposer_for("") == "orchestration"
+
+
+def test_journal_entry_roundtrips_proposer_and_metrics():
+    from inference_optimizer.orchestrator.optimization_journal import JournalEntry
+    e = JournalEntry(
+        phase="EXPLORE", iter=1, kind="backend", change="x", outcome="KEEP",
+        provenance="specialist:serving_specialist", scope="domain",
+        fingerprint="fp123", metrics={"runtime_sec": 42.0},
+    )
+    d = e.to_dict()
+    assert d["provenance"] == "specialist:serving_specialist"
+    assert d["scope"] == "domain"
+    assert d["fingerprint"] == "fp123"
+    assert d["metrics"] == {"runtime_sec": 42.0}
+    back = JournalEntry.from_dict(d)
+    assert back.provenance == "specialist:serving_specialist"
+    assert back.metrics == {"runtime_sec": 42.0}
+    # Empty metrics dict is stripped from the serialized form.
+    assert "metrics" not in JournalEntry(
+        phase="P", iter=0, kind="baseline", change="b", outcome="KEEP",
+    ).to_dict()

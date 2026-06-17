@@ -214,7 +214,7 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c2.shared_state.is_pruned("long")
-        # P3_19: the prune is advisory — proposals still reach the pending queue
+        # The prune is advisory — proposals still reach the pending queue
         # with an advisory observation so the LLM can decide.
         await c2._handle_intent("orchestration", Intent(
             type=IntentType.PROPOSE_ACTION,

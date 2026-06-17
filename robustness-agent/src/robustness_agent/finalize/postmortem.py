@@ -585,7 +585,14 @@ def finalize_session(
 ) -> bool:
     """Convenience wrapper for non-reactor callers (e.g. post-hoc re-runs).
 
-    Returns the :meth:`PostmortemFinalizer.finalize` boolean.
+    Args:
+        session_dir: Session directory to finalize.
+        session_id: Identifier of the session.
+        stop_reason: Reason recorded for finalization.
+        config: Optional finalizer configuration.
+
+    Returns:
+        The :meth:`PostmortemFinalizer.finalize` boolean.
     """
     finalizer = PostmortemFinalizer(
         session_dir=session_dir,
@@ -602,8 +609,16 @@ def finalize_session(
 def _pick_flashpoint(
     findings: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """First HIGH-severity finding, ordered by ``tick_index`` then
-    ``timestamp_unix`` (tie-break). ``None`` if nothing crossed HIGH."""
+    """Pick the earliest HIGH-severity finding as the flashpoint.
+
+    Ordered by ``tick_index`` then ``timestamp_unix`` (tie-break).
+
+    Args:
+        findings: Candidate finding dicts.
+
+    Returns:
+        The first HIGH-severity finding, or ``None`` if none crossed HIGH.
+    """
     high = [
         f for f in findings
         if isinstance(f, dict) and str(f.get("severity")) == "high"
@@ -624,9 +639,19 @@ def _normalise_task_entry(
     result_path: Path,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Project an executor ``result.json`` into the trace shape, capturing
-    the union of action-specific fields (e.g. ``output_throughput`` vs
-    ``gain_pct``) so dashboards need not re-read each file."""
+    """Project an executor ``result.json`` into the trace entry shape.
+
+    Captures the union of action-specific fields (e.g. ``output_throughput``
+    vs ``gain_pct``) so dashboards need not re-read each file.
+
+    Args:
+        task_dir: The task's workspace directory.
+        result_path: Path to the task's ``result.json``.
+        payload: Parsed result payload.
+
+    Returns:
+        A normalized trace entry dict.
+    """
     entry: dict[str, Any] = {
         "task_id": task_dir.name,
         "workspace": str(task_dir),

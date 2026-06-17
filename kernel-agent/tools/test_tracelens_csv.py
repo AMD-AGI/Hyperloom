@@ -9,6 +9,7 @@ TraceLens now consumes only ``analysis.md``; legacy CSV fallbacks are gone.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -22,6 +23,214 @@ if str(_TOOL_DIR) not in sys.path:
 
 import tracelens_analysis as tla  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
+
+
+def test_deterministic_category_analysis_command_maps_manifest_names(tmp_path):
+    """Deterministic route must invoke the real TraceLens script for manifest category names."""
+    cases = {
+        "sdpa_fwd": (
+            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
+            ["--category", "sdpa_fwd"],
+        ),
+        "sdpa_bwd": (
+            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
+            ["--category", "sdpa_bwd"],
+        ),
+        "inferenceattention": (
+            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
+            ["--category", "inferenceattention"],
+        ),
+        "norm_bwd": (
+            "TraceLens.Agent.Analysis.category_analyses.norm_analysis",
+            ["--category", "norm_bwd"],
+        ),
+        "rmsnorm": (
+            "TraceLens.Agent.Analysis.category_analyses.norm_analysis",
+            ["--category", "rmsnorm"],
+        ),
+        "moe_unfused": (
+            "TraceLens.Agent.Analysis.category_analyses.moe_analysis",
+            ["--category", "moe_unfused"],
+        ),
+        "customcollective": (
+            "TraceLens.Agent.Analysis.category_analyses.other_analysis",
+            ["--category", "customcollective"],
+        ),
+        "triton": (
+            "TraceLens.Agent.Analysis.category_analyses.triton_analysis",
+            [],
+        ),
+    }
+    for category, (module_name, extra_args) in cases.items():
+        cmd = tla._category_analysis_command(category, "compute_kernel", tmp_path)
+        assert cmd is not None
+        assert module_name in cmd
+        for arg in extra_args:
+            assert arg in cmd
+
+
+def test_deterministic_category_analysis_command_handles_grouped_gemm(tmp_path):
+    cmd = tla._category_analysis_command(
+        "groupedgemm_fwd",
+        "compute_kernel",
+        tmp_path,
+    )
+
+    assert cmd is not None
+    assert cmd[:2] == [sys.executable, "-c"]
+    snippet = cmd[2]
+    assert "gemm_analysis" in snippet
+    assert "category='groupedgemm_fwd'" in snippet
+    assert "--category" not in cmd
+
+
+def test_deterministic_category_analysis_command_skips_non_compute(tmp_path):
+    assert tla._category_analysis_command("sdpa_fwd", "system", tmp_path) is None
+    assert tla._category_analysis_command("cpu_idle", "compute_kernel", tmp_path) is None
+    assert tla._category_analysis_command("unknown_new_category", "compute_kernel", tmp_path) is None
+
+
+def test_deterministic_pipeline_failure_cannot_return_partial_hot_kernels():
+    with pytest.raises(RuntimeError, match="refusing to return partial hot_kernels"):
+        tla._raise_on_failed_deterministic_pipeline(2)
+
+    tla._raise_on_failed_deterministic_pipeline(0)
+
+
+def test_deterministic_steps_return_category_script_failure(monkeypatch, tmp_path):
+    output_dir = tmp_path / "out"
+    category_dir = output_dir / "category_data"
+    category_dir.mkdir(parents=True)
+    (category_dir / "category_manifest.json").write_text(
+        """
+        {
+          "categories": [
+            {"name": "sdpa_fwd", "tier": "compute_kernel"}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    (tmp_path / "trace.json").write_text("{}", encoding="utf-8")
+    log_path = tmp_path / "tl.log"
+    calls: list[list[str]] = []
+
+    def fake_run_command(cmd, *, cwd, log_path, timeout_s, env=None):
+        calls.append(cmd)
+        if "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis" in cmd:
+            return 7
+        return 0
+
+    monkeypatch.setattr(tla, "run_command", fake_run_command)
+
+    rc = tla._run_deterministic_tracelens_steps(
+        trace_path=tmp_path / "trace.json",
+        output_dir=output_dir,
+        tl_root=tmp_path,
+        platform="MI300X",
+        analysis_mode="standalone",
+        framework="sglang",
+        capture_folder=None,
+        log_path=log_path,
+        budget_minutes=1,
+    )
+
+    assert rc == 7
+    assert any(
+        "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis" in cmd
+        for cmd in calls
+    )
+    assert any("generate_priority_data" in " ".join(cmd) for cmd in calls)
+
+
+def test_deterministic_steps_quote_priority_output_dir(monkeypatch, tmp_path):
+    output_dir = tmp_path / "out'quoted"
+    category_dir = output_dir / "category_data"
+    category_dir.mkdir(parents=True)
+    (category_dir / "category_manifest.json").write_text(
+        '{"categories": []}',
+        encoding="utf-8",
+    )
+    (tmp_path / "trace.json").write_text("{}", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run_command(cmd, *, cwd, log_path, timeout_s, env=None):
+        calls.append(cmd)
+        return 0
+
+    monkeypatch.setattr(tla, "run_command", fake_run_command)
+
+    rc = tla._run_deterministic_tracelens_steps(
+        trace_path=tmp_path / "trace.json",
+        output_dir=output_dir,
+        tl_root=tmp_path,
+        platform="MI300X",
+        analysis_mode="standalone",
+        framework="sglang",
+        capture_folder=None,
+        log_path=tmp_path / "tl.log",
+        budget_minutes=1,
+    )
+
+    assert rc == 0
+    priority_cmd = next(cmd for cmd in calls if "generate_priority_data" in " ".join(cmd))
+    assert str(output_dir) in priority_cmd[2]
+    assert f"generate_priority_data({str(output_dir)!r})" in priority_cmd[2]
+
+
+def test_deterministic_main_fails_before_high_idle_gate(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    import json as _json
+
+    trace = tmp_path / "trace.json"
+    trace.write_text('{"traceEvents": []}', encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    tl_root = tmp_path / "TraceLens"
+    skill = (
+        tl_root
+        / "TraceLens"
+        / "Agent"
+        / "Analysis"
+        / ".cursor"
+        / "skills"
+        / "analysis-orchestrator.md"
+    )
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# skill\n", encoding="utf-8")
+
+    monkeypatch.setattr(tla, "count_gpu_kernel_events", lambda _path: 1)
+    monkeypatch.setattr(tla, "populate_gpu_arch_json", lambda **_kwargs: None)
+    monkeypatch.setattr(tla, "run_command", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(
+        tla,
+        "_run_deterministic_tracelens_steps",
+        lambda **_kwargs: 9,
+    )
+
+    def _unexpected_idle_read(_output_dir):
+        raise AssertionError("idle gate must not run after deterministic failure")
+
+    monkeypatch.setattr(tla, "_extract_idle_pct_from_gpu_timeline", _unexpected_idle_read)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tracelens_analysis.py",
+            "--trace-input", str(trace),
+            "--workspace-path", str(workspace),
+            "--tracelens-root", str(tl_root),
+            "--analysis-route", "deterministic",
+            "--skip-split",
+        ],
+    )
+
+    assert tla.main() == 1
+    result = _json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert "Deterministic TraceLens pipeline failed" in result["error"]
 
 
 # A path — is_kernel_event strict cat == 'kernel'
@@ -3173,3 +3382,438 @@ def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
     )
     assert line == 125
     assert func == "forward"
+
+
+# ---------------------------------------------------------------------------
+# deterministic_extract_hot_kernels
+# ---------------------------------------------------------------------------
+
+def _write_priority_json(output_dir, findings):
+    p = output_dir / "priority_data.json"
+    p.write_text(json.dumps({"findings": findings}), encoding="utf-8")
+
+
+def _write_metrics_json(output_dir, category, operations, status="OK"):
+    cat_dir = output_dir / "category_data"
+    cat_dir.mkdir(parents=True, exist_ok=True)
+    (cat_dir / f"{category}_metrics.json").write_text(
+        json.dumps({
+            "category": category,
+            "status": status,
+            "operations": operations,
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_deterministic_extract_hot_kernels_basic(tmp_path):
+    ops = [
+        {"name": "aten::mm", "time_ms": 10.0, "count": 5,
+         "args": "(1024,1024) bf16", "launcher_path": ""},
+    ]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "gemm", "impact_score": 0.8,
+         "members": [
+             {"operation": "aten::mm", "time_ms": 10.0,
+              "efficiency_pct": 45.0, "bound_type": "compute"},
+         ]},
+    ])
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    assert len(result) == 1
+    c = result[0]
+    assert c["name"] == "aten::mm"
+    assert c["duration_us"] == 10000.0
+    assert c["call_count"] == 5
+    assert c["efficiency_percent"] == 45.0
+    assert c["shapes"] == ["(1024,1024) bf16"]
+    assert c["input_shapes"] == [{"call_num": 5, "shape": "(1024,1024) bf16"}]
+
+
+def test_deterministic_extract_hot_kernels_empty_priority(tmp_path):
+    _write_priority_json(tmp_path, [])
+    assert tla.deterministic_extract_hot_kernels(tmp_path, top_k=5) == []
+
+
+def test_deterministic_extract_hot_kernels_missing_priority(tmp_path):
+    assert tla.deterministic_extract_hot_kernels(tmp_path, top_k=5) == []
+
+
+def test_deterministic_extract_hot_kernels_bad_priority_json(tmp_path):
+    priority_path = tmp_path / "priority_data.json"
+    priority_path.write_text("{not json", encoding="utf-8")
+    log_path = tmp_path / "deterministic.log"
+
+    result = tla.deterministic_extract_hot_kernels(
+        tmp_path, top_k=5, log_path=log_path,
+    )
+
+    assert result == []
+    assert "failed to parse" in log_path.read_text(encoding="utf-8")
+
+
+def test_deterministic_extract_hot_kernels_bad_priority_json_fail_loud(tmp_path):
+    priority_path = tmp_path / "priority_data.json"
+    priority_path.write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="failed to parse"):
+        tla.deterministic_extract_hot_kernels(
+            tmp_path,
+            top_k=5,
+            fail_on_corrupt_priority=True,
+        )
+
+
+def test_deterministic_extract_hot_kernels_top_k_limit(tmp_path):
+    ops = [
+        {"name": f"op{i}", "time_ms": float(i), "count": 1, "args": ""}
+        for i in range(10)
+    ]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    members = [
+        {"operation": f"op{i}", "time_ms": float(i),
+         "efficiency_pct": 50.0}
+        for i in range(10)
+    ]
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "gemm",
+         "impact_score": 1.0, "members": members},
+    ])
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=3)
+    assert len(result) == 3
+
+
+def test_deterministic_extract_sets_non_synthetic_input_shapes(tmp_path):
+    """Input shapes from deterministic extraction must NOT be synthetic."""
+    ops = [
+        {"name": "aiter::mm", "time_ms": 5.0, "count": 3,
+         "args": "(512,256) fp16<br>(256,128) fp16", "launcher_path": ""},
+    ]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "gemm", "impact_score": 0.5,
+         "members": [
+             {"operation": "aiter::mm", "time_ms": 5.0,
+              "efficiency_pct": 60.0},
+         ]},
+    ])
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    c = result[0]
+    assert c["input_shapes"] == [
+        {"call_num": 3, "shape": "(512,256) fp16<br>(256,128) fp16"},
+    ]
+    assert "_input_shapes_synthetic" not in c
+
+
+def test_deterministic_extract_skips_metric_mismatch(tmp_path):
+    ops = [
+        {"name": "aten::mm", "time_ms": 100.0, "count": 5,
+         "args": "(1024,1024) bf16", "launcher_path": ""},
+    ]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "gemm", "impact_score": 0.8,
+         "members": [
+             {"operation": "aten::mm", "time_ms": 10.0,
+              "efficiency_pct": 45.0, "bound_type": "compute"},
+         ]},
+    ])
+
+    log_path = tmp_path / "deterministic.log"
+    result = tla.deterministic_extract_hot_kernels(
+        tmp_path, top_k=5, log_path=log_path,
+    )
+
+    assert result == []
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "skipping priority member with no matching metrics row" in log_text
+    assert "operation='aten::mm'" in log_text
+
+
+# ---------------------------------------------------------------------------
+# deterministic_extract_hot_kernels — "other" bucket inclusion + sorting
+# ---------------------------------------------------------------------------
+
+_OTHER_MOE_NAME = (
+    "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"
+)
+_MOE_KERNEL_DEF = (
+    "/sgl-workspace/sglang/python/sglang/srt/layers/moe/"
+    "moe_runner/triton_utils/fused_moe_triton_kernels.py"
+)
+# The wrapper that merely *launches* the kernel — must never be the source.
+_MOE_LAUNCHER_PATH = (
+    "sglang/srt/layers/moe/moe_runner/triton_utils/"
+    "fused_moe.py(391): _fused_moe_kernel_sequence"
+)
+
+
+def test_deterministic_extract_includes_other_bucket_kernel(tmp_path, monkeypatch):
+    """A high-GPU-time "other"-bucket Triton kernel (fused_moe) that never
+    appears in priority_data findings must still be surfaced, resolved to its
+    *definition* file (not the launcher wrapper)."""
+    _write_metrics_json(tmp_path, "other", [
+        {"name": _OTHER_MOE_NAME, "time_ms": 354.0, "count": 96,
+         "args": "(16384,2048) bf16", "launcher_path": _MOE_LAUNCHER_PATH,
+         "library": "Triton"},
+    ])
+    # priority_data has only a small gemm finding — no fused_moe.
+    _write_metrics_json(tmp_path, "gemm", [
+        {"name": "aten::mm", "time_ms": 10.0, "count": 5,
+         "args": "(1024,1024) bf16", "launcher_path": ""},
+    ])
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "gemm", "impact_score": 0.8,
+         "members": [{"operation": "aten::mm", "time_ms": 10.0,
+                      "efficiency_pct": 45.0, "bound_type": "compute"}]},
+    ])
+    # Hermetic: pin symbol resolution to the kernel definition file.
+    monkeypatch.setattr(tla, "locate_source_via_grep",
+                        lambda name: _MOE_KERNEL_DEF if name == _OTHER_MOE_NAME else "")
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    by_name = {c["name"]: c for c in result}
+    assert _OTHER_MOE_NAME in by_name, "fused_moe other-bucket op must be surfaced"
+    moe = by_name[_OTHER_MOE_NAME]
+    assert moe["source_file"] == _MOE_KERNEL_DEF, "must resolve to definition, not launcher"
+    assert "fused_moe.py" not in moe["source_file"], "must NOT point at the launcher wrapper"
+    assert moe["candidate_source"] == "other_bucket_fallback"
+
+
+def test_deterministic_extract_sorts_all_candidates_by_duration(tmp_path, monkeypatch):
+    """The dominant "other"-bucket kernel (354ms) must outrank a small
+    priority-data kernel (10ms) — all candidates sorted by GPU time."""
+    _write_metrics_json(tmp_path, "other", [
+        {"name": _OTHER_MOE_NAME, "time_ms": 354.0, "count": 96,
+         "args": "(16384,2048) bf16", "launcher_path": _MOE_LAUNCHER_PATH,
+         "library": "Triton"},
+    ])
+    _write_metrics_json(tmp_path, "elementwise", [
+        {"name": "sgl_kernel::silu_and_mul", "time_ms": 10.0, "count": 5,
+         "args": "(1024,1024) bf16", "launcher_path": ""},
+    ])
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "elementwise", "impact_score": 1.9,
+         "members": [{"operation": "sgl_kernel::silu_and_mul", "time_ms": 10.0,
+                      "efficiency_pct": 17.0, "bound_type": "memory"}]},
+    ])
+    monkeypatch.setattr(tla, "locate_source_via_grep",
+                        lambda name: _MOE_KERNEL_DEF if name == _OTHER_MOE_NAME else "")
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    assert result[0]["name"] == _OTHER_MOE_NAME, "biggest kernel must rank first"
+    durations = [c["duration_us"] for c in result]
+    assert durations == sorted(durations, reverse=True), "candidates sorted desc by duration"
+
+
+def test_deterministic_extract_skips_other_op_with_unresolvable_source(tmp_path, monkeypatch):
+    """An "other"-bucket op whose symbol cannot be resolved to a definition
+    file is skipped (never falls back to the launcher wrapper as source)."""
+    _write_metrics_json(tmp_path, "other", [
+        {"name": "sglang_profiler::mystery_op_999", "time_ms": 50.0, "count": 1,
+         "args": "", "launcher_path": _MOE_LAUNCHER_PATH, "library": "Triton"},
+    ])
+    _write_priority_json(tmp_path, [])
+    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: "")
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    assert result == [], "unresolvable other-bucket op must be skipped"
+
+
+# ---------------------------------------------------------------------------
+# _match_op_by_time
+# ---------------------------------------------------------------------------
+
+def test_match_op_by_time_exact_match():
+    ops = [
+        {"name": "a", "time_ms": 10.0, "args": "shape1"},
+        {"name": "a", "time_ms": 20.0, "args": "shape2"},
+    ]
+    result = tla._match_op_by_time(ops, "a", 20.0)
+    assert result["args"] == "shape2"
+
+
+def test_match_op_by_time_close_match():
+    ops = [{"name": "a", "time_ms": 10.005, "args": "ok"}]
+    result = tla._match_op_by_time(ops, "a", 10.0)
+    assert result["args"] == "ok"
+
+
+def test_match_op_by_time_rejects_distant_match():
+    ops = [{"name": "a", "time_ms": 100.0, "args": "wrong"}]
+    result = tla._match_op_by_time(ops, "a", 10.0)
+    assert result == {}
+
+
+def test_match_op_by_time_no_name_match():
+    ops = [{"name": "b", "time_ms": 10.0}]
+    result = tla._match_op_by_time(ops, "a", 10.0)
+    assert result == {}
+
+
+def test_match_op_by_time_empty_ops():
+    assert tla._match_op_by_time([], "a", 10.0) == {}
+
+
+# ---------------------------------------------------------------------------
+# _extract_total_time_us_from_gpu_timeline
+# ---------------------------------------------------------------------------
+
+def test_extract_total_time_us_from_gpu_timeline(tmp_path):
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "gpu_timeline.csv").write_text(
+        "type,time ms,percent\n"
+        "compute_time,100.5,80.0\n"
+        "total_time,125.0,100.0\n"
+        "idle_time,24.5,20.0\n",
+        encoding="utf-8",
+    )
+    result = tla._extract_total_time_us_from_gpu_timeline(tmp_path)
+    assert result == 125000.0
+
+
+def test_extract_total_time_us_returns_none_when_missing(tmp_path):
+    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# _normalize_profiler_op_name / graph-captured keyword recovery
+# ---------------------------------------------------------------------------
+
+def test_normalize_profiler_op_name_strips_graph_wrappers():
+    n = tla._normalize_profiler_op_name
+    # Launch wrapper + return type + template are peeled to the bare symbol.
+    assert n("hipGraphLaunch->void ck::foo_kernel<int>") == "ck::foo_kernel<int>"
+    # Plain symbol with no namespace keeps the identifier after stripping void.
+    assert (
+        n("hipGraphLaunch->void paged_attention_ll4mi_QKV_mfma16_kernel<x>")
+        == "paged_attention_ll4mi_QKV_mfma16_kernel<x>"
+    )
+    # Embedded Itanium-mangled symbol is surfaced for the _Z demangle path.
+    assert (
+        n("hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_fp8E")
+        == "_ZN5aiter37dynamic_per_group_scaled_quant_fp8E"
+    )
+    # .kd suffix and "(Synthetic Op)" annotation are removed.
+    assert (
+        n("hipGraphLaunch->triton_poi_fused_2.kd (Synthetic Op)")
+        == "triton_poi_fused_2"
+    )
+    # Already-clean names pass through unchanged (regression guard).
+    assert n("aten::mm") == "aten::mm"
+    assert (
+        n("sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427")
+        == "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"
+    )
+
+
+def test_candidate_keywords_recovers_graph_captured_symbols():
+    # Before normalization these kept the "hipGraphLaunch->void " prefix and
+    # greped to nothing; now they yield the real kernel identifier.
+    kws = tla._candidate_keywords(
+        "hipGraphLaunch->void paged_attention_ll4mi_QKV_mfma16_kernel<x>"
+    )
+    assert "paged_attention_ll4mi_QKV_mfma16_kernel" in kws
+
+    kws = tla._candidate_keywords(
+        "hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_fp8E"
+    )
+    assert "dynamic_per_group_scaled_quant_fp8E" in kws
+
+    # Clean profiler symbol still resolves to the same keyword as before.
+    kws = tla._candidate_keywords(
+        "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"
+    )
+    assert kws == ["fused_moe_triton_kernels_invoke_fused_moe_kernel_427"]
+
+
+def test_deterministic_other_bucket_logs_unresolved_high_time_op(
+    tmp_path, monkeypatch,
+):
+    """A high-GPU-time other-bucket op with no resolvable source must be logged,
+    not silently dropped (root-cause-B observability guard)."""
+    _write_priority_json(tmp_path, [])
+    _write_metrics_json(tmp_path, "other", [
+        {
+            "name": "hipGraphLaunch->void ck::kernel_moe_gemm_2lds<...>",
+            "time_ms": 217.0,
+            "count": 4,
+            "args": "(1,2) bf16",
+            "launcher_path": "",
+        },
+    ])
+    # Simulate a vendor template kernel that exists only as a compiled .so:
+    # no editable source can be grepped.
+    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: "")
+
+    log_path = tmp_path / "deterministic.log"
+    result = tla.deterministic_extract_hot_kernels(
+        tmp_path, top_k=5, log_path=log_path,
+    )
+
+    assert result == []
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "no editable source resolved" in log_text
+    assert "time_ms=217.000" in log_text
+
+
+def test_minimal_analysis_md_includes_system_level_signals(tmp_path):
+    """System-Level Signals section is rendered from gpu_timeline.csv (no LLM)."""
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "gpu_timeline.csv").write_text(
+        "type,time ms,percent\n"
+        "computation_time,800.0,80.0\n"
+        "exposed_comm_time,40.0,4.0\n"
+        "exposed_memcpy_time,10.0,1.0\n"
+        "idle_time,200.0,20.0\n"
+        "total_time,1000.0,100.0\n",
+        encoding="utf-8",
+    )
+
+    report = tla.generate_minimal_analysis_md(tmp_path, [], idle_pct=20.0)
+    text = report.read_text(encoding="utf-8")
+
+    assert "## System-Level Signals" in text
+    assert "GPU idle | 20.00%" in text
+    # 20% idle is above the default 80%? No — default gate is high; ensure the
+    # note reflects the threshold comparison deterministically.
+    assert "idle gate" in text
+    assert "Exposed communication | 4.00%" in text
+    assert "Exposed memcpy (device copy) | 1.00%" in text
+
+
+def test_minimal_analysis_md_omits_system_signals_without_timeline(tmp_path):
+    """No gpu_timeline.csv -> no System-Level Signals section (no fabrication)."""
+    report = tla.generate_minimal_analysis_md(tmp_path, [], idle_pct=None)
+    text = report.read_text(encoding="utf-8")
+    assert "## System-Level Signals" not in text
+
+
+def test_deterministic_other_bucket_keeps_resolvable_graph_op(
+    tmp_path, monkeypatch,
+):
+    """A graph-captured op whose symbol resolves to source is kept as a candidate."""
+    _write_priority_json(tmp_path, [])
+    _write_metrics_json(tmp_path, "other", [
+        {
+            "name": "hipGraphLaunch->void aiter::my_triton_kernel<x> (Synthetic Op)",
+            "time_ms": 50.0,
+            "count": 2,
+            "args": "(8,16) fp16",
+            "launcher_path": "",
+        },
+    ])
+    monkeypatch.setattr(
+        tla, "locate_source_via_grep",
+        lambda name: "/sgl-workspace/aiter/my_triton_kernel.py",
+    )
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+
+    assert len(result) == 1
+    assert result[0]["source_file"] == "/sgl-workspace/aiter/my_triton_kernel.py"
+    assert result[0]["duration_us"] == 50000.0

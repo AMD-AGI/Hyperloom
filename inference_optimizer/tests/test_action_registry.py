@@ -194,12 +194,16 @@ def test_gate_propose_action_unknown_rejected(gate_with_registry):
     assert exc.value.rule == "unknown_action"
 
 
-def test_gate_propose_action_kernel_owned_allowed_for_proposal(gate_with_registry):
-    """Orchestration may *propose* a kernel-owned action; only delegate is gated."""
-    gate_with_registry.validate_intent("orchestration", Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "kernel_opt", "predicted_gain_pct": 12.0},
-    ))
+def test_gate_propose_action_kernel_owned_rejected(gate_with_registry):
+    """Kernel-owned actions are REQUEST-only: propose_action is gated exactly
+    like delegate (symmetry), so a proposal cannot bypass the kernel REQUEST
+    handler by materializing as a kind=<kernel action> task."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate_with_registry.validate_intent("orchestration", Intent(
+            type=IntentType.PROPOSE_ACTION,
+            payload={"action_name": "kernel_opt", "predicted_gain_pct": 12.0},
+        ))
+    assert exc.value.rule == "kernel_owned_by_kernel_agent"
 
 
 def test_gate_allowed_tools_for_action_uses_metadata(gate_with_registry):

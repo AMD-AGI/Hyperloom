@@ -78,7 +78,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
   `TraceLens_generate_perf_report_pytorch_inference --help`
   (Hyperloom is inference-only since v0.4; the training-mode CLI is no
   longer accepted)
-- GEAK CLI from `GEAK_REF` (default `v3.2.0`) +
+- GEAK CLI from `GEAK_REF` (default `v3.2.1`) +
   `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
   `claude-opus-4-7`). Run-mode default for the generated yaml is
@@ -101,7 +101,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
       environments.
     - `profiler-mcp` — unified profiling MCP (Metrix + rocprof-compute);
       produces `profile.json` per attempt. Metrix is no longer a separate
-      `metrix-mcp` folder in v3.2.0 — it is pulled in transitively via
+      `metrix-mcp` folder in v3.2.1 — it is pulled in transitively via
       `profiler-mcp/pyproject.toml` (`dependencies = ["metrix>=0.1.0"]`).
     - `cross-session-memory-mcp` — SQLite-backed cross-session memory
       retriever; points at `GEAK_MEMORY_STORE_PATH` (default
@@ -364,7 +364,7 @@ repeat the manual install above.
 When `$TRACELENS_ROOT` or `$TRACELENS_INTERNAL_ROOT` is on a read-only mount,
 `ensure_tracelens` uses `$TRACELENS_ROOT` for the public checkout and mirrors
 the internal checkout to `$TRACELENS_MIRROR_DIR` when needed (parallel to
-`${GEAK_ROOT}` / `${OOB_CLI_ROOT}`) via `cp -r`, runs `pip install -e` against
+`${GEAK_ROOT}` / `${OOB_ROOT}`) via `cp -r`, runs `pip install -e` against
 the writable mirror, and `write_env_file` re-exports the resolved root so
 subsequent CLI subprocesses inherit the mirror. Treat these mirrors as
 installer-owned state; do not clone, clean, or edit them by hand.
@@ -415,14 +415,16 @@ canonical upstream path returned in `analysis_report_path` from
 User-specified backends win, subject to feasibility checks. If user does not
 specify backends:
 
-- **Default ladder (all rewritable kernels)**: `geak,claude,codex,cursor` —
-  GEAK first because every kernel Claude/Codex/Cursor can rewrite, GEAK can
-  rewrite too. Claude/Codex stay on as fallbacks if GEAK times out or
-  rejects; `cursor` is appended when `$CURSOR_API_KEY` is provisioned (auto-
-  dropped otherwise to avoid wasted 401 attempts). The kernel type
-  (Triton / HIP-C++ / FlyDSL / Python / unknown) does NOT change the ladder;
-  the capability differences are GEAK-side, not Hyperloom-side, so we let
-  GEAK decide what to handle.
+- **Default ladder (all rewritable kernels)**: `forge,geak` — Forge first
+  (Kernel-Forge autonomous loop), falling through to GEAK when Forge skips a
+  non-Triton candidate or misses a KEEP. `claude`, `codex`, and `cursor` are
+  **NOT** in the default ladder anymore; they are opt-in only, enabled via
+  `--backends` or the `KERNEL_OPT_BACKEND_ORDER` / `KERNEL_OPT_BACKENDS` env
+  (they remain in the `allowed` whitelist so the env override still works).
+  `cursor` is additionally key-gated (dropped when `$CURSOR_API_KEY` is unset
+  to avoid wasted 401 attempts). The kernel type (Triton / HIP-C++ / FlyDSL /
+  Python / unknown) does NOT change the ladder; capability differences are
+  backend-side, not Hyperloom-side, so we let the backend decide what to handle.
 - **No-benchmark case**: still attempt GEAK but flag
   `geak_without_benchmark: true` so the KEEP gate downstream knows
   verification confidence is reduced (matches the existing user-specified
@@ -488,7 +490,7 @@ than a silent skip.
   runner SIGTERMs at 100%. `parallel_e2e_runner` will still extract whatever
   `optimization_report.md` / `optimized_versions/*` were on disk at SIGTERM
   time and promote the attempt to `partial` (see Proposal Rules).
-- **Why GEAK budget tracks $GEAK_RUN_MODE**: GEAK v3.2.0 yaml ships two
+- **Why GEAK budget tracks $GEAK_RUN_MODE**: GEAK v3.2.1 yaml ships two
   presets — `run.budgets.quick.total_s=3600` (1 h, 2 rounds) and
   `run.budgets.full.total_s=7200` (2 h, 5 rounds). GEAK's mini.py:435
   resolves mode by LLM-parsing the prompt-quoted budget: <120 min → quick,

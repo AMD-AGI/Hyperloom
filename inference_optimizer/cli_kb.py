@@ -33,6 +33,12 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     """Resolve the local recipe-snapshot KB root: ``--local-kb-root`` ->
     ``$HYPERLOOM_LOCAL_KB_ROOT`` -> ``workspace_root()/kb``. Not created here
     (LocalRecipeStore creates it lazily on first write).
+
+    Args:
+        args: Parsed CLI arguments; ``local_kb_root`` is consulted first.
+
+    Returns:
+        Path: The resolved local KB root directory.
     """
     explicit = (
         getattr(args, "local_kb_root", None)
@@ -43,12 +49,65 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     return _workspace_root_resolve() / "kb"
 
 
+def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
+    """Wire ``RecipeKB.audit_hook`` to append remote-read trace events.
+
+    Each recipe-snapshot remote read (``get_recipe`` / ``search``) is appended
+    to ``recipe_snapshot/.audit.jsonl`` so the trace records whether the
+    snapshot KB (gbrain / cortex) was consulted, the request, and how it
+    resolved. Best-effort and never raises into the KB op. No-op without a
+    session dir or when the dispatcher predates ``audit_hook``.
+
+    Args:
+        kb (Any): The RecipeKB dispatcher (or a mirroring wrapper around it).
+        session_dir (Path | None): Session dir hosting the audit log.
+    """
+    if session_dir is None:
+        return
+    # Unwrap the inline gbrain-mirroring wrapper so the hook lands on the
+    # actual RecipeKB whose reads emit the audit events.
+    target = getattr(kb, "_inner", kb)
+    if not hasattr(target, "audit_hook"):
+        return
+
+    from datetime import datetime, timezone
+
+    from .session_paths import recipe_snapshot_audit_jsonl
+
+    audit_path = recipe_snapshot_audit_jsonl(Path(session_dir))
+
+    def _hook(event: dict[str, Any]) -> None:
+        """Append a timestamped recipe-snapshot read event to the audit log.
+
+        Args:
+            event (dict[str, Any]): The remote-read trace event to record.
+        """
+        try:
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            row = {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                **event,
+            }
+            with audit_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+        except Exception:  # noqa: BLE001 — audit must never break a KB op
+            log.debug("recipe_snapshot audit append failed", exc_info=True)
+
+    target.audit_hook = _hook
+
+
 def _build_recipe_kb_dispatcher(
     args: argparse.Namespace,
 ) -> Any:
     """Build the local-write / remote-read RecipeKB dispatcher. Local store
     always wired; remote half enabled only when not --degraded-kb and a URL
     resolves (foreground 2s + 1-retry; no hard-coded default endpoint).
+
+    Args:
+        args: Parsed CLI arguments (``degraded_kb``, ``cortex_kb_url``, etc.).
+
+    Returns:
+        Any: A configured ``RecipeKB`` dispatcher (optionally gbrain-mirroring).
     """
     from .recipe_kb import LocalRecipeStore, RecipeKB, RemoteRecipeClient
 
@@ -141,8 +200,19 @@ def _bootstrap_cortex_kb(
     """Boot the recipe-snapshot KB integration, run the T0 anchor, and return
     the dispatcher. KB unavailability never aborts the launch
     (fail_fast=False); a hard T0 failure warns and continues warm-start-empty.
+
+    Args:
+        args: Parsed CLI arguments.
+        session_dir: The current session directory.
+        manifest: The session manifest dict (model, framework, fingerprint).
+        resume: Whether this launch is resuming an existing session.
+
+    Returns:
+        Any: The configured ``RecipeKB`` dispatcher.
     """
     kb = _build_recipe_kb_dispatcher(args)
+    # Trace every recipe-snapshot remote read into the session audit log.
+    _attach_recipe_audit_hook(kb, session_dir)
 
     state = SharedState.load_or_init(session_dir)
     workload = (
@@ -211,6 +281,15 @@ def _bootstrap_knowledge_plane(
     """Construct the :class:`KnowledgePlane` facade. Wires the optional PR
     Monitor REST client (KB reads go through RecipeKB, so cortex_kb=None here).
     Both backends fail-soft; --degraded-pr yields a disabled PRMonitorClient.
+
+    Args:
+        args: Parsed CLI arguments (PR Monitor enablement, URLs, window).
+        cortex_client: Optional cortex client; unused (KB reads go via RecipeKB).
+        session_dir: Optional session directory; when set a status marker is
+            written for breakdown warnings.
+
+    Returns:
+        KnowledgePlane: The wired KnowledgePlane facade.
     """
     from .orchestrator.knowledge_plane import (
         KnowledgePlane,

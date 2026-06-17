@@ -698,6 +698,10 @@ async def test_plateau_advisory_explore_triggered(coord: Coordinator, monkeypatc
                                                 "empty_streak": 3}))
     out = coord._plateau_advisory_block()
     assert "EXPLORE plateau detected" in out
+    # Cyclic mode (default): footer must state the deterministic EXPLORE→KERNEL
+    # advance, not the stale "informational only" claim.
+    assert "advances EXPLORE" in out and "KERNEL" in out
+    assert "informational" not in out
 
 
 @pytest.mark.asyncio
@@ -738,6 +742,32 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
     )
     last = coord.shared_state.last_specialist
     assert last.get("task_id") == "rec-spec-1"
+
+
+@pytest.mark.asyncio
+async def test_record_specialist_result_no_dead_research_evidence_log(
+    coord: Coordinator, caplog,
+) -> None:
+    """Regression (#486 leftover): the deleted ``_aggregate_research_evidence``
+    call raised AttributeError that was swallowed into a spammy error log on
+    every specialist result. The dead call must be gone, so no such error is
+    logged."""
+    import logging
+
+    task = _ptask("rec-spec-dead", "specialist")
+    with caplog.at_level(logging.ERROR):
+        await coord._record_specialist_result(
+            task=task,
+            done_payload={
+                "domain": "kernel",
+                "proposal_set": [{"name": "p1"}],
+            },
+            source="specialist:rec-spec-dead",
+        )
+    assert not any(
+        "research-evidence aggregation failed" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 @pytest.mark.asyncio

@@ -155,6 +155,12 @@ def resolve_candidates_path(run_dir: Path) -> Path:
     Falls back to the flat path (which ``load_candidates`` will surface as a
     clean ``FileNotFoundError``) when nothing matches, preserving the
     "no fabricated target" failure mode for genuinely missing analyses.
+
+    Args:
+        run_dir: The ``runs/<session_id>/`` root for the session.
+
+    Returns:
+        The resolved ``kernel_candidates.json`` path (possibly non-existent).
     """
     flat = run_dir / "kernel_candidates.json"
     if flat.is_file():
@@ -176,7 +182,15 @@ def resolve_candidates_path(run_dir: Path) -> Path:
 def load_candidates(path: Path) -> list[dict[str, Any]]:
     """Load kernel candidates from JSON, normalizing legacy shapes.
 
-    Per Hyperloom#314 returns the union of ``hot_kernels`` (routable) + ``skipped_kernels`` so id lookup still resolves non-routable kernels; legacy flat-list / ``kernel_candidates`` shapes respected.
+    Per Hyperloom#314 returns the union of ``hot_kernels`` (routable) +
+    ``skipped_kernels`` so id lookup still resolves non-routable kernels;
+    legacy flat-list / ``kernel_candidates`` shapes are respected.
+
+    Args:
+        path: Path to the ``kernel_candidates.json`` file.
+
+    Returns:
+        The list of candidate dicts, with trace-report paths backfilled.
     """
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
@@ -212,7 +226,17 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
 
 
 def _normalize_kernel_id(value: str) -> str:
-    """Fold hallucinated ``kn``/``rn`` prefixes onto the real ``k`` numbering, lower-cased, for tolerant comparison."""
+    """Normalize a kernel id for tolerant comparison.
+
+    Folds hallucinated ``kn``/``rn`` prefixes onto the real ``k`` numbering and
+    lower-cases the value.
+
+    Args:
+        value: The raw kernel id.
+
+    Returns:
+        The normalized kernel id.
+    """
     s = value.strip().lower()
     for prefix in ("kn", "rn"):
         if s.startswith(prefix) and s[len(prefix):].isdigit():
@@ -223,7 +247,19 @@ def _normalize_kernel_id(value: str) -> str:
 def find_candidate(
     candidates: list[dict[str, Any]], kernel_id: str
 ) -> dict[str, Any] | None:
-    """Resolve a candidate by exact ``kernel_id``, then unique routable ``name``, then normalized id (``kn``/``rn``→``k``); ``None`` if nothing matches (caller skips gracefully)."""
+    """Resolve a candidate by id with progressively looser matching.
+
+    Tries exact ``kernel_id`` first, then a unique routable ``name`` match,
+    then a normalized id (``kn``/``rn`` → ``k``).
+
+    Args:
+        candidates: The candidate dicts to search.
+        kernel_id: The kernel id (or name) to resolve.
+
+    Returns:
+        The matching candidate, or ``None`` when nothing matches (the caller
+        skips gracefully).
+    """
     for candidate in candidates:
         if candidate.get("kernel_id") == kernel_id:
             return candidate
@@ -299,6 +335,15 @@ def _resolve_source_file(
     kernel, e.g. DeepSeek-R1 routed an MHA rewrite at ``fused_moe.py``); a
     differing LLM path emits a ``[source-override]`` warning. Falls back to the
     LLM path when the candidate has no source_file.
+
+    Args:
+        llm_source: The LLM-supplied ``--source-file`` path.
+        candidate: The TraceLens candidate dict (source of truth).
+        kernel_id: The kernel id, used in log messages.
+        log_path: Optional path to append override/fallback notes.
+
+    Returns:
+        The effective source file path to use.
     """
     cand_source = str((candidate or {}).get("source_file") or "").strip()
     llm = str(llm_source or "").strip()
@@ -398,6 +443,13 @@ def _match_benchmark_for_kernel(
     kernel-name regex hoists that family's bench files to the front (earlier
     patterns win). No match preserves the original order. Prevents picking an
     off-topic benchmark (e.g. fmha → test_pa.py stalling GEAK Step-5).
+
+    Args:
+        kernel_name: The kernel name to match patterns against.
+        bench_files: Candidate benchmark file paths.
+
+    Returns:
+        The benchmark paths reordered so the matching family comes first.
     """
     existing = [p for p in (bench_files or []) if isinstance(p, str) and p]
     if not existing:
@@ -434,8 +486,11 @@ def _profile_timeout_sec() -> int:
 
     Injected as a ``timeout <N>`` prefix on the test_command so a default-matrix
     benchmark (e.g. aiter test_pa.py) can't stall Step 5 for hours; SIGTERM at N
-    surfaces as a normal profiling failure. Default 600s, override via
-    ``KERNEL_OPT_PROFILE_TIMEOUT_SEC``, floored at 1.
+    surfaces as a normal profiling failure.
+
+    Returns:
+        The timeout in seconds: 600 by default, overridable via
+        ``KERNEL_OPT_PROFILE_TIMEOUT_SEC``, floored at 1.
     """
     try:
         value = int(os.environ.get("KERNEL_OPT_PROFILE_TIMEOUT_SEC", "600"))
@@ -503,7 +558,11 @@ def parse_backends(backends: str) -> list[str]:
             (``geak``, ``claude``, ``codex``, ``cursor``).
     """
     parsed = [b.strip().lower() for b in backends.split(",") if b.strip()]
-    allowed = {"geak", "claude", "codex", "cursor"}
+    # `forge` is the Kernel-Forge autonomous-loop backend; it is first in the
+    # default ladder (choose_backends) and falls through to geak/claude/codex
+    # when it skips a non-triton candidate or misses a KEEP. See
+    # claw-dev/docs-zh/forge-as-hyperloom-backend-integration.md.
+    allowed = {"geak", "claude", "codex", "cursor", "forge"}
     invalid = [b for b in parsed if b not in allowed]
     if invalid:
         raise ValueError(f"unsupported backend(s): {', '.join(invalid)} "
@@ -542,6 +601,16 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
             ``geak_without_benchmark`` flag, cursor key presence, etc.).
     """
     user_backends = parse_backends(args.backends)
+    # Honor the coordinator's KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS env
+    # when no explicit --backends was passed: the single-kernel subprocess used to
+    # ignore it and fall back to the full default ladder, so a forge-only run
+    # (KERNEL_OPT_BACKEND_ORDER=forge) still fired geak/claude/codex. Mirror the
+    # handler's _backend_order precedence here so the subprocess agrees.
+    if not user_backends:
+        env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+                     or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
+        if env_order:
+            user_backends = parse_backends(env_order)
     benchmark_available = has_benchmark(args, candidate)
     source_type = str(candidate.get("source_type") or "unknown")
     # Skip cursor from auto-selected defaults when CURSOR_API_KEY is unset (explicit --backends still wins).
@@ -561,9 +630,13 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     if source_type == "vendor_binary":
         return [], notes
 
-    # Unified ladder (#144): GEAK first, then claude/codex. Without a benchmark GEAK still
-    # attempts but flags geak_without_benchmark=True so KEEP gates know confidence is reduced.
-    selected = ["geak", "claude", "codex"]
+    # Unified ladder: forge FIRST (Kernel-Forge autonomous loop; falls through to
+    # geak when forge skips a non-triton candidate or misses a KEEP), then GEAK.
+    # claude/codex are NOT auto-selected anymore — enable them only via explicit
+    # --backends or KERNEL_OPT_BACKEND_ORDER/KERNEL_OPT_BACKENDS env (handled
+    # above). Without a benchmark GEAK still attempts but flags
+    # geak_without_benchmark=True so KEEP gates know confidence is reduced.
+    selected = ["forge", "geak"]
     if not benchmark_available:
         notes["geak_without_benchmark"] = True
     return selected, notes
@@ -701,7 +774,15 @@ def _env_target_platform() -> str:
 
 
 def _format_shapes_for_case(shapes: Any) -> str:
-    """Render a candidate row's ``shapes`` field as one comma-joined line."""
+    """Render a candidate row's ``shapes`` field as a comma-joined line.
+
+    Args:
+        shapes: A shapes value (string, list, or list of ``{call_num, shape}``
+            dicts).
+
+    Returns:
+        The rendered single-line shapes string, or empty when none.
+    """
     if not shapes:
         return ""
     if isinstance(shapes, str):
@@ -723,6 +804,201 @@ def _format_shapes_for_case(shapes: Any) -> str:
     return str(shapes)
 
 
+_SHAPE_ARG_RE = re.compile(
+    r"^\s*\((?P<dims>[^)]*)\)\s*(?P<dtype>[A-Za-z0-9_]+)?\s*$"
+)
+
+
+def _split_shape_fragments(shape_text: Any) -> list[str]:
+    """Split TraceLens ``Args`` text into per-argument shape fragments.
+
+    Args:
+        shape_text: The raw TraceLens ``Args`` text (any type; coerced to str).
+
+    Returns:
+        The non-empty per-argument shape fragments.
+    """
+    text = str(shape_text or "").strip()
+    if not text:
+        return []
+    return [
+        frag.strip()
+        for frag in re.split(r"\s*(?:<br\s*/?>|\n)\s*", text, flags=re.IGNORECASE)
+        if frag.strip()
+    ]
+
+
+def _parse_shape_arg(raw: Any, *, index: int) -> dict[str, Any]:
+    """Parse one shape fragment such as ``(15360,8,768) bf16``.
+
+    Args:
+        raw: The raw shape fragment text (any type; coerced to str).
+        index: The argument index recorded on the parsed result.
+
+    Returns:
+        A dict with ``index`` / ``raw`` and, when parseable, ``shape`` (dims)
+        and ``dtype``.
+    """
+    text = str(raw or "").strip()
+    out: dict[str, Any] = {"index": index, "raw": text}
+    match = _SHAPE_ARG_RE.match(text)
+    if not match:
+        return out
+    dims: list[int | str] = []
+    dims_text = match.group("dims").strip()
+    if dims_text:
+        for part in dims_text.split(","):
+            item = part.strip()
+            if not item:
+                continue
+            try:
+                dims.append(int(item))
+            except ValueError:
+                dims.append(item)
+    out["shape"] = dims
+    dtype = (match.group("dtype") or "").strip()
+    if dtype:
+        out["dtype"] = dtype
+    return out
+
+
+def _shape_case_from_value(
+    value: Any,
+    *,
+    call_count: Any = None,
+    primary: bool = False,
+) -> dict[str, Any]:
+    """Build one structured benchmark shape case from TraceLens shape data.
+
+    Args:
+        value: The shape data (dict, list/tuple, or scalar) to convert.
+        call_count: Fallback call count when the value carries none.
+        primary: Whether this case is the primary benchmark case.
+
+    Returns:
+        A shape-case dict with ``primary`` / ``call_count`` / ``raw`` / ``args``
+        keys.
+    """
+    if isinstance(value, dict):
+        structured_args = value.get("args")
+        raw_shape = value.get("shape") or value.get("Args") or value.get("args") or ""
+        case_count = value.get("call_num", value.get("call_count", call_count))
+    elif isinstance(value, (list, tuple)):
+        structured_args = None
+        fragments: list[str] = []
+        case_count = call_count
+        for item in value:
+            if isinstance(item, dict):
+                shape = item.get("shape") or item.get("Args") or item.get("args") or ""
+                if case_count is None:
+                    case_count = item.get("call_num", item.get("call_count"))
+            else:
+                shape = item
+            if shape not in (None, "", [], ()):
+                fragments.append(str(shape))
+        raw_shape = "<br>".join(fragments)
+    else:
+        structured_args = None
+        raw_shape = value
+        case_count = call_count
+    try:
+        parsed_count = int(float(case_count or 1))
+    except (TypeError, ValueError):
+        parsed_count = 1
+    if isinstance(structured_args, list):
+        args = list(structured_args)
+    else:
+        fragments = _split_shape_fragments(raw_shape)
+        args = [
+            _parse_shape_arg(fragment, index=idx)
+            for idx, fragment in enumerate(fragments)
+        ]
+    return {
+        "primary": bool(primary),
+        "call_count": parsed_count,
+        "raw": str(raw_shape or "").strip(),
+        "args": args,
+    }
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce a TraceLens numeric field, returning ``default`` on drift.
+
+    Args:
+        value: The value to coerce to ``float``.
+        default: Fallback returned when ``value`` cannot be parsed.
+
+    Returns:
+        The parsed float, or ``default`` on any failure.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Expose primary/supplementary serving shapes in machine-readable form.
+
+    Args:
+        candidate: The kernel candidate dict, possibly carrying a
+            ``task_group`` or ``input_shapes``.
+
+    Returns:
+        A dict with ``primary_shape`` and ``supplementary_shapes``, or ``{}``
+        when no usable shapes are present.
+    """
+    group = candidate.get("task_group")
+    rows = group.get("rows") if isinstance(group, dict) else None
+    cases: list[dict[str, Any]] = []
+    input_shapes = candidate.get("input_shapes")
+    is_synthetic = bool(candidate.get("_input_shapes_synthetic"))
+    if isinstance(rows, list) and rows:
+        # A task_group represents one dispatch covering multiple observed
+        # shapes for the same source function. Prefer its rows so the prompt
+        # keeps supplementary shapes instead of only the primary candidate.
+        for idx, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            case = _shape_case_from_value(
+                row.get("shapes"),
+                call_count=row.get("call_count"),
+                primary=idx == 0,
+            )
+            case.update({
+                "operation": str(row.get("name") or ""),
+                "aggregate_time_ms": _safe_float(row.get("duration_us")) / 1000.0,
+                "percent_e2e": row.get("percent_of_total"),
+                "bound": str(row.get("bound_type") or ""),
+                "source": "task_group",
+            })
+            if case["raw"] or case["args"]:
+                cases.append(case)
+    if (
+        not cases
+        and isinstance(input_shapes, list)
+        and input_shapes
+        and not is_synthetic
+    ):
+        # Only use input_shapes when they come from a real program output
+        # (TraceLens / runtime enrichment), not from the synthetic
+        # legacy-shapes conversion in enrich_candidates_with_runtime_metadata.
+        for idx, entry in enumerate(input_shapes):
+            case = _shape_case_from_value(entry, primary=idx == 0)
+            case["source"] = "input_shapes"
+            if case["raw"] or case["args"]:
+                cases.append(case)
+    if not cases:
+        return {}
+    cases[0]["primary"] = True
+    for case in cases[1:]:
+        case["primary"] = False
+    return {
+        "primary_shape": cases[0],
+        "supplementary_shapes": cases[1:],
+    }
+
+
 def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
     """Fallback shapes block when no TraceLens ``task_group`` is attached.
 
@@ -732,6 +1008,13 @@ def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
     speedup will not translate to an end-to-end gain. Generic: applies to any
     candidate carrying captured shapes; returns ``""`` when none exist so the
     prompt stays byte-identical to legacy in that case.
+
+    Args:
+        candidate: The kernel candidate dict, possibly carrying captured
+            shapes.
+
+    Returns:
+        The captured-shapes prompt block, or ``""`` when no shapes exist.
     """
     shapes = candidate.get("shapes") or candidate.get("kernel_shapes")
     rendered = _format_shapes_for_case(shapes)
@@ -754,7 +1037,18 @@ def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
 def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
     """Render the multi-row benchmark cases section for a task_group.
 
-    Falls back to :func:`_build_captured_shapes_block` when ``candidate["task_group"]`` is absent/empty so captured shapes still reach GEAK. With a task_group, emits one bullet per TraceLens row (sorted by aggregate time desc) surfacing operation/args/aggregate_time_ms/percent_e2e/count/per_call_ms/flops_per_byte/efficiency/bound (bound + per_call_ms drive backend dispatch).
+    Falls back to :func:`_build_captured_shapes_block` when
+    ``candidate["task_group"]`` is absent/empty so captured shapes still reach
+    GEAK. With a task_group, emits one bullet per TraceLens row (sorted by
+    aggregate time descending) surfacing operation, args, aggregate time,
+    percent E2E, count, per-call ms, flops/byte, efficiency, and bound (bound +
+    per-call ms drive backend dispatch).
+
+    Args:
+        candidate: The kernel candidate dict, optionally with a ``task_group``.
+
+    Returns:
+        The rendered benchmark-cases prompt block.
     """
     group = candidate.get("task_group")
     rows = group.get("rows") if isinstance(group, dict) else None
@@ -910,7 +1204,14 @@ _PRIORITY_BULLETS: dict[str, list[str]] = {
 
 
 def _classify_bound(bound_type: str) -> str:
-    """Map TraceLens ``bound`` strings to one of ``memory`` / ``compute`` / ``unknown``."""
+    """Classify a TraceLens ``bound`` string into a coarse bucket.
+
+    Args:
+        bound_type: The TraceLens bound description.
+
+    Returns:
+        One of ``"memory"``, ``"compute"``, or ``"unknown"``.
+    """
     text = (bound_type or "").lower()
     if "memory" in text or "bandwidth" in text or "hbm" in text:
         return "memory"
@@ -920,9 +1221,16 @@ def _classify_bound(bound_type: str) -> str:
 
 
 def _build_priority_block(candidate: dict[str, Any]) -> str:
-    """Render the bound-keyed optimization priority list (uses the primary row's bound for a task_group).
+    """Render the bound-keyed optimization priority list.
 
-    Empty string when ``bound_type`` is missing and no ``task_group`` is attached.
+    Uses the primary row's bound when the candidate carries a ``task_group``.
+
+    Args:
+        candidate: The kernel candidate dict.
+
+    Returns:
+        The priority-list prompt block, or ``""`` when ``bound_type`` is
+        missing and no ``task_group`` is attached.
     """
     group = candidate.get("task_group")
     bound_type = str(candidate.get("bound_type") or "").strip()
@@ -1002,6 +1310,13 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
     every P-item's prose under a ``### P{rank}`` header; otherwise a single block.
     The reasoning/resolution prose is labelled a hypothesis to validate (it is
     itself LLM-generated); the numeric impact range is roofline arithmetic.
+
+    Args:
+        candidate: The kernel candidate dict, optionally with a ``task_group``
+            carrying P-item prose.
+
+    Returns:
+        The hypothesis prompt block, or ``""`` when no prose is present.
     """
     # Multi-P-item case (Q2): render every P-item's prose so GEAK sees all framings.
     group = candidate.get("task_group")
@@ -1207,6 +1522,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     input_dtypes = candidate.get("input_dtypes")
     if input_dtypes is None:
         input_dtypes = candidate.get("dtypes", [])
+    benchmark_shape_cases = _structured_benchmark_shape_cases(candidate)
 
     runtime_flags: dict[str, Any] = {}
     if isinstance(candidate.get("runtime_flags"), dict):
@@ -1263,7 +1579,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     for key in ("KV_DTYPE", "BLOCK_SIZE", "HEAD_SIZE"):
         kernel_params.setdefault(key, candidate.get(key))
 
-    return {
+    metadata = {
         "kernel_path": str(source_file or ""),
         "kernel_name": kernel_name,
         "input_shapes": input_shapes or [],
@@ -1282,6 +1598,9 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
             candidate.get("source_promoted_from_launcher"),
         ),
     }
+    if benchmark_shape_cases:
+        metadata["benchmark_shape_cases"] = benchmark_shape_cases
+    return metadata
 
 
 def build_prompt(
@@ -1434,7 +1753,7 @@ def build_prompt(
         "  or `rg ... <repo>`, NEVER `find /`.\n"
         "\n"
         "GOAL & TIME BUDGET:\n"
-        # GEAK v3.2.0 LLM-parses prompt for `--mode full` / `mode=quick` etc.
+        # GEAK v3.2.1 LLM-parses prompt for `--mode full` / `mode=quick` etc.
         # (prompts.py:73-76 trigger list). Emit the explicit token so the
         # parser locks in the right preset (yaml run.budgets.<mode>) instead
         # of leaking off other prompt phrases like "quick micro-benchmark".
@@ -1618,6 +1937,14 @@ def build_prompt(
         f"repo: {kernel_repo}",
         f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
         f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
+        (
+            "Shape contract: when `benchmark_shape_cases` is present in the "
+            "metadata, benchmark its `primary_shape` first and use "
+            "`supplementary_shapes` only as additional coverage. Do not invent "
+            "shapes or reorder tensor arguments."
+            if kernel_metadata.get("benchmark_shape_cases")
+            else ""
+        ),
         promotion_block,
         "",
         "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",
@@ -1663,7 +1990,17 @@ def _backends_module_dir() -> Path:
 
 
 def _import_backend(name: str):
-    """Dynamically load kernel-agent/tools/backends/<name>.py (dir added to sys.path so submodules cross-import)."""
+    """Dynamically import a per-backend submitter module.
+
+    The ``backends`` directory is added to ``sys.path`` so its submodules can
+    cross-import each other.
+
+    Args:
+        name: The backend module name (without ``.py``).
+
+    Returns:
+        The imported backend module.
+    """
     backends_dir = _backends_module_dir()
     if str(backends_dir) not in sys.path:
         sys.path.insert(0, str(backends_dir))
@@ -1672,7 +2009,14 @@ def _import_backend(name: str):
 
 
 def _kernel_agent_root() -> Path:
-    """Output root for kernel-agent tools at ``$USER_DATA_PATH/kernel-agent`` (via workspace_root, which warns once when unset)."""
+    """Resolve the kernel-agent tools output root.
+
+    Uses :func:`workspace_root` (which warns once when ``$USER_DATA_PATH`` is
+    unset).
+
+    Returns:
+        The ``$USER_DATA_PATH/kernel-agent`` output root path.
+    """
     return Path(workspace_root()) / "kernel-agent"
 
 
@@ -1744,7 +2088,18 @@ _DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC = 3600
 
 
 def _ensure_yaml_env_timeout(text: str, *, timeout: int = _DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC) -> str:
-    """Inject ``env.timeout`` (default 3600s) if absent; mini-swe-agent defaults to 30s and would kill the test command."""
+    """Ensure the GEAK YAML carries a sufficient ``env.timeout``.
+
+    Injects or raises ``env.timeout`` (default 3600s) because mini-swe-agent
+    defaults to 30s and would kill the test command.
+
+    Args:
+        text: The original GEAK YAML config text.
+        timeout: Desired timeout in seconds (floored at 60).
+
+    Returns:
+        The YAML text with ``env.timeout`` set to at least ``timeout``.
+    """
     timeout = max(60, int(timeout))
     has_env = re.search(r"^env\s*:\s*(?:#.*)?$", text, flags=re.MULTILINE)
     if has_env:
@@ -2209,6 +2564,17 @@ def _update_kernel_roofline_sidecar(
     Even when ``_run_rocprof_roofline`` skipped (e.g. no ``test_command``)
     or failed, we still write a tagged entry so the dashboard can distinguish
     "considered but skipped/failed" from "not yet evaluated" (``null``).
+
+    Args:
+        workspace_path: Workspace root containing ``reports/``.
+        kernel_id: The kernel id whose sidecar entry is updated.
+        rocprof_json_path: Path to the rocprof JSON artifact, if any.
+        rocprof_txt_path: Path to the rocprof text report, if any.
+        log_path: Optional path to append diagnostics.
+        rocprof_status: Status tag to record when no JSON is available.
+        rocprof_reason: Reason tag to record when no JSON is available.
+        phase: Which sub-key to write (``before_kernel_opt`` or
+            ``after_kernel_opt``).
     """
     sidecar_path = Path(workspace_path) / "reports" / "kernel_roofline.json"
     if not sidecar_path.is_file():
@@ -2347,6 +2713,27 @@ def _oob_output_dir(session_id: str, prompt_file: Path) -> Path:
     return out
 
 
+def _forge_output_dir(session_id: str, prompt_file: Path) -> Path:
+    """Return the per-attempt output directory for a Forge run.
+
+    Mirrors _oob_output_dir but scopes Forge artifacts under their own
+    ``forge/`` root instead of the legacy ``oob/`` directory, so the Forge
+    backend's outputs (forge_loop.log, forge_experiments/, optimization_report,
+    optimized_versions/) are not confusingly nested under a sibling backend's
+    name.
+
+    Args:
+        session_id: Session identifier for the run.
+        prompt_file: Prompt file whose stem scopes the attempt directory.
+
+    Returns:
+        The created ``.../forge/<session_id>/<prompt_stem>`` directory.
+    """
+    out = _kernel_agent_root() / "forge" / session_id / prompt_file.stem
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def _mirror_path_link(run_dir: Path, mirror: Path) -> None:
     """Create a relative symlink inside the run dir pointing at the mirror.
 
@@ -2369,7 +2756,14 @@ def _mirror_path_link(run_dir: Path, mirror: Path) -> None:
 
 
 def _git_checkout_fallback(kernel_repo: str, log_path: Path) -> None:
-    """Best-effort `git checkout -- .` to undo rogue agent writes under the kernel repo. Idempotent."""
+    """Run a best-effort ``git checkout -- .`` to undo rogue agent writes.
+
+    Idempotent and safe to call when the repo has no changes.
+
+    Args:
+        kernel_repo: Path to the kernel repo to clean.
+        log_path: Path to append checkout diagnostics.
+    """
     if not kernel_repo:
         return
     git_dir = Path(kernel_repo) / ".git"
@@ -2455,6 +2849,8 @@ def invoke_backend(
     _shared_out_dir = (
         _geak_output_dir(args.session_id, prompt_file)
         if backend == "geak"
+        else _forge_output_dir(args.session_id, prompt_file)
+        if backend == "forge"
         else _oob_output_dir(args.session_id, prompt_file)
     )
     if common_test_command:
@@ -2595,6 +2991,37 @@ def invoke_backend(
                 if rocprof_before.get("txt_path"):
                     result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
             return result
+        if backend == "forge":
+            # Kernel-Forge autonomous-loop backend. Runs entirely inside a git
+            # worktree of kernel_repo (never mutates the live repo) and emits the
+            # same artifacts as OOB (optimized_versions/ + optimization_report.md),
+            # so the downstream verify/propose/integrate path is unchanged.
+            forge = _import_backend("forge_submit")
+            out_dir = _forge_output_dir(args.session_id, prompt_file)
+            result = forge.submit(
+                source_file=source_file,
+                prompt_file=prompt_file,
+                output_dir=out_dir,
+                test_command=common_test_command,
+                source_type=str((candidate or {}).get("source_type") or "unknown"),
+                candidate=candidate or {},
+                num_gpus=num_gpus,
+                timeout_s=timeout_s,
+                prefer_ray=prefer_ray,
+                kernel_repo=kernel_repo,
+            )
+            result["output_dir"] = str(out_dir)
+            if common_test_command:
+                result["test_command"] = common_test_command
+            if rocprof_before:
+                result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
+                if rocprof_before.get("reason"):
+                    result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
+                if rocprof_before.get("json_path"):
+                    result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
+                if rocprof_before.get("txt_path"):
+                    result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
+            return result
         return {
             "returncode": 2,
             "stdout_tail": f"unknown backend: {backend}",
@@ -2603,7 +3030,10 @@ def invoke_backend(
         }
     finally:
         # Always undo rogue writes under the kernel repo, regardless of exit code.
-        if log_path is not None:
+        # Skip for forge: it manages its own restore (per-file write-back on a
+        # temp branch); a blanket `git checkout -- .` here would overwrite the
+        # dirty-file state that forge just carefully restored.
+        if log_path is not None and backend != "forge":
             _git_checkout_fallback(kernel_repo, log_path)
 
 
@@ -2860,7 +3290,16 @@ _AUTH_RETRY_THRESHOLD = 3
 
 
 def _count_auth_failures(text: str) -> int:
-    """Count distinct inner-LLM auth-failure markers in *text* (distinguishes a transient 401 from an unrecoverable loop)."""
+    """Count inner-LLM auth-failure markers in captured text.
+
+    Distinguishes a transient 401 from an unrecoverable loop.
+
+    Args:
+        text: The captured backend output to scan.
+
+    Returns:
+        The number of auth-failure markers found.
+    """
     if not text:
         return 0
     total = 0
@@ -2870,7 +3309,17 @@ def _count_auth_failures(text: str) -> int:
 
 
 def _extract_speedup_from_report(report_path: str | Path) -> float | None:
-    """Best-effort scan of an OOB optimization_report.md for a speedup figure (median-of-top-3; None if absent)."""
+    """Scan an OOB ``optimization_report.md`` for a speedup figure.
+
+    Uses a median-of-top-3 to dodge cherry-picked best-shape numbers.
+
+    Args:
+        report_path: Path to the optimization report.
+
+    Returns:
+        The estimated speedup, or ``None`` when the report is missing or no
+        plausible figure is found.
+    """
     if not report_path:
         return None
     p = Path(report_path)
@@ -2976,6 +3425,10 @@ def _trust_geak_correctness() -> bool:
     GEAK's save_and_test only checks compile + import, not numerical output, so without this
     every GEAK KEEP would degrade to NEEDS_REVIEW; integrate's E2E magpie benchmark is the
     ground-truth check. Set ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=0`` to restore the conservative behaviour.
+
+    Returns:
+        ``True`` when GEAK correctness should be trusted (the default),
+        ``False`` when the env var disables it.
     """
     raw = os.environ.get("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "").strip().lower()
     if raw in {"0", "false", "no", "off"}:
@@ -3135,9 +3588,17 @@ def _extract_source_block(text_path: Path, target_suffix: str, output_path: Path
 
 
 def _geak_best_worktree(best_patch_path: str) -> Path | None:
-    """Map a GEAK best-patch file path to the ``worktrees/slot_<M>`` it edited (shares ``parallel_<M>``'s suffix).
+    """Map a GEAK best-patch path to the ``worktrees/slot_<M>`` it edited.
 
-    Lets callers pick up the real source file instead of scraping a diff; ``None`` on layout mismatch.
+    The slot shares the ``parallel_<M>`` suffix, letting callers pick up the
+    real source file instead of scraping a diff.
+
+    Args:
+        best_patch_path: Path to the GEAK best-patch file.
+
+    Returns:
+        The corresponding ``worktrees/slot_<M>`` path, or ``None`` on layout
+        mismatch.
     """
     if not best_patch_path:
         return None
@@ -3160,10 +3621,18 @@ def _worktree_source_paths(
     source_file: str,
     kernel_repo: str,
 ) -> list[Path]:
-    """Return existing files under ``worktree`` mirroring ``source_file``.
+    """Find existing files under a worktree mirroring a source file.
 
-    Tries source_file relative to kernel_repo first, then a basename rglob within
-    the worktree. Empty list when nothing matches.
+    Tries ``source_file`` relative to ``kernel_repo`` first, then a basename
+    rglob within the worktree.
+
+    Args:
+        worktree: The worktree directory to search.
+        source_file: The source file path to mirror.
+        kernel_repo: The kernel repo root used for relative resolution.
+
+    Returns:
+        Matching paths under the worktree, or an empty list when none match.
     """
     if not worktree.is_dir() or not source_file:
         return []

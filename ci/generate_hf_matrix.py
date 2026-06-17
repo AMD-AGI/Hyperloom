@@ -37,8 +37,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from optimize_submit import HuggingFaceClient   # noqa: E402
 
-DEFAULT_CRON_CANDIDATES_FILE = (
-    "ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json"
+# The schedule always sets INPUT_CANDIDATES_FILE explicitly (built from the
+# WEKAFS_CHENYI_DIR secret), so this is only the empty-env fallback. Keep the
+# personal /wekafs root out of source; allow a CRON_CANDIDATES_FILE env override.
+DEFAULT_CRON_CANDIDATES_FILE = os.environ.get(
+    "CRON_CANDIDATES_FILE",
+    "ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json",
 )
 
 
@@ -363,6 +367,14 @@ def _filter_entries_by_explicit_models(
     Historically INPUT_MODELS returned bare repo strings and therefore lost
     framework / precision / tp / conc from candidates JSON. For manual reruns
     of a small subset from a fixed pool, keep the candidate dicts intact.
+
+    Args:
+        entries: Candidate entries (dicts and/or repo id strings).
+        explicit_repos: Repo ids requested via ``INPUT_MODELS``.
+
+    Returns:
+        The matching candidate entries in ``explicit_repos`` order; all
+        ``entries`` when ``explicit_repos`` is empty.
     """
     if not explicit_repos:
         return entries
@@ -442,6 +454,13 @@ def _load_candidate_entries(cands_path: Path) -> list[dict]:
 
     BATCH_SIZE unset/0 returns all candidates. Slice order follows the JSON
     (HF download rank) for deterministic batch dispatch.
+
+    Args:
+        cands_path: Path to the candidates JSON file.
+
+    Returns:
+        The candidate dicts (each annotated with ``pool_id`` / ``pool_index``),
+        or ``[]`` when the file cannot be read.
     """
     try:
         data = json.loads(cands_path.read_text(encoding="utf-8"))
@@ -498,21 +517,30 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
 
 # UTC hours at which the schedule cron fires (keep in sync with the
 # ``schedule: cron`` expression at the top of optimize-submit.yml).
-_CRON_FIRE_HOURS_UTC = (4, 12, 20)
+# 2026-06-15: dropped to twice a day (UTC 04:00 / 16:00 = Beijing 12:00 / 00:00).
+_CRON_FIRE_HOURS_UTC = (4, 16)
 
 # Anchor fire: the first scheduled run at/after this instant maps to batch 0.
 # The rotation pool is ordered not-run-first, so batch 0 hits the not-yet-run
 # head. Merge the candidate-pool change before this fire so the very next cron
 # starts at batch 0; bump this if the merge slips to a later fire.
-_CRON_ANCHOR_UTC = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+# 2026-06-15: re-anchored to the next 16:00 UTC fire so the freshly front-loaded
+# 449 >12B multimodal NOT-run models are swept starting at batch 0.
+_CRON_ANCHOR_UTC = datetime(2026, 6, 15, 16, 0, tzinfo=timezone.utc)
 
 
 def _cron_fire_counter(now_utc: datetime) -> int:
     """Map a UTC instant to a strictly increasing scheduled-fire counter.
 
-    Each scheduled cron fire (UTC 4/12/20) advances the counter by exactly one,
+    Each scheduled cron fire (UTC 4/16) advances the counter by exactly one,
     so consecutive cron runs step through batch 0, 1, 2, ... in order (unlike a
-    half-day slot, which collapsed the 12:00 and 20:00 fires onto one index).
+    half-day slot, which would collapse multiple fires onto one index).
+
+    Args:
+        now_utc: The UTC instant to map.
+
+    Returns:
+        A strictly increasing per-fire counter for ``now_utc``.
     """
     idx = bisect.bisect_right(_CRON_FIRE_HOURS_UTC, now_utc.hour) - 1
     if idx < 0:
@@ -525,7 +553,7 @@ def _cron_fire_counter(now_utc: datetime) -> int:
 
 
 def _cron_batch_index(pool_size: int, batch_size: int) -> int:
-    """Sequential production-pool rotation for the thrice-daily cron.
+    """Sequential production-pool rotation for the twice-daily cron.
 
     Each scheduled fire advances the batch index by one (0, 1, 2, ... wrapping
     at the batch count), so the cron marches the whole pool in order and then
@@ -537,6 +565,13 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
     instead of wrapping to the pool tail: a negative ``steps % batches`` would
     otherwise land on the last batch, silently skipping the not-run backlog the
     anchor is meant to drain first.
+
+    Args:
+        pool_size: Total number of candidate entries.
+        batch_size: Entries per batch.
+
+    Returns:
+        The 0-based batch index for the current scheduled fire.
     """
     batches = max((pool_size + batch_size - 1) // batch_size, 1)
     now_raw = (os.environ.get("INPUT_CRON_NOW") or "").strip()

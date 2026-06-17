@@ -16,7 +16,7 @@ from inference_optimizer.recipe_kb.gbrain_remote_client import _page_to_recipe
 
 def _recipe(**over: Any) -> dict[str, Any]:
     base = {
-        "canonical_id": "inference:qwen3-32b:mi300x:sglang:0_5_11:fp8",
+        "canonical_id": "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:0_5_11:fp8",
         "model": "Qwen3-32B", "hardware": "mi300x", "framework": "sglang",
         "framework_version": "0_5_11", "precision": "fp8",
         "best_config": {"extra_server_args": "--cuda-graph-max-bs 256", "FOO": "1"},
@@ -43,7 +43,8 @@ def test_scalar_quotes_risky_keeps_barewords() -> None:
 
 def test_recipe_to_page_roundtrips_via_reader() -> None:
     slug, content = recipe_to_page(_recipe())
-    assert slug == "recipe-snapshot/inference/qwen3-32b/mi300x/sglang/0_5_11/fp8"
+    assert slug == "recipe-snapshot/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/0_5_11/fp8"
+    # Check version token quoting survived
     assert content.startswith("---\ntype: recipe\n")
     # the version token must be quoted so it survives YAML parse
     assert 'framework_version: "0_5_11"' in content
@@ -60,7 +61,7 @@ def test_recipe_to_page_roundtrips_via_reader() -> None:
     r = _page_to_recipe(fm)
     # Reader now emits the unified nested KB-interface envelope: champion
     # under ``body.best_config``, throughput under ``metrics``/``body``.
-    assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:0_5_11:fp8"
+    assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:0_5_11:fp8"
     assert r["body"]["best_config"] == {
         "extra_server_args": "--cuda-graph-max-bs 256",
         "extra_envs": {"FOO": "1"},

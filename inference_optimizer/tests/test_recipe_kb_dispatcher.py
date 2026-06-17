@@ -250,7 +250,7 @@ def test_get_recipe_returns_none_when_neither_has_it(
 
 
 def test_get_recipe_remote_sends_5tuple_label_match(kb: RecipeKB) -> None:
-    """The remote read calls /recipes/search ONCE with the full 5-tuple as label_match."""
+    """The remote read calls /recipes/search ONCE with the full 7-tuple as label_match."""
     import json as _json
     cid = _cid()
     captured: dict = {}
@@ -265,6 +265,7 @@ def test_get_recipe_remote_sends_5tuple_label_match(kb: RecipeKB) -> None:
     label_match = captured.get("label_match") or {}
     assert set(label_match) == {
         "model", "hardware", "framework", "framework_version", "precision",
+        "model_type", "architectures",
     }
     assert all(label_match.values()), "all 5 cid segments must be present"
 
@@ -359,6 +360,80 @@ def test_disabled_remote_treated_as_no_remote(
     out = kb.get_recipe(canonical_id=cid)
     assert out is not None
     assert out["model"] == "local-marker"
+
+
+# Audit hook — recipe-snapshot read trace
+def test_audit_hook_emitted_on_remote_hit(kb: RecipeKB) -> None:
+    cid = _cid()
+    events: list[dict[str, Any]] = []
+    kb.audit_hook = lambda e: events.append(e)
+    v2_payload = {
+        "canonical_id": cid, "version": 5,
+        "labels": {"model": "remote-model", "hardware": "mi300x"},
+        "body": {"best_config": {"tp": "16"}}, "metrics": {"throughput": 30000.0},
+    }
+    with respx.mock(base_url=KB_URL) as mock:
+        mock.post(PATH_RECIPES_SEARCH).mock(
+            return_value=httpx.Response(200, json={"recipes": [v2_payload]}),
+        )
+        kb.get_recipe(canonical_id=cid, prefer={"tp": 8})
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["method"] == "get_recipe"
+    assert ev["remote"] == "cortex"
+    assert ev["resolution"] == "remote"
+    assert ev["hit"] is True
+    assert ev["request"]["canonical_id"] == cid
+    assert ev["request"]["prefer_keys"] == ["tp"]
+    assert ev["result"]["exact"] is True
+    assert ev["result"]["best_throughput"] == 30000.0
+
+
+def test_audit_hook_emitted_on_local_fallthrough(
+    kb: RecipeKB, local_store: LocalRecipeStore,
+) -> None:
+    cid = _cid()
+    local_store.put_recipe(canonical_id=cid, model="local-marker")
+    events: list[dict[str, Any]] = []
+    kb.audit_hook = lambda e: events.append(e)
+    with respx.mock(base_url=KB_URL) as mock:
+        mock.post(PATH_RECIPES_SEARCH).mock(
+            return_value=httpx.Response(503, json={"detail": "down"}),
+        )
+        kb.get_recipe(canonical_id=cid)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["resolution"] == "remote_error"
+    assert ev["hit"] is True  # served from local
+
+
+def test_audit_hook_no_remote_records_local(
+    local_store: LocalRecipeStore,
+) -> None:
+    kb = RecipeKB(local=local_store, remote=None)
+    cid = _cid()
+    events: list[dict[str, Any]] = []
+    kb.audit_hook = lambda e: events.append(e)
+    kb.get_recipe(canonical_id=cid)
+    assert len(events) == 1
+    assert events[0]["remote"] == "none"
+    assert events[0]["resolution"] == "local"
+    assert events[0]["hit"] is False
+
+
+def test_audit_hook_never_raises_into_caller(kb: RecipeKB) -> None:
+    cid = _cid()
+
+    def _boom(_e: dict[str, Any]) -> None:
+        raise RuntimeError("audit sink down")
+
+    kb.audit_hook = _boom
+    with respx.mock(base_url=KB_URL) as mock:
+        mock.post(PATH_RECIPES_SEARCH).mock(
+            return_value=httpx.Response(200, json={"recipes": []}),
+        )
+        # Must not raise despite the failing hook.
+        assert kb.get_recipe(canonical_id=cid) is None
 
 
 # Lifecycle

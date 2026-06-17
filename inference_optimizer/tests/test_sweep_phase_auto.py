@@ -21,6 +21,7 @@ from inference_optimizer.orchestrator.backends.mock_backend import (
     MockBackend, MockTurn, ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
+from inference_optimizer.orchestrator.shared_state import SharedState
 
 
 # Fixtures
@@ -33,6 +34,10 @@ class _BareState:
     current_best: dict[str, Any] = field(default_factory=dict)
     last_baseline: dict[str, Any] = field(default_factory=dict)
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    pending_stack_validation_result: dict[str, Any] = field(default_factory=dict)
+    pending_stack_validation_apply_results: list[dict[str, Any]] = field(default_factory=list)
+    kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
+    optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     save_count: int = 0
 
     def save(self, _session_dir: Path | None) -> None:
@@ -87,7 +92,482 @@ def coord(tmp_path: Path):
     return c
 
 
-# 1. _build_sweep_params_from_recipe — pure static helper
+@pytest.mark.asyncio
+async def test_drain_pending_keep_integrates_records_result_once(
+    tmp_path: Path, monkeypatch,
+):
+    """SWEEP entry drain must record integrate results so the same KEEP is not retried until cap."""
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    c.shared_state.kernel_opt_attempts = {
+        "k004": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 4.21,
+            "last_source_file": "/tmp/kernel.cu",
+        },
+    }
+    calls: list[str] = []
+
+    async def _fake_integrate_handler(payload, *, session_dir):
+        calls.append(payload["kernel_id"])
+        return {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": payload["kernel_id"],
+            "patch_path": "/tmp/optimized.cu",
+            "target_file": "/tmp/kernel.cu",
+            "base_tput": 100.0,
+            "new_tput": 102.0,
+            "gain_pct": 2.0,
+            "workspace": str(tmp_path / "integrate-k004"),
+        }
+
+    async def _noop_roofline(*, reason: str):
+        return None
+
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.kernel_request_handlers.integrate_handler",
+        _fake_integrate_handler,
+    )
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
+
+    await c._drain_pending_keep_integrates()
+
+    assert calls == ["k004"]
+    assert c.shared_state.kernel_integrate_attempts
+    assert c.shared_state.next_pending_keep_kernel_id() == ""
+    assert c.shared_state.current_best["action"] == "integrate"
+    assert c.shared_state.current_best["kernel_id"] == "k004"
+
+
+def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
+    """E2E integrate order should prefer trace impact over isolated micro speedup."""
+    state = SharedState()
+    state.last_trace_analyze = {
+        "hot_kernels_top15": [
+            {"kernel_id": "k001", "gpu_pct": 60.0},
+            {"kernel_id": "k004", "gpu_pct": 10.0},
+        ],
+    }
+    state.kernel_opt_attempts = {
+        "k004": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 4.21,
+            "last_source_file": "/tmp/rmsnorm.cu",
+        },
+        "k001": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 1.51,
+            "last_source_file": "/tmp/moe.cu",
+        },
+    }
+
+    assert state.pending_keep_kernel_ids() == ["k001", "k004"]
+    assert state.next_pending_keep_kernel_id() == "k001"
+
+
+def test_pending_keep_kernel_ids_do_not_retry_needs_review():
+    """A recorded NEEDS_REVIEW attempt should not auto-rerun the same patch."""
+    state = SharedState()
+    state.kernel_opt_attempts = {
+        "k004": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 4.21,
+            "last_source_file": "/tmp/rmsnorm.cu",
+        },
+        "k001": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 1.51,
+            "last_source_file": "/tmp/moe.cu",
+        },
+    }
+    state.record_kernel_integrate_result({
+        "status": "ok",
+        "decision": "NEEDS_REVIEW",
+        "kernel_id": "k004",
+        "patch_path": "/tmp/k004_opt.cu",
+        "target_file": "/tmp/rmsnorm.cu",
+        "new_tput": 100.8,
+        "gain_pct": 0.8,
+        "workspace": "/tmp/integrate-k004",
+    })
+
+    assert state.pending_keep_kernel_ids() == ["k001"]
+    assert state.next_pending_keep_kernel_id() == "k001"
+
+
+def _patch_stack_validation_internals(monkeypatch, *, new_tput: float):
+    """Stub apply/revert/bench so the real stack-validation decision path runs."""
+    import inference_optimizer.orchestrator.kernel_request_handlers as krh
+    import inference_optimizer.orchestrator.action_executors.baseline as baseline_mod
+    import inference_optimizer.orchestrator.action_executors.benchmark_result as br
+
+    def _fake_apply(payload, *, session_dir, kernel_id):
+        return {"status": "ok", "kernel_id": kernel_id, "manifest_path": None}
+
+    def _fake_revert(applied):
+        return {"status": "ok"}
+
+    class _FakeBaselineExecutor:
+        def __init__(self, *, session_dir):
+            self.session_dir = session_dir
+
+        async def __call__(self, ctx):
+            return {
+                "output_throughput": new_tput,
+                "report_path": "/tmp/report",
+                "workspace": "/tmp/workspace",
+            }
+
+    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", _fake_apply)
+    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", _fake_revert)
+    monkeypatch.setattr(baseline_mod, "BaselineExecutor", _FakeBaselineExecutor)
+    monkeypatch.setattr(br, "is_valid_measurement", lambda result: True)
+
+
+def _stack_validation_coordinator(tmp_path: Path) -> Coordinator:
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    # current_best already banks a +10% KEEP'd kernel, applied on disk.
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        baseline_config_path=str(tmp_path / "base.yaml"),
+        current_best={"action": "integrate", "tput": 110.0, "kernel_id": "k_prev"},
+    )
+    c.shared_state.optimization_stack = [
+        {"action": "integrate", "kernel_id": "k_prev", "tput": 110.0},
+    ]
+    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
+        c.shared_state.record_kernel_integrate_result({
+            "status": "ok",
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": kid,
+            "patch_path": f"/tmp/{kid}_opt.cu",
+            "target_file": f"/tmp/{kid}.cu",
+            "new_tput": 100.0 + gain,
+            "gain_pct": gain,
+            "workspace": f"/tmp/integrate-{kid}",
+        })
+    return c
+
+
+@pytest.mark.asyncio
+async def test_stack_validation_reverts_when_no_gain_over_current_best(
+    tmp_path: Path, monkeypatch,
+):
+    """Stack worse than current_best (110) but above baseline (100) must REVERT.
+
+    Regression guard: the KEEP decision is incremental over current_best, not
+    total over the original baseline. new_tput=109 is +9% vs baseline yet -0.9%
+    vs current_best, so the stack adds no value and must be reverted.
+    """
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _patch_stack_validation_internals(monkeypatch, new_tput=109.0)
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert result["decision"] == "REVERT"
+    assert result["gain_pct"] == pytest.approx(9.0)
+    assert result["stack_incremental_gain_pct"] == pytest.approx(-0.9090909, rel=1e-3)
+    assert result["revert_result"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_stack_validation_keeps_on_positive_increment_over_current_best(
+    tmp_path: Path, monkeypatch,
+):
+    """A real increment over current_best (110 -> 112, +1.8%) must KEEP."""
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _patch_stack_validation_internals(monkeypatch, new_tput=112.0)
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert result["decision"] == "KEEP"
+    assert result["gain_pct"] == pytest.approx(12.0)
+    assert result["stack_incremental_gain_pct"] == pytest.approx(1.8181818, rel=1e-3)
+    assert result["revert_result"]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: Path):
+    """Two positive sub-threshold kernel patches should get one combined E2E validation."""
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
+        c.shared_state.record_kernel_integrate_result({
+            "status": "ok",
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": kid,
+            "patch_path": f"/tmp/{kid}_opt.cu",
+            "target_file": f"/tmp/{kid}.cu",
+            "new_tput": 100.0 + gain,
+            "gain_pct": gain,
+            "workspace": f"/tmp/integrate-{kid}",
+        })
+
+    validation_calls = 0
+
+    async def _fake_stack_validation(entries):
+        nonlocal validation_calls
+        validation_calls += 1
+        assert {e["kernel_id"] for e in entries} == {"k001", "k004"}
+        return {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": "k001+k004",
+            "patch_path": "/tmp/k001_opt.cu+/tmp/k004_opt.cu",
+            "target_file": "/tmp/k001.cu+/tmp/k004.cu",
+            "base_tput": 100.0,
+            "new_tput": 102.0,
+            "gain_pct": 2.0,
+            "workspace": str(tmp_path / "integrate-stack"),
+            "apply_result": {"status": "ok"},
+            "stack_kernel_ids": ["k001", "k004"],
+            "stack_validation": True,
+        }
+
+    async def _noop_roofline(*, reason: str):
+        return None
+
+    c._run_kernel_stack_validation_e2e = _fake_stack_validation
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
+
+    await c._maybe_validate_positive_needs_review_stack()
+
+    assert c.shared_state.current_best["action"] == "integrate"
+    assert c.shared_state.current_best["kernel_id"] == "k001+k004"
+    assert c.shared_state.cumulative_gain_validated == pytest.approx(2.0)
+    assert validation_calls == 1
+    resolved_entries = [
+        entry for entry in c.shared_state.kernel_integrate_attempts.values()
+        if entry.get("kernel_id") in {"k001", "k004"}
+    ]
+    assert all(entry["stack_resolved"] is True for entry in resolved_entries)
+    assert {
+        entry["stack_validation_kernel_id"] for entry in resolved_entries
+    } == {"k001+k004"}
+
+    await c._maybe_validate_positive_needs_review_stack()
+
+    assert validation_calls == 1
+    stack_entries = [
+        item for item in c.shared_state.optimization_stack
+        if isinstance(item, dict) and item.get("kernel_id") == "k001+k004"
+    ]
+    assert stack_entries
+    assert stack_entries[0].get("stack_kernel_ids") == ["k001", "k004"]
+
+
+@pytest.mark.asyncio
+async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
+    """A saved pending stack result should finish promotion without re-applying."""
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
+        c.shared_state.record_kernel_integrate_result({
+            "status": "ok",
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": kid,
+            "patch_path": f"/tmp/{kid}_opt.cu",
+            "target_file": f"/tmp/{kid}.cu",
+            "new_tput": 100.0 + gain,
+            "gain_pct": gain,
+            "workspace": f"/tmp/integrate-{kid}",
+        })
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    c._mark_stack_validation_in_progress(stack, "k001+k004")
+    c.shared_state.pending_stack_validation_result = {
+        "status": "ok",
+        "decision": "KEEP",
+        "kernel_id": "k001+k004",
+        "patch_path": "/tmp/k001_opt.cu+/tmp/k004_opt.cu",
+        "target_file": "/tmp/k001.cu+/tmp/k004.cu",
+        "base_tput": 100.0,
+        "new_tput": 102.0,
+        "gain_pct": 2.0,
+        "workspace": str(tmp_path / "integrate-stack"),
+        "apply_result": {"status": "ok"},
+        "stack_kernel_ids": ["k001", "k004"],
+        "stack_validation": True,
+    }
+    c.shared_state.save(tmp_path)
+
+    validation_calls = 0
+
+    async def _should_not_run(entries):
+        nonlocal validation_calls
+        validation_calls += 1
+        raise AssertionError("stack validation should not re-run during recovery")
+
+    async def _noop_roofline(*, reason: str):
+        return None
+
+    c._run_kernel_stack_validation_e2e = _should_not_run
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
+
+    await c._recover_interrupted_stack_validation()
+
+    assert validation_calls == 0
+    assert c.shared_state.current_best["kernel_id"] == "k001+k004"
+    assert not c.shared_state.pending_stack_validation_result
+    resolved = [
+        entry for entry in c.shared_state.kernel_integrate_attempts.values()
+        if entry.get("kernel_id") in {"k001", "k004"}
+    ]
+    assert all(entry.get("stack_resolved") for entry in resolved)
+
+
+def test_positive_needs_review_integrates_skip_in_progress_entries():
+    """In-flight stack members must not be re-selected for another validation."""
+    c = Coordinator.__new__(Coordinator)
+    c.shared_state = SharedState()
+    c.shared_state.kernel_integrate_attempts = {
+        "k001": {
+            "kernel_id": "k001",
+            "patch_path": "/tmp/k001_opt.cu",
+            "target_file": "/tmp/k001.cu",
+            "last_decision": "NEEDS_REVIEW",
+            "best_gain_pct": 0.6,
+            "stack_validation_in_progress": True,
+        },
+        "k004": {
+            "kernel_id": "k004",
+            "patch_path": "/tmp/k004_opt.cu",
+            "target_file": "/tmp/k004.cu",
+            "last_decision": "NEEDS_REVIEW",
+            "best_gain_pct": 0.8,
+        },
+    }
+
+    eligible = c._positive_needs_review_integrates()
+    assert len(eligible) == 1
+    assert eligible[0]["kernel_id"] == "k004"
+
+
+@pytest.mark.asyncio
+async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
+    tmp_path: Path, monkeypatch,
+):
+    """Stack validation must run even when has_keep_pending_integrate is False."""
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    c.tasks = _StubTaskRegistry()
+    c.knowledge_plane = None
+    c.role_registry = {"kernel": object()}
+    # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP
+    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
+        c.shared_state.record_kernel_integrate_result({
+            "status": "ok",
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": kid,
+            "patch_path": f"/tmp/{kid}_opt.cu",
+            "target_file": f"/tmp/{kid}.cu",
+            "new_tput": 100.0 + gain,
+            "gain_pct": gain,
+            "workspace": f"/tmp/integrate-{kid}",
+        })
+    assert not c.shared_state.has_keep_pending_integrate
+
+    validation_calls = []
+
+    async def _fake_stack_validation(entries):
+        validation_calls.append([e["kernel_id"] for e in entries])
+        return {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": "k001+k004",
+            "patch_path": "/tmp/k001_opt.cu+/tmp/k004_opt.cu",
+            "target_file": "/tmp/k001.cu+/tmp/k004.cu",
+            "base_tput": 100.0,
+            "new_tput": 102.0,
+            "gain_pct": 2.0,
+            "workspace": str(tmp_path / "integrate-stack"),
+            "apply_result": {"status": "ok"},
+            "stack_kernel_ids": ["k001", "k004"],
+            "stack_validation": True,
+        }
+
+    async def _noop_roofline(*, reason: str):
+        return None
+
+    c._run_kernel_stack_validation_e2e = _fake_stack_validation
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
+
+    await c._on_enter_sweep(from_phase="KERNEL")
+
+    assert len(validation_calls) == 1
+    assert c.shared_state.current_best["kernel_id"] == "k001+k004"
+
+
+@pytest.mark.asyncio
+async def test_drain_uses_current_best_tput_not_baseline(
+    tmp_path: Path, monkeypatch,
+):
+    """Drain should pass current_best.tput (not baseline) so multi-KEEP gain is incremental."""
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "integrate", "tput": 110.0, "kernel_id": "k_prev"},
+    )
+    c.shared_state.optimization_stack = [
+        {"action": "integrate", "kernel_id": "k_prev", "tput": 110.0},
+    ]
+    c.shared_state.kernel_opt_attempts = {
+        "k_new": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 2.0,
+            "last_source_file": "/tmp/new.cu",
+        },
+    }
+    captured_payloads = []
+
+    async def _fake_integrate_handler(payload, *, session_dir):
+        captured_payloads.append(payload)
+        return {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": payload["kernel_id"],
+            "patch_path": "/tmp/new_opt.cu",
+            "target_file": "/tmp/new.cu",
+            "base_tput": payload.get("base_tput", 0.0),
+            "new_tput": 112.0,
+            "gain_pct": (112.0 / payload.get("base_tput", 100.0) - 1) * 100,
+            "workspace": str(tmp_path / "integrate-k_new"),
+        }
+
+    async def _noop_roofline(*, reason: str):
+        return None
+
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.kernel_request_handlers.integrate_handler",
+        _fake_integrate_handler,
+    )
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
+
+    await c._drain_pending_keep_integrates()
+
+    assert len(captured_payloads) == 1
+    # Should use current_best.tput (110.0), not baseline (100.0)
+    assert captured_payloads[0]["base_tput"] == 110.0
 def test_build_sweep_params_defaults_when_no_recipe():
     """No warm_start_recipe → SKILL.md defaults + source='skill_md_default'."""
     from inference_optimizer.orchestrator.action_executors.sweep import (

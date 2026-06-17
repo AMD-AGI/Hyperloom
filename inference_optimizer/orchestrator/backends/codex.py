@@ -284,6 +284,13 @@ class CodexBackend:
 
         Mirrors ``ClaudeBackend._safe_int`` so both backends report
         identically-shaped token counts on metadata.
+
+        Args:
+            value: A raw usage counter of any type to coerce to an integer.
+
+        Returns:
+            The integer value, or ``0`` when ``value`` is ``None`` or not
+            coercible.
         """
         try:
             return int(value or 0)

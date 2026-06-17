@@ -490,7 +490,7 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
 
 @pytest.mark.asyncio
 async def test_explore_not_denied_before_profile(session_dir):
-    """P2_10: after baseline, ``explore`` is no longer blocked on empty ``last_profile_trace``."""
+    """After baseline, ``explore`` is no longer blocked on empty ``last_profile_trace``."""
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "explore", "predicted_gain_pct": 5.0,
     })
@@ -594,24 +594,28 @@ async def test_coordinator_kill_task_by_robustness(session_dir):
 async def test_coordinator_prune_branch_cancels_family_and_records_advisory(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
-        a = await c.tasks.create(kind="deep_kernel_analysis", params={}, idempotency_key="ka")
-        b = await c.tasks.create(kind="deep_kernel_analysis", params={}, idempotency_key="kb")
+        # ``baseline`` is a non-kernel-owned action that flows through the normal
+        # Critic/pending-proposal path — the prune-advisory mechanism under test
+        # is family-agnostic. (Kernel-owned families are REQUEST-only and can no
+        # longer be proposed at all.)
+        a = await c.tasks.create(kind="baseline", params={}, idempotency_key="ka")
+        b = await c.tasks.create(kind="baseline", params={}, idempotency_key="kb")
 
         await c._handle_intent("robustness", Intent(
             type=IntentType.PRUNE_BRANCH,
-            payload={"family": "deep_kernel_analysis", "reason": "3 fails"},
+            payload={"family": "baseline", "reason": "3 fails"},
         ))
         a_after = await c.tasks.get(a.task_id)
         b_after = await c.tasks.get(b.task_id)
         # Active queue still gets cancelled — the prune kills work in flight.
         assert a_after.state == "cancelled"
         assert b_after.state == "cancelled"
-        assert "deep_kernel_analysis" in c.shared_state.pruned_families
+        assert "baseline" in c.shared_state.pruned_families
 
         # Future propose_action carries an advisory observation but is not dropped.
         await c._handle_intent("orchestration", Intent(
             type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "deep_kernel_analysis", "predicted_gain_pct": 5.0},
+            payload={"action_name": "baseline", "predicted_gain_pct": 5.0},
         ))
         assert c.state.pending_proposals
         obs = await c.bus.tail(topic="observation")
@@ -884,6 +888,94 @@ async def test_handle_unpromotable_kernel_action_records_global_only(
         assert entry["action"] == "kernel_opt"
         assert entry["error_class"] == "timeout"
         assert entry["stderr_tail"] is not None
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
+    session_dir,
+):
+    """cuda_graph_capture_failed (no baseline yet) must arm the one-shot
+    eager fallback flag through the real coordinator failure handler."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        assert c.shared_state.baseline_eager_fallback is False
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-cg-1"),
+            {"status": "failed", "error_class": "cuda_graph_capture_failed",
+             "error": "operation not permitted when stream is capturing"},
+        )
+        assert c.shared_state.baseline_eager_fallback is True
+        # One-shot: a second capture failure must not re-arm (already set).
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-cg-2"),
+            {"status": "failed", "error_class": "cuda_graph_capture_failed",
+             "error": "operation not permitted when stream is capturing"},
+        )
+        assert c.shared_state.baseline_eager_fallback is True
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
+    session_dir,
+):
+    """Regression: executor consumption must clear Coordinator's live state too.
+
+    Otherwise a later coordinator save re-persisted stale True and made the
+    nominal one-shot eager fallback sticky for all later baseline retries.
+    """
+    from inference_optimizer.orchestrator.action_executors.baseline import (
+        BaselineExecutor,
+    )
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-cg-arm"),
+            {"status": "failed", "error_class": "cuda_graph_capture_failed",
+             "error": "operation not permitted when stream is capturing"},
+        )
+        assert c.shared_state.baseline_eager_fallback is True
+
+        executor = BaselineExecutor(
+            session_dir=session_dir,
+            shared_state=c.shared_state,
+        )
+        assert executor._consume_eager_fallback() is True
+        assert c.shared_state.baseline_eager_fallback is False
+
+        # Simulate any later coordinator path flushing the live SharedState.
+        c.shared_state.save(session_dir)
+        assert (
+            SharedState.load_or_init(session_dir).baseline_eager_fallback
+            is False
+        )
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_capture_failure_no_arm_when_baseline_promoted(
+    session_dir,
+):
+    """Resume case: with an existing baseline (tput > 0) the coordinator must
+    NOT arm the eager fallback on a later cuda-graph capture failure."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 1234.0
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-cg-resume"),
+            {"status": "failed", "error_class": "cuda_graph_capture_failed",
+             "error": "operation not permitted when stream is capturing"},
+        )
+        assert c.shared_state.baseline_eager_fallback is False
     finally:
         await c.stop()
 

@@ -1,27 +1,27 @@
 # ROCm Hyperloom
 
-An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperloom treats optimization as a **search problem**: given a workload, it builds a tree of candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — scores each by expected gain and cost, then explores depth-first, always measuring against the real workload. Simply provide your workload and the agent delivers a fully optimized codebase — profiling against peak hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on AMD GPUs, so the team gets production-ready optimized code.
+An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperloom treats optimization as a **search problem**: given a workload, it explores candidate optimizations — backend swaps, server parameters, GEMM tuning, kernel rewrites, parallelism configs — one change at a time, always measuring against the real workload and prioritizing the next move from prior results and KB-driven priors. Simply provide your workload and the agent delivers a fully optimized codebase — profiling against peak hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on AMD GPUs, so the team gets production-ready optimized code.
 
 <p align="center"><img width="600" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
 
 Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets. Hyperloom uses the public TraceLens package (`TRACELENS_ROOT`) by default (open-source-only report). An optional internal TraceLens extension — roofline numbers, gains estimates, and MI355/MI455 MAF data — can be enabled by internal users who set `TRACELENS_INTERNAL_ROOT` to point at their own internal checkout (path self-provided); leave it unset to stay on the open-source-only report. There is no separate on/off toggle.
 
-Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. 
+Block 4 - Code Optimization Loop: The core of Hyperloom. The agent explores candidates — config overrides, code patches, backend switches, kernel rewrites — one change at a time: **Think → Implement → Benchmark → Decide**. Each result informs which candidate to try next. 
 
 In parallel, hot kernels are asynchronously optimized via external backends ([GEAK](https://github.com/AMD-AGI/GEAK/tree/main), and OOB kernel optimization via Claude Code and OpenAI Codex relying on kernel optimization flow of [Apex](https://github.com/AMD-AGI/Apex)). Kernel profiling and validation is powered by [Magpie](https://github.com/AMD-AGI/Magpie), which relies on [IntelliKit](https://github.com/AMDResearch/intellikit) for some of low-level GPU profiling tools.
 
-Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the agent packages the optimized code, submits a PR to your repo, and merges into your codebase, completing the full loop.
+Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintaining accuracy — every change is correctness-gated before acceptance. Once the loop exits, the runtime writes the final report, reproducible session artifacts, and `session_breakdown.json` so downstream delivery workflows can package or review the optimized stack.
 
 ### Learn More
 
 | | |
 |---|---|
-| **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)** | Scoring heuristics, stack mechanics, dynamic branching, and the self-evolving knowledge base |
+| **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)** | Conversational orchestration, phase sequencing, action gates, and KB-driven priors |
 | **[GLM-5 — Discovering Optimizations Hard to Spot Manually](docs/CASE_STUDY_GLM5.md)** | Hidden GEMM configs, cross-repo kernel patches, +193% throughput |
 | **[DeepSeek-R1 — Fast Scale-Up on a New Workload](docs/CASE_STUDY_DEEPSEEK_R1.md)** | 7 configs to optimal in one session, MTP scheduling fix, +97% over B200 |
 | **[Auth & Environment Guide](docs/ENV_AND_AUTH.md)** | Single authoritative auth/env reference; the inline tables in this README are a convenience excerpt |
 | **[Configuration Reference](docs/CONFIGURATION_REFERENCE.md)** | Every environment variable read by the runtime |
-| **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | How to obtain or skip `INFERENCE_OPTIMIZER_KB_ROOT` |
+| **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | Local recipe KB and optional Cortex KB setup |
 | **[`session_breakdown.json` Integration](docs/INTEGRATION_SESSION_BREAKDOWN.md)** | Stable contract for downstream consumers (`claw-stats-service`, dashboards) |
 | **[Operations & Self-Host Runbook](docs/OPERATIONS.md)** | k8s sizing, `USER_DATA_PATH` backup, disaster recovery |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Auth-proxy 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
@@ -168,7 +168,7 @@ OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
 | `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to skip cursor and only use claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
 | `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK or OOB configuration is needed. 
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK or OOB configuration is needed.
 
 > If HTTPS requests to `core42.primus-safe.amd.com` or the AMD LLM Gateway fail with a certificate verification error inside the container, install the AMD certificate bundle manually. This is most common when running on your own GPU server or a custom container image:
 >

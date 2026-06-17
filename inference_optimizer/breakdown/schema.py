@@ -40,7 +40,7 @@ class SessionMeta(TypedDict, total=False):
         created_at_utc (str): ISO UTC timestamp when the session started.
         ended_at_utc (str): ISO UTC timestamp when the session ended.
         stop_reason (str): Why the run stopped (``target_reached`` /
-            ``time_exhausted`` / ``no_more_leverage`` / ``max_ticks`` /
+            ``time_exhausted`` / ``global_converged`` / ``max_ticks`` /
             ``baseline_failed`` / ...).
         max_minutes (int): Configured time budget in minutes.
         elapsed_minutes (float): Wall-clock minutes the session ran.
@@ -56,7 +56,7 @@ class SessionMeta(TypedDict, total=False):
     sandbox_user_id: str | None
     created_at_utc: str
     ended_at_utc: str
-    stop_reason: str              # target_reached / time_exhausted / no_more_leverage / max_ticks / baseline_failed / ...
+    stop_reason: str              # target_reached / time_exhausted / global_converged / max_ticks / baseline_failed / ...
     max_minutes: int
     elapsed_minutes: float
     host: str
@@ -255,7 +255,13 @@ class PhaseEvent(TypedDict, total=False):
         key_metric_kind (str | None): Type/label of the key metric, or None.
         workspace (str | None): Benchmark workspace path, or None.
         error_class (str | None): Error classification on failure, or None.
-        extras (dict[str, Any]): Action-specific extra fields.
+        extras (dict[str, Any]): Action-specific extra fields. For journal-sourced
+            events this carries proposer attribution and a filter label:
+            ``provenance`` (raw explore label), ``proposer`` (resolved component:
+            ``specialist:<domain>`` / ``grid`` / ``orchestration``), ``scope``,
+            ``fingerprint``, ``operation_kind`` (``backend`` / ``param`` / ``env``
+            / ``kernel_opt`` / ``kernel_integrate`` / ``baseline`` / ...), and
+            ``metrics`` (per-variant measurement detail).
     """
     ts: str
     action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / trace_analyze / integrate
@@ -735,6 +741,13 @@ class ParamSearchEntry(TypedDict, total=False):
         gain_pct (float | None): Gain percent vs current best, or None.
         ts (str): ISO UTC timestamp of evaluation.
         status (str): Outcome (``accepted`` / ``rejected`` / ``tested``).
+        operation_kind (str): Filter label for the variant's change type
+            (``backend`` / ``param`` / ``env``).
+        provenance (str): Raw explore proposer label (``llm_direct`` /
+            ``default_grid`` / ``specialist:<domain>``).
+        proposer (str): Resolved proposer/component (``specialist:<domain>`` /
+            ``grid`` / ``orchestration``).
+        scope (str): Specialist dial (``domain`` / ``domains`` / ``freeform``).
     """
     name: str
     fingerprint: str
@@ -744,6 +757,10 @@ class ParamSearchEntry(TypedDict, total=False):
     gain_pct: float | None
     ts: str
     status: str                   # accepted / rejected / tested
+    operation_kind: str           # backend / param / env
+    provenance: str
+    proposer: str
+    scope: str
 
 
 class ParamSearchLedger(TypedDict, total=False):
@@ -1371,6 +1388,10 @@ class OptimizationStackEntry(TypedDict, total=False):
     fingerprint: str
     provenance: str
     task_id: str
+    # filter label for the kind of optimization (backend / param / env on
+    # explore KEEPs); specialist dial.
+    operation_kind: str
+    scope: str
 
 
 # Kernel Roofline — hot-kernel table for the dashboard, mirroring
@@ -1476,7 +1497,12 @@ class DecisionTraceEntry(TypedDict, total=False):
     phase: str                             # phase active at the decision (declared or ts-window backfill)
     tick: int | None                       # orchestrator tick (None when the producer didn't stamp one)
     ts: str                                # ISO ...Z of the decision
-    decision: dict[str, Any]               # {component, change/event/verdict, outcome, gain_pct, task_id/dyn_id}
+    # ``decision`` now carries proposer attribution + a filter label:
+    # {component (resolved proposer: specialist:<domain> / grid / orchestration),
+    #  operation_kind (backend / param / env / kernel_opt / kernel_integrate / ...),
+    #  change/event/verdict, outcome, gain_pct, task_id/dyn_id,
+    #  kind, provenance, scope, fingerprint, metrics}
+    decision: dict[str, Any]
     tokens: DecisionTokens
 
 
@@ -1705,6 +1731,8 @@ class SessionBreakdown(TypedDict, total=False):
         capability_summary (CapabilitySummary): Per-capability roll-up.
         geak_invocations (list[Invocation]): GEAK backend invocations.
         oob_invocations (list[Invocation]): Out-of-box backend invocations.
+        forge_invocations (list[Invocation]): Forge (Kernel-Forge) backend
+            invocations — its own lane, NOT folded into ``oob_invocations``.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
         param_search (ParamSearch): v1-reader compat alias for ``explore_search``.
         explore_search (ParamSearch): Merged explore-search ledger.
@@ -1740,6 +1768,7 @@ class SessionBreakdown(TypedDict, total=False):
     capability_summary: CapabilitySummary
     geak_invocations: list[Invocation]
     oob_invocations: list[Invocation]
+    forge_invocations: list[Invocation]
     kernel_lifecycle: KernelLifecycle
     # explore_search is the native merged ledger; param_search is a v1 alias.
     param_search: ParamSearch
