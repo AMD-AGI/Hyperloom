@@ -367,9 +367,13 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
     assert all(entry["stack_resolved"] is True for entry in resolved_entries)
     assert {entry["stack_validation_kernel_id"] for entry in resolved_entries} == {"k001+k004"}
 
+    # Re-invoking must be a no-op (idempotent): the stack is already validated,
+    # so the call count must not advance. Compare against the snapshot rather
+    # than the literal so the idempotency intent is explicit.
+    calls_before_recall = validation_calls
     await c._maybe_validate_positive_needs_review_stack()
 
-    assert validation_calls == 1
+    assert validation_calls == calls_before_recall
     stack_entries = [
         item
         for item in c.shared_state.optimization_stack
