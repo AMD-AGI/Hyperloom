@@ -105,6 +105,13 @@ def _resolve_framework_root(explicit: str | None) -> Path | None:
 
     Precedence: explicit param → first existing
     ``resolve_source_file_allowlist()`` entry. None when nothing resolves.
+
+    Args:
+        explicit: Explicit framework-root override, or ``None`` to use the
+            allowlist.
+
+    Returns:
+        The resolved framework source root, or ``None`` when nothing resolves.
     """
     if explicit:
         p = Path(explicit)
@@ -139,7 +146,18 @@ def _run_git_apply(
     framework_root: Path, patch_path: Path, *, p_level: int,
     three_way: bool, check_only: bool,
 ) -> tuple[bool, str]:
-    """Single ``git apply`` invocation at an explicit strip level."""
+    """Single ``git apply`` invocation at an explicit strip level.
+
+    Args:
+        framework_root: The git checkout to apply into.
+        patch_path: The patch file to apply.
+        p_level: The ``-p<N>`` strip level.
+        three_way: Whether to pass ``-3`` for a three-way merge.
+        check_only: Whether to pass ``--check`` (dry run, no mutation).
+
+    Returns:
+        A ``(ok, stderr)`` tuple; ``ok`` is True on a zero return code.
+    """
     cmd = ["git", "-C", str(framework_root), "apply", f"-p{p_level}"]
     if three_way:
         cmd.append("-3")
@@ -167,6 +185,14 @@ def _preflight_missing_targets(
     Defense-in-depth: ``specialist_patch_safety`` already drops these at
     authoring time, but patches supplied directly via ``params.patches``
     bypass that gate.
+
+    Args:
+        framework_root: The git checkout the patches target.
+        patch_paths: The patch files to preflight.
+
+    Returns:
+        A list of per-patch records (``patch`` + ``missing_targets``) for
+        patches whose targets are absent at every strip level.
     """
     records: list[dict[str, Any]] = []
     for patch in patch_paths:
@@ -183,7 +209,17 @@ def _preflight_missing_targets(
 def _detect_p_level(
     framework_root: Path, patch_path: Path, *, three_way: bool,
 ) -> int | None:
-    """Return the first ``-p`` level whose ``--check`` applies cleanly."""
+    """Return the first ``-p`` level whose ``--check`` applies cleanly.
+
+    Args:
+        framework_root: The git checkout to test against.
+        patch_path: The patch file to probe.
+        three_way: Whether to probe with ``-3``.
+
+    Returns:
+        The first ``-p<N>`` level that applies cleanly, or ``None`` when none
+        do.
+    """
     for lvl in _P_LEVELS:
         ok, _ = _run_git_apply(
             framework_root, patch_path, p_level=lvl,
@@ -200,7 +236,18 @@ def _git_apply(
 ) -> tuple[bool, str]:
     """Run ``git apply [-3] -p<auto> [--check] <patch>`` inside
     ``framework_root``, auto-detecting the strip level. Returns
-    ``(ok, stderr)``."""
+    ``(ok, stderr)``.
+
+    Args:
+        framework_root: The git checkout to apply into.
+        patch_path: The patch file to apply.
+        three_way: Whether to pass ``-3`` for a three-way merge.
+        check_only: Whether to only check (dry run) rather than mutate.
+
+    Returns:
+        A ``(ok, stderr)`` tuple; ``ok`` is True when the apply (or check)
+        succeeds.
+    """
     lvl = _detect_p_level(framework_root, patch_path, three_way=three_way)
     if lvl is None:
         # Surface a representative error at the git-native default level.
@@ -221,7 +268,16 @@ def _git_apply_reverse(
 ) -> tuple[bool, str]:
     """Reverse-apply ``patch_path`` (``git apply -R -p<auto>``) as the REVERT
     path; caller falls back to ``git checkout`` on failure. Auto-detects the
-    same strip level the forward apply used via ``-R --check``."""
+    same strip level the forward apply used via ``-R --check``.
+
+    Args:
+        framework_root: The git checkout to reverse-apply into.
+        patch_path: The patch file to reverse-apply.
+
+    Returns:
+        A ``(ok, stderr)`` tuple; ``ok`` is True when the reverse apply
+        succeeds.
+    """
     for lvl in _P_LEVELS:
         check = [
             "git", "-C", str(framework_root), "apply", "-R", f"-p{lvl}",
@@ -279,7 +335,16 @@ _PATCH_DEV_NULL = "/dev/null"
 
 
 def _strip_path_prefix(path: str, level: int) -> str:
-    """Drop ``level`` leading path components (mimics ``git apply -p<level>``)."""
+    """Drop ``level`` leading path components (mimics ``git apply -p<level>``).
+
+    Args:
+        path: The diff-header path to strip.
+        level: The number of leading components to drop (``<= 0`` is a no-op).
+
+    Returns:
+        The path with ``level`` leading components removed (or the basename
+        when there are not enough components).
+    """
     if level <= 0:
         return path
     parts = path.split("/")
@@ -293,6 +358,13 @@ def _commit_strip_level(
 
     The patch has already been applied, so modify/create targets exist in the
     tree; the level that maximises those hits is the one the forward apply used.
+
+    Args:
+        framework_root: The git checkout the patch was applied into.
+        pairs: ``(old_path, new_path)`` header pairs from the patch.
+
+    Returns:
+        The ``-p`` strip level resolving the most targets to existing files.
     """
     best_lvl, best_hits = 1, -1
     for lvl in _P_LEVELS:
@@ -322,6 +394,14 @@ def _patch_touched_paths(
     commit. Only paths that exist post-apply are emitted (pure deletions, the
     rare KEEP shape, are skipped) so the subsequent ``git add`` pathspec can
     never miss and silently stage nothing for the whole set.
+
+    Args:
+        framework_root: The git checkout the patches were applied into.
+        patches: The applied patch files to inspect.
+
+    Returns:
+        The repo-relative paths the patches modified/created that exist
+        post-apply.
     """
     out: list[str] = []
     for patch in patches:
@@ -362,6 +442,15 @@ def _git_commit_kept(
     dirty framework tree is not folded into the win commit. Best-effort: a
     commit failure (e.g. nothing staged) is non-fatal — the KEEP still stands in
     the working tree exactly as before.
+
+    Args:
+        framework_root: The git checkout to commit in.
+        message: The commit message for the KEEP.
+        paths: The repo-relative patch-touched paths to stage and commit.
+
+    Returns:
+        A ``(ok, note)`` tuple; ``ok`` is ``True`` on a successful commit or a
+        benign no-op (nothing to commit), and ``note`` carries any detail.
     """
     if not paths:
         return True, "no patch-touched paths to commit"
@@ -403,6 +492,15 @@ def _resolve_patch_paths(
     Order: ``params.patches`` → ``specialist_done.patches_written`` →
     filesystem scan of ``specialist_workspace/{worktree/,}patches/``.
     Entries normalised to absolute Paths; missing ones logged + dropped.
+
+    Args:
+        specialist_workspace: The specialist task workspace to resolve
+            relative paths / scan for patches.
+        explicit_patches: Explicit patch paths from params, or ``None``.
+        done_payload: The parsed ``specialist_done.json`` payload, or ``None``.
+
+    Returns:
+        The resolved, existing patch files as absolute Paths.
     """
     candidates: list[str] = []
     if explicit_patches:
@@ -889,6 +987,13 @@ class IntegratePatchExecutor:
         """Return the first proposal whose provenance starts with
         ``specialist:serving:framework_pr`` (F2-5); ``None`` otherwise so
         the KB writeback hook no-ops for legacy / kernel outputs.
+
+        Args:
+            done_payload: The parsed ``specialist_done.json`` payload, or
+                ``None``.
+
+        Returns:
+            The matching framework_pr proposal dict, or ``None`` when absent.
         """
         if not isinstance(done_payload, dict):
             return None
@@ -916,6 +1021,14 @@ class IntegratePatchExecutor:
 
         No-op for other provenance or when both dedup keys (``fa_pr_url`` /
         ``fa_pr_sha``) are missing. Write errors are logged + swallowed.
+
+        Args:
+            done_payload: The parsed ``specialist_done.json`` payload, or
+                ``None``.
+            outcome: The outcome label to record (e.g. integrated / reverted).
+            tps_delta_pct: The measured throughput delta percentage.
+            extra: The runner ``extra`` mapping (provides shared state /
+                session id).
         """
         proposal = self._find_framework_pr_proposal(done_payload)
         if proposal is None:
@@ -963,7 +1076,16 @@ class IntegratePatchExecutor:
         self, framework_root: Path | None, applied: list[Path],
     ) -> list[Path]:
         """Reverse-apply the applied patches (best-effort); returns those
-        actually reverted."""
+        actually reverted.
+
+        Args:
+            framework_root: The git checkout to revert in, or ``None`` (no-op).
+            applied: The patches that were applied this run.
+
+        Returns:
+            The patches actually reverted (may be the full ``applied`` list
+            when the checkout fallback fires).
+        """
         reverted: list[Path] = []
         if framework_root is None or not applied:
             return reverted
@@ -1001,6 +1123,17 @@ class IntegratePatchExecutor:
 
         Returns ``(bench_result_dict, gate_evidence)`` where gate_evidence
         carries ``accuracy_pass`` (True / False / None).
+
+        Args:
+            params: The task params (config / model / bench knobs).
+            output_root: The per-task workspace root for the bench.
+            config_changes_applied: Env overrides layered onto the variant.
+            specialist_task_id: The originating specialist task id (names the
+                variant).
+
+        Returns:
+            A ``(bench_result_dict, gate_evidence)`` tuple where
+            ``gate_evidence`` carries ``accuracy_pass`` (True / False / None).
         """
         config_path = Path(
             params.get("config_path")

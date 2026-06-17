@@ -353,6 +353,12 @@ def _count_optimization_stack(head: str) -> int:
 
     ``SharedState._format_optimization_stack`` emits ``"(none)"`` (empty) or a
     Python list repr (e.g. ``['baseline:v1', 'integrate:v2']``).
+
+    Args:
+        head: The rendered ``optimization_stack`` head value.
+
+    Returns:
+        The number of stack entries (``0`` when empty/unparseable).
     """
     if not head or head == "(none)":
         return 0
@@ -372,7 +378,12 @@ def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:
     """Decode the ``=== Time budget ===`` section in place onto ``snapshot``.
 
     The Coordinator emits one body line below the header; an absent section
-    leaves defaults so BudgetMonitor / deadline_imminent signals short-circuit.
+    leaves defaults so BudgetMonitor / deadline_imminent signals
+    short-circuit.
+
+    Args:
+        snapshot: Snapshot mutated in place with parsed budget fields.
+        body: The time-budget section body text.
     """
     if not body:
         return
@@ -413,6 +424,12 @@ def _split_double_space(value: str) -> str:
 
     ``to_prompt_summary`` joins two scalars with two spaces
     (``baseline_tput=...  baseline_acc=...``); cut at that boundary.
+
+    Args:
+        value: The raw scalar text possibly containing a trailing neighbour.
+
+    Returns:
+        The value trimmed at the first double-space boundary.
     """
     return value.split("  ", 1)[0].strip()
 

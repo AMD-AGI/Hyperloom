@@ -31,6 +31,12 @@ def _phase_event_key(ev: dict[str, Any]) -> tuple[str, str, str]:
     ``(action, ts-to-second, change|task_id)`` with the timestamp canonicalised
     to ``...Z`` so a recorder fragment row and the collector's audit-list row
     for the same attempt collapse to one event.
+
+    Args:
+        ev: A phase-timeline event dict.
+
+    Returns:
+        The ``(action, ts-to-second, change|task_id)`` dedupe key.
     """
     return (
         str(ev.get("action") or ""),
@@ -51,6 +57,15 @@ def _merge_phase_timeline(
     the base and only append fragment rows whose dedupe key is missing (the
     crash-survivable audit rows the on-disk state may have lost). Result stays
     sorted by ``ts`` like the collector's own output.
+
+    Args:
+        fragment: The recorder ``phase_timeline`` fragment (may be any type).
+        collector_value: The collector-computed phase timeline used as the
+            base.
+
+    Returns:
+        The merged timeline (collector base plus missing fragment rows),
+        sorted by ``ts``.
     """
     base: list[dict[str, Any]] = (
         list(collector_value) if isinstance(collector_value, list) else []
@@ -76,7 +91,16 @@ def _merge_phase_timeline(
 
 
 def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
-    """Read ``state.json`` as a plain dict; empty dict + warning when missing."""
+    """Read ``state.json`` as a plain dict; empty dict + warning when missing.
+
+    Args:
+        session_dir: The hyperloom session directory.
+        warnings: Accumulator appended to when the file is missing or
+            unparseable.
+
+    Returns:
+        The parsed ``state.json`` contents, or an empty dict on any failure.
+    """
     state_path = session_dir / "state.json"
     if not state_path.exists():
         warnings.append(f"state.json missing at {state_path}")
@@ -130,6 +154,10 @@ def _attach_kernel_roofline(
     surfaced empty (roofline enrichment happens after discovery records). Pure
     best-effort: a missing/empty roofline table or kernel just leaves the
     journey untouched.
+
+    Args:
+        kernel_journey: The kernel-journey view mutated in place.
+        kernel_roofline: The per-kernel roofline table to merge from.
     """
     if not isinstance(kernel_journey, dict) or not isinstance(
         kernel_roofline, dict,
@@ -217,7 +245,17 @@ def build(
     schema_version = SCHEMA_VERSION_V3 if assembled else SCHEMA_VERSION
 
     def _pick(section: str, collector_value: Any) -> Any:
-        """Fragment value if recorded and non-empty, else the collector value."""
+        """Fragment value if recorded and non-empty, else the collector value.
+
+        Args:
+            section: The breakdown section name to look up in the recorder
+                fragments.
+            collector_value: The fallback collector-computed value.
+
+        Returns:
+            The recorder fragment value when present and non-empty, else
+            ``collector_value``.
+        """
         frag = assembled.get(section)
         if isinstance(frag, list) and frag:
             return frag
@@ -487,7 +525,16 @@ def _load_assembled(
 ) -> dict[str, Any]:
     """Assemble recorder fragments into ``{section: value}`` (empty on opt-out
     or when no fragments exist). Never raises — a recorder bug must not poison
-    the export; it just falls back to collectors."""
+    the export; it just falls back to collectors.
+
+    Args:
+        session_dir: The hyperloom session directory.
+        warnings: Accumulator appended to when assembly fails.
+
+    Returns:
+        The assembled ``{section: value}`` mapping, or an empty dict when the
+        recorder is disabled, no fragments exist, or assembly fails.
+    """
     disabled = os.environ.get(
         "INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER", "",
     ).strip().lower() in ("1", "true", "yes")
@@ -513,7 +560,17 @@ def _safe_collect(
     *,
     default: Any = None,
 ):
-    """Run a collector with broad exception catching; failure → warning + ``default`` (a bug in one collector must not poison the export)."""
+    """Run a collector with broad exception catching; failure → warning + ``default`` (a bug in one collector must not poison the export).
+
+    Args:
+        name: Collector name used in the warning message.
+        fn: Zero-argument callable that runs the collector.
+        warnings: Accumulator appended to when the collector raises.
+        default: Value returned on failure; an empty dict when ``None``.
+
+    Returns:
+        The collector result, or ``default`` (or an empty dict) on failure.
+    """
     try:
         return fn()
     except Exception as exc:  # noqa: BLE001
@@ -534,6 +591,16 @@ def write_breakdown_json(
 
     ``output_path`` defaults to ``<session_dir>/session_breakdown.json``;
     ``include_transcripts`` is as in :func:`build`.
+
+    Args:
+        session_dir: The hyperloom session directory to build from.
+        output_path: Destination file; defaults to
+            ``<session_dir>/session_breakdown.json``.
+        include_transcripts: Whether to embed transcripts, as in
+            :func:`build`.
+
+    Returns:
+        The absolute path of the written breakdown file.
     """
     sd = Path(session_dir).resolve()
     target = Path(output_path).resolve() if output_path else sd / BREAKDOWN_FILENAME
@@ -575,6 +642,12 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
     Best-effort and self-skipping: returns False (no-op) when no breakdown or
     no receipt exists yet, when live push was disabled, or on any error. Never
     raises -- it must not mask the session's stop_reason at shutdown.
+
+    Args:
+        session_dir: The hyperloom session directory holding the breakdown.
+
+    Returns:
+        ``True`` when the langfuse section was refreshed, ``False`` otherwise.
     """
     from ..orchestrator.trace.langfuse_emitter import read_receipt
 
@@ -642,6 +715,14 @@ def write_minimal_final_report(
 
     Stays minimal (one SharedState read) so it never raises or blocks
     shutdown. Idempotent: never overwrites an existing ``reports/final.md``.
+
+    Args:
+        session_dir: The hyperloom session directory.
+        output_path: Destination file; defaults to
+            ``<session_dir>/reports/final.md``.
+
+    Returns:
+        The path of the (existing or newly written) ``final.md`` file.
     """
     from ..orchestrator.shared_state import SharedState
     from ..session_paths import reports_dir

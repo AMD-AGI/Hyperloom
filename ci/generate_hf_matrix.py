@@ -367,6 +367,14 @@ def _filter_entries_by_explicit_models(
     Historically INPUT_MODELS returned bare repo strings and therefore lost
     framework / precision / tp / conc from candidates JSON. For manual reruns
     of a small subset from a fixed pool, keep the candidate dicts intact.
+
+    Args:
+        entries: Candidate entries (dicts and/or repo id strings).
+        explicit_repos: Repo ids requested via ``INPUT_MODELS``.
+
+    Returns:
+        The matching candidate entries in ``explicit_repos`` order; all
+        ``entries`` when ``explicit_repos`` is empty.
     """
     if not explicit_repos:
         return entries
@@ -446,6 +454,13 @@ def _load_candidate_entries(cands_path: Path) -> list[dict]:
 
     BATCH_SIZE unset/0 returns all candidates. Slice order follows the JSON
     (HF download rank) for deterministic batch dispatch.
+
+    Args:
+        cands_path: Path to the candidates JSON file.
+
+    Returns:
+        The candidate dicts (each annotated with ``pool_id`` / ``pool_index``),
+        or ``[]`` when the file cannot be read.
     """
     try:
         data = json.loads(cands_path.read_text(encoding="utf-8"))
@@ -520,6 +535,12 @@ def _cron_fire_counter(now_utc: datetime) -> int:
     Each scheduled cron fire (UTC 4/16) advances the counter by exactly one,
     so consecutive cron runs step through batch 0, 1, 2, ... in order (unlike a
     half-day slot, which would collapse multiple fires onto one index).
+
+    Args:
+        now_utc: The UTC instant to map.
+
+    Returns:
+        A strictly increasing per-fire counter for ``now_utc``.
     """
     idx = bisect.bisect_right(_CRON_FIRE_HOURS_UTC, now_utc.hour) - 1
     if idx < 0:
@@ -544,6 +565,13 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
     instead of wrapping to the pool tail: a negative ``steps % batches`` would
     otherwise land on the last batch, silently skipping the not-run backlog the
     anchor is meant to drain first.
+
+    Args:
+        pool_size: Total number of candidate entries.
+        batch_size: Entries per batch.
+
+    Returns:
+        The 0-based batch index for the current scheduled fire.
     """
     batches = max((pool_size + batch_size - 1) // batch_size, 1)
     now_raw = (os.environ.get("INPUT_CRON_NOW") or "").strip()
