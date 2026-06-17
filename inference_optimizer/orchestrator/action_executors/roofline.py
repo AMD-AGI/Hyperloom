@@ -23,6 +23,7 @@ Design constraints (§4/§6):
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -160,6 +161,21 @@ def _failed(
     return out
 
 
+def _profile_err_text(profile_result: Any) -> str:
+    """Flatten a profile result's error fields into one blob for cuda-graph
+    capture-failure detection."""
+    if not isinstance(profile_result, dict):
+        return ""
+    parts = [
+        str(profile_result.get(k) or "")
+        for k in ("error", "error_class", "error_excerpt", "stderr_tail")
+    ]
+    sub = profile_result.get("sub_result")
+    if isinstance(sub, dict):
+        parts += [str(sub.get(k) or "") for k in ("error", "error_class")]
+    return "\n".join(parts)
+
+
 class RooflineExecutor:
     """Production composite ActionRunner.
 
@@ -242,8 +258,24 @@ class RooflineExecutor:
         # Track the last failure kind so the no-trace contract is preserved
         # (profile_no_trace_failed) instead of collapsing into profile_failed.
         last_phase = "profile"
+        # One-shot: after a cuda-graph capture crash
+        # (hipErrorStreamCaptureUnsupported) the next attempt boots eager so the
+        # torch-profiler stream capture cannot collide (mirrors baseline).
+        disable_cuda_graph = False
+        # Resolve framework so the eager fallback picks the correct flag (vLLM
+        # needs --enforce-eager, sglang --disable-cuda-graph). Internal roofline
+        # tasks omit params["framework"], so fall back to env then shared_state.
+        framework = self._resolve_framework(ctx)
+        from .baseline import (
+            _disable_cuda_graph_flag,
+            _is_cuda_graph_capture_failure,
+        )
+        eager_flag = _disable_cuda_graph_flag(framework)
         for attempt in range(1, _PROFILE_MAX_ATTEMPTS + 1):
-            profile_ctx = self._wrap_profile_ctx(ctx)
+            profile_ctx = self._wrap_profile_ctx(
+                ctx, disable_cuda_graph=disable_cuda_graph,
+                framework=framework,
+            )
             try:
                 profile_result = await profile_executor(profile_ctx)
             except Exception as exc:  # noqa: BLE001
@@ -255,6 +287,15 @@ class RooflineExecutor:
                     _PROFILE_MAX_ATTEMPTS,
                     last_error,
                 )
+                if not disable_cuda_graph and _is_cuda_graph_capture_failure(
+                    last_error
+                ):
+                    disable_cuda_graph = True
+                    log.warning(
+                        "roofline: cuda-graph capture failure detected; next "
+                        "attempt boots eager (%s)",
+                        eager_flag,
+                    )
                 continue
             if not isinstance(profile_result, dict):
                 last_phase = "profile"
@@ -293,6 +334,15 @@ class RooflineExecutor:
                     _PROFILE_MAX_ATTEMPTS,
                     last_error,
                 )
+                if not disable_cuda_graph and _is_cuda_graph_capture_failure(
+                    last_error, _profile_err_text(profile_result)
+                ):
+                    disable_cuda_graph = True
+                    log.warning(
+                        "roofline: cuda-graph capture failure detected; next "
+                        "attempt boots eager (%s)",
+                        eager_flag,
+                    )
                 continue
             if not trace_path:
                 last_phase = "profile_no_trace"
@@ -512,16 +562,38 @@ class RooflineExecutor:
         sd = ctx.extra.get("session_dir") if ctx.extra else None
         return Path(sd) if sd else Path(".")
 
+    def _resolve_framework(self, ctx: RunnerContext) -> str:
+        """Resolve the active framework: task params > FRAMEWORK env >
+        shared_state.framework. Internal roofline tasks omit params["framework"],
+        so the fallbacks keep the eager flag framework-correct (mirrors baseline).
+        """
+        params = ctx.task.params or {}
+        fw = str(params.get("framework") or "").strip()
+        if fw:
+            return fw
+        fw = os.environ.get("FRAMEWORK", "").strip()
+        if fw:
+            return fw
+        return str(getattr(self.shared_state, "framework", "") or "").strip()
+
     @staticmethod
-    def _wrap_profile_ctx(parent_ctx: RunnerContext) -> RunnerContext:
+    def _wrap_profile_ctx(
+        parent_ctx: RunnerContext, *, disable_cuda_graph: bool = False,
+        framework: str = "",
+    ) -> RunnerContext:
         """Construct a child RunnerContext for profile_executor.
 
         Bypasses SubAgentRunner's child Task creation (avoids double task
         accounting); the child carries kind="profile" + same params and
-        inherits the lease (no profile_lane re-acquire).
+        inherits the lease (no profile_lane re-acquire). When
+        ``disable_cuda_graph`` is set (post capture-crash retry), the
+        framework-correct eager flag is folded into ``base_extra_args``
+        (``framework`` resolved by the caller via params/env/shared_state).
 
         Args:
             parent_ctx: The parent runner context to derive the child from.
+            disable_cuda_graph: Whether to inject the eager fallback flag.
+            framework: Framework name used to choose the correct eager flag.
 
         Returns:
             A child ``RunnerContext`` for the profile sub-step.
@@ -529,11 +601,18 @@ class RooflineExecutor:
         from ..task_registry import Task
 
         parent_task = parent_ctx.task
+        params = dict(parent_task.params or {})
+        if disable_cuda_graph:
+            from .baseline import _with_cuda_graph_disabled
+            params["base_extra_args"] = _with_cuda_graph_disabled(
+                str(params.get("base_extra_args") or ""),
+                framework or str(params.get("framework") or ""),
+            )
         sub_task = Task(
             task_id=f"{parent_task.task_id}-profile",
             kind="profile",
             state="running",
-            params=dict(parent_task.params or {}),
+            params=params,
             idempotency_key=f"{parent_task.idempotency_key}-profile",
             requires_lanes=list(parent_task.requires_lanes or []),
             allowed_tools=list(parent_task.allowed_tools or []),
