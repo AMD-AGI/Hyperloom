@@ -66,6 +66,12 @@ def _is_real_artifact_path(path: str) -> bool:
 
     Excludes stdout/stderr/log dumps kernel-agent writes on early-failure
     paths and stuffs into ``optimized_path``.
+
+    Args:
+        path: Candidate artifact path string.
+
+    Returns:
+        True when the path looks like a real kernel artifact.
     """
     if not path:
         return False
@@ -105,6 +111,12 @@ def _classify_attempt_failure(
 
     Priority: timeout → preprocess → compile → correctness → agent_error →
     unknown. ``succeeded`` attempts get ``("", "")``.
+
+    Args:
+        attempt: One attempt record dict.
+
+    Returns:
+        An ``(error_class, error_message)`` tuple.
     """
     status = str(attempt.get("status") or "").strip().lower()
     if status == "succeeded":
@@ -174,6 +186,13 @@ def _backend_results_dir(session_dir: Path, session_id: str) -> Path | None:
 
     ``key`` lookup order: ``session_dir.name``, then ``state.session_id``,
     then a lone subdir under ``kernel-agent/runs/`` (migrated-key recovery).
+
+    Args:
+        session_dir: Session directory root.
+        session_id: State session id used as a fallback lookup key.
+
+    Returns:
+        The results directory path, or ``None`` when none is found.
     """
     runs_root = Path(session_dir) / "kernel-agent" / "runs"
     if not runs_root.is_dir():
@@ -199,6 +218,13 @@ def _load_kernel_result(
 
     Returns ``(payload_dict_or_None, unavailable_reason)``; reused by ladder
     harvesting and verification passthrough.
+
+    Args:
+        results_dir: Directory holding ``<kid>.json`` result files, or ``None``.
+        kernel_id: Kernel id whose result is loaded.
+
+    Returns:
+        A ``(payload_or_None, unavailable_reason)`` tuple.
     """
     if results_dir is None:
         return None, "kernel_agent_results_dir_missing"
@@ -227,6 +253,13 @@ def _load_backend_ladder(
       ``kernel_agent_results_dir_missing``,
       ``kernel_agent_result_file_missing``, ``parse_error``,
       ``no_attempts_recorded``.
+
+    Args:
+        results_dir: Directory holding ``<kid>.json`` result files, or ``None``.
+        kernel_id: Kernel id whose ladder is parsed.
+
+    Returns:
+        A ``(ladder, unavailable_reason)`` tuple.
     """
     data, reason = _load_kernel_result(results_dir, kernel_id)
     if data is None:
@@ -262,7 +295,15 @@ def _load_backend_ladder(
 
 
 def _relative_to_session(p: Path, session_dir: Path) -> str:
-    """Render ``p`` as a path relative to ``session_dir`` when possible."""
+    """Render ``p`` as a path relative to ``session_dir`` when possible.
+
+    Args:
+        p: The path to render.
+        session_dir: Session directory to make ``p`` relative to.
+
+    Returns:
+        The relative path string, or the absolute string when not nested.
+    """
     try:
         return str(p.relative_to(session_dir))
     except ValueError:
@@ -277,7 +318,17 @@ def _classify_attempted(
     rejected_ids: set[str],
     kernel_id: str,
 ) -> str:
-    """Decide the category for a kernel that has an attempts ledger row."""
+    """Decide the category for a kernel that has an attempts ledger row.
+
+    Args:
+        entry: The kernel's attempts ledger row.
+        integrated_ids: Kernel ids already integrated.
+        rejected_ids: Kernel ids that were rejected.
+        kernel_id: The kernel id being classified.
+
+    Returns:
+        The outcome category constant.
+    """
     last_decision = str(entry.get("last_decision") or "").upper()
     if kernel_id in integrated_ids:
         return CATEGORY_INTEGRATED
@@ -293,6 +344,12 @@ def _unattempted_reason(top_entry: dict[str, Any]) -> tuple[str, str]:
 
     Order matters: ``no_source_file`` first since source-file resolve is the
     dispatcher's first gate.
+
+    Args:
+        top_entry: The kernel's top-list/roofline entry.
+
+    Returns:
+        A ``(reason_code, human_detail)`` tuple.
     """
     source = str(top_entry.get("source_file") or "").strip()
     reusable = bool(top_entry.get("reusable_native_kernel"))
@@ -332,7 +389,17 @@ def _summary_one_line(
     backend_ladder: list[dict[str, Any]],
     artifact_error: str,
 ) -> str:
-    """One-line natural-language summary, deterministic, never LLM."""
+    """One-line natural-language summary, deterministic, never LLM.
+
+    Args:
+        category: The kernel outcome category.
+        entry: The kernel's attempt ledger row.
+        backend_ladder: Per-backend attempt rows.
+        artifact_error: Verification error detail, when any.
+
+    Returns:
+        A one-line summary string (``""`` for unknown categories).
+    """
     if category == CATEGORY_INTEGRATED:
         micro = entry.get("last_micro_speedup") or 0.0
         return f"integrated into optimization_stack; micro_speedup={micro:.3f}x"
@@ -378,6 +445,14 @@ def build_kernel_optimization_summary(
     top15 with the per-kernel kernel-agent ``results/<kid>.json`` files.
     Returns a JSON-ready dict for atomic write to
     ``<session_dir>/reports/kernel_optimization_summary.json``.
+
+    Args:
+        state: The session ``SharedState`` instance.
+        session_dir: Session directory (path or string).
+        schema_version: Schema version stamped onto the output.
+
+    Returns:
+        A JSON-ready summary dict.
     """
     sd_path = Path(session_dir)
     session_id = str(getattr(state, "session_id", "") or "")
@@ -701,6 +776,12 @@ def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int
     Priority: ``error_class``-derived buckets trump legacy structural buckets
     so root causes don't get buried in ``other``; falls back to structural
     classification when no ladder attempt carries an error_class.
+
+    Args:
+        by_kernel: The per-kernel summary rows.
+
+    Returns:
+        Mapping of failure-mode bucket to count.
     """
     breakdown: dict[str, int] = {
         # Legacy structural buckets (kept for back-compat)
@@ -763,7 +844,17 @@ def _build_top_takeaways(
     rejection_breakdown: dict[str, int],
     failure_reason_breakdown: dict[str, int],
 ) -> list[str]:
-    """Deterministic 2-4 sentence summary, no LLM."""
+    """Deterministic 2-4 sentence summary, no LLM.
+
+    Args:
+        counts: Per-category totals.
+        by_kernel: The per-kernel summary rows.
+        rejection_breakdown: Counts of rejection reasons.
+        failure_reason_breakdown: Counts of failure modes.
+
+    Returns:
+        A list of takeaway sentences.
+    """
     out: list[str] = []
     attempted = counts.get("attempted", 0)
     integrated = counts.get("integrated", 0)
@@ -824,6 +915,12 @@ def _find_highest_impact_missed(
 
     "Missed" = ``ATTEMPTED_REJECTED`` OR ``UNATTEMPTED``; ``INTEGRATED`` /
     ``KEEP_PENDING`` are excluded.
+
+    Args:
+        by_kernel: The per-kernel summary rows.
+
+    Returns:
+        The highest-``gpu_pct`` missed row, or ``None`` when none qualify.
     """
     best: dict[str, Any] | None = None
     best_gpu = -1.0

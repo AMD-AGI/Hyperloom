@@ -424,7 +424,18 @@ def evaluate_kernel_pipeline_signals(
     *,
     config: KernelPipelineConfig | None = None,
 ) -> list[Symptom]:
-    """Stateless slice of F (F2 / F4 / F5); F1 is stateful in :class:`RayPendingDetector`."""
+    """Evaluate the stateless kernel-pipeline signals (F2 / F4 / F5).
+
+    F1 is stateful and lives in :class:`RayPendingDetector`.
+
+    Args:
+        ctx: Reactor context for the current tick.
+        data: Collected source data.
+        config: Optional configuration; a default is used when ``None``.
+
+    Returns:
+        The kernel-pipeline symptoms, possibly empty.
+    """
     cfg = config or KernelPipelineConfig()
     out: list[Symptom] = []
     out.extend(_geak_budget_symptoms(data, cfg))
