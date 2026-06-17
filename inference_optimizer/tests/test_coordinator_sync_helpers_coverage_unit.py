@@ -51,6 +51,28 @@ def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
 
 
+# -- WS1: explicit specialist wall-clock budget ----------------------------
+def test_specialist_wall_budget_base_no_macro_cycle(coord: Coordinator) -> None:
+    # ≤24h runs keep macro_cycle == 0 → base lane values (cpu 10min / gpu 60min).
+    coord.shared_state.macro_cycle = 0
+    assert coord._specialist_wall_budget_sec(needs_gpu=False) == 10 * 60
+    assert coord._specialist_wall_budget_sec(needs_gpu=True) == 60 * 60
+
+
+def test_specialist_wall_budget_macro_cycle_amplifies(coord: Coordinator) -> None:
+    coord.shared_state.macro_cycle = 1
+    # cpu: 10 × (1+1) = 20min; gpu: 60 × 2 = 120min.
+    assert coord._specialist_wall_budget_sec(needs_gpu=False) == 20 * 60
+    assert coord._specialist_wall_budget_sec(needs_gpu=True) == 120 * 60
+
+
+def test_specialist_wall_budget_caps_at_4h(coord: Coordinator) -> None:
+    coord.shared_state.macro_cycle = 10
+    # gpu: 60 × 11 = 660min → capped at 240min (4h); cpu: 10 × 11 = 110min.
+    assert coord._specialist_wall_budget_sec(needs_gpu=True) == 240 * 60
+    assert coord._specialist_wall_budget_sec(needs_gpu=False) == 110 * 60
+
+
 # -- static / pure helpers -------------------------------------------------
 def test_gap_layer_for_action(coord: Coordinator) -> None:
     assert coord._gap_layer_for_action("kernel_opt") == ("kernel", "kernel_switch_specialist")

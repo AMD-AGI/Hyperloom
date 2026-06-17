@@ -270,6 +270,7 @@ class SpecialistSubprocessDispatcher:
         allowed_tools: tuple[str, ...],
         max_turns: int,
         gpu_ids: tuple[int, ...] = (),
+        wall_budget_sec: float | None = None,
     ) -> SpecialistSubprocessResult:
         """Spawn a claude subprocess, reap it, return the parsed result.
 
@@ -291,7 +292,13 @@ class SpecialistSubprocessDispatcher:
             allowed_tools (tuple[str, ...]): Per-task tool whitelist
                 (post-:meth:`SpecialistRunner._resolve_tools`).
             max_turns (int): Hard cap on LLM turns; multiplied by the
-                config's ``per_turn_max_seconds`` for the wall-clock ceiling.
+                config's ``per_turn_max_seconds`` for the legacy wall-clock
+                ceiling (used only when ``wall_budget_sec`` is not supplied).
+            gpu_ids (tuple[int, ...]): GPU ids to expose to the subprocess.
+            wall_budget_sec (float | None): WS1 explicit wall-clock budget
+                (seconds). When provided it overrides the
+                ``max_turns × per_turn_max_seconds`` ceiling as the reaper's
+                hard kill deadline — turns are no longer the stop signal.
 
         Returns:
             SpecialistSubprocessResult: Parsed outcome — done payload (if
@@ -308,6 +315,16 @@ class SpecialistSubprocessDispatcher:
         if worktree is not None:
             done_candidates.append(worktree / "specialist_done.json")
         done_candidates.append(workspace / "specialist_done.json")
+        # WS1 incremental checkpoint: the agent atomically rewrites this
+        # partial as it accumulates findings (it does NOT trigger reap — only
+        # the final ``specialist_done.json`` does). When a budget kill lands
+        # before the final file is written, we recover the partial as the
+        # run's best-so-far result. Same worktree-first / workspace-fallback
+        # search order as the final file.
+        partial_candidates: list[Path] = []
+        if worktree is not None:
+            partial_candidates.append(worktree / "specialist_done.partial.json")
+        partial_candidates.append(workspace / "specialist_done.partial.json")
         heartbeat_file = workspace / "heartbeat.json"
 
         # Write the prompt file (system + user collapsed into one
@@ -357,7 +374,12 @@ class SpecialistSubprocessDispatcher:
             )
 
         # Reap loop — poll done-file / exit / heartbeat staleness / timeout.
-        max_seconds = float(max_turns) * float(self.config.per_turn_max_seconds)
+        # WS1: prefer the Coordinator-injected explicit wall budget; fall back
+        # to the legacy ``max_turns × per_turn`` ceiling only when unset.
+        if wall_budget_sec and wall_budget_sec > 0:
+            max_seconds = float(wall_budget_sec)
+        else:
+            max_seconds = float(max_turns) * float(self.config.per_turn_max_seconds)
         try:
             outcome = await self._reap_loop(
                 proc=proc,
@@ -380,6 +402,21 @@ class SpecialistSubprocessDispatcher:
                 done_payload = self._read_done(cand)
                 if done_payload is not None:
                     break
+
+        # WS1: no final done.json (typically a budget kill / stale-heartbeat
+        # reap) — fall back to the most recent incremental partial so a
+        # killed-but-productive specialist still surfaces its best-so-far
+        # findings instead of being discarded as an empty timeout.
+        if done_payload is None:
+            for cand in partial_candidates:
+                if cand.exists():
+                    partial = self._read_done(cand)
+                    if partial is not None:
+                        partial["_recovered_from_partial"] = True
+                        done_payload = partial
+                        if not outcome.get("error"):
+                            outcome["error"] = "recovered_from_partial"
+                        break
 
         # 8. Token usage (full-trace B1): the Claude CLI's terminal
         #    ``stream-json`` result row carries the cumulative session

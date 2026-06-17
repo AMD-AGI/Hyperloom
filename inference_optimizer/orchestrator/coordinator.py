@@ -8696,6 +8696,15 @@ class Coordinator:
                     if isinstance(needs_gpu_raw, str)
                     else bool(needs_gpu_raw)
                 )
+                # WS1: explicit wall-clock budget replaces the old
+                # ``max_seconds = max_turns × per_turn`` ceiling (which became
+                # ~1000×600 once the turn cap was lifted). Lane-tiered base ×
+                # ``macro_cycle`` amplification, hard-capped at 4h. macro_cycle
+                # is 0 for ≤24h bounded runs (``is_long_run`` gate), so those
+                # always get the base value and never degrade.
+                extra_context["wall_budget_sec"] = self._specialist_wall_budget_sec(
+                    needs_gpu=needs_gpu,
+                )
                 if needs_gpu:
                     try:
                         gpu_count = int(params.get("gpu_count", 1) or 1)
@@ -8750,6 +8759,32 @@ class Coordinator:
                 )
             )
         return spawned
+
+    def _specialist_wall_budget_sec(self, *, needs_gpu: bool) -> float:
+        """Compute the WS1 explicit wall-clock budget for a specialist task.
+
+        Replaces the legacy ``max_seconds = max_turns × per_turn`` ceiling that
+        was implicitly disabled once the turn cap was lifted to ~1000. The
+        budget is a lane-tiered base (cpu 10min / gpu 60min) amplified by the
+        macro-cycle count and hard-capped at 4h::
+
+            budget_min = min(base × (macro_cycle + 1), 240)
+
+        ``macro_cycle`` only grows on long/unbounded runs (``is_long_run`` >24h
+        gate), so ≤24h bounded runs always get the base value (cpu 10 / gpu 60)
+        and never degrade.
+
+        Args:
+            needs_gpu: Whether the specialist holds a GPU lease (selects the
+                60min GPU lane base vs the 10min cpu base).
+
+        Returns:
+            float: The wall-clock budget in seconds.
+        """
+        base_min = 60.0 if needs_gpu else 10.0
+        macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        budget_min = min(base_min * (macro_cycle + 1), 240.0)
+        return budget_min * 60.0
 
     async def _reap_dispatched_task(
         self,
