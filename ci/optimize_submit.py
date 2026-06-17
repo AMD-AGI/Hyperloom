@@ -95,14 +95,15 @@ DEFAULT_CONTEXT_RESERVE_TOKENS = 16
 MIN_MAX_POSITION_EMBEDDINGS = 2048
 
 # Hardware facts from AMD Instinct datasheets. tp_thresholds_b is CI policy:
-# MI300X baseline (32/128/256B) scaled by per-GPU HBM capacity.
+# MI300X baseline (80/128/256B): <=80B->TP1, <=128B->TP2, <=256B->TP4,
+# >256B->TP8. mi325x/mi355x stay scaled by per-GPU HBM capacity.
 GPU_PROFILES = {
     "mi300x": {
         "gpu_type": "MI300X",
         "llvm_target": "gfx942",
         "hbm_gb": 192,
         "hbm_bandwidth_tb_s": 5.3,
-        "tp_thresholds_b": (32, 128, 256),
+        "tp_thresholds_b": (80, 128, 256),
     },
     "mi325x": {
         "gpu_type": "MI325X",
@@ -293,6 +294,19 @@ SGLANG_ARCHS: set[str] = {
     "GPTBigCodeForCausalLM",
     "FalconForCausalLM",
     "ChatGLMModel",
+    # New architectures natively supported by sglang v0.5.11 (transformers 5.x)
+    # in the current sandbox image. Without these, detect_framework falls back
+    # to vLLM and the old proxy/vllm/vllm-openai-rocm:v0.19.0 image (transformers
+    # <5) crashes at baseline ("does not recognize this architecture" /
+    # "TokenizersBackend does not exist"). Verified against the failing models'
+    # config.architectures.
+    "Gemma4ForConditionalGeneration",            # gemma-4 (dense + A4B MoE)
+    "Qwen3_5ForConditionalGeneration",           # Qwen3.5 / Qwen3.6 dense
+    "Qwen3_5MoeForConditionalGeneration",        # Qwen3.5 / Qwen3.6 A3B MoE
+    "Mistral3ForConditionalGeneration",          # Mistral3 / Ministral3
+    "NemotronHForCausalLM",                      # Nemotron-H (nemotron_h)
+    "Glm4ForCausalLM",                           # GLM-4 (glm4) dense
+    "Glm4MoeForCausalLM",                        # GLM-4.5 / 4.6 (glm4_moe)
 }
 
 # Architectures that require vLLM (Lightning Attention, sparse, or special quant).
@@ -680,16 +694,19 @@ def detect_tp(params_b: float, precision: str = "BF16", gpu_type: str | None = N
 def detect_concurrency(tp: int, framework: str) -> int:
     """Pick a benchmark concurrency from tensor-parallel size and framework.
 
+    CI policy is now a single fixed concurrency of 64 across every framework
+    and TP size, so benchmark load stays directly comparable between models
+    regardless of how they are sharded or served. ``tp`` / ``framework`` are
+    kept for API compatibility.
+
     Args:
         tp (int): Tensor-parallel size.
         framework (str): Serving framework (``vllm`` / ``sglang``).
 
     Returns:
-        int: The chosen concurrency level.
+        int: The chosen concurrency level (always ``64``).
     """
-    if framework == "vllm":
-        return 64 if tp <= 4 else 16
-    return 64 if tp == 1 else 32 if tp <= 4 else 64
+    return 64
 
 
 def _sglang_image_for(repo_id: str = "") -> str:
