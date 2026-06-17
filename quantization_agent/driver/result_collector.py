@@ -50,10 +50,10 @@ class ValidationSteps:
     run / crashed early, not that the step was skipped on purpose.
     """
 
-    auxiliary: str | None = None   # Step 1
-    md5: str | None = None         # Step 2
-    config: str | None = None      # Step 3
-    fuzzy: str | None = None       # Step 4
+    auxiliary: str | None = None  # Step 1
+    md5: str | None = None  # Step 2
+    config: str | None = None  # Step 3
+    fuzzy: str | None = None  # Step 4
 
 
 @dataclass(frozen=True)
@@ -85,12 +85,12 @@ class CollectedArtifacts:
     source_eval_present: bool
     quantized_eval_present: bool
     eval_report_present: bool
-    eval_report_data: dict | None       # parsed eval_report.json (or None)
-    eval_skipped_reason: str | None     # contents of eval_skipped.txt if present
+    eval_report_data: dict | None  # parsed eval_report.json (or None)
+    eval_skipped_reason: str | None  # contents of eval_skipped.txt if present
 
     # SKILL.md control-plane files
-    last_phase: str | None              # contents of last_phase.txt
-    blocked_reason: str | None          # contents of blocked.md
+    last_phase: str | None  # contents of last_phase.txt
+    blocked_reason: str | None  # contents of blocked.md
     fix_hypothesis_attempts: tuple[int, ...] = field(default_factory=tuple)
 
 
@@ -290,6 +290,7 @@ def _strict_validation_enabled(env: dict[str, str] | None = None) -> bool:
 # public entry
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def collect_artifacts(
     workspace: Path,
     *,
@@ -316,14 +317,12 @@ def collect_artifacts(
 
     quantized_dir_exists = bool(qdir and qdir.is_dir())
     has_config = bool(quantized_dir_exists and (qdir / "config.json").is_file())  # type: ignore[union-attr]
-    has_weights = bool(quantized_dir_exists and _has_glob(qdir, _WEIGHT_GLOBS))   # type: ignore[arg-type]
+    has_weights = bool(quantized_dir_exists and _has_glob(qdir, _WEIGHT_GLOBS))  # type: ignore[arg-type]
     has_tokenizer = bool(quantized_dir_exists and _has_any(qdir, _TOKENIZER_FILES))  # type: ignore[arg-type]
 
     validation_text = _read_text(workspace / "validation_report.md")
     validation_present = validation_text is not None
-    validation_steps = (
-        _parse_validation_report(validation_text) if validation_text else ValidationSteps()
-    )
+    validation_steps = _parse_validation_report(validation_text) if validation_text else ValidationSteps()
 
     eval_data, _ = _read_json(workspace / "eval_report.json")
 

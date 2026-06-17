@@ -61,6 +61,7 @@ class NoopRcaEngine:
 # Throttle
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class RcaThrottleConfig:
     """Tunables that bound LLM RCA cost.
@@ -106,9 +107,7 @@ class RcaThrottle:
         # meaningless without persistence under subprocess-per-tick.
         # ``_tick_calls`` / ``_tick_id`` stay in-memory (per-tick budget only).
         loaded = state_view.load() if state_view is not None else {}
-        self._last_called_unix: dict[tuple[str, ...], float] = (
-            _decode_throttle_keys(loaded.get("last_called_unix"))
-        )
+        self._last_called_unix: dict[tuple[str, ...], float] = _decode_throttle_keys(loaded.get("last_called_unix"))
         self._tick_calls = 0
         self._tick_id: int | None = None
 
@@ -125,11 +124,11 @@ class RcaThrottle:
         """Write the current cooldown timestamps to the state view, if any."""
         if self._state_view is None:
             return
-        self._state_view.save({
-            "last_called_unix": _encode_throttle_keys(
-                self._last_called_unix
-            ),
-        })
+        self._state_view.save(
+            {
+                "last_called_unix": _encode_throttle_keys(self._last_called_unix),
+            }
+        )
 
     def begin_tick(self, tick_id: int) -> None:
         """Reset the per-tick call counter when a new tick begins.
@@ -322,11 +321,7 @@ class LlmRcaEngine:
         content = message.get("content")
         if isinstance(content, list):
             # Some providers return a list of content parts
-            content = "".join(
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict)
-            )
+            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
         return str(content or "").strip()
 
 

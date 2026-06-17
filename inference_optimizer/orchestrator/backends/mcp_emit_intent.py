@@ -84,35 +84,24 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
             required payload field.
     """
     if not isinstance(payload, dict):
-        raise IntentValidationError(
-            f"emit_intent input must be an object, got {type(payload).__name__}"
-        )
+        raise IntentValidationError(f"emit_intent input must be an object, got {type(payload).__name__}")
     extra = set(payload.keys()) - {"intent_type", "payload"}
     if extra:
-        raise IntentValidationError(
-            f"emit_intent input has unexpected keys: {sorted(extra)!r}"
-        )
+        raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(extra)!r}")
     if "intent_type" not in payload or "payload" not in payload:
-        raise IntentValidationError(
-            "emit_intent input requires both 'intent_type' and 'payload'"
-        )
+        raise IntentValidationError("emit_intent input requires both 'intent_type' and 'payload'")
     try:
         intent_type = IntentType(payload["intent_type"])
     except ValueError as exc:
-        raise IntentValidationError(
-            f"emit_intent: unknown intent_type {payload['intent_type']!r}"
-        ) from exc
+        raise IntentValidationError(f"emit_intent: unknown intent_type {payload['intent_type']!r}") from exc
     inner = payload["payload"]
     if not isinstance(inner, dict):
-        raise IntentValidationError(
-            f"emit_intent: 'payload' must be an object, got {type(inner).__name__}"
-        )
+        raise IntentValidationError(f"emit_intent: 'payload' must be an object, got {type(inner).__name__}")
     required = _PAYLOAD_REQUIRED.get(intent_type, ())
     missing = [k for k in required if k not in inner]
     if missing:
         raise IntentValidationError(
-            f"emit_intent: intent_type={intent_type.value} missing required "
-            f"fields: {missing!r}"
+            f"emit_intent: intent_type={intent_type.value} missing required fields: {missing!r}"
         )
 
 
@@ -189,9 +178,7 @@ def build_emit_intent_server(
     if tool_factory is None:
         tool_factory = getattr(sdk, "tool", None) if sdk is not None else None
     if server_factory is None:
-        server_factory = (
-            getattr(sdk, "create_sdk_mcp_server", None) if sdk is not None else None
-        )
+        server_factory = getattr(sdk, "create_sdk_mcp_server", None) if sdk is not None else None
     if tool_factory is None or server_factory is None:
         log.info(
             "emit_intent MCP server unavailable (sdk=%s).",

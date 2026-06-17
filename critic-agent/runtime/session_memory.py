@@ -128,9 +128,7 @@ class SessionMemory:
                 used, falling back to ``DEFAULT_SESSION_MEMORY_DIR``.
         """
         if root is None:
-            root = os.environ.get(
-                "CRITIC_SESSION_MEMORY_DIR", DEFAULT_SESSION_MEMORY_DIR
-            )
+            root = os.environ.get("CRITIC_SESSION_MEMORY_DIR", DEFAULT_SESSION_MEMORY_DIR)
         self.root = Path(root)
         self.prior_cache_ttl = float(
             os.environ.get(
@@ -263,9 +261,7 @@ class SessionMemory:
             SessionMemoryError: If ``context`` is not a dict.
         """
         if not isinstance(context, dict):
-            raise SessionMemoryError(
-                f"context must be a dict, got {type(context).__name__}"
-            )
+            raise SessionMemoryError(f"context must be a dict, got {type(context).__name__}")
         self._ensure_session_dir(session_id)
         _write_json_atomic(self._context_path(session_id), context)
 
@@ -297,9 +293,7 @@ class SessionMemory:
             SessionMemoryError: If ``incoming`` is not a dict.
         """
         if not isinstance(incoming, dict):
-            raise SessionMemoryError(
-                f"incoming context must be a dict, got {type(incoming).__name__}"
-            )
+            raise SessionMemoryError(f"incoming context must be a dict, got {type(incoming).__name__}")
         stored = self.load_context(session_id)
         merged: dict[str, Any] = dict(stored)
         explicit: list[str] = []
@@ -348,9 +342,7 @@ class SessionMemory:
             SessionMemoryError: If ``decision_review`` is not a dict.
         """
         if not isinstance(decision_review, dict):
-            raise SessionMemoryError(
-                "decision_review must be a dict"
-            )
+            raise SessionMemoryError("decision_review must be a dict")
         self._ensure_session_dir(session_id)
         record = {
             "ts": _now_iso(),
@@ -638,9 +630,7 @@ def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise SessionMemoryError(
-                    f"corrupt jsonl line at {path}: {exc}"
-                ) from exc
+                raise SessionMemoryError(f"corrupt jsonl line at {path}: {exc}") from exc
             if isinstance(obj, dict):
                 yield obj
 

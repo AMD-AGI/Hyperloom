@@ -234,7 +234,10 @@ def generation_name(row: dict[str, Any]) -> str:
 
 
 def generation_metadata(
-    row: dict[str, Any], *, phase: str, has_text: bool,
+    row: dict[str, Any],
+    *,
+    phase: str,
+    has_text: bool,
 ) -> dict[str, Any]:
     """Assemble the per-Generation metadata block (join keys + flags).
 
@@ -319,23 +322,27 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
     # Drop keys the decision didn't carry so the score metadata stays compact.
     meta = {k: v for k, v in meta.items() if v is not None}
     comment = str(dec.get("change") or "")
-    scores: list[dict[str, Any]] = [{
-        "name": "decision_outcome",
-        "value": str(dec.get("outcome") or "unknown"),
-        "data_type": "CATEGORICAL",
-        "comment": comment,
-        "metadata": meta,
-    }]
+    scores: list[dict[str, Any]] = [
+        {
+            "name": "decision_outcome",
+            "value": str(dec.get("outcome") or "unknown"),
+            "data_type": "CATEGORICAL",
+            "comment": comment,
+            "metadata": meta,
+        }
+    ]
     gain = dec.get("gain_pct")
     if gain is not None:
         try:
-            scores.append({
-                "name": "gain_pct",
-                "value": float(gain),
-                "data_type": "NUMERIC",
-                "comment": comment,
-                "metadata": meta,
-            })
+            scores.append(
+                {
+                    "name": "gain_pct",
+                    "value": float(gain),
+                    "data_type": "NUMERIC",
+                    "comment": comment,
+                    "metadata": meta,
+                }
+            )
         except (TypeError, ValueError):
             pass
     return scores

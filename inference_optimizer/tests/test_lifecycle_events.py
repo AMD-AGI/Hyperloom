@@ -60,7 +60,7 @@ def test_make_lifecycle_event_shape():
         step="trace_analyze",
         status="start",  # lower-cased on purpose
         phase="kernel",  # lower-cased on purpose
-        label=None,      # default from step
+        label=None,  # default from step
         artifacts={"out_dir": "/tmp/run", "empty": "", "none": None},
         detail="  starting  ",
         duration_s=1.23456,
@@ -69,20 +69,26 @@ def test_make_lifecycle_event_shape():
     )
     assert event["seq"] == 3
     assert event["ts"] == "2026-06-09T00:00:00+00:00"
-    assert event["phase"] == "KERNEL"          # upper-cased
+    assert event["phase"] == "KERNEL"  # upper-cased
     assert event["step"] == "trace_analyze"
-    assert event["label"] == "TraceLens"       # defaulted from step
-    assert event["status"] == "START"          # upper-cased
-    assert event["detail"] == "starting"       # stripped
+    assert event["label"] == "TraceLens"  # defaulted from step
+    assert event["status"] == "START"  # upper-cased
+    assert event["detail"] == "starting"  # stripped
     # Empty / None artifact values are dropped; survivors are str-coerced.
     assert event["artifacts"] == {"out_dir": "/tmp/run"}
-    assert event["duration_s"] == 1.235        # rounded to 3dp
+    assert event["duration_s"] == 1.235  # rounded to 3dp
 
 
 def test_make_lifecycle_event_omits_duration_when_none():
     event = make_lifecycle_event(
-        step="report", status="START", phase="CLOSE", label=None,
-        artifacts=None, detail="", duration_s=None, seq=0,
+        step="report",
+        status="START",
+        phase="CLOSE",
+        label=None,
+        artifacts=None,
+        detail="",
+        duration_s=None,
+        seq=0,
         ts="2026-06-09T00:00:00+00:00",
     )
     assert "duration_s" not in event
@@ -110,8 +116,8 @@ def test_record_lifecycle_event_appends_and_defaults_phase():
     )
     assert len(s.lifecycle) == 1
     assert row is s.lifecycle[0]
-    assert row["phase"] == "KERNEL"            # defaulted from current phase
-    assert row["label"] == "GEAK"              # defaulted from step
+    assert row["phase"] == "KERNEL"  # defaulted from current phase
+    assert row["label"] == "GEAK"  # defaulted from step
     assert row["status"] == "START"
     assert row["artifacts"] == {"workspace": "/tmp/ws"}
     assert row["seq"] == 0
@@ -121,8 +127,11 @@ def test_record_lifecycle_event_explicit_phase_and_label_override():
     s = SharedState(session_id="abc")
     s.phase = PHASE_KERNEL
     row = s.record_lifecycle_event(
-        step="custom", status="END", phase="EXPLORE",
-        label="Custom Label", duration_s=2.0,
+        step="custom",
+        status="END",
+        phase="EXPLORE",
+        label="Custom Label",
+        duration_s=2.0,
     )
     assert row["phase"] == "EXPLORE"
     assert row["label"] == "Custom Label"
@@ -149,8 +158,10 @@ def test_lifecycle_persists_round_trip(tmp_path):
     s = SharedState(session_id="abc")
     s.phase = PHASE_KERNEL
     s.record_lifecycle_event(
-        step="trace_analyze", status="END",
-        artifacts={"candidates": "/tmp/kc.json"}, duration_s=42.0,
+        step="trace_analyze",
+        status="END",
+        artifacts={"candidates": "/tmp/kc.json"},
+        duration_s=42.0,
     )
     s.save(tmp_path)
 

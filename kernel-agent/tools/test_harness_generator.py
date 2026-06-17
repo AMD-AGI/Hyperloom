@@ -17,7 +17,8 @@ _TOOLS_DIR = Path(__file__).resolve().parent
 def _load_module():
     """Load harness_generator.py as an isolated module."""
     spec = importlib.util.spec_from_file_location(
-        "harness_generator_under_test", _TOOLS_DIR / "harness_generator.py",
+        "harness_generator_under_test",
+        _TOOLS_DIR / "harness_generator.py",
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -31,7 +32,7 @@ def _load_module():
 hg = _load_module()
 
 
-BENCH_SRC = '''\
+BENCH_SRC = """\
 import torch
 import torch.nn.functional as F
 
@@ -53,10 +54,11 @@ def test_main():
     w = torch.randn(N, dtype=torch.bfloat16)
     torch_ref(x, w, 1e-6)
     triton_kernel(x, w, 1e-6)
-'''
+"""
 
 
 # ---- BenchmarkAnalyzer ----
+
 
 def test_get_imports():
     a = hg.BenchmarkAnalyzer(BENCH_SRC)
@@ -75,6 +77,7 @@ def test_get_decorated_functions():
 
 def test_decorator_name_variants():
     import ast
+
     a = hg.BenchmarkAnalyzer("x = 1")
     assert a._decorator_name(ast.parse("@deco\ndef f():pass").body[0].decorator_list[0]) == "deco"
     assert a._decorator_name(ast.parse("@deco()\ndef f():pass").body[0].decorator_list[0]) == "deco"
@@ -98,10 +101,7 @@ def test_classify_functions_single_perftest_is_kernel():
 
 
 def test_classify_functions_two_plain_perftests():
-    src = (
-        "@perftest\ndef alpha(a):\n    return a\n"
-        "@perftest\ndef beta(a):\n    return a\n"
-    )
+    src = "@perftest\ndef alpha(a):\n    return a\n@perftest\ndef beta(a):\n    return a\n"
     a = hg.BenchmarkAnalyzer(src)
     ref, kernel = a.classify_functions(a.get_decorated_functions())
     # Both unclassified -> both become kernel candidates; first wins as kernel.
@@ -122,10 +122,7 @@ def test_get_test_function_benchmark():
 
 
 def test_get_test_function_toplevel_caller():
-    src = (
-        "@perftest\ndef mykernel(a):\n    return a\n"
-        "def bench_runner():\n    return mykernel(1)\n"
-    )
+    src = "@perftest\ndef mykernel(a):\n    return a\ndef bench_runner():\n    return mykernel(1)\n"
     a = hg.BenchmarkAnalyzer(src)
     tf = a.get_test_function(a.get_decorated_functions())
     assert tf.name == "bench_runner"
@@ -160,6 +157,7 @@ def test_extract_call_to_not_found():
 
 def test_call_func_name_variants():
     import ast
+
     a = hg.BenchmarkAnalyzer("x = 1")
     assert a._call_func_name(ast.parse("foo()").body[0].value) == "foo"
     assert a._call_func_name(ast.parse("a.b.c()").body[0].value) == "a.b.c"
@@ -173,6 +171,7 @@ def test_get_toplevel_statements():
 
 
 # ---- config builder ----
+
 
 def test_parse_shape_string():
     assert hg._parse_shape_string("(256, 128) bf16") == ((256, 128), "bf16")
@@ -218,26 +217,46 @@ def test_build_configs_unparseable_shapes_fallback():
 
 # ---- predicates ----
 
-@pytest.mark.parametrize("name,expected", [
-    ("eps", True), ("epsilon", True), ("dropout", True),
-    ("use_model_sensitive", True), ("x", False),
-])
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("eps", True),
+        ("epsilon", True),
+        ("dropout", True),
+        ("use_model_sensitive", True),
+        ("x", False),
+    ],
+)
 def test_is_scalar_param(name, expected):
     assert hg._is_scalar_param(name) is expected
 
 
-@pytest.mark.parametrize("name,expected", [
-    ("weight", True), ("bias", True), ("gamma", True),
-    ("up_weight", True), ("x", False),
-])
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("weight", True),
+        ("bias", True),
+        ("gamma", True),
+        ("up_weight", True),
+        ("x", False),
+    ],
+)
 def test_is_weight_param(name, expected):
     assert hg._is_weight_param(name) is expected
 
 
-@pytest.mark.parametrize("s,expected", [
-    ("foo", True), ("x1", True), ("True", False),
-    ("None", False), ("1e-6", False), ("torch.randn(3)", False),
-])
+@pytest.mark.parametrize(
+    "s,expected",
+    [
+        ("foo", True),
+        ("x1", True),
+        ("True", False),
+        ("None", False),
+        ("1e-6", False),
+        ("torch.randn(3)", False),
+    ],
+)
 def test_is_variable(s, expected):
     assert hg._is_variable(s) is expected
 
@@ -251,6 +270,7 @@ def test_match_call_args_to_params():
 
 # ---- adapter generators ----
 
+
 def test_generate_setup_inputs_no_target():
     a = hg.BenchmarkAnalyzer("x = 1")
     body = hg._generate_setup_inputs(a, None, "M, N, dtype = cfg", None, None)
@@ -262,7 +282,11 @@ def test_generate_setup_inputs_with_kernel():
     a = hg.BenchmarkAnalyzer(BENCH_SRC)
     dec = a.get_decorated_functions()
     body = hg._generate_setup_inputs(
-        a, dec["test_main"], "M, N, dtype = cfg", dec["torch_ref"], dec["triton_kernel"],
+        a,
+        dec["test_main"],
+        "M, N, dtype = cfg",
+        dec["torch_ref"],
+        dec["triton_kernel"],
     )
     assert "weight" in body
     assert "eps" in body
@@ -296,9 +320,12 @@ def test_generate_run_func_body_without_call():
 
 # ---- maybe_generate_harness ----
 
+
 def test_maybe_generate_harness_missing_file(tmp_path):
     out = hg.maybe_generate_harness(
-        benchmark_file=str(tmp_path / "nope.py"), candidate={}, source_file="",
+        benchmark_file=str(tmp_path / "nope.py"),
+        candidate={},
+        source_file="",
         out_dir=tmp_path,
     )
     assert out is None
@@ -309,7 +336,10 @@ def test_maybe_generate_harness_no_decorated(tmp_path, monkeypatch):
     bench = tmp_path / "b.py"
     bench.write_text("import torch\nx = 1\n", encoding="utf-8")
     out = hg.maybe_generate_harness(
-        benchmark_file=str(bench), candidate={}, source_file="", out_dir=tmp_path,
+        benchmark_file=str(bench),
+        candidate={},
+        source_file="",
+        out_dir=tmp_path,
     )
     assert out is None
 
@@ -319,7 +349,10 @@ def test_maybe_generate_harness_no_kernel_or_ref(tmp_path, monkeypatch):
     bench = tmp_path / "b.py"
     bench.write_text("@benchmark\ndef test_x():\n    pass\n", encoding="utf-8")
     out = hg.maybe_generate_harness(
-        benchmark_file=str(bench), candidate={}, source_file="", out_dir=tmp_path,
+        benchmark_file=str(bench),
+        candidate={},
+        source_file="",
+        out_dir=tmp_path,
     )
     assert out is None
 
@@ -330,8 +363,11 @@ def test_maybe_generate_harness_success(tmp_path, monkeypatch):
     bench = tmp_path / "bench_rms.py"
     bench.write_text(BENCH_SRC, encoding="utf-8")
     out = hg.maybe_generate_harness(
-        benchmark_file=str(bench), candidate={"input_shapes": [{"call_num": 1, "shape": "(256, 128) bf16"}]},
-        source_file="", out_dir=tmp_path, log_fn=logs.append,
+        benchmark_file=str(bench),
+        candidate={"input_shapes": [{"call_num": 1, "shape": "(256, 128) bf16"}]},
+        source_file="",
+        out_dir=tmp_path,
+        log_fn=logs.append,
     )
     assert out is not None
     assert "--correctness" in out.test_command
@@ -344,13 +380,17 @@ def test_maybe_generate_harness_already_valid_skips(tmp_path, monkeypatch):
     bench = tmp_path / "bench_rms.py"
     bench.write_text(BENCH_SRC, encoding="utf-8")
     out = hg.maybe_generate_harness(
-        benchmark_file=str(bench), candidate={}, source_file="", out_dir=tmp_path,
+        benchmark_file=str(bench),
+        candidate={},
+        source_file="",
+        out_dir=tmp_path,
     )
     assert out is None
 
 
 def _fake_static_check(harness_ok, bench_ok):
     """Build a static_check stub keyed on whether the path is a harness file."""
+
     def static_check(path):
         # Key off the file name only; the tmp_path dir itself contains the
         # test name ("...harness_success") and must not be misread as harness.
@@ -374,6 +414,7 @@ def _inject_fake_validate(monkeypatch, *, harness_ok, bench_ok, force_file=False
         if str(validator_dir) not in sys.path:
             sys.path.insert(0, str(validator_dir))
         import validate_harness as real_vh
+
         monkeypatch.setattr(real_vh, "static_check", stub)
     else:
         mod = types.ModuleType("validate_harness")

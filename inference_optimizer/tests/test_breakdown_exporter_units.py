@@ -12,6 +12,7 @@ from inference_optimizer.breakdown import exporter as ex
 
 # _load_state
 
+
 class TestLoadState:
     def test_missing_returns_empty_and_warns(self, tmp_path):
         warnings: list[str] = []
@@ -36,6 +37,7 @@ class TestLoadState:
 
 # _load_manifest
 
+
 class TestLoadManifest:
     def test_missing_returns_empty_and_warns(self, tmp_path):
         warnings: list[str] = []
@@ -59,6 +61,7 @@ class TestLoadManifest:
 
 # collect_specialist_runs — round_id coercion (fail-soft)
 
+
 class TestCoerceRoundId:
     def test_numeric_string_becomes_int(self):
         assert col._coerce_round_id("3") == 3
@@ -71,9 +74,7 @@ class TestCoerceRoundId:
 
     def test_task_id_hash_kept_as_string(self):
         # The bug repro: a task-id hash must NOT raise on int() cast.
-        assert col._coerce_round_id(
-            "607ba5c978a147d2a2b2ef8132fe2730"
-        ) == "607ba5c978a147d2a2b2ef8132fe2730"
+        assert col._coerce_round_id("607ba5c978a147d2a2b2ef8132fe2730") == "607ba5c978a147d2a2b2ef8132fe2730"
 
     def test_none_and_empty_collapse_to_zero(self):
         assert col._coerce_round_id(None) == 0
@@ -111,9 +112,7 @@ class TestCollectSpecialistRuns:
         """Rounds with singular ``domain`` / ``task_id`` + bare ``confidence`` must be surfaced rather than emitting empty fields."""
         runs_dir = tmp_path / "runs" / "specialist" / "abc123"
         runs_dir.mkdir(parents=True)
-        (runs_dir / "specialist_done.json").write_text(
-            json.dumps({"domain": "comm_specialist", "proposal_set": []})
-        )
+        (runs_dir / "specialist_done.json").write_text(json.dumps({"domain": "comm_specialist", "proposal_set": []}))
         state = {
             "specialist_rounds": [
                 {

@@ -145,7 +145,9 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
     deduped = _dedupe(out)
     _log.info(
         "enumerate_candidates: total=%d after dedup (explicit=%d, searched=%d)",
-        len(deduped), len(request.candidate_refs), len(out) - len(request.candidate_refs),
+        len(deduped),
+        len(request.candidate_refs),
+        len(out) - len(request.candidate_refs),
     )
     return deduped
 
@@ -189,9 +191,7 @@ def _resolve_keywords(request: ExploreRequest) -> list[str]:
     return []
 
 
-def _rank_by_keyword_overlap(
-    prs: list[GitHubPr], keywords: list[str]
-) -> list[GitHubPr]:
+def _rank_by_keyword_overlap(prs: list[GitHubPr], keywords: list[str]) -> list[GitHubPr]:
     """Stable-rerank PRs by anti-aware keyword score.
 
     Uses :func:`score_title_with_anti_signal` so wrong-axis PRs (e.g.

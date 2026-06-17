@@ -3,10 +3,10 @@
 """Branch coverage for integrate_patch helper functions: framework-root
 resolution, git apply / reverse / checkout spawn-failure handling, patch-path
 resolution, and the best-effort revert fallback chain."""
+
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 from inference_optimizer.orchestrator.action_executors import integrate_patch as ip
 
@@ -30,8 +30,7 @@ def test_resolve_framework_root_explicit_dir(tmp_path):
 def test_resolve_framework_root_explicit_missing_then_git(tmp_path, monkeypatch):
     gitroot = tmp_path / "fw"
     (gitroot / ".git").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist",
-                        lambda: [str(gitroot)])
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(gitroot)])
     # explicit doesn't exist -> warn + fall back to git allowlist entry
     assert ip._resolve_framework_root("/no/such/dir") == gitroot
 
@@ -39,8 +38,7 @@ def test_resolve_framework_root_explicit_missing_then_git(tmp_path, monkeypatch)
 def test_resolve_framework_root_non_git_fallback(tmp_path, monkeypatch):
     plain = tmp_path / "plain"
     plain.mkdir()
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist",
-                        lambda: [str(plain)])
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(plain)])
     assert ip._resolve_framework_root(None) == plain
 
 
@@ -51,18 +49,15 @@ def test_resolve_framework_root_none(monkeypatch):
 
 # ---- _run_git_apply spawn failure -----------------------------------------
 def test_run_git_apply_spawn_fail(tmp_path, monkeypatch):
-    monkeypatch.setattr(ip.subprocess, "run",
-                        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
-    ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch",
-                                p_level=1, three_way=False, check_only=True)
+    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
+    ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, three_way=False, check_only=True)
     assert ok is False
     assert "spawn failed" in err
 
 
 def test_run_git_apply_success(tmp_path, monkeypatch):
     monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: _CP(0, ""))
-    ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch",
-                                p_level=1, three_way=True, check_only=True)
+    ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, three_way=True, check_only=True)
     assert ok is True
 
 
@@ -76,8 +71,7 @@ def test_preflight_missing_targets_read_error(tmp_path):
 def test_preflight_missing_targets_records(tmp_path, monkeypatch):
     patch = tmp_path / "p.patch"
     patch.write_text("--- a/ghost.py\n+++ b/ghost.py\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "patch_targets_missing",
-                        lambda text, root: ["a/ghost.py"])
+    monkeypatch.setattr(ip, "patch_targets_missing", lambda text, root: ["a/ghost.py"])
     records = ip._preflight_missing_targets(tmp_path, [patch])
     assert records[0]["missing_targets"] == ["a/ghost.py"]
 
@@ -91,8 +85,7 @@ def test_git_apply_check_only_after_detect(tmp_path, monkeypatch):
 
 def test_git_apply_no_level(tmp_path, monkeypatch):
     monkeypatch.setattr(ip, "_detect_p_level", lambda *a, **k: None)
-    monkeypatch.setattr(ip, "_run_git_apply",
-                        lambda *a, **k: (False, "no apply"))
+    monkeypatch.setattr(ip, "_run_git_apply", lambda *a, **k: (False, "no apply"))
     ok, err = ip._git_apply(tmp_path, tmp_path / "p.patch")
     assert ok is False
 
@@ -113,8 +106,7 @@ def test_git_apply_reverse_success(tmp_path, monkeypatch):
 
 
 def test_git_apply_reverse_check_spawn_fail(tmp_path, monkeypatch):
-    monkeypatch.setattr(ip.subprocess, "run",
-                        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
+    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
     ok, err = ip._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is False and "spawn failed" in err
 
@@ -153,13 +145,7 @@ def test_git_apply_reverse_no_level(tmp_path, monkeypatch):
 
 
 # ---- _patch_touched_paths / commit scoping --------------------------------
-_DIFF = (
-    "--- a/pkg/mod.py\n"
-    "+++ b/pkg/mod.py\n"
-    "@@ -1 +1 @@\n"
-    "-old\n"
-    "+new\n"
-)
+_DIFF = "--- a/pkg/mod.py\n+++ b/pkg/mod.py\n@@ -1 +1 @@\n-old\n+new\n"
 
 
 def test_patch_touched_paths_returns_only_patched_file(tmp_path):
@@ -178,12 +164,7 @@ def test_patch_touched_paths_returns_only_patched_file(tmp_path):
 def test_patch_touched_paths_skips_unresolvable_and_creations(tmp_path):
     # Creation patch: new file present (strip level 1), old is /dev/null.
     (tmp_path / "new.py").write_text("content\n", encoding="utf-8")
-    create = (
-        "--- /dev/null\n"
-        "+++ b/new.py\n"
-        "@@ -0,0 +1 @@\n"
-        "+content\n"
-    )
+    create = "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+content\n"
     patch = tmp_path / "c.patch"
     patch.write_text(create, encoding="utf-8")
     assert ip._patch_touched_paths(tmp_path, [patch]) == ["new.py"]
@@ -220,8 +201,7 @@ def test_git_commit_kept_scopes_add_to_paths(tmp_path, monkeypatch):
 
 # ---- _git_checkout_clean spawn failure ------------------------------------
 def test_git_checkout_clean_spawn_fail(tmp_path, monkeypatch):
-    monkeypatch.setattr(ip.subprocess, "run",
-                        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
+    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
     ok, err = ip._git_checkout_clean(tmp_path)
     assert ok is False and "spawn failed" in err
 
@@ -232,18 +212,15 @@ def test_resolve_patch_paths_scan(tmp_path):
     base.mkdir()
     (base / "a.patch").write_text("x", encoding="utf-8")
     (base / "b.diff").write_text("y", encoding="utf-8")
-    out = ip._resolve_patch_paths(
-        specialist_workspace=tmp_path, explicit_patches=None,
-        done_payload=None)
+    out = ip._resolve_patch_paths(specialist_workspace=tmp_path, explicit_patches=None, done_payload=None)
     names = sorted(p.name for p in out)
     assert names == ["a.patch", "b.diff"]
 
 
 def test_resolve_patch_paths_missing_logged(tmp_path):
     out = ip._resolve_patch_paths(
-        specialist_workspace=tmp_path,
-        explicit_patches=["/no/such/file.patch"],
-        done_payload=None)
+        specialist_workspace=tmp_path, explicit_patches=["/no/such/file.patch"], done_payload=None
+    )
     assert out == []
 
 
@@ -251,8 +228,8 @@ def test_resolve_patch_paths_from_done_payload(tmp_path):
     p = tmp_path / "x.patch"
     p.write_text("z", encoding="utf-8")
     out = ip._resolve_patch_paths(
-        specialist_workspace=tmp_path, explicit_patches=None,
-        done_payload={"patches_written": [str(p)]})
+        specialist_workspace=tmp_path, explicit_patches=None, done_payload={"patches_written": [str(p)]}
+    )
     assert out[0].name == "x.patch"
 
 

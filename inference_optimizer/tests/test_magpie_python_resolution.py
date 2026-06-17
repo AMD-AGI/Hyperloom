@@ -7,7 +7,6 @@ from __future__ import annotations
 import logging
 import subprocess
 
-import pytest
 
 from inference_optimizer.orchestrator.action_executors import _grid_runner
 
@@ -15,7 +14,8 @@ from inference_optimizer.orchestrator.action_executors import _grid_runner
 def test_env_magpie_python_used_when_it_can_import(monkeypatch):
     monkeypatch.setenv("MAGPIE_PYTHON", "/good/python")
     monkeypatch.setattr(
-        _grid_runner, "run_with_session_kill",
+        _grid_runner,
+        "run_with_session_kill",
         lambda *a, **k: type("P", (), {"returncode": 0})(),
     )
     assert _grid_runner._resolve_magpie_python() == "/good/python"
@@ -27,7 +27,12 @@ def test_can_import_probe_uses_only_supported_run_kwargs(monkeypatch):
     probe_cmds: list[list[str]] = []
 
     def strict_run(
-        cmd, *, env=None, cwd=None, timeout=None, text=True,
+        cmd,
+        *,
+        env=None,
+        cwd=None,
+        timeout=None,
+        text=True,
         soft_deadline_sec=None,
     ):
         # Mirror run_with_session_kill's real signature exactly — no ``capture_output``.
@@ -58,8 +63,7 @@ def test_stale_env_magpie_python_ignored_and_autodetected(monkeypatch, caplog):
         resolved = _grid_runner._resolve_magpie_python()
 
     assert resolved == "/opt/venv/bin/python3"
-    assert any("MAGPIE_PYTHON" in r.message and "cannot import Magpie" in r.message
-               for r in caplog.records)
+    assert any("MAGPIE_PYTHON" in r.message and "cannot import Magpie" in r.message for r in caplog.records)
 
 
 def test_probe_requires_yaml_dependency(monkeypatch):
@@ -84,7 +88,9 @@ def test_probe_requires_yaml_dependency(monkeypatch):
 
     monkeypatch.setattr(_grid_runner, "run_with_session_kill", fake_run)
     monkeypatch.setattr(
-        _grid_runner.shutil, "which", lambda _n: "/opt/venv/bin/python3",
+        _grid_runner.shutil,
+        "which",
+        lambda _n: "/opt/venv/bin/python3",
     )
 
     resolved = _grid_runner._resolve_magpie_python()
@@ -99,7 +105,8 @@ def test_falls_back_to_opt_venv_when_path_python_cannot_import(monkeypatch, tmp_
     """When neither the env value nor PATH python3 can import Magpie, return /opt/venv/bin/python as the last resort."""
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     monkeypatch.setattr(
-        _grid_runner, "run_with_session_kill",
+        _grid_runner,
+        "run_with_session_kill",
         lambda *a, **k: type("P", (), {"returncode": 1})(),
     )
     monkeypatch.setattr(_grid_runner.shutil, "which", lambda _n: "/usr/bin/python3")

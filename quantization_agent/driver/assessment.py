@@ -49,9 +49,7 @@ from .outcomes import (
 from .result_collector import CollectedArtifacts, collect_artifacts
 
 
-_BLOCKED_OUTCOME_RE = re.compile(
-    r"(?:^|\n)\s*outcome_id\s*:\s*([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE
-)
+_BLOCKED_OUTCOME_RE = re.compile(r"(?:^|\n)\s*outcome_id\s*:\s*([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
 
 _GAP_NARRATIVE_EPSILON = 1e-4  # gaps smaller than this are "clean success"
 
@@ -100,28 +98,49 @@ class Assessment:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SDK_RUNTIME_PATTERNS = (
-    "rate limit", "rate_limit", "ratelimit",
-    "authentication", "auth_error", "unauthorized", "api key",
-    "context length", "context_length", "context window",
-    "connectionerror", "timeouterror", "anyio.endofstream",
-    "anthropic.", "claude_agent_sdk",
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "authentication",
+    "auth_error",
+    "unauthorized",
+    "api key",
+    "context length",
+    "context_length",
+    "context window",
+    "connectionerror",
+    "timeouterror",
+    "anyio.endofstream",
+    "anthropic.",
+    "claude_agent_sdk",
 )
 
 _OOM_PATTERNS = ("out of memory", "cuda out of memory", "oom", "torch.outofmemoryerror")
 
 _MODEL_LOAD_PATTERNS = (
-    "safetensorerror", "missing keys", "no such file",
-    "from_pretrained", "transformers.utils.import_utils",
-    "weight shape", "dtype mismatch",
+    "safetensorerror",
+    "missing keys",
+    "no such file",
+    "from_pretrained",
+    "transformers.utils.import_utils",
+    "weight shape",
+    "dtype mismatch",
 )
 
 _EXPORT_PATTERNS = (
-    "save_pretrained", "safetensors.write", "ioerror", "no space left",
-    "stale file handle", "nfs",
+    "save_pretrained",
+    "safetensors.write",
+    "ioerror",
+    "no space left",
+    "stale file handle",
+    "nfs",
 )
 
 _QUANTIZED_LOAD_PATTERNS = (
-    "vllm", "sglang", "engine.start", "engine startup",
+    "vllm",
+    "sglang",
+    "engine.start",
+    "engine startup",
 )
 
 
@@ -305,6 +324,7 @@ def _classify_bootstrap_sdk_error(sdk_error: str) -> OutcomeId | None:
 # main entry
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def classify_attempt(
     workspace: Path,
     *,
@@ -403,6 +423,7 @@ def classify_attempt(
 # ─────────────────────────────────────────────────────────────────────────────
 # Assessment assembly
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def build_assessment(
     attempts: list[OutcomeId | None],

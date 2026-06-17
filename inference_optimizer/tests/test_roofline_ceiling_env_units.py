@@ -57,9 +57,12 @@ def test_server_args_env_override_and_payload():
 
     assert rc._server_args_payload("nope") == ""
     assert rc._server_args_payload({"extra_args": " --z "}) == "--z"
-    assert rc._server_args_payload(
-        {"candidate_extra_server_args": "--first", "extra_server_args": "--second"},
-    ) == "--first"
+    assert (
+        rc._server_args_payload(
+            {"candidate_extra_server_args": "--first", "extra_server_args": "--second"},
+        )
+        == "--first"
+    )
 
     # env override wins over payload.
     entry = {"extra_envs": {"EXTRA_ATOM_ARGS": "--env"}, "extra_args": "--payload"}
@@ -72,9 +75,12 @@ def test_read_baseline_yaml_benchmark(tmp_path: Path):
     assert rc._read_baseline_yaml_benchmark(SimpleNamespace(last_baseline=None)) == {}
     # last_baseline is a non-dict truthy value → {}.
     assert rc._read_baseline_yaml_benchmark(SimpleNamespace(last_baseline=[1])) == {}
-    assert rc._read_baseline_yaml_benchmark(
-        SimpleNamespace(last_baseline={"extras": {}}),
-    ) == {}
+    assert (
+        rc._read_baseline_yaml_benchmark(
+            SimpleNamespace(last_baseline={"extras": {}}),
+        )
+        == {}
+    )
 
     cfg = tmp_path / "materialized.yaml"
     cfg.write_text("benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: '--tp 8'\n", encoding="utf-8")

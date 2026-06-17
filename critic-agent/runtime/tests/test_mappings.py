@@ -27,16 +27,12 @@ from runtime.importance_mapping import (
 
 
 def test_high_with_measurement_scores_above_default():
-    score = importance_for_verdict(
-        verdict="reject", confidence="high", has_measurement=True
-    )
+    score = importance_for_verdict(verdict="reject", confidence="high", has_measurement=True)
     assert score == 0.7
 
 
 def test_high_without_measurement_drops_back_to_low():
-    score = importance_for_verdict(
-        verdict="reject", confidence="high", has_measurement=False
-    )
+    score = importance_for_verdict(verdict="reject", confidence="high", has_measurement=False)
     assert score == 0.4
 
 

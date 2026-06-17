@@ -238,9 +238,7 @@ _DYNAMO_IDLE_WORKER_ENTRYPOINT = "/usr/local/bin/mn-idle.sh"
 
 # Frontend launch command (role 0). round-robin router is the simplest mode;
 # the optimizer benchmarks through this OpenAI-compatible endpoint.
-_DYNAMO_FRONTEND_ENTRYPOINT_TMPL = (
-    "python3 -m dynamo.frontend --http-port {port} --router-mode round-robin"
-)
+_DYNAMO_FRONTEND_ENTRYPOINT_TMPL = "python3 -m dynamo.frontend --http-port {port} --router-mode round-robin"
 
 # Valid enum values mirrored from the webhook (validateDynamoDeployment).
 _DYNAMO_BACKENDS = frozenset({"sglang", "vllm", "trtllm"})
@@ -355,14 +353,10 @@ def build_dynamo_workload_body(
         )
     bf = (backend_framework or "sglang").lower()
     if bf not in _DYNAMO_BACKENDS:
-        raise ValueError(
-            f"backend_framework must be one of {sorted(_DYNAMO_BACKENDS)}, got {bf!r}"
-        )
+        raise ValueError(f"backend_framework must be one of {sorted(_DYNAMO_BACKENDS)}, got {bf!r}")
     kvb = (kv_transfer_backend or "nixl").lower()
     if kvb not in _DYNAMO_KV_BACKENDS:
-        raise ValueError(
-            f"kv_transfer_backend must be one of {sorted(_DYNAMO_KV_BACKENDS)}, got {kvb!r}"
-        )
+        raise ValueError(f"kv_transfer_backend must be one of {sorted(_DYNAMO_KV_BACKENDS)}, got {kvb!r}")
 
     # Frontend (role 0): CPU-only OpenAI-compatible router/HTTP server.
     frontend_resource = {
@@ -429,10 +423,7 @@ def build_dynamo_workload_body(
         images = [image, image, image]
         entry_points = [frontend_ep, idle_ep, idle_ep]
         service_roles = ["frontend", "prefill", "decode"]
-        multinode_roles = (
-            (["prefill"] if prefill_mn else [])
-            + (["decode"] if decode_mn else [])
-        )
+        multinode_roles = (["prefill"] if prefill_mn else []) + (["decode"] if decode_mn else [])
     else:
         # Aggregated: [frontend, worker]. worker.replica == node count; the
         # dispatcher sets multinode.numberOfNodes and forces replicas=1.

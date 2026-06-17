@@ -91,9 +91,7 @@ def test_finalize_carries_full_proposal_set(tmp_path: Path):
     assert result.status == "succeeded"
     assert len(result.specialist_done["proposal_set"]) == 8
     assert result.specialist_done["empty"] is False
-    assert [
-        p["name"] for p in result.specialist_done["proposal_set"]
-    ] == [f"prop-{i}" for i in range(8)]
+    assert [p["name"] for p in result.specialist_done["proposal_set"]] == [f"prop-{i}" for i in range(8)]
     assert "proposals_truncated_from" not in result.specialist_done
     assert not any("proposal_set_truncated" in n for n in result.notes)
 

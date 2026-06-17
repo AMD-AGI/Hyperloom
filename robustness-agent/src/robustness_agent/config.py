@@ -230,10 +230,10 @@ class Config:
 
     # -- I state-integrity signals (2026-05-19) --
     state_integrity_enabled: bool = True
-    state_wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024     # 1 GiB
+    state_wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024  # 1 GiB
     state_wal_bytes_critical_threshold: int = 4 * 1024 * 1024 * 1024  # 4 GiB
     state_stale_lease_min_age_s: float = 60.0
-    state_inbox_bloat_warn_bytes: int = 100 * 1024 * 1024     # 100 MiB
+    state_inbox_bloat_warn_bytes: int = 100 * 1024 * 1024  # 100 MiB
     state_inbox_bloat_critical_bytes: int = 500 * 1024 * 1024  # 500 MiB
 
     # -- J external-deps signals (2026-05-19) --
@@ -262,27 +262,31 @@ class Config:
     # gpu_memory_leaked "no live owner" check matches every legitimate VRAM
     # holder; vLLM v1 / Ray / aiter JIT entries are critical or EngineCore-
     # children get mis-classified as "not a server".
-    server_process_patterns: list[str] = field(default_factory=lambda: [
-        # SGLang
-        "sglang.srt",
-        "sglang.launch_server",
-        # vLLM
-        "vllm.entrypoints",
-        "vllm serve",
-        "vllm.v1.engine.core",
-        "vllm.engine.async_llm_engine",
-        "EngineCore",
-        # Magpie / InferenceX
-        "Magpie",
-        "inferencex",
-        # Ray + JIT compilation
-        "ray::IDLE",
-        "raylet",
-        "hipcc",
-    ])
-    benchmark_process_patterns: list[str] = field(default_factory=lambda: [
-        "benchmark_serving",
-    ])
+    server_process_patterns: list[str] = field(
+        default_factory=lambda: [
+            # SGLang
+            "sglang.srt",
+            "sglang.launch_server",
+            # vLLM
+            "vllm.entrypoints",
+            "vllm serve",
+            "vllm.v1.engine.core",
+            "vllm.engine.async_llm_engine",
+            "EngineCore",
+            # Magpie / InferenceX
+            "Magpie",
+            "inferencex",
+            # Ray + JIT compilation
+            "ray::IDLE",
+            "raylet",
+            "hipcc",
+        ]
+    )
+    benchmark_process_patterns: list[str] = field(
+        default_factory=lambda: [
+            "benchmark_serving",
+        ]
+    )
 
     @classmethod
     async def discover(cls) -> "Config":
@@ -301,7 +305,8 @@ class Config:
         workload_uid = _discover_workload_uid()
         disable_local_probe = _env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
         enable_cluster_pod_metrics = _env_bool(
-            "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS", False,
+            "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS",
+            False,
         )
         nodes = _env_int("ROBUSTNESS_NODES", 1)
 
@@ -402,9 +407,7 @@ def _discover_llm_credentials() -> tuple[str, str]:
     """
     base_url = os.environ.get("OPENAI_BASE_URL", "")
     api_key = (
-        os.environ.get("SAFE_API_KEY", "")
-        or os.environ.get("OPENAI_API_KEY", "")
-        or os.environ.get("LLM_API_KEY", "")
+        os.environ.get("SAFE_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("LLM_API_KEY", "")
     )
     return base_url, api_key
 

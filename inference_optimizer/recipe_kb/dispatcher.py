@@ -107,8 +107,8 @@ def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
         InvalidCanonicalIdError: If ``canonical_id`` is malformed; the
             caller falls back to a local read.
     """
-    model, hardware, framework, model_type, architectures, framework_version, precision = (
-        cid_to_path_components(canonical_id)
+    model, hardware, framework, model_type, architectures, framework_version, precision = cid_to_path_components(
+        canonical_id
     )
     return {
         "model": model,
@@ -180,14 +180,11 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
     # as exact). A real v2 row always carries ``labels`` + ``body``; the
     # absence of EVERY v2 envelope marker means the row is already arbor,
     # so we pass it through untouched.
-    if not any(
-        marker in v2_payload
-        for marker in ("body", "labels", "findings", "failures", "gaps", "metrics")
-    ):
+    if not any(marker in v2_payload for marker in ("body", "labels", "findings", "failures", "gaps", "metrics")):
         return dict(v2_payload)
-    body    = v2_payload.get("body")    or {}
+    body = v2_payload.get("body") or {}
     metrics = v2_payload.get("metrics") or {}
-    labels  = v2_payload.get("labels")  or {}
+    labels = v2_payload.get("labels") or {}
     if not isinstance(body, dict):
         body = {}
     if not isinstance(metrics, dict):
@@ -197,44 +194,41 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
 
     arbor: dict[str, Any] = {
         # store-managed metadata
-        "canonical_id":      v2_payload.get("canonical_id", ""),
-        "version":           v2_payload.get("version", 1),
-        "created_at":        v2_payload.get("created_at", ""),
-        "updated_at":        v2_payload.get("updated_at", ""),
+        "canonical_id": v2_payload.get("canonical_id", ""),
+        "version": v2_payload.get("version", 1),
+        "created_at": v2_payload.get("created_at", ""),
+        "updated_at": v2_payload.get("updated_at", ""),
         # 5-tuple identity from labels (with empty fallback when the
         # central row pre-dates the labels stamp)
-        "model":             str(labels.get("model") or ""),
-        "hardware":          str(labels.get("hardware") or ""),
-        "framework":         str(labels.get("framework") or ""),
+        "model": str(labels.get("model") or ""),
+        "hardware": str(labels.get("hardware") or ""),
+        "framework": str(labels.get("framework") or ""),
         "framework_version": str(labels.get("framework_version") or ""),
-        "precision":         str(labels.get("precision") or ""),
+        "precision": str(labels.get("precision") or ""),
         # arbor payload pulled out of body / metrics.
         # kb-extract recipes store optimized args directly in body.extra_sglang_args
         # rather than body.best_config; synthesize best_config when absent.
-        "best_config":       dict(body.get("best_config") or {}) or (
+        "best_config": dict(body.get("best_config") or {})
+        or (
             {"extra_server_args": str(body.get("extra_sglang_args") or body.get("extra_server_args") or "").strip()}
             if (body.get("extra_sglang_args") or body.get("extra_server_args"))
             else {}
         ),
-        "best_throughput":   float(
-            body.get("best_throughput")
-            or metrics.get("throughput")
-            or 0.0
-        ),
-        "what_worked":       list(v2_payload.get("findings") or []),
-        "what_failed":       list(v2_payload.get("failures") or []),
-        "remaining_gaps":    list(v2_payload.get("gaps") or []),
-        "prs_tested":        list(body.get("prs_tested") or []),
-        "pitfalls":          list(v2_payload.get("pitfalls") or []),
-        "lessons":           list(v2_payload.get("lessons") or []),
-        "last_profiled":     str(body.get("last_profiled") or ""),
+        "best_throughput": float(body.get("best_throughput") or metrics.get("throughput") or 0.0),
+        "what_worked": list(v2_payload.get("findings") or []),
+        "what_failed": list(v2_payload.get("failures") or []),
+        "remaining_gaps": list(v2_payload.get("gaps") or []),
+        "prs_tested": list(body.get("prs_tested") or []),
+        "pitfalls": list(v2_payload.get("pitfalls") or []),
+        "lessons": list(v2_payload.get("lessons") or []),
+        "last_profiled": str(body.get("last_profiled") or ""),
         "stack_fingerprint": dict(body.get("stack_fingerprint") or {}),
-        "sessions":          list(body.get("sessions") or []),
+        "sessions": list(body.get("sessions") or []),
         # v2-only audit fields pass through
-        "authority":     v2_payload.get("authority", "EXPERIENTIAL"),
-        "confidence":    v2_payload.get("confidence", 0.85),
+        "authority": v2_payload.get("authority", "EXPERIENTIAL"),
+        "confidence": v2_payload.get("confidence", 0.85),
         "evidence_refs": list(v2_payload.get("evidence_refs") or []),
-        "provenance":    dict(v2_payload.get("provenance") or {}),
+        "provenance": dict(v2_payload.get("provenance") or {}),
     }
     # Carry through any extra top-level keys the envelope shipped that
     # aren't part of the v2 wire structure (``body`` / ``labels`` /
@@ -270,10 +264,18 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
 #   / ``osl`` / ``max_model_len``) — exact int/float equality.
 # A field absent on the row contributes 0 (no penalty, no credit).
 _PREFER_NUMERIC_KEYS: tuple[str, ...] = (
-    "tp", "ep", "pp", "conc", "isl", "osl", "max_model_len",
+    "tp",
+    "ep",
+    "pp",
+    "conc",
+    "isl",
+    "osl",
+    "max_model_len",
 )
 _PREFER_STRING_KEYS: tuple[str, ...] = (
-    "framework_version", "quant_scheme", "workload_mode",
+    "framework_version",
+    "quant_scheme",
+    "workload_mode",
 )
 
 
@@ -313,7 +315,8 @@ def _prefer_score(row: dict[str, Any], prefer: dict[str, Any]) -> int:
 
 
 def _rerank_by_prefer(
-    rows: list[dict[str, Any]], prefer: dict[str, Any] | None,
+    rows: list[dict[str, Any]],
+    prefer: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     """Stable rerank of flat arbor rows by ``prefer`` similarity.
 
@@ -433,7 +436,8 @@ class RecipeKB:
         if self.remote is None:
             return "none"
         return _REMOTE_LABELS.get(
-            type(self.remote).__name__, type(self.remote).__name__,
+            type(self.remote).__name__,
+            type(self.remote).__name__,
         )
 
     def _emit_audit(self, event: dict[str, Any]) -> None:
@@ -486,10 +490,7 @@ class RecipeKB:
         if isinstance(row, dict):
             result = {
                 "canonical_id": str(row.get("canonical_id") or ""),
-                "exact": bool(
-                    canonical_id
-                    and str(row.get("canonical_id") or "") == canonical_id
-                ),
+                "exact": bool(canonical_id and str(row.get("canonical_id") or "") == canonical_id),
                 "best_throughput": float(row.get("best_throughput") or 0.0),
                 "best_config_nonempty": bool(row.get("best_config")),
             }
@@ -524,14 +525,14 @@ class RecipeKB:
                 self.on_remote_failure(method, exc)
             except Exception:  # noqa: BLE001
                 log.exception(
-                    "on_remote_failure callback raised — continuing "
-                    "with local fallback for %s", method,
+                    "on_remote_failure callback raised — continuing with local fallback for %s",
+                    method,
                 )
         else:
             log.warning(
-                "recipe_kb: remote %s failed (%s); falling back to "
-                "local store",
-                method, exc,
+                "recipe_kb: remote %s failed (%s); falling back to local store",
+                method,
+                exc,
             )
 
     # ==================================================================
@@ -734,33 +735,46 @@ class RecipeKB:
                 # scan that chokes on large legacy page corpora.
                 try:
                     direct = self.remote.get_recipe(  # type: ignore[union-attr]
-                        canonical_id=canonical_id, version=version,
+                        canonical_id=canonical_id,
+                        version=version,
                     )
                 except (RemoteRecipeClientError, Exception):  # noqa: BLE001
                     direct = None
                 if direct is not None and isinstance(direct, dict) and direct:
                     normalized = self._normalize_remote_row(direct)
                     if normalized and normalized.get("canonical_id"):
-                        self._emit_audit(self._read_audit_event(
-                            method="get_recipe", resolution="remote",
-                            row=normalized, canonical_id=canonical_id,
-                            prefer=prefer, candidates=1,
-                        ))
+                        self._emit_audit(
+                            self._read_audit_event(
+                                method="get_recipe",
+                                resolution="remote",
+                                row=normalized,
+                                canonical_id=canonical_id,
+                                prefer=prefer,
+                                candidates=1,
+                            )
+                        )
                         return normalized
                 # Fast path miss — try label-match search with prefer rerank.
                 labels = _labels_from_canonical_id(canonical_id)
                 candidate_limit = 25 if prefer else 1
                 rows = self.remote.search(  # type: ignore[union-attr]
-                    label_match=labels, limit=candidate_limit, prefer=prefer,
+                    label_match=labels,
+                    limit=candidate_limit,
+                    prefer=prefer,
                 )
                 if rows:
                     normalized_rows = [self._normalize_remote_row(r) for r in rows]
                     ranked = _rerank_by_prefer(normalized_rows, prefer)
-                    self._emit_audit(self._read_audit_event(
-                        method="get_recipe", resolution="remote",
-                        row=ranked[0], canonical_id=canonical_id,
-                        prefer=prefer, candidates=len(rows),
-                    ))
+                    self._emit_audit(
+                        self._read_audit_event(
+                            method="get_recipe",
+                            resolution="remote",
+                            row=ranked[0],
+                            canonical_id=canonical_id,
+                            prefer=prefer,
+                            candidates=len(rows),
+                        )
+                    )
                     return ranked[0]
                 # remote miss — fall through to local.
                 resolution = "remote_miss"
@@ -771,12 +785,18 @@ class RecipeKB:
                 log.warning("get_recipe: %s; local-only read", exc)
                 resolution = "remote_error"
         local_row = self.local.get_recipe(
-            canonical_id=canonical_id, version=version,
+            canonical_id=canonical_id,
+            version=version,
         )
-        self._emit_audit(self._read_audit_event(
-            method="get_recipe", resolution=resolution, row=local_row,
-            canonical_id=canonical_id, prefer=prefer,
-        ))
+        self._emit_audit(
+            self._read_audit_event(
+                method="get_recipe",
+                resolution=resolution,
+                row=local_row,
+                canonical_id=canonical_id,
+                prefer=prefer,
+            )
+        )
         return local_row
 
     def get_history(
@@ -802,7 +822,8 @@ class RecipeKB:
                 version.
         """
         return self.local.get_history(
-            canonical_id=canonical_id, limit=limit,
+            canonical_id=canonical_id,
+            limit=limit,
         )
 
     def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
@@ -878,12 +899,16 @@ class RecipeKB:
                 if rows:
                     normalized = [self._normalize_remote_row(r) for r in rows]
                     ranked = _rerank_by_prefer(normalized, prefer)
-                    self._emit_audit(self._read_audit_event(
-                        method="search", resolution="remote",
-                        row=ranked[0] if ranked else None,
-                        label_match=label_match, prefer=prefer,
-                        candidates=len(rows),
-                    ))
+                    self._emit_audit(
+                        self._read_audit_event(
+                            method="search",
+                            resolution="remote",
+                            row=ranked[0] if ranked else None,
+                            label_match=label_match,
+                            prefer=prefer,
+                            candidates=len(rows),
+                        )
+                    )
                     return ranked
                 resolution = "remote_miss"
             except RemoteRecipeClientError as exc:
@@ -897,11 +922,15 @@ class RecipeKB:
             limit=limit,
         )
         ranked_local = _rerank_by_prefer(local_rows, prefer)
-        self._emit_audit(self._read_audit_event(
-            method="search", resolution=resolution,
-            row=ranked_local[0] if ranked_local else None,
-            label_match=label_match, prefer=prefer,
-        ))
+        self._emit_audit(
+            self._read_audit_event(
+                method="search",
+                resolution=resolution,
+                row=ranked_local[0] if ranked_local else None,
+                label_match=label_match,
+                prefer=prefer,
+            )
+        )
         return ranked_local
 
     def list_attempts(
@@ -921,7 +950,8 @@ class RecipeKB:
             list[dict[str, Any]]: Attempt rows newest-first.
         """
         return self.local.list_attempts(
-            canonical_id=canonical_id, limit=limit,
+            canonical_id=canonical_id,
+            limit=limit,
         )
 
     def list_session_attempts(
@@ -941,7 +971,8 @@ class RecipeKB:
             list[dict[str, Any]]: Attempts for the session oldest-first.
         """
         return self.local.list_session_attempts(
-            session_id=session_id, limit=limit,
+            session_id=session_id,
+            limit=limit,
         )
 
     # ==================================================================

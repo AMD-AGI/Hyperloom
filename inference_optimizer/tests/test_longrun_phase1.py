@@ -71,7 +71,9 @@ def test_sweep_closes_when_globally_converged(monkeypatch):
     monkeypatch.setenv(CYCLIC_ENV, "1")
     # No gain this cycle + streak already at 2 → effective 3 ≥ threshold.
     st = _sweep_state(
-        macro_cycle=2, cumulative_gain=5.0, gain_at_cycle_start=5.0,
+        macro_cycle=2,
+        cumulative_gain=5.0,
+        gain_at_cycle_start=5.0,
         no_gain_streak=2,
     )
     target, reason, evidence = ps.compute_next_phase(st, max_hours=96.0)
@@ -96,8 +98,10 @@ def test_short_bounded_run_never_reloops(monkeypatch):
     # 12h bounded run with plenty of budget + gain: legacy single-pass chain
     # must wind down to CLOSE, never open a macro-cycle.
     st = _sweep_state(
-        max_minutes=12 * 60, started_hours_ago=1.0,
-        cumulative_gain=5.0, gain_at_cycle_start=0.0,
+        max_minutes=12 * 60,
+        started_hours_ago=1.0,
+        cumulative_gain=5.0,
+        gain_at_cycle_start=0.0,
     )
     reloop, ev = ps.should_reloop_to_explore(st)
     assert reloop is False
@@ -149,7 +153,9 @@ def test_should_reloop_respects_max_cycles(monkeypatch):
 def test_per_cycle_budget_shrinks_phase_window():
     now = 1_000_000.0
     common = dict(
-        session_id="t", phase=ps.PHASE_EXPLORE, max_minutes=96 * 60,
+        session_id="t",
+        phase=ps.PHASE_EXPLORE,
+        max_minutes=96 * 60,
         phase_started_unix=now,
     )
     whole_run = SharedState(**common, cycle_minutes=0.0)
@@ -157,10 +163,14 @@ def test_per_cycle_budget_shrinks_phase_window():
     budget = dict(ps.DEFAULT_PHASE_BUDGET_PCT)  # EXPLORE = 0.45
 
     rem_run = ps.phase_budget_remaining_seconds(
-        whole_run, budget_pct=budget, now_unix=now,
+        whole_run,
+        budget_pct=budget,
+        now_unix=now,
     )
     rem_cycle = ps.phase_budget_remaining_seconds(
-        per_cycle, budget_pct=budget, now_unix=now,
+        per_cycle,
+        budget_pct=budget,
+        now_unix=now,
     )
     # whole-run: 96h*0.45; per-cycle: 6h*0.45 → much smaller.
     assert rem_run == pytest.approx(96 * 3600 * 0.45)
@@ -194,8 +204,11 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     from inference_optimizer.paths import make_session_dir as _msd
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.backends import (
-        MockBackend, MockCriticBackend, MockKernelBackend,
-        MockRobustnessBackend, ScriptedPlan,
+        MockBackend,
+        MockCriticBackend,
+        MockKernelBackend,
+        MockRobustnessBackend,
+        ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
 
@@ -240,9 +253,7 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
     assert st.no_gain_cycle_streak == 0
     # The loopback transition row is stamped with the new cycle number
     # (the entry pump may append later non-transition rows).
-    loopback_row = next(
-        r for r in reversed(st.phase_history) if r.get("to_phase")
-    )
+    loopback_row = next(r for r in reversed(st.phase_history) if r.get("to_phase"))
     assert loopback_row["to_phase"] == "FRAMEWORK_PR"
     assert loopback_row["cycle"] == 1
 
@@ -258,7 +269,7 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
     st.macro_cycle = 3
     st.cumulative_gain_validated = 5.0
     st.gain_at_cycle_start = 5.0  # no gain this cycle
-    st.no_gain_cycle_streak = 2   # → effective 3 ≥ threshold
+    st.no_gain_cycle_streak = 2  # → effective 3 ≥ threshold
     st.last_sweep = {"status": "succeeded"}
 
     await c._advance_phase_if_needed()
@@ -281,8 +292,15 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
     st = SharedState(session_id="t", phase=ps.PHASE_EXPLORE, macro_cycle=2)
     # Simulate a history that already passed through SWEEP in a prior cycle.
     st.phase_history = [
-        {"from_phase": "SWEEP", "to_phase": "EXPLORE", "reason": "cycle_reloop",
-         "evidence": {}, "ts": "", "ts_unix": 0.0, "cycle": 2},
+        {
+            "from_phase": "SWEEP",
+            "to_phase": "EXPLORE",
+            "reason": "cycle_reloop",
+            "evidence": {},
+            "ts": "",
+            "ts_unix": 0.0,
+            "cycle": 2,
+        },
     ]
     gate = PolicyGate(
         role_registry=default_role_registry(),

@@ -312,7 +312,9 @@ class InMemoryKBClient:
         # Scope value normalisation (G-3): warn when an incoming value differs
         # from its normalised form.
         for k, v in payload["scope"].items():
-            if str(v).strip().lower() != _normalise_value(v) or _normalise_value(v) != _normalise_value(payload["scope"][k]):
+            if str(v).strip().lower() != _normalise_value(v) or _normalise_value(v) != _normalise_value(
+                payload["scope"][k]
+            ):
                 if str(v) != _normalise_value(v):
                     warnings.append("scope_value_normalized")
                     break
@@ -383,9 +385,7 @@ class InMemoryKBClient:
         """
         self._maybe_fail("batch_insert")
         if on_conflict not in ("upsert", "error"):
-            raise KBValidationError(
-                f"batch_insert: on_conflict must be upsert|error, got {on_conflict!r}"
-            )
+            raise KBValidationError(f"batch_insert: on_conflict must be upsert|error, got {on_conflict!r}")
         results: list[dict[str, Any]] = []
         for item in items:
             if on_conflict == "upsert":
@@ -397,9 +397,7 @@ class InMemoryKBClient:
                     item["slug"],
                 )
                 if key in self._index:
-                    raise KBValidationError(
-                        f"batch_insert: conflict on {key!r}; use on_conflict=upsert"
-                    )
+                    raise KBValidationError(f"batch_insert: conflict on {key!r}; use on_conflict=upsert")
                 results.append(self.upsert(item))
         return {"results": results, "count": len(results)}
 
@@ -434,9 +432,7 @@ class InMemoryKBClient:
             src = edge.get("from_id")
             dst = edge.get("to_id")
             if not (kind and src and dst):
-                raise KBValidationError(
-                    f"edges/add: missing kind/from_id/to_id: {edge!r}"
-                )
+                raise KBValidationError(f"edges/add: missing kind/from_id/to_id: {edge!r}")
             row_src = self._rows.get(src)
             if row_src is None:
                 # Source missing → standard 404 in real service.
