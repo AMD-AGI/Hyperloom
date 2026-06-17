@@ -386,21 +386,49 @@ class HuggingFaceClient:
 
     BASE = "https://huggingface.co"
 
-    def __init__(self, token: str = "", timeout: int = 15):
+    def __init__(self, token: str = "", timeout: int = 15, tokens: list[str] | None = None, seed: str = ""):
         """Initialise the HF client session.
 
+        Supports a *pool* of HuggingFace tokens. Requests start on a token chosen
+        by hashing ``seed`` (so parallel CI jobs spread their first hit across the
+        pool) and, on HTTP 429 (Too Many Requests), transparently rotate to the
+        next token with exponential backoff before retrying. This mitigates the
+        bursty rate-limiting that hits the resolve/config.json endpoint when many
+        optimize jobs fan out at once.
+
         Args:
-            token (str): Optional HuggingFace token for gated-model access.
+            token (str): Primary HuggingFace token for gated-model access.
             timeout (int): Per-request timeout in seconds.
+            tokens (list[str] | None): Additional tokens to alternate with.
+            seed (str): Per-job string used to pick the starting token.
         """
         self.timeout = timeout
+        pool: list[str] = []
+        for t in [token, *(tokens or [])]:
+            if t and t not in pool:
+                pool.append(t)
+        self._tokens = pool
+        if pool:
+            self._idx = (hash(seed) % len(pool)) if seed else 0
+        else:
+            self._idx = 0
         self._sess = requests.Session()
         self._sess.headers["User-Agent"] = "hyperloom-optimize-submit/1.0"
-        if token:
-            self._sess.headers["Authorization"] = f"Bearer {token}"
+        self._apply_token()
+
+    def _apply_token(self) -> None:
+        """Set the Authorization header to the currently-selected token."""
+        if self._tokens:
+            tok = self._tokens[self._idx % len(self._tokens)]
+            self._sess.headers["Authorization"] = f"Bearer {tok}"
+        else:
+            self._sess.headers.pop("Authorization", None)
 
     def _get(self, path: str) -> dict | list:
         """GET a HuggingFace API path and return the parsed JSON body.
+
+        On HTTP 429 the client rotates to the next token in the pool and retries
+        with exponential backoff (capped at 30s); other errors raise immediately.
 
         Args:
             path (str): Path appended to the HF base URL.
@@ -411,9 +439,24 @@ class HuggingFaceClient:
         Raises:
             requests.HTTPError: If the response status indicates an error.
         """
-        resp = self._sess.get(f"{self.BASE}{path}", timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.json()
+        attempts = max(4, len(self._tokens) * 2)
+        last_exc: Exception | None = None
+        for i in range(attempts):
+            resp = self._sess.get(f"{self.BASE}{path}", timeout=self.timeout)
+            if resp.status_code == 429:
+                last_exc = requests.HTTPError(
+                    f"429 Client Error: Too Many Requests for url: {self.BASE}{path}", response=resp
+                )
+                if len(self._tokens) > 1:
+                    self._idx += 1
+                    self._apply_token()
+                time.sleep(min(2 ** i, 30))
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        if last_exc is not None:
+            raise last_exc
+        raise requests.HTTPError(f"exhausted retries for url: {self.BASE}{path}")
 
     def model_info(self, repo_id: str) -> dict:
         """Fetch a repo's model metadata from the HF API.
@@ -3898,6 +3941,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hf-token", default=os.environ.get("HF_TOKEN", ""), help="HuggingFace token (or set $HF_TOKEN)"
     )
+    parser.add_argument(
+        "--hf-token-2",
+        default=os.environ.get("HF_TOKEN_2", ""),
+        help="Secondary HuggingFace token to alternate with on 429 (or set $HF_TOKEN_2)",
+    )
 
     # Production-pool audit metadata: copied into submission_manifest.json (does
     # not affect submission) to trace which pool entry a task reran.
@@ -4060,7 +4108,10 @@ def main() -> int:
             "fallback to be deployed; will 400 on submit_task otherwise"
         )
 
-    hf = HuggingFaceClient(args.hf_token)
+    hf_seed = ",".join(getattr(args, "model", None) or []) or os.environ.get("GITHUB_RUN_ID", "")
+    hf = HuggingFaceClient(args.hf_token, tokens=[args.hf_token_2], seed=hf_seed)
+    if args.hf_token_2:
+        log.info("HF token pool: 2 tokens (alternate on 429)")
     # Dry-run never hits SaFE, so a placeholder token is fine.
     safe = SafeOptimizeClient(
         base_url,

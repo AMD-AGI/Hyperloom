@@ -91,6 +91,7 @@ jobs:
       count:  ${{ steps.matrix.outputs.count }}
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
+      HF_TOKEN_2:            ${{ secrets.HF_TOKEN_2 }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
       # Always read the fixed candidates JSON (both schedule and dispatch) so
       # the daily corpus is reproducible and editable in one place.
@@ -139,6 +140,7 @@ jobs:
       SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
       HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
       HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
+      HF_TOKEN_2:                       ${{ secrets.HF_TOKEN_2 }}
       SAFE_OPTIMIZE_REGISTER_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_REGISTER_WORKSPACE }}
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
@@ -158,6 +160,7 @@ jobs:
         continue-on-error: true
         env:
           HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          HF_TOKEN_2: ${{ secrets.HF_TOKEN_2 }}
           MODEL_REPO: ${{ matrix.model }}
         run: |
           set -euo pipefail
