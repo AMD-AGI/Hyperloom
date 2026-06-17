@@ -54,3 +54,56 @@ def test_enrich_no_dtype_stays_empty():
     cand = {"name": "y", "shapes": ["(1,2)", "(3,4)"]}
     tla.enrich_candidates_with_runtime_metadata([cand], _args())
     assert cand["input_dtypes"] == []
+
+
+# --- analysis_remapped.md parse tolerance (extra/inserted column) ---
+import tracelens_skill_runner as tlr  # noqa: E402
+
+
+_REMAP_TABLE = (
+    "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
+    "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+    "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+    "#### 🔴 P1: Inserted Source Path column (Tensile)\n\n"
+    "**Identification:** stub\n**Data:**\n"
+    # NOTE: 'Source Path' INSERTED between 'Kernel Path' and 'Time (ms)'.
+    "| Operation | Args | Kernel Path | Source Path | Time (ms) | %E2E | Count | "
+    "FLOPS/Byte | Efficiency | Bound |\n"
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+    "| stub_op | (64,5120) bf16 | /x/k.cu | /x/launch.py | 1.0 | 5 | 10 | 1000 | "
+    "40% of 708 TFLOPS | compute-bound |\n"
+    "**Reasoning for Slowdown:** stub\n**Resolution:** stub\n"
+)
+
+
+def test_parse_tolerates_inserted_source_path_column(tmp_path):
+    md = tmp_path / "analysis_remapped.md"
+    md.write_text(_REMAP_TABLE, encoding="utf-8")
+    cands = tlr.parse_analysis_md(md, top_k=10)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["name"] == "stub_op"
+    # name-keyed read still maps the right cells despite the inserted column:
+    # the 'Kernel Path' cell is captured (under tracelens_launcher_path) and the
+    # Args shape parses — neither is corrupted by the extra 'Source Path' column.
+    assert c.get("tracelens_launcher_path") == "/x/k.cu"
+    assert c["shapes"] == ["(64,5120) bf16"]
+
+
+def test_parse_still_rejects_reordered_canonical_columns(tmp_path):
+    # Bound<->Efficiency swapped -> canonical relative order broken -> reject.
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
+        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### 🔴 P1: Reordered (Tensile)\n\n**Identification:** stub\n**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Bound | Efficiency |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "compute-bound | 40% of 708 TFLOPS |\n"
+        "**Reasoning for Slowdown:** stub\n**Resolution:** stub\n",
+        encoding="utf-8",
+    )
+    assert tlr.parse_analysis_md(md, top_k=10) == []
