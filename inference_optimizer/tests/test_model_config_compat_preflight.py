@@ -830,3 +830,25 @@ def test_gguf_with_safetensors_not_blocked(tmp_path):
     (m / "model.gguf").write_text("dummy", encoding="utf-8")
     (m / "model.safetensors").write_text("dummy", encoding="utf-8")
     assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_declared_standard_quant_with_scales_index_not_blocked(tmp_path):
+    # AWQ/GPTQ/compressed-tensors legitimately ship '.scales'/'.biases' tensors;
+    # a declared supported quant_method must NOT be misread as MLX (the weight-
+    # index tell only applies to checkpoints with NO quant_method declared).
+    for method in ("awq", "gptq", "compressed-tensors"):
+        m = tmp_path / f"std_scales_{method.replace('-', '_')}"
+        _write_config(
+            m, model_type="qwen3", max_position_embeddings=32768,
+            quantization_config={"quant_method": method},
+        )
+        (m / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {
+                "model.layers.0.self_attn.q_proj.scales":
+                    "model-00001.safetensors",
+                "model.layers.0.self_attn.q_proj.biases":
+                    "model-00001.safetensors",
+                "model.embed_tokens.weight": "model-00001.safetensors",
+            }}), encoding="utf-8",
+        )
+        assert cli._detect_incompatible_model_config(str(m)) is None, method

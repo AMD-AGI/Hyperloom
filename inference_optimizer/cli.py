@@ -1331,6 +1331,7 @@ def _detect_private_quant(model_path: str, data: dict) -> str | None:
     (paroquant, MLX mx.quantize incl. JANG/MTPLX, mxtq, GGUF). Hardware-agnostic
     and conservative — declared standard quant methods keep passing."""
     qc = data.get("quantization_config")
+    declared_supported = False
     if isinstance(qc, dict):
         method = str(qc.get("quant_method") or "").strip().lower()
         if method and method not in _SUPPORTED_QUANT_METHODS:
@@ -1350,9 +1351,14 @@ def _detect_private_quant(model_path: str, data: dict) -> str | None:
                 "quantization_config 'mode: affine/mlx' with no quant_method is "
                 "an MLX (mx.quantize) checkpoint with no vLLM/sglang loader."
             )
-    mlx_reason = _detect_mlx_quant_weights(model_path)
-    if mlx_reason is not None:
-        return mlx_reason
+        declared_supported = bool(method)
+    # A declared supported quant_method (awq/gptq/compressed-tensors/...)
+    # legitimately ships '.scales'/'.biases'; the MLX weight-index tell only
+    # applies to checkpoints with NO quant_method declared.
+    if not declared_supported:
+        mlx_reason = _detect_mlx_quant_weights(model_path)
+        if mlx_reason is not None:
+            return mlx_reason
     return _detect_gguf_only_checkpoint(model_path)
 
 
