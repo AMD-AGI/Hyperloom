@@ -47,7 +47,16 @@ _ENV_DENY_PATTERN = re.compile(
 
 
 def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
-    """Apply the allowlist + secret denylist; returns a fresh ``dict[str, str]`` (values stringified)."""
+    """Apply the allowlist + secret denylist; returns a fresh ``dict[str, str]`` (values stringified).
+
+    Args:
+        envs (dict[str, Any] | None): Raw environment mapping to filter, or
+            ``None``.
+
+    Returns:
+        dict[str, str]: The allowlisted, secret-stripped subset with every
+        value coerced to ``str``. Empty when ``envs`` is not a dict.
+    """
     if not isinstance(envs, dict):
         return {}
     out: dict[str, str] = {}
@@ -104,7 +113,15 @@ _SERVER_LOG_MAX_BYTES = 256 * 1024
 
 
 def _strip_log_prefix(line: str) -> str:
-    """Strip a leading ``[ts] LEVEL [src.py:NN]`` style prefix (incl. the process tag) from a log line."""
+    """Strip a leading ``[ts] LEVEL [src.py:NN]`` style prefix (incl. the process tag) from a log line.
+
+    Args:
+        line (str): A single raw log line.
+
+    Returns:
+        str: The line with any recognized timestamp / level prefix removed
+        and surrounding whitespace stripped.
+    """
     s = line
     s = _LOG_PREFIX_RE.sub("", s)
     s = _LOG_TIMESTAMP_RE.sub("", s)
@@ -138,6 +155,14 @@ def _load_yaml_dict_safe(config_yaml: Path) -> dict | None:
     """Parse ``config_yaml`` to its top-level dict, or ``None`` on miss/failure. Never raises.
 
     Shared by both yaml passes so the file is read at most once.
+
+    Args:
+        config_yaml (Path): The YAML file to parse.
+
+    Returns:
+        dict | None: The decoded top-level mapping, or ``None`` when PyYAML is
+        unavailable, the file fails to read/parse, or the document is not a
+        dict.
     """
     try:
         import yaml  # type: ignore[import-not-found]
@@ -154,7 +179,15 @@ def _load_yaml_dict_safe(config_yaml: Path) -> dict | None:
 
 
 def _yaml_cmd_from_dict(data: dict) -> str:
-    """Find a ``cmd`` / ``command`` / ``launch`` field (top-level or under ``benchmark``); ``""`` on miss."""
+    """Find a ``cmd`` / ``command`` / ``launch`` field (top-level or under ``benchmark``); ``""`` on miss.
+
+    Args:
+        data (dict): The parsed YAML config mapping.
+
+    Returns:
+        str: The first non-empty command string found, or ``""`` when none of
+        the recognized fields hold one.
+    """
     for key in ("cmd", "command", "launch"):
         val = data.get(key)
         if isinstance(val, str) and val.strip():
@@ -173,6 +206,14 @@ def _yaml_benchmark_synthesis(data: dict) -> str:
 
     Returns ``""`` unless both ``benchmark.framework`` and
     ``benchmark.model`` are non-empty.
+
+    Args:
+        data (dict): The parsed YAML config mapping.
+
+    Returns:
+        str: A space-joined ``key=value`` summary (framework / model plus any
+        present precision / tp / gpu / envs), or ``""`` when framework or model
+        is missing.
     """
     bench = data.get("benchmark")
     if not isinstance(bench, dict):
@@ -219,6 +260,16 @@ def _extract_framework_args(
     priority order: ``log_non_default_args`` / ``log_args_line`` /
     ``log_python_cmd`` / ``yaml_cmd`` / ``yaml_benchmark`` (synthesized,
     not a literal cmdline) / ``unknown`` (empty args).
+
+    Args:
+        server_log (Path | None): The ``server.log`` to scan, or ``None``.
+        config_yaml (Path | None): The variant config YAML used as a fallback
+            source, or ``None``. Defaults to ``None``.
+
+    Returns:
+        tuple[str, str]: ``(args_string, source)`` — the extracted launch args
+        and a provenance label, with ``("", "unknown")`` when no source yields
+        anything.
     """
     chunk: str = ""
     if server_log is not None:
@@ -296,7 +347,16 @@ def _extract_framework_args(
 
 
 def _read_invocation_envs(config_path: Path | None) -> dict[str, str]:
-    """Read ``benchmark.envs`` (or top-level ``envs:``) from a variant config; allowlisted subset, never raises."""
+    """Read ``benchmark.envs`` (or top-level ``envs:``) from a variant config; allowlisted subset, never raises.
+
+    Args:
+        config_path (Path | None): The variant config YAML to read, or
+            ``None``.
+
+    Returns:
+        dict[str, str]: The allowlisted, secret-stripped env subset. Empty when
+        the path is missing, PyYAML is unavailable, or parsing fails.
+    """
     if config_path is None:
         return {}
     try:
@@ -517,6 +577,15 @@ def _benchmark_report_metrics(
 
     Priority: V2 nested (``throughput.*`` / ``latency.<m>.mean_ms``),
     pre-V2 flat top-level, then legacy ``result.<flat>``.
+
+    Args:
+        report (dict[str, Any] | None): A parsed ``benchmark_report.json``, or
+            ``None``.
+
+    Returns:
+        tuple[float | None, float | None, float | None, float | None]:
+        ``(output_throughput, ttft, tpot, e2el)`` with each element ``None``
+        when not present or not numeric.
     """
     if not isinstance(report, dict):
         return (None, None, None, None)
@@ -565,7 +634,15 @@ def _benchmark_report_metrics(
 
 
 def _benchmark_report_candidates(root: Path) -> list[Path]:
-    """Return benchmark reports under a task/workspace root (handles the several on-disk layouts used over time)."""
+    """Return benchmark reports under a task/workspace root (handles the several on-disk layouts used over time).
+
+    Args:
+        root (Path): The task or workspace directory to search.
+
+    Returns:
+        list[Path]: Candidate ``benchmark_report.json`` paths (direct and
+        glob-matched). Empty when ``root`` does not exist.
+    """
     if not root.exists():
         return []
 
@@ -601,7 +678,15 @@ def _latest_benchmark_report(candidates: Iterable[Path]) -> Path | None:
 
 
 def _find_benchmark_report(workspace: Path | None) -> Path | None:
-    """Locate the most recent (by mtime) ``benchmark_report.json`` under a task workspace, else ``None``."""
+    """Locate the most recent (by mtime) ``benchmark_report.json`` under a task workspace, else ``None``.
+
+    Args:
+        workspace (Path | None): The task workspace to search, or ``None``.
+
+    Returns:
+        Path | None: The newest matching report, or ``None`` when ``workspace``
+        is ``None`` / missing or no report exists.
+    """
     if workspace is None or not workspace.exists():
         return None
     return _latest_benchmark_report(_benchmark_report_candidates(workspace))
@@ -618,6 +703,18 @@ def _resolve_under_session(
     ``session_dir`` (container paths like ``/workspace/runs/...`` map to the
     wekafs ``<session_dir>/runs/...`` view). Returns the first existing
     path, else ``None``.
+
+    Args:
+        session_dir (Path): The on-disk session root to re-root under.
+        raw (str | None): The (possibly container-rooted) path to resolve, or
+            ``None``.
+        anchors (tuple[str, ...]): Path-segment names whose suffix is re-rooted
+            at ``session_dir``. Defaults to ``("runs", "kernel-agent",
+            "kernel-agent-workspace")``.
+
+    Returns:
+        Path | None: The first existing resolved path, or ``None`` when ``raw``
+        is empty / unusable or nothing resolves.
     """
     if not raw:
         return None
@@ -662,7 +759,15 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 
 
 def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
-    """Recover terminal reason/time from the CLOSE phase transition (next-best when ``state.stop_reason`` wasn't mirrored)."""
+    """Recover terminal reason/time from the CLOSE phase transition (next-best when ``state.stop_reason`` wasn't mirrored).
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        tuple[str, str]: ``(reason, ts)`` from the most recent CLOSE
+        transition, or ``("", "")`` when no such transition exists.
+    """
     history = state.get("phase_history") or []
     if not isinstance(history, list):
         return "", ""
@@ -1144,7 +1249,15 @@ def collect_final(
 
 
 def _find_latest_validate_stack_report(session_dir: Path) -> Path | None:
-    """Most-recent validate_stack benchmark_report.json (authoritative for the final stack's clock)."""
+    """Most-recent validate_stack benchmark_report.json (authoritative for the final stack's clock).
+
+    Args:
+        session_dir (Path): Absolute session root.
+
+    Returns:
+        Path | None: The newest ``benchmark_report.json`` under
+        ``runs/validate_stack/``, or ``None`` when none exist.
+    """
     root = session_dir / "runs" / "validate_stack"
     if not root.exists():
         return None
@@ -1159,7 +1272,16 @@ def _find_latest_validate_stack_report(session_dir: Path) -> Path | None:
 def _find_current_best_report(
     session_dir: Path, state: dict[str, Any],
 ) -> Path | None:
-    """Best-effort benchmark report for ``state.current_best`` (via workspace or action/variant/tput match)."""
+    """Best-effort benchmark report for ``state.current_best`` (via workspace or action/variant/tput match).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        Path | None: The matched report, or ``None`` when ``current_best`` is
+        missing or no report resolves.
+    """
     cb = state.get("current_best") or {}
     if not isinstance(cb, dict):
         return None
@@ -1174,7 +1296,17 @@ def _find_current_best_report(
 def _find_stack_top_report(
     session_dir: Path, state: dict[str, Any],
 ) -> Path | None:
-    """Last optimization_stack entry's benchmark_report.json (next-best when no validate_stack run exists)."""
+    """Last optimization_stack entry's benchmark_report.json (next-best when no validate_stack run exists).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        Path | None: The top stack entry's report (via workspace or
+        action/variant/tput match), or ``None`` when the stack is empty or
+        nothing resolves.
+    """
     cb = state.get("current_best") or {}
     stack = state.get("optimization_stack") or []
     if not stack and isinstance(cb, dict):
@@ -1199,7 +1331,17 @@ def _find_stack_top_report(
 def _find_matching_action_report(
     session_dir: Path, entry: dict[str, Any],
 ) -> Path | None:
-    """Match a report under ``runs/<action>/`` by variant name and tput (conservative; tput beats variant, latency-less reports skipped)."""
+    """Match a report under ``runs/<action>/`` by variant name and tput (conservative; tput beats variant, latency-less reports skipped).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        entry (dict[str, Any]): A stack / current_best entry carrying
+            ``action``, ``variant_name``, and ``tput``.
+
+    Returns:
+        Path | None: The best-scoring matching report, or ``None`` when the
+        action is missing or no candidate matches.
+    """
     action = str(entry.get("action") or "").strip()
     if not action:
         return None
@@ -1240,7 +1382,20 @@ def _build_final_invocation(
     benchmark_report: Path | None,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Best-effort :class:`BenchmarkInvocation` for the final stack run (config = the launched ``*.with_envs.yaml`` sibling)."""
+    """Best-effort :class:`BenchmarkInvocation` for the final stack run (config = the launched ``*.with_envs.yaml`` sibling).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        benchmark_report (Path | None): The resolved final benchmark report
+            whose siblings supply the config / server log, or ``None``.
+        warnings (list[str]): Shared warnings list (mutated in place when args
+            extraction fails).
+
+    Returns:
+        dict[str, Any]: The invocation dict (framework args + source, extra
+        envs, and relative config / server-log paths).
+    """
     config_path: Path | None = None
     server_log_path: Path | None = None
     if benchmark_report is not None:
@@ -1287,7 +1442,15 @@ _AUDIT_ACTIONS = (
 
 
 def _parse_iso_unix(ts: Any) -> float | None:
-    """Best-effort ISO-8601 -> unix seconds. ``None`` on any failure."""
+    """Best-effort ISO-8601 -> unix seconds. ``None`` on any failure.
+
+    Args:
+        ts (Any): An ISO-8601 string or already-numeric timestamp.
+
+    Returns:
+        float | None: The timestamp in Unix seconds, or ``None`` when ``ts`` is
+        empty or unparseable.
+    """
     if ts is None:
         return None
     if isinstance(ts, (int, float)):
@@ -1309,6 +1472,13 @@ def _iso_z(ts: Any) -> str:
     The journal and ``state.phase_history`` use different suffixes;
     collapsing both keeps display and ``[entered_ts, exit_ts)`` matching
     consistent. Returns the input unchanged when empty/unparseable.
+
+    Args:
+        ts (Any): An ISO-8601 timestamp value (any suffix), or ``None``.
+
+    Returns:
+        str: The canonical ``...Z`` UTC string, ``""`` for empty input, or the
+        original string when it cannot be parsed.
     """
     if ts is None:
         return ""
@@ -1328,7 +1498,17 @@ def _iso_z(ts: Any) -> str:
 def _load_optimization_journal(
     session_dir: Path | None, warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Read ``reports/optimization_journal.json`` entries (the canonical action ledger); ``[]`` on legacy sessions."""
+    """Read ``reports/optimization_journal.json`` entries (the canonical action ledger); ``[]`` on legacy sessions.
+
+    Args:
+        session_dir (Path | None): Absolute session root, or ``None``.
+        warnings (list[str]): Shared warnings list (mutated in place on parse
+            failure).
+
+    Returns:
+        list[dict[str, Any]]: The journal ``entries`` list, or ``[]`` when the
+        file is missing / malformed or ``session_dir`` is ``None``.
+    """
     if session_dir is None:
         return []
     data = _load_json_safe(
@@ -1341,7 +1521,15 @@ def _load_optimization_journal(
 
 
 def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
-    """Map one optimization_journal entry to a phase_timeline event (keeps the declared ``phase`` for exact bucketing)."""
+    """Map one optimization_journal entry to a phase_timeline event (keeps the declared ``phase`` for exact bucketing).
+
+    Args:
+        e (dict[str, Any]): One ``optimization_journal.json`` entry.
+
+    Returns:
+        dict[str, Any]: The event row with normalized timestamp, resolved
+        action, metric / decision fields, and a threaded ``extras`` map.
+    """
     metric = e.get("throughput_after")
     metric_kind = "output_throughput" if metric is not None else None
     if metric is None and e.get("gain_pct") is not None:
@@ -1405,6 +1593,16 @@ def collect_phase_timeline(
     the journal copy winning, then sorted by ``ts``. Passing
     ``session_dir=None`` degrades gracefully to the audit-list scrape
     (used by unit fixtures that have no on-disk journal).
+
+    Args:
+        session_dir (Path | None): Absolute session root, or ``None`` to skip
+            the on-disk journal source.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        list[dict[str, Any]]: The merged, de-duplicated, ts-sorted action
+        events.
     """
     events: list[dict[str, Any]] = []
 
@@ -1515,7 +1713,15 @@ def collect_phase_timeline(
 def _capability_for_action(
     state: dict[str, Any], action: str,
 ) -> dict[str, Any]:
-    """Per-action capability tally from ``<action>_attempts``, with an ``optimization_stack`` KEEP fallback for V1/partial state."""
+    """Per-action capability tally from ``<action>_attempts``, with an ``optimization_stack`` KEEP fallback for V1/partial state.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        action (str): The action label whose attempts / keeps are tallied.
+
+    Returns:
+        dict[str, Any]: ``{"status", "attempts", "keeps"}`` for the action.
+    """
     attempts_list = state.get(f"{action}_attempts") or []
     n_attempts = len(attempts_list) if isinstance(attempts_list, list) else 0
     n_keeps = sum(
@@ -1727,6 +1933,13 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
 
     Headline counts aggregate all domains; ``by_specialist`` breaks them
     out per SpecialistDomain.key.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        dict[str, Any]: The specialist capability row (aggregate status /
+        attempts / keeps / tested plus a ``by_specialist`` per-domain map).
     """
     rounds = state.get("specialist_rounds") or []
     if not isinstance(rounds, list) or not rounds:
@@ -1818,7 +2031,12 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
-    """Seed every catalogue domain with a not_attempted CapabilityEntry (stable shape, no KeyError-guarding)."""
+    """Seed every catalogue domain with a not_attempted CapabilityEntry (stable shape, no KeyError-guarding).
+
+    Returns:
+        dict[str, dict[str, Any]]: One zeroed, ``not_attempted`` capability
+        entry per catalogue specialist-domain key.
+    """
     return {
         d: {"status": "not_attempted", "attempts": 0, "keeps": 0, "tested": 0}
         for d in _SPECIALIST_DOMAIN_KEYS
@@ -1827,7 +2045,15 @@ def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
 
 # §7 / §8 GEAK / OOB invocations
 def _kernel_agent_run_dirs(session_dir: Path) -> list[Path]:
-    """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts, so historical sessions still render."""
+    """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts, so historical sessions still render.
+
+    Args:
+        session_dir (Path): Absolute session root.
+
+    Returns:
+        list[Path]: Every kernel-agent run directory across the canonical and
+        two legacy layouts. Empty when none exist.
+    """
     candidates: list[Path] = []
     # Canonical (current): <sd>/kernel-agent/runs/<sid>/
     new_root = session_dir / "kernel-agent" / "runs"
@@ -1946,6 +2172,14 @@ def _stamp_kernel_level_decisions(
     Reads kernel-level ``results/<kid>.json`` + ``verification/<kid>.json``;
     the best attempt is chosen by backend hint, else highest micro_speedup
     (ties: latest ts). Other attempts keep their per-attempt decision.
+
+    Args:
+        invocations (list[dict[str, Any]]): All parsed per-attempt invocations
+            (mutated in place — the best attempt per kernel is stamped).
+        run_dirs (list[Path]): The kernel-agent run directories the
+            invocations came from.
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place).
     """
     # Group by (run_id, kernel_id); same kid in different run_dirs is separate.
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -2036,7 +2270,18 @@ def _shape_kernel_metadata(
     result: dict[str, Any],
     attempt: dict[str, Any],
 ) -> dict[str, Any]:
-    """Best-effort kernel metadata, preferring ``result['kernel_metadata']`` over the attempt's own."""
+    """Best-effort kernel metadata, preferring ``result['kernel_metadata']`` over the attempt's own.
+
+    Args:
+        result (dict[str, Any]): The kernel-level ``results/<kid>.json`` dict
+            (may be empty).
+        attempt (dict[str, Any]): The per-attempt record used as a fallback
+            source.
+
+    Returns:
+        dict[str, Any]: Shaped kernel metadata (name, source file, shapes,
+        gpu_pct, arithmetic_intensity).
+    """
     meta = result.get("kernel_metadata") if isinstance(result, dict) else None
     if isinstance(meta, dict) and meta:
         return {
@@ -2056,7 +2301,15 @@ def _shape_kernel_metadata(
 
 
 def _infer_run_dir_kernel_id(run_dir: Path) -> str:
-    """Recover the kernel id for a run dir whose attempts omit ``kernel_id``; only when the dir holds a single kid."""
+    """Recover the kernel id for a run dir whose attempts omit ``kernel_id``; only when the dir holds a single kid.
+
+    Args:
+        run_dir (Path): A kernel-agent run directory.
+
+    Returns:
+        str: The single kernel id inferred from ``results`` / ``verification``
+        filenames, or ``""`` when zero or more than one is present.
+    """
     kids: set[str] = set()
     for sub in ("results", "verification"):
         d = run_dir / sub
@@ -2072,7 +2325,17 @@ def collect_kernel_invocations(
     session_dir: Path,
     warnings: list[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return ``(geak_invocations, oob_invocations, forge_invocations)`` from each run dir's ``optimization_attempts.jsonl``, split by ``backend`` into three independent lanes."""
+    """Return ``(geak_invocations, oob_invocations, forge_invocations)`` from each run dir's ``optimization_attempts.jsonl``, split by ``backend`` into three independent lanes.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        The ``(geak, oob, forge)`` invocation lanes, each sorted by
+        ``(kernel_id, ts)``.
+    """
     all_invocations: list[dict[str, Any]] = []
     run_dirs = _kernel_agent_run_dirs(session_dir)
     for run_dir in run_dirs:
@@ -2157,6 +2420,15 @@ def _read_kernel_candidates(
 
     Resolves via the orchestrator-recorded path, then the new and legacy
     on-disk layouts (glob fallbacks), then ``last_trace_analyze.hot_kernels_top15``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        list[dict[str, Any]]: The resolved ``hot_kernels`` list, or ``[]`` when
+        no source yields a non-empty list.
     """
     sk = state.get("last_trace_analyze") or {}
     raw_path = sk.get("candidates_path") if isinstance(sk, dict) else None
@@ -2206,7 +2478,14 @@ def _read_kernel_candidates(
 def _index_invocations_by_kernel(
     invs: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Fold per-attempt invocations into a per-kernel ``{attempts, best_speedup, decision, last_status}`` summary."""
+    """Fold per-attempt invocations into a per-kernel ``{attempts, best_speedup, decision, last_status}`` summary.
+
+    Args:
+        invs (list[dict[str, Any]]): Per-attempt invocation records.
+
+    Returns:
+        dict[str, dict[str, Any]]: Per-kernel summary keyed by ``kernel_id``.
+    """
     out: dict[str, dict[str, Any]] = {}
     for inv in invs:
         kid = str(inv.get("kernel_id") or "")
@@ -2246,6 +2525,21 @@ def _collect_detected_kernels(
     preferred, else ``benchmark_report.kernel_summary``),
     ``selected_for_optimization``, per-lane ``geak`` / ``oob`` / ``forge``
     summaries, ``adopted_by`` (from integrate KEEPs), and ``final_decision``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        geak (list[dict[str, Any]]): GEAK-lane invocations.
+        oob (list[dict[str, Any]]): OOB-lane invocations.
+        warnings (list[str]): Shared warnings list (mutated in place).
+        forge (list[dict[str, Any]] | None): Forge-lane invocations. Defaults
+            to ``None`` (treated as empty).
+        cap (int | None): Optional maximum number of rows to return (highest
+            GPU share first). Defaults to ``None`` (no cap).
+
+    Returns:
+        list[dict[str, Any]]: Per-kernel lifecycle rows sorted by descending
+        GPU share, truncated to ``cap`` when given.
     """
     forge = forge or []
     by_kid: dict[str, dict[str, Any]] = {}
@@ -2751,7 +3045,17 @@ def _shape_ledger(
 def _patch_winners_history(
     rows: list[Any], baseline_tput: float | None,
 ) -> list[dict[str, Any]]:
-    """Fix ``backend_winners_history`` data gaps: fall back to session ``baseline_tput`` for a 0 ``base_tput``, and compute missing per-winner ``gain_pct``."""
+    """Fix ``backend_winners_history`` data gaps: fall back to session ``baseline_tput`` for a 0 ``base_tput``, and compute missing per-winner ``gain_pct``.
+
+    Args:
+        rows (list[Any]): Raw ``backend_winners_history`` rows.
+        baseline_tput (float | None): Session baseline throughput used to
+            patch a zero / missing ``base_tput``.
+
+    Returns:
+        list[dict[str, Any]]: The patched rows with repaired ``base_tput`` and
+        back-filled per-winner ``gain_pct`` where derivable.
+    """
     out: list[dict[str, Any]] = []
     for r in rows:
         if not isinstance(r, dict):
@@ -2799,6 +3103,15 @@ def _shape_winners_history(
     ``_shape_ledger`` drops this history, so without re-emitting it the exported
     ``explore_search`` carries no ``fingerprint``→``provenance`` map and downstream
     consumers can't reconstruct ``phase_breakdown.explore.by_domain`` offline.
+
+    Args:
+        explore_search (dict[str, Any] | None): The ``explore_search`` ledger
+            from state, or ``None``.
+
+    Returns:
+        list[dict[str, Any]]: The shaped ``winners_history`` rows (round id,
+        variant, fingerprint, provenance, scope, gain, args/envs, ts). Empty
+        when no history is present.
     """
     if not isinstance(explore_search, dict):
         return []
@@ -3068,7 +3381,15 @@ def collect_critic_robustness(
 def _critic_kb_writes_summary(
     critic_iters: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Build ``critic_robustness.kb_writes_summary`` by counting each iteration's verdict into ``by_verdict``."""
+    """Build ``critic_robustness.kb_writes_summary`` by counting each iteration's verdict into ``by_verdict``.
+
+    Args:
+        critic_iters (list[dict[str, Any]]): The parsed critic-iteration rows.
+
+    Returns:
+        dict[str, Any]: ``{"total", "by_verdict"}`` where ``by_verdict`` counts
+        each non-empty, upper-cased verdict.
+    """
     by_verdict: dict[str, int] = {}
     total = 0
     for entry in critic_iters:
@@ -3224,6 +3545,15 @@ def _collect_lane_timeline(
     One row per lane (capacity, live_holders, lease_expired_count). The
     per-tick holders timeline is deferred; the aggregates suffice for the
     ``benchmark_lane.peak ≤ 1`` invariant check.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on DB
+            errors).
+
+    Returns:
+        list[dict[str, Any]]: One per-lane occupancy row plus a ``__total__``
+        aggregate row. Empty when the coordinator DB is absent / unreadable.
     """
     db_path = session_dir / "storage" / "coordinator.db"
     if not db_path.exists():
@@ -3367,6 +3697,12 @@ def _normalize_specialist_key(provenance: str) -> str:
     ``specialist:<domain>`` → bare ``<domain>``; ``legacy:<action>`` →
     ``legacy_<action>``; ``default_grid`` / ``llm_direct`` pass through;
     empty/unknown → ``"unknown"`` (so by_domain is never keyed by ``""``).
+
+    Args:
+        provenance (str): The raw provenance label.
+
+    Returns:
+        str: The normalized specialist key.
     """
     s = (provenance or "").strip()
     if not s:
@@ -3425,6 +3761,14 @@ def _promote_legacy_gain_entries(
     Recovers action/variant/ts/args from the parallel
     ``optimization_stack`` and computes ``delta_pct`` against the prior
     entry; ``None`` ledger entries stay ``None`` to keep index alignment.
+
+    Args:
+        state_entries (list[Any]): The legacy numeric gain ledger.
+        state (dict[str, Any]): Parsed ``state.json`` (supplies the parallel
+            ``optimization_stack``).
+
+    Returns:
+        list[dict[str, Any]]: The promoted V1 ``StackGainEntry`` rows.
     """
     stack = state.get("optimization_stack") or []
     out: list[dict[str, Any]] = []
@@ -3476,6 +3820,15 @@ def collect_roofline(
 
     Returns ``[]`` when no snapshots exist or on parse failure
     (best-effort; errors recorded in ``warnings``).
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place on build
+            failure).
+
+    Returns:
+        list[dict[str, Any]]: A single-element comparison list (baseline /
+        latest / optional delta), or ``[]`` when no snapshots or on failure.
     """
     snapshots = state.get("roofline_snapshots")
     if not isinstance(snapshots, list) or not snapshots:
@@ -3661,6 +4014,18 @@ def _collect_phase_breakdown(
     Assigns each KEEP entry to the phase active at its acceptance
     timestamp (explore further splits by domain, kernel by kernel_id).
     Missing phase_history → everything lands under ``unattributed``.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        entries (list[dict[str, Any]]): The per-stack gain-ledger entries.
+        warnings (list[str]): Shared warnings list (mutated in place when
+            ``phase_history`` is empty).
+
+    Returns:
+        dict[str, Any]: Per-phase gain buckets (prelude / framework_pr /
+        explore / kernel / gemm_tuning / sweep / close, plus a conditional
+        ``unattributed``), each with a ``total_gain_pct`` and phase-specific
+        sub-breakdowns.
     """
     # phase timeline lookup: for an entry ts, pick the latest row with ts_unix ≤ ts.
     history = state.get("phase_history") or []
@@ -3845,7 +4210,18 @@ def _reconstruct_gain_ledger(
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Approximate per-stack contribution (each entry's ``gain_pct`` as its delta) when Coordinator didn't record it; best-effort, see ``attribution.notes``."""
+    """Approximate per-stack contribution (each entry's ``gain_pct`` as its delta) when Coordinator didn't record it; best-effort, see ``attribution.notes``.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (kept for signature
+            symmetry; not mutated here).
+
+    Returns:
+        list[dict[str, Any]]: One reconstructed gain-ledger row per stack
+        entry, with cumulative gain and ``delta_pct``. Empty when there is no
+        ``optimization_stack``.
+    """
     stack = state.get("optimization_stack") or []
     if not isinstance(stack, list):
         return []
@@ -3902,6 +4278,18 @@ def collect_roofline_progress(
     list-shaped key. Pure over ``state`` + ``manifest``. Output: ``trajectory[]``
     (baseline + KEEPs, ts-sorted), ceiling/target reference lines from the latest
     snapshot, headline current-best numbers, and a ``snapshots[]`` passthrough.
+
+    Args:
+        session_dir (Path): Absolute session root (kept for a uniform collector
+            signature; the body is pure over state/manifest).
+        state (dict[str, Any]): Parsed ``state.json``.
+        manifest (dict[str, Any]): Parsed ``manifest.json``.
+        warnings (list[str]): Shared warnings list (mutated in place on a
+            trajectory / current-best mismatch).
+
+    Returns:
+        dict[str, Any]: The ``roofline_progress`` section (trajectory, ceiling
+        / target reference lines, headline numbers, and normalized snapshots).
     """
     # Trajectory: baseline + each KEEP.
     baseline_tput = _to_float(state.get("baseline_tput")) or 0.0
@@ -4061,6 +4449,15 @@ def collect_kernel_roofline(
     Missing file → ``{}`` (quiet); malformed → ``{}`` + warning; non-list
     ``kernels`` → ``[]``. Entries are type-coerced so upstream drift
     doesn't break consumers.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on
+            malformed input).
+
+    Returns:
+        dict[str, Any]: The ``kernel_roofline`` section, or ``{}`` when the
+        file is absent / not a JSON object.
     """
     path = session_dir / _KERNEL_ROOFLINE_REL_PATH
     if not path.exists():
@@ -4136,6 +4533,15 @@ def collect_kernel_optimization_summary(
     Missing → ``{}`` (quiet); malformed → ``{}`` + warning. Otherwise
     mirrored verbatim (producer additions ride through) apart from shape
     guards on the iterated containers + an added ``report_path``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on
+            malformed input).
+
+    Returns:
+        dict[str, Any]: The mirrored summary section (with a ``report_path``),
+        or ``{}`` when the file is absent / not a JSON object.
     """
     path = session_dir / _KERNEL_OPT_SUMMARY_REL_PATH
     if not path.exists():
@@ -4199,6 +4605,16 @@ def collect_conc_sweep_summary(
     mirrored verbatim (only ``comparison`` shape-guarded) + ``report_path``.
     Do not synthesize the optional blocks the producer omits when
     ``status="skipped"``; pass through exactly what it wrote.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on
+            malformed input).
+
+    Returns:
+        dict[str, Any]: The mirrored conc-sweep summary (with a
+        ``report_path``), or ``{}`` when the file is absent / not a JSON
+        object.
     """
     path = session_dir / _CONC_SWEEP_SUMMARY_REL_PATH
     if not path.exists():
@@ -4234,6 +4650,13 @@ def collect_optimization_stack(
 
     Each entry is stamped ``validated`` (within
     ``cumulative_gain_validated_stack_len``). Returns ``[]`` when absent.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        list[dict[str, Any]]: One normalized stack entry per KEEP (each flagged
+        ``validated``), or ``[]`` when the stack is absent.
     """
     stack = state.get("optimization_stack") or []
     if not isinstance(stack, list):
@@ -4255,7 +4678,17 @@ def collect_optimization_stack(
 def _normalize_optimization_stack_entry(
     raw: dict[str, Any], *, validated: bool,
 ) -> dict[str, Any]:
-    """Coerce one stack entry to the schema shape; unknown fields pass through verbatim (Inv-10.1 fact-layer compat)."""
+    """Coerce one stack entry to the schema shape; unknown fields pass through verbatim (Inv-10.1 fact-layer compat).
+
+    Args:
+        raw (dict[str, Any]): One raw ``optimization_stack`` entry.
+        validated (bool): Whether the entry falls within the validated stack
+            length.
+
+    Returns:
+        dict[str, Any]: The coerced stack entry with optional evidence fields
+        included only when present in ``raw``.
+    """
     # Known fields — coerced types
     out: dict[str, Any] = {
         "action":                       str(raw.get("action") or ""),
@@ -4349,6 +4782,18 @@ def collect_phase_segments(
     own ``phase`` when present, else by the ``[entered_ts, exit_ts)``
     window. Empty when ``phase_history`` is missing (readers fall back to
     the flat ``phase_timeline``).
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        phase_timeline (list[dict[str, Any]]): The flat action timeline whose
+            events are attributed into segments.
+        warnings (list[str]): Shared warnings list (mutated in place when a
+            legacy plateau proxy fired).
+
+    Returns:
+        list[dict[str, Any]]: One segment per phase transition (with folded
+        sub-events and attributed actions). Empty when ``phase_history`` is
+        missing.
     """
     history = state.get("phase_history") or []
     if not isinstance(history, list) or not history:
@@ -4405,7 +4850,16 @@ def collect_phase_segments(
         })
 
     def _owner_by_window(ts: str) -> dict[str, Any] | None:
-        """Return the segment whose ``[entered_ts, exit_ts)`` ISO window holds ``ts`` (lexicographic compare)."""
+        """Return the segment whose ``[entered_ts, exit_ts)`` ISO window holds ``ts`` (lexicographic compare).
+
+        Args:
+            ts (str): An ISO-8601 timestamp.
+
+        Returns:
+            dict[str, Any] | None: The owning segment, the last segment when
+            ``ts`` is empty / past the end, or ``None`` when there are no
+            segments.
+        """
         if not ts:
             return segments[-1] if segments else None
         for s in segments:
@@ -4482,7 +4936,19 @@ def collect_kb_provenance(
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the Cortex KB integration audit, merging SharedState warm-start fields, the NDJSON queue counts, and the audit-log status tail."""
+    """Collect the Cortex KB integration audit, merging SharedState warm-start fields, the NDJSON queue counts, and the audit-log status tail.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        manifest (dict[str, Any]): Parsed ``manifest.json``.
+        warnings (list[str]): Shared warnings list (mutated in place; also used
+            to surface PR-monitor / flusher status markers).
+
+    Returns:
+        dict[str, Any]: The KB-provenance section (warm-start fields, queue
+        counts, audit-status tail, recipe-snapshot reads, and flusher status).
+    """
     from ..session_paths import (
         cortex_audit_jsonl as _audit_path,
         cortex_dead_letter_ndjson as _dl_path,
@@ -4644,7 +5110,19 @@ def _collect_flusher_status(
     pid_path: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Merge the ``.kb_flusher_status.json`` boot marker with a live pid probe into one stable shape."""
+    """Merge the ``.kb_flusher_status.json`` boot marker with a live pid probe into one stable shape.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        status_path (Path): The ``.kb_flusher_status.json`` boot marker path.
+        pid_path (Path): The flusher pid-file path used for the liveness probe.
+        warnings (list[str]): Shared warnings list (mutated in place when the
+            marker is unreadable).
+
+    Returns:
+        dict[str, Any]: The merged flusher-status dict (enabled / spawned /
+        alive / pid / config / reason).
+    """
     base: dict[str, Any] = {
         "enabled":       False,
         "spawned":       False,
@@ -4695,7 +5173,15 @@ def _collect_flusher_status(
 
 # specialist_runs section
 def _coerce_round_id(value: Any) -> int | str:
-    """Normalise ``round_id`` to int when purely numeric, else keep the string (empty/None → 0). Never raises."""
+    """Normalise ``round_id`` to int when purely numeric, else keep the string (empty/None → 0). Never raises.
+
+    Args:
+        value (Any): The raw ``round_id`` value.
+
+    Returns:
+        int | str: The integer round id when ``value`` is purely numeric,
+        ``0`` for empty / ``None``, else the original string.
+    """
     if value is None or value == "":
         return 0
     if isinstance(value, bool):
@@ -4722,6 +5208,18 @@ def collect_specialist_runs(
 
     ``include_transcripts`` inlines the transcript bytes under each ref's
     ``body`` (default False = path-only).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place on scan /
+            read failures).
+        include_transcripts (bool): When ``True``, inline each transcript's
+            bytes under its ``body``. Defaults to ``False`` (path-only).
+
+    Returns:
+        list[dict[str, Any]]: One shaped specialist-round row (with transcript
+        refs). Empty when no rounds exist.
     """
     rounds = state.get("specialist_rounds") or []
     if not isinstance(rounds, list) or not rounds:
@@ -4833,7 +5331,16 @@ def _normalize_specialist_domain_breakdown(
 
 
 def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
-    """Best-effort domain for ``task_id`` within a round; "" when unmapped (older M5 rounds)."""
+    """Best-effort domain for ``task_id`` within a round; "" when unmapped (older M5 rounds).
+
+    Args:
+        round_entry (dict[str, Any]): One specialist-round record.
+        task_id (str): The task id to resolve a domain for.
+
+    Returns:
+        str: The mapped domain, an unambiguous single tag/domain, or ``""``
+        when it cannot be determined.
+    """
     mapping = round_entry.get("task_domains")
     if isinstance(mapping, dict):
         v = mapping.get(task_id)
@@ -4870,6 +5377,13 @@ def _coerce_token(value: Any) -> int:
     The rollup sums tokens, so a missing counter contributes 0 here (the
     ``None``-vs-0 distinction matters only on the raw per-call rows, which
     we preserve verbatim in ``decision_trace.jsonl``).
+
+    Args:
+        value (Any): A raw token-counter value.
+
+    Returns:
+        int: The integer count, or ``0`` when ``value`` is ``None`` / not
+        numeric.
     """
     if value is None:
         return 0
@@ -4919,6 +5433,15 @@ def _load_llm_calls(
     ``reports/trace/ext/*.jsonl`` shard written by out-of-process children.
     Best-effort: missing files / dirs yield ``[]``; malformed lines are
     skipped by :func:`_load_jsonl_safe`.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on scan
+            failures).
+
+    Returns:
+        list[dict[str, Any]]: Every well-formed LLM-call row across the ledger
+        and ext shards. Empty when no trace files exist.
     """
     trace_root = session_dir / "reports" / "trace"
     rows: list[dict[str, Any]] = list(
@@ -4944,6 +5467,15 @@ def _load_dispatch_history_all(
     Walks ``agents/orchestration/dynamic_actions/<dyn_id>/`` and stamps
     each row with its owning ``dyn_id`` so the join can key on it. Returns
     ``[]`` when the dynamic_actions tree is absent (no dynamic actions ran).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on scan
+            failures).
+
+    Returns:
+        list[dict[str, Any]]: Every dispatch-history row, each stamped with its
+        owning ``dyn_id``. Empty when no dynamic actions ran.
     """
     root = session_dir / "agents" / "orchestration" / "dynamic_actions"
     if not root.is_dir():
@@ -4973,6 +5505,13 @@ def _build_phase_windows(
     (real transitions). Used to backfill a call's / decision's phase from
     its ``ts`` when the producer didn't stamp one (out-of-process children,
     sub-agent runners). Empty when phase_history is missing.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        list[tuple[float, str]]: ``(entered_unix, phase)`` pairs sorted by
+        timestamp. Empty when ``phase_history`` is missing.
     """
     history = state.get("phase_history") or []
     if not isinstance(history, list):
@@ -4995,7 +5534,17 @@ def _build_phase_windows(
 
 
 def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
-    """Return the phase active at ``ts`` per ``windows`` (latest <= ts)."""
+    """Return the phase active at ``ts`` per ``windows`` (latest <= ts).
+
+    Args:
+        ts (Any): An ISO-8601 timestamp (or numeric Unix value).
+        windows (list[tuple[float, str]]): The ``(entered_unix, phase)``
+            timeline from :func:`_build_phase_windows`.
+
+    Returns:
+        str: The latest phase whose boundary is ``<= ts``, or ``""`` when ``ts``
+        is unparseable or the timeline is empty.
+    """
     unix = _parse_iso_unix(ts)
     if unix is None or not windows:
         return ""
@@ -5011,7 +5560,16 @@ def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
 def _decision_key(task_id: str, dyn_id: str) -> str | None:
     """Canonical join key for a decision / call: ``dyn_id`` wins over
     ``task_id`` (a dynamic_action dispatch owns both). ``None`` when
-    neither is present (the call can only be ts-window bucketed)."""
+    neither is present (the call can only be ts-window bucketed).
+
+    Args:
+        task_id (str): The call's / decision's task id.
+        dyn_id (str): The owning dynamic-action id.
+
+    Returns:
+        str | None: ``"dyn:<dyn_id>"`` when a dyn id is present, else
+        ``"task:<task_id>"``, else ``None``.
+    """
     d = (dyn_id or "").strip()
     if d:
         return f"dyn:{d}"
@@ -5028,6 +5586,14 @@ def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, int]:
     ``total_cache_creation`` / ``total_cache_read``) and the per-decision view
     (pre-summed ``total_cache``). ``total_in_out`` is prompt+completion only;
     ``grand_total`` folds in every cache token too.
+
+    Args:
+        bucket (dict[str, Any] | None): A token bucket in either shape, or
+            ``None``.
+
+    Returns:
+        dict[str, int]: A copy of the bucket with added ``total_in_out`` and
+        ``grand_total`` figures.
     """
     b = dict(bucket or {})
     ti = int(b.get("total_in", 0) or 0)
@@ -5063,6 +5629,19 @@ def collect_token_usage(
 
     Empty-but-valid (zeroed ``session_total``) when ``decision_trace`` is empty
     (e.g. a pre-trace session), so downstream readers never KeyError.
+
+    Args:
+        decision_trace (dict[str, Any]): The output of
+            :func:`collect_decision_trace` (supplies the token rollup).
+        action_timeline (list[dict[str, Any]]): The visible action timeline to
+            annotate with joined token figures.
+        warnings (list[str]): Shared warnings list (kept for a uniform
+            collector signature; not mutated here).
+
+    Returns:
+        dict[str, Any]: The ``token_usage`` section (session total, per
+        component / phase, decision-attribution split, and the annotated
+        timeline).
     """
     dt = decision_trace if isinstance(decision_trace, dict) else {}
     rollup = dt.get("token_rollup") or {}
@@ -5152,6 +5731,17 @@ def collect_langfuse(
     Either way credentials are redacted to host + presence booleans. Never
     raises: any failure degrades to a minimal ``config_only`` view so the
     breakdown still records whether the feature was even on.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        manifest (dict[str, Any]): Parsed ``manifest.json``.
+        warnings (list[str]): Shared warnings list (mutated in place on receipt
+            / emitter read failures).
+
+    Returns:
+        dict[str, Any]: The ``langfuse`` section, tagged with a
+        ``receipt_source`` of ``receipt_file`` / ``live_emitter`` /
+        ``config_only`` depending on which tier resolved.
     """
     from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
 
@@ -5207,6 +5797,13 @@ def _proposal_scores_by_variant(state: dict[str, Any]) -> dict[str, list[dict[st
     Returns ``{variant_name: [{rater, score, reason}, ...]}`` so a decision row
     can show who scored the proposal and how (the proposal_scorer signal that
     fed the KEEP/REVERT). Best-effort: shape drift yields an empty map.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        dict[str, list[dict[str, Any]]]: Per-variant rater scores. Empty when
+        no ensemble scores are present.
     """
     out: dict[str, list[dict[str, Any]]] = {}
     rounds = state.get("specialist_rounds")
@@ -5256,6 +5853,15 @@ def collect_decision_trace(
     "unattributed_tokens": {...}}``. All-empty (zeroed rollup) when no
     trace files exist, so a session that ran before the trace subsystem
     landed degrades cleanly.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: ``{"decision_trace", "token_rollup",
+        "unattributed_tokens"}`` — the joined timeline plus token rollups.
     """
     calls = _load_llm_calls(session_dir, warnings)
     phase_windows = _build_phase_windows(state)
@@ -5438,6 +6044,13 @@ def _write_decision_trace_jsonl(
     the collector is the single producer, so a full rewrite is simpler than
     append + dedup and stays consistent with the latest join. Best-effort:
     OSError is recorded in ``warnings`` and swallowed.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        decision_trace (list[dict[str, Any]]): The joined decision-trace rows
+            to write (one JSON object per line).
+        warnings (list[str]): Shared warnings list (mutated in place on write
+            failure).
     """
     target = session_dir / "reports" / "trace" / "decision_trace.jsonl"
     try:

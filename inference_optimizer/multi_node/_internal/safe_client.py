@@ -140,7 +140,17 @@ class SafeClient:
             raise SafeApiError(resp.status_code, resp.text, endpoint=endpoint) from e
 
     def create_workload(self, body: dict) -> str:
-        """POST /api/v1/workloads; returns the workload_id (non-2xx raises :class:`SafeApiError`)."""
+        """POST /api/v1/workloads; returns the workload_id (non-2xx raises :class:`SafeApiError`).
+
+        Args:
+            body: The CreateWorkloadRequest body to submit.
+
+        Returns:
+            str: The created workload id.
+
+        Raises:
+            SafeApiError: On any non-2xx status or a response missing an id.
+        """
         endpoint = "POST /api/v1/workloads"
         resp = self._client.post(self._url("/api/v1/workloads"), json=body)
         if not (200 <= resp.status_code < 300):
@@ -202,7 +212,14 @@ class SafeClient:
         return data
 
     def stop_workload(self, workload_id: str) -> None:
-        """POST /api/v1/workloads/{workload_id}/stop; idempotent (404/409 treated as success)."""
+        """POST /api/v1/workloads/{workload_id}/stop; idempotent (404/409 treated as success).
+
+        Args:
+            workload_id: The workload id to stop.
+
+        Raises:
+            SafeApiError: On any status other than 200/204/404/409.
+        """
         endpoint = f"POST /api/v1/workloads/{workload_id}/stop"
         resp = self._client.post(self._url(f"/api/v1/workloads/{workload_id}/stop"))
         if resp.status_code in (200, 204, 404, 409):
@@ -212,7 +229,14 @@ class SafeClient:
         raise SafeApiError(resp.status_code, resp.text, endpoint=endpoint)
 
     def delete_workload(self, workload_id: str) -> None:
-        """DELETE /api/v1/workloads/{workload_id}; idempotent (404 treated as success)."""
+        """DELETE /api/v1/workloads/{workload_id}; idempotent (404 treated as success).
+
+        Args:
+            workload_id: The workload id to delete.
+
+        Raises:
+            SafeApiError: On any status other than 200/204/404.
+        """
         endpoint = f"DELETE /api/v1/workloads/{workload_id}"
         resp = self._client.delete(self._url(f"/api/v1/workloads/{workload_id}"))
         if resp.status_code in (200, 204, 404):
@@ -223,7 +247,14 @@ class SafeClient:
 
 
 def from_env() -> SafeClient:
-    """Construct a SafeClient from SAFE_API_URL + SAFE_API_KEY env vars; clean RuntimeError when missing."""
+    """Construct a SafeClient from SAFE_API_URL + SAFE_API_KEY env vars; clean RuntimeError when missing.
+
+    Returns:
+        SafeClient: A client configured from the environment.
+
+    Raises:
+        RuntimeError: If ``SAFE_API_URL`` or ``SAFE_API_KEY`` is missing.
+    """
     base = (os.environ.get("SAFE_API_URL") or "").strip()
     key = (os.environ.get("SAFE_API_KEY") or "").strip()
     missing = [name for name, val in (("SAFE_API_URL", base), ("SAFE_API_KEY", key)) if not val]

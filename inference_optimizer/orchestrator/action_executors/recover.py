@@ -141,6 +141,10 @@ def _is_multi_node_sandbox() -> bool:
 
     Single-node (``is_multi_node() == False``) is unaffected — the sandbox
     IS the GPU pod, so local rocm-smi / gpureset are meaningful.
+
+    Returns:
+        ``True`` when running in multi-node mode (nodes >= 2); ``False`` for
+        single-node or when the mode cannot be determined.
     """
     try:
         from ._multi_node_env import is_multi_node
@@ -467,6 +471,9 @@ class RecoverExecutor:
 
         Returns one record per signalled PID (cmdline at discovery + final
         signal name ``"TERM"`` / ``"KILL"``).
+
+        Returns:
+            One record per signalled PID, or ``[]`` when none were stale.
         """
         candidates = self._discover_stale_pids()
         if not candidates:
@@ -489,7 +496,12 @@ class RecoverExecutor:
 
     def _discover_stale_pids(self) -> list[dict[str, Any]]:
         """Run ``pgrep -a -f -- <pattern>`` per owner pattern (matches the
-        full cmdline) and return unique PID records, excluding our own PID."""
+        full cmdline) and return unique PID records, excluding our own PID.
+
+        Returns:
+            Unique PID records matching the owner patterns, or ``[]`` when
+            ``pgrep`` is unavailable or nothing matched.
+        """
         if not shutil.which("pgrep"):
             log.warning("recover_executor: pgrep not on PATH; skipping kill stage")
             return []

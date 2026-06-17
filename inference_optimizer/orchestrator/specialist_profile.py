@@ -83,7 +83,11 @@ class SpecialistProfile:
     def grants_bench_tool(self) -> bool:
         """True iff this dispatch may use the in-loop ``run_bench`` tool. Only
         patch-authoring specialists with ``bench=True`` qualify (bench has no
-        meaning for read-only research)."""
+        meaning for read-only research).
+
+        Returns:
+            ``True`` when the profile is patch-mode with ``bench=True``.
+        """
         return self.mode == MODE_PATCH and self.bench
 
 
@@ -121,6 +125,13 @@ def _infer_scope(p: dict[str, Any]) -> str:
     specialist; one with no anchor at all is treated as ``freeform`` so a bare
     dispatch defaults to the cheap read-only lane instead of the expensive
     patch/GPU lane.
+
+    Args:
+        p: The dispatch params to inspect for domain/tag anchors.
+
+    Returns:
+        ``SCOPE_DOMAINS`` for two-or-more tags, ``SCOPE_DOMAIN`` for one, or
+        ``SCOPE_FREEFORM`` when no anchor is present.
     """
     # Local import avoids a module-load cycle (specialist_domains is heavier).
     from .specialist_domains import normalize_dispatch_tags
@@ -144,6 +155,14 @@ def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfi
     domain/tag anchor: anchored dispatches resolve to ``domain``/``domains``
     (legacy patch/GPU default preserved), while a truly bare dispatch resolves
     to ``freeform`` → ``research`` → ``cpu`` (safe & cheap first).
+
+    Args:
+        params: The dispatch params carrying ``scope`` / ``mode`` / ``bench`` /
+            ``lane``, or ``None``.
+
+    Returns:
+        The resolved :class:`SpecialistProfile` with legacy-compatible
+        fallbacks applied.
     """
     p = params or {}
 
