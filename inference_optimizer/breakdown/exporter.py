@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import collectors
+from .agent_timeline import build_agent_timeline
 from .schema import SCHEMA_VERSION, SCHEMA_VERSION_V3
 
 log = logging.getLogger(__name__)
@@ -509,6 +510,27 @@ def build(
     # enriched after discovery. Best-effort; never raises.
     _attach_kernel_roofline(kernel_journey, kernel_roofline)
 
+    # Unified three-actor timeline (specialist proposals + orchestrator
+    # decisions + critic reviews) merged onto one ``ts`` axis. Built locally
+    # from the sections just collected so the field is present in *every*
+    # produced breakdown. This is byte-for-byte the same data the Langfuse
+    # trace carries (the writer attaches this very breakdown as the trace
+    # output), so a downstream consumer reading ``agent_timeline`` from the SBD
+    # or re-deriving it from Langfuse gets identical content.
+    agent_timeline = _safe_collect(
+        "agent_timeline",
+        lambda: build_agent_timeline(
+            {
+                "decision_trace": decision_trace,
+                "specialist_runs": specialist_runs,
+                "critic_robustness": critic_robustness,
+            },
+            source="local",
+        ),
+        warnings,
+        default={},
+    )
+
     source_files = collectors.collect_source_files(
         sd,
         baseline.get("benchmark_report_path"),
@@ -580,6 +602,10 @@ def build(
         # carries ``{tool, root_dir, commit, version}``. Empty {} on sessions
         # that predate the recorder.
         "versions": versions,
+        # Unified specialist-proposal + orchestrator-decision + critic-review
+        # timeline, merged onto one ``ts`` axis. Additive optional section;
+        # older readers ignore it.
+        "agent_timeline": agent_timeline,
         "warnings": warnings,
         "source_files": source_files,
     }

@@ -1779,6 +1779,80 @@ class LangfusePush(TypedDict, total=False):
     receipt_source: str
 
 
+class TimelineEvent(TypedDict, total=False):
+    """One chronological event on the unified three-actor ``agent_timeline``.
+
+    A flat, transport-agnostic projection of one source record (an
+    orchestrator decision, a specialist proposal round, or a critic review)
+    normalised to a common shape so the three histories can be merged and
+    sorted on a single time axis.
+
+    Attributes:
+        ts (str): ISO UTC timestamp used as the primary sort key
+            (``decision.ts`` / ``specialist_run.completed_at`` /
+            ``critic_iteration.ts``).
+        seq (int): Monotonic fallback ordering index, assigned at build time
+            (stable tiebreaker when two events share a ``ts`` or one is missing).
+        actor (str): ``orchestrator`` / ``specialist`` / ``critic``.
+        kind (str): ``decision`` / ``proposal`` / ``review``.
+        phase (str): Phase active at the event (orchestrator decisions only).
+        tick (int | None): Orchestrator tick, when the source carried one.
+        title (str): One-line human summary (e.g. ``KEEP target_analysis``).
+        detail (dict[str, Any]): Actor-specific payload (original fields kept
+            verbatim — outcome/gain for decisions, domain/findings for
+            proposals, verdict/topic for reviews).
+        source (dict[str, Any]): Provenance pointer
+            (``{section, index}`` and, when fetched from Langfuse, ``trace_id``).
+    """
+
+    ts: str
+    seq: int
+    actor: str
+    kind: str
+    phase: str
+    tick: int | None
+    title: str
+    detail: dict[str, Any]
+    source: dict[str, Any]
+
+
+class AgentTimeline(TypedDict, total=False):
+    """Unified, time-ordered timeline of specialist proposals, orchestrator
+    decisions, and critic reviews.
+
+    Additive optional top-level section: a v1/v2/v3 reader that doesn't know
+    about it simply ignores it. Assembled (by
+    :func:`inference_optimizer.breakdown.agent_timeline.build_agent_timeline`)
+    by merging ``decision_trace.decision_trace`` (orchestrator),
+    ``specialist_runs`` (specialist), and
+    ``critic_robustness.critic_iterations`` (critic) onto one ``ts`` axis.
+
+    Attributes:
+        schema (str): Timeline schema id (``hyperloom.agent_timeline.v1``).
+        source (str): Where the source sections came from
+            (``langfuse`` when fetched back from a trace, ``local`` when built
+            straight from the breakdown payload).
+        trace_id (str): Langfuse trace id the data was recovered from (when
+            ``source == "langfuse"``).
+        fetched_at_utc (str): ISO UTC timestamp the timeline was assembled.
+        events (list[TimelineEvent]): Events sorted by ``(ts, seq)``.
+        counts (dict[str, int]): Per-actor event counts
+            (``{"orchestrator": n, "specialist": n, "critic": n}``).
+        degraded (bool): True when one or more source sections were missing /
+            empty / unparseable (the timeline is still emitted, just partial).
+        warnings (list[str]): Non-fatal notes raised while assembling.
+    """
+
+    schema: str
+    source: str
+    trace_id: str
+    fetched_at_utc: str
+    events: list[TimelineEvent]
+    counts: dict[str, int]
+    degraded: bool
+    warnings: list[str]
+
+
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -1890,6 +1964,12 @@ class SessionBreakdown(TypedDict, total=False):
     # Additive optional section recorded at author time; empty {} on sessions
     # that predate the recorder.
     versions: dict[str, KernelToolMetadata]
+    # Unified three-actor decision timeline (specialist proposals +
+    # orchestrator decisions + critic reviews) merged onto one ``ts`` axis.
+    # Built by ``breakdown.agent_timeline.build_agent_timeline`` and, on the
+    # upload path, recovered from the Langfuse trace. Additive optional
+    # section; empty {} on sessions that predate it, so older readers ignore it.
+    agent_timeline: AgentTimeline
 
     warnings: list[str]
     source_files: SourceFiles
@@ -1899,6 +1979,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "SCHEMA_VERSION_V3",
     "AdoptedKernel",
+    "AgentTimeline",
     "Attribution",
     "Baseline",
     "BaselineAttemptSummary",
@@ -1956,6 +2037,7 @@ __all__ = [
     "Sweep",
     "SweepPoint",
     "Telemetry",
+    "TimelineEvent",
     "TokenBucket",
     "TokenRollup",
     "TokenUsage",

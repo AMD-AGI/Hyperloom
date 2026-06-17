@@ -16,6 +16,11 @@ Public surface:
 
 from __future__ import annotations
 
+from .agent_timeline import (
+    AGENT_TIMELINE_SCHEMA,
+    build_agent_timeline,
+    enrich_breakdown_with_langfuse_timeline,
+)
 from .exporter import (
     BREAKDOWN_FILENAME,
     EXPORTER_VERSION,
@@ -28,10 +33,13 @@ from .schema import SCHEMA_VERSION
 from .session_package import package_session_artifacts
 
 __all__ = [
+    "AGENT_TIMELINE_SCHEMA",
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "SCHEMA_VERSION",
     "build",
+    "build_agent_timeline",
+    "enrich_breakdown_with_langfuse_timeline",
     "package_session_artifacts",
     "patch_breakdown_langfuse",
     "write_breakdown_json",
