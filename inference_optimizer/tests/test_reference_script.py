@@ -162,6 +162,30 @@ def test_discovery_exact(tmp_path):
     assert path.endswith("dsr1_fp8_mi300x.sh")
 
 
+def test_discovery_exact_underscore_model(tmp_path):
+    """Model aliases that contain ``_`` (qwen3_moe, qwen2_5_vl) must parse:
+    the precision/gpu fields sit to the right of the GPU anchor, so they are
+    not mistaken for the model's own underscore segments. Regression for the
+    GPU-anchored filename parser."""
+    root = _mk_tree(tmp_path, [
+        "qwen3_moe_bf16_mi300x.sh",
+        "qwen2_5_vl_fp8_mi300x.sh",
+    ])
+    path, tier = discover_reference_script(
+        str(root), model_path="/wekafs/models/qwen3_moe", precision="bf16",
+        gpu_type="mi300x", framework="vllm",
+    )
+    assert tier == "exact"
+    assert path.endswith("qwen3_moe_bf16_mi300x.sh")
+
+    path2, tier2 = discover_reference_script(
+        str(root), model_path="qwen2_5_vl", precision="fp8",
+        gpu_type="mi300x", framework="vllm",
+    )
+    assert tier2 == "exact"
+    assert path2.endswith("qwen2_5_vl_fp8_mi300x.sh")
+
+
 def test_discovery_version_mismatch_is_none(tmp_path):
     root = _mk_tree(tmp_path, ["minimaxm2.5_fp8_mi300x.sh"])
     path, tier = discover_reference_script(

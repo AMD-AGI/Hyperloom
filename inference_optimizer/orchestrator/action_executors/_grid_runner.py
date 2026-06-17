@@ -992,10 +992,21 @@ def compact_json_server_args(
     server dies at boot with an argparse/JSON error (observed: ``Value
     {"method": cannot be converted``). Re-serialising each JSON object/array
     with compact separators removes the SEPARATOR spaces only — ``json.dumps``
-    preserves spaces inside string values — so the value stays a single shell
-    word. This mirrors the deliberately space-free ``--hf-overrides`` injection
-    in ``_workload_envs`` and is the same round-trip-safe contract the dedup
-    helpers rely on.
+    deliberately preserves spaces *inside* string values. This mirrors the
+    deliberately space-free ``--hf-overrides`` injection in ``_workload_envs``
+    and is the same round-trip-safe contract the dedup helpers rely on.
+
+    LIMITATION — separator spaces only: the value becomes a single shell word
+    only when the JSON has no space *inside* a string value. A value like
+    ``{"model":"draft model name"}`` still contains a literal space, and under
+    Magpie's unquoted ``$EXTRA_VLLM_ARGS`` expansion that space word-splits no
+    matter what — there is no way to keep a space-bearing token as one word via
+    unquoted expansion. Such flags (string values holding spaces — a free-text
+    name, a path with spaces) are NOT supported: they are left intact rather
+    than corrupted (stripping the inner space would change the value), and the
+    server will still fail to boot. Callers must avoid space-bearing JSON string
+    values for vLLM/atom. See
+    ``test_compact_json_server_args_internal_space_unsupported``.
 
     No-op for sglang (its Magpie path differs and tolerates the quoting), for
     empty strings, and for strings with no ``{``/``[``. Any blob that does not

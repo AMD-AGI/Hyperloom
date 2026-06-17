@@ -1134,12 +1134,23 @@ class TestCompactJsonServerArgs:
         )
         assert len(out.split()) == 2
 
-    def test_string_internal_space_preserved(self):
+    def test_compact_json_server_args_internal_space_unsupported(self):
         # json.dumps keeps spaces INSIDE string values; only separators shrink.
+        # Such a value is therefore NOT made a single shell word — under
+        # Magpie's unquoted $EXTRA_VLLM_ARGS expansion it still word-splits, so
+        # this flag shape is explicitly unsupported (documented limitation). We
+        # leave the value intact (do not corrupt it by stripping inner spaces),
+        # but assert the limitation so callers are not misled into thinking it
+        # is boot-safe.
         out = _grid_runner.compact_json_server_args(
             '--speculative-config {"model": "draft model name"}', "vllm"
         )
+        # Value is preserved verbatim (separator space after ':' removed only).
         assert out == '--speculative-config {"model":"draft model name"}'
+        # ...but it still splits into MORE than the ideal 2 words: the two
+        # internal spaces of "draft model name" survive, so the shell sees
+        # ['--speculative-config', '{"model":"draft', 'model', 'name"}'].
+        assert len(out.split()) == 4
 
     def test_other_flags_around_json_untouched(self):
         out = _grid_runner.compact_json_server_args(

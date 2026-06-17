@@ -329,8 +329,17 @@ def render_reference_script(
 # ── discovery ──────────────────────────────────────────────────────────────
 
 # Filename pattern: {model}_{precision}_{gpu}[_{suffix}...].sh
+# Positional fallback only (see _parse_filename): the leading ``[^_]+`` cannot
+# represent a model alias that itself contains ``_`` (e.g. ``qwen3_moe``,
+# ``qwen2_5_vl``), so the GPU-anchored parse below is tried first.
 _FNAME_RE = re.compile(r"^([^_]+)_([^_]+)_([^_]+?)((?:_[^_]+)*)\.sh$")
 _KNOWN_FW_SUFFIXES = ("atom", "sglang", "vllm")
+
+# GPU segment anchor: the ``{gpu}`` field is drawn from a small, well-formed
+# vocabulary (AMD ``mi3xx``/``mi2xx``, NVIDIA ``b/h/a<NNN>``, ``g[bh]<NNN>``).
+# Anchoring on it lets ``{model}`` keep underscores — everything before the
+# precision token (which sits immediately left of the GPU) is the model alias.
+_GPU_TOKEN_RE = re.compile(r"^(mi\d{2,4}[a-z]?|[abh]\d{2,4}|g[bh]\d{2,4})$")
 
 
 def _normalize_model(s: str) -> str:
@@ -383,7 +392,32 @@ def models_compatible(reference_model: str, run_model: str) -> bool:
 
 
 def _parse_filename(name: str) -> tuple[str, str, str, set[str]] | None:
-    """Return (model_seg, precision, gpu, suffix_set) or None."""
+    """Return (model_seg, precision, gpu, suffix_set) or None.
+
+    Tries a GPU-anchored parse first so model aliases that contain ``_``
+    (``qwen3_moe``, ``qwen2_5_vl``) are recognised: the GPU token is found by
+    its known shape, the precision is the segment immediately to its left, the
+    model is everything before that, and any segments to its right are
+    suffixes. Falls back to the positional ``{model}_{precision}_{gpu}`` regex
+    when no GPU-shaped segment is present (preserving prior behaviour for
+    unfamiliar GPU names).
+    """
+    if not name.endswith(".sh"):
+        return None
+    stem = name[: -len(".sh")]
+    segments = stem.split("_")
+    # GPU-anchored: find a GPU-shaped segment with at least a model + precision
+    # to its left (index >= 2).
+    for i in range(2, len(segments)):
+        if _GPU_TOKEN_RE.match(segments[i].lower()):
+            model_seg = "_".join(segments[:i - 1])
+            precision = segments[i - 1]
+            gpu = segments[i]
+            suffixes = {s for s in segments[i + 1:] if s}
+            if model_seg and precision:
+                return model_seg, precision.lower(), gpu.lower(), suffixes
+            break
+    # Positional fallback (model alias must not contain ``_``).
     m = _FNAME_RE.match(name)
     if not m:
         return None
