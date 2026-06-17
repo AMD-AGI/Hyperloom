@@ -15,6 +15,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MONITOR = REPO_ROOT / "inference_optimizer" / "launcher" / "robustness_monitor.sh.example"
@@ -28,7 +30,15 @@ _MONITOR_VARS = (
     "REPO_ROOT",
     "MAX_HOURS",
     "MAGPIE_PYTHON",
+    "STARTUP_GRACE_SEC",
+    "STATE_FRESH_SEC",
+    "DEAD_CONFIRMATIONS",
+    "RECHECK_INTERVAL_SEC",
+    "POLL_INTERVAL_SEC",
 )
+
+# The multi-signal liveness probe reads ``/proc`` (the monitor host is Linux).
+_HAS_PROC = os.path.isdir("/proc")
 
 
 def _clean_env() -> dict[str, str]:
@@ -36,6 +46,26 @@ def _clean_env() -> dict[str, str]:
     for var in _MONITOR_VARS:
         env.pop(var, None)
     return env
+
+
+def _run_monitor_briefly(env, *, seconds=3.0):
+    """Start the monitor, let it poll for ``seconds``, then stop and capture output."""
+    proc = subprocess.Popen(
+        ["bash", str(MONITOR)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(seconds)
+    proc.terminate()
+    try:
+        out, err = proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+    return out, err
 
 
 def test_monitor_waits_for_delayed_launch_info(tmp_path):
@@ -219,3 +249,100 @@ def test_monitor_resume_is_pinned_to_resolved_session_dir():
     """Crash recovery must never use bare --resume, which auto-picks the latest session."""
     text = MONITOR.read_text(encoding="utf-8")
     assert '--resume --resume-from "$session_dir"' in text
+
+
+# --- Issue #592: robust liveness + cold-start grace (no spurious resume) -----
+
+
+@pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")
+def test_monitor_does_not_resume_during_startup_grace(tmp_path):
+    """Within the cold-start grace window a not-yet-alive session is never resumed."""
+    sess = tmp_path / "sess"
+    sess.mkdir(parents=True)
+    pidfile = tmp_path / "pid"
+    pidfile.write_text("999999\n", encoding="utf-8")  # dead pid
+
+    env = _clean_env()
+    env.update(
+        {
+            "PID_FILE": str(pidfile),
+            "REPO_ROOT": str(tmp_path),
+            "INFERENCE_OPTIMIZER_SESSION_DIR": str(sess),
+            "MAX_HOURS": "1",
+            "STARTUP_GRACE_SEC": "3600",  # never leave grace during the test
+            "RECHECK_INTERVAL_SEC": "1",
+        }
+    )
+
+    out, err = _run_monitor_briefly(env, seconds=3.0)
+    combined = out + err
+    assert "within startup grace" in combined, combined
+    assert "resuming" not in combined, combined
+
+
+@pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")
+def test_monitor_does_not_resume_when_owner_pid_alive(tmp_path):
+    """An alive owner pid in optimizer.lock keeps the monitor from resuming (past grace)."""
+    sess = tmp_path / "sess"
+    (sess / "runtime").mkdir(parents=True)
+    pidfile = tmp_path / "pid"
+    pidfile.write_text("999999\n", encoding="utf-8")  # wrapper pid is dead
+
+    live = subprocess.Popen(["sleep", "30"])
+    try:
+        (sess / "runtime" / "optimizer.lock").write_text(
+            json.dumps(
+                {
+                    "pid": live.pid,
+                    "hostname": "x",
+                    "started_at": "t",
+                    "heartbeat_at": "t",
+                }
+            ),
+            encoding="utf-8",
+        )
+        env = _clean_env()
+        env.update(
+            {
+                "PID_FILE": str(pidfile),
+                "REPO_ROOT": str(tmp_path),
+                "INFERENCE_OPTIMIZER_SESSION_DIR": str(sess),
+                "MAX_HOURS": "1",
+                "STARTUP_GRACE_SEC": "0",  # past grace immediately
+                "RECHECK_INTERVAL_SEC": "1",
+                "POLL_INTERVAL_SEC": "1",
+            }
+        )
+        out, err = _run_monitor_briefly(env, seconds=3.0)
+        combined = out + err
+        assert "resuming" not in combined, combined
+    finally:
+        live.terminate()
+        live.wait(timeout=10)
+
+
+@pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")
+def test_monitor_requires_consecutive_dead_confirmations(tmp_path):
+    """A single dead observation does not resume; the streak must reach DEAD_CONFIRMATIONS."""
+    sess = tmp_path / "sess"
+    sess.mkdir(parents=True)
+    pidfile = tmp_path / "pid"
+    pidfile.write_text("999999\n", encoding="utf-8")  # dead
+
+    env = _clean_env()
+    env.update(
+        {
+            "PID_FILE": str(pidfile),
+            "REPO_ROOT": str(tmp_path),
+            "INFERENCE_OPTIMIZER_SESSION_DIR": str(sess),
+            "MAX_HOURS": "1",
+            "STARTUP_GRACE_SEC": "0",
+            "DEAD_CONFIRMATIONS": "5",
+            "RECHECK_INTERVAL_SEC": "1",
+        }
+    )
+    # ~2.5s with a 1s recheck => a couple of confirmations, well short of 5.
+    out, err = _run_monitor_briefly(env, seconds=2.5)
+    combined = out + err
+    assert "dead signal 1/5" in combined, combined
+    assert "resuming" not in combined, combined

@@ -179,6 +179,7 @@ from .orchestrator.system_prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
+from .session_lock import SessionAlreadyRunning, SessionLock
 from .paths import (
     DEFAULT_SESSION_DIR,
     ENV_USER_DATA_PATH,
@@ -586,6 +587,42 @@ def _emit_launch_info(
         path.write_text(json.dumps(launch_info, indent=2))
         print(f"Launch info file: {path}")
     return launch_info
+
+
+# Exit code for "another optimizer already owns this session" (issue #592).
+# Distinct from the generic config/usage failures (``2``) so the robustness
+# monitor can tell a refused duplicate launch from a real misconfiguration.
+SESSION_BUSY_EXIT_CODE = 3
+
+
+def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
+    """Take the single-optimizer session lock or exit ``SESSION_BUSY_EXIT_CODE``.
+
+    Guards both fresh ``optimize`` and ``--resume`` against a second optimizer
+    attaching to the same ``session_dir`` (issue #592). When a live optimizer
+    already owns the session this refuses to run *before* any ``state.json`` /
+    lease mutation, so a misfiring robustness monitor can never corrupt the
+    shared session.
+
+    Args:
+        session_dir (Path): The resolved session root directory.
+
+    Returns:
+        SessionLock: The acquired lock; the caller must keep it referenced for
+            the optimizer's lifetime.
+    """
+    lock = SessionLock(session_dir)
+    try:
+        return lock.acquire()
+    except SessionAlreadyRunning as exc:
+        print(
+            f"ERROR: {exc}. Refusing to start a second optimizer on the same "
+            f"session (would corrupt shared leases / state.json). If the owner "
+            f"is truly dead, wait for the OS to drop the lock or remove "
+            f"{lock.path} before retrying.",
+            file=sys.stderr,
+        )
+        sys.exit(SESSION_BUSY_EXIT_CODE)
 
 
 def _clean_stale_aiter_locks(
@@ -2905,6 +2942,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         for sub in __import__("inference_optimizer.paths", fromlist=["_SESSION_SKELETON"])._SESSION_SKELETON:
             (session_dir / sub).mkdir(parents=True, exist_ok=True)
 
+        # Single-optimizer guard (issue #592): take the session lock before any
+        # state.json / lease access so a misfiring monitor cannot attach a
+        # second optimizer to this session. Held for the whole run.
+        session_lock = _acquire_session_lock_or_exit(session_dir)
+
         try:
             manifest = load_manifest(session_dir)
         except FileNotFoundError as exc:
@@ -3171,6 +3213,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
         # session_dir defaults to <workspace_root>/<model>/<UTC ts>/ (INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat for legacy).
         session_dir = make_session_dir(model_name=args.model)
+        # Single-optimizer guard (issue #592): a fresh per-session dir is
+        # normally uncontended, but take the lock here too so the contract
+        # ("one optimizer owns a session") holds uniformly and the owner pid is
+        # published for the robustness monitor.
+        session_lock = _acquire_session_lock_or_exit(session_dir)
         manifest = write_manifest(session_dir, args=args)
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
@@ -3547,6 +3594,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         await coordinator.stop()
+        # Drop the single-optimizer session lock (issue #592) once the
+        # coordinator has released its leases. The OS would drop it on process
+        # exit anyway; this just frees it promptly for an intentional resume.
+        session_lock.release()
         # End-of-session safety net: always materialize session_breakdown.json (best-effort; never mask stop_reason).
         # Skip when the CLOSE sequencer already wrote it (close_sequence_done is locked in CORE_STATE_FIELDS).
         sequencer_done = getattr(
