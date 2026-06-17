@@ -162,11 +162,7 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
     for c in conv:
         conv_by_key[lfmap.pair_key(c)] = c
 
-    internal_id = str(
-        manifest.get("session_id")
-        or (llm[0].get("session_id") if llm else "")
-        or session_dir.name
-    )
+    internal_id = str(manifest.get("session_id") or (llm[0].get("session_id") if llm else "") or session_dir.name)
     # Correlate on claw_session_id (fallback internal id) so backfill and the
     # live emitter land on one Langfuse trace.
     seed = lfmap.correlation_seed(manifest, internal_id)
@@ -184,13 +180,15 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
         conv_row = conv_by_key.get(lfmap.pair_key(row))
         if conv_row is not None:
             paired += 1
-        gens.append({
-            "ts": row.get("ts"),
-            "row": row,
-            "input": (conv_row or {}).get("prompt"),
-            "output": (conv_row or {}).get("response"),
-            "has_text": conv_row is not None,
-        })
+        gens.append(
+            {
+                "ts": row.get("ts"),
+                "row": row,
+                "input": (conv_row or {}).get("prompt"),
+                "output": (conv_row or {}).get("response"),
+                "has_text": conv_row is not None,
+            }
+        )
 
     return {
         "trace_id_seed": seed,
@@ -257,39 +255,37 @@ def print_plan(plan: dict[str, Any]) -> None:
     """
     s = plan["stats"]
     print(f"Trace: {plan['name']}  (session_id={plan['session_id']})")
-    print(f"  claw_session_id = {plan.get('claw_session_id') or '(none)'}  "
-          f"internal_session_id = {plan.get('internal_session_id')}")
+    print(
+        f"  claw_session_id = {plan.get('claw_session_id') or '(none)'}  "
+        f"internal_session_id = {plan.get('internal_session_id')}"
+    )
     print(f"  trace_id = {lfmap.derive_trace_id(plan['trace_id_seed'])}")
-    print(f"  llm_calls={s['llm_calls']} conversations={s['conversations']} "
-          f"decisions={s['decisions']} "
-          f"generations_with_text={s['generations_with_text']} "
-          f"phases={s['phase_count']}")
+    print(
+        f"  llm_calls={s['llm_calls']} conversations={s['conversations']} "
+        f"decisions={s['decisions']} "
+        f"generations_with_text={s['generations_with_text']} "
+        f"phases={s['phase_count']}"
+    )
     print("  metadata:", json.dumps(plan["metadata"], ensure_ascii=False))
     print("  Phases / agents / generations:")
     for phase, agents in plan["phases"].items():
         lo, hi = _phase_time_bounds(agents)
         total = sum(len(g) for g in agents.values())
-        print(f"    [{phase}] {total} gen(s) across {len(agents)} agent(s), "
-              f"{lo} .. {hi}")
+        print(f"    [{phase}] {total} gen(s) across {len(agents)} agent(s), {lo} .. {hi}")
         for agent, gens in agents.items():
             models = sorted({str(g["row"].get("model")) for g in gens})
             with_text = sum(1 for g in gens if g["has_text"])
-            print(f"        - {agent}: {len(gens)} gen(s), {with_text} with text, "
-                  f"models={models}")
-    outcomes = [
-        (d.get("decision") or {}).get("outcome") for d in plan["decisions"]
-    ]
+            print(f"        - {agent}: {len(gens)} gen(s), {with_text} with text, models={models}")
+    outcomes = [(d.get("decision") or {}).get("outcome") for d in plan["decisions"]]
     keep = outcomes.count("KEEP")
     rev = outcomes.count("REVERT")
     nop = outcomes.count("no_promote")
-    gainful = sum(
-        1 for d in plan["decisions"]
-        if (d.get("decision") or {}).get("gain_pct") is not None
+    gainful = sum(1 for d in plan["decisions"] if (d.get("decision") or {}).get("gain_pct") is not None)
+    print(
+        f"  Scores: {len(plan['decisions'])} decisions "
+        f"(KEEP={keep} REVERT={rev} no_promote={nop}; gain_pct set={gainful})"
     )
-    print(f"  Scores: {len(plan['decisions'])} decisions "
-          f"(KEEP={keep} REVERT={rev} no_promote={nop}; gain_pct set={gainful})")
-    print(f"  Recipe-snapshot reads: {len(plan.get('recipe_audit') or [])} "
-          f"audit row(s)")
+    print(f"  Recipe-snapshot reads: {len(plan.get('recipe_audit') or [])} audit row(s)")
 
 
 # ---------------------------------------------------------------------------
@@ -347,14 +343,18 @@ def ingest(plan: dict[str, Any]) -> int:
         p_lo, p_hi = _phase_time_bounds(agents)
         phase_span = _start_obs(
             root,
-            name=f"phase:{phase}", as_type="span", start_time=p_lo or trace_start,
+            name=f"phase:{phase}",
+            as_type="span",
+            start_time=p_lo or trace_start,
             metadata={"phase": phase, "agent_count": len(agents)},
         )
         for agent, gens in agents.items():
             a_lo, a_hi = _time_bounds(gens)
             agent_span = _start_obs(
                 phase_span,
-                name=f"agent:{agent}", as_type="span", start_time=a_lo or p_lo or trace_start,
+                name=f"agent:{agent}",
+                as_type="span",
+                start_time=a_lo or p_lo or trace_start,
                 metadata={"phase": phase, "agent": agent, "generation_count": len(gens)},
             )
             agent_spans[(phase, agent)] = agent_span
@@ -370,7 +370,9 @@ def ingest(plan: dict[str, Any]) -> int:
                     input=g.get("input"),
                     output=g.get("output"),
                     metadata=lfmap.generation_metadata(
-                        row, phase=phase, has_text=g["has_text"],
+                        row,
+                        phase=phase,
+                        has_text=g["has_text"],
                     ),
                     usage_details=lfmap.usage_details(row),
                 )
@@ -388,21 +390,28 @@ def ingest(plan: dict[str, Any]) -> int:
         ra_lo = min(ra_times) if ra_times else last_end
         ra_span = _start_obs(
             root,
-            name=f"agent:recipe_kb", as_type="span", start_time=ra_lo or trace_start,
-            metadata={"phase": UNPHASED, "agent": "recipe_kb",
-                      "read_count": len(recipe_audit)},
+            name="agent:recipe_kb",
+            as_type="span",
+            start_time=ra_lo or trace_start,
+            metadata={"phase": UNPHASED, "agent": "recipe_kb", "read_count": len(recipe_audit)},
         )
         for r in recipe_audit:
             r_start = lfmap.parse_ts(r.get("ts"))
             method = str(r.get("method") or "read")
             obs = _start_obs(
                 ra_span,
-                name=f"kb:recipe_snapshot:{method}", as_type="span",
-                start_time=r_start, input=None, output=r,
-                metadata={"kind": "recipe_snapshot", "method": method,
-                          "remote": r.get("remote"),
-                          "resolution": r.get("resolution"),
-                          "hit": bool(r.get("hit"))},
+                name=f"kb:recipe_snapshot:{method}",
+                as_type="span",
+                start_time=r_start,
+                input=None,
+                output=r,
+                metadata={
+                    "kind": "recipe_snapshot",
+                    "method": method,
+                    "remote": r.get("remote"),
+                    "resolution": r.get("resolution"),
+                    "hit": bool(r.get("hit")),
+                },
             )
             _end_obs(obs, r_start)
         _end_obs(ra_span, (max(ra_times) if ra_times else None) or trace_start)
@@ -439,16 +448,20 @@ def ingest(plan: dict[str, Any]) -> int:
             try:
                 if span is not None and hasattr(span, "score"):
                     span.score(
-                        name=score["name"], value=score["value"],
+                        name=score["name"],
+                        value=score["value"],
                         data_type=score["data_type"],
                         comment=score.get("comment") or "",
                         metadata=meta,
                     )
                 else:
                     client.create_score(
-                        name=score["name"], value=score["value"],
-                        trace_id=trace_id, data_type=score["data_type"],
-                        comment=score.get("comment") or "", metadata=meta,
+                        name=score["name"],
+                        value=score["value"],
+                        trace_id=trace_id,
+                        data_type=score["data_type"],
+                        comment=score.get("comment") or "",
+                        metadata=meta,
                     )
             except Exception:  # noqa: BLE001
                 log.exception("create_score failed for decision %d", i)
@@ -473,10 +486,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--session-dir", type=Path, required=True,
-                   help="Hyperloom session directory (contains reports/trace/).")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Parse + print the plan; no SDK / no network.")
+    p.add_argument(
+        "--session-dir", type=Path, required=True, help="Hyperloom session directory (contains reports/trace/)."
+    )
+    p.add_argument("--dry-run", action="store_true", help="Parse + print the plan; no SDK / no network.")
     p.add_argument("--verbose", "-v", action="count", default=0)
     return p
 
@@ -492,8 +505,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
-        level=(logging.DEBUG if args.verbose >= 2
-               else logging.INFO if args.verbose == 1 else logging.WARNING),
+        level=(logging.DEBUG if args.verbose >= 2 else logging.INFO if args.verbose == 1 else logging.WARNING),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     sd = args.session_dir.resolve()

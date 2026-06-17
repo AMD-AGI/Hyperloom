@@ -277,10 +277,12 @@ class HTTPKBClient:
                 with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
                     payload = resp.read().decode("utf-8") or "{}"
                     body_obj = json.loads(payload) if payload else {}
-                    registry.counter(CRITIC_KB_WRITE_TOTAL).inc({
-                        "endpoint": endpoint_label,
-                        "status": str(resp.status),
-                    })
+                    registry.counter(CRITIC_KB_WRITE_TOTAL).inc(
+                        {
+                            "endpoint": endpoint_label,
+                            "status": str(resp.status),
+                        }
+                    )
                     registry.histogram(CRITIC_KB_WRITE_DURATION_SECONDS).observe(
                         time.time() - start, {"endpoint": endpoint_label}
                     )
@@ -289,9 +291,12 @@ class HTTPKBClient:
                 # 4xx → don't retry; let caller dead-letter.
                 status = getattr(exc, "code", 0)
                 err_body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-                registry.counter(CRITIC_KB_WRITE_TOTAL).inc({
-                    "endpoint": endpoint_label, "status": str(status),
-                })
+                registry.counter(CRITIC_KB_WRITE_TOTAL).inc(
+                    {
+                        "endpoint": endpoint_label,
+                        "status": str(status),
+                    }
+                )
                 if status == 404:
                     raise KBNotFoundError(f"{path} 404: {err_body}") from exc
                 if status == 409:
@@ -304,9 +309,7 @@ class HTTPKBClient:
             if attempt > self.retry_max:
                 break
             self._sleep(self._backoff_for(attempt))
-        raise KBTransportError(
-            f"{path}: failed after {self.retry_max} retries — last_error={last_error!r}"
-        )
+        raise KBTransportError(f"{path}: failed after {self.retry_max} retries — last_error={last_error!r}")
 
     def _backoff_for(self, attempt: int) -> float:
         """Compute the sleep duration before the next retry.

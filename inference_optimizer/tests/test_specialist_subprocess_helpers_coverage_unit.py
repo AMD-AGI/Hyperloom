@@ -2,14 +2,13 @@
 
 """Coverage for specialist_subprocess helpers: worktree pick/setup/teardown,
 claude argv assembly, patch discovery, and done-file parse/unwrap."""
+
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from inference_optimizer.orchestrator import specialist_subprocess as ss
 from inference_optimizer.orchestrator.specialist_subprocess import (
@@ -198,11 +197,13 @@ def test_read_done_flat_dict(tmp_path: Path) -> None:
 def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
     p = tmp_path / "done.json"
     p.write_text(
-        json.dumps({
-            "intent_type": "specialist_done",
-            "domain": "kernel_switch_specialist",
-            "payload": {"proposal_set": [{"name": "v1"}], "empty": False},
-        }),
+        json.dumps(
+            {
+                "intent_type": "specialist_done",
+                "domain": "kernel_switch_specialist",
+                "payload": {"proposal_set": [{"name": "v1"}], "empty": False},
+            }
+        ),
         encoding="utf-8",
     )
     out = SpecialistSubprocessDispatcher._read_done(p)

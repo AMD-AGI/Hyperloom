@@ -37,8 +37,7 @@ def winner_decision(
     if ratio < req.thresholds.min_throughput_ratio:
         return (
             False,
-            f"throughput ratio {ratio:.4f} below required "
-            f"{req.thresholds.min_throughput_ratio:.4f}",
+            f"throughput ratio {ratio:.4f} below required {req.thresholds.min_throughput_ratio:.4f}",
         )
     if req.baseline.accuracy is not None:
         if accuracy is None:
@@ -47,8 +46,7 @@ def winner_decision(
         if drop > req.thresholds.max_accuracy_drop:
             return (
                 False,
-                f"accuracy drop {drop:.4f} exceeds max "
-                f"{req.thresholds.max_accuracy_drop:.4f}",
+                f"accuracy drop {drop:.4f} exceeds max {req.thresholds.max_accuracy_drop:.4f}",
             )
     if completed and "/" in completed:
         left, _, right = completed.partition("/")

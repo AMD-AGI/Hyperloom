@@ -18,7 +18,6 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from inference_optimizer import cli
 
@@ -153,10 +152,7 @@ def test_detection_candidates_exclude_wekafs_host_mounts():
     # The preflight detection loop must not hard-code these read-only mounts.
     assert 'Path("/wekafs/hyperloom/InferenceX")' not in src
     assert 'Path("/opt/hyperloom/InferenceX")' not in src
-    assert (
-        'Path("/wekafs/fully-local/inference_optimization/InferenceX")'
-        not in src
-    )
+    assert 'Path("/wekafs/fully-local/inference_optimization/InferenceX")' not in src
 
 
 # ---------------------------------------------------------------------------

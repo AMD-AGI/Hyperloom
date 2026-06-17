@@ -13,7 +13,6 @@ import re
 from pathlib import Path
 
 
-
 # Files whose content is rendered into LLM context.
 _PROMPT_ROOTS = (
     Path("inference_optimizer/actions"),
@@ -22,9 +21,7 @@ _PROMPT_ROOTS = (
 
 # Code files whose string literals reach the orchestration prompt via
 # ``SharedState.format_for_prompt()``.
-_PROMPT_AUX_FILES = (
-    Path("inference_optimizer/orchestrator/shared_state.py"),
-)
+_PROMPT_AUX_FILES = (Path("inference_optimizer/orchestrator/shared_state.py"),)
 
 # Allow-list: these files document the denial rule and necessarily quote the
 # forbidden pattern.
@@ -94,8 +91,7 @@ def test_no_prompt_instructs_llm_to_propose_analysis_action():
     assert not hits, (
         "LLM-facing prompts still instruct the model to propose "
         "roofline/profile (PolicyGate will deny on every session). "
-        "Offending sites:\n  "
-        + "\n  ".join(f"{p}:{ln}: {body!r}" for p, ln, body in hits)
+        "Offending sites:\n  " + "\n  ".join(f"{p}:{ln}: {body!r}" for p, ln, body in hits)
     )
 
 
@@ -111,8 +107,4 @@ def test_shared_state_empty_analysis_md_does_not_tell_llm_to_propose():
     assert "propose `profile`" not in low
     assert "propose roofline" not in low
     assert "propose profile" not in low
-    assert (
-        "auto-enqueued" in low
-        or "coordinator" in low
-        or "phase_incompatible" in low
-    )
+    assert "auto-enqueued" in low or "coordinator" in low or "phase_incompatible" in low

@@ -18,7 +18,6 @@ from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
 
-
 @dataclass
 class AiterJitConfig:
     """Tunables for :class:`AiterJitDetector`."""
@@ -55,19 +54,13 @@ class AiterJitDetector:
         # Disk-backed cross-tick state; required for the regression check under subprocess-per-tick transport.
         loaded = state_view.load() if state_view is not None else {}
         last_so = loaded.get("last_so_count")
-        self._last_so_count: int | None = (
-            int(last_so) if isinstance(last_so, (int, float)) else None
-        )
+        self._last_so_count: int | None = int(last_so) if isinstance(last_so, (int, float)) else None
         try:
-            self._last_build_count: int = max(
-                0, int(loaded.get("last_build_count", 0))
-            )
+            self._last_build_count: int = max(0, int(loaded.get("last_build_count", 0)))
         except (TypeError, ValueError):
             self._last_build_count = 0
         try:
-            self._stale_build_streak: int = max(
-                0, int(loaded.get("stale_build_streak", 0))
-            )
+            self._stale_build_streak: int = max(0, int(loaded.get("stale_build_streak", 0)))
         except (TypeError, ValueError):
             self._stale_build_streak = 0
 
@@ -75,14 +68,18 @@ class AiterJitDetector:
         """Write the cross-tick JIT counters to the state view, if any."""
         if self._state_view is None:
             return
-        self._state_view.save({
-            "last_so_count": self._last_so_count,
-            "last_build_count": self._last_build_count,
-            "stale_build_streak": self._stale_build_streak,
-        })
+        self._state_view.save(
+            {
+                "last_so_count": self._last_so_count,
+                "last_build_count": self._last_build_count,
+                "stale_build_streak": self._stale_build_streak,
+            }
+        )
 
     def evaluate(
-        self, ctx: ReactorContext, data: SourceData,
+        self,
+        ctx: ReactorContext,
+        data: SourceData,
     ) -> list[Symptom]:
         """Evaluate the JIT-cache regression and stuck-build rules for this tick.
 
@@ -136,7 +133,10 @@ class AiterJitDetector:
         return symptoms
 
     def _regression_symptom(
-        self, info: dict[str, Any], *, prev: int,
+        self,
+        info: dict[str, Any],
+        *,
+        prev: int,
     ) -> Symptom:
         """Build the ``aiter_jit_regressed`` symptom for a cache that went cold.
 
@@ -199,10 +199,7 @@ class AiterJitDetector:
             },
             subject={},
             source="local",
-            suggestion=(
-                "observe; if it persists, suggest cleaning "
-                "<jit_dir>/build/ manually between runs"
-            ),
+            suggestion=("observe; if it persists, suggest cleaning <jit_dir>/build/ manually between runs"),
         )
 
 

@@ -124,6 +124,7 @@ def test_critic_prompt_includes_phase_review_contract(registry):
 def test_role_md_files_carry_phase_awareness():
     """Static rules fragments + Robustness markdown carry phase awareness."""
     from inference_optimizer.paths import asset_system_prompts_dir
+
     root = asset_system_prompts_dir()
     for name in ("orchestration", "kernel", "critic", "robustness"):
         body = (root / f"{name}.md").read_text(encoding="utf-8")
@@ -142,13 +143,15 @@ def test_role_md_files_carry_phase_awareness():
 def test_shared_state_phase_status_summary_renders_compact_block():
     s = SharedState(max_minutes=60)
     s.record_phase_transition(
-        to_phase="EXPLORE", reason="prelude_done",
+        to_phase="EXPLORE",
+        reason="prelude_done",
         evidence={"baseline_tput": 100},
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=1_000_000.0,
     )
     out = s.to_phase_status_summary(
-        budget_pct={"EXPLORE": 0.5}, now_unix=1_000_120.0,
+        budget_pct={"EXPLORE": 0.5},
+        now_unix=1_000_120.0,
     )
     assert "phase     : EXPLORE" in out
     assert "entered" in out
@@ -162,8 +165,11 @@ def test_shared_state_phase_status_summary_renders_compact_block():
 def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
     s = SharedState(max_minutes=0)
     s.record_phase_transition(
-        to_phase="EXPLORE", reason="prelude_done", evidence={},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+        to_phase="EXPLORE",
+        reason="prelude_done",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1.0,
     )
     out = s.to_phase_status_summary(now_unix=10.0)
     assert "unlimited run" in out.lower()
@@ -172,12 +178,18 @@ def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
 def test_shared_state_phase_budget_telemetry_reports_per_phase_elapsed():
     s = SharedState(max_minutes=60)
     s.record_phase_transition(
-        to_phase="PRELUDE", reason="phase_entered", evidence={},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1_000_000.0,
+        to_phase="PRELUDE",
+        reason="phase_entered",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1_000_000.0,
     )
     s.record_phase_transition(
-        to_phase="EXPLORE", reason="prelude_done", evidence={},
-        ts="2026-05-19T00:01:00+00:00", ts_unix=1_000_060.0,
+        to_phase="EXPLORE",
+        reason="prelude_done",
+        evidence={},
+        ts="2026-05-19T00:01:00+00:00",
+        ts_unix=1_000_060.0,
     )
     out = s.to_phase_budget_telemetry(now_unix=1_000_300.0)
     # PRELUDE: 60s elapsed, cap 180s (5% of 3600s), used 33%.
@@ -192,16 +204,25 @@ def test_shared_state_phase_budget_telemetry_includes_framework_pr():
     # Regression: the renderer must iterate PHASE_NAMES so FRAMEWORK_PR isn't swallowed.
     s = SharedState(max_minutes=60)
     s.record_phase_transition(
-        to_phase="PRELUDE", reason="phase_entered", evidence={},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1_000_000.0,
+        to_phase="PRELUDE",
+        reason="phase_entered",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1_000_000.0,
     )
     s.record_phase_transition(
-        to_phase="FRAMEWORK_PR", reason="prelude_done", evidence={},
-        ts="2026-05-19T00:01:00+00:00", ts_unix=1_000_060.0,
+        to_phase="FRAMEWORK_PR",
+        reason="prelude_done",
+        evidence={},
+        ts="2026-05-19T00:01:00+00:00",
+        ts_unix=1_000_060.0,
     )
     s.record_phase_transition(
-        to_phase="EXPLORE", reason="framework_pr_phase_done", evidence={},
-        ts="2026-05-19T00:03:00+00:00", ts_unix=1_000_180.0,
+        to_phase="EXPLORE",
+        reason="framework_pr_phase_done",
+        evidence={},
+        ts="2026-05-19T00:03:00+00:00",
+        ts_unix=1_000_180.0,
     )
     out = s.to_phase_budget_telemetry(now_unix=1_000_300.0)
     assert "PRELUDE: elapsed=60s" in out
@@ -218,10 +239,8 @@ def test_shared_state_warm_start_summary_renders_recipe_and_pitfalls():
     s = SharedState()
     s.warm_start_recipe = {
         "workload": "deepseek-v4-pro",
-        "hw":       "mi300x",
-        "raw":      "recipe_id=42 stack=sglang/0.4.10\n"
-                    "best_config={'foo':'bar'}\n"
-                    "what_worked=[A, B]",
+        "hw": "mi300x",
+        "raw": "recipe_id=42 stack=sglang/0.4.10\nbest_config={'foo':'bar'}\nwhat_worked=[A, B]",
     }
     s.warm_start_pitfalls = [
         {"raw": "OOM on fp8 expert_dtype — switch to fp4"},
@@ -246,16 +265,20 @@ def _silent_intent() -> Intent:
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
     from inference_optimizer.orchestrator.backends import (
-        MockBackend, MockCriticBackend, MockKernelBackend, MockRobustnessBackend,
+        MockBackend,
+        MockCriticBackend,
+        MockKernelBackend,
+        MockRobustnessBackend,
         ScriptedPlan,
     )
     from inference_optimizer.orchestrator.coordinator import Coordinator
+
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel":        MockKernelBackend(),
-        "critic":        MockCriticBackend(),
-        "robustness":    MockRobustnessBackend(),
+        "kernel": MockKernelBackend(),
+        "critic": MockCriticBackend(),
+        "robustness": MockRobustnessBackend(),
     }
     return Coordinator(session_dir, backends=backends)
 
@@ -277,14 +300,15 @@ async def test_compose_prompt_emits_phase_block_for_every_role(
 
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_renders_warm_start_when_set(
-    coordinator_with_mocks, session_dir,
+    coordinator_with_mocks,
+    session_dir,
 ):
     c = coordinator_with_mocks
     try:
         c.shared_state.warm_start_recipe = {
             "workload": "qwen3-8b",
-            "hw":       "mi325x",
-            "raw":      "recipe_id=99 best_throughput=2100",
+            "hw": "mi325x",
+            "raw": "recipe_id=99 best_throughput=2100",
         }
         c.shared_state.save(session_dir)
         prompt = await c._compose_prompt("orchestration")
@@ -323,7 +347,8 @@ async def test_compose_prompt_robustness_renders_specialist_health(
 
 @pytest.mark.asyncio
 async def test_compose_prompt_robustness_includes_budget_telemetry(
-    coordinator_with_mocks, session_dir,
+    coordinator_with_mocks,
+    session_dir,
 ):
     c = coordinator_with_mocks
     try:

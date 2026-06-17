@@ -51,20 +51,21 @@ class SessionBreakdownExecutor:
         if session_dir is None:
             return {
                 "status": "failed",
-                "error":  "session_breakdown_executor: could not resolve session_dir",
+                "error": "session_breakdown_executor: could not resolve session_dir",
             }
 
         params = ctx.task.params or {}
         output_path = params.get("output_path")
 
         from ...breakdown import build, write_breakdown_json
+
         try:
             target = write_breakdown_json(session_dir, output_path=output_path)
         except Exception as exc:  # noqa: BLE001
             log.exception("session_breakdown export failed")
             return {
                 "status": "failed",
-                "error":  f"{type(exc).__name__}: {exc}",
+                "error": f"{type(exc).__name__}: {exc}",
             }
 
         # Surface warnings + size to the bus event.
@@ -79,10 +80,10 @@ class SessionBreakdownExecutor:
             len(warnings),
         )
         return {
-            "status":         "succeeded",
+            "status": "succeeded",
             "breakdown_path": str(target),
-            "warnings":       warnings,
-            "size_bytes":     int(target.stat().st_size) if target.exists() else 0,
+            "warnings": warnings,
+            "size_bytes": int(target.stat().st_size) if target.exists() else 0,
         }
 
     @staticmethod
@@ -104,6 +105,7 @@ class SessionBreakdownExecutor:
         if params.get("session_dir"):
             return Path(params["session_dir"])
         from ...paths import session_dir as _sd
+
         candidate = _sd()
         # manifest.json (not state.json) so a fresh session yields a partial
         # breakdown.

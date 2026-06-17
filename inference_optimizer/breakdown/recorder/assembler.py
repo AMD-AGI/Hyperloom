@@ -165,9 +165,9 @@ def _compose_critic_robustness(out: dict[str, Any]) -> None:
     critic_iters = critic_iters if isinstance(critic_iters, list) else []
     rob_signals = rob_signals if isinstance(rob_signals, list) else []
     out["critic_robustness"] = {
-        "critic_iterations":  critic_iters,
+        "critic_iterations": critic_iters,
         "robustness_signals": rob_signals,
-        "kb_writes_summary":  _kb_writes_summary(critic_iters),
+        "kb_writes_summary": _kb_writes_summary(critic_iters),
     }
 
 
@@ -206,14 +206,8 @@ def _compose_kernel_journey(out: dict[str, Any]) -> None:
             if kid:
                 discovery_by_kid[kid] = hk
 
-    dispatch_by_kid = {
-        str(r.get("kernel_id") or ""): r for r in dispatch_rows
-        if str(r.get("kernel_id") or "")
-    }
-    e2e_by_kid = {
-        str(r.get("kernel_id") or ""): r for r in e2e_rows
-        if str(r.get("kernel_id") or "")
-    }
+    dispatch_by_kid = {str(r.get("kernel_id") or ""): r for r in dispatch_rows if str(r.get("kernel_id") or "")}
+    e2e_by_kid = {str(r.get("kernel_id") or ""): r for r in e2e_rows if str(r.get("kernel_id") or "")}
     attempts_by_kid: dict[str, list[dict[str, Any]]] = {}
     for r in backend_rows:
         kid = str(r.get("kernel_id") or "")
@@ -232,19 +226,21 @@ def _compose_kernel_journey(out: dict[str, Any]) -> None:
         disp = dispatch_by_kid.get(kid, {})
         atts = attempts_by_kid.get(kid, [])
         kernel_e2e = e2e_by_kid.get(kid, {})
-        kernels.append({
-            "kernel_id":        kid,
-            "name":             str(disc.get("name") or ""),
-            "gpu_pct":          disc.get("gpu_pct"),
-            "bound_type":       str(disc.get("bound_type") or ""),
-            "source_file":      disc.get("source_file"),
-            "micro_speedup":    _best_micro_speedup(atts),
-            "discovery":        disc,
-            "dispatch":         disp,
-            "backend_attempts": atts,
-            "e2e":              kernel_e2e,
-            "outcome":          _kernel_outcome(disp, atts, kernel_e2e),
-        })
+        kernels.append(
+            {
+                "kernel_id": kid,
+                "name": str(disc.get("name") or ""),
+                "gpu_pct": disc.get("gpu_pct"),
+                "bound_type": str(disc.get("bound_type") or ""),
+                "source_file": disc.get("source_file"),
+                "micro_speedup": _best_micro_speedup(atts),
+                "discovery": disc,
+                "dispatch": disp,
+                "backend_attempts": atts,
+                "e2e": kernel_e2e,
+                "outcome": _kernel_outcome(disp, atts, kernel_e2e),
+            }
+        )
 
     def _gpu(k: dict[str, Any]) -> float:
         """Return a kernel's gpu_pct as a float (``-inf`` when absent/unparseable).
@@ -265,7 +261,7 @@ def _compose_kernel_journey(out: dict[str, Any]) -> None:
     kernels.sort(key=_gpu, reverse=True)
     out["kernel_journey"] = {
         "discovery_runs": discovery_runs,
-        "kernels":        kernels,
+        "kernels": kernels,
     }
 
 

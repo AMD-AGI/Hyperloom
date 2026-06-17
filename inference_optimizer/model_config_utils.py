@@ -42,7 +42,9 @@ def _load_model_config_dict(model_path: str) -> dict | None:
         return None
     if not isinstance(data, dict):
         logging.warning(
-            "model_config_not_a_dict: %s (got %s)", cfg_path, type(data).__name__,
+            "model_config_not_a_dict: %s (got %s)",
+            cfg_path,
+            type(data).__name__,
         )
         return None
     return data

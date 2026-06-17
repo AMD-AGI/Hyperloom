@@ -81,6 +81,7 @@ class QuantSkillRunResult:
 # counter file
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _read_counter(workspace: Path) -> int:
     """Read the persisted requantize-attempt counter.
 
@@ -117,6 +118,7 @@ def _bump_counter(workspace: Path) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 # interactive prompt
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _resolve_interactive(interactive: bool | None) -> bool:
     """Resolve the effective interactive mode.
@@ -160,6 +162,7 @@ def _ask_operator(message: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # retry decision
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _has_fix_hypothesis(workspace: Path, attempt_number: int) -> bool:
     """Look for the hypothesis written by SKILL.md for the NEXT attempt.
@@ -241,8 +244,7 @@ def _decide_next_step(
     if outcome == OutcomeId.eval_gap_exceeded:
         # #21: decision point, not a re-run candidate.
         if interactive and _ask_operator(
-            f"[quantization-agent] Eval gap exceeded ({outcome}). "
-            f"Accept partial result? [y/N]: "
+            f"[quantization-agent] Eval gap exceeded ({outcome}). Accept partial result? [y/N]: "
         ):
             return _RetryDecision(
                 retry=False,
@@ -275,6 +277,7 @@ def _decide_next_step(
 # ─────────────────────────────────────────────────────────────────────────────
 # main entry
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 async def quantize_via_prompt(
     prompt: str,
@@ -322,7 +325,8 @@ async def quantize_via_prompt(
     quark_root_path = Path(quark_root).expanduser()
     if not quark_root_path.is_dir():
         return _build_failed_bootstrap_result(
-            workspace_path, OutcomeId.quark_root_missing,
+            workspace_path,
+            OutcomeId.quark_root_missing,
             f"quark_root path does not exist or is not a directory: {quark_root_path} "
             f"(set $QUARK_ROOT or pass quark_root=; default is {DEFAULT_QUARK_ROOT}"
             + (f", clone from {DEFAULT_QUARK_GIT_URL}" if DEFAULT_QUARK_GIT_URL else "")
@@ -389,9 +393,7 @@ async def quantize_via_prompt(
             )
         attempt_n += 1
 
-    assessment = build_assessment(
-        attempts_list, workspace=workspace_path, artifacts=artifacts, notes=tuple(notes)
-    )
+    assessment = build_assessment(attempts_list, workspace=workspace_path, artifacts=artifacts, notes=tuple(notes))
 
     status = derive_status(assessment, artifacts)  # type: ignore[arg-type]
     quantized_model_dir = (

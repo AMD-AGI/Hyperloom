@@ -68,9 +68,7 @@ def _now_iso() -> str:
 # ``params`` resolves cleanly to substrate knobs.
 _LEVER_ENV_KEYS: tuple[str, ...] = ("extra_envs", "envs", "env")
 _LEVER_ARG_KEYS: tuple[str, ...] = ("extra_server_args", "server_args", "args")
-_LEVER_CONTAINER_KEYS: frozenset[str] = frozenset(
-    _LEVER_ENV_KEYS + _LEVER_ARG_KEYS + ("grid",)
-)
+_LEVER_CONTAINER_KEYS: frozenset[str] = frozenset(_LEVER_ENV_KEYS + _LEVER_ARG_KEYS + ("grid",))
 
 
 def _proposal_levers(
@@ -113,9 +111,7 @@ def _proposal_levers(
     args = " ".join(args_parts).strip()
 
     params: dict[str, Any] = {
-        k: v
-        for k, v in src.items()
-        if k not in _LEVER_CONTAINER_KEYS and isinstance(v, (str, int, float, bool))
+        k: v for k, v in src.items() if k not in _LEVER_CONTAINER_KEYS and isinstance(v, (str, int, float, bool))
     }
     return params, envs, args
 
@@ -129,33 +125,39 @@ ACTION_CLASS_PATCH_LANDING = "patch_landing"
 ACTION_CLASS_EVIDENCE_PRODUCER = "evidence_producer"
 ACTION_CLASS_FRAMEWORK_OP = "framework_op"
 
-_PATCH_LANDING_ACTIONS: frozenset[str] = frozenset({
-    "integrate",
-    "integrate_patch",
-    "apply_patch",
-})
+_PATCH_LANDING_ACTIONS: frozenset[str] = frozenset(
+    {
+        "integrate",
+        "integrate_patch",
+        "apply_patch",
+    }
+)
 
 # Actions that produce the evidence patch_landing expects; explicit so it's
 # clear what Critic default-approves when KB priors are silent.
-_EVIDENCE_PRODUCER_ACTIONS: frozenset[str] = frozenset({
-    "explore",
-    "specialist",
-    "sweep",
-    "profile",
-    "roofline",
-    "kernel_opt",
-    "deep_kernel_analysis",
-    "operator_tuning",
-    "vendor_kernel_config",
-})
+_EVIDENCE_PRODUCER_ACTIONS: frozenset[str] = frozenset(
+    {
+        "explore",
+        "specialist",
+        "sweep",
+        "profile",
+        "roofline",
+        "kernel_opt",
+        "deep_kernel_analysis",
+        "operator_tuning",
+        "vendor_kernel_config",
+    }
+)
 
-_FRAMEWORK_OP_ACTIONS: frozenset[str] = frozenset({
-    "baseline",
-    "target_analysis",
-    "recover",
-    "report",
-    "session_breakdown",
-})
+_FRAMEWORK_OP_ACTIONS: frozenset[str] = frozenset(
+    {
+        "baseline",
+        "target_analysis",
+        "recover",
+        "report",
+        "session_breakdown",
+    }
+)
 
 _APPROVE_REQUIRES_PATCH_LANDING: tuple[str, ...] = (
     "comparable_before_after_benchmark",
@@ -244,16 +246,10 @@ def _discover_robustness_findings_path(session_id: str) -> Path | None:
     if explicit:
         candidate = Path(explicit) / f"{session_id or 'default'}.jsonl"
         return candidate if candidate.is_file() else None
-    session_dir = os.environ.get(
-        "ROBUSTNESS_AGENT_SESSION_DIR", ""
-    ).strip()
+    session_dir = os.environ.get("ROBUSTNESS_AGENT_SESSION_DIR", "").strip()
     if not session_dir:
         return None
-    candidate = (
-        Path(session_dir)
-        / _ROBUSTNESS_FINDINGS_SUBDIR
-        / f"{session_id or 'default'}.jsonl"
-    )
+    candidate = Path(session_dir) / _ROBUSTNESS_FINDINGS_SUBDIR / f"{session_id or 'default'}.jsonl"
     return candidate if candidate.is_file() else None
 
 
@@ -280,7 +276,9 @@ def _load_robustness_priors(
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         log.warning(
-            "critic: cannot read robustness findings %s: %s", path, exc,
+            "critic: cannot read robustness findings %s: %s",
+            path,
+            exc,
         )
         return []
     rows: list[dict[str, Any]] = []
@@ -304,22 +302,24 @@ def _load_robustness_priors(
     # Narrow projection — only what the SKILL needs to reason about the failure.
     out: list[dict[str, Any]] = []
     for row in selected:
-        out.append({
-            "symptom_name": row.get("symptom_name"),
-            "severity": row.get("severity"),
-            "tick_index": row.get("tick_index"),
-            "timestamp_unix": row.get("timestamp_unix"),
-            "summary": row.get("summary"),
-            "rca_text": row.get("rca_text"),
-            "intents": [
-                {
-                    "intent_type": (i or {}).get("intent_type"),
-                    "payload": (i or {}).get("payload"),
-                }
-                for i in (row.get("intents") or [])
-                if isinstance(i, dict)
-            ],
-        })
+        out.append(
+            {
+                "symptom_name": row.get("symptom_name"),
+                "severity": row.get("severity"),
+                "tick_index": row.get("tick_index"),
+                "timestamp_unix": row.get("timestamp_unix"),
+                "summary": row.get("summary"),
+                "rca_text": row.get("rca_text"),
+                "intents": [
+                    {
+                        "intent_type": (i or {}).get("intent_type"),
+                        "payload": (i or {}).get("payload"),
+                    }
+                    for i in (row.get("intents") or [])
+                    if isinstance(i, dict)
+                ],
+            }
+        )
     return out
 
 
@@ -399,13 +399,9 @@ class JudgeBundle:
             "proposals": [dict(p) for p in self.proposals],
             "messages": [dict(m) for m in self.messages],
             "decision": dict(self.decision),
-            "kb_priors_by_proposal": {
-                k: [dict(p) for p in v] for k, v in self.kb_priors_by_proposal.items()
-            },
+            "kb_priors_by_proposal": {k: [dict(p) for p in v] for k, v in self.kb_priors_by_proposal.items()},
             "kb_priors_for_decision": [dict(p) for p in self.kb_priors_for_decision],
-            "kb_assess_by_proposal": {
-                k: dict(v) for k, v in self.kb_assess_by_proposal.items()
-            },
+            "kb_assess_by_proposal": {k: dict(v) for k, v in self.kb_assess_by_proposal.items()},
             "kb_assess_trace": dict(self.kb_assess_trace),
             "kb_priors_trace": dict(self.kb_priors_trace),
             "robustness_priors": [dict(p) for p in self.robustness_priors],
@@ -518,12 +514,15 @@ class DecisionReviewer:
         """
         req = parse_request(raw_request)
         merge = self.session_memory.merge_context(req.session_id, req.context)
-        self.session_memory.append_event(req.session_id, {
-            "kind": "init_session",
-            "explicit_keys": merge.explicit_keys,
-            "from_memory_keys": merge.from_memory_keys,
-            "missing_keys": merge.missing_keys,
-        })
+        self.session_memory.append_event(
+            req.session_id,
+            {
+                "kind": "init_session",
+                "explicit_keys": merge.explicit_keys,
+                "from_memory_keys": merge.from_memory_keys,
+                "missing_keys": merge.missing_keys,
+            },
+        )
         return {
             "session_id": req.session_id,
             "merged_context": merge.merged,
@@ -567,15 +566,20 @@ class DecisionReviewer:
                 session_context=session_ctx,
                 ctx=ctx,
             )
-            outcome.kb_writes.append({
-                "trigger": "session_close",
-                "result": res.to_dict(),
-                "items": len(drafts),
-            })
-        self.session_memory.append_event(req.session_id, {
-            "kind": "close_session",
-            "kb_writes": [w["result"]["status"] for w in outcome.kb_writes],
-        })
+            outcome.kb_writes.append(
+                {
+                    "trigger": "session_close",
+                    "result": res.to_dict(),
+                    "items": len(drafts),
+                }
+            )
+        self.session_memory.append_event(
+            req.session_id,
+            {
+                "kind": "close_session",
+                "kb_writes": [w["result"]["status"] for w in outcome.kb_writes],
+            },
+        )
         return outcome
 
     # ------------------------------------------------------------------
@@ -611,26 +615,23 @@ class DecisionReviewer:
         bundle.review_constraints = self._review_constraints(req.proposals)
         known = req.options.get("known_actions")
         if isinstance(known, list) and known:
-            bundle.review_constraints["known_actions"] = sorted(
-                str(a) for a in known if isinstance(a, str)
-            )
+            bundle.review_constraints["known_actions"] = sorted(str(a) for a in known if isinstance(a, str))
 
         # Hard requirement: if model/framework still unknown, KB reads must be
         # skipped and the Critic should fall back to needs_review.
-        critical_missing = [
-            k for k in CRITICAL_CONTEXT_KEYS if merge.merged.get(k) in (None, "", "unknown")
-        ]
+        critical_missing = [k for k in CRITICAL_CONTEXT_KEYS if merge.merged.get(k) in (None, "", "unknown")]
         if critical_missing:
             bundle.required_context = critical_missing
             bundle.kb_read_skipped_reason = "missing_critical_context"
-            bundle.notes.append(
-                "model and/or framework unknown — KB priors not fetched"
+            bundle.notes.append("model and/or framework unknown — KB priors not fetched")
+            self.session_memory.append_event(
+                req.session_id,
+                {
+                    "kind": "prepare_review",
+                    "missing_critical": critical_missing,
+                    "kb_skipped": True,
+                },
             )
-            self.session_memory.append_event(req.session_id, {
-                "kind": "prepare_review",
-                "missing_critical": critical_missing,
-                "kb_skipped": True,
-            })
             return bundle
 
         # Skip KB reads only if explicitly disabled or inappropriate kind.
@@ -642,26 +643,30 @@ class DecisionReviewer:
         if not self.kb_writer.read_enabled:
             bundle.kb_read_skipped_reason = "kb_read_disabled"
             bundle.notes.append("KB_READ_ENABLED=false — proceeding without priors")
-            self.session_memory.append_event(req.session_id, {
-                "kind": "prepare_review",
-                "kb_skipped": True,
-                "reason": "kb_read_disabled",
-            })
+            self.session_memory.append_event(
+                req.session_id,
+                {
+                    "kind": "prepare_review",
+                    "kb_skipped": True,
+                    "reason": "kb_read_disabled",
+                },
+            )
             return bundle
 
         # Breaker open from an earlier failure → skip another timeout.
         if self.kb_writer.is_kb_unreachable():
             bundle.kb_read_skipped_reason = "kb_unreachable"
-            bundle.notes.append(
-                "KB service unreachable (circuit breaker open); proceeding without priors"
-            )
+            bundle.notes.append("KB service unreachable (circuit breaker open); proceeding without priors")
             bundle.review_constraints["kb_breaker"] = self.kb_writer.kb_breaker_state()
-            self.session_memory.append_event(req.session_id, {
-                "kind": "prepare_review",
-                "kb_skipped": True,
-                "reason": "kb_unreachable",
-                "breaker": self.kb_writer.kb_breaker_state(),
-            })
+            self.session_memory.append_event(
+                req.session_id,
+                {
+                    "kind": "prepare_review",
+                    "kb_skipped": True,
+                    "reason": "kb_unreachable",
+                    "breaker": self.kb_writer.kb_breaker_state(),
+                },
+            )
             return bundle
 
         scope = build_scope(req.context, session_context=merge.merged, require_critical=False)
@@ -687,19 +692,24 @@ class DecisionReviewer:
                 topic_hits[p.msg_id] = priors.get("priors") or []
                 if priors.get("cache") == "kb_unreachable":
                     any_kb_unreachable = True
-                self.session_memory.append_event(req.session_id, {
-                    "kind": "kb_prior_lookup",
-                    "msg_id": p.msg_id,
-                    "topic": topic,
-                    "cache": priors.get("cache"),
-                    "count": len(topic_hits[p.msg_id]),
-                })
-                priors_requests.append({
-                    "msg_id": p.msg_id,
-                    "topic": topic,
-                    "cache": priors.get("cache"),
-                    "count": len(topic_hits[p.msg_id]),
-                })
+                self.session_memory.append_event(
+                    req.session_id,
+                    {
+                        "kind": "kb_prior_lookup",
+                        "msg_id": p.msg_id,
+                        "topic": topic,
+                        "cache": priors.get("cache"),
+                        "count": len(topic_hits[p.msg_id]),
+                    },
+                )
+                priors_requests.append(
+                    {
+                        "msg_id": p.msg_id,
+                        "topic": topic,
+                        "cache": priors.get("cache"),
+                        "count": len(topic_hits[p.msg_id]),
+                    }
+                )
             bundle.kb_priors_by_proposal = topic_hits
         else:
             topic = self._topic_for_decision(req)
@@ -714,18 +724,23 @@ class DecisionReviewer:
             bundle.kb_priors_for_decision = priors.get("priors") or []
             if priors.get("cache") == "kb_unreachable":
                 any_kb_unreachable = True
-            self.session_memory.append_event(req.session_id, {
-                "kind": "kb_prior_lookup_decision",
-                "topic": topic,
-                "cache": priors.get("cache"),
-                "count": len(bundle.kb_priors_for_decision),
-            })
-            priors_requests.append({
-                "msg_id": None,
-                "topic": topic,
-                "cache": priors.get("cache"),
-                "count": len(bundle.kb_priors_for_decision),
-            })
+            self.session_memory.append_event(
+                req.session_id,
+                {
+                    "kind": "kb_prior_lookup_decision",
+                    "topic": topic,
+                    "cache": priors.get("cache"),
+                    "count": len(bundle.kb_priors_for_decision),
+                },
+            )
+            priors_requests.append(
+                {
+                    "msg_id": None,
+                    "topic": topic,
+                    "cache": priors.get("cache"),
+                    "count": len(bundle.kb_priors_for_decision),
+                }
+            )
 
         # Audit trail for the historical KB prior reads (always injected; no
         # env gate). The priors themselves feed the LLM; this records what we
@@ -741,9 +756,7 @@ class DecisionReviewer:
 
         if any_kb_unreachable:
             bundle.kb_read_skipped_reason = "kb_unreachable"
-            bundle.notes.append(
-                "KB service unreachable for at least one lookup — priors may be incomplete"
-            )
+            bundle.notes.append("KB service unreachable for at least one lookup — priors may be incomplete")
             bundle.review_constraints["kb_breaker"] = self.kb_writer.kb_breaker_state()
 
         if scope.get("model") == "unknown" or scope.get("framework") == "unknown":
@@ -802,10 +815,12 @@ class DecisionReviewer:
         for p in req.proposals:
             params, envs, args = _proposal_levers(p.payload)
             if not params and not envs and not args:
-                trace["requests"].append({
-                    "msg_id": p.msg_id,
-                    "skipped": "no_levers",
-                })
+                trace["requests"].append(
+                    {
+                        "msg_id": p.msg_id,
+                        "skipped": "no_levers",
+                    }
+                )
                 continue
             verdict = client.assess(focus=focus, params=params, envs=envs, args=args)
             req_entry: dict[str, Any] = {
@@ -821,18 +836,19 @@ class DecisionReviewer:
             req_entry["reasonable"] = verdict.get("reasonable")
             trace["requests"].append(req_entry)
             results[p.msg_id] = verdict
-            self.session_memory.append_event(req.session_id, {
-                "kind": "kb_assess_lookup",
-                "msg_id": p.msg_id,
-                "reasonable": verdict.get("reasonable"),
-            })
+            self.session_memory.append_event(
+                req.session_id,
+                {
+                    "kind": "kb_assess_lookup",
+                    "msg_id": p.msg_id,
+                    "reasonable": verdict.get("reasonable"),
+                },
+            )
         trace["verdict_count"] = len(results)
         bundle.kb_assess_trace = trace
         if results:
             bundle.kb_assess_by_proposal = results
-            bundle.notes.append(
-                f"kb_assess_injected count={len(results)}"
-            )
+            bundle.notes.append(f"kb_assess_injected count={len(results)}")
 
     @staticmethod
     def _assess_focus(merged_context: dict[str, Any]) -> dict[str, Any]:
@@ -844,11 +860,7 @@ class DecisionReviewer:
         Returns:
             dict[str, Any]: A ``focus`` dict with non-empty known dimensions.
         """
-        hardware = (
-            merged_context.get("hardware")
-            or merged_context.get("gpu_type")
-            or merged_context.get("scale")
-        )
+        hardware = merged_context.get("hardware") or merged_context.get("gpu_type") or merged_context.get("scale")
         candidate = {
             "model": merged_context.get("model"),
             "hardware": hardware,
@@ -856,10 +868,7 @@ class DecisionReviewer:
             "framework_version": merged_context.get("framework_version"),
             "precision": merged_context.get("precision"),
         }
-        return {
-            k: v for k, v in candidate.items()
-            if v not in (None, "", "unknown")
-        }
+        return {k: v for k, v in candidate.items() if v not in (None, "", "unknown")}
 
     # ------------------------------------------------------------------
     # L4 helper: pull recent HIGH-severity Robustness findings into the
@@ -875,23 +884,17 @@ class DecisionReviewer:
         Args:
             bundle (JudgeBundle): The bundle to enrich in place.
         """
-        if os.environ.get(
-            "CRITIC_ROBUSTNESS_PRIORS_DISABLED", ""
-        ).lower() in {"1", "true", "yes"}:
+        if os.environ.get("CRITIC_ROBUSTNESS_PRIORS_DISABLED", "").lower() in {"1", "true", "yes"}:
             return
         findings_path = _discover_robustness_findings_path(bundle.session_id)
         if findings_path is None:
             return
         try:
-            limit = int(
-                os.environ.get("CRITIC_ROBUSTNESS_PRIORS_LIMIT", "5")
-            )
+            limit = int(os.environ.get("CRITIC_ROBUSTNESS_PRIORS_LIMIT", "5"))
         except ValueError:
             limit = 5
         # Severity floor: HIGH by default; drop to MEDIUM via the env knob.
-        min_severity = os.environ.get(
-            "CRITIC_ROBUSTNESS_PRIORS_MIN_SEVERITY", "high"
-        ).lower()
+        min_severity = os.environ.get("CRITIC_ROBUSTNESS_PRIORS_MIN_SEVERITY", "high").lower()
         try:
             priors = _load_robustness_priors(
                 findings_path,
@@ -906,10 +909,7 @@ class DecisionReviewer:
             return
         if priors:
             bundle.robustness_priors = priors
-            bundle.notes.append(
-                f"robustness_priors_injected count={len(priors)} "
-                f"path={findings_path}"
-            )
+            bundle.notes.append(f"robustness_priors_injected count={len(priors)} path={findings_path}")
 
     # ------------------------------------------------------------------
     # Phase 2: commit-review
@@ -938,9 +938,7 @@ class DecisionReviewer:
         req = parse_request(raw_request)
         self._populate_inbox(req)
         if not isinstance(review, dict):
-            raise ReviewValidationError(
-                f"review must be a dict, got {type(review).__name__}"
-            )
+            raise ReviewValidationError(f"review must be a dict, got {type(review).__name__}")
 
         outcome = CommitOutcome(
             kind=req.kind,
@@ -956,9 +954,7 @@ class DecisionReviewer:
         elif req.kind == KB_DRAFT_REQUEST:
             self._commit_kb_draft(req, review, outcome, session_ctx)
         else:
-            raise ReviewValidationError(
-                f"commit_review does not support kind={req.kind!r}"
-            )
+            raise ReviewValidationError(f"commit_review does not support kind={req.kind!r}")
         return outcome
 
     # ------------------------------------------------------------------
@@ -988,14 +984,13 @@ class DecisionReviewer:
         if not req.context:
             req.context.update({k: parsed.shared_state[k] for k in parsed.shared_state})
         # Filter out proposals already handled in this session (idempotency).
-        new_msg_ids = self.session_memory.filter_unreviewed(
-            req.session_id, [p.msg_id for p in parsed.proposals]
-        )
+        new_msg_ids = self.session_memory.filter_unreviewed(req.session_id, [p.msg_id for p in parsed.proposals])
         keep = set(new_msg_ids)
         req.proposals = [p for p in parsed.proposals if p.msg_id in keep]
 
     def _review_constraints(
-        self, proposals: list[Proposal] | None = None,
+        self,
+        proposals: list[Proposal] | None = None,
     ) -> dict[str, Any]:
         """Return the per-bundle review constraints payload.
 
@@ -1016,9 +1011,7 @@ class DecisionReviewer:
             "ceiling_importance": 0.84,
         }
         if not proposals:
-            constraints["approve_requires"] = list(
-                _APPROVE_REQUIRES_PATCH_LANDING
-            )
+            constraints["approve_requires"] = list(_APPROVE_REQUIRES_PATCH_LANDING)
             return constraints
         per_proposal: dict[str, str] = {}
         max_rank = -1
@@ -1030,15 +1023,10 @@ class DecisionReviewer:
             if rank > max_rank:
                 max_rank = rank
                 max_class = cls
-        constraints["approve_requires"] = list(
-            _APPROVE_REQUIRES_BY_CLASS[max_class]
-        )
+        constraints["approve_requires"] = list(_APPROVE_REQUIRES_BY_CLASS[max_class])
         constraints["bundle_action_class"] = max_class
         constraints["proposal_action_classes"] = per_proposal
-        constraints["approve_requires_by_class"] = {
-            cls: list(reqs)
-            for cls, reqs in _APPROVE_REQUIRES_BY_CLASS.items()
-        }
+        constraints["approve_requires_by_class"] = {cls: list(reqs) for cls, reqs in _APPROVE_REQUIRES_BY_CLASS.items()}
         return constraints
 
     def _topic_for_proposal(self, proposal: Proposal) -> str:
@@ -1107,25 +1095,17 @@ class DecisionReviewer:
         if verdicts_raw is None:
             verdicts_raw = review.get("verdicts")
         if not isinstance(verdicts_raw, list):
-            raise ReviewValidationError(
-                "coordinator_inbox commit expects review.review_verdicts to be a list"
-            )
+            raise ReviewValidationError("coordinator_inbox commit expects review.review_verdicts to be a list")
         intents: list[Intent] = []
         for i, item in enumerate(verdicts_raw):
             if not isinstance(item, dict):
-                raise ReviewValidationError(
-                    f"review.review_verdicts[{i}] must be an object"
-                )
+                raise ReviewValidationError(f"review.review_verdicts[{i}] must be an object")
             target = item.get("target_proposal_msg_id")
             verdict = item.get("verdict")
             if verdict not in ALLOWED_VERDICTS:
-                raise ReviewValidationError(
-                    f"review.review_verdicts[{i}].verdict {verdict!r} is not valid"
-                )
+                raise ReviewValidationError(f"review.review_verdicts[{i}].verdict {verdict!r} is not valid")
             if not isinstance(target, str) or not target:
-                raise ReviewValidationError(
-                    f"review.review_verdicts[{i}].target_proposal_msg_id missing"
-                )
+                raise ReviewValidationError(f"review.review_verdicts[{i}].target_proposal_msg_id missing")
             try:
                 intent = build_review_verdict_intent(
                     target_proposal_msg_id=target,
@@ -1145,17 +1125,18 @@ class DecisionReviewer:
             except IntentEnvelopeValidationError as exc:
                 raise ReviewValidationError(str(exc)) from exc
             intents.append(intent)
-            self.session_memory.mark_reviewed(
-                req.session_id, target, verdict, decision_id=req.decision_id
+            self.session_memory.mark_reviewed(req.session_id, target, verdict, decision_id=req.decision_id)
+            self.session_memory.append_decision(
+                req.session_id,
+                {
+                    "ts": _now_iso(),
+                    "target_proposal_msg_id": target,
+                    "verdict": verdict,
+                    "reasoning": item.get("reasoning"),
+                    "source": item.get("source", "critic"),
+                    "kb_evidence": item.get("kb_evidence") or [],
+                },
             )
-            self.session_memory.append_decision(req.session_id, {
-                "ts": _now_iso(),
-                "target_proposal_msg_id": target,
-                "verdict": verdict,
-                "reasoning": item.get("reasoning"),
-                "source": item.get("source", "critic"),
-                "kb_evidence": item.get("kb_evidence") or [],
-            })
             get_registry().counter(CRITIC_REVIEW_VERDICT_TOTAL).inc({"verdict": verdict})
             self._maybe_write_kb_for_verdict(item, req, session_ctx, outcome)
 
@@ -1166,9 +1147,7 @@ class DecisionReviewer:
             body = advisory.get("body_md") or advisory.get("text")
             if not body:
                 continue
-            intents.append(build_advice_intent(
-                body, target_proposal_msg_id=advisory.get("target_proposal_msg_id")
-            ))
+            intents.append(build_advice_intent(body, target_proposal_msg_id=advisory.get("target_proposal_msg_id")))
 
         # Heartbeat fallback if no proposals to review.
         if not intents:
@@ -1201,13 +1180,10 @@ class DecisionReviewer:
         """
         for k in ("verdict", "reason"):
             if k not in review:
-                raise ReviewValidationError(
-                    f"decision_request review missing required key {k!r}"
-                )
+                raise ReviewValidationError(f"decision_request review missing required key {k!r}")
         if review["verdict"] not in {"adopt", "reject", "revise", "needs_info"}:
             raise ReviewValidationError(
-                f"decision_request review.verdict {review['verdict']!r} not in "
-                f"adopt|reject|revise|needs_info"
+                f"decision_request review.verdict {review['verdict']!r} not in adopt|reject|revise|needs_info"
             )
         decision_review = {
             "kind": "critic_decision_review",
@@ -1223,10 +1199,13 @@ class DecisionReviewer:
             "required_context": review.get("required_context") or [],
             "notes": review.get("notes") or [],
         }
-        self.session_memory.append_decision(req.session_id, {
-            "ts": _now_iso(),
-            "decision_review": decision_review,
-        })
+        self.session_memory.append_decision(
+            req.session_id,
+            {
+                "ts": _now_iso(),
+                "decision_review": decision_review,
+            },
+        )
         # Translate adopt/reject into KB writes when there's reusable lesson.
         verdict_for_kb = {
             "adopt": "approve",
@@ -1255,10 +1234,12 @@ class DecisionReviewer:
             session_context=session_ctx,
             ctx=ctx,
         )
-        outcome.kb_writes.append({
-            "trigger": "decision_request",
-            "result": write_res.to_dict(),
-        })
+        outcome.kb_writes.append(
+            {
+                "trigger": "decision_request",
+                "result": write_res.to_dict(),
+            }
+        )
         outcome.decision_review = decision_review
 
     # ---- kb_draft commit ----------------------------------------------
@@ -1340,11 +1321,13 @@ class DecisionReviewer:
                 session_context=session_ctx,
                 ctx=ctx,
             )
-            outcome.kb_writes.append({
-                "trigger": "review_verdict",
-                "target_proposal_msg_id": verdict_item.get("target_proposal_msg_id"),
-                "result": res.to_dict(),
-            })
+            outcome.kb_writes.append(
+                {
+                    "trigger": "review_verdict",
+                    "target_proposal_msg_id": verdict_item.get("target_proposal_msg_id"),
+                    "result": res.to_dict(),
+                }
+            )
         except RuntimeAdapterError as exc:
             outcome.notes.append(f"kb_write_skipped: {exc}")
 

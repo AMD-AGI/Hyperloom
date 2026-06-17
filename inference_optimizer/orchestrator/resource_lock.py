@@ -40,7 +40,7 @@ KNOWN_LANES = (
 # Lane → lanes that must *also* be free or co-acquired (DESIGN §3.5.3).
 LANE_CONFLICTS: dict[str, frozenset[str]] = {
     "benchmark_lane": frozenset({"profile_lane", "server_lifecycle"}),
-    "profile_lane":   frozenset({"benchmark_lane", "server_lifecycle"}),
+    "profile_lane": frozenset({"benchmark_lane", "server_lifecycle"}),
     "server_lifecycle": frozenset({"benchmark_lane", "profile_lane"}),
     "workspace_mutation": frozenset(),
     # research_lane does not conflict with any serving-side lane.
@@ -83,6 +83,7 @@ def _expand_lanes(lanes: list[str]) -> list[str]:
 @dataclass
 class Lease:
     """Lease handle returned by ``acquire_many``."""
+
     holder_id: str
     task_id: str
     action: str
@@ -178,28 +179,25 @@ class SqliteLeaseBackend:
             capacity_by_lane: dict[str, int] = {}
             placeholders = ",".join("?" * len(expanded))
             cur.execute(
-                f"SELECT lane, capacity FROM lane_capacity "
-                f"WHERE lane IN ({placeholders})",
+                f"SELECT lane, capacity FROM lane_capacity WHERE lane IN ({placeholders})",
                 expanded,
             )
             for row in cur.fetchall():
                 capacity_by_lane[row["lane"]] = int(row["capacity"])
             for lane in expanded:
                 capacity_by_lane.setdefault(
-                    lane, int(DEFAULT_LANE_CAPACITIES.get(lane, 1)),
+                    lane,
+                    int(DEFAULT_LANE_CAPACITIES.get(lane, 1)),
                 )
 
             # Pull holders to reap expired rows and count surviving distinct holders per lane.
             cur.execute(
-                f"SELECT lane, holder_id, expires_at FROM leases "
-                f"WHERE lane IN ({placeholders})",
+                f"SELECT lane, holder_id, expires_at FROM leases WHERE lane IN ({placeholders})",
                 expanded,
             )
             rows = [dict(r) for r in cur.fetchall()]
 
-            holders_per_lane: dict[str, set[str]] = {
-                lane: set() for lane in expanded
-            }
+            holders_per_lane: dict[str, set[str]] = {lane: set() for lane in expanded}
             expired: list[tuple[str, str]] = []  # (lane, previous_holder)
             for row in rows:
                 lane = row["lane"]
@@ -300,22 +298,16 @@ class SqliteLeaseBackend:
             StaleLeaseError: If the number of rows updated does not match the
                 lease's lane count (the lease no longer belongs to us).
         """
-        new_expires_iso = datetime.fromtimestamp(
-            time.time() + ttl_sec, tz=timezone.utc
-        ).isoformat()
+        new_expires_iso = datetime.fromtimestamp(time.time() + ttl_sec, tz=timezone.utc).isoformat()
         now_iso = _now_iso()
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(lease.lanes))
             cur.execute(
-                f"UPDATE leases SET expires_at=?, heartbeat_at=? "
-                f"WHERE lane IN ({placeholders}) AND holder_id=?",
+                f"UPDATE leases SET expires_at=?, heartbeat_at=? WHERE lane IN ({placeholders}) AND holder_id=?",
                 (new_expires_iso, now_iso, *lease.lanes, lease.holder_id),
             )
             if cur.rowcount != len(lease.lanes):
-                raise StaleLeaseError(
-                    f"heartbeat mismatch: expected {len(lease.lanes)} rows, "
-                    f"got {cur.rowcount}"
-                )
+                raise StaleLeaseError(f"heartbeat mismatch: expected {len(lease.lanes)} rows, got {cur.rowcount}")
 
     async def release(self, lease: Lease) -> int:
         """Drop every (lane, holder_id) row this lease owns.
@@ -332,8 +324,7 @@ class SqliteLeaseBackend:
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(lease.lanes))
             cur.execute(
-                f"DELETE FROM leases WHERE lane IN ({placeholders}) "
-                f"AND holder_id=?",
+                f"DELETE FROM leases WHERE lane IN ({placeholders}) AND holder_id=?",
                 (*lease.lanes, lease.holder_id),
             )
             return cur.rowcount
@@ -369,11 +360,13 @@ class SqliteLeaseBackend:
                         "*",
                         "lease_expired",
                         None,
-                        json.dumps({
-                            "lane": row["lane"],
-                            "previous_holder": row["holder_id"],
-                            "reap_pass": True,
-                        }),
+                        json.dumps(
+                            {
+                                "lane": row["lane"],
+                                "previous_holder": row["holder_id"],
+                                "reap_pass": True,
+                            }
+                        ),
                         2,
                         now_iso_str,
                     ),
@@ -406,8 +399,7 @@ class SqliteLeaseBackend:
             dict[str, int]: Map of lane name to its live holder count.
         """
         rows = await self.db.fetchall(
-            "SELECT lane, COUNT(*) AS n FROM leases "
-            "WHERE expires_at > ? GROUP BY lane",
+            "SELECT lane, COUNT(*) AS n FROM leases WHERE expires_at > ? GROUP BY lane",
             (_now_iso(),),
         )
         return {r["lane"]: int(r["n"]) for r in rows}
@@ -423,9 +415,7 @@ class SqliteLeaseBackend:
                 with any rows present in the ``lane_capacity`` table.
         """
         try:
-            rows = await self.db.fetchall(
-                "SELECT lane, capacity FROM lane_capacity"
-            )
+            rows = await self.db.fetchall("SELECT lane, capacity FROM lane_capacity")
         except Exception:  # noqa: BLE001 — best-effort observation
             return dict(DEFAULT_LANE_CAPACITIES)
         out: dict[str, int] = dict(DEFAULT_LANE_CAPACITIES)
@@ -568,9 +558,7 @@ class ResourceLockManager:
         Returns:
             dict[str, dict[str, int]]: Map of lane name to its counter dict.
         """
-        return {
-            lane: dict(d) for lane, d in self._counters.items()
-        }
+        return {lane: dict(d) for lane, d in self._counters.items()}
 
     def _bump_counter(self, lane: str, field: str) -> None:
         """Increment one per-lane lifetime counter by 1.

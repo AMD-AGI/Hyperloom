@@ -59,6 +59,7 @@ async def test_build_reactor_components_uses_server_url_when_set(tmp_path: Path)
 # M1.5 LLM RCA wiring
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_factory_uses_noop_engine_when_credentials_missing(tmp_path: Path):
     from robustness_agent.decision.rca_engine import NoopRcaEngine
@@ -153,6 +154,7 @@ async def test_factory_propagates_severity_min_config(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # M2 multi-node policy: disable_local_probe + cluster fan-out wiring
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_factory_uses_quiet_fallback_when_local_probe_disabled(tmp_path: Path):

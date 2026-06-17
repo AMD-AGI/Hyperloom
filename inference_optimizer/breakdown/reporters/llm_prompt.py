@@ -74,20 +74,20 @@ def _section_input(rendered: RenderedSection) -> dict[str, Any]:
             block is deliberately excluded so the LLM cannot rewrite it).
     """
     return {
-        "section_id":  rendered.section_id,
-        "title":       rendered.title,
-        "skipped":     rendered.skipped,
-        "key_facts":   list(rendered.key_facts),
-        "decisions":   [
+        "section_id": rendered.section_id,
+        "title": rendered.title,
+        "skipped": rendered.skipped,
+        "key_facts": list(rendered.key_facts),
+        "decisions": [
             {
-                "kind":       d.kind,
-                "subject":    d.subject,
+                "kind": d.kind,
+                "subject": d.subject,
                 "metric_pct": d.metric_pct,
-                "rationale":  d.rationale,
+                "rationale": d.rationale,
             }
             for d in rendered.decisions
         ],
-        "warnings":    list(rendered.warnings),
+        "warnings": list(rendered.warnings),
     }
 
 
@@ -107,7 +107,7 @@ def build_user_prompt(
     payload = {
         "global_facts": global_facts.as_prompt_dict(),
         # Skipped sections are withheld so the model can't "explain" a phantom section.
-        "sections":     [_section_input(s) for s in rendered if not s.skipped],
+        "sections": [_section_input(s) for s in rendered if not s.skipped],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -141,8 +141,5 @@ def parse_llm_response(raw: str) -> dict[str, Any]:
         return {"executive_summary": "", "section_narratives": {}}
     return {
         "executive_summary": str(data.get("executive_summary") or "").strip(),
-        "section_narratives": {
-            str(k): str(v).strip()
-            for k, v in (data.get("section_narratives") or {}).items()
-        },
+        "section_narratives": {str(k): str(v).strip() for k, v in (data.get("section_narratives") or {}).items()},
     }

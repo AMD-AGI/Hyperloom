@@ -1,6 +1,7 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
 """Unit tests for the dual remote recipe-KB composite client."""
+
 from __future__ import annotations
 
 import argparse
@@ -29,31 +30,39 @@ class _FakeSource:
 def test_composite_search_accepts_prefer_and_merges_sources() -> None:
     from inference_optimizer.recipe_kb.composite_remote import CompositeRemoteRecipeClient
 
-    gbrain = _FakeSource([{
-        "canonical_id": CID,
-        "model": "test-model",
-        "hardware": "mi300x",
-        "framework": "sglang",
-        "framework_version": "0.5.11",
-        "precision": "fp8",
-        "authority": "EXPERIENTIAL",
-        "confidence": 0.85,
-        "best_config": {"extra_envs": {"SGLANG_USE_AITER": "1"}},
-        "best_throughput": 0.0,
-    }])
-    cortex = _FakeSource([{
-        "canonical_id": CID,
-        "model": "test-model",
-        "hardware": "mi300x",
-        "framework": "sglang",
-        "framework_version": "0.5.11",
-        "precision": "fp8",
-        "authority": "EXPERIENTIAL",
-        "confidence": 0.85,
-        "best_config": {},
-        "best_throughput": 9868.3,
-        "lessons": [{"statement": "cortex lesson"}],
-    }])
+    gbrain = _FakeSource(
+        [
+            {
+                "canonical_id": CID,
+                "model": "test-model",
+                "hardware": "mi300x",
+                "framework": "sglang",
+                "framework_version": "0.5.11",
+                "precision": "fp8",
+                "authority": "EXPERIENTIAL",
+                "confidence": 0.85,
+                "best_config": {"extra_envs": {"SGLANG_USE_AITER": "1"}},
+                "best_throughput": 0.0,
+            }
+        ]
+    )
+    cortex = _FakeSource(
+        [
+            {
+                "canonical_id": CID,
+                "model": "test-model",
+                "hardware": "mi300x",
+                "framework": "sglang",
+                "framework_version": "0.5.11",
+                "precision": "fp8",
+                "authority": "EXPERIENTIAL",
+                "confidence": 0.85,
+                "best_config": {},
+                "best_throughput": 9868.3,
+                "lessons": [{"statement": "cortex lesson"}],
+            }
+        ]
+    )
 
     client = CompositeRemoteRecipeClient(
         [gbrain, cortex],
@@ -86,11 +95,13 @@ def test_cli_kb_both_mode_builds_composite(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("GBRAIN_TOKEN", "token")
     monkeypatch.setenv("CORTEX_KB_URL", "http://cortex.invalid")
 
-    kb = _build_recipe_kb_dispatcher(argparse.Namespace(
-        degraded_kb=False,
-        cortex_kb_url=None,
-        local_kb_root=str(tmp_path),
-    ))
+    kb = _build_recipe_kb_dispatcher(
+        argparse.Namespace(
+            degraded_kb=False,
+            cortex_kb_url=None,
+            local_kb_root=str(tmp_path),
+        )
+    )
 
     assert isinstance(kb.remote, CompositeRemoteRecipeClient)
     assert kb.remote._names == ["gbrain", "cortex"]

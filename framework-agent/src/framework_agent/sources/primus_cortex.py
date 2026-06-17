@@ -96,26 +96,18 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             status = int(getattr(resp, "status", 200) or 200)
             body = resp.read()
-            content_type = (
-                resp.headers.get("Content-Type", "") if resp.headers else ""
-            )
+            content_type = resp.headers.get("Content-Type", "") if resp.headers else ""
             return status, body, content_type
     except urllib.error.HTTPError as exc:
         try:
             err_body = exc.read().decode("utf-8", errors="replace")[:512]
         except Exception:  # noqa: BLE001 - read can raise OSError on closed body
             err_body = ""
-        raise PrimusCortexError(
-            f"primus_cortex HTTP {exc.code} at {url}: {err_body}"
-        ) from exc
+        raise PrimusCortexError(f"primus_cortex HTTP {exc.code} at {url}: {err_body}") from exc
     except urllib.error.URLError as exc:
-        raise PrimusCortexError(
-            f"primus_cortex unreachable at {url}: {exc.reason}"
-        ) from exc
+        raise PrimusCortexError(f"primus_cortex unreachable at {url}: {exc.reason}") from exc
     except (TimeoutError, OSError) as exc:
-        raise PrimusCortexError(
-            f"primus_cortex transport error at {url}: {exc}"
-        ) from exc
+        raise PrimusCortexError(f"primus_cortex transport error at {url}: {exc}") from exc
 
 
 def _http_get_json(url: str, *, timeout_sec: float) -> Any:
@@ -138,9 +130,7 @@ def _http_get_json(url: str, *, timeout_sec: float) -> Any:
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        raise PrimusCortexError(
-            f"primus_cortex returned non-JSON at {url}: {exc}; body[:200]={text[:200]!r}"
-        ) from exc
+        raise PrimusCortexError(f"primus_cortex returned non-JSON at {url}: {exc}; body[:200]={text[:200]!r}") from exc
 
 
 def _http_get_text(url: str, *, timeout_sec: float) -> str:
@@ -177,14 +167,10 @@ def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
             ``number``.
     """
     if not isinstance(item, dict):
-        raise PrimusCortexError(
-            f"primus_cortex item at {source_url} is not a JSON object: {type(item).__name__}"
-        )
+        raise PrimusCortexError(f"primus_cortex item at {source_url} is not a JSON object: {type(item).__name__}")
     number = item.get("number")
     if not isinstance(number, int):
-        raise PrimusCortexError(
-            f"primus_cortex item at {source_url} has non-int 'number': {number!r}"
-        )
+        raise PrimusCortexError(f"primus_cortex item at {source_url} has non-int 'number': {number!r}")
     return GitHubPr(
         number=number,
         title=str(item.get("title") or ""),
@@ -222,10 +208,7 @@ def _extract_pr_list(payload: Any, *, source_url: str) -> list[dict[str, Any]]:
                 f"field (tried items/prs/data/results); keys={list(payload.keys())!r}"
             )
     else:
-        raise PrimusCortexError(
-            f"primus_cortex response at {source_url} is not list or dict: "
-            f"{type(payload).__name__}"
-        )
+        raise PrimusCortexError(f"primus_cortex response at {source_url} is not list or dict: {type(payload).__name__}")
     out: list[dict[str, Any]] = []
     for item in items:
         if isinstance(item, dict):
@@ -264,9 +247,7 @@ def list_perf_prs(
     try:
         repo_slug = _repo_slug(repo_url)
     except ValueError as exc:
-        raise PrimusCortexError(
-            f"cannot derive repo slug from repo_url={repo_url!r}: {exc}"
-        ) from exc
+        raise PrimusCortexError(f"cannot derive repo slug from repo_url={repo_url!r}: {exc}") from exc
 
     query: dict[str, Any] = {"state": state, "limit": limit}
     if label:
@@ -304,9 +285,7 @@ def pr_get(
     url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}")
     payload = _http_get_json(url, timeout_sec=timeout_sec)
     if not isinstance(payload, dict):
-        raise PrimusCortexError(
-            f"primus_cortex pr_get at {url} did not return an object: {type(payload).__name__}"
-        )
+        raise PrimusCortexError(f"primus_cortex pr_get at {url} did not return an object: {type(payload).__name__}")
     return payload
 
 
@@ -348,9 +327,7 @@ def pr_files(
                 f"(tried files/items/data); keys={list(payload.keys())!r}"
             )
     else:
-        raise PrimusCortexError(
-            f"primus_cortex pr_files at {url} returned non-list/dict: {type(payload).__name__}"
-        )
+        raise PrimusCortexError(f"primus_cortex pr_files at {url} returned non-list/dict: {type(payload).__name__}")
     return [item for item in items if isinstance(item, dict)]
 
 
@@ -407,21 +384,12 @@ def pr_patches(
         if not isinstance(item, dict):
             continue
         file_meta = item.get("file") if isinstance(item.get("file"), dict) else item
-        path = (
-            file_meta.get("file_path")
-            or file_meta.get("filename")
-            or file_meta.get("path")
-            or ""
-        )
+        path = file_meta.get("file_path") or file_meta.get("filename") or file_meta.get("path") or ""
         if not isinstance(path, str) or not path:
             continue
         previous_path = file_meta.get("previous_path") or path
         status = (file_meta.get("status") or "").lower()
-        old_path = (
-            previous_path
-            if isinstance(previous_path, str) and previous_path
-            else path
-        )
+        old_path = previous_path if isinstance(previous_path, str) and previous_path else path
         if status == "added":
             old_label = "/dev/null"
         else:
@@ -470,9 +438,7 @@ def search_perf_prs_via_primus_search(
     try:
         repo_slug = _repo_slug(repo_url)
     except ValueError as exc:
-        raise PrimusCortexError(
-            f"cannot derive repo slug from repo_url={repo_url!r}: {exc}"
-        ) from exc
+        raise PrimusCortexError(f"cannot derive repo slug from repo_url={repo_url!r}: {exc}") from exc
 
     url = _build_url(
         base_url,

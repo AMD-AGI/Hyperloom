@@ -33,13 +33,12 @@ try:
         repo_url_for_framework,
     )
 except ImportError:  # pragma: no cover — exercised only in IO-only test envs
-
     # MUST stay byte-for-byte identical to
     # ``framework_agent.repo_map._FRAMEWORK_TO_REPO_URL`` (sync test enforced).
     _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
         "sglang": "https://github.com/sgl-project/sglang.git",
-        "vllm":   "https://github.com/ROCm/vllm.git",
-        "atom":   "https://github.com/ROCm/ATOM.git",
+        "vllm": "https://github.com/ROCm/vllm.git",
+        "atom": "https://github.com/ROCm/ATOM.git",
     }
 
     def repo_url_for_framework(framework: str) -> str:
@@ -52,7 +51,8 @@ except ImportError:  # pragma: no cover — exercised only in IO-only test envs
             The repo URL, or ``""`` when the framework is unknown.
         """
         return _FRAMEWORK_TO_REPO_URL.get(
-            (framework or "").strip().lower(), "",
+            (framework or "").strip().lower(),
+            "",
         )
 
 
@@ -148,8 +148,7 @@ async def _invoke_fa_phase(
     fa_bin = _resolve_fa_binary()
     if not fa_bin:
         raise RuntimeError(
-            f"fa binary not found (subcommand={subcommand!r}); "
-            "checked $FA_BIN, $PATH, $FRAMEWORK_AGENT_ROOT/scripts/fa"
+            f"fa binary not found (subcommand={subcommand!r}); checked $FA_BIN, $PATH, $FRAMEWORK_AGENT_ROOT/scripts/fa"
         )
     tmp_dir = session_dir / ".fa-tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -161,22 +160,20 @@ async def _invoke_fa_phase(
     try:
         rc, stdout, stderr = await asyncio.to_thread(
             _run_fa_subcommand_sync,
-            fa_bin, subcommand, request_path, timeout_sec,
+            fa_bin,
+            subcommand,
+            request_path,
+            timeout_sec,
         )
     finally:
         with contextlib.suppress(OSError):
             request_path.unlink()
     if rc != 0:
-        raise RuntimeError(
-            f"fa {subcommand} exited rc={rc}; stderr={(stderr or '')[-512:]!r}"
-        )
+        raise RuntimeError(f"fa {subcommand} exited rc={rc}; stderr={(stderr or '')[-512:]!r}")
     try:
         return json.loads(stdout)
     except (json.JSONDecodeError, TypeError) as exc:
-        raise RuntimeError(
-            f"fa {subcommand} produced invalid JSON: {exc!r}; "
-            f"first 200 chars={ (stdout or '')[:200]!r}"
-        )
+        raise RuntimeError(f"fa {subcommand} produced invalid JSON: {exc!r}; first 200 chars={(stdout or '')[:200]!r}")
 
 
 async def phase_discover(
@@ -218,14 +215,14 @@ async def phase_discover(
     """
     resolved_repo_url = (repo_url or repo_url_for_framework(framework)).strip()
     request = {
-        "model":     model,
+        "model": model,
         "framework": (framework or "sglang").strip().lower(),
-        "gpu_type":  gpu_type,
-        "gaps":      gaps,
-        "repo_url":  resolved_repo_url,
-        "work_dir":  str(session_dir / ".fa-tmp" / "phase-discover"),
+        "gpu_type": gpu_type,
+        "gaps": gaps,
+        "repo_url": resolved_repo_url,
+        "work_dir": str(session_dir / ".fa-tmp" / "phase-discover"),
         "max_search_candidates": int(max_candidates),
-        "batch_id":  batch_id,
+        "batch_id": batch_id,
     }
     kw = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()]
     if kw:

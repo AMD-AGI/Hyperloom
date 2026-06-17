@@ -43,9 +43,7 @@ def _validate_stack_event(
             "task_id": task_id,
             "error_class": error_class,
             "params": {
-                "optimization_stack": stack or [
-                    {"action": "backends", "variant_name": "fp8"}
-                ],
+                "optimization_stack": stack or [{"action": "backends", "variant_name": "fp8"}],
                 "config_path": "/tmp/baseline_config.yaml",
             },
             # Different idempotency_key each attempt — the smoking gun.
@@ -61,7 +59,9 @@ def test_no_streak_silent_below_threshold():
     ]
     data = SourceData(coordinator_events=events)
     out = evaluate_repeated_payload_signals(
-        _ctx(), data, config=RepeatedPayloadConfig(streak_threshold=3),
+        _ctx(),
+        data,
+        config=RepeatedPayloadConfig(streak_threshold=3),
     )
     assert out == []
 
@@ -74,7 +74,9 @@ def test_three_identical_payloads_fires_high():
     ]
     data = SourceData(coordinator_events=events)
     out = evaluate_repeated_payload_signals(
-        _ctx(), data, config=RepeatedPayloadConfig(streak_threshold=3),
+        _ctx(),
+        data,
+        config=RepeatedPayloadConfig(streak_threshold=3),
     )
     assert len(out) == 1
     sym = out[0]
@@ -88,10 +90,7 @@ def test_three_identical_payloads_fires_high():
 
 def test_different_idempotency_key_does_not_break_dedup():
     """The 2026-05-18 GPU-leak failure mode: distinct keys, same payload."""
-    events = [
-        _validate_stack_event(task_id=str(i))
-        for i in range(5)
-    ]
+    events = [_validate_stack_event(task_id=str(i)) for i in range(5)]
     data = SourceData(coordinator_events=events)
     out = evaluate_repeated_payload_signals(_ctx(), data)
     sym = next(s for s in out if s.name == "same_payload_loop")
@@ -106,7 +105,9 @@ def test_payload_change_resets_streak():
     ]
     data = SourceData(coordinator_events=events)
     out = evaluate_repeated_payload_signals(
-        _ctx(), data, config=RepeatedPayloadConfig(streak_threshold=3),
+        _ctx(),
+        data,
+        config=RepeatedPayloadConfig(streak_threshold=3),
     )
     # After the t3 payload change the streak resets to length 1.
     assert all(s.name != "same_payload_loop" for s in out)
@@ -121,7 +122,9 @@ def test_success_resets_streak():
     ]
     data = SourceData(coordinator_events=events)
     out = evaluate_repeated_payload_signals(
-        _ctx(), data, config=RepeatedPayloadConfig(streak_threshold=3),
+        _ctx(),
+        data,
+        config=RepeatedPayloadConfig(streak_threshold=3),
     )
     assert all(s.name != "same_payload_loop" for s in out)
 
@@ -148,12 +151,13 @@ def test_baseline_family_uses_dedicated_projection():
     }
     events = []
     for i in range(3):
-        payload = {**base_payload, "task_id": f"b{i}",
-                   "idempotency_key": f"baseline-tick-{i}"}
+        payload = {**base_payload, "task_id": f"b{i}", "idempotency_key": f"baseline-tick-{i}"}
         events.append({"topic": "delegated_result", "agent": "coordinator", "payload": payload})
     data = SourceData(coordinator_events=events)
     out = evaluate_repeated_payload_signals(
-        _ctx(), data, config=RepeatedPayloadConfig(streak_threshold=3),
+        _ctx(),
+        data,
+        config=RepeatedPayloadConfig(streak_threshold=3),
     )
     sym = next(s for s in out if s.name == "same_payload_loop")
     assert sym.evidence["family"] == "baseline"
@@ -208,12 +212,12 @@ def test_inbox_and_coordinator_events_combined():
     )
     # config_path differs so inbox + coord won't merge into one hash;
     # match them up:
-    inbox[0].payload["params"]["config_path"] = (
-        coord_events[0]["payload"]["params"]["config_path"]
-    )
+    inbox[0].payload["params"]["config_path"] = coord_events[0]["payload"]["params"]["config_path"]
     data = SourceData(coordinator_events=coord_events)
     out = evaluate_repeated_payload_signals(
-        ctx, data, config=RepeatedPayloadConfig(streak_threshold=3),
+        ctx,
+        data,
+        config=RepeatedPayloadConfig(streak_threshold=3),
     )
     sym = next(s for s in out if s.name == "same_payload_loop")
     assert sym.evidence["count"] == 3
@@ -255,18 +259,16 @@ def test_legacy_extra_sglang_args_envelope_hashes_identically(recwarn):
     ]
     data = SourceData(coordinator_events=events)
     out = evaluate_repeated_payload_signals(
-        _ctx(), data, config=RepeatedPayloadConfig(streak_threshold=3),
+        _ctx(),
+        data,
+        config=RepeatedPayloadConfig(streak_threshold=3),
     )
     sym = next(s for s in out if s.name == "same_payload_loop")
     assert sym.evidence["family"] == "integrate"
-    assert sym.evidence["count"] == 3, (
-        "legacy + canonical envelopes did not collapse to the same hash"
-    )
+    assert sym.evidence["count"] == 3, "legacy + canonical envelopes did not collapse to the same hash"
     # At least one DeprecationWarning must fire for the audit channel.
     legacy_warnings = [
-        w for w in recwarn.list
-        if issubclass(w.category, DeprecationWarning)
-        and "extra_sglang_args" in str(w.message)
+        w for w in recwarn.list if issubclass(w.category, DeprecationWarning) and "extra_sglang_args" in str(w.message)
     ]
     assert legacy_warnings, "no DeprecationWarning fired on legacy envelope"
 
@@ -280,7 +282,9 @@ def test_legacy_envelope_alone_still_fingerprints():
     ]
     data = SourceData(coordinator_events=events)
     out = evaluate_repeated_payload_signals(
-        _ctx(), data, config=RepeatedPayloadConfig(streak_threshold=3),
+        _ctx(),
+        data,
+        config=RepeatedPayloadConfig(streak_threshold=3),
     )
     sym = next(s for s in out if s.name == "same_payload_loop")
     assert sym.evidence["count"] == 3

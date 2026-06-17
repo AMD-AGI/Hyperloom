@@ -25,6 +25,7 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
 def _clear_kernel_request_handler_caches():
     """Clear ``lru_cache`` state on env-bound helpers between tests."""
     from inference_optimizer.orchestrator import kernel_request_handlers as krh
+
     krh._default_geak_budget_minutes.cache_clear()
     krh._default_kernel_batch_parallel.cache_clear()
 
@@ -45,14 +46,17 @@ _bootstrap_kernel_agent_env()
 def seed_target_analysis_marker(session_dir: Path) -> Path:
     """Write a ``no_target_gpu_configured`` marker JSON at the session dir."""
     from inference_optimizer.session_paths import target_baseline_json
+
     path = target_baseline_json(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({
-            "status": "skipped",
-            "reason": "no_target_gpu_configured",
-            "warning": "compare_against_gpu is empty",
-        }),
+        json.dumps(
+            {
+                "status": "skipped",
+                "reason": "no_target_gpu_configured",
+                "warning": "compare_against_gpu is empty",
+            }
+        ),
         encoding="utf-8",
     )
     return path

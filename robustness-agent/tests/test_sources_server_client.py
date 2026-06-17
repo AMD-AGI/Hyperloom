@@ -34,15 +34,14 @@ def _ctx(
 
 def _client(handler) -> RobustnessServerClient:
     transport = httpx.MockTransport(handler)
-    http = httpx.AsyncClient(
-        base_url="http://server.test", transport=transport, timeout=5.0
-    )
+    http = httpx.AsyncClient(base_url="http://server.test", transport=transport, timeout=5.0)
     return RobustnessServerClient("http://server.test", client=http)
 
 
 # ---------------------------------------------------------------------------
 # Client low-level behaviour
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_get_session_returns_none_on_404():
@@ -141,6 +140,7 @@ async def test_metrics_window_query_params_are_unix_seconds():
 # ---------------------------------------------------------------------------
 # Source adapter behaviour
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_source_returns_pods_events_summary():
@@ -271,9 +271,7 @@ async def test_list_cluster_pod_metric_categories_unwraps_available():
     from robustness_agent.sources.server_client import _MetricsWindow
 
     try:
-        out = await client.list_cluster_pod_metric_categories(
-            "ns1", "podA", _MetricsWindow(start_unix=10, end_unix=20)
-        )
+        out = await client.list_cluster_pod_metric_categories("ns1", "podA", _MetricsWindow(start_unix=10, end_unix=20))
     finally:
         await client.aclose()
     assert out == [{"name": "gpu_temp", "category": "gpu"}]
@@ -318,9 +316,7 @@ async def test_list_cluster_faults_forwards_filters_and_unwraps():
 
     client = _client(handler)
     try:
-        faults = await client.list_cluster_faults(
-            since="1700000000", node="g1", phase="Isolating", page_size=100
-        )
+        faults = await client.list_cluster_faults(since="1700000000", node="g1", phase="Isolating", page_size=100)
     finally:
         await client.aclose()
     assert seen["path"] == "/api/v1/cluster/faults"
@@ -464,9 +460,7 @@ def _gpu_metric_response(value: float, *, gpu_id: str = "0", ts: int = 100):
                             "series": [
                                 {
                                     "labels": {"gpu": gpu_id},
-                                    "values": [
-                                        {"timestamp": ts, "value": value}
-                                    ],
+                                    "values": [{"timestamp": ts, "value": value}],
                                 }
                             ],
                         }
@@ -626,10 +620,7 @@ async def test_source_pod_metrics_caps_fan_out_per_tick():
         if "/sessions/sess-1/pods" in request.url.path:
             return httpx.Response(
                 200,
-                json=[
-                    {"pod": {"namespace": "ns1", "name": f"pod-{i:02d}"}}
-                    for i in range(10)
-                ],
+                json=[{"pod": {"namespace": "ns1", "name": f"pod-{i:02d}"}} for i in range(10)],
             )
         if "/sessions/sess-1/events" in request.url.path:
             return httpx.Response(200, json={"events": []})
@@ -701,6 +692,7 @@ async def test_server_pod_metrics_drive_local_health_gpu_signal():
 # M2 multi-node: workload_uid -> /cluster/workloads/{uid}/hierarchy fan-out
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_source_workload_uid_merges_hierarchy_pods_into_session_pods():
     """Hierarchy-derived workers are added even when session_pods skipped them."""
@@ -742,10 +734,7 @@ async def test_source_workload_uid_merges_hierarchy_pods_into_session_pods():
         await client.aclose()
 
     assert "/api/v1/cluster/workloads/wl-1/hierarchy" in paths_hit
-    pod_refs = {
-        (entry["pod"]["namespace"], entry["pod"]["name"])
-        for entry in data.session_pods
-    }
+    pod_refs = {(entry["pod"]["namespace"], entry["pod"]["name"]) for entry in data.session_pods}
     assert pod_refs == {
         ("ns1", "head-pod"),
         ("ns1", "worker-0"),

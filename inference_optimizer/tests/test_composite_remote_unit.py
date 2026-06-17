@@ -3,6 +3,7 @@
 """Coverage for ``recipe_kb.composite_remote``: precedence/richness helpers,
 list-union + group merge with field provenance, and the fan-out client
 (search, get_recipe, list_* delegation, health/close, best-effort skips)."""
+
 from __future__ import annotations
 
 import pytest
@@ -17,17 +18,28 @@ from inference_optimizer.recipe_kb.remote_client import RemoteRecipeClientError
 # -- pure helpers ----------------------------------------------------------
 def test_richness_counts_populated_fields() -> None:
     assert cr._richness({}) == 0
-    assert cr._richness({
-        "best_config": {"a": 1}, "what_worked": ["x"], "lessons": ["l"],
-        "stack_fingerprint": {"rocm": "6"}, "prs_tested": ["pr"],
-    }) == 5
+    assert (
+        cr._richness(
+            {
+                "best_config": {"a": 1},
+                "what_worked": ["x"],
+                "lessons": ["l"],
+                "stack_fingerprint": {"rocm": "6"},
+                "prs_tested": ["pr"],
+            }
+        )
+        == 5
+    )
 
 
 def test_precedence_key_handles_bad_numbers() -> None:
-    key = cr._precedence_key({
-        "authority": "EXPERIENTIAL", "confidence": "nan-ish",
-        "best_throughput": "bad",
-    })
+    key = cr._precedence_key(
+        {
+            "authority": "EXPERIENTIAL",
+            "confidence": "nan-ish",
+            "best_throughput": "bad",
+        }
+    )
     assert key[0] == 3  # EXPERIENTIAL rank
     assert key[1] == 0.0 and key[3] == 0.0  # coerced from bad strings
 
@@ -59,12 +71,19 @@ def test_union_lists_unhashable_items() -> None:
 def test_merge_group_backfill_and_provenance() -> None:
     rows = [
         {  # higher precedence base, missing best_config
-            "_source": "gbrain", "canonical_id": "c1", "authority": "EXPERIENTIAL",
-            "confidence": 0.9, "what_worked": ["aiter"], "best_config": {},
+            "_source": "gbrain",
+            "canonical_id": "c1",
+            "authority": "EXPERIENTIAL",
+            "confidence": 0.9,
+            "what_worked": ["aiter"],
+            "best_config": {},
         },
         {  # lower precedence donor supplies best_config
-            "_source": "cortex", "canonical_id": "c1", "authority": "VALIDATED",
-            "confidence": 0.5, "best_config": {"extra_server_args": "--tp 1"},
+            "_source": "cortex",
+            "canonical_id": "c1",
+            "authority": "VALIDATED",
+            "confidence": 0.5,
+            "best_config": {"extra_server_args": "--tp 1"},
             "what_worked": ["mla"],
         },
     ]
@@ -129,7 +148,8 @@ def test_search_merges_by_cid() -> None:
     rows_a = [{"canonical_id": "c1", "authority": "EXPERIENTIAL", "confidence": 0.9}]
     rows_b = [{"canonical_id": "c1", "authority": "VALIDATED", "confidence": 0.5}]
     c = CompositeRemoteRecipeClient(
-        [_FakeSource("a", rows_a), _FakeSource("b", rows_b)], names=["a", "b"],
+        [_FakeSource("a", rows_a), _FakeSource("b", rows_b)],
+        names=["a", "b"],
     )
     out = c.search(limit=5)
     assert len(out) == 1  # merged into one cid
@@ -146,8 +166,7 @@ def test_fan_out_search_skips_failing_source() -> None:
             raise RuntimeError("kaboom")
 
     c = CompositeRemoteRecipeClient(
-        [_BoomRemote("a"), _BoomGeneric("b"),
-         _FakeSource("c", [{"canonical_id": "c1"}])],
+        [_BoomRemote("a"), _BoomGeneric("b"), _FakeSource("c", [{"canonical_id": "c1"}])],
         names=["a", "b", "c"],
     )
     out = c.search(limit=5)
@@ -157,7 +176,8 @@ def test_fan_out_search_skips_failing_source() -> None:
 def test_fan_out_search_skips_empty_arbor(monkeypatch) -> None:
     monkeypatch.setattr(cr, "_v2_to_arbor", lambda row: {} if row.get("drop") else row)
     c = CompositeRemoteRecipeClient(
-        [_FakeSource("a", [{"drop": True}, {"canonical_id": "c1"}])], names=["a"],
+        [_FakeSource("a", [{"drop": True}, {"canonical_id": "c1"}])],
+        names=["a"],
     )
     out = c.search(limit=5)
     assert len(out) == 1
@@ -185,7 +205,8 @@ def test_list_recent() -> None:
 
 def test_list_delegation_to_first_active() -> None:
     c = CompositeRemoteRecipeClient(
-        [_FakeSource("a", enabled=False), _FakeSource("b")], names=["a", "b"],
+        [_FakeSource("a", enabled=False), _FakeSource("b")],
+        names=["a", "b"],
     )
     assert c.list_attempts(canonical_id="c1") == [{"attempt": "c1"}]
     assert c.list_session_attempts(session_id="s1") == [{"session": "s1"}]
@@ -213,7 +234,8 @@ def test_health_false_when_unhealthy_and_raising() -> None:
             raise RuntimeError("boom")
 
     c = CompositeRemoteRecipeClient(
-        [_RaiseHealth("a"), _FakeSource("b", healthy=False)], names=["a", "b"],
+        [_RaiseHealth("a"), _FakeSource("b", healthy=False)],
+        names=["a", "b"],
     )
     assert c.health() is False
 

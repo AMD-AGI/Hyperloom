@@ -24,6 +24,7 @@ def _prompt(shared: str, inbox: str, *, time_budget: str | None = None) -> str:
 # Empty / no-messages cases
 # ---------------------------------------------------------------------------
 
+
 def test_empty_prompt_returns_empty_context():
     ctx = from_coordinator_prompt("")
     assert isinstance(ctx, ReactorContext)
@@ -182,6 +183,7 @@ def test_payload_with_topic_substring_does_not_break_topic_field():
 # Time-budget section (consumed by signals/budget.py)
 # ---------------------------------------------------------------------------
 
+
 def test_time_budget_section_parses_into_snapshot():
     prompt = _prompt(
         "session_id=sess-tb\ncrash_count=0\ncumulative_gain_validated=2.5%\n",
@@ -292,13 +294,11 @@ def test_optimization_stack_size_zero_when_none():
 # non-``(none)``; the ``no_levers_found`` cold-start guard defers until then.
 # ---------------------------------------------------------------------------
 
+
 def test_explore_started_false_when_all_last_explore_keys_are_none():
     """Pre-explore/sweep the lines are all ``(none)`` → flag stays False so ``no_levers_found`` defers."""
     prompt = _prompt(
-        "session_id=s\n"
-        "last_explore=(none)\n"
-        "last_sweep=(none)\n"
-        "crash_count=0\n",
+        "session_id=s\nlast_explore=(none)\nlast_sweep=(none)\ncrash_count=0\n",
         "=== Inbox for robustness ===\n(no new messages)\n",
     )
     ctx = from_coordinator_prompt(prompt)
@@ -326,14 +326,11 @@ def test_explore_started_true_for_each_individual_explore_family():
         "last_sweep",
     ):
         prompt = _prompt(
-            f"session_id=s\n{key}=status=succeeded decision=promoted\n"
-            "crash_count=0\n",
+            f"session_id=s\n{key}=status=succeeded decision=promoted\ncrash_count=0\n",
             "=== Inbox for robustness ===\n(no new messages)\n",
         )
         ctx = from_coordinator_prompt(prompt)
-        assert ctx.shared_state.explore_started is True, (
-            f"{key} should flip explore_started"
-        )
+        assert ctx.shared_state.explore_started is True, f"{key} should flip explore_started"
 
 
 def test_explore_started_default_false_when_keys_absent():

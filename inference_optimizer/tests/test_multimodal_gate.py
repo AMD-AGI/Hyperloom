@@ -25,7 +25,8 @@ def _write_config(model_dir: Path, payload) -> None:
 
 def _args(model: str, *, allow_mm_text_fallback: bool = True) -> argparse.Namespace:
     return argparse.Namespace(
-        model=model, allow_mm_text_fallback=allow_mm_text_fallback,
+        model=model,
+        allow_mm_text_fallback=allow_mm_text_fallback,
     )
 
 
@@ -43,11 +44,14 @@ def test_detect_rwkv6qwen2_hybrid_rejected(tmp_path):
     """RWKV6Qwen2ForCausalLM (RWKV/Qwen2 hybrid) is not in sglang's supported
     arch list and fails ModelConfig validation; reject before boot."""
     m = tmp_path / "rwkv6qwen2"
-    _write_config(m, {
-        "architectures": ["RWKV6Qwen2ForCausalLM"],
-        "model_type": "rwkv6qwen2",
-        "max_position_embeddings": 8192,
-    })
+    _write_config(
+        m,
+        {
+            "architectures": ["RWKV6Qwen2ForCausalLM"],
+            "model_type": "rwkv6qwen2",
+            "max_position_embeddings": 8192,
+        },
+    )
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["architecture"] == "RWKV6Qwen2ForCausalLM"
@@ -57,21 +61,27 @@ def test_detect_rwkv6qwen2_hybrid_rejected(tmp_path):
 def test_detect_plain_rwkv_not_rejected(tmp_path):
     """Plain RwkvForCausalLM IS supported by sglang; must NOT be blocked."""
     m = tmp_path / "rwkv"
-    _write_config(m, {
-        "architectures": ["RwkvForCausalLM"],
-        "model_type": "rwkv",
-        "max_position_embeddings": 4096,
-    })
+    _write_config(
+        m,
+        {
+            "architectures": ["RwkvForCausalLM"],
+            "model_type": "rwkv",
+            "max_position_embeddings": 4096,
+        },
+    )
     assert cli._detect_unsupported_model(str(m)) is None
 
 
 def test_detect_unsupported_arch_nested_in_text_config(tmp_path):
     """Blocklisted arch nested under text_config must still be caught."""
     m = tmp_path / "nested_rwkv6"
-    _write_config(m, {
-        "model_type": "wrapper",
-        "text_config": {"architectures": ["RWKV6Qwen2ForCausalLM"]},
-    })
+    _write_config(
+        m,
+        {
+            "model_type": "wrapper",
+            "text_config": {"architectures": ["RWKV6Qwen2ForCausalLM"]},
+        },
+    )
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["architecture"] == "RWKV6Qwen2ForCausalLM"
@@ -81,10 +91,13 @@ def test_detect_unsupported_arch_nested_in_text_config(tmp_path):
 def test_detect_gemma3_conditional_generation_rejected(tmp_path):
     """Gemma3ForConditionalGeneration is not a causal LM arch -> rejected."""
     m = tmp_path / "gemma3"
-    _write_config(m, {
-        "architectures": ["Gemma3ForConditionalGeneration"],
-        "model_type": "gemma3",
-    })
+    _write_config(
+        m,
+        {
+            "architectures": ["Gemma3ForConditionalGeneration"],
+            "model_type": "gemma3",
+        },
+    )
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["architecture"] == "Gemma3ForConditionalGeneration"
@@ -145,9 +158,7 @@ def test_detect_phi3v_causal_lm_rejected(tmp_path):
 
 def test_detect_causal_lm_allowed(tmp_path):
     """Standard ForCausalLM architectures pass through."""
-    for i, arch in enumerate(
-        ["MistralForCausalLM", "Qwen2ForCausalLM", "LlamaForCausalLM"]
-    ):
+    for i, arch in enumerate(["MistralForCausalLM", "Qwen2ForCausalLM", "LlamaForCausalLM"]):
         m = tmp_path / f"text{i}"
         _write_config(m, {"architectures": [arch], "model_type": "llama"})
         assert cli._detect_unsupported_model(str(m)) is None
@@ -178,10 +189,13 @@ def test_detect_known_model_type_no_arch_allowed(tmp_path):
 def test_detect_known_text_model_type_with_nonstandard_arch_allowed(tmp_path):
     """Known text-generation model_type can allow non-ForCausalLM class names."""
     m = tmp_path / "chatglm"
-    _write_config(m, {
-        "architectures": ["ChatGLMForConditionalGeneration"],
-        "model_type": "chatglm",
-    })
+    _write_config(
+        m,
+        {
+            "architectures": ["ChatGLMForConditionalGeneration"],
+            "model_type": "chatglm",
+        },
+    )
     assert cli._detect_unsupported_model(str(m)) is None
 
 
@@ -189,11 +203,14 @@ def test_detect_causal_lm_with_vision_config_is_text_coercible(tmp_path):
     """A generic ForCausalLM arch carrying vision_config is text-coercible:
     a text decoder exists, so we degrade to the text path (not fail-fast)."""
     m = tmp_path / "visioncausal"
-    _write_config(m, {
-        "architectures": ["LlamaForCausalLM"],
-        "model_type": "llama",
-        "vision_config": {"hidden_size": 1024},
-    })
+    _write_config(
+        m,
+        {
+            "architectures": ["LlamaForCausalLM"],
+            "model_type": "llama",
+            "vision_config": {"hidden_size": 1024},
+        },
+    )
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
@@ -204,11 +221,14 @@ def test_detect_kimi_k25_text_coercible(tmp_path):
     """Kimi-K2.6 carries vision_config but its text MoE path benchmarks fine
     -> text_coercible (degrade with warning), not fail-fast."""
     m = tmp_path / "kimi_k25"
-    _write_config(m, {
-        "architectures": ["KimiK25ForConditionalGeneration"],
-        "model_type": "kimi_k25",
-        "vision_config": {"hidden_size": 1024},
-    })
+    _write_config(
+        m,
+        {
+            "architectures": ["KimiK25ForConditionalGeneration"],
+            "model_type": "kimi_k25",
+            "vision_config": {"hidden_size": 1024},
+        },
+    )
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
@@ -218,11 +238,14 @@ def test_detect_qwen35_moe_text_coercible(tmp_path):
     """Qwen3.6 MoE carries vision_config but benchmarks as text-only
     -> text_coercible."""
     m = tmp_path / "qwen3_5_moe"
-    _write_config(m, {
-        "architectures": ["Qwen3_5MoeForConditionalGeneration"],
-        "model_type": "qwen3_5_moe",
-        "vision_config": {"hidden_size": 1024},
-    })
+    _write_config(
+        m,
+        {
+            "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+            "model_type": "qwen3_5_moe",
+            "vision_config": {"hidden_size": 1024},
+        },
+    )
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
@@ -232,17 +255,20 @@ def test_detect_gemma4_wrapper_with_text_config_is_text_coercible(tmp_path):
     """A multimodal wrapper with an explicit nested text decoder should fall
     back to text-only without requiring a per-family top-level allowlist entry."""
     m = tmp_path / "gemma4"
-    _write_config(m, {
-        "architectures": ["Gemma4ForConditionalGeneration"],
-        "model_type": "gemma4",
-        "vision_config": {"hidden_size": 1024},
-        "text_config": {
-            "model_type": "gemma4_text",
-            "vocab_size": 262144,
-            "hidden_size": 4096,
-            "num_hidden_layers": 48,
+    _write_config(
+        m,
+        {
+            "architectures": ["Gemma4ForConditionalGeneration"],
+            "model_type": "gemma4",
+            "vision_config": {"hidden_size": 1024},
+            "text_config": {
+                "model_type": "gemma4_text",
+                "vocab_size": 262144,
+                "hidden_size": 4096,
+                "num_hidden_layers": 48,
+            },
         },
-    })
+    )
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
@@ -252,17 +278,20 @@ def test_detect_gemma4_wrapper_with_text_config_is_text_coercible(tmp_path):
 def test_detect_known_vlm_with_text_config_still_vision_only(tmp_path):
     """The hard denylist wins before text_config capability detection."""
     m = tmp_path / "qwen_vl"
-    _write_config(m, {
-        "architectures": ["Qwen2VLForConditionalGeneration"],
-        "model_type": "qwen2_vl",
-        "vision_config": {"hidden_size": 1024},
-        "text_config": {
-            "model_type": "qwen2",
-            "architectures": ["Qwen2ForCausalLM"],
-            "vocab_size": 151936,
-            "hidden_size": 4096,
+    _write_config(
+        m,
+        {
+            "architectures": ["Qwen2VLForConditionalGeneration"],
+            "model_type": "qwen2_vl",
+            "vision_config": {"hidden_size": 1024},
+            "text_config": {
+                "model_type": "qwen2",
+                "architectures": ["Qwen2ForCausalLM"],
+                "vocab_size": 151936,
+                "hidden_size": 4096,
+            },
         },
-    })
+    )
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["verdict"] == cli._VERDICT_VISION_ONLY
@@ -275,11 +304,14 @@ def test_detect_mislabeled_vlm_with_vision_config_is_vision_only(tmp_path):
     text-generation architecture must fail-fast (vision_only), not degrade.
     Guards against _SUPPORTED_MODEL_TYPES widening text_coercible routing."""
     m = tmp_path / "mislabeled"
-    _write_config(m, {
-        "architectures": ["SomeVisionForConditionalGeneration"],
-        "model_type": "qwen2",
-        "vision_config": {"hidden_size": 1024},
-    })
+    _write_config(
+        m,
+        {
+            "architectures": ["SomeVisionForConditionalGeneration"],
+            "model_type": "qwen2",
+            "vision_config": {"hidden_size": 1024},
+        },
+    )
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["verdict"] == cli._VERDICT_VISION_ONLY
@@ -298,10 +330,13 @@ def test_detect_invalid_config_returns_none(tmp_path):
 # 2. preflight gate — persists a canonical stop reason and signals exit
 def test_preflight_blocks_gemma3(tmp_path, monkeypatch):
     model = tmp_path / "gemma3"
-    _write_config(model, {
-        "architectures": ["Gemma3ForConditionalGeneration"],
-        "model_type": "gemma3",
-    })
+    _write_config(
+        model,
+        {
+            "architectures": ["Gemma3ForConditionalGeneration"],
+            "model_type": "gemma3",
+        },
+    )
     sd = tmp_path / "session"
     _seed_state(sd, monkeypatch)
 
@@ -331,10 +366,13 @@ def test_preflight_blocks_unknown_arch(tmp_path, monkeypatch):
 
 def test_preflight_allows_plain_text(tmp_path, monkeypatch):
     model = tmp_path / "mistral"
-    _write_config(model, {
-        "architectures": ["MistralForCausalLM"],
-        "model_type": "mistral",
-    })
+    _write_config(
+        model,
+        {
+            "architectures": ["MistralForCausalLM"],
+            "model_type": "mistral",
+        },
+    )
     sd = tmp_path / "session_text"
     _seed_state(sd, monkeypatch)
     assert cli._preflight_unsupported_model_arch(_args(str(model)), sd) is False
@@ -365,10 +403,13 @@ def test_preflight_persists_stop_reason_under_strict_env(tmp_path, monkeypatch):
     """Under strict mode the preflight must still persist the stop_reason."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_STRICT_STOP_REASON", "1")
     model = tmp_path / "gemma3strict"
-    _write_config(model, {
-        "architectures": ["Gemma3ForConditionalGeneration"],
-        "model_type": "gemma3",
-    })
+    _write_config(
+        model,
+        {
+            "architectures": ["Gemma3ForConditionalGeneration"],
+            "model_type": "gemma3",
+        },
+    )
     sd = tmp_path / "session_strict"
     _seed_state(sd, monkeypatch)
     assert cli._preflight_unsupported_model_arch(_args(str(model)), sd) is True
@@ -379,11 +420,14 @@ def test_preflight_persists_stop_reason_under_strict_env(tmp_path, monkeypatch):
 # 4. text_coercible — multimodal signal but a text path exists
 def _coercible_model(tmp_path: Path) -> Path:
     m = tmp_path / "kimi_k25"
-    _write_config(m, {
-        "architectures": ["KimiK25ForConditionalGeneration"],
-        "model_type": "kimi_k25",
-        "vision_config": {"hidden_size": 1024},
-    })
+    _write_config(
+        m,
+        {
+            "architectures": ["KimiK25ForConditionalGeneration"],
+            "model_type": "kimi_k25",
+            "vision_config": {"hidden_size": 1024},
+        },
+    )
     return m
 
 
@@ -395,7 +439,8 @@ def test_preflight_text_coercible_fallback_on_proceeds(tmp_path, monkeypatch):
     _seed_state(sd, monkeypatch)
 
     blocked = cli._preflight_unsupported_model_arch(
-        _args(str(model), allow_mm_text_fallback=True), sd,
+        _args(str(model), allow_mm_text_fallback=True),
+        sd,
     )
 
     assert blocked is False
@@ -419,7 +464,8 @@ def test_preflight_text_coercible_fallback_off_fails_fast(tmp_path, monkeypatch)
     _seed_state(sd, monkeypatch)
 
     blocked = cli._preflight_unsupported_model_arch(
-        _args(str(model), allow_mm_text_fallback=False), sd,
+        _args(str(model), allow_mm_text_fallback=False),
+        sd,
     )
 
     assert blocked is True
@@ -430,15 +476,19 @@ def test_preflight_text_coercible_fallback_off_fails_fast(tmp_path, monkeypatch)
 def test_preflight_vision_only_ignores_fallback_flag(tmp_path, monkeypatch):
     """A true VLM (vision_only) fail-fasts even with the fallback flag on."""
     model = tmp_path / "llava"
-    _write_config(model, {
-        "architectures": ["LlavaForConditionalGeneration"],
-        "model_type": "llava",
-    })
+    _write_config(
+        model,
+        {
+            "architectures": ["LlavaForConditionalGeneration"],
+            "model_type": "llava",
+        },
+    )
     sd = tmp_path / "session_vision_only"
     _seed_state(sd, monkeypatch)
 
     blocked = cli._preflight_unsupported_model_arch(
-        _args(str(model), allow_mm_text_fallback=True), sd,
+        _args(str(model), allow_mm_text_fallback=True),
+        sd,
     )
 
     assert blocked is True
@@ -453,14 +503,16 @@ def test_report_renders_degraded_mode_section():
 
     state = SharedState(session_id="s", model_name="kimi", model_path="/m/kimi")
     state.degraded_mode = True
-    state.model_warnings = [{
-        "kind": "multimodal_text_fallback",
-        "model_name": "kimi",
-        "architecture": "KimiK25ForConditionalGeneration",
-        "model_type": "kimi_k25",
-        "signal": "multimodal config key 'vision_config'",
-        "detail": "DEGRADED MODE: ...",
-    }]
+    state.model_warnings = [
+        {
+            "kind": "multimodal_text_fallback",
+            "model_name": "kimi",
+            "architecture": "KimiK25ForConditionalGeneration",
+            "model_type": "kimi_k25",
+            "signal": "multimodal config key 'vision_config'",
+            "detail": "DEGRADED MODE: ...",
+        }
+    ]
     summary = report._build_summary_dict(state, {}, [], external_baseline=None)
     assert summary["degraded_mode"] is True
     assert len(summary["model_warnings"]) == 1

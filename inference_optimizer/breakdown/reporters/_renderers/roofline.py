@@ -34,16 +34,16 @@ def _snapshot_kv(label: str, snap: dict[str, Any] | None) -> str:
         return ""
     tk = snap.get("top_kernel") or {}
     items = [
-        ("snapshot_id",    snap.get("snapshot_id")),
-        ("ts",             snap.get("ts")),
-        ("compute_pct",    snap.get("compute_pct")),
-        ("idle_pct",       snap.get("idle_pct")),
-        ("comm_pct",       snap.get("comm_pct")),
+        ("snapshot_id", snap.get("snapshot_id")),
+        ("ts", snap.get("ts")),
+        ("compute_pct", snap.get("compute_pct")),
+        ("idle_pct", snap.get("idle_pct")),
+        ("comm_pct", snap.get("comm_pct")),
         ("top_bottleneck", snap.get("top_bottleneck")),
-        ("top_kernel.name",          tk.get("name") if isinstance(tk, dict) else None),
-        ("top_kernel.gpu_pct",       tk.get("gpu_pct") if isinstance(tk, dict) else None),
+        ("top_kernel.name", tk.get("name") if isinstance(tk, dict) else None),
+        ("top_kernel.gpu_pct", tk.get("gpu_pct") if isinstance(tk, dict) else None),
         ("top_kernel.efficiency_pct", tk.get("efficiency_pct") if isinstance(tk, dict) else None),
-        ("top_kernel.bound_type",     tk.get("bound_type") if isinstance(tk, dict) else None),
+        ("top_kernel.bound_type", tk.get("bound_type") if isinstance(tk, dict) else None),
     ]
     body = md_kv_list(items)
     if not body:
