@@ -77,7 +77,17 @@ _MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
 
 
 def render_model_arch_compact(arch: dict | None) -> str:
-    """Render the advisory ``model_arch`` profile as a single compact line (``""`` when empty/not a dict)."""
+    """Render the advisory ``model_arch`` profile as a single compact line (``""`` when empty/not a dict).
+
+    Args:
+        arch (dict | None): The advisory architecture profile mapping
+            (structured keys plus an optional free-text ``notes`` field).
+
+    Returns:
+        str: A ``"; "``-joined ``label=value`` line over the recognized
+            structured fields (plus ``notes`` when present), or ``""`` when
+            ``arch`` is empty or not a dict.
+    """
     if not isinstance(arch, dict) or not arch:
         return ""
     parts: list[str] = []
@@ -197,6 +207,15 @@ def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
     order, so retaining the last ``_EXPLORE_TESTED_CAP`` keys evicts the oldest
     rejections first. Dropping a stale rejection only risks one re-exploration,
     which the round-level dedup still catches in-session.
+
+    Args:
+        tested (dict[str, Any]): The explore_search negative ledger keyed by
+            canonical fingerprint.
+
+    Returns:
+        dict[str, Any]: The ledger trimmed to the most recent
+            ``_EXPLORE_TESTED_CAP`` keys, or an empty dict when ``tested`` is
+            not a dict.
     """
     if not isinstance(tested, dict) or len(tested) <= _EXPLORE_TESTED_CAP:
         return tested if isinstance(tested, dict) else {}
@@ -214,6 +233,18 @@ def _stamp_cycle_on_tested(
     ``cycle`` / ``bottleneck`` values are preserved so an entry stays attributed
     to the cycle + bottleneck that first rejected it, enabling per-cycle /
     per-bottleneck bucketing of veto fingerprints across bottleneck shifts.
+
+    Args:
+        tested (dict[str, Any]): The negative ledger keyed by fingerprint;
+            entry dict values are stamped in place.
+        cycle (int): The macro-cycle to attribute newly-stamped entries to.
+        bottleneck (str): The live bottleneck label to stamp; blank values
+            skip the bottleneck stamp.
+
+    Returns:
+        dict[str, Any]: The same ``tested`` mapping with ``cycle`` /
+            ``bottleneck`` stamped on entries lacking them, or an empty dict
+            when ``tested`` is not a dict.
     """
     if not isinstance(tested, dict):
         return {}
@@ -230,7 +261,20 @@ def _stamp_cycle_on_tested(
 def _stamp_cycle_on_rejected(
     rejected: list[Any], cycle: int, bottleneck: str = "",
 ) -> list[Any]:
-    """Bucket rejected entries by macro-cycle + bottleneck (R3)."""
+    """Bucket rejected entries by macro-cycle + bottleneck (R3).
+
+    Args:
+        rejected (list[Any]): The rejected-entries list; dict items are
+            stamped in place.
+        cycle (int): The macro-cycle to attribute newly-stamped entries to.
+        bottleneck (str): The live bottleneck label to stamp; blank values
+            skip the bottleneck stamp.
+
+    Returns:
+        list[Any]: The same ``rejected`` list with ``cycle`` /
+            ``bottleneck`` stamped on entries lacking them, or an empty list
+            when ``rejected`` is not a list.
+    """
     if not isinstance(rejected, list):
         return []
     bn = (bottleneck or "").strip()
@@ -243,7 +287,16 @@ def _stamp_cycle_on_rejected(
     return rejected
 
 def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
-    """Recursively rewrite legacy ``extra_sglang_args`` field names in-place; returns count rewritten (canonical kept when both present)."""
+    """Recursively rewrite legacy ``extra_sglang_args`` field names in-place; returns count rewritten (canonical kept when both present).
+
+    Args:
+        obj (Any): An arbitrarily nested structure (dict / list / scalar);
+            dicts and lists are walked recursively and mutated in place.
+
+    Returns:
+        int: The number of legacy keys rewritten or dropped across the whole
+            structure.
+    """
     migrated = 0
     if isinstance(obj, dict):
         for legacy_key, canonical_key in _PHASE4_LEGACY_KEY_RENAMES.items():
@@ -514,7 +567,7 @@ class SharedState:
     params_winner_history: list[dict[str, Any]] = field(default_factory=list)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
     params_no_promote_streak: int = 0
-    # Unified explore ledger — persistent DFS state for merged ``explore``; ``tested`` keyed by canonical_fingerprint. ``accepted`` includes inlined stack-rebench survivors; rebench-evicted entries live in rejected with reason='stack_unstable'.
+    # Unified explore ledger — persistent explore-search state for merged ``explore``; ``tested`` keyed by canonical_fingerprint. ``accepted`` includes inlined stack-rebench survivors; rebench-evicted entries live in rejected with reason='stack_unstable'.
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per EXPLORE round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
@@ -849,7 +902,22 @@ class SharedState:
         params_winner_history: Any,
         synergy_attempted: Any,
     ) -> dict[str, Any]:
-        """Shape the unified ``explore_search`` ledger at load time; folds live history so resume preserves cross-round aggregation."""
+        """Shape the unified ``explore_search`` ledger at load time; folds live history so resume preserves cross-round aggregation.
+
+        Args:
+            existing (Any): The persisted ``explore_search`` dict (or any
+                value; non-dicts are treated as empty).
+            backend_winners_history (Any): Legacy backend-winners rows folded
+                into the unified ``winners_history``.
+            params_winner_history (Any): Legacy params-winner rows folded into
+                the unified ``winners_history``.
+            synergy_attempted (Any): Legacy synergy combos folded (deduped)
+                into ``synergy_attempted``.
+
+        Returns:
+            dict[str, Any]: The normalized ``explore_search`` ledger with all
+                required keys defaulted and live history folded in.
+        """
         from .action_executors._grid_runner import variant_fingerprint as _fp
 
         existing = existing if isinstance(existing, dict) else {}
@@ -1086,7 +1154,23 @@ class SharedState:
         *,
         strict: bool | None = None,
     ) -> str:
-        """Validated writer for :attr:`stop_reason` (Inv-8.3 closed vocab): values outside ``STOP_REASON_VOCAB`` map to ``"unknown"`` (lenient) or raise (``strict=True``, default env ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON``). Returns value written."""
+        """Validated writer for :attr:`stop_reason` (Inv-8.3 closed vocab): values outside ``STOP_REASON_VOCAB`` map to ``"unknown"`` (lenient) or raise (``strict=True``, default env ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON``). Returns value written.
+
+        Args:
+            value (str): The proposed stop reason; blank clears
+                :attr:`stop_reason`.
+            strict (bool | None): When ``True`` an out-of-vocab value raises;
+                when ``None`` the mode is read from
+                ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON``.
+
+        Returns:
+            str: The value actually written (``""``, the validated reason, or
+                ``"unknown"`` in lenient mode).
+
+        Raises:
+            ValueError: When ``strict`` is enabled and ``value`` is not in
+                ``STOP_REASON_VOCAB``.
+        """
         from .phase_state import STOP_REASON_VOCAB, is_valid_stop_reason
         text = str(value or "").strip()
         if not text:
@@ -1118,7 +1202,15 @@ class SharedState:
 
     # escalate hint plumbing
     def set_pending_escalate_hint(self, hint: str) -> str:
-        """Stash the LLM-supplied hint for the next phase compute pass; unknown hints dropped (Inv-8.2: closed vocab). Returns value written."""
+        """Stash the LLM-supplied hint for the next phase compute pass; unknown hints dropped (Inv-8.2: closed vocab). Returns value written.
+
+        Args:
+            hint (str): The proposed escalate hint; values outside the closed
+                vocab (and blanks) are dropped.
+
+        Returns:
+            str: The hint actually stored (``""`` when dropped or blank).
+        """
         from .phase_state import is_valid_escalate_hint
         text = str(hint or "").strip()
         if text and not is_valid_escalate_hint(text):
@@ -1127,7 +1219,11 @@ class SharedState:
         return text
 
     def consume_pending_escalate_hint(self) -> str:
-        """Pop the pending hint (recording consumption in audit fields) so the next tick doesn't re-trigger; returns cleared hint."""
+        """Pop the pending hint (recording consumption in audit fields) so the next tick doesn't re-trigger; returns cleared hint.
+
+        Returns:
+            str: The consumed hint (``""`` when none was pending).
+        """
         hint = (self.pending_escalate_hint or "").strip()
         if not hint:
             return ""
@@ -1146,7 +1242,20 @@ class SharedState:
         ts: str | None = None,
         ts_unix: float | None = None,
     ) -> dict[str, Any]:
-        """Append a phase_history row and atomically update ``phase`` fields; ``phase``/``phase_history`` are CORE_STATE_FIELDS so LLM update_state is rejected. Returns the inserted row."""
+        """Append a phase_history row and atomically update ``phase`` fields; ``phase``/``phase_history`` are CORE_STATE_FIELDS so LLM update_state is rejected. Returns the inserted row.
+
+        Args:
+            to_phase (str): The phase being entered.
+            reason (str): The transition reason (from ``PHASE_EXIT_REASONS``).
+            evidence (dict[str, Any] | None): Optional structured evidence
+                attached to the history row.
+            ts (str | None): Optional ISO timestamp; defaults to now (UTC).
+            ts_unix (float | None): Optional Unix epoch matching ``ts``;
+                defaults to the current time.
+
+        Returns:
+            dict[str, Any]: The inserted phase_history row.
+        """
         from datetime import datetime as _dt, timezone as _tz
         import time as _time
         # Lazy import to avoid an import-time cycle.
@@ -1178,6 +1287,10 @@ class SharedState:
 
         Single accessor so the R3 redirect logic and prompt advisory read the
         same value (latest = ``roofline_snapshots[-1]``).
+
+        Returns:
+            str: The latest snapshot's ``top_bottleneck``, or ``""`` when no
+                snapshot exists.
         """
         snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
         if not snaps:
@@ -1193,6 +1306,10 @@ class SharedState:
         Called when a cyclic EXPLORE plateau winds the cycle down. Records the
         bottleneck we plateaued on so the redirect advisory can steer specialists
         away from it; falls back to the live top bottleneck when not supplied.
+
+        Args:
+            prev_bottleneck (str): The bottleneck plateaued on; when blank the
+                live top bottleneck is used instead.
         """
         self.pending_bottleneck_switch = True
         pb = (prev_bottleneck or "").strip() or self.current_top_bottleneck()
@@ -1210,6 +1327,13 @@ class SharedState:
         Returns True when the flag was cleared. A fresh roofline whose top
         bottleneck differs from the plateaued one means the redirect succeeded,
         so the orchestration prompt should stop nagging.
+
+        Args:
+            new_top_bottleneck (str): The current live top bottleneck.
+
+        Returns:
+            bool: ``True`` when a pending switch was cleared, ``False``
+                otherwise.
         """
         if not bool(getattr(self, "pending_bottleneck_switch", False)):
             return False
@@ -1247,6 +1371,23 @@ class SharedState:
         Coordinator-only writer (``policy.CORE_STATE_FIELDS`` guards
         ``lifecycle`` so an LLM ``update_state`` cannot forge events).
         Returns the inserted row.
+
+        Args:
+            step (str): The machine step/handler name (e.g. ``trace_analyze``).
+            status (str): The boundary status (e.g. ``START`` / ``END`` /
+                ``ERROR``).
+            phase (str | None): The owning phase; defaults to the current
+                coordinator phase.
+            label (str | None): Human-friendly step name; defaults to the
+                mapping in ``phase_state.LIFECYCLE_STEP_LABELS``.
+            artifacts (dict[str, str] | None): Optional produced-artifact
+                path map recorded on the event.
+            detail (str): Optional free-text detail.
+            duration_s (float | None): Optional step duration in seconds.
+            ts (str | None): Optional ISO timestamp; defaults to now (UTC).
+
+        Returns:
+            dict[str, Any]: The inserted lifecycle event row.
         """
         # Lazy import to avoid an import-time cycle with the orchestrator
         # package (phase_state imports nothing from SharedState).
@@ -1346,7 +1487,21 @@ class SharedState:
         traceback_text: str,
         agent: str = "",
     ) -> dict[str, Any]:
-        """Persist a compact Coordinator exception summary for postmortems."""
+        """Persist a compact Coordinator exception summary for postmortems.
+
+        Args:
+            tick (int): The Coordinator tick at which the exception fired.
+            stage (str): The tick-loop stage that raised.
+            exc_type (str): The exception class name.
+            message (str): The exception message (truncated to 1000 chars).
+            traceback_text (str): The formatted traceback (truncated to
+                12000 chars).
+            agent (str): Optional agent identifier associated with the stage.
+
+        Returns:
+            dict[str, Any]: The recorded exception summary now stored in
+                :attr:`last_tick_exception`.
+        """
         entry = {
             "tick": int(tick or 0),
             "ts": _now_iso(),
@@ -1360,7 +1515,18 @@ class SharedState:
         return entry
 
     def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
-        """Merge a non-empty changes dict into this state; does NOT re-validate the role/source allowlist (PolicyGate filters upstream). Returns fields actually written."""
+        """Merge a non-empty changes dict into this state; does NOT re-validate the role/source allowlist (PolicyGate filters upstream). Returns fields actually written.
+
+        Args:
+            changes (dict[str, Any]): Field-name -> value mapping to apply;
+                keys not matching a dataclass field are ignored.
+            allow_core (bool): Whether core fields may be written (enforced by
+                PolicyGate upstream; accepted here for call-site parity).
+
+        Returns:
+            dict[str, Any]: The subset of ``changes`` actually written to
+                dataclass fields.
+        """
         if not changes:
             return {}
         applied: dict[str, Any] = {}
@@ -1679,7 +1845,12 @@ class SharedState:
         return entry
 
     def record_kernel_opt(self, result: dict[str, Any]) -> None:
-        """Capture kernel_optimization_handler result for the next Orch turn; empty kernel_id no-op, non-KEEP can't overwrite a pending KEEP, retires kernel_id (r24 guard) after >= max_partial PARTIALs (INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL)."""
+        """Capture kernel_optimization_handler result for the next Orch turn; empty kernel_id no-op, non-KEEP can't overwrite a pending KEEP, retires kernel_id (r24 guard) after >= max_partial PARTIALs (INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL).
+
+        Args:
+            result (dict[str, Any]): The kernel_optimization_handler result
+                envelope; non-dicts and empty ``kernel_id`` are no-ops.
+        """
         if not isinstance(result, dict):
             return
         # Author-time breakdown capture: record geak/oob invocations (incl.
@@ -1908,7 +2079,13 @@ class SharedState:
         }
 
     def _source_files_in_optimization_stack(self) -> set[str]:
-        """source_file paths already touched by an integrate entry; enforces "same source_file, only strongest KEEP integrated" (apply_kernel_patch is a whole-file overwrite)."""
+        """source_file paths already touched by an integrate entry; enforces "same source_file, only strongest KEEP integrated" (apply_kernel_patch is a whole-file overwrite).
+
+        Returns:
+            set[str]: The set of ``target_file`` / ``source_file`` paths
+                referenced by ``integrate`` entries of
+                :attr:`optimization_stack`.
+        """
         sources: set[str] = set()
         for e in (self.optimization_stack or []):
             if not isinstance(e, dict) or e.get("action") != "integrate":
@@ -1973,7 +2150,16 @@ class SharedState:
         return total
 
     def _kernel_trace_impact_pct(self, kernel_id: str) -> float:
-        """Return TraceLens gpu_pct for a kernel_id; unknown kernels sort last."""
+        """Return TraceLens gpu_pct for a kernel_id; unknown kernels sort last.
+
+        Args:
+            kernel_id (str): The kernel identifier to look up in the latest
+                trace-analyze ``hot_kernels_top15``.
+
+        Returns:
+            float: The kernel's ``gpu_pct`` impact, or ``0.0`` when blank,
+                unknown, or unparseable.
+        """
         kid = str(kernel_id or "").strip()
         if not kid:
             return 0.0
@@ -1995,6 +2181,10 @@ class SharedState:
         Ordering favors trace impact (``gpu_pct``) over kernel micro speedup:
         E2E validation should test the highest-impact hot kernel first, not
         merely the patch with the largest isolated microbenchmark win.
+
+        Returns:
+            str: The highest-impact pending KEEP ``kernel_id``, or ``""``
+                when the queue is drained.
         """
         pending = self.pending_keep_kernel_ids()
         return pending[0] if pending else ""
@@ -2006,6 +2196,10 @@ class SharedState:
         ``NEEDS_REVIEW``) are excluded so a noisy near-threshold result does not
         automatically rerun the same patch up to the historical max-attempt cap.
         Positive ``NEEDS_REVIEW`` rows are handled by stack validation instead.
+
+        Returns:
+            list[str]: Pending KEEP ``kernel_id`` values sorted impact-first
+                (trace ``gpu_pct``, then micro speedup), one per source file.
         """
         integrated_ids = self._kernel_ids_in_optimization_stack()
         integrated_sources = self._source_files_in_optimization_stack()
@@ -2065,7 +2259,18 @@ class SharedState:
         min_gpu_pct: float | None = None,
         top_n: int | None = None,
     ) -> list[str]:
-        """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by gpu_pct, one kernel_id per task_group."""
+        """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by gpu_pct, one kernel_id per task_group.
+
+        Args:
+            min_gpu_pct (float | None): Minimum GPU-share threshold; when
+                ``None`` it is read from ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``.
+            top_n (int | None): Cap on enforced kernels by gpu_pct; when
+                ``None`` it is read from ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``.
+
+        Returns:
+            list[str]: The untried hot-reusable ``kernel_id`` values (one per
+                task_group), sorted strongest-first.
+        """
         info = self.last_trace_analyze or {}
         hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
         task_groups = info.get("task_groups") or []
@@ -2151,7 +2356,16 @@ class SharedState:
     # Per-action audit (kernel parity for non-kernel actions)
     @staticmethod
     def _truncate_excerpt(value: Any, *, limit: int = 800) -> str | None:
-        """Coerce ``value`` to str and trim to ``limit`` chars; None for falsy inputs (renderer shows ``err=(none)``)."""
+        """Coerce ``value`` to str and trim to ``limit`` chars; None for falsy inputs (renderer shows ``err=(none)``).
+
+        Args:
+            value (Any): The value to coerce to a string excerpt.
+            limit (int): Maximum retained length in characters (default 800).
+
+        Returns:
+            str | None: The trimmed string, or ``None`` when ``value`` is
+                falsy.
+        """
         if value is None:
             return None
         text = str(value)
@@ -2163,7 +2377,17 @@ class SharedState:
 
     @staticmethod
     def _stderr_tail(value: Any, *, limit: int = 1000) -> str | None:
-        """Pull the last ``limit`` chars from a subprocess error blob (stderr's actionable signal is at the end)."""
+        """Pull the last ``limit`` chars from a subprocess error blob (stderr's actionable signal is at the end).
+
+        Args:
+            value (Any): The error blob to coerce and tail.
+            limit (int): Maximum retained trailing length in characters
+                (default 1000).
+
+        Returns:
+            str | None: The trailing slice of the string, or ``None`` when
+                ``value`` is falsy.
+        """
         if value is None:
             return None
         text = str(value)
@@ -2182,7 +2406,24 @@ class SharedState:
         extras: dict[str, Any] | None = None,
         max_history: int = _DEFAULT_ATTEMPTS_HISTORY,
     ) -> dict[str, Any] | None:
-        """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``. Entry schema {ts, task_id, status, decision, key_metric, key_metric_kind, workspace, error_class, error_excerpt, stderr_tail, raw_result_path, reported_success, extras}. Returns the entry, or None when ``action`` not in the audit set (kernel-owned actions use bespoke recorders). Does NOT call :meth:`save`."""
+        """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``. Entry schema {ts, task_id, status, decision, key_metric, key_metric_kind, workspace, error_class, error_excerpt, stderr_tail, raw_result_path, reported_success, extras}. Returns the entry, or None when ``action`` not in the audit set (kernel-owned actions use bespoke recorders). Does NOT call :meth:`save`.
+
+        Args:
+            action (str): The audited action name (must be in
+                ``_AUDIT_ACTIONS``).
+            task_id (str): The task id this attempt belongs to.
+            status (str): The task status string.
+            decision (str): The promotion decision string.
+            result (dict[str, Any] | None): The action result envelope;
+                ``None`` treated as empty.
+            extras (dict[str, Any] | None): Optional extra fields recorded on
+                the entry.
+            max_history (int): Cap on retained ``<action>_attempts`` entries.
+
+        Returns:
+            dict[str, Any] | None: The recorded attempt entry, or ``None``
+                when ``action`` is not audited.
+        """
         if action not in _AUDIT_ACTIONS:
             return None
         attempts_attr = f"{action}_attempts"
@@ -2260,7 +2501,19 @@ class SharedState:
         result: dict[str, Any] | None,
         max_history: int = _DEFAULT_LAST_FAILURES,
     ) -> dict[str, Any]:
-        """Append one rich failure record to :attr:`last_action_failures` for self-correction; invoked for EVERY unpromotable task kind, unlike :meth:`record_action_attempt`."""
+        """Append one rich failure record to :attr:`last_action_failures` for self-correction; invoked for EVERY unpromotable task kind, unlike :meth:`record_action_attempt`.
+
+        Args:
+            action (str): The failed action name.
+            task_id (str): The task id that failed.
+            result (dict[str, Any] | None): The failure result envelope;
+                ``None`` treated as empty.
+            max_history (int): Cap on retained ``last_action_failures``
+                entries.
+
+        Returns:
+            dict[str, Any]: The recorded failure entry.
+        """
         result = result or {}
         error_class = result.get("error_class")
         error_class_str = str(error_class) if error_class else None
@@ -2302,6 +2555,10 @@ class SharedState:
         Prefers ``baseline_tput``; falls back to ``last_baseline``'s
         ``tput``/``output_throughput`` so a state that lost ``baseline_tput``
         still stamps an achieved value (avoids an empty within/gap pct).
+
+        Returns:
+            float: The resolved baseline throughput, or ``0.0`` when none is
+                available.
         """
         if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
             return float(self.baseline_tput)
@@ -2318,6 +2575,10 @@ class SharedState:
         Reads ``current_best``'s ``tput``/``output_throughput`` so a
         current_best-tagged snapshot keeps its arm even when ``tput`` is
         momentarily absent (avoids silently downgrading to the baseline arm).
+
+        Returns:
+            float: The resolved current_best throughput, or ``0.0`` when none
+                is available.
         """
         cb = self.current_best if isinstance(self.current_best, dict) else {}
         for key in ("tput", "output_throughput"):
@@ -2331,7 +2592,14 @@ class SharedState:
         payload: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
-        """Write the canonical 11-field ``last_trace_analyze`` dict (single writer). ``roofline_snapshot_id`` increments monotonically; PR #321 retired ``last_trace_analyze_baseline`` (roofline_snapshots feeds report.py Roofline Comparison)."""
+        """Write the canonical 11-field ``last_trace_analyze`` dict (single writer). ``roofline_snapshot_id`` increments monotonically; PR #321 retired ``last_trace_analyze_baseline`` (roofline_snapshots feeds report.py Roofline Comparison).
+
+        Args:
+            payload (dict[str, Any]): The trace_analyze task payload (supplies
+                ``trace_input`` / ``trace_dir`` and optional ``roofline_arm``).
+            result (dict[str, Any]): The trace_analyze result envelope; a
+                non-dict result is a no-op.
+        """
         if not isinstance(result, dict):
             return
         trace_input = (
@@ -2678,7 +2946,12 @@ class SharedState:
         }
 
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
-        """Record conc_sweep task completion (mirrors record_sweep). Bug #12: status lets exit_normal_sweep return conc_sweep_done so SWEEP→CLOSE fires on conc_sweep alone."""
+        """Record conc_sweep task completion (mirrors record_sweep). Bug #12: status lets exit_normal_sweep return conc_sweep_done so SWEEP→CLOSE fires on conc_sweep alone.
+
+        Args:
+            result (dict[str, Any]): The conc_sweep result envelope; a
+                non-dict result is a no-op.
+        """
         if not isinstance(result, dict):
             return
         self.last_conc_sweep = {
@@ -2693,7 +2966,12 @@ class SharedState:
 
     # specialist round bookkeeping
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
-        """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites)."""
+        """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites).
+
+        Args:
+            entry (dict[str, Any]): The round summary; an empty / non-dict
+                value is a no-op. A blank ``round_id`` always appends.
+        """
         if not isinstance(entry, dict) or not entry:
             return
         round_id = str(entry.get("round_id") or "").strip()
@@ -2727,7 +3005,17 @@ class SharedState:
     def bump_specialist_domain_empty_streak(
         self, domain: str, *, empty: bool,
     ) -> int:
-        """Increment/reset the per-domain empty-proposal streak; returns new value (escalation threshold lives in ``KB_design §3.9``, not here)."""
+        """Increment/reset the per-domain empty-proposal streak; returns new value (escalation threshold lives in ``KB_design §3.9``, not here).
+
+        Args:
+            domain (str): The specialist domain; blank normalizes to
+                ``"unknown"``.
+            empty (bool): ``True`` to increment the streak, ``False`` to reset
+                it to zero.
+
+        Returns:
+            int: The post-update streak value for the domain.
+        """
         d = str(domain or "").strip() or "unknown"
         if empty:
             self.specialist_domain_empty_streak[d] = int(
@@ -2754,7 +3042,15 @@ class SharedState:
 
     @staticmethod
     def _anchor_for(domain_or_anchor: str) -> str:
-        """Resolve a domain key or raw tag to its canonical kb_anchor."""
+        """Resolve a domain key or raw tag to its canonical kb_anchor.
+
+        Args:
+            domain_or_anchor (str): A domain key, raw tag, or anchor string.
+
+        Returns:
+            str: The canonical kb_anchor, falling back to the trimmed input
+                when no mapping resolves (``""`` for blank input).
+        """
         from .specialist_domains import domain_for_tag, get_domain
 
         s = str(domain_or_anchor or "").strip()
@@ -2769,13 +3065,23 @@ class SharedState:
         return s
 
     def note_specialist_dispatched(self, domain_or_anchor: str) -> None:
-        """Reset ``rounds_since_last_specialist`` for the dispatched anchor."""
+        """Reset ``rounds_since_last_specialist`` for the dispatched anchor.
+
+        Args:
+            domain_or_anchor (str): The dispatched domain / anchor whose
+                counter should be reset.
+        """
         anchor = self._anchor_for(domain_or_anchor)
         if anchor:
             self.rounds_since_last_specialist[anchor] = 0
 
     def note_domain_keep(self, domain_or_anchor: str) -> None:
-        """Reset ``rounds_since_last_keep`` for the anchor that just KEPT."""
+        """Reset ``rounds_since_last_keep`` for the anchor that just KEPT.
+
+        Args:
+            domain_or_anchor (str): The domain / anchor whose KEEP counter
+                should be reset.
+        """
         anchor = self._anchor_for(domain_or_anchor)
         if anchor:
             self.rounds_since_last_keep[anchor] = 0
@@ -2786,7 +3092,18 @@ class SharedState:
         """Return anchors whose ``rounds_since_last_specialist`` ≥
         ``specialist_threshold`` OR ``rounds_since_last_keep`` ≥
         ``keep_threshold`` (point 1 lower-bound; point 2 hard-trigger reads
-        this). Deterministically ordered by widest gap first."""
+        this). Deterministically ordered by widest gap first.
+
+        Args:
+            specialist_threshold (int): Rounds-since-last-specialist value at
+                or above which an anchor counts as stalled.
+            keep_threshold (int): Rounds-since-last-keep value at or above
+                which an anchor counts as stalled.
+
+        Returns:
+            list[str]: Stalled anchors ordered by widest gap first, then by
+                anchor name.
+        """
         anchors = (
             set(self.rounds_since_last_specialist)
             | set(self.rounds_since_last_keep)
@@ -2804,7 +3121,15 @@ class SharedState:
         """Return the canonical_id of the most actionable open gap whose
         ``domain_hint`` resolves to ``anchor`` (or ``""`` when none). Selection:
         highest severity, then least-attempted, then oldest (point 2 reads this
-        to force-dispatch a stalled domain that still has pending work)."""
+        to force-dispatch a stalled domain that still has pending work).
+
+        Args:
+            anchor (str): The domain / anchor to match gaps against.
+
+        Returns:
+            str: The ``canonical_id`` of the most actionable matching gap, or
+                ``""`` when none match.
+        """
         target = self._anchor_for(anchor)
         if not target:
             return ""
@@ -2829,7 +3154,15 @@ class SharedState:
 
     # gaps ledger helpers
     def find_gap(self, canonical_id: str) -> dict[str, Any] | None:
-        """Return the gap entry matching ``canonical_id`` (or ``None``)."""
+        """Return the gap entry matching ``canonical_id`` (or ``None``).
+
+        Args:
+            canonical_id (str): The gap's canonical identifier.
+
+        Returns:
+            dict[str, Any] | None: The matching gap row, or ``None`` when the
+                id is blank or not present.
+        """
         if not canonical_id:
             return None
         cid = str(canonical_id)
@@ -2839,7 +3172,16 @@ class SharedState:
         return None
 
     def upsert_gap(self, entry: dict[str, Any]) -> dict[str, Any]:
-        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer (Inv-1 single-writer + CORE_STATE_FIELDS lock). Returns the merged entry."""
+        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer (Inv-1 single-writer + CORE_STATE_FIELDS lock). Returns the merged entry.
+
+        Args:
+            entry (dict[str, Any]): The gap row to upsert; must carry a
+                non-empty ``canonical_id`` (else a no-op returning ``{}``).
+
+        Returns:
+            dict[str, Any]: The inserted-or-merged gap row, or ``{}`` when the
+                entry is invalid.
+        """
         if not isinstance(entry, dict):
             return {}
         cid = str(entry.get("canonical_id") or "").strip()
@@ -2910,7 +3252,17 @@ class SharedState:
         canonical_id: str,
         attempt: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Append one attempt row to an existing gap; returns the gap or ``None`` when unknown (caller may ``upsert_gap`` instead)."""
+        """Append one attempt row to an existing gap; returns the gap or ``None`` when unknown (caller may ``upsert_gap`` instead).
+
+        Args:
+            canonical_id (str): The gap's canonical identifier.
+            attempt (dict[str, Any]): The attempt row to append (a ``ts`` is
+                stamped when absent).
+
+        Returns:
+            dict[str, Any] | None: The updated gap row, or ``None`` when no
+                gap matches ``canonical_id``.
+        """
         gap = self.find_gap(canonical_id)
         if gap is None:
             return None
@@ -2923,7 +3275,13 @@ class SharedState:
         return gap
 
     def replace_gaps(self, entries: list[dict[str, Any]]) -> None:
-        """Bulk-replace ``gaps`` with a fresh dedup'd list (discards stale rows wholesale); idempotent."""
+        """Bulk-replace ``gaps`` with a fresh dedup'd list (discards stale rows wholesale); idempotent.
+
+        Args:
+            entries (list[dict[str, Any]]): The replacement gap rows; deduped
+                by ``canonical_id``, per-gap attempts and the list are capped.
+                A non-list value is a no-op.
+        """
         if not isinstance(entries, list):
             return
         dedup: dict[str, dict[str, Any]] = {}
@@ -2958,7 +3316,16 @@ class SharedState:
         task_id: str = "",
         delta_pct: float | None = None,
     ) -> None:
-        """Append one intervention entry and update config-only counters. consecutive-config counter advances on ``"config"``, resets on ``"code_patch"``; ``"code_patch_attempt"`` is telemetry-only."""
+        """Append one intervention entry and update config-only counters. consecutive-config counter advances on ``"config"``, resets on ``"code_patch"``; ``"code_patch_attempt"`` is telemetry-only.
+
+        Args:
+            change_type (str): The intervention kind (e.g. ``config`` /
+                ``code_patch`` / ``code_patch_attempt``).
+            action (str): The action name driving the intervention.
+            task_id (str): The originating task id.
+            delta_pct (float | None): Optional measured gain delta for the
+                intervention.
+        """
         ct = str(change_type or "").strip().lower()
         entry = {
             "change_type": ct,
@@ -2978,7 +3345,17 @@ class SharedState:
             self.consecutive_config_only_rounds = 0
 
     def get_intervention_mix(self, *, recent_window: int = 5) -> dict[str, Any]:
-        """Summarise the intervention-mix ledger as derived counts (config vs code_patch totals, recent window, consecutive_config_only, config_heavy). Read-only; unknown change_types ignored in tallies but break the trailing config-only run."""
+        """Summarise the intervention-mix ledger as derived counts (config vs code_patch totals, recent window, consecutive_config_only, config_heavy). Read-only; unknown change_types ignored in tallies but break the trailing config-only run.
+
+        Args:
+            recent_window (int): Size of the trailing window for the
+                ``recent_*`` tallies; non-positive uses the full ledger.
+
+        Returns:
+            dict[str, Any]: Derived totals (total/recent config and
+                code_patch counts, ``consecutive_config_only``,
+                ``config_heavy``).
+        """
         ledger = [e for e in (self.intervention_mix or []) if isinstance(e, dict)]
 
         def _ct(entry: dict[str, Any]) -> str:
@@ -3026,7 +3403,14 @@ class SharedState:
         }
 
     def bump_specialist_dispatched(self, n: int = 1) -> int:
-        """Increment the per-EXPLORE specialist dispatch counter; returns post-increment value."""
+        """Increment the per-EXPLORE specialist dispatch counter; returns post-increment value.
+
+        Args:
+            n (int): Amount to add to the dispatch counter (default 1).
+
+        Returns:
+            int: The post-increment dispatch count.
+        """
         self.explore_specialist_dispatched_count = (
             int(self.explore_specialist_dispatched_count or 0) + int(n)
         )
@@ -3037,12 +3421,27 @@ class SharedState:
         self.explore_specialist_dispatched_count = 0
 
     def bump_research_scout_runs(self, n: int = 1) -> int:
-        """Increment the research-scout dispatch counter; return new total."""
+        """Increment the research-scout dispatch counter; return new total.
+
+        Args:
+            n (int): Amount to add to the scout-run counter (default 1).
+
+        Returns:
+            int: The post-increment scout-run total.
+        """
         self.research_scout_runs = int(self.research_scout_runs or 0) + int(n)
         return self.research_scout_runs
 
     def register_seen_pr_ids(self, pr_ids: Any) -> int:
-        """Add PR ids to the shared seen-set (scout + FRAMEWORK_PR dedup); returns count newly added."""
+        """Add PR ids to the shared seen-set (scout + FRAMEWORK_PR dedup); returns count newly added.
+
+        Args:
+            pr_ids (Any): An iterable of PR id values; blanks and duplicates
+                are skipped.
+
+        Returns:
+            int: The number of PR ids newly added to the seen-set.
+        """
         seen = set(self.research_scout_seen_pr_ids or [])
         added = 0
         for raw in pr_ids or []:
@@ -3060,7 +3459,14 @@ class SharedState:
         return added
 
     def has_seen_pr_id(self, pr_id: Any) -> bool:
-        """True iff ``pr_id`` was already surfaced by scout / FRAMEWORK_PR."""
+        """True iff ``pr_id`` was already surfaced by scout / FRAMEWORK_PR.
+
+        Args:
+            pr_id (Any): The PR id to check.
+
+        Returns:
+            bool: ``True`` when the id is non-blank and already seen.
+        """
         pid = str(pr_id or "").strip()
         return bool(pid) and pid in set(self.research_scout_seen_pr_ids or [])
 
@@ -3070,14 +3476,25 @@ class SharedState:
         self.params_no_promote_streak = 0
 
     def note_explore_outcome(self, *, promoted: bool) -> None:
-        """Update the legacy plateau proxy after one explore task (KEEP resets, no-promote increments)."""
+        """Update the legacy plateau proxy after one explore task (KEEP resets, no-promote increments).
+
+        Args:
+            promoted (bool): ``True`` when the explore task produced a KEEP
+                (resets the proxy); ``False`` increments the no-promote
+                streak.
+        """
         if promoted:
             self.reset_explore_plateau_proxy()
         else:
             self.params_no_promote_streak += 1
 
     def to_intervention_mix_summary(self) -> str:
-        """Render the intervention ledger as neutral telemetry (one-line counts summary; ``""`` when empty). No directive emitted — config-vs-patch is the LLM's choice."""
+        """Render the intervention ledger as neutral telemetry (one-line counts summary; ``""`` when empty). No directive emitted — config-vs-patch is the LLM's choice.
+
+        Returns:
+            str: A single-line counts summary, or ``""`` when the ledger is
+                empty.
+        """
         mix = self.intervention_mix or []
         if not mix:
             return ""
@@ -3106,7 +3523,14 @@ class SharedState:
     def record_specialist_patch_verdict(
         self, specialist_task_id: str, verdict: str,
     ) -> None:
-        """Record the Critic verdict for a specialist worktree patch; idempotent (later verdict overwrites), empty ``verdict`` clears the entry to force re-review."""
+        """Record the Critic verdict for a specialist worktree patch; idempotent (later verdict overwrites), empty ``verdict`` clears the entry to force re-review.
+
+        Args:
+            specialist_task_id (str): The specialist task id; blank is a
+                no-op.
+            verdict (str): The Critic verdict; blank clears the recorded
+                verdict to force re-review.
+        """
         sid = str(specialist_task_id or "").strip()
         if not sid:
             return
@@ -3119,7 +3543,15 @@ class SharedState:
     def get_specialist_patch_verdict(
         self, specialist_task_id: str,
     ) -> str:
-        """Return the patch verdict, or empty when no Critic decision exists."""
+        """Return the patch verdict, or empty when no Critic decision exists.
+
+        Args:
+            specialist_task_id (str): The specialist task id.
+
+        Returns:
+            str: The recorded verdict, or ``""`` when none exists or the id
+                is blank.
+        """
         sid = str(specialist_task_id or "").strip()
         if not sid:
             return ""
@@ -3136,7 +3568,13 @@ class SharedState:
             self.last_specialist = dict(snapshot)
 
     def apply_explore_search_update(self, update: dict[str, Any]) -> None:
-        """Merge an ExploreExecutor search update into persistent state (v0.8 M3); executor never writes ``accepted`` directly — :meth:`record_explore_accepted` is the single writer for that bucket."""
+        """Merge an ExploreExecutor search update into persistent state (v0.8 M3); executor never writes ``accepted`` directly — :meth:`record_explore_accepted` is the single writer for that bucket.
+
+        Args:
+            update (dict[str, Any]): The executor's explore-search update
+                (tested / rejected / name_index / history fields); a non-dict
+                value is a no-op.
+        """
         if not isinstance(update, dict):
             return
         prior = self.explore_search if isinstance(self.explore_search, dict) else {}
@@ -3193,7 +3631,12 @@ class SharedState:
         self.explore_search = merged
 
     def record_explore_accepted(self, variant: dict[str, Any]) -> None:
-        """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry so a variant isn't in both buckets."""
+        """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry so a variant isn't in both buckets.
+
+        Args:
+            variant (dict[str, Any]): The promoted variant to record; an
+                empty / non-dict value is a no-op.
+        """
         if not isinstance(variant, dict) or not variant:
             return
         from .action_executors._canonical_fingerprint import canonical_fingerprint
@@ -3259,7 +3702,17 @@ class SharedState:
         param_flags: list[str] | None = None,
         source_path: str = "",
     ) -> None:
-        """Persist the AST-discovered flag list for a framework; the prompt surfaces the union so the LLM synthesizes new GridVariants beyond DEFAULT_*_GRID. Idempotent per-framework."""
+        """Persist the AST-discovered flag list for a framework; the prompt surfaces the union so the LLM synthesizes new GridVariants beyond DEFAULT_*_GRID. Idempotent per-framework.
+
+        Args:
+            framework (str): The framework key; blank normalizes to
+                ``"unknown"``.
+            backend_flags (list[str] | None): Discovered backend flags;
+                ``None`` leaves the existing list untouched.
+            param_flags (list[str] | None): Discovered parameter flags;
+                ``None`` leaves the existing list untouched.
+            source_path (str): Optional path to the scanned source file.
+        """
         fw = (framework or "").strip().lower() or "unknown"
         entry = dict(self.discovered_flags.get(fw) or {})
         if backend_flags is not None:
@@ -3290,7 +3743,19 @@ class SharedState:
         extra_server_args: str = "",
         ts: str | None = None,
     ) -> float | None:
-        """Mirror an optimization_stack append into gain_per_stack_entry; computes ``(new_tput-baseline_tput)/baseline_tput*100`` and appends. Returns gain_pct (None when baseline_tput is 0 or new_tput non-positive)."""
+        """Mirror an optimization_stack append into gain_per_stack_entry; computes ``(new_tput-baseline_tput)/baseline_tput*100`` and appends. Returns gain_pct (None when baseline_tput is 0 or new_tput non-positive).
+
+        Args:
+            action (str): The action that produced the stack entry.
+            variant_name (str | None): The variant name, when applicable.
+            new_tput (float): The measured throughput for the entry.
+            extra_server_args (str): The extra server args for the entry.
+            ts (str | None): Optional ISO timestamp for the entry.
+
+        Returns:
+            float | None: The computed incremental gain pct, or ``None`` when
+                ``baseline_tput`` is 0 or ``new_tput`` is non-positive.
+        """
         try:
             base = float(self.baseline_tput or 0.0)
         except (TypeError, ValueError):
@@ -3332,7 +3797,16 @@ class SharedState:
 
     # Time-budget helpers (consumed by Coordinator._compose_prompt)
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:
-        """Wall-clock minutes since ``start_ts`` (0.0 when empty/unparseable)."""
+        """Wall-clock minutes since ``start_ts`` (0.0 when empty/unparseable).
+
+        Args:
+            now (datetime | None): Reference time; defaults to the current UTC
+                time.
+
+        Returns:
+            float: Minutes elapsed since ``start_ts`` (clamped at 0.0; 0.0
+                when ``start_ts`` is empty or unparseable).
+        """
         if not self.start_ts:
             return 0.0
         try:
@@ -3348,17 +3822,39 @@ class SharedState:
         return max(0.0, delta)
 
     def remaining_minutes(self, *, now: datetime | None = None) -> float | None:
-        """Minutes left in the wall-clock budget; ``None`` when ``max_minutes`` unset (unbounded), else clamped at 0."""
+        """Minutes left in the wall-clock budget; ``None`` when ``max_minutes`` unset (unbounded), else clamped at 0.
+
+        Args:
+            now (datetime | None): Reference time; defaults to the current UTC
+                time.
+
+        Returns:
+            float | None: Minutes remaining in the budget (clamped at 0.0), or
+                ``None`` when ``max_minutes`` is unset.
+        """
         if not self.max_minutes:
             return None
         return max(0.0, float(self.max_minutes) - self.elapsed_minutes(now=now))
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
-        """True iff a new KEEP landed since the last inline stack rebench (purely a stack-length check vs ``cumulative_gain_validated_stack_len``)."""
+        """True iff a new KEEP landed since the last inline stack rebench (purely a stack-length check vs ``cumulative_gain_validated_stack_len``).
+
+        Returns:
+            bool: ``True`` when ``optimization_stack`` is longer than
+                ``cumulative_gain_validated_stack_len``.
+        """
         return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len)
 
     def to_mission_summary(self, *, now: datetime | None = None) -> str:
-        """Mission-progress block printed at the top of every tick (outcome-shaped state: raw/validated gain, time vs budget, stack staleness); distinct from :meth:`to_prompt_summary`."""
+        """Mission-progress block printed at the top of every tick (outcome-shaped state: raw/validated gain, time vs budget, stack staleness); distinct from :meth:`to_prompt_summary`.
+
+        Args:
+            now (datetime | None): Reference time for elapsed / remaining
+                calculations; defaults to the current UTC time.
+
+        Returns:
+            str: The multi-line mission-progress block.
+        """
         elapsed = self.elapsed_minutes(now=now)
         remaining = self.remaining_minutes(now=now)
         budget_line = (
@@ -3416,7 +3912,16 @@ class SharedState:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3); compact (≤5 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate."""
+        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3); compact (≤5 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
+
+        Args:
+            budget_pct (dict[str, float] | None): Per-phase budget fractions;
+                defaults to :attr:`phase_budget_pct`.
+            now_unix (float | None): Reference Unix time; defaults to now.
+
+        Returns:
+            str: The compact ``=== Phase ===`` block.
+        """
         from .phase_state import (
             DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
             DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
@@ -3505,7 +4010,17 @@ class SharedState:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-phase budget telemetry block for Robustness (one ``phase: elapsed=Xs cap=Ys (Z%)`` line per phase) so it can spot budget overruns."""
+        """Render the per-phase budget telemetry block for Robustness (one ``phase: elapsed=Xs cap=Ys (Z%)`` line per phase) so it can spot budget overruns.
+
+        Args:
+            budget_pct (dict[str, float] | None): Per-phase budget fractions;
+                defaults to :attr:`phase_budget_pct`.
+            now_unix (float | None): Reference Unix time; defaults to now.
+
+        Returns:
+            str: One telemetry line per phase, or ``"(no phase history yet)"``
+                when no history exists.
+        """
         from .phase_state import (
             DEFAULT_PHASE_BUDGET_PCT,
             PHASE_NAMES,
@@ -3553,7 +4068,15 @@ class SharedState:
         return "\n".join(lines) or "(no phase history yet)"
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
-        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section (v0.8 §3.3 §4.1); empty when no recipe/pitfalls. Capped; full JSON at runtime/cortex/.kb_warm.json / .kb_pitfalls.json."""
+        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section (v0.8 §3.3 §4.1); empty when no recipe/pitfalls. Capped; full JSON at runtime/cortex/.kb_warm.json / .kb_pitfalls.json.
+
+        Args:
+            max_lines (int): Cap on rendered lines before truncation.
+
+        Returns:
+            str: The warm-start summary block, or ``""`` when no recipe /
+                pitfalls are present.
+        """
         recipe = self.warm_start_recipe or {}
         pitfalls = self.warm_start_pitfalls or []
         if not recipe and not pitfalls:
@@ -3596,7 +4119,14 @@ class SharedState:
         return "\n".join(out)
 
     def to_gaps_summary(self, *, max_entries: int = 10) -> str:
-        """Render :attr:`gaps` for prompt injection (KB_design §3.3/§3.5); empty when no gaps. Capped at ``max_entries`` newest rows."""
+        """Render :attr:`gaps` for prompt injection (KB_design §3.3/§3.5); empty when no gaps. Capped at ``max_entries`` newest rows.
+
+        Args:
+            max_entries (int): Maximum number of newest gap rows to render.
+
+        Returns:
+            str: The rendered gaps block, or ``""`` when no gaps exist.
+        """
         if not self.gaps:
             return ""
         # Newest first by last_updated_ts (deterministic fallback to first_seen_ts/insertion).
@@ -3639,7 +4169,16 @@ class SharedState:
         return "\n".join(rows)
 
     def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
-        """Render advisory multi-model proposal scores for Orchestration. NO mean/sorting (Inv-9.1: no system-side scoreboard); rater identities anonymized to avoid brand bias. Empty when no recent round carries scores."""
+        """Render advisory multi-model proposal scores for Orchestration. NO mean/sorting (Inv-9.1: no system-side scoreboard); rater identities anonymized to avoid brand bias. Empty when no recent round carries scores.
+
+        Args:
+            max_rounds (int): Maximum number of recent scored rounds to
+                render.
+
+        Returns:
+            str: The anonymized proposal-scores block, or ``""`` when no
+                recent round carries scores.
+        """
         rounds = [
             r for r in (self.specialist_rounds or [])
             if isinstance(r, dict)
@@ -3829,7 +4368,12 @@ class SharedState:
         )
 
     def _format_attempts_history(self) -> str:
-        """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``) so the LLM gauges reliability without 6x20 rows."""
+        """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``) so the LLM gauges reliability without 6x20 rows.
+
+        Returns:
+            str: A per-action totals summary, or ``"(no attempts recorded)"``
+                when no attempts exist.
+        """
         parts: list[str] = []
         for action in sorted(_AUDIT_ACTIONS):
             attempts_attr = f"{action}_attempts"
@@ -3849,7 +4393,12 @@ class SharedState:
         return " ".join(parts) if parts else "(no attempts recorded)"
 
     def _format_last_action_failures(self) -> str:
-        """Render up to the 3 most-recent global failures (rich-context companion to crash_count/baseline_failure_streak); full list on disk."""
+        """Render up to the 3 most-recent global failures (rich-context companion to crash_count/baseline_failure_streak); full list on disk.
+
+        Returns:
+            str: A pipe-joined render of the last 3 failures (with an
+                ``[+N earlier]`` suffix when more exist), or ``"(none)"``.
+        """
         if not self.last_action_failures:
             return "(none)"
         rows: list[str] = []
@@ -3909,7 +4458,15 @@ class SharedState:
 
     @staticmethod
     def _format_variant_line(entry: dict[str, Any]) -> str:
-        """One-line render of a search variant for prompt blocks."""
+        """One-line render of a search variant for prompt blocks.
+
+        Args:
+            entry (dict[str, Any]): A search-variant entry (name, gain_pct,
+                tput, extra args / envs).
+
+        Returns:
+            str: A single fixed-width line summarizing the variant.
+        """
         name = str(entry.get("name") or "?")
         gain = entry.get("gain_pct")
         tput = entry.get("tput") or entry.get("output_throughput")
@@ -3936,7 +4493,17 @@ class SharedState:
     def _enrich_with_tested_gain(
         entry: dict[str, Any], tested: dict[str, Any],
     ) -> dict[str, Any]:
-        """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]`` at render time (some accepted entries don't persist gain_pct; avoids a second writer)."""
+        """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]`` at render time (some accepted entries don't persist gain_pct; avoids a second writer).
+
+        Args:
+            entry (dict[str, Any]): The accepted-variant entry to enrich.
+            tested (dict[str, Any]): The negative ledger keyed by fingerprint,
+                used to backfill missing gain / tput.
+
+        Returns:
+            dict[str, Any]: ``entry`` itself when already complete, otherwise
+                a copy with ``gain_pct`` / ``tput`` backfilled where possible.
+        """
         if (
             entry.get("gain_pct") is not None
             and entry.get("tput") is not None
@@ -3960,7 +4527,12 @@ class SharedState:
         return out
 
     def _format_backend_winners_history(self) -> str:
-        """Multi-line render of the explore-round winners history (last 5 rounds: per-winner gain_pct/tput/flags); older rounds collapse to an elision line."""
+        """Multi-line render of the explore-round winners history (last 5 rounds: per-winner gain_pct/tput/flags); older rounds collapse to an elision line.
+
+        Returns:
+            str: The multi-line winners-history render, or
+                ``"(no explore rounds completed)"`` when empty.
+        """
         if not self.backend_winners_history:
             return "(no explore rounds completed)"
         last = self.backend_winners_history[-5:]
@@ -4006,7 +4578,14 @@ class SharedState:
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
-        """Multi-line render of a ``*_search`` dedup ledger; each entry surfaces real ``gain_pct``. Counts on the head line; bodies show last 5 per bucket (only the prompt body is truncated)."""
+        """Multi-line render of a ``*_search`` dedup ledger; each entry surfaces real ``gain_pct``. Counts on the head line; bodies show last 5 per bucket (only the prompt body is truncated).
+
+        Args:
+            search (dict[str, Any] | None): The search ledger to render.
+
+        Returns:
+            str: The multi-line ledger render, or ``"(none)"`` when empty.
+        """
         if not search:
             return "(none)"
         accepted = list(search.get("accepted") or [])
@@ -4056,14 +4635,27 @@ class SharedState:
 
     @staticmethod
     def _strip_base64_data_urls(text: str) -> str:
-        """Drop base64 image payloads before prompt injection (in-memory only; on-disk file intact). Delegates to ``inference_optimizer.tracelens_md``."""
+        """Drop base64 image payloads before prompt injection (in-memory only; on-disk file intact). Delegates to ``inference_optimizer.tracelens_md``.
+
+        Args:
+            text (str): The markdown text to scrub of base64 data URLs.
+
+        Returns:
+            str: The text with base64 data URLs stripped (``""`` for falsy
+                input).
+        """
         if not text:
             return text or ""
         from inference_optimizer.tracelens_md import strip_base64_data_urls
         return strip_base64_data_urls(text)
 
     def _format_analysis_md_full(self) -> str:
-        """Inject TraceLens analysis.md verbatim (Roofline composite design §6.1: no truncation/interpretation) between ``=== TraceLens Analysis ... ===`` bookends; header carries snapshot id + gain. Empty cache → one-line hint to propose ``roofline``."""
+        """Inject TraceLens analysis.md verbatim (Roofline composite design §6.1: no truncation/interpretation) between ``=== TraceLens Analysis ... ===`` bookends; header carries snapshot id + gain. Empty cache → one-line hint to propose ``roofline``.
+
+        Returns:
+            str: The verbatim analysis.md wrapped in bookends, or a one-line
+                hint when no TraceLens snapshot is cached.
+        """
         cached = self.last_trace_analyze or {}
         md_text = cached.get("analysis_md_text") or ""
         if not md_text:
@@ -4104,7 +4696,12 @@ class SharedState:
         )
 
     def _format_profiler_digest(self) -> str:
-        """Compact bottleneck-focused profiler block (saturation mix + cross-snapshot delta + hot kernels + lever); ``(none)`` until a snapshot lands."""
+        """Compact bottleneck-focused profiler block (saturation mix + cross-snapshot delta + hot kernels + lever); ``(none)`` until a snapshot lands.
+
+        Returns:
+            str: The profiler digest block, or ``"(none)"`` until a roofline
+                snapshot lands.
+        """
         from .roofline_snapshot import build_profiler_digest
         digest = build_profiler_digest(
             self.roofline_snapshots, self.last_trace_analyze,

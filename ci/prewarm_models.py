@@ -118,10 +118,19 @@ def tmp_dir(target_root: Path, repo_id: str) -> Path:
 
 
 def is_complete(dest: Path, repo_id: str, hf_api: HfApi, token: str) -> bool:
-    """True iff dest/ has every file the HF repo claims, with non-zero size.
+    """Report whether a local copy fully mirrors the HF repo.
 
     One ``list_repo_files`` call; partial prior runs fail this because they
     miss a file or have a zero-sized one.
+
+    Args:
+        dest: Local destination directory.
+        repo_id: HF repo id to compare against.
+        hf_api: An :class:`HfApi` client.
+        token: HF token for gated repos.
+
+    Returns:
+        ``True`` iff ``dest`` has every claimed file with non-zero size.
     """
     if not dest.is_dir():
         return False
@@ -258,8 +267,19 @@ def _load_candidates(path: Path) -> list[str]:
 
 def _slice_repos(repos: list[str], batch_index: int | None,
                  batch_size: int | None) -> list[str]:
-    """Apply optional --batch-index / --batch-size slice (same semantics as
-    generate_hf_matrix.py, so prewarm + optimize target the same repos)."""
+    """Apply an optional ``--batch-index`` / ``--batch-size`` slice.
+
+    Uses the same semantics as ``generate_hf_matrix.py`` so prewarm and
+    optimize target the same repos.
+
+    Args:
+        repos: The full repo list.
+        batch_index: 0-based batch index (defaults to 0).
+        batch_size: Entries per batch; falsy returns all repos.
+
+    Returns:
+        The selected repo slice.
+    """
     if not batch_size:
         return repos
     bi = batch_index or 0

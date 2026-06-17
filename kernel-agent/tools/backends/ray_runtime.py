@@ -27,11 +27,13 @@ DEFAULT_MIN_NOFILE = 65536
 
 
 def _fd_limit_warn(msg: str) -> None:
-    """Single indirection for fd-limit warnings.
+    """Emit an fd-limit warning to stderr with a stable prefix.
 
     Kept as a module function so tests can capture it and so every warning
-    carries the same prefix. Goes to stderr; callers that own a log_path
-    also get a line in the Ray lifecycle log.
+    carries the same prefix.
+
+    Args:
+        msg: The warning message body.
     """
     print(f"[kernel-agent WARN] {msg}", file=sys.stderr)
 
@@ -52,8 +54,7 @@ def _min_nofile_target() -> int:
 def ensure_fd_limit(
     min_soft: Optional[int] = None, log_path: Optional[Path] = None,
 ) -> Tuple[int, int]:
-    """Raise this process's RLIMIT_NOFILE soft limit before Ray spawns the
-    raylet (issue #433).
+    """Raise this process's RLIMIT_NOFILE soft limit before Ray starts.
 
     The child ``ray start`` process inherits this process's limits, so the
     raylet's open-files ceiling is whatever we set here. We raise the soft
@@ -61,9 +62,15 @@ def ensure_fd_limit(
     cap needs no privileges; lifting the hard cap does (CAP_SYS_RESOURCE),
     so when the hard cap is itself below ``min_soft`` we raise soft as high
     as allowed and warn — only ``docker run --ulimit nofile=...`` at
-    container launch can lift the hard cap in an unprivileged container.
+    container launch can lift the hard cap in an unprivileged container
+    (issue #433).
 
-    Returns the ``(soft, hard)`` limit in effect after the call.
+    Args:
+        min_soft: Target soft limit; defaults to the configured target.
+        log_path: Optional path to append a lifecycle log line.
+
+    Returns:
+        The ``(soft, hard)`` limit in effect after the call.
     """
     if min_soft is None:
         min_soft = _min_nofile_target()
@@ -127,6 +134,13 @@ def isolated_compile_cache_env(output_dir, base_env: Optional[dict] = None) -> d
     ``AITER_ROOT_DIR`` only steers aiter's cpp_itfs ``BUILD_DIR`` -- sources
     and configs resolve off the package dir -- so redirecting it is
     compile-safe.
+
+    Args:
+        output_dir: The per-attempt output directory caches are nested under.
+        base_env: Base environment to copy; defaults to ``os.environ``.
+
+    Returns:
+        An environment dict with per-attempt cache directories set.
     """
     env = dict(os.environ if base_env is None else base_env)
     base = os.path.join(str(output_dir), ".cache")
@@ -163,7 +177,15 @@ def ray_status_ok() -> bool:
 def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> bool:
     """Ensure a Ray cluster is reachable, starting a head node if needed.
 
-    Returns True if this call started Ray, False if already running; raises on failure.
+    Args:
+        num_gpus: Optional GPU count to pass to ``ray start --head``.
+        log_path: Optional path to append ``ray start`` output.
+
+    Returns:
+        ``True`` if this call started Ray, ``False`` if it was already running.
+
+    Raises:
+        RuntimeError: If starting the Ray head node fails.
     """
     if ray_status_ok():
         return False
@@ -210,14 +232,36 @@ def stop_ray_if_owned(started: bool, log_path: Optional[Path] = None) -> None:
 
 
 def _is_ray_version_mismatch(text: str) -> bool:
-    """True when Ray refused the job due to a cluster started under a different Python/Ray (issue #432); matches the stable ``Version mismatch`` banner."""
+    """Detect Ray's version-mismatch banner in captured output.
+
+    Indicates the cluster was started under a different Python/Ray than this
+    process (issue #432).
+
+    Args:
+        text: The captured error or output text.
+
+    Returns:
+        ``True`` if the text contains the stable version-mismatch banner.
+    """
     return "version mismatch" in (text or "").lower()
 
 
 def force_restart_local_cluster(
     num_gpus: Optional[int] = None, log_path: Optional[Path] = None,
 ) -> None:
-    """Tear down any reachable Ray cluster and start a fresh local head under THIS interpreter. Recovers from a stale/foreign cluster (issue #432) whose version mismatch otherwise mislabels as a "compile failed" REVERT; also clears raylet zombies. Raises RuntimeError if the fresh head fails to start."""
+    """Tear down any reachable Ray cluster and start a fresh local head.
+
+    The fresh head runs under this interpreter, recovering from a
+    stale/foreign cluster (issue #432) whose version mismatch otherwise
+    mislabels as a "compile failed" REVERT; this also clears raylet zombies.
+
+    Args:
+        num_gpus: Optional GPU count for the fresh head node.
+        log_path: Optional path to append restart output.
+
+    Raises:
+        RuntimeError: If the fresh head node fails to start.
+    """
     # issue #433: raise the open-files limit before the fresh raylet starts
     # so it inherits a high enough ceiling (the container default 1024 makes
     # the raylet abort on startup / linger as a zombie).
@@ -312,6 +356,10 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
     once. ``num_gpus`` / ``log_path`` are threaded through to the restart so
     the new head matches the requested GPU count and the action is audited
     in ``ray_lifecycle.log``.
+
+    Args:
+        num_gpus: Optional GPU count forwarded to a restart, if needed.
+        log_path: Optional path to audit Ray lifecycle actions.
     """
     import contextlib
     import io
