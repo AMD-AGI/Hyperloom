@@ -463,7 +463,7 @@ def test_integrate_fault_rejected_after_budget_exhausted(state: SharedState):
         ),
     )
     assert entry.get("retryable") is not True
-    assert entry["rejected"]["reason"] == "fault_retries_exhausted_2"
+    assert entry["rejected"]["reason"] == "fault_attempts_exhausted_2"
     assert "k001" in state.rejected_kernel_ids
 
 
@@ -479,6 +479,29 @@ def test_integrate_genuine_revert_rejects_immediately(state: SharedState):
     assert entry.get("retryable") is not True
     assert entry["rejected"]["reason"] == "revert_decision"
     assert "k001" in state.rejected_kernel_ids
+
+
+def test_integrate_bare_apply_fault_is_retryable_without_error_class(
+    state: SharedState,
+):
+    """A status=failed/decision=REVERT envelope with NO top-level error_class.
+
+    This is the exact shape ``integrate_handler`` emits on the apply-failed and
+    "re-baseline did not succeed" paths. Keying fault detection on ``decision``
+    would misread it as a genuine REVERT and discard the patch on the first
+    environment hiccup; it must instead be a retryable fault.
+    """
+    entry = state.record_kernel_integrate_result(
+        # NOTE: no error_class — mirrors the bare handler envelope.
+        _integrate_result("k001", decision="REVERT", status="failed"),
+    )
+    assert entry is not None
+    assert entry["fault_count"] == 1
+    assert entry["verdict_attempt_count"] == 0
+    assert entry.get("retryable") is True
+    assert "rejected" not in entry
+    assert state.rejected_kernel_patches == []
+    assert "k001" not in state.rejected_kernel_ids
 
 
 def test_integrate_keep_is_terminal_and_not_rejected(state: SharedState):
