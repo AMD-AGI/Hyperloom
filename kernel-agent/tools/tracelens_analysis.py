@@ -3724,15 +3724,18 @@ def deterministic_extract_hot_kernels(
 
         cat_ops = ops_by_category.get(category, [])
 
-        sorted_members = sorted(
-            members,
-            key=lambda m: m.get("efficiency_pct", 100),
-        )
+        def _eff_sort_key(m: dict[str, Any]) -> float:
+            # ``efficiency_pct`` may be present-but-null in priority_data; a
+            # bare ``.get(key, 100)`` returns None then (default only applies
+            # to a missing key), which breaks both ``sorted`` comparisons and
+            # the downstream ``round``. Treat null as the missing-key default.
+            v = m.get("efficiency_pct")
+            return float(v) if isinstance(v, (int, float)) else 100.0
+
+        sorted_members = sorted(members, key=_eff_sort_key)
 
         for member in sorted_members:
             op_name = member.get("operation", "")
-            # TraceLens may emit null (not just missing) for synthetic ops;
-            # `or 0` guards round(None) on the candidate dict below.
             member_time_ms = member.get("time_ms") or 0
 
             # Match by (name, time_ms) to avoid collisions when multiple
@@ -3751,7 +3754,9 @@ def deterministic_extract_hot_kernels(
                 continue
 
             duration_us = member_time_ms * 1000
-            eff_pct = member.get("efficiency_pct") or 0
+            eff_pct = member.get("efficiency_pct")
+            if not isinstance(eff_pct, (int, float)):
+                eff_pct = 0
 
             launcher_path = full_op.get("launcher_path", "")
             if launcher_path in ("\u2014", "-", ""):
@@ -3907,6 +3912,23 @@ def generate_minimal_analysis_md(
     report_path = output_dir / "analysis.md"
     lines: list[str] = []
 
+    def _fnum(v: Any, default: float = 0.0) -> float:
+        """Coerce a possibly-null/str metric to float for ``:.Nf`` formatting.
+
+        Deterministic "other"-bucket candidates (e.g. synthetic GDN/MoE ops)
+        can carry present-but-null metric fields; a bare ``.get(k, 0)`` returns
+        None then and ``f"{None:.2f}"`` raises ``unsupported format string
+        passed to NoneType.__format__``. Treat null/non-numeric as the default.
+        """
+        if isinstance(v, bool):
+            return default
+        if isinstance(v, (int, float)):
+            return float(v)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
     gpu_timeline_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
     gpu_rows: list[dict[str, str]] = []
     if gpu_timeline_path.exists():
@@ -3998,10 +4020,10 @@ def generate_minimal_analysis_md(
         for i, c in enumerate(candidates, 1):
             lines.append(
                 f"| {i} | {c.get('name', '')} "
-                f"| {c.get('duration_us', 0):.1f} "
-                f"| {c.get('gpu_pct', 0):.2f}% "
-                f"| {c.get('efficiency_percent', 0):.1f}% "
-                f"| {c.get('impact_score', 0):.2f} "
+                f"| {_fnum(c.get('duration_us')):.1f} "
+                f"| {_fnum(c.get('gpu_pct')):.2f}% "
+                f"| {_fnum(c.get('efficiency_percent')):.1f}% "
+                f"| {_fnum(c.get('impact_score')):.2f} "
                 f"| {c.get('tracelens_category', '')} "
                 f"| {c.get('bound_type', '')} "
                 f"| {c.get('source_file', '') or '-'} |"
@@ -4037,12 +4059,12 @@ def generate_minimal_analysis_md(
         for rc in rank_cands:
             lines.append(
                 f"| {rc.get('name', '')} "
-                f"| {rc.get('duration_us', 0):.1f} "
-                f"| {rc.get('gpu_pct', 0):.2f}% "
-                f"| {rc.get('impact_score', 0):.2f} "
+                f"| {_fnum(rc.get('duration_us')):.1f} "
+                f"| {_fnum(rc.get('gpu_pct')):.2f}% "
+                f"| {_fnum(rc.get('impact_score')):.2f} "
                 f"| {rc.get('call_count', 1)} "
                 f"| - "
-                f"| {rc.get('efficiency_percent', 0):.1f}% "
+                f"| {_fnum(rc.get('efficiency_percent')):.1f}% "
                 f"| {rc.get('bound_type', '')} "
                 f"| {' '.join(rc.get('shapes', []))} "
                 f"| {rc.get('source_file', '') or '-'} "

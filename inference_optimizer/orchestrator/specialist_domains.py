@@ -288,10 +288,19 @@ FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
 
 
 # Default number of LLM turns a specialist may run.
-DEFAULT_SPECIALIST_MAX_TURNS: int = 12
+#
+# WS1: the turn count is no longer the stop signal — a specialist runs until it
+# reaches a deliverable conclusion, bounded by the explicit wall-clock budget
+# (see ``Coordinator`` dispatch + ``SpecialistSubprocessDispatcher._reap_loop``)
+# rather than by turns. This is set to a practically-unbounded value so the old
+# ``max_seconds = max_turns × per_turn`` ceiling is decoupled from turns;
+# ``per_turn_max_seconds`` survives only as a single-stuck-turn backstop (and in
+# practice the 300s stale-heartbeat check does that work).
+DEFAULT_SPECIALIST_MAX_TURNS: int = 1000
 
 # Hard cap (PolicyGate R2 ``specialist_max_turns_excess`` enforces this).
-SPECIALIST_MAX_TURNS_HARD_CAP: int = 16
+# WS1: lifted to "effectively unbounded"; the real stop is the wall budget.
+SPECIALIST_MAX_TURNS_HARD_CAP: int = 1000
 
 
 __all__ = [
