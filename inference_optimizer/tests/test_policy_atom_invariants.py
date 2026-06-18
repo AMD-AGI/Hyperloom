@@ -16,7 +16,8 @@ import pytest
 from inference_optimizer.orchestrator import policy as policy_module
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import (
-    Intent, IntentType,
+    Intent,
+    IntentType,
 )
 from inference_optimizer.orchestrator.policy import (
     PolicyDenied,
@@ -59,16 +60,14 @@ def test_no_framework_atom_action_unsupported_rule_name_in_source():
 def test_atom_unsupported_actions_attribute_removed_from_policy_gate():
     """Runtime-level guard: PolicyGate must not expose the constant."""
     assert not hasattr(PolicyGate, "_ATOM_UNSUPPORTED_ACTIONS"), (
-        "PolicyGate._ATOM_UNSUPPORTED_ACTIONS was removed; "
-        "reintroducing requires updating this guard intentionally."
+        "PolicyGate._ATOM_UNSUPPORTED_ACTIONS was removed; reintroducing requires updating this guard intentionally."
     )
 
 
 def test_validate_helper_removed_from_policy_gate():
     """Runtime-level guard: PolicyGate must not expose the validator."""
     assert not hasattr(PolicyGate, "_validate_framework_atom_action_unsupported"), (
-        "PolicyGate._validate_framework_atom_action_unsupported was "
-        "removed."
+        "PolicyGate._validate_framework_atom_action_unsupported was removed."
     )
 
 
@@ -81,7 +80,7 @@ def test_historical_rule_name_mention_is_documented_provenance_only():
         "will continue to enforce that no rule of this name is emitted."
     )
     idx = src.find("framework_atom_action_unsupported")
-    window = src[max(0, idx - 600): idx + 600]
+    window = src[max(0, idx - 600) : idx + 600]
     assert "NOTE" in window, (
         "framework_atom_action_unsupported mention is no longer "
         "documented as historical provenance; if you re-add the rule, "
@@ -137,8 +136,7 @@ def test_framework_pr_still_denied_via_phase_incompatible_under_atom(
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
     assert exc.value.rule == "phase_incompatible", (
-        f"expected R1 phase_incompatible to deny framework_pr under "
-        f"atom; got rule={exc.value.rule!r}"
+        f"expected R1 phase_incompatible to deny framework_pr under atom; got rule={exc.value.rule!r}"
     )
 
 
@@ -151,6 +149,5 @@ def test_kernel_actions_not_denied_by_removed_atom_rule(action_name, monkeypatch
         gate.validate_intent("orchestration", _delegate(action_name))
     except PolicyDenied as exc:
         assert exc.rule != "framework_atom_action_unsupported", (
-            f"{action_name} must never trigger the removed atom rule; "
-            f"got rule={exc.rule!r}"
+            f"{action_name} must never trigger the removed atom rule; got rule={exc.rule!r}"
         )

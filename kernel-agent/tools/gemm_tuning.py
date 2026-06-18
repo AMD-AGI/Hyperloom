@@ -227,11 +227,13 @@ def main(argv: list[str] | None = None) -> int:
         _json_line({"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"})
         return 2
     if not args.benchmark_script:
-        _json_line({
-            "status": "failed",
-            "error_class": "benchmark_script_missing",
-            "error": "benchmark_script is required",
-        })
+        _json_line(
+            {
+                "status": "failed",
+                "error_class": "benchmark_script_missing",
+                "error": "benchmark_script is required",
+            }
+        )
         return 2
     cwd = Path(args.cwd).resolve()
     cwd.mkdir(parents=True, exist_ok=True)
@@ -240,23 +242,27 @@ def main(argv: list[str] | None = None) -> int:
     task_file.write_text(task, encoding="utf-8")
 
     if args.dry_run:
-        _json_line({
-            "status": "ok",
-            "dry_run": True,
-            "workspace": str(cwd),
-            "task_file": str(task_file),
-            "argv_task_safe": True,
-        })
+        _json_line(
+            {
+                "status": "ok",
+                "dry_run": True,
+                "workspace": str(cwd),
+                "task_file": str(task_file),
+                "argv_task_safe": True,
+            }
+        )
         return 0
 
     if not args.config:
-        _json_line({
-            "status": "failed",
-            "error_class": "geak_config_missing",
-            "error": "GEAK config is required via --config or GEAK_CONFIG",
-            "workspace": str(cwd),
-            "task_file": str(task_file),
-        })
+        _json_line(
+            {
+                "status": "failed",
+                "error_class": "geak_config_missing",
+                "error": "GEAK config is required via --config or GEAK_CONFIG",
+                "workspace": str(cwd),
+                "task_file": str(task_file),
+            }
+        )
         return 2
 
     exit_code: int | str = 0
@@ -273,13 +279,15 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         exit_code = exc.code if exc.code is not None else 0
     except BaseException as exc:  # noqa: BLE001 - return structured failure
-        _json_line({
-            "status": "failed",
-            "error_class": exc.__class__.__name__,
-            "error": repr(exc),
-            "workspace": str(cwd),
-            "task_file": str(task_file),
-        })
+        _json_line(
+            {
+                "status": "failed",
+                "error_class": exc.__class__.__name__,
+                "error": repr(exc),
+                "workspace": str(cwd),
+                "task_file": str(task_file),
+            }
+        )
         return 1
 
     workspace = _latest_gemm_workspace(cwd)
@@ -287,14 +295,16 @@ def main(argv: list[str] | None = None) -> int:
     status_raw = str(report.get("status") or "").strip().lower()
     ok = status_raw in {"complete", "completed", "ok", "succeeded", "success"}
     if not report:
-        _json_line({
-            "status": "failed",
-            "error_class": "final_report_missing",
-            "error": "GEAK completed without writing final_report.json",
-            "returncode": exit_code,
-            "workspace": str(workspace or cwd),
-            "task_file": str(task_file),
-        })
+        _json_line(
+            {
+                "status": "failed",
+                "error_class": "final_report_missing",
+                "error": "GEAK completed without writing final_report.json",
+                "returncode": exit_code,
+                "workspace": str(workspace or cwd),
+                "task_file": str(task_file),
+            }
+        )
         return 1
 
     out = {

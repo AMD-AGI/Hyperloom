@@ -23,6 +23,7 @@ def _client(handler) -> httpx.Client:
 
 # ── Tavily ──────────────────────────────────────────────────────────────
 
+
 class TestTavily:
     def test_happy_path_maps_results(self):
         captured: dict = {}
@@ -32,10 +33,12 @@ class TestTavily:
             captured["body"] = json.loads(request.content.decode("utf-8"))
             return httpx.Response(
                 200,
-                json={"results": [
-                    {"title": "T1", "url": "https://a/b", "content": "snip1"},
-                    {"title": "T2", "url": "https://c/d", "content": ""},
-                ]},
+                json={
+                    "results": [
+                        {"title": "T1", "url": "https://a/b", "content": "snip1"},
+                        {"title": "T2", "url": "https://c/d", "content": ""},
+                    ]
+                },
             )
 
         provider = TavilyProvider(api_key="tk", http_client=_client(handler))
@@ -69,7 +72,8 @@ class TestTavily:
             return httpx.Response(200, json={"results": []})
 
         TavilyProvider(api_key="tk", http_client=_client(handler)).search(
-            "x", SearchOptions(blocked_domains=("spam.io",)),
+            "x",
+            SearchOptions(blocked_domains=("spam.io",)),
         )
         assert captured["body"]["exclude_domains"] == ["spam.io"]
         assert "include_domains" not in captured["body"]
@@ -105,7 +109,8 @@ class TestTavily:
             return httpx.Response(200, json={"results": []})
 
         TavilyProvider(api_key="tk", http_client=_client(handler)).search(
-            "x", SearchOptions(freshness="anything"),
+            "x",
+            SearchOptions(freshness="anything"),
         )
         assert "days" not in captured["body"]
 
@@ -116,6 +121,7 @@ class TestTavily:
 
 # ── Serper ──────────────────────────────────────────────────────────────
 
+
 class TestSerper:
     def test_happy_path_with_site_filter(self):
         captured: dict = {}
@@ -124,9 +130,14 @@ class TestSerper:
             captured["url"] = str(request.url)
             captured["headers"] = dict(request.headers)
             captured["body"] = json.loads(request.content.decode("utf-8"))
-            return httpx.Response(200, json={"organic": [
-                {"title": "T1", "link": "https://github.com/foo", "snippet": "s1"},
-            ]})
+            return httpx.Response(
+                200,
+                json={
+                    "organic": [
+                        {"title": "T1", "link": "https://github.com/foo", "snippet": "s1"},
+                    ]
+                },
+            )
 
         provider = SerperProvider(api_key="sk", http_client=_client(handler))
         hits = provider.search(
@@ -149,15 +160,21 @@ class TestSerper:
 
     def test_blocked_domains_filtered_post_fetch(self):
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"organic": [
-                {"title": "ok", "link": "https://github.com/x"},
-                {"title": "bad", "link": "https://spam.io/y"},
-                {"title": "sub", "link": "https://api.spam.io/z"},
-            ]})
+            return httpx.Response(
+                200,
+                json={
+                    "organic": [
+                        {"title": "ok", "link": "https://github.com/x"},
+                        {"title": "bad", "link": "https://spam.io/y"},
+                        {"title": "sub", "link": "https://api.spam.io/z"},
+                    ]
+                },
+            )
 
         provider = SerperProvider(api_key="sk", http_client=_client(handler))
         hits = provider.search(
-            "x", SearchOptions(blocked_domains=("spam.io",)),
+            "x",
+            SearchOptions(blocked_domains=("spam.io",)),
         )
         assert [h.url for h in hits] == ["https://github.com/x"]
 
@@ -169,7 +186,8 @@ class TestSerper:
             return httpx.Response(200, json={"organic": []})
 
         SerperProvider(api_key="sk", http_client=_client(handler)).search(
-            "x", SearchOptions(blocked_domains=("spam.io",)),
+            "x",
+            SearchOptions(blocked_domains=("spam.io",)),
         )
         assert captured["body"]["q"] == "x"  # no site: appended for blocked
 

@@ -34,6 +34,17 @@ async def run_quantization_prelude_async(
     Awaits the async ``quantize_via_prompt`` directly (the caller already
     runs inside ``asyncio.run``). Raises ``SystemExit(3)`` when no usable
     quantized model was produced.
+
+    Args:
+        prompt: User-provided quantization instructions (e.g. scheme text).
+        source_model: Path to the model to quantize.
+        workspace: Working directory; the quantized model is exported under it.
+
+    Returns:
+        The path to the exported quantized model directory.
+
+    Raises:
+        SystemExit: If quantization failed or produced no usable model.
     """
     # quantization_agent is a top-level package (sibling of inference_optimizer);
     # imported lazily so this module loads even where its deps are absent.
@@ -65,10 +76,7 @@ async def run_quantization_prelude_async(
     qdir = result.quantized_model_dir
 
     if result.status == "success":
-        print(
-            f"Quantization: success (final={final}, "
-            f"eval_gap={result.assessment.eval_gap}) -> {qdir}"
-        )
+        print(f"Quantization: success (final={final}, eval_gap={result.assessment.eval_gap}) -> {qdir}")
         return str(qdir)
 
     if result.status == "partial" and qdir is not None:
@@ -98,12 +106,16 @@ def run_quantization_prelude(
     DO NOT call from within a running event loop — the cli prelude awaits
     :func:`run_quantization_prelude_async` directly because ``_run_optimize``
     already runs under ``asyncio.run``.
+
+    Args:
+        prompt: User-provided quantization instructions (e.g. scheme text).
+        source_model: Path to the model to quantize.
+        workspace: Working directory; the quantized model is exported under it.
+
+    Returns:
+        The path to the exported quantized model directory.
     """
-    return asyncio.run(
-        run_quantization_prelude_async(
-            prompt=prompt, source_model=source_model, workspace=workspace
-        )
-    )
+    return asyncio.run(run_quantization_prelude_async(prompt=prompt, source_model=source_model, workspace=workspace))
 
 
 __all__ = ["run_quantization_prelude", "run_quantization_prelude_async"]

@@ -40,6 +40,7 @@ _JS_SHELL_MARKERS = (
 
 # ── SSRF guard ──────────────────────────────────────────────────────────
 
+
 def _ipv4_blocked(addr: str) -> bool:
     """Return whether an IPv4 address falls in a blocked SSRF range.
 
@@ -139,6 +140,7 @@ def _resolve_or_raise(hostname: str) -> None:
 
 # ── URL validation ──────────────────────────────────────────────────────
 
+
 class FetchError(RuntimeError):
     """Surface-able fetch failure. Message is returned to the LLM verbatim."""
 
@@ -224,14 +226,11 @@ def _same_host(a: str, b: str) -> bool:
         """
         return (host or "").lower().removeprefix("www.")
 
-    return (
-        _norm(pa.hostname) == _norm(pb.hostname)
-        and pa.port == pb.port
-        and pa.scheme == pb.scheme
-    )
+    return _norm(pa.hostname) == _norm(pb.hostname) and pa.port == pb.port and pa.scheme == pb.scheme
 
 
 # ── Fetch result ────────────────────────────────────────────────────────
+
 
 @dataclass(frozen=True)
 class _FetchResult:
@@ -267,6 +266,7 @@ def _looks_like_js_shell(text: str) -> bool:
 
 
 # ── Cache key ───────────────────────────────────────────────────────────
+
 
 @dataclass(frozen=True)
 class _CacheEntry:
@@ -310,7 +310,6 @@ def _read_response_body_limited(resp: httpx.Response, max_bytes: int) -> bytes:
             parts.append(chunk[:remaining])
             break
     return b"".join(parts)
-
 
 
 @dataclass
@@ -367,10 +366,7 @@ class WebFetchClient:
 
         parsed = urlparse(url)
         if _domain_blocked(parsed.hostname or "", self.config.fetch_domain_denylist):
-            return (
-                f"Error: domain {parsed.hostname} is blocked by "
-                f"WEB_FETCH_DOMAIN_DENYLIST"
-            )
+            return f"Error: domain {parsed.hostname} is blocked by WEB_FETCH_DOMAIN_DENYLIST"
 
         cache_key = (url, raw_param)
         cached = self._cache.get(cache_key)
@@ -386,13 +382,9 @@ class WebFetchClient:
             return f"Error: fetch failed — {exc}"
 
         ct = result.content_type
-        if not (
-            ct.startswith("text/")
-            or ct in {"application/json", "application/xml"}
-        ):
+        if not (ct.startswith("text/") or ct in {"application/json", "application/xml"}):
             return (
-                f"Error: unsupported binary content-type {ct or '<unknown>'}. "
-                "Use a browser MCP tool for this content."
+                f"Error: unsupported binary content-type {ct or '<unknown>'}. Use a browser MCP tool for this content."
             )
 
         try:

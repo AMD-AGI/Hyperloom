@@ -55,9 +55,7 @@ def test_validation_step_skipped_parsed(build_workspace):
 
 def test_missing_validation_step_returns_none(tmp_path):
     # Report present but without all 4 step lines.
-    (tmp_path / "validation_report.md").write_text(
-        "**Step 4 — fuzzy tensor names**: ok\n", encoding="utf-8"
-    )
+    (tmp_path / "validation_report.md").write_text("**Step 4 — fuzzy tensor names**: ok\n", encoding="utf-8")
     art = collect_artifacts(tmp_path)
     assert art.validation_steps.fuzzy == "ok"
     assert art.validation_steps.md5 is None
@@ -67,9 +65,7 @@ def test_missing_validation_step_returns_none(tmp_path):
 
 def test_manifest_missing_outputs_key(tmp_path):
     pytest.importorskip("yaml")
-    (tmp_path / "run_manifest.yaml").write_text(
-        "version: '1'\n", encoding="utf-8"
-    )
+    (tmp_path / "run_manifest.yaml").write_text("version: '1'\n", encoding="utf-8")
     art = collect_artifacts(tmp_path)
     assert art.manifest_present is True
     assert art.manifest_parse_error == "missing_outputs_quantized_model_dir"
@@ -131,9 +127,7 @@ def test_quantized_dir_resolved_relative(tmp_path):
     (qdir / "config.json").write_text("{}", encoding="utf-8")
     (qdir / "model.safetensors").write_bytes(b"\x00")
     (qdir / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "run_manifest.yaml").write_text(
-        "outputs:\n  quantized_model_dir: out\n", encoding="utf-8"
-    )
+    (tmp_path / "run_manifest.yaml").write_text("outputs:\n  quantized_model_dir: out\n", encoding="utf-8")
     art = collect_artifacts(tmp_path)
     assert art.quantized_model_dir is not None
     assert art.quantized_model_dir.name == "out"

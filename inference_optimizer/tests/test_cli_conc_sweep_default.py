@@ -40,20 +40,17 @@ def test_cli_no_enable_conc_sweep_disables(monkeypatch: pytest.MonkeyPatch):
 def test_cli_env_var_can_opt_out(monkeypatch: pytest.MonkeyPatch, val: str):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP", val)
     ns = _parse()
-    assert ns.enable_conc_sweep is False, (
-        f"env={val!r} should opt out of conc-sweep, got True"
-    )
+    assert ns.enable_conc_sweep is False, f"env={val!r} should opt out of conc-sweep, got True"
 
 
 @pytest.mark.parametrize("val", ["", "1", "true", "yes", "on", "something"])
 def test_cli_env_var_truthy_or_unset_keeps_default_on(
-    monkeypatch: pytest.MonkeyPatch, val: str,
+    monkeypatch: pytest.MonkeyPatch,
+    val: str,
 ):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP", val)
     ns = _parse()
-    assert ns.enable_conc_sweep is True, (
-        f"env={val!r} should leave default-on intact, got False"
-    )
+    assert ns.enable_conc_sweep is True, f"env={val!r} should leave default-on intact, got False"
 
 
 def test_cli_no_flag_overrides_truthy_env(monkeypatch: pytest.MonkeyPatch):
