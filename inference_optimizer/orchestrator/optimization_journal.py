@@ -77,6 +77,12 @@ class JournalEntry:
     throughput_after: float | None = None
     error_class: str | None = None
     reason: str | None = None
+    # Predicted (pre-measurement) gain for this change, when the proposer
+    # supplied one (PendingProposal / critic verdict). Persisted alongside the
+    # measured ``gain_pct`` so the decision-trace collector can surface a
+    # predicted-vs-realized calibration signal. ``None`` (stripped by
+    # ``to_dict``) when no prediction was available (e.g. default-grid sweeps).
+    predicted_gain_pct: float | None = None
     task_id: str = ""
     variant_name: str = ""
     ts: str = ""
@@ -132,6 +138,7 @@ class JournalEntry:
             throughput_after=d.get("throughput_after"),
             error_class=d.get("error_class"),
             reason=d.get("reason"),
+            predicted_gain_pct=d.get("predicted_gain_pct"),
             task_id=str(d.get("task_id", "")),
             variant_name=str(d.get("variant_name", "")),
             ts=str(d.get("ts", "")),

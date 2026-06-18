@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -286,6 +287,10 @@ class ProposalScorer:
         model: str,
         prompt: str,
         proposal_names: list[str],
+        *,
+        task_id: str | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Score every proposal with a single model (raises on failure; caller records the per-model error).
 
@@ -304,6 +309,7 @@ class ProposalScorer:
         client = self._ensure_client()
         full_prompt = f"{prompt}\n\n{_SCORING_INSTRUCTIONS}"
         messages = [{"role": "user", "content": full_prompt}]
+        _t0 = time.perf_counter()
         try:
             resp = await asyncio.wait_for(
                 client.chat.completions.create(
@@ -315,30 +321,49 @@ class ProposalScorer:
             )
         except asyncio.TimeoutError as exc:
             raise RuntimeError(f"timed out after {self.call_timeout_s:.0f}s") from exc
+        latency_ms = int((time.perf_counter() - _t0) * 1000)
         # Full-trace A6: record this model's token spend before parsing.
         # Best-effort + a no-op when ``session_dir`` is unset (tests).
-        self._trace_scorer_llm_call(model, getattr(resp, "usage", None))
+        self._trace_scorer_llm_call(
+            model,
+            getattr(resp, "usage", None),
+            latency_ms=latency_ms,
+            task_id=task_id,
+            tick=tick,
+            phase=phase,
+        )
         text = resp.choices[0].message.content or ""
         # Full-trace: persist the full (redacted) prompt + reply so the
         # scorer's conversation lines up with its token row.
-        self._record_scorer_conversation(model, full_prompt, text)
+        self._record_scorer_conversation(
+            model, full_prompt, text, task_id=task_id, tick=tick, phase=phase,
+        )
         parsed = _extract_scores_json(text)
         if parsed is None:
             raise RuntimeError(f"no parseable scores JSON (reply_chars={len(text)})")
         return _normalise_model_scores(parsed, proposal_names=proposal_names)
 
-    def _trace_scorer_llm_call(self, model: str, usage: Any) -> None:
+    def _trace_scorer_llm_call(
+        self, model: str, usage: Any, *,
+        latency_ms: int | None = None, task_id: str | None = None,
+        tick: int | None = None, phase: str | None = None,
+    ) -> None:
         """Append one ``llm_calls.jsonl`` row for a proposal-scoring call.
 
         No-op when ``session_dir`` is unset. OpenAI usage carries
-        ``prompt_tokens`` / ``completion_tokens`` (no cache split). tick /
-        phase are unknown here (the scorer runs off the dispatch path) — the
-        collector backfills phase from the ts window. Best-effort: never
-        raises into the scoring path.
+        ``prompt_tokens`` / ``completion_tokens`` (no cache split). ``task_id``
+        ties the scoring spend back to the specialist round it scored, and
+        ``tick`` / ``phase`` (threaded from the coordinator dispatch point)
+        place it on the timeline instead of relying on ts-window backfill.
+        Best-effort: never raises into the scoring path.
 
         Args:
             model: The model slug whose usage is being recorded.
             usage: The OpenAI usage object from the response, or ``None``.
+            latency_ms: Wall-clock latency of the scoring call, when measured.
+            task_id: The specialist round this scoring spend is attributed to.
+            tick: Timeline tick threaded from the coordinator dispatch point.
+            phase: Optimization phase threaded from the coordinator dispatch point.
         """
         if self.session_dir is None:
             return
@@ -355,8 +380,12 @@ class ProposalScorer:
                 component="proposal_scorer",
                 role="proposal_scorer",  # must match the conversation row's
                 model=str(model),  # role for Langfuse token<->text pairing
+                task_id=task_id,
+                tick=tick,
+                phase=phase,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break scoring
@@ -371,6 +400,10 @@ class ProposalScorer:
         model: str,
         prompt: str,
         response: str,
+        *,
+        task_id: str | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a proposal-scoring call.
 
@@ -396,6 +429,9 @@ class ProposalScorer:
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
                 role="proposal_scorer",
+                task_id=task_id,
+                tick=tick,
+                phase=phase,
                 model=str(model),
                 prompt=prompt or "",
                 response=response or "",
@@ -413,12 +449,24 @@ class ProposalScorer:
         *,
         gap: dict[str, Any],
         proposals: list[dict[str, Any]],
+        task_id: str | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
     ) -> dict[str, Any]:
         """Score ``proposals`` against ``gap`` with every configured model (per-model failures land in ``errors``, never raised).
+
+        ``task_id`` (the specialist round being scored) is stamped on every
+        per-model trace row so the collector can attribute the scoring spend
+        to that decision instead of dropping it into ``unattributed``;
+        ``tick`` / ``phase`` (threaded from the coordinator dispatch point)
+        place the rows on the timeline.
 
         Args:
             gap: The gap the proposals are meant to address.
             proposals: Candidate variants to score (non-dict entries ignored).
+            task_id: The specialist round being scored, stamped on trace rows.
+            tick: Timeline tick threaded from the coordinator dispatch point.
+            phase: Optimization phase threaded from the coordinator dispatch point.
 
         Returns:
             A dict with the scoring ``scale``, per-model ``models`` scores,
@@ -433,7 +481,17 @@ class ProposalScorer:
         prompt = self._build_prompt(gap=gap, proposals=proposals)
 
         results = await asyncio.gather(
-            *(self._score_one_model(m, prompt, proposal_names) for m in self.models),
+            *(
+                self._score_one_model(
+                    m,
+                    prompt,
+                    proposal_names,
+                    task_id=task_id,
+                    tick=tick,
+                    phase=phase,
+                )
+                for m in self.models
+            ),
             return_exceptions=True,
         )
         models_out: dict[str, dict[str, Any]] = {}
