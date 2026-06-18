@@ -1879,5 +1879,21 @@
       }
     },
     "sglang": {}
+  },
+  "aiter::fmoe_g1u1": {
+    "kind": "single",
+    "patchable": true,
+    "python_launcher_path": [
+      "aiter/fused_moe.py(367): fused_moestage"
+    ],
+    "sglang": {
+      "aiter::fmoe_bf16_pertokenFp8_g1u1_vs_silu_1tg_ps_32x256": {
+        "kernel_kind": "aiter_asm_kernel",
+        "kernel_source_line": "5",
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_cu/asm_fmoe.cu",
+        "patchable": true
+      }
+    },
+    "vllm": {}
   }
 }
