@@ -471,6 +471,48 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
     assert captured["env"]["RESULT_DIR"] == str(tmp_path / "redirect_leak")
 
 
+def test_baseline_executor_falls_back_to_shared_state_model_path(
+    tmp_path, monkeypatch
+):
+    # params has no model_path and MODEL_PATH is unset: without the SharedState
+    # fallback the bare YAML model name leaks into --model-path (sglang then
+    # treats it as an HF repo id and fails "is not a local folder").
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
+    output_dir = tmp_path / "ws"
+    captured: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        cfg_idx = cmd.index("--benchmark-config")
+        out_idx = cmd.index("--output-dir")
+        captured["cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        _fake_workspace(Path(cmd[out_idx + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=SimpleNamespace(
+            model_path="/wekafs/models/PrimeIntellect-Qwen3-1.7B",
+        ),
+    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert (
+        captured["cfg"]["benchmark"]["model"]
+        == "/wekafs/models/PrimeIntellect-Qwen3-1.7B"
+    )
+
+
 def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
     base = tmp_path / "base.yaml"
     _write_yaml(base)
