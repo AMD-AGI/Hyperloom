@@ -127,7 +127,7 @@ SKIP_FRAMEWORK_AGENT=0
 # kernel-agent installer). Default off: the runtime default optimizer is
 # native, so native-only users skip the extra GEAK-e2e checkout + pip. Enable
 # with --with-perfskills or INSTALL_PERFSKILLS=1 when you intend to run
-# `optimize --kernel-optimizer perfskills`.
+# with KERNEL_OPT_BACKEND_ORDER=perfskills.
 case "${INSTALL_PERFSKILLS:-0}" in
   1|true|TRUE|yes|YES|on|ON) INSTALL_PERFSKILLS=1 ;;
   *) INSTALL_PERFSKILLS=0 ;;
@@ -157,7 +157,7 @@ Options:
   --dry-run              Print actions without running them
   --with-perfskills      Also install the PerfSkills/GEAK-e2e optimizer
                          (forwarded to the kernel-agent installer; only
-                         needed for `optimize --kernel-optimizer perfskills`).
+                         needed for KERNEL_OPT_BACKEND_ORDER=perfskills runs).
                          Equivalent to INSTALL_PERFSKILLS=1.
   --skip-kernel-agent    Skip the chained kernel-agent installer
   --skip-framework-agent Skip the chained framework-agent installer

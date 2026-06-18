@@ -880,6 +880,74 @@ class Sweep(TypedDict, total=False):
     config_path: str | None
 
 
+class Perfskills(TypedDict, total=False):
+    """PerfSkills/GEAK-e2e KERNEL-phase section (``KERNEL_OPT_BACKEND_ORDER=perfskills``).
+
+    Emitted only when the KERNEL phase was delegated to the PerfSkills e2e
+    optimizer; ``{}`` (section omitted) on native sessions. Mirrors the
+    normalized ``result.json`` recorded in ``state.perfskills_result`` plus the
+    budget-cap audit. See ``collectors.collect_perfskills``.
+
+    Attributes:
+        engaged (bool): True when PerfSkills owned the KERNEL phase.
+        status (str): ``ok`` / ``no_gain`` / ``error`` / ``timeout`` /
+            ``skipped`` / ``missing`` / ``unknown``.
+        error_class (str | None): Normalized failure class (None on success),
+            e.g. ``timeout`` / ``insufficient_budget`` / ``no_result_json`` /
+            ``runner_crashed`` / ``workflow_parse_error``.
+        error (str | None): Human-readable failure detail.
+        returncode (int | None): Runner subprocess exit code.
+        baseline_throughput_tok_s (float | None): PerfSkills baseline tok/s.
+        final_throughput_tok_s (float | None): PerfSkills final tok/s.
+        throughput_speedup (float | None): final / baseline.
+        gain_pct (float | None): Percent gain over the PerfSkills baseline.
+        metric_basis (str | None): Measurement basis (aggregate output tok/s).
+        bench_client (str | None): ``inferencex`` / ``native``.
+        ttft_mean_ms (float | None): Median TTFT (ms).
+        tpot_mean_ms (float | None): Median TPOT (ms).
+        output_parity (str | None): Output-parity verdict.
+        accepted_kernels (list[Any]): Per-kernel changes the e2e accepted.
+        accepted_heads (list[Any]): Per-head changes the e2e accepted.
+        kernels_optimized (int): ``len(accepted_kernels)``.
+        accepted_config (dict[str, Any]): Accepted serving config.
+        validated_regimes (list[Any]): Regimes the kernels were validated at.
+        eval_dir (str | None): Relative path to the e2e eval dir.
+        report_path (str | None): Relative path to the human report.
+        final_launch_script (str | None): Reusable optimized launch script.
+        bench_script (str | None): Reusable bench script (SWEEP reuse handle).
+        final_patch (str | None): Relative path to the final patch.
+        runner_timeout_s (int | None): Budget-capped runner timeout.
+        kill_timeout_s (int | None): Hard subprocess kill timeout.
+    """
+
+    engaged: bool
+    status: str
+    error_class: str | None
+    error: str | None
+    returncode: int | None
+    baseline_throughput_tok_s: float | None
+    final_throughput_tok_s: float | None
+    throughput_speedup: float | None
+    gain_pct: float | None
+    metric_basis: str | None
+    bench_client: str | None
+    ttft_mean_ms: float | None
+    tpot_mean_ms: float | None
+    output_parity: str | None
+    accepted_kernels: list[Any]
+    accepted_heads: list[Any]
+    kernels_optimized: int
+    accepted_config: dict[str, Any]
+    validated_regimes: list[Any]
+    eval_dir: str | None
+    report_path: str | None
+    final_launch_script: str | None
+    bench_script: str | None
+    final_patch: str | None
+    runner_timeout_s: int | None
+    kill_timeout_s: int | None
+
+
 # §12 Critic / Robustness
 class CriticIteration(TypedDict, total=False):
     """One critic-agent review pass over a proposed change.
@@ -1846,6 +1914,10 @@ class SessionBreakdown(TypedDict, total=False):
     param_search: ParamSearch
     explore_search: ParamSearch
     sweep: Sweep
+    # PerfSkills/GEAK-e2e KERNEL-phase section (KERNEL_OPT_BACKEND_ORDER=perfskills).
+    # Additive + optional: ``{}`` (omitted) on native sessions, so v1/v2 readers
+    # that don't know it simply ignore it and historic breakdowns are unchanged.
+    perfskills: Perfskills
     critic_robustness: CriticRobustness
     telemetry: Telemetry
     attribution: Attribution

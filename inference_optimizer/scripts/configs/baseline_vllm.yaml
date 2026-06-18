@@ -20,15 +20,6 @@ benchmark:
     # ROCR_VISIBLE_DEVICES injected at runtime by baseline.py
     # (`0..TP-1`); export `ROCR_VISIBLE_DEVICES=...` to override.
     PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    # Kimi-K2.6 int4 known-good serving config (kimi-2.6-vllm.md). Without
-    # --max-num-seqs 256, full cudagraph capture at batch>=512 over-allocates
-    # Triton LDS (>64 KiB) and the engine core dies at startup. Appended to the
-    # vllm serve command via EXTRA_VLLM_ARGS (vllm_mi300x.sh).
-    EXTRA_VLLM_ARGS: "--block-size 64 --no-enable-prefix-caching --max-num-seqs 256 --mm-encoder-tp-mode data"
-    # Corrected int4 W4A16 fused-MoE config (BLOCK_SIZE_N capped to 128) so the
-    # E=384,N=256 kernel fits MI300X 64 KiB LDS. Without this the shipped config
-    # over-allocates (69632 B) and EngineCore dies at cudagraph capture.
-    VLLM_TUNED_CONFIG_FOLDER: "/wekafs/chaox/test_results/kimi_k2.6_20260617/vllm_tuned_configs"
 
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime

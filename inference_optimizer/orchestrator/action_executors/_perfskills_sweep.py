@@ -1,7 +1,8 @@
 """Workload sweep that REUSES PerfSkills' delivered scripts.
 
-When the KERNEL phase was delegated to PerfSkills (``--kernel-optimizer
-perfskills``), the optimized server is reproduced from PerfSkills' own
+When the KERNEL phase was delegated to PerfSkills
+(``KERNEL_OPT_BACKEND_ORDER=perfskills``), the optimized server is reproduced
+from PerfSkills' own
 ``bench_e2e.sh`` + the already-built overlay/flags/env recorded in
 ``result.json`` — never reconstructed by Hyperloom (this removes the overlay
 reproduction risk). Each grid point relaunches the optimized server through
@@ -135,6 +136,36 @@ async def sweep_via_perfskills(
     # result.json) so sweep numbers stay 口径-consistent with the headline result.
     bench_client = str(result.get("bench_client") or "native").strip() or "native"
 
+    # ── Forward the validated measurement 口径 + client trust onto every variant ──
+    # The sweep must measure on the SAME workload shape the KERNEL phase
+    # accepted, otherwise bench_e2e.sh falls back to its own standalone defaults
+    # (notably RANDOM_RANGE_RATIO=1 => fixed full-length prompts) and the grid
+    # is no longer 口径-comparable to the baseline/final. Prefer an explicit
+    # bench_protocol block, else the first validated regime. Only the
+    # concurrency-INDEPENDENT knobs are forwarded; num_prompts is deliberately
+    # left to bench_e2e.sh's per-conc default because the regime's count is tied
+    # to its own concurrency (forwarding a fixed count would mis-size other concs).
+    _protocol = result.get("bench_protocol")
+    if not isinstance(_protocol, dict):
+        _regimes = result.get("validated_regimes") or []
+        _protocol = _regimes[0] if _regimes and isinstance(_regimes[0], dict) else {}
+    protocol_env: dict[str, str] = {}
+    for _src, _dst in (
+        ("random_range_ratio", "RANDOM_RANGE_RATIO"),
+        ("num_warmups", "NUM_WARMUPS"),
+        ("seed", "SEED"),
+    ):
+        _val = _protocol.get(_src)
+        if _val is not None:
+            protocol_env[_dst] = str(_val)
+    # Mirror the server's --trust-remote-code onto the bench CLIENT: the accepted
+    # flags launch a custom-tokenizer server and bench_e2e.sh's client loads the
+    # same tokenizer (transformers raises ValueError without trust). Model-
+    # agnostic — keyed on the flags, never on a model name.
+    if "trust-remote-code" in flags or "trust_remote_code" in flags:
+        for _tk in ("BENCH_TRUST_REMOTE_CODE", "HF_HUB_TRUST_REMOTE_CODE", "MAGPIE_TRUST_REMOTE_CODE"):
+            protocol_env.setdefault(_tk, "1")
+
     output_root.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, Any]] = []
 
@@ -168,6 +199,10 @@ async def sweep_via_perfskills(
                 "EXTRA_ENV": env_str,
                 "BENCH_CLIENT": bench_client,
             })
+            # setdefault: the forwarded 口径/trust apply unless the operator
+            # already pinned the knob in the process env (explicit wins).
+            for _k, _v in protocol_env.items():
+                env.setdefault(_k, _v)
             cmd = ["bash", str(bench_script)]
 
             def _run() -> subprocess.CompletedProcess:

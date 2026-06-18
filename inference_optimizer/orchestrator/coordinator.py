@@ -2637,10 +2637,26 @@ class Coordinator:
         return verdict_row
 
     def _perfskills_enabled(self) -> bool:
-        """Whether the KERNEL phase is delegated to the PerfSkills e2e optimizer."""
-        return str(
-            getattr(self.shared_state, "kernel_optimizer", "native") or "native"
-        ).strip().lower() == "perfskills"
+        """Whether the KERNEL phase is delegated to the PerfSkills e2e optimizer.
+
+        The single source of truth is the kernel backend order
+        (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``): when
+        ``perfskills`` appears there, it owns the whole phase.  The
+        ``kernel_optimizer`` state field is the persisted record of that
+        decision (derived from the order at startup); it is used as a resume
+        fallback so this stays correct even when the env var is not re-exported
+        in a fresh shell.
+        """
+        from .kernel_request_handlers import perfskills_selected
+
+        if perfskills_selected():
+            return True
+        return (
+            str(getattr(self.shared_state, "kernel_optimizer", "") or "")
+            .strip()
+            .lower()
+            == "perfskills"
+        )
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """Run deterministic KERNEL-entry setup before LLM kernel work (FP8 GEMM tuning gate).
@@ -2768,11 +2784,11 @@ class Coordinator:
         """Resolve the PerfSkills e2e timeouts from the live run budget.
 
         The KERNEL phase-entry hook runs PerfSkills synchronously, so a fixed
-        6h subprocess would (a) ignore ``--max-hours`` / the run deadline and
-        (b) keep the tick loop from reaching the deadline → closing-phase check
-        until it returns. To stay inside the budget we cap the run so it ALWAYS
-        finishes with at least the closing-grace window left, and shrink the
-        runner's own budget by a safety margin on top of that.
+        subprocess default would (a) ignore ``--max-hours`` / the run deadline
+        and (b) keep the tick loop from reaching the deadline → closing-phase
+        check until it returns. To stay inside the budget we cap the run so it
+        ALWAYS finishes with at least the closing-grace window left, and shrink
+        the runner's own budget by a safety margin on top of that.
 
         Returns:
             tuple[int, int, bool]: ``(runner_timeout_s, kill_timeout_s,
@@ -2783,10 +2799,17 @@ class Coordinator:
             (e.g. a unit test invoking the hook directly), where the env default
             is used verbatim.
         """
-        env_timeout = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "21600"))
+        # Standalone fallback ONLY: the 12h (43200s) default applies when no run
+        # deadline is set (budget_known=False) — e.g. a unit test invoking the
+        # hook directly, or PerfSkills run outside an orchestrated session. When
+        # Hyperloom DRIVES the run (deadline known) the budget MUST come from
+        # Hyperloom's live deadline / KERNEL phase allocation, so this default
+        # never caps a Hyperloom-driven run (a long --max-hours session can
+        # legitimately allot KERNEL more than 12h).
+        env_default_timeout = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "43200"))
         deadline = self._run_deadline
         if deadline is None:
-            return env_timeout, env_timeout + 600, False
+            return env_default_timeout, env_default_timeout + 600, False
         remaining = deadline - time.monotonic()
         grace = effective_closing_grace_sec(
             float(getattr(self.shared_state, "max_minutes", 0) or 0), None,
@@ -2795,8 +2818,21 @@ class Coordinator:
         # Reserve the closing window: the subprocess (incl. result.json flush)
         # must be killed with at least ``grace`` left so closing can still run.
         kill_budget = remaining - grace
-        runner_timeout = int(max(0.0, min(float(env_timeout), kill_budget - margin)))
-        kill_timeout = int(max(0.0, min(float(env_timeout) + 600.0, kill_budget)))
+        # Also honour the KERNEL phase's own wall-clock budget: PerfSkills runs
+        # synchronously inside the phase-entry hook, so a run longer than the
+        # phase allocation would overrun the phase budget the same way it would
+        # overrun the session deadline. Cap by min(session, kernel_phase).
+        phase_rem = _phase_state.phase_budget_remaining_seconds(
+            self.shared_state, budget_pct=self._phase_budget_pct,
+        )
+        if phase_rem is not None:
+            kill_budget = min(kill_budget, float(phase_rem))
+        # Hyperloom-authoritative budget: the runner self-stops ``margin`` before
+        # the hard subprocess kill, and the kill reserves the closing-grace
+        # window. Derived purely from the live budget — the 12h env default does
+        # NOT cap it (requirement: PerfSkills time comes from Hyperloom here).
+        kill_timeout = int(max(0.0, kill_budget))
+        runner_timeout = int(max(0.0, kill_budget - margin))
         return runner_timeout, kill_timeout, True
 
     async def _run_perfskills_kernel_phase(self, *, from_phase: str) -> None:
@@ -2881,8 +2917,8 @@ class Coordinator:
             return
 
         # Budget-aware timeouts: shrink to the remaining run deadline and always
-        # reserve the closing-grace window (Fix: was a fixed 6h that ignored
-        # --max-hours and blocked the deadline → closing-phase transition).
+        # reserve the closing-grace window (Fix: was a fixed default that
+        # ignored --max-hours and blocked the deadline → closing-phase transition).
         runner_timeout, kill_timeout, budget_known = self._perfskills_timeouts()
         min_run = int(os.environ.get("PERFSKILLS_MIN_RUN_S", "600"))
         if budget_known and runner_timeout < min_run:

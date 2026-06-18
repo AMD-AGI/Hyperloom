@@ -3,7 +3,7 @@
 """Unit coverage for the PerfSkills/GEAK-e2e breakdown collector and the
 sweep ``benchmark_report.json`` writer.
 
-These exercise the ``--kernel-optimizer=perfskills`` paths in isolation:
+These exercise the ``KERNEL_OPT_BACKEND_ORDER=perfskills`` paths in isolation:
 
 * :func:`collect_perfskills` — the not-engaged short-circuit, the
   engaged-but-missing-result fallback, the full success mapping (including the
@@ -33,6 +33,21 @@ def test_collect_perfskills_not_engaged_returns_empty(tmp_path: Path) -> None:
     out = collect_perfskills(tmp_path, {"kernel_optimizer": "native"}, warnings)
     assert out == {}
     assert warnings == []
+
+
+def test_collect_perfskills_native_with_empty_result_default(tmp_path: Path) -> None:
+    # Regression: SharedState defaults perfskills_result to ``{}``. An empty dict
+    # must NOT be treated as engaged, or every native session emits a spurious
+    # perfskills section.
+    state = {"kernel_optimizer": "native", "perfskills_result": {}}
+    out = collect_perfskills(tmp_path, state, [])
+    assert out == {}
+
+
+def test_collect_perfskills_empty_result_no_flag(tmp_path: Path) -> None:
+    # Empty result + no/blank optimizer flag → not engaged.
+    out = collect_perfskills(tmp_path, {"perfskills_result": {}}, [])
+    assert out == {}
 
 
 def test_collect_perfskills_engaged_without_result(tmp_path: Path) -> None:
@@ -184,6 +199,20 @@ def test_read_json_roundtrip_and_missing(tmp_path: Path) -> None:
     assert _read_json(good) == {"a": 1}
     # Missing / unparseable files degrade to an empty dict (never raise).
     assert _read_json(tmp_path / "nope.json") == {}
+
+
+def test_schema_has_perfskills_contract() -> None:
+    # The exporter emits a top-level ``perfskills`` section, so the wire schema
+    # must declare it (contract + TypedDict), else readers have no shape to rely on.
+    from inference_optimizer.breakdown import schema
+
+    assert hasattr(schema, "Perfskills")
+    assert "perfskills" in schema.SessionBreakdown.__annotations__
+    # ``from __future__ import annotations`` stores the type as a string ref.
+    assert "Perfskills" in str(schema.SessionBreakdown.__annotations__["perfskills"])
+    # A few representative fields must be part of the declared shape.
+    for field in ("engaged", "status", "error_class", "throughput_speedup", "accepted_kernels"):
+        assert field in schema.Perfskills.__annotations__
 
 
 def test_pareto_front_drops_dominated_points() -> None:

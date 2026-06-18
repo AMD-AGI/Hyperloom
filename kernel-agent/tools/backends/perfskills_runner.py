@@ -101,14 +101,14 @@ def build_handoff(
     return h
 
 
-def call_perfskills(handoff: dict, output_dir: Path, *, timeout_s: int = 21600,
+def call_perfskills(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
                     python_bin: str = "") -> dict:
     """Run PerfSkills e2e once and return the parsed result.json (+ run metadata).
 
     Args:
         handoff: handoff payload (see :func:`build_handoff`).
         output_dir: where handoff.json / result.json are written.
-        timeout_s: subprocess timeout (default 6h).
+        timeout_s: subprocess timeout (default 12h).
         python_bin: python interpreter for the runner (default the current one).
 
     Returns:
@@ -127,7 +127,14 @@ def call_perfskills(handoff: dict, output_dir: Path, *, timeout_s: int = 21600,
     cmd = [py, runner, str(handoff_path), str(result_path)]
 
     env = dict(os.environ)
-    env.setdefault("PERFSKILLS_E2E_TIMEOUT_S", str(timeout_s))
+    # The resolved ``timeout_s`` is AUTHORITATIVE for the delegated director run:
+    # run_e2e.py reads PERFSKILLS_E2E_TIMEOUT_S to self-stop (anyio.fail_after)
+    # before our outer subprocess kill. Assign (not setdefault) so a value
+    # inherited from the parent env (e.g. a stale export / ray passthrough) can
+    # never override the caller's budget — when Hyperloom drives, PerfSkills'
+    # time MUST come from Hyperloom (the --timeout-s it passes). Standalone runs
+    # resolve timeout_s to the 12h default (or an explicit env, see _main).
+    env["PERFSKILLS_E2E_TIMEOUT_S"] = str(timeout_s)
 
     started = time.time()
     try:
@@ -175,11 +182,19 @@ def _main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Run PerfSkills e2e once.")
     ap.add_argument("handoff_json")
     ap.add_argument("output_dir")
-    ap.add_argument("--timeout-s", type=int, default=21600)
+    # Sentinel default: an explicit --timeout-s (Hyperloom always passes one) is
+    # authoritative. Without it (standalone runner invocation) fall back to an
+    # explicitly-exported PERFSKILLS_E2E_TIMEOUT_S, else the 12h default.
+    ap.add_argument("--timeout-s", type=int, default=None)
     args = ap.parse_args(argv)
 
+    if args.timeout_s is not None:
+        timeout_s = args.timeout_s
+    else:
+        timeout_s = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "43200"))  # 12h
+
     handoff = json.loads(Path(args.handoff_json).read_text(encoding="utf-8"))
-    out = call_perfskills(handoff, Path(args.output_dir), timeout_s=args.timeout_s)
+    out = call_perfskills(handoff, Path(args.output_dir), timeout_s=timeout_s)
     print(json.dumps({"status": out.get("status"),
                       "speedup": out.get("throughput_speedup"),
                       "result_path": out.get("result_path")}))

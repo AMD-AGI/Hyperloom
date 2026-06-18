@@ -133,7 +133,7 @@ GEAK_REF="${GEAK_REF:-v3.2.1}"
 # e2e whole-pipeline optimizer (formerly the standalone PerfSkills repo). Its
 # code has MIGRATED INTO GEAK on the GEAK_v4 branch (interface/run_e2e.py +
 # e2e_workflow/). Hyperloom calls interface/run_e2e.py at the KERNEL phase when
-# --kernel-optimizer=perfskills. This is a SECOND GEAK checkout pinned to the
+# KERNEL_OPT_BACKEND_ORDER=perfskills. This is a SECOND GEAK checkout pinned to the
 # e2e branch, kept SEPARATE from the single-kernel GEAK checkout above. The
 # PERFSKILLS_* names are retained as the stable handle for this optimizer;
 # operators override repo/ref/root with PERFSKILLS_REPO / PERFSKILLS_REF /
@@ -251,8 +251,8 @@ CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh
 CHECK_ONLY=0
 DRY_RUN=0
 # The PerfSkills/GEAK-e2e optimizer is OPT-IN: it is only used at runtime when a
-# session passes ``--kernel-optimizer=perfskills``. The default runtime optimizer
-# is ``native``, so installing the second GEAK-e2e checkout (extra clone + network
+# session sets ``KERNEL_OPT_BACKEND_ORDER=perfskills``. The default runtime
+# optimizer is ``native``, so installing the second GEAK-e2e checkout (extra clone + network
 # + claude-agent-sdk pip) unconditionally would tax every native-only user. Gate
 # it behind ``--with-perfskills`` / ``INSTALL_PERFSKILLS=1``; default off.
 case "${INSTALL_PERFSKILLS:-0}" in
@@ -274,7 +274,7 @@ Options:
   --check-only       Verify current environment, do not install
   --dry-run          Print actions without running installs
   --with-perfskills  Also install the PerfSkills/GEAK-e2e optimizer checkout
-                     (only needed for --kernel-optimizer=perfskills runs).
+                     (only needed for KERNEL_OPT_BACKEND_ORDER=perfskills runs).
   -h, --help         Show this help
 
 Environment (optional):

@@ -6042,7 +6042,7 @@ def collect_perfskills(
     """Collect the PerfSkills/GEAK-e2e KERNEL-phase section.
 
     When the KERNEL phase is delegated to the PerfSkills e2e optimizer
-    (``--kernel-optimizer=perfskills``), the native kernel lifecycle is bypassed
+    (``KERNEL_OPT_BACKEND_ORDER=perfskills``), the native kernel lifecycle is bypassed
     and the only structured record is ``state.perfskills_result`` (the normalized
     ``result.json`` plus runner metadata). This collector maps that into the
     session-breakdown's data contract so the run is auditable: what the optimizer
@@ -6062,10 +6062,15 @@ def collect_perfskills(
     """
     optimizer = str(state.get("kernel_optimizer") or "").strip().lower()
     result = state.get("perfskills_result")
-    engaged = optimizer == "perfskills" or isinstance(result, dict)
+    # ``perfskills_result`` defaults to ``{}`` in SharedState, so an empty dict
+    # must NOT count as engaged — otherwise every native session would emit a
+    # spurious perfskills section. Engage only when the optimizer flag selected
+    # perfskills, or a non-empty result was actually recorded.
+    has_result = isinstance(result, dict) and bool(result)
+    engaged = optimizer == "perfskills" or has_result
     if not engaged:
         return {}
-    if not isinstance(result, dict):
+    if not has_result:
         # Engaged via the optimizer flag but no result recorded yet/at all.
         return {
             "engaged": True,

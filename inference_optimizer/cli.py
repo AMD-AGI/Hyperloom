@@ -2244,6 +2244,23 @@ def _seed_shared_state(
     # KB architecture tags from config.json (architectures + model_type); fresh-launch only (resume rehydrates).
     _cfg_tags = _load_model_config_tags(str(args.model))
 
+    # Single control plane for the KERNEL phase: the kernel backend order env
+    # (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``), set by the
+    # launcher / CI submit layer. The per-kernel ladder and the phase-level
+    # PerfSkills check read it directly; here we derive the persisted
+    # ``kernel_optimizer`` record from the resolved order so resume/breakdown
+    # stay correct even if the env var is not re-exported in a fresh shell.
+    _resolved_kernel_order = [
+        t.strip().lower()
+        for t in str(
+            os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+            or os.environ.get("KERNEL_OPT_BACKENDS")
+            or ""
+        ).split(",")
+        if t.strip()
+    ]
+    _kernel_optimizer_record = "perfskills" if "perfskills" in _resolved_kernel_order else "native"
+
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -2269,7 +2286,7 @@ def _seed_shared_state(
         osl=_int_env_or_arg("osl", "OSL"),
         max_model_len=_int_env_or_arg("max_model_len", "MAX_MODEL_LEN"),
         kernel_enabled=not getattr(args, "no_kernel", False),
-        kernel_optimizer=str(getattr(args, "kernel_optimizer", "native") or "native").strip().lower(),
+        kernel_optimizer=_kernel_optimizer_record,
         continue_kernel_after_gemm=bool(getattr(args, "continue_kernel_after_gemm", True)),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
@@ -5813,18 +5830,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "parameter search). Useful when GEAK/OOB/GPU "
         "compile env is unavailable or you just want the "
         "quick-win parameter path. Default: kernel enabled.",
-    )
-    opt.add_argument(
-        "--kernel-optimizer",
-        type=str,
-        default="native",
-        choices=["native", "perfskills"],
-        help="Which optimizer owns the KERNEL phase. 'native' (default) uses "
-        "the built-in GEAK/per-kernel loop. 'perfskills' delegates the "
-        "whole KERNEL phase to the cloned PerfSkills e2e optimizer "
-        "(interface/run_e2e.py) once, seeded with the EXPLORE best config; "
-        "SWEEP then reuses PerfSkills' final_launch.sh + bench_e2e.sh. "
-        "Requires PERFSKILLS_E2E_RUNNER (set by the installer).",
     )
     opt.add_argument(
         "--no-explore",
