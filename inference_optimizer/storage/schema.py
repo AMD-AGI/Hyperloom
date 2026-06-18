@@ -24,12 +24,18 @@ SCHEMA_VERSION = 3
 
 # Default lane capacities; ``--research-lane-capacity`` overrides research_lane
 # at boot. A fresh DB runs with research_lane=1 (single specialist).
+# ``gpu_research_lane`` carries GPU specialists and is mutually exclusive with
+# the serving lanes (LANE_CONFLICTS). Capacity-1 / strictly serial: the
+# co-acquisition lock model can't express a multi-holder lane that also mutexes
+# the cap-1 serving lanes, so a single GPU specialist holds the machine at a
+# time (the GPU pool partitions cards within that one lease).
 DEFAULT_LANE_CAPACITIES: dict[str, int] = {
     "server_lifecycle": 1,
     "workspace_mutation": 1,
     "benchmark_lane": 1,
     "profile_lane": 1,
     "research_lane": 1,
+    "gpu_research_lane": 1,
 }
 
 

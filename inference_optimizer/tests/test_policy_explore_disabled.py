@@ -17,6 +17,13 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.protocol.intent import Intent, IntentType
 
 
+@pytest.fixture(autouse=True)
+def _enable_interleave(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise the EXPLORE↔KERNEL interleave grey channel, which is
+    OFF by default; enable it so KERNEL widens to explore/specialist/integrate_patch."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
+
+
 def _gate(state: SharedState, *, strict_phase: bool) -> PolicyGate:
     return PolicyGate(
         role_registry=default_role_registry(),
@@ -48,7 +55,7 @@ def test_kernel_explore_denied_when_explore_disabled(strict_phase):
 def test_kernel_explore_allowed_when_explore_enabled():
     state = SharedState(phase=PHASE_KERNEL, explore_enabled=True)
     gate = _gate(state, strict_phase=False)
-    # interleave default-on: explore is a valid KERNEL interleave action.
+    # interleave enabled (fixture): explore is a valid KERNEL interleave action.
     gate.validate_intent("orchestration", _delegate_explore())
 
 
