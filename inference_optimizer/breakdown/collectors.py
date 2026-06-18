@@ -5010,6 +5010,12 @@ def collect_kb_provenance(
     recipe_audit = _read_last_n_audit(_recipe_audit_path(session_dir), n=50)
     recipe_by_resolution: dict[str, int] = {}
     recipe_by_remote: dict[str, int] = {}
+    # Per-path (e.g. gbrain vs cortex) attribution derived from the composite
+    # remote's provenance, emitted by the dispatcher audit. ``by_source``
+    # counts how often each path contributed a returned row; ``best_config_by
+    # _source`` counts which path supplied the replayable champion config.
+    recipe_by_source: dict[str, int] = {}
+    recipe_best_config_by_source: dict[str, int] = {}
     recipe_hits = 0
     for row in recipe_audit:
         recipe_by_resolution[str(row.get("resolution") or "unknown")] = (
@@ -5020,9 +5026,49 @@ def collect_kb_provenance(
         )
         if row.get("hit"):
             recipe_hits += 1
+        result = row.get("result") if isinstance(row.get("result"), dict) else {}
+        for src in (result.get("sources") or []):
+            recipe_by_source[str(src)] = recipe_by_source.get(str(src), 0) + 1
+        best_config_src = result.get("best_config_source")
+        for src in (
+            best_config_src if isinstance(best_config_src, list)
+            else [best_config_src] if best_config_src else []
+        ):
+            recipe_best_config_by_source[str(src)] = (
+                recipe_best_config_by_source.get(str(src), 0) + 1
+            )
 
     cortex_sid = (state.get("cortex_session_id") or "").strip()
     warm = state.get("warm_start_recipe") or {}
+    # FINAL reference attribution: which path supplied the warm recipe that was
+    # actually applied this session. Prefer the merged row's field provenance,
+    # then the WarmStartContext source tag set at T0.
+    warm_recipe_row = warm.get("recipe") if isinstance(warm, dict) else {}
+    warm_start_recipe_source = ""
+    # 1) Precise self-case: the merged identity row owns its replayable config,
+    #    so its per-field provenance is the authoritative applied-config source.
+    if isinstance(warm_recipe_row, dict):
+        warm_field_sources = warm_recipe_row.get("_field_sources")
+        if isinstance(warm_field_sources, dict):
+            bc_src = warm_field_sources.get("best_config")
+            if isinstance(bc_src, str) and bc_src:
+                warm_start_recipe_source = bc_src
+            elif isinstance(bc_src, list) and bc_src:
+                warm_start_recipe_source = str(bc_src[0])
+    # 2) Config-donor case: the identity row carries no replayable config (its
+    #    best_config was borrowed from a sibling), so the T0 WarmStartContext
+    #    source — resolved donor-aware in _warm_recipe_source — is authoritative
+    #    over the identity row's generic _sources.
+    if not warm_start_recipe_source:
+        wsc = state.get("warm_start_context") or {}
+        warm_start_recipe_source = str(
+            ((wsc.get("match") or {}).get("source") or "")
+        ) if isinstance(wsc, dict) else ""
+    # 3) Last resort: the identity row's first contributing source.
+    if not warm_start_recipe_source and isinstance(warm_recipe_row, dict):
+        warm_sources = warm_recipe_row.get("_sources")
+        if isinstance(warm_sources, list) and warm_sources:
+            warm_start_recipe_source = str(warm_sources[0])
     pitfalls = state.get("warm_start_pitfalls") or []
     lessons = state.get("warm_start_lessons") or []
     # warm-recipe replay outcome; empty before completion / when --no-warm-replay.
@@ -5033,6 +5079,7 @@ def collect_kb_provenance(
         "warm_start_ts": state.get("warm_start_ts") or "",
         "warm_start_recipe_seen": bool(warm and warm.get("raw")),
         "warm_start_recipe_tier": str(warm.get("tier") or "") if isinstance(warm, dict) else "",
+        "warm_start_recipe_source": warm_start_recipe_source,
         "warm_start_pitfall_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
         "warm_start_lesson_count": len(lessons) if isinstance(lessons, list) else 0,
         # operator-visible replay summary, passed through verbatim.
@@ -5052,6 +5099,8 @@ def collect_kb_provenance(
             "hits": recipe_hits,
             "by_resolution": recipe_by_resolution,
             "by_remote": recipe_by_remote,
+            "by_source": recipe_by_source,
+            "best_config_by_source": recipe_best_config_by_source,
             "tail": recipe_audit[-10:],
         },
         "flusher_status": _collect_flusher_status(
@@ -5397,7 +5446,7 @@ def _load_llm_calls(
     session_dir: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Read every LLM-call row: the in-process ledger + all ext shards.
+    """Read every LLM-call row from ``reports/trace/llm_calls.jsonl``.
 
     Merges ``reports/trace/llm_calls.jsonl`` with every
     ``reports/trace/ext/*.jsonl`` shard written by out-of-process children.
@@ -5425,6 +5474,67 @@ def _load_llm_calls(
         for shard in shards:
             rows.extend(_load_jsonl_safe(shard, warnings))
     return [r for r in rows if isinstance(r, dict)]
+
+
+def _load_proposal_task_map(
+    session_dir: Path, warnings: list[str],
+) -> dict[str, str]:
+    """Read ``reports/trace/proposal_task_map.jsonl`` into ``{msg_id: task_id}``.
+
+    Written by the Coordinator when an approved proposal is materialized into a
+    task. Lets the join attribute a Critic review call (which only carries the
+    reviewed proposal ``msg_id``) to the decision the proposal became. Later
+    rows win on duplicate msg_id. Best-effort: missing file yields ``{}``.
+    """
+    rows = _load_jsonl_safe(
+        session_dir / "reports" / "trace" / "proposal_task_map.jsonl", warnings,
+    )
+    out: dict[str, str] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        mid = str(r.get("proposal_msg_id") or "").strip()
+        tid = str(r.get("task_id") or "").strip()
+        if mid and tid:
+            out[mid] = tid
+    return out
+
+
+def _attribute_critic_calls(
+    calls: list[dict[str, Any]], msg_to_task: dict[str, str],
+) -> None:
+    """Backfill ``task_id`` on Critic review calls from the proposal→task map.
+
+    A Critic reasoning call records the proposal ``msg_id``s it reviewed but not
+    a ``task_id`` (the task is materialized only after approval). We only
+    attribute a call that reviewed exactly ONE proposal which resolves to
+    exactly one task, so it joins that decision through the normal key path.
+
+    A *batch* review (several reviewed msg_ids) judged all of those proposals
+    together, so folding its whole token spend onto a single decision — even
+    when only one of the batch was later materialized (the others rejected /
+    not materialized, so absent from the map) — would over-attribute that
+    decision's cost and under-count overhead. Such batch reviews, plus
+    ambiguous (multiple distinct tasks) or unresolvable reviews, are left
+    unkeyed (→ overhead). The call dicts are mutated in place. No-op when the
+    map is empty.
+    """
+    if not msg_to_task:
+        return
+    for call in calls:
+        if str(call.get("component") or "") != "critic":
+            continue
+        if str(call.get("task_id") or "").strip():
+            continue  # already keyed; respect it
+        reviewed = call.get("reviewed_msg_ids")
+        if not isinstance(reviewed, list):
+            continue
+        reviewed_ids = {m for m in reviewed if isinstance(m, str) and m}
+        resolved = {msg_to_task[m] for m in reviewed_ids if m in msg_to_task}
+        # Single-target review only: a partial mapping (reviewed several, only
+        # one materialized) must NOT collapse the batch's cost onto that one.
+        if len(reviewed_ids) == 1 and len(resolved) == 1:
+            call["task_id"] = next(iter(resolved))
 
 
 def _load_dispatch_history_all(
@@ -5473,7 +5583,8 @@ def _build_phase_windows(
     Derived from ``state.phase_history`` rows that carry a ``to_phase``
     (real transitions). Used to backfill a call's / decision's phase from
     its ``ts`` when the producer didn't stamp one (out-of-process children,
-    sub-agent runners). Empty when phase_history is missing.
+    sub-agent runners, the proposal_scorer off the dispatch path). Empty when
+    phase_history is missing.
 
     Args:
         state (dict[str, Any]): Parsed ``state.json``.
@@ -5524,6 +5635,17 @@ def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
         else:
             break
     return phase
+
+
+# Components whose unjoined LLM spend is *legitimately* not tied to a single
+# decision (planning / review / monitoring), bucketed as ``overhead`` rather
+# than ``unattributed`` so the attribution ledger separates "expected shared
+# cost" from "a real attribution gap to chase".
+_OVERHEAD_COMPONENTS: frozenset[str] = frozenset({
+    "orchestration",
+    "critic",
+    "robustness",
+})
 
 
 def _decision_key(task_id: str, dyn_id: str) -> str | None:
@@ -5618,14 +5740,25 @@ def collect_token_usage(
     by_component = rollup.get("by_component") or {}
     by_phase = rollup.get("by_phase") or {}
     unattributed = dt.get("unattributed_tokens") or _empty_token_bucket()
+    overhead = dt.get("overhead_tokens") or _empty_token_bucket()
 
-    # attributed = session_total - unattributed, field by field.
+    # attributed = session_total - unattributed - overhead, field by field.
     attributed = _empty_token_bucket()
     for k in attributed:
-        attributed[k] = int(session_total.get(k, 0) or 0) - int(unattributed.get(k, 0) or 0)
+        attributed[k] = (
+            int(session_total.get(k, 0) or 0)
+            - int(unattributed.get(k, 0) or 0)
+            - int(overhead.get(k, 0) or 0)
+        )
     total_calls = int(session_total.get("calls", 0) or 0)
     attr_calls = int(attributed.get("calls", 0) or 0)
-    attributed_calls_pct = round(100.0 * attr_calls / total_calls, 2) if total_calls else 0.0
+    overhead_calls = int(overhead.get("calls", 0) or 0)
+    attributed_calls_pct = (
+        round(100.0 * attr_calls / total_calls, 2) if total_calls else 0.0
+    )
+    overhead_calls_pct = (
+        round(100.0 * overhead_calls / total_calls, 2) if total_calls else 0.0
+    )
 
     # Per-task token map from the per-decision view (only decision-bearing
     # task_ids carry tokens — i.e. the attributed subset).
@@ -5663,11 +5796,13 @@ def collect_token_usage(
         "by_phase": {p: _token_convenience(b) for p, b in by_phase.items()},
         "attribution": {
             "attributed_to_decisions": _token_convenience(attributed),
+            "overhead": _token_convenience(overhead),
             "unattributed": _token_convenience(unattributed),
             "attributed_calls_pct": attributed_calls_pct,
+            "overhead_calls_pct": overhead_calls_pct,
         },
         "timeline": timeline,
-        "source": "reports/trace/llm_calls.jsonl (+ reports/trace/ext/*.jsonl)",
+        "source": "reports/trace/llm_calls.jsonl",
         "correlation": (
             "timeline[].task_id joins action_timeline[].task_id; components "
             "without a per-decision task_id (orchestration / kernel / critic / "
@@ -5803,7 +5938,7 @@ def collect_decision_trace(
     """Join the token ledger to the decision streams into one timeline.
 
     Implements FULL_TRACE_DESIGN §6: read the per-call token rows
-    (``reports/trace/llm_calls.jsonl`` + ``ext/*.jsonl``), read the
+    (``reports/trace/llm_calls.jsonl``), read the
     decision rows (``optimization_journal.json`` KEEP/REVERT entries +
     every dynamic_action ``dispatch_history.jsonl``), then attach each
     decision's LLM calls by the shared ``task_id`` / ``dyn_id`` key, with a
@@ -5831,6 +5966,11 @@ def collect_decision_trace(
     calls = _load_llm_calls(session_dir, warnings)
     phase_windows = _build_phase_windows(state)
     scores_by_variant = _proposal_scores_by_variant(state)
+
+    # Item 2: attribute Critic review calls to the decision their reviewed
+    # proposal became (msg_id -> task_id), so critic spend that served a single
+    # materialized proposal joins that decision instead of landing in overhead.
+    _attribute_critic_calls(calls, _load_proposal_task_map(session_dir, warnings))
 
     # ── Index calls by decision key; orphans (no key) go to a ts list ──
     calls_by_key: dict[str, list[dict[str, Any]]] = {}
@@ -5867,6 +6007,11 @@ def collect_decision_trace(
             "task_id": task_id,
             "operation_kind": operation_kind_for("", change_kind),
         }
+        # Predicted (pre-measurement) gain, when the proposer supplied one, so
+        # the decision row carries predicted-vs-realized for calibration.
+        predicted_gain = _to_float(e.get("predicted_gain_pct"))
+        if predicted_gain is not None:
+            decision["predicted_gain_pct"] = predicted_gain
         if change_kind:
             decision["kind"] = change_kind
         if provenance:
@@ -5961,15 +6106,28 @@ def collect_decision_trace(
 
     # ── Unjoined calls: keyed calls with no matching decision + orphans ──
     # These still count toward the session total + phase/component rollup so
-    # the books balance, but they don't anchor to a decision row.
+    # the books balance, but they don't anchor to a decision row. We split
+    # them two ways for an honest attribution ledger:
+    #   * ``overhead``      — inherently cross-decision LLM spend (planning /
+    #                         review / monitoring) that legitimately has no
+    #                         single owning decision (orchestration / critic /
+    #                         robustness reactor turns).
+    #   * ``unattributed``  — everything else that *should* have carried a
+    #                         decision key but didn't (a real gap to chase).
     unattributed = _empty_token_bucket()
+    overhead = _empty_token_bucket()
+
+    def _route_unjoined(call: dict[str, Any]) -> dict[str, int]:
+        comp = str(call.get("component") or "")
+        return overhead if comp in _OVERHEAD_COMPONENTS else unattributed
+
     for key, key_calls in calls_by_key.items():
         if key in consumed_keys:
             continue
         for call in key_calls:
-            _fold_call_into_bucket(unattributed, call)
+            _fold_call_into_bucket(_route_unjoined(call), call)
     for call in orphan_calls:
-        _fold_call_into_bucket(unattributed, call)
+        _fold_call_into_bucket(_route_unjoined(call), call)
 
     # ── Rollups: by_phase + by_component + session_total (ALL calls) ──
     by_phase: dict[str, dict[str, int]] = {}
@@ -5996,6 +6154,7 @@ def collect_decision_trace(
         "decision_trace": decision_trace,
         "token_rollup": token_rollup,
         "unattributed_tokens": unattributed,
+        "overhead_tokens": overhead,
     }
 
 
