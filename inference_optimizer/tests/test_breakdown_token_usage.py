@@ -164,6 +164,22 @@ class TestCollectTokenUsage:
         assert rows["baseline"]["task_id"] is None
         assert rows["baseline"]["tokens"] is None
 
+    def test_attribution_splits_overhead_from_unattributed(self):
+        # Add an overhead bucket (e.g. orchestration/critic) and shrink the
+        # plain unattributed so the three-way split reconciles to session_total.
+        dt = _decision_trace_fixture()
+        dt["overhead_tokens"] = _bucket(80, 40, 4, 6, 1)   # orchestration turn
+        dt["unattributed_tokens"] = _bucket(10, 10, 2, 2, 1)  # leftover
+        out = col.collect_token_usage(dt, _timeline_fixture(), [])
+        attr = out["attribution"]
+        # attributed = session_total - unattributed - overhead
+        assert attr["attributed_to_decisions"]["calls"] == 1
+        assert attr["attributed_to_decisions"]["total_in"] == 10
+        assert attr["overhead"]["calls"] == 1
+        assert attr["overhead"]["total_in"] == 80
+        assert attr["unattributed"]["calls"] == 1
+        assert attr["overhead_calls_pct"] == round(100.0 / 3, 2)
+
     def test_empty_decision_trace_is_safe(self):
         out = col.collect_token_usage({}, [], [])
         assert out["session_total"]["calls"] == 0

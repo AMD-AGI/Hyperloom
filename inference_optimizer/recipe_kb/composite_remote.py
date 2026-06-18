@@ -324,12 +324,19 @@ class CompositeRemoteRecipeClient:
         sub_kwargs = dict(kwargs)
         sub_kwargs["limit"] = per_source_limit
         grouped: dict[str, list[dict[str, Any]]] = {}
+        source_candidates: dict[str, int] = {}
         for name, source in self._active():
             rows = self._fan_out_search(name=name, source=source, kwargs=sub_kwargs)
+            source_candidates[name] = len(rows)
             for row in rows:
                 cid = row.get("canonical_id") or ""
                 grouped.setdefault(cid, []).append(row)
         merged = [_merge_group(rows) for rows in grouped.values()]
+        # Stamp per-source candidate counts on every merged row so the
+        # downstream audit/trace can attribute coverage to each path
+        # (e.g. gbrain vs cortex) without re-querying the backends.
+        for row in merged:
+            row["_source_candidates"] = dict(source_candidates)
         merged.sort(key=_precedence_key, reverse=True)
         return merged
 
@@ -400,13 +407,23 @@ class CompositeRemoteRecipeClient:
                     arbor["_source"] = name
                     hits.append(arbor)
         if hits:
-            if len(hits) == 1:
-                return hits[0]
+            # Per-source candidate counts for trace provenance (gbrain vs cortex);
+            # each fast-path source yields at most one row, so a hit counts as 1.
+            source_candidates: dict[str, int] = {}
+            for h in hits:
+                src = h.get("_source")
+                if src:
+                    source_candidates[src] = source_candidates.get(src, 0) + 1
             grouped: dict[str, list[dict[str, Any]]] = {}
             for h in hits:
                 grouped.setdefault(h.get("canonical_id") or "", []).append(h)
+            # Always merge (even a single hit) so the returned row carries the
+            # uniform ``_sources`` / ``_field_sources`` provenance the dispatcher
+            # audit reads; stamp per-source candidate counts on top.
             merged = [_merge_group(rows) for rows in grouped.values()]
             merged.sort(key=_precedence_key, reverse=True)
+            for row in merged:
+                row["_source_candidates"] = dict(source_candidates)
             for row in merged:
                 if row.get("canonical_id") == canonical_id:
                     return row
