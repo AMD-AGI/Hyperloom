@@ -513,6 +513,56 @@ def test_baseline_executor_falls_back_to_shared_state_model_path(
     )
 
 
+def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(
+    tmp_path, monkeypatch
+):
+    # Production form: the executor is a module-level singleton
+    # (self.shared_state is None) and live state arrives via ctx.extra.
+    # Without reading ctx.extra the bare YAML model name would leak.
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
+    output_dir = tmp_path / "ws"
+    captured: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        cfg_idx = cmd.index("--benchmark-config")
+        out_idx = cmd.index("--output-dir")
+        captured["cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        _fake_workspace(Path(cmd[out_idx + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(  # no shared_state — singleton form
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    task = SimpleNamespace(task_id="t-baseline-extra", params={
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+    })
+    ctx = SimpleNamespace(
+        task=task,
+        extra={
+            "shared_state": SimpleNamespace(
+                model_path="/wekafs/models/PrimeIntellect-Qwen3-1.7B",
+            ),
+        },
+    )
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert (
+        captured["cfg"]["benchmark"]["model"]
+        == "/wekafs/models/PrimeIntellect-Qwen3-1.7B"
+    )
+
+
 def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
     base = tmp_path / "base.yaml"
     _write_yaml(base)

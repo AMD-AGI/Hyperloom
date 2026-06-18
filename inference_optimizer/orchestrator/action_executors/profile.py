@@ -997,6 +997,12 @@ class ProfileExecutor(BaselineExecutor):
                     # the capture sidecars (it accepts *.json.gz).
                     main_trace = selected_trace_dir
                     result["profile_trace_selection_reason"] = "capture_only_fallback"
+                    log.info(
+                        "profile_executor: no *.trace.json.gz; falling back to "
+                        "%d SGLang capture sidecar(s) in %s (#575)",
+                        len(selected_trace_files),
+                        selected_trace_dir,
+                    )
                 else:
                     main_trace = _preferred_main_trace_path(
                         selected_trace_dir,
@@ -1033,7 +1039,8 @@ class ProfileExecutor(BaselineExecutor):
                 )
                 if existing_empty_dirs:
                     log.warning(
-                        "profile_executor: trace dirs exist but no .trace.json.gz files in %s",
+                        "profile_executor: trace dirs exist but no .trace.json.gz "
+                        "or capture sidecar (bs_*_rank*.json.gz) files in %s",
                         ", ".join(str(p) for p in existing_empty_dirs),
                     )
                 else:

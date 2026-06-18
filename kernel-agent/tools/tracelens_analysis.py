@@ -3216,7 +3216,8 @@ def _finalize_candidates(
 def recommend_backends(candidate: dict[str, Any]) -> list[str]:
     """Recommend a backend ladder for a reusable native kernel.
 
-    Orders GEAK first, then claude/codex.
+    Orders forge first, then GEAK, then the claude/codex LLM backends
+    (cursor appended only when CURSOR_API_KEY is set).
 
     Args:
         candidate: The hot-kernel candidate dict.
@@ -3234,7 +3235,7 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    # GEAK first; append cursor only when CURSOR_API_KEY is provisioned.
+    # forge then GEAK; append cursor only when CURSOR_API_KEY is provisioned.
     cursor_tail = ["cursor"] if os.environ.get("CURSOR_API_KEY", "").strip() else []
     return ["forge", "geak", "claude", "codex"] + cursor_tail
 
@@ -3753,7 +3754,11 @@ def deterministic_extract_hot_kernels(
                 "duration_us": round(duration_us, 3),
                 "call_count": op_count,
                 "efficiency_percent": round(eff_pct, 2),
-                "impact_score": member.get("impact_score") or impact_score,
+                "impact_score": (
+                    member.get("impact_score")
+                    if member.get("impact_score") is not None
+                    else impact_score
+                ),
                 "bound_type": member.get("bound_type", ""),
                 "tracelens_category": category,
                 "tracelens_pitem_rank": global_rank,

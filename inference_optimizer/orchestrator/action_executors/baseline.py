@@ -934,13 +934,15 @@ class BaselineExecutor:
         timeout_sec = self._resolve_timeout(params)
         # Model path: task.params['model_path'] > $MODEL_PATH > SharedState;
         # if none, leave the YAML's hardcoded `model:` for fixture-based tests.
-        # The SharedState fallback stops a real run (params + env both unset)
-        # from leaking the YAML's bare model name into --model-path, which
-        # sglang then treats as an HF repo id ("is not a local folder").
+        # Read live state from ctx.extra (Coordinator path: the executor is a
+        # module-level singleton with self.shared_state=None), mirroring the
+        # eager-fallback resolution above; the fallback stops a real run (params
+        # + env both unset) from leaking the YAML bare model name into
+        # --model-path, which sglang treats as an HF repo id.
         resolved_model = (
             str(params.get("model_path") or "").strip()
             or os.environ.get("MODEL_PATH", "").strip()
-            or str(getattr(self.shared_state, "model_path", "") or "").strip()
+            or str(getattr(live_shared_state, "model_path", "") or "").strip()
         )
         # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
         resolved_gpu = (
