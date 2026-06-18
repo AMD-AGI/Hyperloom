@@ -437,6 +437,24 @@ def test_session_metadata(fixture_session: Path) -> None:
     assert s["max_minutes"] == 180
 
 
+def test_session_meta_emitted_without_ci(fixture_session: Path) -> None:
+    """``session_meta`` is produced by the exporter itself (no CI backfill).
+
+    Guards the regression where sessions that skipped ci/optimize_submit landed
+    in pulse without a ``session_meta`` block.
+    """
+    bd = build(fixture_session)
+    assert "session_meta" in bd
+    meta = bd["session_meta"]
+    # code_revision is sourced from the manifest and must always be present.
+    assert meta["code_revision"] == "86d2ed3"
+    # Mirrors the §1 session code_revision so pulse's COALESCE resolves either.
+    assert meta["code_revision"] == bd["session"]["code_revision"]
+    # Field contract the CI backfill used to write.
+    for key in ("image", "image_id", "session_duration_seconds"):
+        assert key in meta
+
+
 def test_session_stop_reason_falls_back_to_close_phase(tmp_path: Path) -> None:
     """Legacy states may close via phase_history without top-level stop_reason.
 
