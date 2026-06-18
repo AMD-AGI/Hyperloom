@@ -153,12 +153,19 @@ RESEARCH_LANE_CEILING_FALLBACK: int = 2
 def detect_gpu_count() -> int:
     """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed.
 
+    ``ROCR_VISIBLE_DEVICES`` is consulted first because it is the canonical ROCm
+    pinning mask per the repo's GPU runner convention (and the CLI preflight
+    drops ``HIP_VISIBLE_DEVICES`` when ROCR is set). Honouring it here keeps the
+    GPU-specialist capacity scoped to the operator's mask instead of the whole
+    machine.
+
     Returns:
-        int: the number of visible GPUs derived from ``HIP_VISIBLE_DEVICES`` /
-            ``CUDA_VISIBLE_DEVICES`` env masks, else the count parsed from
-            ``rocm-smi``; 0 when nothing can be probed.
+        int: the number of visible GPUs derived from the
+            ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES`` /
+            ``CUDA_VISIBLE_DEVICES`` env masks (first one set wins), else the
+            count parsed from ``rocm-smi``; 0 when nothing can be probed.
     """
-    for env_name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+    for env_name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
         raw = os.environ.get(env_name)
         if raw is None:
             continue
@@ -250,7 +257,9 @@ SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration
 
 # Free-form (``scope='freeform'``) sanity-gate limits (absorbed from the
 # retired dynamic_specialist wave channel).
-SPECIALIST_FREEFORM_WAVE_MAX: int = 8
+# WS3: relaxed from 8 → 16; the real ceiling is the ``research_lane`` capacity
+# (2×GPU) and the GPU specialist pool, so this is just a coarse sanity tripwire.
+SPECIALIST_FREEFORM_WAVE_MAX: int = 16
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 # Lightweight mechanical red-line tripwire over free-form task descriptions:
 # obviously-destructive host commands a dispatch must never embed. This is a
@@ -263,6 +272,11 @@ _FREEFORM_REDLINE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r">\s*/dev/sd[a-z]"),
     re.compile(r":\(\)\s*\{.*\};\s*:"),  # fork bomb
     re.compile(r"\bshutdown\b|\breboot\b", re.IGNORECASE),
+    # Global process cleanup can kill the optimizer's serving / benchmark
+    # process; ban pipe-to-kill and killall.
+    re.compile(r"\bps\s+(?:aux|-\w+)\b.*\|.*\bkill\b", re.IGNORECASE),
+    re.compile(r"\bpgrep\b.*\|.*\bkill\b", re.IGNORECASE),
+    re.compile(r"\bkillall\b", re.IGNORECASE),
 )
 
 # Prefix the SubAgentRunner stamps on specialist emit-intents (``from_agent='specialist:<task_id>'``).
@@ -278,12 +292,28 @@ KB_WRITE_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
-#: KB *readonly* surfaces. R5 ``tool_whitelist_role`` requires a specialist sub-agent caller.
+#: KB *readonly* surfaces (the ``cortex_kb`` MCP server is the gbrain knowledge
+#: graph; these are its read-only tools). R5 ``tool_whitelist_role`` requires a
+#: specialist sub-agent caller. Write tools (put_page / delete_page / add_tag /
+#: revert_version / submit_job / …) are deliberately omitted so they never enter
+#: ``--allowedTools``; the local-first write contract is preserved.
 CORTEX_KB_READ_TOOL_NAMES: frozenset[str] = frozenset(
     {
-        "mcp__cortex_kb__traverse",
-        "mcp__cortex_kb__find_recipe",
         "mcp__cortex_kb__query",
+        "mcp__cortex_kb__search",
+        "mcp__cortex_kb__recall",
+        "mcp__cortex_kb__get_page",
+        "mcp__cortex_kb__list_pages",
+        "mcp__cortex_kb__get_chunks",
+        "mcp__cortex_kb__resolve_slugs",
+        "mcp__cortex_kb__traverse_graph",
+        "mcp__cortex_kb__get_links",
+        "mcp__cortex_kb__get_backlinks",
+        "mcp__cortex_kb__get_tags",
+        "mcp__cortex_kb__get_timeline",
+        "mcp__cortex_kb__find_experts",
+        "mcp__cortex_kb__find_trajectory",
+        "mcp__cortex_kb__extract_facts",
     }
 )
 
@@ -450,6 +480,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",
         "cumulative_gain_validated_stack_len",
+        "pending_integrate",
+        "resume_pending_revalidation",
         "baseline_tput",
         "baseline_accuracy",
         "session_id",
@@ -496,6 +528,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "no_gain_cycle_streak",
         "pending_bottleneck_switch",
         "last_cycle_bottleneck",
+        "saturated_directions",
+        "bottleneck_shift",
+        "cycle_strategy_log",
         # operator-facing lifecycle event log (#266). Coordinator-only writer
         # (SharedState.record_lifecycle_event); LLM update_state must not be
         # able to forge "phase X finished, outputs at <path>" events.
@@ -523,6 +558,10 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "gaps",
         # Orchestration working-memory checkpoint; Coordinator-authored (LLM must not self-author durable memory).
         "orchestration_memory",
+        # Bounded rollback ring of prior good orchestration_memory records;
+        # Coordinator-only writer (operator re-seed via env). Locked in lock-step
+        # with its parent so the LLM can't forge/erase rollback snapshots.
+        "orchestration_memory_history",
         # FRAMEWORK_PR per-repo discovery budget; set once, locked against LLM inflation.
         "framework_pr_max_candidates",
         # Advisory model-architecture profile from the SKILL launcher; locked as the sole source of truth.
@@ -1708,12 +1747,20 @@ class PolicyGate:
                     f"delegate{{action='specialist'}}: max_turns must be int, got {max_turns_raw!r}",
                     rule="specialist_dispatch_source",
                 ) from exc
-            if max_turns <= 0 or max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
+            # WS1: turns are no longer the stop signal — depth is bounded by the
+            # wall-clock budget. ``max_turns=0`` is accepted as "unbounded" (run
+            # to a deliverable conclusion); negatives and values above the
+            # effectively-unbounded hard cap are still rejected.
+            if max_turns < 0 or max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
                 raise PolicyDenied(
                     f"delegate{{action='specialist'}}: max_turns={max_turns} "
-                    f"outside (0, {SPECIALIST_MAX_TURNS_HARD_CAP}]",
+                    f"outside [0, {SPECIALIST_MAX_TURNS_HARD_CAP}]",
                     rule="specialist_dispatch_source",
-                    hint=(f"max_turns must be in (0, {SPECIALIST_MAX_TURNS_HARD_CAP}]; the prompt default is 8."),
+                    hint=(
+                        f"max_turns must be in [0, {SPECIALIST_MAX_TURNS_HARD_CAP}] "
+                        "(0 = unbounded; depth is bounded by the wall-clock "
+                        "budget, so omit max_turns unless capping a probe early)."
+                    ),
                 )
 
         self._validate_specialist_gpu_request(params)

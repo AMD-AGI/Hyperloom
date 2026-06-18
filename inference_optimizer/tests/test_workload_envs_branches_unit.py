@@ -172,6 +172,26 @@ def test_run_eval_from_env(monkeypatch, tmp_path):
     assert bench["envs"]["RUN_EVAL"] == "true"
 
 
+def test_run_eval_defaults_true(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    src = _write(tmp_path / "cfg.yaml")
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["RUN_EVAL"] == "true"
+
+
+def test_run_eval_explicit_false_warns_not_blocks(monkeypatch, tmp_path, caplog):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("RUN_EVAL", "false")
+    monkeypatch.setattr(we, "_RUN_EVAL_DISABLED_WARN_EMITTED", False)
+    src = _write(tmp_path / "cfg.yaml")
+    with caplog.at_level("WARNING"):
+        bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["RUN_EVAL"] == "false"
+    assert any("RUN_EVAL is disabled" in r.message for r in caplog.records)
+
+
 # ---- profile-window math --------------------------------------------------
 def test_profile_negative_delay_clamped(monkeypatch, tmp_path):
     _clear_env(monkeypatch)

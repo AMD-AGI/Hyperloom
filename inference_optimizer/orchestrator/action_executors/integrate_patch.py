@@ -20,12 +20,19 @@ Inputs (``ctx.task.params``)::
         ``specialist_done.patches_written``.
     config_changes (dict[str, str], optional) — env vars layered on
         the variant's launch env. Reverted with the patches on REVERT.
-    keep_threshold_pct (float, optional) — KEEP threshold; defaults to
-        DEFAULT_KEEP_THRESHOLD_PCT (1.0). No stack rebench here, so the
-        sole gate sits at the grid noise floor (1.0%) to avoid committing
-        noise-level "gains".
-    accuracy_baseline (float | dict, optional) — accuracy gate input;
-        forwarded to the existing accuracy gate utilities.
+    keep_threshold_pct (float, optional) — first-pass KEEP threshold;
+        defaults to DEFAULT_KEEP_THRESHOLD_PCT (1.0), the grid noise floor.
+        A KEEP is then re-confirmed by a full-stack rebench unless
+        ``enable_stack_rebench`` is False.
+    accuracy_baseline (float, optional) — baseline accuracy for the gate.
+        With a positive baseline the measured drop is enforced; without one,
+        the gate skips with a warning.
+    enable_stack_rebench (bool, optional) — when True (default) a KEEP
+        is confirmed by a second full-stack rebench (stability floor +
+        accuracy) before it is committed.
+    rebench_stable_threshold_pct (float, optional) — stability floor for
+        the confirmation rebench, as a percentage above ``base_tput``
+        (default 0.0).
     base_tput (float, optional) — baseline throughput to compare
         against. Falls back to ``SharedState.baseline_tput`` if zero.
     benchmark_script / result_dir / variant_timeout_sec — same
@@ -76,6 +83,7 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
+from ._stack_rebench import measure_stack_rebench
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -86,7 +94,7 @@ from ._workload_envs import (
 log = logging.getLogger(__name__)
 
 
-DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # D1: was 0.2 (below grid 1.0% noise floor; no stack rebench here)
+DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # grid noise floor; KEEP is re-confirmed by a stack rebench
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 long workload
 
 
@@ -800,6 +808,7 @@ class IntegratePatchExecutor:
                 ),
             }
         extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or extra.get("state")
         # Specialist workspace conventionally at runs/specialist/<id>/.
         specialist_workspace = self.session_dir / "runs" / "specialist" / specialist_task_id
         if not specialist_workspace.is_dir():
@@ -892,6 +901,24 @@ class IntegratePatchExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
+        # Long-run #4: mark the non-transactional integrate window before any
+        # framework tree mutation. The Coordinator clears this after promoting
+        # the final KEEP/REVERT/APPLY_FAILED result into SharedState.
+        if shared_state is not None:
+            try:
+                shared_state.pending_integrate = {
+                    "specialist_task_id": specialist_task_id,
+                    "task_id": str(getattr(ctx.task, "task_id", "") or ""),
+                    "patches": [str(p) for p in patch_paths],
+                    "config_changes": dict(config_changes),
+                    "framework_source_root": str(framework_root or ""),
+                    "workspace": str(output_root),
+                    "ts": _now_iso(),
+                }
+                shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — sentinel is best-effort
+                log.exception("integrate_patch: failed to persist pending_integrate sentinel")
+
         # Stage 1: apply patches (best-effort with -3 fallback).
         applied: list[Path] = []
         apply_errors: list[dict[str, str]] = []
@@ -937,7 +964,6 @@ class IntegratePatchExecutor:
         # ``integrate_patch_requires_critic_verdict`` already gates the
         # delegate; this is belt-and-braces for paths that bypass PolicyGate
         # (legacy resume / test injection). No-ops when SharedState is absent.
-        shared_state = extra.get("shared_state") or extra.get("state")
         if shared_state is not None and not params.get("bypass_critic"):
             try:
                 recorded = shared_state.get_specialist_patch_verdict(
@@ -1055,6 +1081,54 @@ class IntegratePatchExecutor:
                 "bench_result": bench_result,
                 "workspace": str(output_root),
             }
+
+        # Confirmation rebench: a patch only KEEPs if a second full-stack run
+        # still clears the stability floor and the accuracy gate.
+        if params.get("enable_stack_rebench", True) and base_tput > 0:
+            confirm = await self._confirm_stack_rebench(
+                params=params,
+                output_root=output_root,
+                config_changes_applied=config_changes_applied,
+                specialist_task_id=specialist_task_id,
+                base_tput=base_tput,
+            )
+            if not confirm["stable"] or confirm["accuracy_pass"] is False:
+                reverted = self._revert_patches(framework_root, applied)
+                reasons = []
+                if not confirm["stable"]:
+                    reasons.append(
+                        f"stack rebench {confirm['tput']} below stability floor {confirm['stable_floor']:.2f}"
+                    )
+                if confirm["accuracy_pass"] is False:
+                    reasons.append("accuracy regression on rebench")
+                await self._maybe_write_framework_pr_kb_record(
+                    done_payload=done_payload,
+                    outcome="reverted_smoke_fail",
+                    tps_delta_pct=float(delta_pct or 0.0),
+                    extra=extra,
+                )
+                return {
+                    "status": "reverted",
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "config_changes_applied": {},
+                    "output_throughput": new_tput,
+                    "delta_pct": delta_pct,
+                    "accuracy_pass": confirm["accuracy_pass"],
+                    "base_tput": base_tput,
+                    "keep_threshold_pct": keep_threshold_pct,
+                    "reason": "; ".join(reasons) or "stack rebench failed",
+                    "bench_result": bench_result,
+                    "stack_rebench": confirm,
+                    "workspace": str(output_root),
+                }
+            # Confirmed: the rebench tput is the headline.
+            if isinstance(confirm["tput"], (int, float)) and confirm["tput"] > 0:
+                new_tput = confirm["tput"]
+                delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
+            if confirm["accuracy_pass"] is not None:
+                accuracy_pass = confirm["accuracy_pass"]
 
         await self._maybe_write_framework_pr_kb_record(
             done_payload=done_payload,
@@ -1307,31 +1381,113 @@ class IntegratePatchExecutor:
                 "output_throughput": getattr(r, "output_throughput", None),
                 "ttft_ms": getattr(r, "ttft_ms", None),
                 "itl_ms": getattr(r, "itl_ms", None),
-                "result_dir": str(getattr(r, "result_dir", "")),
+                # ``VariantResult`` exposes the benchmark dir as ``workspace``
+                # (there is no ``result_dir`` attribute); using the wrong name
+                # left ``_grade_accuracy`` with an empty path so the accuracy
+                # gate silently skipped on every patch.
+                "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
             }
 
-        # Accuracy gate runs only on a succeeded bench with a baseline;
-        # else ``None`` (KEEP gate skips the accuracy check).
         accuracy_pass: bool | None = None
-        baseline_accuracy = params.get("accuracy_baseline")
-        if (
-            bench.get("status") == "succeeded"
-            and isinstance(baseline_accuracy, (int, float))
-            and float(baseline_accuracy) > 0
-        ):
-            try:
-                eval_results = parse_eval_results(bench["result_dir"])
-                if eval_results.get("score") is not None:
-                    accuracy_pass = accuracy_passed(
-                        eval_results["score"],
-                        float(baseline_accuracy),
-                    )
-            except Exception:  # noqa: BLE001
-                log.exception("integrate_patch: accuracy gate parse failed; treating as None (gate skipped)")
+        if bench.get("status") == "succeeded":
+            accuracy_pass = self._grade_accuracy(bench["workspace"], params.get("accuracy_baseline"))
 
         return bench, {"accuracy_pass": accuracy_pass}
+
+    @staticmethod
+    def _grade_accuracy(result_dir: str, baseline_accuracy: Any) -> bool | None:
+        """Grade a bench's accuracy against the baseline.
+
+        With a recorded baseline the measured drop is enforced; without one
+        (or no eval result) the check is skipped (``None``) and warned loudly.
+        """
+        # Accept numeric strings (e.g. ``"0.85"``) in addition to int/float so a
+        # baseline carried as text is not silently coerced to 0.0 (which would
+        # skip the gate). Non-numeric / missing values fall back to 0.0 (skip).
+        try:
+            baseline_value = float(baseline_accuracy)
+        except (TypeError, ValueError):
+            baseline_value = 0.0
+        try:
+            eval_results = parse_eval_results(result_dir)
+            new_accuracy = eval_results.get("accuracy")
+            if new_accuracy is not None and baseline_value > 0:
+                return accuracy_passed(baseline_value, float(new_accuracy))
+            if baseline_value <= 0:
+                log.warning(
+                    "integrate_patch: no baseline accuracy; accuracy gate skipped "
+                    "(throughput-only KEEP). Accuracy regressions will not be caught.",
+                )
+            else:
+                log.warning("integrate_patch: variant produced no accuracy result; gate skipped")
+        except Exception:  # noqa: BLE001
+            log.exception("integrate_patch: accuracy gate parse failed; treating as None (gate skipped)")
+        return None
+
+    async def _confirm_stack_rebench(
+        self,
+        *,
+        params: dict[str, Any],
+        output_root: Path,
+        config_changes_applied: dict[str, str],
+        specialist_task_id: str,
+        base_tput: float,
+    ) -> dict[str, Any]:
+        """Re-bench the patched stack once more and re-grade throughput + accuracy.
+
+        Mirrors the explore ledger's post-KEEP confirmation: a patch only KEEPs
+        if a second full-stack run still clears the stability floor and the
+        accuracy gate. Returns ``stable`` / ``tput`` / ``accuracy_pass`` / etc.
+        """
+        config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
+        resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
+        resolved_gpu = (
+            str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
+        )
+        override_script = sanitize_script_name(params.get("benchmark_script"))
+        override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        base_extra_args = str(params.get("base_extra_args") or "").strip()
+        config_path = materialize_config_with_envs(
+            config_path,
+            output_root,
+            model_path=resolved_model or None,
+            gpu_type=resolved_gpu or None,
+            benchmark_script=override_script,
+            out_name="integrate_patch.rebench.yaml",
+        )
+        variant = GridVariant(
+            name=f"integrate-patch-rebench-{specialist_task_id[:8]}",
+            extra_server_args=base_extra_args,
+            extra_envs=dict(config_changes_applied),
+            note=f"integrate_patch_rebench:{specialist_task_id}",
+        )
+        rebench = await measure_stack_rebench(
+            config_path=config_path,
+            base_extra_args=base_extra_args,
+            variant=variant,
+            base_tput=base_tput,
+            stable_threshold_pct=float(params.get("rebench_stable_threshold_pct", 0.0)),
+            output_slot=output_root / "stack_rebench",
+            variant_timeout_sec=int(params.get("variant_timeout_sec", self.variant_timeout_sec)),
+            model_path=resolved_model or None,
+            gpu_type=resolved_gpu or None,
+            benchmark_script=override_script,
+            result_dir=override_result_dir,
+            magpie_python=params.get("magpie_python") or None,
+        )
+        accuracy_pass = (
+            self._grade_accuracy(rebench.workspace, params.get("accuracy_baseline")) if rebench.workspace else None
+        )
+        return {
+            "stable": rebench.stable,
+            "tput": rebench.tput,
+            "workspace": rebench.workspace,
+            "warnings": rebench.warnings,
+            "stable_floor": rebench.stable_floor,
+            "accuracy_pass": accuracy_pass,
+        }
 
 
 __all__ = [

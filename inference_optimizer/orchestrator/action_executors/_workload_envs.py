@@ -45,9 +45,11 @@ from ...model_config_utils import _load_model_config_dict, _model_is_gemma2
 
 log = logging.getLogger(__name__)
 
-# Emit the RUN_EVAL=false default warning once per process to keep logs
-# readable.
-_RUN_EVAL_DEFAULT_WARN_EMITTED = False
+# Warn once per process when the accuracy gate is disabled.
+_RUN_EVAL_DISABLED_WARN_EMITTED = False
+
+# Truthy-false spellings that disable the accuracy gate.
+_RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
 
 class FrameworkScriptMismatchError(ValueError):
@@ -648,29 +650,22 @@ def materialize_config_with_envs(
     )
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
-    # Accuracy eval (GSM8K) is OFF by default: Magpie's scripts pass
-    # `run_eval --concurrent-requests N` but InferenceX's `run_lm_eval`
-    # rejects that flag (fails the whole benchmark). Until upstream realigns,
-    # the user opts in via env / extra_envs; the accuracy gate treats a missing
-    # result as "no regression". Resolved after extra_envs merging so an
-    # explicit RUN_EVAL=true doesn't trigger the warning.
+    # Accuracy eval (GSM8K) is ON by default; env / extra_envs may override.
+    # Disabling it removes the per-variant accuracy gate, so accuracy-
+    # destroying changes can pass on throughput alone — warn loudly, never
+    # block. Resolved after extra_envs merging so the source is honored.
     if "RUN_EVAL" not in envs:
         env_run_eval = os.environ.get("RUN_EVAL")
-        if env_run_eval is not None:
-            envs["RUN_EVAL"] = env_run_eval
-        else:
-            envs["RUN_EVAL"] = "false"
-            global _RUN_EVAL_DEFAULT_WARN_EMITTED
-            if not _RUN_EVAL_DEFAULT_WARN_EMITTED:
-                log.warning(
-                    "RUN_EVAL defaulted to false (no per-variant accuracy "
-                    "gate): Magpie main / InferenceX main disagree on "
-                    "`run_eval --concurrent-requests`. Export RUN_EVAL=true "
-                    "(or pass extra_envs={'RUN_EVAL': 'true'}) once your "
-                    "InferenceX checkout accepts that flag. This warning "
-                    "fires once per process."
-                )
-                _RUN_EVAL_DEFAULT_WARN_EMITTED = True
+        envs["RUN_EVAL"] = env_run_eval if env_run_eval is not None else "true"
+    if str(envs.get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE_VALUES:
+        global _RUN_EVAL_DISABLED_WARN_EMITTED
+        if not _RUN_EVAL_DISABLED_WARN_EMITTED:
+            log.warning(
+                "RUN_EVAL is disabled: no per-variant accuracy gate, so "
+                "accuracy regressions will not be caught. Set RUN_EVAL=true "
+                "to restore the gate. This warning fires once per process."
+            )
+            _RUN_EVAL_DISABLED_WARN_EMITTED = True
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:

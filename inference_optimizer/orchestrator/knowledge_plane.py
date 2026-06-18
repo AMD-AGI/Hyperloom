@@ -139,6 +139,11 @@ class KnowledgePlane:
     pr_feed_window_days: int = DEFAULT_PR_FEED_WINDOW_DAYS
     pr_feed_per_repo_limit: int = DEFAULT_PR_FEED_PER_REPO_LIMIT
     pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL
+    # Read-only KB-graph (gbrain) MCP advertised to specialists as the
+    # ``cortex_kb`` server; empty disables it (the mcp__cortex_kb__* tools are
+    # then stripped from the specialist whitelist).
+    cortex_kb_mcp_url: str = ""
+    cortex_kb_mcp_headers: dict[str, str] = field(default_factory=dict)
     # Aggregated warnings from the latest pr_feed_warm call.
     last_warnings: list[str] = field(default_factory=list)
 
@@ -152,6 +157,8 @@ class KnowledgePlane:
         pr_feed_window_days: int = DEFAULT_PR_FEED_WINDOW_DAYS,
         pr_feed_per_repo_limit: int = DEFAULT_PR_FEED_PER_REPO_LIMIT,
         pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL,
+        cortex_kb_mcp_url: str = "",
+        cortex_kb_mcp_headers: dict[str, str] | None = None,
     ) -> "KnowledgePlane":
         """Construct a plane from injected clients and config.
 
@@ -164,6 +171,10 @@ class KnowledgePlane:
             pr_feed_window_days (int): PR feed lookback window in days.
             pr_feed_per_repo_limit (int): Max PRs fetched per repo.
             pr_monitor_mcp_url (str): MCP URL advertised to specialists.
+            cortex_kb_mcp_url (str): Read-only KB-graph MCP URL advertised to
+                specialists as the ``cortex_kb`` server; empty disables it.
+            cortex_kb_mcp_headers (dict[str, str] | None): Optional auth headers
+                (e.g. ``Authorization: Bearer …``) for the KB-graph MCP server.
 
         Returns:
             KnowledgePlane: The constructed facade.
@@ -174,6 +185,8 @@ class KnowledgePlane:
             pr_feed_window_days=int(pr_feed_window_days),
             pr_feed_per_repo_limit=int(pr_feed_per_repo_limit),
             pr_monitor_mcp_url=pr_monitor_mcp_url,
+            cortex_kb_mcp_url=(cortex_kb_mcp_url or "").strip(),
+            cortex_kb_mcp_headers=dict(cortex_kb_mcp_headers or {}),
         )
 
     def reset_round_caches(self) -> None:
@@ -194,16 +207,36 @@ class KnowledgePlane:
 
     @property
     def cortex_enabled(self) -> bool:
-        """Whether Cortex is enabled (always ``False``).
+        """Whether the read-only ``cortex_kb`` KB-graph MCP is wired.
 
-        Backwards-compatible shim; the knowledge plane no longer wires
-        Cortex.
+        Drives whether the specialist runner keeps the ``mcp__cortex_kb__*``
+        read tools in the resolved whitelist. ``False`` (the default) when no
+        KB-graph MCP URL is configured — Cortex recipe READS still flow through
+        ``RecipeKB`` regardless; this gate is only about the specialist's
+        autonomous KB-query tool surface.
 
         Returns:
-            ``False``.
+            bool: ``True`` when a ``cortex_kb_mcp_url`` is configured.
         """
-        # Backwards-compatible shim; KnowledgePlane no longer wires Cortex.
-        return False
+        return bool((self.cortex_kb_mcp_url or "").strip())
+
+    def cortex_specialist_mcp_url(self) -> str:
+        """KB-graph MCP URL to advertise as the specialist ``cortex_kb`` server.
+
+        Returns:
+            The configured URL, or ``""`` when the KB-graph MCP is disabled.
+        """
+        return (self.cortex_kb_mcp_url or "").strip()
+
+    def cortex_specialist_mcp_headers(self) -> dict[str, str]:
+        """Auth headers for the specialist ``cortex_kb`` MCP server.
+
+        Returns:
+            A copy of the configured header map (``{}`` when none / disabled).
+        """
+        if not (self.cortex_kb_mcp_url or "").strip():
+            return {}
+        return dict(self.cortex_kb_mcp_headers or {})
 
     def resolve_domain_repos(self, domain: str) -> DomainRepos | None:
         """Look up domain config; returns None for unknown domains.

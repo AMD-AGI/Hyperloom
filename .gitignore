@@ -76,6 +76,11 @@ atom_boost_tutorials.md
 ./code-cleansing-plan
 code_cleansing.MD
 stall_code.md
+reference_sessions
+dig_in.MD
+long_run_optimization.MD
+main_enhance_progressing.md
+main_enhance.md
 
 # Large HF candidate pools are hosted off-repo on /wekafs (read by the cron at
 # runtime) — keep only the small InferenceX daily set tracked in git.

@@ -141,6 +141,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",
         "cumulative_gain_validated_stack_len",
+        "pending_integrate",
+        "resume_pending_revalidation",
         "baseline_tput",
         "baseline_accuracy",
         "session_id",
@@ -184,6 +186,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "no_gain_cycle_streak",
         "pending_bottleneck_switch",
         "last_cycle_bottleneck",
+        "saturated_directions",
+        "bottleneck_shift",
+        "cycle_strategy_log",
         # operator-facing lifecycle event log (#266); Coordinator-only writer.
         "lifecycle",
         # specialist sub-agent ledger.
@@ -208,6 +213,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "gaps",
         # Orchestration working-memory checkpoint (Coordinator-authored).
         "orchestration_memory",
+        # Bounded rollback ring of prior good orchestration_memory records
+        # (Coordinator-only writer); mirrors upstream, locked with its parent.
+        "orchestration_memory_history",
         # FRAMEWORK_PR per-repo discovery budget (Coordinator-controlled).
         "framework_pr_max_candidates",
         # Advisory model-architecture profile (launcher / state.json owned).

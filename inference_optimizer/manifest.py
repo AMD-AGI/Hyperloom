@@ -356,6 +356,24 @@ def build_session_id(model_name: str = "") -> str:
     return f"{stem}_{_utc_now_compact()}_{uuid.uuid4().hex[:8]}"
 
 
+def _gpu_specialist_capacity_from_args(args: argparse.Namespace | None) -> int:
+    """Return the session-locked GPU specialist capacity.
+
+    WS2 defaults GPU specialists to whole-machine capacity. The parsed CLI arg
+    normally carries that detected value, but manifest helpers are also used in
+    tests and direct-call paths where ``args`` can be missing or incomplete.
+    """
+    raw = getattr(args, "gpu_specialist_capacity", None) if args is not None else None
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            pass
+    from .orchestrator.policy import detect_gpu_count
+
+    return detect_gpu_count()
+
+
 def build_manifest(
     session_dir: Path,
     *,
@@ -434,7 +452,7 @@ def build_manifest(
         # Locked at session start; resume reads it back so a restart can't
         # change concurrency semantics.
         "research_lane_capacity": int(getattr(args, "research_lane_capacity", 1) or 1) if args is not None else 1,
-        "gpu_specialist_capacity": int(getattr(args, "gpu_specialist_capacity", 0) or 0) if args is not None else 0,
+        "gpu_specialist_capacity": _gpu_specialist_capacity_from_args(args),
         # IR-3 soft-degrade audit
         "kb_degraded_reason": (getattr(args, "kb_degraded_reason", None) if args is not None else None),
         "pr_degraded_reason": (getattr(args, "pr_degraded_reason", None) if args is not None else None),
