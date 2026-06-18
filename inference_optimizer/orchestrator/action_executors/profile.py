@@ -425,6 +425,30 @@ def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
     return sorted(trace_dir.rglob("*.trace.json.gz"))
 
 
+# SGLang graph-capture sidecars land as ``capture_traces/bs_*_rank*.json.gz``
+# (no ``.trace`` infix), so the primary ``*.trace.json.gz`` glob misses them.
+# Scoped to capture sidecar names so arbitrary ``*.json.gz`` is never promoted.
+_CAPTURE_SIDECAR_GLOBS = ("bs_*_rank*.json.gz", "graph_capture*.json.gz")
+
+
+def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:
+    """Return SGLang capture sidecars under ``trace_dir`` (fallback only).
+
+    Args:
+        trace_dir: The directory to scan recursively.
+
+    Returns:
+        Sorted capture sidecar paths, excluding ``*.trace.json.gz`` already
+        covered by the primary scan.
+    """
+    found: set[Path] = set()
+    for pattern in _CAPTURE_SIDECAR_GLOBS:
+        for p in trace_dir.rglob(pattern):
+            if not p.name.endswith(".trace.json.gz"):
+                found.add(p)
+    return sorted(found)
+
+
 def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path:
     """Trace path to pass downstream to TraceLens.
 
@@ -939,6 +963,7 @@ class ProfileExecutor(BaselineExecutor):
             selected_trace_dir: Path | None = None
             selected_trace_files: list[Path] = []
             existing_empty_dirs: list[Path] = []
+            capture_only = False
             for trace_dir in _candidate_trace_dirs(workspace):
                 if not trace_dir.is_dir():
                     continue
@@ -949,17 +974,44 @@ class ProfileExecutor(BaselineExecutor):
                     break
                 existing_empty_dirs.append(trace_dir)
 
+            # #575: SGLang can emit only capture sidecars
+            # (capture_traces/bs_*_rank*.json.gz) without a top-level
+            # *.trace.json.gz. Fall back to those so roofline analyzes the
+            # available trace instead of failing with no_trace_files.
+            if selected_trace_dir is None:
+                for trace_dir in _candidate_trace_dirs(workspace):
+                    if not trace_dir.is_dir():
+                        continue
+                    sidecars = _capture_sidecar_traces_for_dir(trace_dir)
+                    if sidecars:
+                        selected_trace_dir = trace_dir
+                        selected_trace_files = sidecars
+                        capture_only = True
+                        break
+
             if selected_trace_dir is not None:
                 result["trace_dir"] = str(selected_trace_dir)
                 result["trace_files"] = [str(p) for p in selected_trace_files]
-                main_trace = _preferred_main_trace_path(
-                    selected_trace_dir,
-                    selected_trace_files,
-                )
+                if capture_only:
+                    # Pass the dir so TraceLens picks its own ingest order over
+                    # the capture sidecars (it accepts *.json.gz).
+                    main_trace = selected_trace_dir
+                    result["profile_trace_selection_reason"] = "capture_only_fallback"
+                    log.info(
+                        "profile_executor: no *.trace.json.gz; falling back to "
+                        "%d SGLang capture sidecar(s) in %s (#575)",
+                        len(selected_trace_files),
+                        selected_trace_dir,
+                    )
+                else:
+                    main_trace = _preferred_main_trace_path(
+                        selected_trace_dir,
+                        selected_trace_files,
+                    )
+                    result["profile_trace_selection_reason"] = (
+                        "merged_trace_preferred" if main_trace.name.startswith("merged-") else "trace_dir_preferred"
+                    )
                 result["main_trace_path"] = str(main_trace)
-                result["profile_trace_selection_reason"] = (
-                    "merged_trace_preferred" if main_trace.name.startswith("merged-") else "trace_dir_preferred"
-                )
                 # #210: warn if the trace shape suggests PROFILE_EXTRA_BODY
                 # leaked / shape-discovery missing. Read-only; never blocks.
                 try:
@@ -982,10 +1034,13 @@ class ProfileExecutor(BaselineExecutor):
                 result["status"] = "failed"
                 result["error_class"] = "no_trace_files"
                 probed = ", ".join(str(p) for p in _candidate_trace_dirs(workspace))
-                result["error"] = f"no .trace.json.gz under {workspace_str} (probed: {probed})"
+                result["error"] = (
+                    f"no .trace.json.gz or capture sidecar under {workspace_str} (probed: {probed})"
+                )
                 if existing_empty_dirs:
                     log.warning(
-                        "profile_executor: trace dirs exist but no .trace.json.gz files in %s",
+                        "profile_executor: trace dirs exist but no .trace.json.gz "
+                        "or capture sidecar (bs_*_rank*.json.gz) files in %s",
                         ", ".join(str(p) for p in existing_empty_dirs),
                     )
                 else:

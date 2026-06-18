@@ -265,12 +265,15 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # backend TRITON) — the unrecognized arch leaves an empty model type.
 # deepseek_v4: confirmed from DeepSeek-V4-Flash server.log ModelConfig
 # validation failure.
+# glm_moe_dsa: confirmed from zai-org-GLM-5.1 server.log ("model type
+# `glm_moe_dsa` but Transformers does not recognize this architecture" →
+# ModelConfig ValidationError in engine init).
 _UNRECOGNIZED_MODEL_TYPES = frozenset({
-    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash",
+    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash", "glm_moe_dsa",
 })
 _UNRECOGNIZED_ARCHITECTURES = frozenset({
     "deepseekv4forcausallm", "glm4moeliteforcausallm",
-    "mimov2flashforcausallm",
+    "mimov2flashforcausallm", "glmmoedsaforcausallm",
 })
 # ministral3 only fails inside a Mistral3 multimodal wrapper (Surpem-Supertron2
 # server.log: vLLM registry raises KeyError('ministral3') for text_config.
@@ -780,6 +783,18 @@ def _detect_private_quant(model_path: str, data: dict) -> str | None:
             return (
                 "quantization_config 'mode: affine/mlx' with no quant_method is "
                 "an MLX (mx.quantize) checkpoint with no vLLM/sglang loader."
+            )
+        # quantization_config carries real quant params (bits/group_size/...) but
+        # declares no quant_method: sglang can't pick a loader and raises
+        # "Unknown quantization method: ''" in engine init.
+        if not method and any(
+            qc.get(k) is not None
+            for k in ("bits", "group_size", "weight_format", "weight_bits")
+        ):
+            return (
+                "quantization_config declares quant params (e.g. bits/group_size) "
+                "but no quant_method; sglang/vLLM cannot select a loader and "
+                "fails engine init with \"Unknown quantization method: ''\"."
             )
         declared_supported = bool(method)
     # A declared supported quant_method (awq/gptq/compressed-tensors/...)
