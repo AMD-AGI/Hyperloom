@@ -84,7 +84,7 @@ read them when invoked standalone.
 | `RANDOM_RANGE_RATIO` | unset    | Optional Magpie random-range jitter.                                 |
 | `ROCR_VISIBLE_DEVICES` | inherited | Standard ROCm visible-device mask.                                  |
 | `HIP_VISIBLE_DEVICES` | inherited | Standard HIP visible-device mask.                                   |
-| `RUN_EVAL`        | unset       | When set to a non-empty value, runs the accuracy eval step inside the workload runner. |
+| `RUN_EVAL`        | `true`      | Runs the accuracy eval step inside the workload runner by default. Set to `false`/`0`/`no`/`off` to disable; disabling emits a warning. |
 
 ---
 
@@ -119,8 +119,11 @@ read them when invoked standalone.
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | `HYPERLOOM_LOCAL_KB_ROOT`             | `$USER_DATA_PATH/kb`   | Filesystem root for the local recipe-snapshot KB store. Overridden by `--local-kb-root`. See [KB_GUIDE.md](KB_GUIDE.md).             |
 | `CORTEX_KB_URL`                       | unset                  | Optional remote Cortex KB service URL. Also set by `--cortex-kb-url`. No remote KB is contacted unless this is configured.            |
-| `RECIPE_KB_REMOTE`                    | unset                  | Advanced remote-read mode selector. Writes remain local.                                                                              |
-| `RECIPE_KB_MIRROR_MODE`               | unset                  | Advanced mirroring mode for remote KB integrations.                                                                                   |
+| `RECIPE_KB_REMOTE`                    | `auto`                 | Remote KB **read** mode (writes always stay local). `auto` (default, also when unset) composites gbrain + Cortex dual-read only when **both** are configured, else uses the single configured remote, else local-only. `both` always composites around whatever is configured (even one source). `gbrain` reads from gbrain only (paired with `RECIPE_KB_MIRROR_MODE`). Any other value (or unset `CORTEX_KB_URL`) resolves to a single Cortex remote when `CORTEX_KB_URL` is set, else local-only. See [KB_GUIDE.md](KB_GUIDE.md). |
+| `RECIPE_KB_MIRROR_MODE`               | `external`             | gbrain mirror mode (only when `RECIPE_KB_REMOTE=gbrain`). `external` (default): an out-of-band CronJob ingests the local store into gbrain. `inline`: best-effort in-process mirror of each local write into gbrain (local write stays authoritative). |
+| `HYPERLOOM_SPECIALIST_KB_MCP_URL`     | unset                  | Read-only KB-graph (`cortex_kb`) MCP endpoint advertised to specialist subprocesses; also settable via `--specialist-kb-mcp-url`. When unset, falls back to the gbrain MCP derived from `$GBRAIN_BASE_URL` (+ `/mcp`). Specialist KB writes always stay local. |
+| `HYPERLOOM_SPECIALIST_KB_MCP_TOKEN`   | unset                  | Bearer token for `HYPERLOOM_SPECIALIST_KB_MCP_URL` (sent as `Authorization: Bearer …`).                                              |
+| `GBRAIN_BASE_URL` / `GBRAIN_TOKEN`    | unset                  | gbrain knowledge-graph base URL + bearer token. Used both for the gbrain remote-read path (`RECIPE_KB_REMOTE=auto`/`both`/`gbrain`) and as the default specialist `cortex_kb` MCP endpoint (`$GBRAIN_BASE_URL/mcp`) when no explicit override is set. |
 | `CRITIC_AGENT_ROOT`                   | derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `ROBUSTNESS_AGENT_ROOT`               | derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
 | `ROBUSTNESS_LLM_RCA_DISABLED`         | unset                  | Set to `1` to forcibly disable the LLM RCA engine even when credentials are present.                                                 |
@@ -198,6 +201,36 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
 To get the single "total tokens for this run" number, read
 `token_usage.session_total.grand_total` (all-in) or `.total_in_out`
 (prompt+completion only).
+
+---
+
+## 9. Long-run / roofline convergence tuning
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_SATURATION_WITHIN_PCT` | `95.0` | Roofline ceiling threshold used by `direction_saturation()`. A dominant direction is marked saturated when achieved throughput is at least this percentage of the relevant roofline ceiling. Values outside `(0, 100]` fall back to `95.0`. |
+| `INFERENCE_OPTIMIZER_SATURATION_CONVERGENCE` | enabled | Set to `0`/`false`/`no`/`off` to disable the cyclic-phase stop condition that blocks another macro-cycle when every tracked roofline domain is saturated. |
+
+### Orchestration-memory checkpoint guardrail (long-run durability)
+
+These bound the persistent orchestration conversation so multi-day runs do not
+overflow the model context window. The guardrail measures *real* token usage
+(input + cache-read + cache-creation) against the orchestration model's context
+window (`MODEL_CONTEXT_WINDOWS`; 200k default), scaled by the fractions below.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION` | `0.70` | Soft checkpoint threshold as a fraction of the orchestration context window. At/above it a compaction is attempted (a degenerate summary is skipped, preserving the live conversation + prior memory). Values outside `(0, 1]` fall back to the default. |
+| `INFERENCE_OPTIMIZER_CTX_HARD_FRACTION` | `0.85` | Hard checkpoint threshold (fraction of the context window). At/above it the run compacts via the deterministic fallback even if the summary looks degenerate. Values outside `(0, 1]` fall back to the default. Keep `> SOFT`. |
+| `INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK` | unset | Recovery escape hatch: set to a positive integer `n` to re-seed the next orchestration push from the `n`-th-from-newest snapshot in the bounded `orchestration_memory_history` ring (capped at 10), instead of the live memory — used to recover when a recent compaction dropped a key thread. Out-of-range / non-integer values warn and fall back to live memory. |
+
+### Specialist exploration (phase interleave & GPU pool)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE` | off | EXPLORE↔KERNEL phase interleave, **off by default** (matches `origin/main`). Set to `1`/`true`/`yes`/`on` to opt in: EXPLORE may then propose kernel-owned actions and KERNEL may propose the explore triple (`explore`/`specialist`/`integrate_patch`). Default-off keeps phase gating strict. |
+| `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY` | detected GPU count | Max number of GPU-specialist leases (the `gpu_research_lane` pool size). When set it wins (parsed as a non-negative int; `0` disables `needs_gpu=true` dispatch). When unset it defaults to the visible GPU count probed at launch (`detect_gpu_count()`), which honours `ROCR_VISIBLE_DEVICES` → `HIP_VISIBLE_DEVICES` → `CUDA_VISIBLE_DEVICES`, else whole-machine via `rocm-smi`. |
+| `INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES` | derived from mask | Explicit comma/semicolon-separated **absolute** GPU id pool for specialists (capped to capacity). When unset, the pool is derived from the visible-device mask (`ROCR_VISIBLE_DEVICES`, then `HIP`/`CUDA`) so specialists stay on the operator's pinned cards; with no mask set it falls back to `0..capacity-1`. The leased ids are written verbatim into each specialist subprocess's `ROCR_VISIBLE_DEVICES`. |
 
 ---
 

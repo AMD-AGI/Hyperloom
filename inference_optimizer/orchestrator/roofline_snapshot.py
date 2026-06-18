@@ -10,6 +10,7 @@ shape consumed by ``report.py`` and downstream frontends.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,19 @@ _TABLE_ROW_RE = re.compile(
     re.MULTILINE,
 )
 _PCT_NUM_RE = re.compile(r"([-+]?\d+(?:\.\d+)?)")
+DEFAULT_SATURATION_WITHIN_PCT: float = 95.0
+
+
+def saturation_within_threshold_pct() -> float:
+    """Return the configured roofline saturation threshold percentage."""
+    raw = os.environ.get("INFERENCE_OPTIMIZER_SATURATION_WITHIN_PCT", "").strip()
+    if not raw:
+        return DEFAULT_SATURATION_WITHIN_PCT
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_SATURATION_WITHIN_PCT
+    return val if 0.0 < val <= 100.0 else DEFAULT_SATURATION_WITHIN_PCT
 
 
 def _parse_pct(raw: str | None) -> float | None:
@@ -120,9 +134,6 @@ def _tracelens_dir_for_analysis_md(analysis_md_path: Path) -> Path:
     Returns:
         Path: The parent directory holding the TraceLens artifacts.
     """
-    # ``.../tracelens/analysis.md`` -> ``.../tracelens/``
-    if analysis_md_path.name == "analysis.md" and analysis_md_path.parent.name:
-        return analysis_md_path.parent
     return analysis_md_path.parent
 
 
@@ -565,6 +576,33 @@ def dominant_direction(snapshot: dict[str, Any] | None) -> tuple[str, float]:
         return "", 0.0
     best = max(candidates.items(), key=lambda kv: kv[1])
     return best[0], best[1]
+
+
+def direction_saturation(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """Classify whether the latest dominant roofline direction is near ceiling.
+
+    The decision uses the already-computed ``within_roofline_pct`` metric:
+    achieved throughput divided by the relevant roofline ceiling. Missing
+    percentages are treated as not saturated so incomplete TraceLens output never
+    forces convergence.
+    """
+    direction, pct = dominant_direction(snapshot)
+    snap = snapshot if isinstance(snapshot, dict) else {}
+    within = snap.get("within_roofline_pct")
+    gap = snap.get("gap_to_roofline_pct")
+    threshold = saturation_within_threshold_pct()
+    saturated = isinstance(within, (int, float)) and float(within) >= threshold
+    hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
+    return {
+        "direction": direction,
+        "direction_pct": round(float(pct), 2),
+        "within_pct": float(within) if isinstance(within, (int, float)) else None,
+        "gap_pct": float(gap) if isinstance(gap, (int, float)) else None,
+        "saturated": bool(saturated),
+        "threshold_pct": threshold,
+        "bound_kind": snap.get("roofline_bound_kind"),
+        "domain_hint": {"domain": hint[0], "tag": hint[1]} if hint else {},
+    }
 
 
 def build_profiler_digest(

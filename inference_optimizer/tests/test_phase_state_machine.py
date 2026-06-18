@@ -180,14 +180,14 @@ def test_phase_interleave_env_flag_is_picked_up(monkeypatch):
         "kernel_opt",
         "EXPLORE",
     )
-    # Explicit on values enable interleave.
+    # Explicit on values enable interleave (opt-in).
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
     assert phase_state.is_phase_interleave_enabled() is True
     assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
         "kernel_opt",
         "EXPLORE",
     )
-    # Explicit off values stay off.
+    # Explicit off values keep interleave off.
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "0")
     assert phase_state.is_phase_interleave_enabled() is False
     assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
@@ -205,13 +205,41 @@ def test_phase_exit_reasons_includes_required_vocab():
         "prelude_done",
         "plateau_explore",
         "plateau_kernel",
+        "explore_phase_budget_exhausted",
+        "kernel_phase_budget_exhausted",
+        "explore_budget_cap",
+        "kernel_budget_cap",
+        "sweep_budget_cap",
         "sweep_done",
+        "conc_sweep_done",
+        "sweep_budget_exhausted",
+        "kernel_phase_aborted_no_trace",
+        "explore_force_exit_low_budget",
+        "explore_no_more_leverage",
+        "kernel_no_more_leverage",
+        "framework_pr_phase_done",
+        "framework_pr_plateau",
+        "framework_pr_force_exit_low_budget",
+        "cycle_reloop",
+        "global_converged",
         "robustness_escalated",
         "target_reached",
         "time_exhausted",
+        "time_exhausted_during_prelude",
         "user_stop_requested",
+        "cortex_t0_failed",
         "cortex_drain_failed",
+        "cortex_commit_failed",
+        "prelude_baseline_failed",
+        "prelude_policy_loop",
+        "policy_loop",
+        "crash_threshold_exceeded",
+        "baseline_failed",
+        "emergency",
+        "max_ticks",
+        "signal",
         "no_kernel_skipped",
+        "phase_entered",
     ):
         assert phase_state.is_valid_phase_exit_reason(reason), reason
 
