@@ -175,7 +175,6 @@ class BenchmarkAnalyzer:
             if fi.decorator == "benchmark":
                 continue
             name_lower = fi.name.lower()
-            body_lower = fi.source.lower()
 
             is_ref = any(h in name_lower for h in self.REF_HINTS)
             is_kernel = any(h in name_lower for h in self.KERNEL_HINTS)

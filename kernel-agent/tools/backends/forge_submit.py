@@ -23,6 +23,7 @@ import fcntl
 import os
 import re
 import shutil
+import site
 import subprocess
 import sys
 import time
@@ -209,8 +210,6 @@ def _editable_roots() -> list[str]:
       2. Setuptools-style .pth files that ``import __editable___<pkg>_finder``;
          the finder .py has a ``MAPPING`` dict mapping package names to paths.
     """
-    import re
-    import site
     roots: set[str] = set()
     seen_dirs: set[str] = set()
     scan_dirs = list(sys.path)
@@ -257,7 +256,7 @@ def _editable_roots() -> list[str]:
                 continue
             fpath = os.path.join(d, n)
             try:
-                txt = open(fpath, errors="replace").read()
+                with open(fpath, errors="replace") as _fh: txt = _fh.read()
             except OSError:
                 continue
             # Layout 1: quoted absolute paths directly in the file.
@@ -271,7 +270,7 @@ def _editable_roots() -> list[str]:
                 if fm:
                     finder_file = os.path.join(d, fm.group(1) + ".py")
                     try:
-                        ftxt = open(finder_file, errors="replace").read()
+                        with open(finder_file, errors="replace") as _fh2: ftxt = _fh2.read()
                     except OSError:
                         continue
                     for m in re.findall(r"['\"](/[^'\"]+)['\"]", ftxt):
@@ -306,7 +305,7 @@ def _acquire_repo_lock(repo: str) -> int | None:
     """
     try:
         fd = os.open(os.path.join(repo, ".git", "forge_inplace.lock"),
-                     os.O_CREAT | os.O_RDWR, 0o644)
+                     os.O_CREAT | os.O_RDWR, 0o600)
     except OSError:
         return None
     try:
@@ -1168,8 +1167,8 @@ def _apply_fellow_env(env: dict) -> None:
             _key = str(_cfg.get("primaryApiKey") or "").strip()
             if _key:
                 env["ANTHROPIC_API_KEY"] = _key
-        except Exception:
-            pass
+        except Exception:  # noqa: S110
+            pass  # best-effort: missing/unreadable config is not fatal
 
 
 def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
@@ -1246,8 +1245,8 @@ def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
             f.write(out)
             if loop_exc:
                 f.write(f"\n=== forge-loop exception ===\n{loop_exc}\n")
-    except OSError:
-        pass
+    except OSError:  # noqa: S110
+        pass  # best-effort log; failure to write doesn't block the result parse
 
     # Parse the result: prefer the JSON sidecar, else the sentinel line.
     baseline_ms = best_ms = None
