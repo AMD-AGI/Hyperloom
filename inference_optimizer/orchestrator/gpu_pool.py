@@ -18,6 +18,13 @@ from ..storage.connection import SqliteConnection
 
 DEFAULT_GPU_LEASE_TTL_SEC = 1800
 
+# WS2: GPU-lease / gpu_research_lane TTL grace over the agent wall budget. The
+# iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — the lease must
+# outlive the agent's wall-budget kill so the cards are never reclaimed while
+# the agent is still computing (which would let serving grab them and pollute
+# the result). TTL = wall_budget × (1 + grace).
+GPU_LEASE_TTL_GRACE = 0.1
+
 
 def _now_iso() -> str:
     """Return the current UTC time as a microsecond ISO-8601 string.
@@ -233,6 +240,7 @@ class SpecialistGpuPool:
 
 __all__ = [
     "DEFAULT_GPU_LEASE_TTL_SEC",
+    "GPU_LEASE_TTL_GRACE",
     "GpuLease",
     "SpecialistGpuPool",
     "resolve_gpu_specialist_devices",

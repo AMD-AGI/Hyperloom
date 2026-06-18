@@ -73,6 +73,97 @@ def test_specialist_wall_budget_caps_at_4h(coord: Coordinator) -> None:
     assert coord._specialist_wall_budget_sec(needs_gpu=False) == 110 * 60
 
 
+# -- WS2: GPU lease TTL re-source + structured-finally release --------------
+def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
+    # TTL = wall_budget × (1 + grace); the lease must outlive the kill so cards
+    # are never reclaimed mid-run (iron law kill ≤ gpu_lease TTL ≤ lane TTL).
+    from inference_optimizer.orchestrator.gpu_pool import GPU_LEASE_TTL_GRACE
+
+    coord.shared_state.macro_cycle = 0
+    budget = coord._specialist_wall_budget_sec(needs_gpu=True)  # 3600
+    ttl = int(budget * (1.0 + GPU_LEASE_TTL_GRACE))
+    assert ttl == int(3600 * 1.1)
+    assert ttl >= budget  # kill ≤ lease TTL
+
+
+def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> None:
+    import asyncio
+
+    released: list[object] = []
+
+    class _Task:
+        task_id = "tg-ok"
+
+    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None):
+        return "RESULT"
+
+    async def _fake_release(lease):
+        released.append(lease)
+
+    coord.sub.run_task = _fake_run_task
+    coord.gpu_specialist_pool.release = _fake_release
+    sentinel_lease = object()
+    out = asyncio.run(
+        coord._run_dispatched_with_gpu_release(
+            _Task(), prebound_lease=None, extra_context={}, gpu_lease=sentinel_lease,
+        )
+    )
+    assert out == "RESULT"
+    assert released == [sentinel_lease]
+
+
+def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> None:
+    import asyncio
+
+    released: list[object] = []
+
+    class _Task:
+        task_id = "tg-boom"
+
+    async def _boom(task, *, prebound_lease=None, extra_context=None):
+        raise RuntimeError("subprocess crashed")
+
+    async def _fake_release(lease):
+        released.append(lease)
+
+    coord.sub.run_task = _boom
+    coord.gpu_specialist_pool.release = _fake_release
+    sentinel_lease = object()
+    with pytest.raises(RuntimeError, match="subprocess crashed"):
+        asyncio.run(
+            coord._run_dispatched_with_gpu_release(
+                _Task(), prebound_lease=None, extra_context={}, gpu_lease=sentinel_lease,
+            )
+        )
+    # C1: lease released via finally even though run_task raised.
+    assert released == [sentinel_lease]
+
+
+def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
+    import asyncio
+
+    called: list[object] = []
+
+    class _Task:
+        task_id = "tc-cpu"
+
+    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None):
+        return "CPU"
+
+    async def _fake_release(lease):
+        called.append(lease)
+
+    coord.sub.run_task = _fake_run_task
+    coord.gpu_specialist_pool.release = _fake_release
+    out = asyncio.run(
+        coord._run_dispatched_with_gpu_release(
+            _Task(), prebound_lease=None, extra_context={}, gpu_lease=None,
+        )
+    )
+    assert out == "CPU"
+    assert called == []  # no GPU lease → release never called
+
+
 # -- static / pure helpers -------------------------------------------------
 def test_gap_layer_for_action(coord: Coordinator) -> None:
     assert coord._gap_layer_for_action("kernel_opt") == ("kernel", "kernel_switch_specialist")

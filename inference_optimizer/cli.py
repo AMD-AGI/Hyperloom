@@ -3669,6 +3669,29 @@ def _default_research_lane_capacity() -> int:
     return research_lane_ceiling()
 
 
+def _default_gpu_specialist_capacity() -> int:
+    """Default ``--gpu-specialist-capacity``: $INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY else the whole machine.
+
+    WS2 turns GPU specialists on by default at whole-machine capacity. When the
+    env var is set (including ``0`` as an explicit disable escape hatch) it
+    wins; otherwise the default is the visible GPU count probed on the launch
+    host (``detect_gpu_count()``), or ``0`` when nothing can be probed.
+
+    Returns:
+        int: The resolved GPU specialist capacity (env value when set and
+            parseable, otherwise the detected whole-machine GPU count).
+    """
+    env = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY")
+    if env is not None and env.strip() != "":
+        try:
+            return max(0, int(env))
+        except ValueError:
+            pass
+    from inference_optimizer.orchestrator.policy import detect_gpu_count
+
+    return detect_gpu_count()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser and subcommands.
 
@@ -4414,9 +4437,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--gpu-specialist-capacity",
         dest="gpu_specialist_capacity",
         type=int,
-        default=int(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "0") or "0"),
+        default=_default_gpu_specialist_capacity(),
         help="Number of GPUs available to specialists that request "
-        "needs_gpu=true. 0 disables GPU specialists (default). "
+        "needs_gpu=true. Defaults to the whole machine (visible GPU "
+        "count on the launch host); set "
+        "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=0 (or pass 0) to "
+        "disable GPU specialists. GPU specialists serialize against the "
+        "serving lanes via gpu_research_lane. "
         "Set INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES to a "
         "comma-separated GPU id pool when the specialist pool should "
         "not use device ids 0..N-1. Locked at session start.",

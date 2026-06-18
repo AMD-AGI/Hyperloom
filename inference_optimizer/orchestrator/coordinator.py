@@ -71,6 +71,7 @@ from .policy import (
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from .gpu_pool import (
+    GPU_LEASE_TTL_GRACE,
     SpecialistGpuPool,
     resolve_gpu_specialist_devices,
 )
@@ -468,6 +469,13 @@ class Coordinator:
                 _set_lane_capacity(self.db.raw, "research_lane", cap)
         except Exception:  # noqa: BLE001 — non-fatal; default seed wins
             log.exception("failed to sync research_lane_capacity to leases DB")
+        # WS2: gpu_research_lane stays capacity-1 (strictly serial GPU
+        # specialists). The co-acquisition lock model can't express a
+        # multi-holder lane that is also mutually exclusive with the cap-1
+        # serving lanes, so a single GPU specialist holds the whole machine at a
+        # time (gpu_count up to the whole machine); the GPU pool partitions the
+        # physical cards within that one lease. The seed default (1) is correct;
+        # no runtime sync needed.
         # `strict_paths` defers to the env flag (on in production, off in tests).
         self.policy = PolicyGate(
             role_registry=self.role_registry,
@@ -8853,24 +8861,20 @@ class Coordinator:
                         gpu_count = int(params.get("gpu_count", 1) or 1)
                     except (TypeError, ValueError):
                         gpu_count = 1
-                    try:
-                        max_turns = int(params.get("max_turns", 8) or 8)
-                    except (TypeError, ValueError):
-                        max_turns = 8
-                    try:
-                        per_turn_s = float(
-                            params.get("specialist_per_turn_max_seconds")
-                            or os.environ.get(
-                                "INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS",
-                                "600",
-                            )
-                            or 600.0
-                        )
-                    except (TypeError, ValueError):
-                        per_turn_s = 600.0
+                    # WS2: TTL re-sourced to the WS1 wall budget (the old
+                    # ``max_turns × per_turn`` ceiling became ~1000×600 once the
+                    # turn cap was lifted). Iron law: the agent's wall-budget
+                    # kill (= the budget) must fire at or before the GPU lease
+                    # TTL, which in turn must not outlive the gpu_research_lane
+                    # lease TTL (both = budget × (1 + grace), set here and in
+                    # intent_router) — the cards are never reclaimed while the
+                    # agent is still computing.
                     gpu_ttl_sec = max(
                         int(task.lease_ttl_sec or 0),
-                        int(max(1, max_turns) * max(1.0, per_turn_s)),
+                        int(
+                            self._specialist_wall_budget_sec(needs_gpu=True)
+                            * (1.0 + GPU_LEASE_TTL_GRACE)
+                        ),
                     )
                     gpu_lease = await self.gpu_specialist_pool.try_acquire(
                         count=gpu_count,
@@ -8892,16 +8896,65 @@ class Coordinator:
                 (
                     task,
                     asyncio.create_task(
-                        self.sub.run_task(
+                        self._run_dispatched_with_gpu_release(
                             task,
                             prebound_lease=lease,
                             extra_context=extra_context,
+                            gpu_lease=gpu_lease,
                         ),
                     ),
                     gpu_lease,
                 )
             )
         return spawned
+
+    async def _run_dispatched_with_gpu_release(
+        self,
+        task: Task,
+        *,
+        prebound_lease: Any,
+        extra_context: dict[str, Any],
+        gpu_lease: Any,
+    ) -> "SubAgentResult":
+        """Run a dispatched task, releasing its GPU lease in a structured finally.
+
+        C1 liveness: binding the GPU-lease release to the asyncio task's own
+        lifecycle (rather than relying solely on the pump loop walking to
+        :meth:`_reap_dispatched_task`) guarantees the cards are freed when the
+        run completes — normally, on error, or on cancellation — even if the
+        pump coroutine is cancelled or the reap never runs. Combined with the
+        TTL reaper (``gpu_specialist_pool.reap_expired``) this is the
+        ``finally + TTL`` double insurance that keeps a crashed/cancelled GPU
+        specialist from pinning the serving cards forever. The lock-lane lease
+        already has its own ``finally`` in ``sub_agent_runner.run_task``.
+
+        ``release`` is idempotent (a no-op DELETE), so the belt-and-suspenders
+        release in :meth:`_reap_dispatched_task` remains harmless.
+
+        Args:
+            task: The dispatched task.
+            prebound_lease: The already-acquired resource-lane lease (or None).
+            extra_context: Per-task context (wall budget, gpu ids, …).
+            gpu_lease: The GPU specialist lease to release, or None.
+
+        Returns:
+            SubAgentResult: The result from ``sub.run_task``.
+        """
+        try:
+            return await self.sub.run_task(
+                task,
+                prebound_lease=prebound_lease,
+                extra_context=extra_context,
+            )
+        finally:
+            if gpu_lease is not None:
+                try:
+                    await self.gpu_specialist_pool.release(gpu_lease)
+                except Exception:  # noqa: BLE001 — defensive cleanup; TTL backstops
+                    log.exception(
+                        "dispatcher: finally GPU-lease release failed for task=%s",
+                        task.task_id,
+                    )
 
     def _specialist_wall_budget_sec(self, *, needs_gpu: bool) -> float:
         """Compute the WS1 explicit wall-clock budget for a specialist task.
