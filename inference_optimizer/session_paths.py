@@ -38,6 +38,23 @@ def state_path(session_dir: Path) -> Path:
     return Path(session_dir) / "state.json"
 
 
+def optimizer_lock_path(session_dir: Path) -> Path:
+    """Compute ``<sd>/runtime/optimizer.lock`` — the single-optimizer session lock.
+
+    A live ``optimize`` process holds an exclusive advisory lock on this file
+    for its whole lifetime and writes its owner metadata (pid / host /
+    heartbeat) into it. A second optimizer attaching to the same session must
+    fail fast instead of clobbering ``state.json`` / ``coordinator.db`` leases.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/runtime/optimizer.lock``.
+    """
+    return Path(session_dir) / "runtime" / "optimizer.lock"
+
+
 # Per-task workspaces under runs/<action>/<task_id>/.
 # Which actions own a runs/ workspace is derived from the ActionRegistry's
 # ``pipeline_phase`` field; these are the phases whose executors write there.
