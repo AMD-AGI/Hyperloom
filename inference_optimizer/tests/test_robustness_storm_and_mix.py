@@ -50,7 +50,9 @@ def test_consecutive_config_only_resets_on_code_patch_keep():
     s.record_intervention(change_type="config", action="explore", task_id="t2")
     assert s.consecutive_config_only_rounds == 2
     s.record_intervention(
-        change_type="code_patch", action="integrate_patch", task_id="t3",
+        change_type="code_patch",
+        action="integrate_patch",
+        task_id="t3",
     )
     assert s.consecutive_config_only_rounds == 0
 
@@ -111,8 +113,11 @@ def test_coordinator_intervention_hook_skips_explore_with_no_winners():
     c = Coordinator.__new__(Coordinator)
     c.shared_state = SharedState(session_id="pr-a8-skip")
     task = Task(
-        task_id="explore-2", kind="explore", state="succeeded",
-        params={}, idempotency_key="explore-2",
+        task_id="explore-2",
+        kind="explore",
+        state="succeeded",
+        params={},
+        idempotency_key="explore-2",
     )
     result = {"status": "succeeded", "winners": [], "best_variant": None}
     c._record_intervention_for_task(task, result)
@@ -132,8 +137,11 @@ def test_coordinator_intervention_hook_records_code_patch_for_integrate_kept():
     assert c.shared_state.consecutive_config_only_rounds == 2
 
     task = Task(
-        task_id="ip-1", kind="integrate_patch", state="succeeded",
-        params={}, idempotency_key="ip-1",
+        task_id="ip-1",
+        kind="integrate_patch",
+        state="succeeded",
+        params={},
+        idempotency_key="ip-1",
     )
     result = {
         "status": "kept",
@@ -154,16 +162,16 @@ def test_coordinator_intervention_hook_records_integrate_attempts():
     c = Coordinator.__new__(Coordinator)
     c.shared_state = SharedState(session_id="pr-a8-noop")
     task = Task(
-        task_id="ip-2", kind="integrate_patch", state="succeeded",
-        params={}, idempotency_key="ip-2",
+        task_id="ip-2",
+        kind="integrate_patch",
+        state="succeeded",
+        params={},
+        idempotency_key="ip-2",
     )
-    for status in ("reverted", "apply_failed", "rejected_by_critic",
-                    "applied_no_bench", "no_patches"):
+    for status in ("reverted", "apply_failed", "rejected_by_critic", "applied_no_bench", "no_patches"):
         c._record_intervention_for_task(task, {"status": status})
     assert len(c.shared_state.intervention_mix) == 5
-    assert {
-        e["change_type"] for e in c.shared_state.intervention_mix
-    } == {"code_patch_attempt"}
+    assert {e["change_type"] for e in c.shared_state.intervention_mix} == {"code_patch_attempt"}
     assert c.shared_state.consecutive_config_only_rounds == 0
 
 

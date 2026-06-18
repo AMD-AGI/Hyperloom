@@ -107,8 +107,10 @@ def test_shared_state_normalizes_explore_search_tested() -> None:
             "schema_version": 1,
             "tested": {
                 fp_a: {
-                    "name": "A", "fingerprint": fp_a,
-                    "extra_server_args": "--A", "extra_envs": {},
+                    "name": "A",
+                    "fingerprint": fp_a,
+                    "extra_server_args": "--A",
+                    "extra_envs": {},
                 },
             },
         },

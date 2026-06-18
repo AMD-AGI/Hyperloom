@@ -4,7 +4,7 @@
 the `inference_optimizer` runtime (producer) and any downstream
 consumer (`claw-stats-service`, results service, notebooks, custom
 dashboards). One file per session, written to
-`$USER_DATA_PATH/session_breakdown.json` at session end (and on
+`$SESSION_DIR/session_breakdown.json` at session end (and on
 operator demand via [`scripts/dump_session_breakdown.py`](OPERATOR_SCRIPTS.md)).
 
 The authoritative source of truth for the wire shape is
@@ -15,24 +15,39 @@ This page describes the contract from a consumer's perspective.
 
 ## 1. Versioning
 
-The top-level `schema_version` field is a stable string. The current
-producer emits:
+The top-level `schema_version` field is a stable string. The producer
+emits **one of two version strings depending on the aggregation path**:
 
 ```json
-"schema_version": "hyperloom.session_breakdown.v2"
+"schema_version": "hyperloom.session_breakdown.v2"     // legacy collector-only fallback
+"schema_version": "hyperloom.session_breakdown.v3.0"   // when author-time recorder fragments are present
 ```
 
-`v2` is **additive over `v1`**: it only adds sections (e.g.
+When the session has author-time recorder fragments (the "new way"
+write-side spool), the exporter aggregates from them and stamps
+`v3.0`; sessions without fragments (historical runs, recorder-disabled
+runs) fall back to the legacy collectors and keep the `v2` stamp. Both
+strings can therefore appear in production today.
+
+**`v3.0` is the same additive wire shape as `v2`** — the recorder path
+captures facts the collectors can miss (pre-dispatch / infra failures,
+pruned robustness signals) but adds no breaking field changes. A reader
+written for `v2` parses a `v3.0` file unchanged by ignoring unknown keys.
+`v2` is itself **additive over `v1`**: it only adds sections (e.g.
 `specialist_runs`, `action_timeline`, `kernel_optimization_summary`,
-`conc_sweep_summary`), so a `v1` reader can still consume a `v2` file by
-ignoring unknown keys.
+`conc_sweep_summary`).
 
 Compatibility rules:
 
+* **Do not gate on string equality.** A consumer that treats
+  `schema_version` as a contract MUST accept the `v2` **and** `v3.0`
+  family (e.g. parse the `vN[.M]` prefix and compare the **major**
+  component, or allowlist both strings). Pinning to the exact `v2`
+  string will reject `v3.0` files even though they are wire-compatible.
 * **New optional fields** may appear at any time **without** bumping
-  `schema_version`. Consumers must tolerate unknown keys.
+  the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields require a major
-  bump (e.g. `v2` → `v3`). The runtime will continue to write the previous
+  bump (e.g. `v3` → `v4`). The runtime will continue to write the previous
   version's file in parallel for at least one release after the bump.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   **never** as a default / fabricated value. Consumers MUST treat
@@ -61,6 +76,7 @@ The `exporter_version` field carries the producing Hyperloom version
   "capability_summary": { /* §8  Capability cards */ },
   "geak_invocations":   [ /* §9  Invocation[] */ ],
   "oob_invocations":    [ /* §10 Invocation[] */ ],
+  "forge_invocations":  [ /* §9–10 Invocation[] — Kernel-Forge lane */ ],
   "kernel_lifecycle":   { /* §11 4+1-stage kernel lifecycle */ },
   "param_search":       { /* §12 ParamSearch */ },
   "sweep":              { /* §13 Sweep */ },
@@ -89,13 +105,13 @@ started, …).
 | `sandbox_user_id`  | string \| null | Hosted SaFE user id; populated from env `SANDBOX_USER_ID`.                            |
 | `created_at_utc`   | string  | ISO-8601 UTC.                                                                                |
 | `ended_at_utc`     | string  | ISO-8601 UTC.                                                                                |
-| `stop_reason`      | string  | One of `target_reached`, `time_exhausted`, `no_more_leverage`, `max_ticks`, `baseline_failed`, ... |
+| `stop_reason`      | string  | One of `target_reached`, `time_exhausted`, `global_converged`, `max_ticks`, `baseline_failed`, ... |
 | `max_minutes`      | int     | Configured time budget.                                                                       |
 | `elapsed_minutes`  | float   | Actual wall-clock.                                                                            |
 | `host`             | string  | Hostname of the Coordinator pod.                                                              |
 | `code_revision`    | string  | Hyperloom git SHA.                                                                            |
 | `pid`              | int     | Coordinator PID.                                                                              |
-| `session_dir`      | string  | `$USER_DATA_PATH` for this session.                                                          |
+| `session_dir`      | string  | Concrete session directory, typically `$USER_DATA_PATH/<model_basename>/<timestamp>/`.       |
 | `tick_count`       | int     | Number of Coordinator ticks.                                                                  |
 | `image`            | string \| null | Container image fully-qualified, if configured.                                       |
 
@@ -181,11 +197,13 @@ Drives the per-session UI cards in PrimusClaw.
 
 ---
 
-## 9–10. `geak_invocations` / `oob_invocations` — `Invocation[]`
+## 9–10. `geak_invocations` / `oob_invocations` / `forge_invocations` — `Invocation[]`
 
-Same shape; `backend` distinguishes (`geak` / `claude` / `codex` /
-`cursor`). One entry per attempt-on-a-kernel. The
-`decision` enum is `KEEP` / `PARTIAL` / `REVERT` / `FAILED`.
+Same `Invocation` shape across all three lists; `backend` distinguishes
+(`geak` / `claude` / `codex` / `cursor` / `forge`). `forge_invocations` is the
+Kernel-Forge lane and is kept separate — it is **not** folded into
+`oob_invocations`. One entry per attempt-on-a-kernel. The `decision` enum is
+`KEEP` / `PARTIAL` / `REVERT` / `FAILED`.
 
 ---
 
@@ -375,7 +393,7 @@ investigation than the breakdown summarises.
     "baseline_report": "runs/baseline/report.json",
     "profile_reports": ["runs/profile/report.json"],
     "sweep_reports": ["runs/sweep/grid.json"],
-    "kernel_attempts": ["agents/kernel/runs/sess-20260517-1130/optimization_attempts.jsonl"],
+    "kernel_attempts": ["kernel-agent/runs/sess-20260517-1130/optimization_attempts.jsonl"],
     "critic_workdir": "critic-workdir",
     "robustness_workdir": "agents/robustness"
   }
@@ -410,8 +428,10 @@ regardless of producer.
 The Hyperloom team commits to:
 
 1. Never **removing** or **renaming** a documented field within a
-   major `schema_version`. Such changes require a `v2` bump and a
-   one-release deprecation window with both files written in parallel.
+   major `schema_version`. Such changes require a major bump (the next
+   being `v4`) and a one-release deprecation window with both files
+   written in parallel. Note `v3.0` is **not** such a break — it shares
+   `v2`'s wire shape and only marks the recorder-aggregation path.
 2. Never **fabricating** values for fields the runtime did not
    actually measure. Missing → null / `[]` / `{}`.
 3. Adding new **optional** fields freely. Consumers must tolerate

@@ -39,9 +39,7 @@ def test_intent_type_values_match_upstream():
     from robustness_agent.role.envelope import IntentType
 
     upstream_ip, _, _ = _UPSTREAM  # type: ignore[misc]
-    assert {t.value for t in IntentType} == {
-        t.value for t in upstream_ip.IntentType
-    }
+    assert {t.value for t in IntentType} == {t.value for t in upstream_ip.IntentType}
 
 
 def test_payload_required_matches_upstream():

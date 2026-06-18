@@ -23,23 +23,27 @@ def _scope():
 
 def test_upsert_creates_then_returns_existing():
     kb = InMemoryKBClient()
-    out1 = kb.upsert({
-        "scope": _scope(),
-        "kind": "pitfall",
-        "slug": "mla-fp8-torch-compile-incompat",
-        "importance": 0.5,
-        "summary": "first",
-        "metadata": {"topic": "t"},
-    })
+    out1 = kb.upsert(
+        {
+            "scope": _scope(),
+            "kind": "pitfall",
+            "slug": "mla-fp8-torch-compile-incompat",
+            "importance": 0.5,
+            "summary": "first",
+            "metadata": {"topic": "t"},
+        }
+    )
     assert out1["created"] is True
-    out2 = kb.upsert({
-        "scope": _scope(),
-        "kind": "pitfall",
-        "slug": "mla-fp8-torch-compile-incompat",
-        "importance": 0.4,
-        "summary": "second",
-        "metadata": {"topic": "t2"},
-    })
+    out2 = kb.upsert(
+        {
+            "scope": _scope(),
+            "kind": "pitfall",
+            "slug": "mla-fp8-torch-compile-incompat",
+            "importance": 0.4,
+            "summary": "second",
+            "metadata": {"topic": "t2"},
+        }
+    )
     assert out2["created"] is False
     # Importance protected (G-2): incoming < existing keeps existing.
     assert out2["row"]["importance"] == 0.5
@@ -58,12 +62,22 @@ def test_upsert_missing_field_raises():
 
 def test_contradicts_edge_auto_mirrors():
     kb = InMemoryKBClient()
-    a = kb.upsert({
-        "scope": _scope(), "kind": "pitfall", "slug": "a-aaaaaa", "importance": 0.5,
-    })["row"]["id"]
-    b = kb.upsert({
-        "scope": _scope(), "kind": "pitfall", "slug": "b-bbbbbb", "importance": 0.5,
-    })["row"]["id"]
+    a = kb.upsert(
+        {
+            "scope": _scope(),
+            "kind": "pitfall",
+            "slug": "a-aaaaaa",
+            "importance": 0.5,
+        }
+    )["row"]["id"]
+    b = kb.upsert(
+        {
+            "scope": _scope(),
+            "kind": "pitfall",
+            "slug": "b-bbbbbb",
+            "importance": 0.5,
+        }
+    )["row"]["id"]
     out = kb.add_edges([{"kind": "contradicts", "from_id": a, "to_id": b}])
     assert {"from_id": a, "to_id": b, "kind": "contradicts"} in out["added"]
     assert any(m["from_id"] == b and m["to_id"] == a for m in out["mirrored_to"])
@@ -75,9 +89,14 @@ def test_contradicts_edge_auto_mirrors():
 
 def test_contradicts_with_missing_target_records_skip():
     kb = InMemoryKBClient()
-    a = kb.upsert({
-        "scope": _scope(), "kind": "pitfall", "slug": "a-aaaaaa", "importance": 0.5,
-    })["row"]["id"]
+    a = kb.upsert(
+        {
+            "scope": _scope(),
+            "kind": "pitfall",
+            "slug": "a-aaaaaa",
+            "importance": 0.5,
+        }
+    )["row"]["id"]
     out = kb.add_edges([{"kind": "contradicts", "from_id": a, "to_id": "ghost"}])
     assert out["mirror_skipped"]
     assert out["mirror_skipped"][0]["reason"] == "dst_missing"
@@ -85,16 +104,24 @@ def test_contradicts_with_missing_target_records_skip():
 
 def test_list_returns_only_matching_scope_after_normalisation():
     kb = InMemoryKBClient()
-    kb.upsert({
-        "scope": _scope(), "kind": "pitfall", "slug": "a-pitfall1",
-        "importance": 0.5,
-    })
+    kb.upsert(
+        {
+            "scope": _scope(),
+            "kind": "pitfall",
+            "slug": "a-pitfall1",
+            "importance": 0.5,
+        }
+    )
     other = dict(_scope())
     other["framework"] = "vllm"
-    kb.upsert({
-        "scope": other, "kind": "pitfall", "slug": "b-pitfall2",
-        "importance": 0.5,
-    })
+    kb.upsert(
+        {
+            "scope": other,
+            "kind": "pitfall",
+            "slug": "b-pitfall2",
+            "importance": 0.5,
+        }
+    )
     out = kb.list(scope_filter={"framework": "  SGLang "})
     assert all(r["scope"]["framework"] == "sglang" for r in out["entries"])
     assert any(r["slug"] == "a-pitfall1" for r in out["entries"])
@@ -102,11 +129,15 @@ def test_list_returns_only_matching_scope_after_normalisation():
 
 def test_metadata_filter_supports_nested_paths():
     kb = InMemoryKBClient()
-    kb.upsert({
-        "scope": _scope(), "kind": "pitfall", "slug": "deep-pitfall",
-        "importance": 0.5,
-        "metadata": {"evidence": {"packet_evidence": ["benchmark.after.gain_pct"]}},
-    })
+    kb.upsert(
+        {
+            "scope": _scope(),
+            "kind": "pitfall",
+            "slug": "deep-pitfall",
+            "importance": 0.5,
+            "metadata": {"evidence": {"packet_evidence": ["benchmark.after.gain_pct"]}},
+        }
+    )
     out = kb.list(
         scope_filter=_scope(),
         metadata_filter={"evidence": {"packet_evidence": ["benchmark.after.gain_pct"]}},
@@ -116,11 +147,15 @@ def test_metadata_filter_supports_nested_paths():
 
 def test_metadata_filter_array_contains_subset():
     kb = InMemoryKBClient()
-    kb.upsert({
-        "scope": _scope(), "kind": "technique", "slug": "tag-test",
-        "importance": 0.5,
-        "metadata": {"tags": ["dispatch", "kernel", "active_path"]},
-    })
+    kb.upsert(
+        {
+            "scope": _scope(),
+            "kind": "technique",
+            "slug": "tag-test",
+            "importance": 0.5,
+            "metadata": {"tags": ["dispatch", "kernel", "active_path"]},
+        }
+    )
     hit = kb.list(
         scope_filter=_scope(),
         metadata_filter={"tags": ["dispatch"]},

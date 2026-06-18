@@ -35,6 +35,7 @@ from robustness_agent.role.envelope import (
 # Builders — happy path
 # ---------------------------------------------------------------------------
 
+
 def test_heartbeat_builder_uses_known_topic_and_body():
     intent = build_heartbeat()
     assert intent.type is IntentType.SEND_MESSAGE
@@ -133,6 +134,7 @@ def test_update_state_builder_only_allows_robustness_fields():
 # Builders — defensive errors
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "severity",
     ["", "warn", "critical", "INFO", None],
@@ -209,6 +211,7 @@ def test_update_state_rejects_empty_changes():
 # Envelope serialisation
 # ---------------------------------------------------------------------------
 
+
 def test_envelope_dict_is_json_serialisable():
     intents = [
         build_heartbeat(),
@@ -244,6 +247,7 @@ def test_backend_turn_result_default_fields():
 # Static tables — invariants
 # ---------------------------------------------------------------------------
 
+
 def test_payload_required_covers_every_intent_type():
     for intent_type in IntentType.__members__.values():
         assert intent_type in PAYLOAD_REQUIRED, intent_type
@@ -254,12 +258,14 @@ def test_robustness_only_subset_of_allowed():
 
 
 def test_robustness_only_set_matches_design_v06():
-    assert ROBUSTNESS_ONLY_INTENTS == frozenset({
-        IntentType.KILL_TASK,
-        IntentType.FORCE_DISPATCH,
-        IntentType.PRUNE_BRANCH,
-        IntentType.ESCALATE_STRATEGY_CHANGE,
-    })
+    assert ROBUSTNESS_ONLY_INTENTS == frozenset(
+        {
+            IntentType.KILL_TASK,
+            IntentType.FORCE_DISPATCH,
+            IntentType.PRUNE_BRANCH,
+            IntentType.ESCALATE_STRATEGY_CHANGE,
+        }
+    )
 
 
 def test_kill_task_scope_locked_to_task():

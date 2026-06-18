@@ -55,8 +55,7 @@ def session_dir(tmp_path: Path) -> Path:
 @pytest.mark.asyncio
 async def test_no_flag_writes_skipped_marker(session_dir):
     """Without --compare-against-gpu, the executor still runs and persists a ``no_target_gpu_configured`` marker JSON."""
-    executor = TargetAnalysisExecutor(compare_against_gpu="",
-                                       session_dir=session_dir)
+    executor = TargetAnalysisExecutor(compare_against_gpu="", session_dir=session_dir)
     result = await executor(_ctx(session_dir, {"model_path": "MiniMax-M2.5"}))
     assert result["status"] == "succeeded"
     assert result["baseline_status"] == "skipped"
@@ -72,14 +71,13 @@ async def test_no_flag_writes_skipped_marker(session_dir):
 @pytest.mark.asyncio
 async def test_no_competitor_target_graceful(session_dir):
     """No ``competitor_target.json`` on disk → succeeded + no_match."""
-    executor = TargetAnalysisExecutor(compare_against_gpu="b300",
-                                       session_dir=session_dir)
+    executor = TargetAnalysisExecutor(compare_against_gpu="b300", session_dir=session_dir)
     params = {
         "model_path": "MiniMax-M2.5",
-        "framework":  "vllm",
-        "precision":  "fp8",
-        "isl":        1024,
-        "osl":        1024,
+        "framework": "vllm",
+        "precision": "fp8",
+        "isl": 1024,
+        "osl": 1024,
     }
     result = await executor(_ctx(session_dir, params))
     assert result["status"] == "succeeded"
@@ -96,15 +94,19 @@ async def test_model_mapping_miss_writes_skipped(session_dir, monkeypatch):
     monkeypatch.setenv("INFERENCEX_TIMEOUT_SEC", "5.0")
     monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "1")
 
-    executor = TargetAnalysisExecutor(compare_against_gpu="b300",
-                                       session_dir=session_dir)
-    result = await executor(_ctx(session_dir, {
-        "model_path": "/wekafs/models/MyCorp-Custom-FT-7B",
-        "framework":  "vllm",
-        "precision":  "fp8",
-        "isl":        1024,
-        "osl":        1024,
-    }))
+    executor = TargetAnalysisExecutor(compare_against_gpu="b300", session_dir=session_dir)
+    result = await executor(
+        _ctx(
+            session_dir,
+            {
+                "model_path": "/wekafs/models/MyCorp-Custom-FT-7B",
+                "framework": "vllm",
+                "precision": "fp8",
+                "isl": 1024,
+                "osl": 1024,
+            },
+        )
+    )
     assert result["status"] == "succeeded"
     assert result["baseline_status"] == "skipped"
     assert result["reason"] == "model_mapping_miss"
@@ -114,25 +116,34 @@ async def test_model_mapping_miss_writes_skipped(session_dir, monkeypatch):
 async def test_happy_path_writes_files(session_dir):
     """Full pipeline reading an LLM-authored competitor target."""
     from inference_optimizer.orchestrator import research_hints
-    research_hints.write_competitor_target(session_dir, {
-        "gpu": "b300", "model": "MiniMax-M2.5",
-        "framework": "vllm", "precision": "fp8",
-        "per_conc": [
-            {"conc": 64, "tput_per_gpu": 2781.5, "tpot_ms": 22.0,
-             "source": "https://pr/9"},
-        ],
-        "notes": "scout-authored",
-    })
 
-    executor = TargetAnalysisExecutor(compare_against_gpu="b300",
-                                       session_dir=session_dir)
-    result = await executor(_ctx(session_dir, {
-        "model_path": "/wekafs/models/MiniMaxAI-MiniMax-M2.5",
-        "framework":  "vllm",
-        "precision":  "fp8",
-        "isl":        1024,
-        "osl":        1024,
-    }))
+    research_hints.write_competitor_target(
+        session_dir,
+        {
+            "gpu": "b300",
+            "model": "MiniMax-M2.5",
+            "framework": "vllm",
+            "precision": "fp8",
+            "per_conc": [
+                {"conc": 64, "tput_per_gpu": 2781.5, "tpot_ms": 22.0, "source": "https://pr/9"},
+            ],
+            "notes": "scout-authored",
+        },
+    )
+
+    executor = TargetAnalysisExecutor(compare_against_gpu="b300", session_dir=session_dir)
+    result = await executor(
+        _ctx(
+            session_dir,
+            {
+                "model_path": "/wekafs/models/MiniMaxAI-MiniMax-M2.5",
+                "framework": "vllm",
+                "precision": "fp8",
+                "isl": 1024,
+                "osl": 1024,
+            },
+        )
+    )
     assert result["status"] == "succeeded"
     assert result["baseline_status"] == "ok"
     assert result["reason"] == "ok"
@@ -158,9 +169,7 @@ async def test_happy_path_writes_files(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_report_executor_renders_external_baseline_section(
-    tmp_path: Path, monkeypatch
-):
+async def test_report_executor_renders_external_baseline_section(tmp_path: Path, monkeypatch):
     """ReportExecutor reads target_baseline.json and injects an advisory section without touching SharedState."""
     from inference_optimizer.orchestrator.action_executors import ReportExecutor
     from inference_optimizer.orchestrator.shared_state import SharedState
@@ -168,39 +177,47 @@ async def test_report_executor_renders_external_baseline_section(
 
     sd = tmp_path / "sess-report"
     sd.mkdir()
-    SharedState(session_id=sd.name, model_name="MiniMax-M2.5",
-                baseline_tput=1500.0).save(sd)
+    SharedState(session_id=sd.name, model_name="MiniMax-M2.5", baseline_tput=1500.0).save(sd)
     (sd / "storage").mkdir()
     SqliteConnection(sd / "storage" / "coordinator.db").close()
 
     target_dir = sd / "target_analysis"
     target_dir.mkdir()
-    (target_dir / "target_baseline.json").write_text(json.dumps({
-        "query": {
-            "model": "MiniMax-M2.5", "gpu": "b300",
-            "framework": "vllm", "precision": "fp8",
-            "isl": 1024, "osl": 1024,
-        },
-        "fetched_at": "2026-05-12T07:00:34Z",
-        "row_count": 1,
-        "best": {
-            "tput_per_gpu": 2781.5, "output_tput_per_gpu": 1390.7,
-            "conc": 64, "decode_tp": 2,
-            "mean_ttft_ms": 94.0, "mean_tpot_ms": 22.0, "mean_e2el_ms": 20600.0,
-            "date": "2026-04-17",
-        },
-        "all_concurrencies": [],
-        "status": "ok",
-        "warning": "",
-        "source": "https://inferencex.semianalysis.com/api/v1",
-    }))
+    (target_dir / "target_baseline.json").write_text(
+        json.dumps(
+            {
+                "query": {
+                    "model": "MiniMax-M2.5",
+                    "gpu": "b300",
+                    "framework": "vllm",
+                    "precision": "fp8",
+                    "isl": 1024,
+                    "osl": 1024,
+                },
+                "fetched_at": "2026-05-12T07:00:34Z",
+                "row_count": 1,
+                "best": {
+                    "tput_per_gpu": 2781.5,
+                    "output_tput_per_gpu": 1390.7,
+                    "conc": 64,
+                    "decode_tp": 2,
+                    "mean_ttft_ms": 94.0,
+                    "mean_tpot_ms": 22.0,
+                    "mean_e2el_ms": 20600.0,
+                    "date": "2026-04-17",
+                },
+                "all_concurrencies": [],
+                "status": "ok",
+                "warning": "",
+                "source": "https://inferencex.semianalysis.com/api/v1",
+            }
+        )
+    )
 
     monkeypatch.setenv("USER_DATA_PATH", str(sd))
 
     class _ReportCtx:
-        task = Task(task_id="r-1", kind="report", params={},
-                    requires_lanes=(), state="running",
-                    idempotency_key="r-1")
+        task = Task(task_id="r-1", kind="report", params={}, requires_lanes=(), state="running", idempotency_key="r-1")
         lease = None
         extra = {"session_dir": str(sd)}
 
@@ -220,6 +237,7 @@ async def test_report_executor_renders_external_baseline_section(
 
 
 # env helpers
+
 
 class TestEnvHelpers:
     def test_env_int_uses_default_when_missing(self, monkeypatch):
@@ -241,6 +259,7 @@ class TestEnvHelpers:
 
 # session_dir resolution
 
+
 class _DummySummary:
     status = "ok"
     reason = ""
@@ -251,8 +270,7 @@ class _DummySummary:
 
 def _unit_ctx(*, params: dict | None = None, extra: dict | None = None) -> SimpleNamespace:
     return SimpleNamespace(
-        task=SimpleNamespace(task_id="ta-t1", kind="target_analysis",
-                             params=params or {}),
+        task=SimpleNamespace(task_id="ta-t1", kind="target_analysis", params=params or {}),
         extra=extra or {},
     )
 
@@ -270,7 +288,8 @@ class TestResolveSessionDir:
 
     def test_constructor_session_dir_used(self, tmp_path):
         ex = ta.TargetAnalysisExecutor(
-            compare_against_gpu="MI300X", session_dir=tmp_path,
+            compare_against_gpu="MI300X",
+            session_dir=tmp_path,
         )
         ctx = _unit_ctx()
         assert ex._resolve_session_dir(ctx) == tmp_path
@@ -278,7 +297,8 @@ class TestResolveSessionDir:
     def test_falls_back_to_paths_session_dir(self, tmp_path, monkeypatch):
         ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
         monkeypatch.setattr(
-            "inference_optimizer.paths.session_dir", lambda: tmp_path,
+            "inference_optimizer.paths.session_dir",
+            lambda: tmp_path,
         )
         ctx = _unit_ctx()
         assert ex._resolve_session_dir(ctx) == tmp_path
@@ -290,12 +310,14 @@ class TestResolveSessionDir:
             raise RuntimeError("no session")
 
         monkeypatch.setattr(
-            "inference_optimizer.paths.session_dir", boom,
+            "inference_optimizer.paths.session_dir",
+            boom,
         )
         assert ex._resolve_session_dir(_unit_ctx()) is None
 
 
 # Execution branches
+
 
 class TestExecutor:
     @pytest.mark.asyncio
@@ -339,7 +361,9 @@ class TestExecutor:
 
     @pytest.mark.asyncio
     async def test_analyzer_crash_in_no_gpu_branch_is_swallowed(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         ex = ta.TargetAnalysisExecutor(compare_against_gpu="")
         monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: tmp_path)
@@ -356,7 +380,9 @@ class TestExecutor:
 
     @pytest.mark.asyncio
     async def test_format_result_uses_summary_without_best(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         class _NoBestSummary:
             status = "no_data"
