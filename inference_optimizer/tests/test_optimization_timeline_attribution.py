@@ -203,6 +203,71 @@ def test_decision_trace_attributes_critic_review_to_decision(tmp_path: Path) -> 
     assert out["overhead_tokens"]["total_in"] == 5
 
 
+def test_decision_trace_partial_mapping_critic_stays_overhead(tmp_path: Path) -> None:
+    # A batch critic review of three proposals where only ONE (m1) was later
+    # materialized (m2/m3 rejected -> absent from the map). The review served
+    # all three, so its token spend must NOT collapse onto task-A; it stays in
+    # overhead. A separate single-target review (m1 only) still attributes.
+    trace = tmp_path / "reports" / "trace"
+    trace.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "reports" / "optimization_journal.json").write_text(
+        json.dumps({"entries": [
+            {"ts": "2026-06-12T00:00:02Z", "kind": "backend", "change": "x",
+             "outcome": "KEEP", "phase": "EXPLORE", "gain_pct": 3.0,
+             "task_id": "task-A", "provenance": "specialist:perf"},
+        ]}),
+        encoding="utf-8",
+    )
+    # Only m1 maps to a task; m2/m3 were never materialized.
+    (trace / "proposal_task_map.jsonl").write_text(
+        json.dumps({"proposal_msg_id": "m1", "task_id": "task-A"}) + "\n",
+        encoding="utf-8",
+    )
+    rows = [
+        # Batch review of m1+m2+m3, partial mapping -> overhead (NOT task-A).
+        {"component": "critic", "reviewed_msg_ids": ["m1", "m2", "m3"],
+         "input_tokens": 30, "output_tokens": 6, "ts": "2026-06-12T00:00:00Z"},
+        # Single-target review of m1 -> attributes to task-A.
+        {"component": "critic", "reviewed_msg_ids": ["m1"],
+         "input_tokens": 40, "output_tokens": 9, "ts": "2026-06-12T00:00:00Z"},
+    ]
+    (trace / "llm_calls.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8",
+    )
+    out = collectors.collect_decision_trace(tmp_path, {}, [])
+    dec = out["decision_trace"][0]
+    # Only the single-target review folds into task-A's decision.
+    assert dec["tokens"]["calls"] == 1
+    assert dec["tokens"]["by_component"]["critic"]["total_in"] == 40
+    # The partial-mapping batch review stays in overhead, not unattributed.
+    assert out["overhead_tokens"]["calls"] == 1
+    assert out["overhead_tokens"]["total_in"] == 30
+
+
+def test_attribute_critic_calls_unit() -> None:
+    from inference_optimizer.breakdown.collectors import _attribute_critic_calls
+
+    msg_to_task = {"m1": "task-A", "m2": "task-B"}
+    calls = [
+        # Single target, resolves to one task -> attributed.
+        {"component": "critic", "reviewed_msg_ids": ["m1"]},
+        # Batch review, partial mapping (only m1 known) -> left unkeyed.
+        {"component": "critic", "reviewed_msg_ids": ["m1", "x9"]},
+        # Batch review of two distinct tasks -> ambiguous, left unkeyed.
+        {"component": "critic", "reviewed_msg_ids": ["m1", "m2"]},
+        # Already keyed -> respected.
+        {"component": "critic", "task_id": "task-Z", "reviewed_msg_ids": ["m1"]},
+        # Non-critic -> ignored.
+        {"component": "orchestration", "reviewed_msg_ids": ["m1"]},
+    ]
+    _attribute_critic_calls(calls, msg_to_task)
+    assert calls[0]["task_id"] == "task-A"
+    assert "task_id" not in calls[1]
+    assert "task_id" not in calls[2]
+    assert calls[3]["task_id"] == "task-Z"
+    assert "task_id" not in calls[4]
+
+
 def test_shape_ledger_entry_tags_operation_kind_and_proposer() -> None:
     from inference_optimizer.breakdown.collectors import _shape_ledger
 

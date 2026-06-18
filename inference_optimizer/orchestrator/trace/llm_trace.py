@@ -339,11 +339,15 @@ def append_llm_call(
     malformed row is a programming error at the call site, not a runtime
     disk condition, and must surface in tests.
 
+    In-process producers append directly into the parent's
+    ``llm_calls.jsonl``. Out-of-process children instead write their own
+    ``reports/trace/ext/<component>-<pid>.jsonl`` shard (legacy/compat path);
+    the collector and Langfuse emitter backfill those shards at read time, so
+    this function intentionally has no shard-target override.
+
     Args:
         session_dir: Session directory used to resolve the ledger path.
         record: The LLM-call record to serialize and append.
-        target: Optional override destination (e.g. an ext shard path);
-            defaults to the session's ``llm_calls.jsonl``.
 
     Raises:
         LLMTraceRowError: If the serialized row violates the closed schema.

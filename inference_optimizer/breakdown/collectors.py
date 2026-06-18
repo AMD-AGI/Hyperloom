@@ -5506,11 +5506,18 @@ def _attribute_critic_calls(
     """Backfill ``task_id`` on Critic review calls from the proposal→task map.
 
     A Critic reasoning call records the proposal ``msg_id``s it reviewed but not
-    a ``task_id`` (the task is materialized only after approval). When a call's
-    reviewed msg_ids resolve to exactly ONE task, we stamp that ``task_id`` so
-    the call joins the decision through the normal key path; ambiguous (multiple
-    distinct tasks) or unresolvable reviews are left unkeyed (→ overhead). The
-    call dicts are mutated in place. No-op when the map is empty.
+    a ``task_id`` (the task is materialized only after approval). We only
+    attribute a call that reviewed exactly ONE proposal which resolves to
+    exactly one task, so it joins that decision through the normal key path.
+
+    A *batch* review (several reviewed msg_ids) judged all of those proposals
+    together, so folding its whole token spend onto a single decision — even
+    when only one of the batch was later materialized (the others rejected /
+    not materialized, so absent from the map) — would over-attribute that
+    decision's cost and under-count overhead. Such batch reviews, plus
+    ambiguous (multiple distinct tasks) or unresolvable reviews, are left
+    unkeyed (→ overhead). The call dicts are mutated in place. No-op when the
+    map is empty.
     """
     if not msg_to_task:
         return
@@ -5522,11 +5529,11 @@ def _attribute_critic_calls(
         reviewed = call.get("reviewed_msg_ids")
         if not isinstance(reviewed, list):
             continue
-        resolved = {
-            msg_to_task[m] for m in reviewed
-            if isinstance(m, str) and m in msg_to_task
-        }
-        if len(resolved) == 1:
+        reviewed_ids = {m for m in reviewed if isinstance(m, str) and m}
+        resolved = {msg_to_task[m] for m in reviewed_ids if m in msg_to_task}
+        # Single-target review only: a partial mapping (reviewed several, only
+        # one materialized) must NOT collapse the batch's cost onto that one.
+        if len(reviewed_ids) == 1 and len(resolved) == 1:
             call["task_id"] = next(iter(resolved))
 
 

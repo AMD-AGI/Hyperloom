@@ -1270,6 +1270,41 @@ def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
     return baseline_ms, best_ms, improved, out, loop_exc
 
 
+# Canonical claude/usage token counters (mirrors
+# parse_usage.normalize_usage, the parser that consumes FORGE_LLM_USAGE).
+_FORGE_USAGE_TOKEN_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _usage_has_token_counter(usage: object) -> bool:
+    """True when ``usage`` carries at least one int-coercible canonical counter.
+
+    Mirrors the FORGE_LLM_USAGE consumer's contract
+    (``parse_usage.normalize_usage``): a usage block is meaningful as soon as
+    ANY of the four canonical token counters is present and int-coercible. The
+    per-iteration ``calls`` field is optional metadata, NOT a precondition —
+    gating on it would silently drop a sidecar that reports only aggregate
+    token counters (or ``calls == 0`` with real counts), so the parent emits no
+    FORGE_LLM_USAGE marker and the tracer loses the forge token row entirely.
+    """
+    if not isinstance(usage, dict):
+        return False
+    for key in _FORGE_USAGE_TOKEN_KEYS:
+        value = usage.get(key)
+        if value is None:
+            continue
+        try:
+            int(value)
+            return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | None]:
     """Recover the forge run's LLM usage + key-step timeline from the CLI sidecar.
 
@@ -1279,8 +1314,11 @@ def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | Non
     ``forge_cli_result.json`` (keys ``llm_usage`` / ``steps``), surface them so
     ``submit`` can re-emit the canonical FORGE_LLM_USAGE / FORGE_STEPS markers.
 
-    Returns ``(llm_usage, steps)``; either is ``None`` when the sidecar is
-    missing the field (older Forge CLI / no-agent run) -> the markers stay a
+    ``llm_usage`` is surfaced as soon as it carries any int-coercible token
+    counter (``calls`` is optional metadata, matching the parser); ``steps`` is
+    surfaced when it carries a non-empty ``steps`` list. Returns
+    ``(llm_usage, steps)``; either is ``None`` when the sidecar is missing /
+    lacks that field (older Forge CLI / no-agent run) -> the markers stay a
     no-op and the tracer simply records no forge cost/steps.
     """
     sidecar = Path(output_dir) / "forge_cli_result.json"
@@ -1294,7 +1332,7 @@ def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | Non
     if not isinstance(parsed, dict):
         return None, None
     usage = parsed.get("llm_usage")
-    usage = usage if isinstance(usage, dict) and usage.get("calls") else None
+    usage = usage if _usage_has_token_counter(usage) else None
     steps = parsed.get("steps")
     steps = steps if isinstance(steps, dict) and steps.get("steps") else None
     return usage, steps

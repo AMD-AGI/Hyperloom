@@ -258,14 +258,19 @@ def report_file(session_dir: Path, ts: str, suffix: str = "md") -> Path:
 # Layout (see FULL_TRACE_DESIGN §3.3):
 #
 #   <sd>/reports/trace/
-#     llm_calls.jsonl              # every LLM call's token row (single writer)
+#     llm_calls.jsonl              # every in-process LLM call's token row
+#     ext/<component>-<pid>.jsonl  # out-of-process child shards (compat path)
 #     decision_trace.jsonl         # collector join product (token+decision)
 #
 # All trace writers are best-effort and swallow OSError; these helpers only
 # compute paths (callers mkdir the parent before writing). The parent process
-# is the sole writer of llm_calls.jsonl: out-of-process children (specialist /
-# geak / oob) surface their tokens by having the parent parse their logs and
-# append, so there is no concurrent-writer fan-in to coordinate.
+# is the sole writer of llm_calls.jsonl, so there is no concurrent-writer
+# fan-in to coordinate on that file. Out-of-process children (specialist /
+# geak / oob / robustness / critic-agent CLI) do NOT append to it; they write
+# their own ext/*.jsonl shard (see ``ext_trace_path``) which the collector
+# (``_load_llm_calls``) and the Langfuse emitter (``_flush_ext_shards``)
+# backfill at read time. The ext shards are a legacy/child-compatibility path:
+# new producers should run in-process and parent-append into llm_calls.jsonl.
 def trace_dir(session_dir: Path) -> Path:
     """``<sd>/reports/trace/`` — root of the unified token+decision trace.
 
