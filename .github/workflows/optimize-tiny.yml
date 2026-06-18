@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-name: 
+name: SaFE Optimize Tiny (count-filler)
 
 # Scheduled/manual entrypoint for the count-filler pool, hosted off-repo at
 #   $WEKAFS_CHENYI_DIR/ci-candidates/sub100_lt12b_pulse_notrun.json
@@ -126,7 +126,7 @@ jobs:
                   "batch_size": os.environ["BATCH_SIZE"],
                   "exclude_leaderboard": "false",
                   "exclude_active_workflows": "true",
-                  "max_parallel": os.environ["BATCH_SIZE"],
+                  "max_parallel": "200",
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
                   "task_timeout_min": "420",
                   "max_hours": "6",
