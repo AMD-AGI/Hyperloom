@@ -275,16 +275,43 @@ class RobustnessAgentBackend:
         except Exception:  # noqa: BLE001
             pass
 
+        metadata: dict[str, Any] = {
+            "session_id": session_id,
+            "turn_idx": turn_idx,
+            "tick_index": runtime_tick_index,
+            "parse_warnings": parse_warnings,
+        }
+        # Fold any RCA-LLM token spend the runtime reported into the metadata
+        # under the canonical counter keys, so the Coordinator's reactor trace
+        # records a ``component=robustness`` ledger row instead of silently
+        # dropping it. Absent on the common no-LLM (Noop) path.
+        self._merge_llm_usage(metadata, emit.get("llm_usage"))
+
         return BackendTurnResult(
             intents=intents,
             raw_text="(robustness-agent)",
-            metadata={
-                "session_id": session_id,
-                "turn_idx": turn_idx,
-                "tick_index": runtime_tick_index,
-                "parse_warnings": parse_warnings,
-            },
+            metadata=metadata,
         )
+
+    @staticmethod
+    def _merge_llm_usage(metadata: dict[str, Any], usage: Any) -> None:
+        """Map a runtime ``llm_usage`` block onto canonical metadata counters.
+
+        The robustness runtime reports ``{input_tokens, output_tokens, calls,
+        latency_ms, model}``. We surface ``input_tokens`` / ``output_tokens``
+        (the keys the reactor trace looks for) plus ``model`` so the ledger row
+        carries a model name. No-op when ``usage`` is missing or shapeless.
+        """
+        if not isinstance(usage, dict):
+            return
+        it = usage.get("input_tokens")
+        ot = usage.get("output_tokens")
+        if it is None and ot is None:
+            return
+        metadata["input_tokens"] = it
+        metadata["output_tokens"] = ot
+        if usage.get("model"):
+            metadata["model"] = usage.get("model")
 
     def _allocate_workdir(self, turn_idx: int) -> Path:
         """Create and return a per-turn workdir, pruning stale ones first.
