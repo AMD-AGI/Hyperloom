@@ -26,6 +26,16 @@ from ..specialist_domains import (
 _NONE_PLACEHOLDER = "(none)"
 
 
+# Forbids global process cleanup that could kill the optimizer's serving /
+# benchmark process. Shared by bash-enabled specialist and leaf prompts.
+BASH_KILL_SAFETY_PREAMBLE = (
+    "Do NOT run global process cleanup. Never run `ps aux | grep ... | xargs "
+    "kill`, `pgrep -f ... | xargs kill`, or `killall` — these can kill the "
+    "optimizer's serving / benchmark process. Only manage processes you "
+    "started yourself, by their own PID."
+)
+
+
 # Soft cap on ``proposal_set`` size; re-exported from ``policy.py`` so the
 # prompt-side cap and the runner-side hard truncate stay aligned.
 from inference_optimizer.orchestrator.policy import (
@@ -553,6 +563,13 @@ class SpecialistPromptInputs:
     # (timeout / crash / stale-heartbeat) attempt; empty on the first attempt.
     auto_retry_reason: str = ""
 
+    # WS1 wall-clock budget for this dispatch (seconds) and the dispatch start
+    # timestamp (ISO-8601 UTC), so the specialist can self-throttle instead of
+    # only learning the deadline when the reaper hard-kills it. 0 / "" => not
+    # supplied (legacy turn-bounded path); the budget section renders nothing.
+    wall_budget_sec: float = 0.0
+    started_at_iso: str = ""
+
 
 # Section 1 — Identity & autonomy
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
@@ -592,6 +609,13 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "(Section 8) carrying ``proposal_set`` + ``patches_written``. The hard",
         "capability boundary is fixed by Section 9 Iron Rules; everything inside",
         "it is yours.",
+        "",
+        "Fan-out: to parallelize independent single-shot sub-tasks (e.g. bench "
+        "N candidates of one lever at once, or read several subsystems), you "
+        "MAY ``Task(subagent_type=\"hyperloom-leaf\")``. Leaves are single-turn, "
+        "inherit your VISIBLE_DEVICES (so they share your GPU and cannot "
+        "oversubscribe), and cannot fan out further. Use leaves for breadth; do "
+        "multi-round depth (e.g. coordinate-descent autotune) yourself.",
     ]
     # Per-domain expertise + focus blocks.
     rendered_focus_keys: set[str] = set()
@@ -820,6 +844,48 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
     if inp.target_gap_notes:
         rows.append("")
         rows.append(inp.target_gap_notes)
+    return rows
+
+
+# Section 2a — Execution budget (wall-clock)
+def _section_execution_budget(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the wall-clock budget block so the specialist can self-throttle.
+
+    Renders the concrete WS1 budget (seconds + minutes) and the dispatch start
+    timestamp. Returns ``[]`` when no budget was supplied (legacy turn-bounded
+    path), so the section is omitted entirely rather than emitting a placeholder.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``wall_budget_sec`` /
+            ``started_at_iso``).
+
+    Returns:
+        The rendered execution-budget section lines, or ``[]`` when no budget
+        is set.
+    """
+    if inp.wall_budget_sec <= 0:
+        return []
+    mins = inp.wall_budget_sec / 60.0
+    rows = [
+        "## 2a. EXECUTION BUDGET (wall-clock)",
+        "",
+        f"- Hard wall-clock budget for this entire dispatch: "
+        f"**{inp.wall_budget_sec:.0f}s (~{mins:.0f} min)**.",
+    ]
+    if inp.started_at_iso:
+        rows.append(f"- Dispatch started at: {inp.started_at_iso} (UTC).")
+    rows.extend(
+        [
+            "- The Coordinator hard-kills your subprocess when this budget is "
+            "exhausted — turns are NOT the stop signal. Scope your work to "
+            "reach a deliverable conclusion inside the budget.",
+            "- Self-throttle: check elapsed wall-clock with Bash "
+            "(``date -u +%s`` vs the start above), keep your "
+            "``specialist_done.partial.json`` checkpoint current, and write "
+            "the final ``specialist_done.json`` before the budget runs out so "
+            "your best work is never lost to a kill.",
+        ]
+    )
     return rows
 
 
@@ -1364,6 +1430,19 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "for that file and treats its appearance as the run's exit",
         "signal. After writing it, stop — do not call any further tools.",
         "",
+        "**Incremental checkpoint (do this throughout the run):** every time",
+        "you reach a new finding or finish a candidate, rewrite your",
+        "best-so-far payload to",
+        f"``{workspace}/specialist_done.partial.json`` (write to",
+        f"``{workspace}/specialist_done.partial.json.tmp`` first, then rename",
+        "over the partial so a reader never sees a half-written file). This",
+        "partial uses the **same payload schema** as the final file but does",
+        "**NOT** end the run — keep working. There is a wall-clock budget; if",
+        "you are stopped before finishing, whatever is in the partial is",
+        "preserved as your result, so keep it current. Write the final",
+        "``specialist_done.json`` (which ends the run) only once, as your",
+        "absolute last action.",
+        "",
         "Payload schema (identical for both channels):",
         "",
         "```json",
@@ -1509,6 +1588,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "7. If you hit a tool error or run out of useful actions, emit",
         "   ``specialist_done{empty=true, summary='<why>'}`` rather than",
         "   stalling.",
+        f"8. {BASH_KILL_SAFETY_PREAMBLE}",
     ]
 
 
@@ -1536,6 +1616,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     ]
     user_sections = [
         _section_hardware(inp),  # 0: § 1
+        _section_execution_budget(inp),  # 0a: § 2a (omitted when no budget)
         _section_gap(inp),  # 1: § 2-3
         _section_kb_subgraph(inp),  # 2: § 4
         _section_roofline_evidence(inp),  # 3: § 4a
@@ -1568,6 +1649,8 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         """
         out: list[str] = []
         for sec in sections:
+            if not sec:  # skip omitted sections (e.g. no execution budget)
+                continue
             if out:
                 out.append("")
             out.extend(sec)

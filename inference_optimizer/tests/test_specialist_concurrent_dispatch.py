@@ -252,12 +252,19 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
     tmp_path: Path,
     monkeypatch,
 ):
+    # WS2: the GPU lease TTL is re-sourced to the WS1 wall budget × (1 + grace)
+    # (the old ``max_turns × per_turn`` ceiling became ~1000×600 once the turn
+    # cap was lifted). The iron law is kill ≤ gpu_lease TTL ≤ gpu_research_lane
+    # TTL — neither max_turns nor per_turn drives the lease any more.
+    from inference_optimizer.orchestrator.gpu_pool import GPU_LEASE_TTL_GRACE
+
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS", "10")
     coord = await _build_coord_with_capacity(
         tmp_path,
         capacity=1,
         gpu_specialist_capacity=1,
     )
+    coord.shared_state.macro_cycle = 0
     probe = _ConcurrencyProbe(sleep_seconds=0.01)
     coord.sub.register_executor("specialist", probe)
     captured_ttls: list[int] = []
@@ -285,7 +292,10 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
 
     await coord._pump_dispatcher_once()
 
-    assert captured_ttls == [40]
+    budget = coord._specialist_wall_budget_sec(needs_gpu=True)  # 3600 (gpu base)
+    expected_ttl = max(5, int(budget * (1.0 + GPU_LEASE_TTL_GRACE)))
+    assert captured_ttls == [expected_ttl]
+    assert expected_ttl >= int(budget)  # kill ≤ lease TTL
     assert probe.gpu_ids_by_task
 
 
@@ -296,12 +306,15 @@ def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
     from inference_optimizer.orchestrator import policy as policy_mod
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", raising=False)
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     parser = cli_mod._build_parser()
     args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
     assert args.research_lane_capacity == policy_mod.research_lane_ceiling()
     assert args.research_lane_capacity == 8
-    assert args.gpu_specialist_capacity == 0
+    # WS2: GPU specialists default on at whole-machine capacity (detected GPU
+    # count), not 0. Env=0 (or --gpu-specialist-capacity 0) still disables.
+    assert args.gpu_specialist_capacity == 4
 
 
 def test_cli_research_lane_capacity_env_override(monkeypatch):

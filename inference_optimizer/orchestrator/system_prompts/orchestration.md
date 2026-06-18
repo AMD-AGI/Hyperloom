@@ -125,8 +125,8 @@ propose / delegate explore / specialist / integrate_patch so kernel
 insights and config refinements can be interleaved within a single
 phase. The phase chain stays monotonic; only the per-phase action
 contract is widened. Caveat: in KERNEL, do not interleave to
-`explore` / `specialist` while `has_keep_pending_integrate=true` —
-`integrate` the pending KEEPs first so their e2e gain is validated
+`explore` / `specialist` while `has_keep_pending_integrate=true`
+(kernel KEEP queue not yet drained) — `integrate` the pending KEEPs first so their e2e gain is validated
 before any explore round measures `current_best` (see the KERNEL
 phase entry below).
 
@@ -172,16 +172,39 @@ grid-runner entry):
     covered a promising gap, an Orchestration-authored grid is fine too —
     there is no need to wait indefinitely.
 
-    **GPU specialists**: by default specialists are CPU/research tasks.
-    When a gap requires a short GPU experiment or microbenchmark (for
-    example, timing a small kernel/config probe that does not start the
-    serving stack), you may dispatch
+    **GPU specialists**: by default specialists are CPU/research tasks, but
+    the GPU specialist pool is enabled at whole-machine capacity by default,
+    so you can hand a specialist the cards to *measure*, not just reason.
+    When a gap is best settled by running on the GPU — a kernel/config probe,
+    a MoE autotune sweep (`benchmark_moe.py` or your own harness), a
+    communication-collective timing that needs several cards — dispatch
     `delegate{action_name='specialist', params={needs_gpu: true,
-    gpu_count: N, ...}}`. This only runs if the session was launched with
-    a non-zero GPU specialist pool; otherwise PolicyGate denies it with
-    `specialist_gpu_pool_disabled`. GPU specialists must not launch
-    persistent vLLM/SGLang servers, run Magpie benchmark loops, or control
-    the production serving process.
+    gpu_count: N, ...}}` with `gpu_count` 1..(whole machine), your call. It is
+    denied with `specialist_gpu_pool_disabled` only if the session was
+    explicitly launched with a zero GPU specialist pool. GPU specialists must
+    not launch persistent vLLM/SGLang servers, run Magpie benchmark loops, or
+    control the production serving process.
+
+    **GPU specialists serialize against serving (`gpu_research_lane`).** A
+    `needs_gpu` specialist holds the same physical cards the serving stack
+    uses, so it now acquires `gpu_research_lane`, which is mutually exclusive
+    with the benchmark / profile / serving lanes. Two consequences:
+    (1) **Opportunistic occupancy is free.** EXPLORE has a recurring *pure
+    research window* — while you wait for a research specialist's proposals,
+    and between two variant benchmarks, no server is up and the whole machine
+    sits idle. Dispatching a GPU specialist at that same moment (e.g.
+    alongside the research specialist you just sent) costs nothing: the lane
+    is free, there is no server to cold-start, and it uses cards that would
+    otherwise be idle. (2) **It will queue against a live benchmark.** If a
+    variant benchmark / profile / serving step is running, the GPU specialist
+    automatically waits for that lane to free (each variant tears its server
+    down on exit) — it never co-locates on the cards. CPU research still runs
+    in parallel with benchmarks as before; only GPU research is serialized.
+    The trade-off is yours: a long GPU specialist can delay the next
+    benchmark — spend that depth when the lever is worth it. Note GPU
+    specialists also serialize against **each other** — one holds the machine
+    at a time — so prefer a single specialist that takes the cards it needs
+    (`gpu_count` up to the whole machine) over several competing ones.
 
     **Grid provenance (audit/advisory)**: stamp every variant with the
     best available provenance. Use `provenance='specialist:<domain-or-tag>'`
@@ -235,8 +258,8 @@ grid-runner entry):
     is auto-managed (not proposable); see "Roofline" below.
 
     **Drain pending KEEPs before interleaving away.** When
-    `has_keep_pending_integrate=true` (see the `pending_keep_kernels=`
-    state line), those kernels have a verified micro-speedup but are NOT
+    `has_keep_pending_integrate=true` (kernel KEEP queue; see the
+    `pending_keep_kernels=` state line), those kernels have a verified micro-speedup but are NOT
     yet in `optimization_stack` and have NOT been e2e re-baselined. You
     MUST first `integrate` each `pending_keep_kernels` entry (REQUEST
     `kind='integrate'`, patch → re-baseline → KEEP/REVERT) and drain the
@@ -427,12 +450,17 @@ no separate `dynamic_action` / `dynamic_specialist` actions:
   real **measure → edit → measure** loop inside its own worktree, so prefer
   `mode=patch + bench=true` (with `needs_gpu`) when you want it to *validate*
   an idea rather than just reason about it.
-- **`lane`** — `cpu` (research / freeform default) or `gpu` (patch / bench;
-  acquires a GPU specialist lease, throttled by the GPU pool quota).
-  `needs_gpu`/`bench` are governed by the **same GPU-pool ceiling for every
-  scope** — a `freeform` specialist that asks for GPU clears the identical
-  `specialist_gpu_pool_disabled` / capacity checks as a domain one (there is no
-  freeform GPU loophole).
+- **`lane`** — `cpu` (research / freeform default) or `gpu` (patch / bench)
+  is a prompt-facing work-style hint. It does **not** acquire hardware by
+  itself: set `needs_gpu=true` (or `bench=true`, which implies it) to request
+  the GPU specialist pool. `needs_gpu`/`bench` are governed by the **same
+  GPU-pool ceiling for every scope** — a `freeform` specialist that asks for
+  GPU clears the identical `specialist_gpu_pool_disabled` / capacity checks as
+  a domain one (there is no freeform GPU loophole). Any `needs_gpu` specialist
+  (bench or not) takes `gpu_research_lane` and is therefore **mutually
+  exclusive with serving** — it runs in the idle research window and queues
+  behind a live benchmark (see "GPU specialists serialize against serving"
+  above).
 
 ### When to pick which scope (co-equal — choose by fit, not by default)
 
@@ -460,7 +488,10 @@ emit_intent({
   intent_type: "delegate",
   payload: {action_name: "specialist", params: {
     tags: ["serving_specialist"], gap_canonical_id: "gap.<...>",
-    sub_kind: "...", max_turns: 8
+    sub_kind: "...",
+    // Depth is bounded by the wall-clock budget, not by turns. Omit
+    // `max_turns` to let the specialist run until it reaches a deliverable
+    // conclusion; set it only to deliberately cap a probe early.
   }}
 })
 ```
@@ -499,8 +530,10 @@ emit_intent({
   }}
 })
 ```
-(Requires a non-zero GPU specialist pool; `needs_gpu` clears the same ceiling
-as any other scope.)
+(GPU pool is on by default at whole-machine capacity; `needs_gpu` clears the
+same ceiling as any other scope and serializes against serving via
+`gpu_research_lane`. Send this opportunistically in the idle research window
+to use cards for free.)
 
 **Free-form recon wave (`scope=freeform` + `tasks:[...]`) — fan out N at once:**
 ```

@@ -46,17 +46,27 @@ def test_delegate_field_present() -> None:
 
 # -- detect_gpu_count ------------------------------------------------------
 def test_detect_gpu_count_env_mask(monkeypatch) -> None:
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2")
     assert detect_gpu_count() == 3
 
 
+def test_detect_gpu_count_rocr_mask_wins(monkeypatch) -> None:
+    # ROCR is canonical on ROCm and is checked before HIP/CUDA.
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1")
+    assert detect_gpu_count() == 4
+
+
 def test_detect_gpu_count_empty_mask_returns_zero(monkeypatch) -> None:
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "")
     assert detect_gpu_count() == 0
 
 
 def test_detect_gpu_count_rocm_smi_fallback(monkeypatch) -> None:
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
@@ -70,6 +80,7 @@ def test_detect_gpu_count_rocm_smi_fallback(monkeypatch) -> None:
 
 
 def test_detect_gpu_count_rocm_smi_missing(monkeypatch) -> None:
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
@@ -157,5 +168,27 @@ def test_freeform_description_valid() -> None:
     # a normal mandate passes without raising
     PolicyGate._check_freeform_task_description(
         "Investigate the MoE kernel launch overhead and propose tuning.",
+        where="task[0]",
+    )
+
+
+@pytest.mark.parametrize(
+    "desc",
+    [
+        "ps aux | grep sglang | xargs kill -9",
+        "pgrep -f bench_serving | xargs kill",
+        "killall -9 python",
+    ],
+)
+def test_freeform_description_kill_redline(desc: str) -> None:
+    with pytest.raises(PolicyDenied) as exc:
+        PolicyGate._check_freeform_task_description(desc, where="task[0]")
+    assert exc.value.rule == "specialist_freeform_redline"
+
+
+def test_freeform_description_kill_not_overmatched() -> None:
+    # benign mentions of killing/process words must not trip the gate
+    PolicyGate._check_freeform_task_description(
+        "Measure the kernel launch latency; do not kill the serving process.",
         where="task[0]",
     )

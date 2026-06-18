@@ -125,6 +125,9 @@ def test_path_helpers_with_workspace(tmp_path):
     assert r._transcript_path(tmp_path).name == "transcript.jsonl"
     assert r._heartbeat_path(tmp_path).name == "heartbeat.json"
     assert r._done_path(tmp_path).name == "specialist_done.json"
+    # WS1: incremental checkpoint target is distinct from the final file.
+    assert r._partial_done_path(tmp_path).name == "specialist_done.partial.json"
+    assert r._partial_done_path(None) is None
 
 
 # ---- _resolve_workspace ---------------------------------------------------
@@ -188,6 +191,44 @@ def test_write_specialist_done(tmp_path):
     r._write_specialist_done(tmp_path, {"empty": True})
     payload = json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
     assert payload["empty"] is True and "ts" in payload
+
+
+# ---- WS1: atomic write + incremental partial ------------------------------
+def test_write_specialist_done_atomic_leaves_no_tmp(tmp_path):
+    # B6: the final write goes through temp + os.replace; no .tmp residue and
+    # the target is valid JSON (never a half-written file).
+    r = _runner()
+    r._write_specialist_done(tmp_path, {"empty": True})
+    assert not list(tmp_path.glob("*.tmp"))
+    assert json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))["empty"] is True
+
+
+def test_write_specialist_done_partial(tmp_path):
+    # WS1: partial lands at its own path, is flagged, and does NOT create the
+    # final file (so the reaper's exit signal is not tripped).
+    r = _runner()
+    r._write_specialist_done_partial(tmp_path, {"proposal_set": [{"name": "x"}]})
+    partial = tmp_path / "specialist_done.partial.json"
+    assert partial.exists()
+    assert not (tmp_path / "specialist_done.json").exists()
+    payload = json.loads(partial.read_text(encoding="utf-8"))
+    assert payload["_recovered_from_partial"] is True
+    assert payload["proposal_set"] == [{"name": "x"}]
+    assert "ts" in payload
+
+
+def test_write_specialist_done_partial_noop_none_workspace():
+    _runner()._write_specialist_done_partial(None, {"a": 1})  # must not raise
+
+
+def test_write_specialist_done_partial_rewrite_is_atomic(tmp_path):
+    # High-frequency rewrites never leave a .tmp behind and always parse.
+    r = _runner()
+    for i in range(5):
+        r._write_specialist_done_partial(tmp_path, {"turns_used": i})
+    assert not list(tmp_path.glob("*.tmp"))
+    payload = json.loads((tmp_path / "specialist_done.partial.json").read_text(encoding="utf-8"))
+    assert payload["turns_used"] == 4
 
 
 # ---- _maybe_setup_worktree ------------------------------------------------

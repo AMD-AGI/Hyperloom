@@ -430,13 +430,13 @@ class TestCoerceExtraEnvs:
     def test_used_by_backends_grid_override(self):
         llm_entry = {
             "name": "aiter_mla_off",
-            "extra_sglang_args": "--attention-backend aiter --disable-mla",
+            "extra_server_args": "--attention-backend aiter --disable-mla",
             "extra_envs": "SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0",
             "note": "aiter attn without MLA fast path",
         }
         v = GridVariant(
             name=llm_entry["name"],
-            extra_sglang_args=llm_entry["extra_sglang_args"],
+            extra_server_args=llm_entry["extra_server_args"],
             extra_envs=coerce_extra_envs(llm_entry["extra_envs"]),
             note=llm_entry["note"],
         )

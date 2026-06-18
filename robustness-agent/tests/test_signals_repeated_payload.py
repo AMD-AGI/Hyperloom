@@ -273,7 +273,7 @@ def test_legacy_extra_sglang_args_envelope_hashes_identically(recwarn):
     assert legacy_warnings, "no DeprecationWarning fired on legacy envelope"
 
 
-def test_legacy_envelope_alone_still_fingerprints():
+def test_legacy_envelope_alone_still_fingerprints(recwarn):
     """An all-legacy-key streak must still fire — the shim normalises before projection, not just on mixed-key bursts."""
     events = [
         _integrate_event(task_id="t1", args_value="--tp 4", legacy=True),
@@ -288,3 +288,10 @@ def test_legacy_envelope_alone_still_fingerprints():
     )
     sym = next(s for s in out if s.name == "same_payload_loop")
     assert sym.evidence["count"] == 3
+    # The legacy-alias DeprecationWarning is part of the audit channel; capture
+    # it via recwarn (like the mixed-key sibling) so it does not leak to the
+    # pytest warnings summary.
+    legacy_warnings = [
+        w for w in recwarn.list if issubclass(w.category, DeprecationWarning) and "extra_sglang_args" in str(w.message)
+    ]
+    assert legacy_warnings, "no DeprecationWarning fired on legacy envelope"
