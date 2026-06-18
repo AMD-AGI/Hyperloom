@@ -491,19 +491,73 @@ class Coordinator:
         # Orchestration working-memory checkpoint policy + tracker (plan Step 4).
         from . import orchestration_memory as _orch_mem
 
-        self._checkpoint_policy = _orch_mem.CheckpointPolicy()
+        # Context-token guardrail (#3): derive soft/hard budgets from the
+        # orchestration model's window × fraction (env-overridable). Falls back to
+        # a conservative 200k window for unknown models; 0 budgets => token
+        # triggers disabled (char/tick/time cadence still applies).
+        def _ckpt_fraction(env_key: str, default: float) -> float:
+            try:
+                v = float(os.environ.get(env_key, "").strip() or default)
+            except (TypeError, ValueError):
+                v = default
+            return v if 0.0 < v <= 1.0 else default
+
+        _orch_model = str(getattr(self.backends.get("orchestration"), "model", "") or "")
+        _ctx_window = _orch_mem.context_window_for_model(_orch_model)
+        _soft_frac = _ckpt_fraction(
+            "INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION",
+            _orch_mem.DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION,
+        )
+        _hard_frac = _ckpt_fraction(
+            "INFERENCE_OPTIMIZER_CTX_HARD_FRACTION",
+            _orch_mem.DEFAULT_CONTEXT_TOKEN_HARD_FRACTION,
+        )
+        self._checkpoint_policy = _orch_mem.CheckpointPolicy(
+            context_token_soft=int(_ctx_window * _soft_frac),
+            context_token_hard=int(_ctx_window * _hard_frac),
+        )
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
+        # Consecutive degenerate checkpoint replies (#1); resets on a good one.
+        self._consec_degenerate_ckpt: int = 0
         # Disable checkpointing entirely via env.
         self._checkpoint_enabled: bool = os.environ.get(
             "INFERENCE_OPTIMIZER_DISABLE_ORCH_CHECKPOINT",
             "",
         ).strip().lower() not in {"1", "true", "yes", "on"}
         # Seed memory rendered into the next full SEED push (resume recovery source).
-        self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(
-            dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
-        )
+        # Operator rollback (#1): INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK=<n>
+        # re-seeds from the n-th-from-newest history snapshot instead of the live
+        # memory, to recover when the most recent compaction(s) lost a key thread.
+        _seed_memory = dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
+        _rollback_raw = os.environ.get("INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK", "").strip()
+        if _rollback_raw:
+            try:
+                _n = int(_rollback_raw)
+                _hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
+                if _n >= 1 and len(_hist) >= _n:
+                    _seed_memory = dict(_hist[-_n])
+                    self.shared_state.orchestration_memory = _seed_memory
+                    log.warning(
+                        "Coordinator: orchestration memory rolled back to history[-%d] "
+                        "(of %d snapshots)",
+                        _n,
+                        len(_hist),
+                    )
+                else:
+                    log.warning(
+                        "Coordinator: ORCH_MEMORY_ROLLBACK=%s out of range (history has %d); "
+                        "using live memory",
+                        _rollback_raw,
+                        len(_hist),
+                    )
+            except (TypeError, ValueError):
+                log.warning(
+                    "Coordinator: invalid ORCH_MEMORY_ROLLBACK=%r; using live memory",
+                    _rollback_raw,
+                )
+        self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(_seed_memory)
         # No-progress circuit-breaker telemetry (plan Step 6); threshold = high-severity cutoff.
         self._progress_marker: dict[str, Any] = {}
         try:
@@ -920,12 +974,21 @@ class Coordinator:
         tracker = self._checkpoint_tracker
         ticks_since = max(0, tick - tracker.last_tick)
         minutes_since = max(0.0, now_min - tracker.last_minute_mark)
-        # Approximate conversation growth from recorded prompt char counts since last reset.
-        if not force and not self._checkpoint_policy.should_checkpoint(
-            ticks_since_last=ticks_since,
-            minutes_since_last=minutes_since,
-            chars_since_last=tracker.chars_since_last,
-            phase_changed=phase_changed,
+        # Hard context-token guardrail: near the window we MUST compact even when
+        # the LLM summary is degenerate (deterministic fallback) to avoid overflow.
+        hard = self._checkpoint_policy.is_hard_compaction(tracker.context_tokens_now)
+        # Authoritative growth signal is the context-token water level; the char
+        # count is a fallback for backends that don't report token usage.
+        if (
+            not force
+            and not hard
+            and not self._checkpoint_policy.should_checkpoint(
+                ticks_since_last=ticks_since,
+                minutes_since_last=minutes_since,
+                chars_since_last=tracker.chars_since_last,
+                phase_changed=phase_changed,
+                context_tokens_now=tracker.context_tokens_now,
+            )
         ):
             return False
 
@@ -941,6 +1004,48 @@ class Coordinator:
             )
             raw_text = getattr(result, "raw_text", "") or ""
             parsed = _orch_mem.parse_checkpoint_reply(raw_text)
+            degenerate = _orch_mem.is_degenerate_checkpoint(parsed)
+            cur_phase = str(getattr(self.shared_state, "phase", "") or "")
+            # Path 1 — degenerate reply, NOT near the window: skip compaction.
+            # Preserve the live conversation + prior memory (a forgetful summary
+            # must never blank the plan or drop the history). Still reset the
+            # tracker so we don't immediately retry next tick (checkpoint storm).
+            if degenerate and not hard:
+                self._consec_degenerate_ckpt += 1
+                tracker.reset(tick=tick, minute_mark=now_min, phase=cur_phase)
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "orchestration_checkpoint_degraded",
+                        "tick": tick,
+                        "consecutive": self._consec_degenerate_ckpt,
+                        "parse_error": str(parsed.get("parse_error", "") or ""),
+                    },
+                )
+                # Repeated degeneracy: raise the observation's severity so the
+                # operator/robustness sees it (advisory, P3_19 style — never
+                # auto-changes strategy, and does not hijack the alert intent).
+                if self._consec_degenerate_ckpt >= 3:
+                    await self._record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": "orchestration_checkpoint_degraded",
+                            "severity": "medium",
+                            "tick": tick,
+                            "consecutive": self._consec_degenerate_ckpt,
+                            "detail": "orchestration checkpoint summaries repeatedly degenerate",
+                        },
+                    )
+                return False
+            # Path 2 — degenerate but near the window: compact anyway using a
+            # deterministic fallback synthesised from authoritative state, so the
+            # conversation is reset and never overflows.
+            if degenerate and hard:
+                parsed = _orch_mem.deterministic_memory_fallback(self.shared_state)
+            # Path 3 (and post-fallback): a usable summary — compact for real.
+            self._consec_degenerate_ckpt = 0
             seq = 0
             try:
                 row = self.bus.db.fetchone_sync("SELECT COALESCE(MAX(seq), 0) AS s FROM events")
@@ -954,6 +1059,14 @@ class Coordinator:
                 previous=dict(getattr(self.shared_state, "orchestration_memory", {}) or {}),
             )
             self.shared_state.orchestration_memory = record
+            # Append to the rollback ring (bounded) so a later bad compaction can
+            # be recovered from a prior good snapshot (long-run #1).
+            try:
+                hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
+                hist.append(record)
+                self.shared_state.orchestration_memory_history = hist[-10:]
+            except Exception:  # noqa: BLE001 — history is best-effort
+                log.exception("Coordinator: failed to append orchestration_memory_history")
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001
@@ -964,7 +1077,7 @@ class Coordinator:
             tracker.reset(
                 tick=tick,
                 minute_mark=now_min,
-                phase=str(getattr(self.shared_state, "phase", "") or ""),
+                phase=cur_phase,
             )
             await self._record_observation(
                 "coordinator",
@@ -975,11 +1088,23 @@ class Coordinator:
                     "seq": seq,
                     "checkpoint_count": record.get("checkpoint_count", 0),
                     "phase_changed": bool(phase_changed),
+                    "hard_compaction": bool(hard),
+                    "context_tokens": int(tracker.context_tokens_now),
                 },
             )
             return True
         except Exception:  # noqa: BLE001 — never let a checkpoint kill the loop
             log.exception("Coordinator: orchestration checkpoint failed")
+            # Reset the tracker even on failure so a transient backend error
+            # (e.g. gateway 401) can't trigger a checkpoint storm next tick.
+            try:
+                tracker.reset(
+                    tick=tick,
+                    minute_mark=now_min,
+                    phase=str(getattr(self.shared_state, "phase", "") or ""),
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return False
 
     def _attach_orchestration_context_tools(self) -> None:
@@ -5491,12 +5616,10 @@ class Coordinator:
         """
         backend = self.backends[agent_name]
         prompt = await self._compose_prompt(agent_name)
-        # Accumulate orchestration prompt size as a proxy for conversation growth (plan Step 4).
-        if agent_name == "orchestration" and self._orchestration_conversational():
-            try:
-                self._checkpoint_tracker.chars_add(len(prompt))
-            except Exception:  # noqa: BLE001
-                pass
+        # Conversation-growth accounting happens AFTER the turn returns, from the
+        # backend's reported token usage (see below) — a delta-prompt char count
+        # before the call badly undercounts the cached history in a persistent
+        # conversation (#3).
         sys_prompt = await self._load_system_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # max_turns=0 → backend default; ClaudeBackend needs ≥2 for tool_use→tool_result→final-text.
@@ -5551,6 +5674,26 @@ class Coordinator:
         # prompt+response for this reactor turn. Separate file from the
         # token ledger; same best-effort posture.
         self._record_reactor_conversation(agent_name, result)
+        # Context-token water level (#3): the persistent conversation's true size
+        # is the backend's reported input usage (input + cache_read +
+        # cache_creation). Fall back to a full-turn char accumulation only when
+        # the backend reports no usage (e.g. codex), never the old delta-only.
+        if agent_name == "orchestration" and self._orchestration_conversational():
+            try:
+                md = getattr(result, "metadata", None) or {}
+                it = md.get("input_tokens")
+                cr = md.get("cache_read_input_tokens")
+                cc = md.get("cache_creation_input_tokens")
+                if it is not None or cr is not None or cc is not None:
+                    self._checkpoint_tracker.set_context_tokens(
+                        int(it or 0) + int(cr or 0) + int(cc or 0)
+                    )
+                else:
+                    self._checkpoint_tracker.chars_add(
+                        len(prompt) + len(getattr(result, "raw_text", "") or "")
+                    )
+            except Exception:  # noqa: BLE001 — accounting must never break routing
+                pass
         # Completed orchestration turn means SEED delivered; flip flag so later turns send DELTA (plan Step 3).
         if agent_name == "orchestration":
             self._orchestration_seeded = True

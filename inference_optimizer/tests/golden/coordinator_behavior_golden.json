@@ -275,6 +275,7 @@
     "no_gain_cycle_streak": 0,
     "optimization_stack": [],
     "orchestration_memory": {},
+    "orchestration_memory_history": [],
     "osl": 0,
     "params_no_promote_streak": 0,
     "params_winner_history": [],

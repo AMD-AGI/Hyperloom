@@ -309,13 +309,20 @@ class _FakeRunResult:
         self.raw_text = raw_text
 
 
-def _make_conversational(coord: Coordinator) -> None:
+def _make_conversational(coord: Coordinator, *, raw_text: str | None = None) -> None:
     backend = coord.backends["orchestration"]
     backend.conversational = True  # type: ignore[attr-defined]
     backend.reset_conversation = lambda: None  # type: ignore[attr-defined]
+    # A well-formed checkpoint reply (valid JSON) so the compaction "taken" path
+    # runs; pass raw_text= to exercise the degenerate (non-JSON) path.
+    reply = raw_text if raw_text is not None else (
+        '```json\n{"current_plan": "tune MoE", "hypotheses": ["h1"], '
+        '"tried_and_why": ["explored attention backends"], "pending": ["p1"], '
+        '"learnings": ["l1"]}\n```'
+    )
 
     async def _run(**kw):
-        return _FakeRunResult("SUMMARY: explored attention backends; next: tune MoE")
+        return _FakeRunResult(reply)
 
     backend.run = _run  # type: ignore[assignment]
 
@@ -339,6 +346,9 @@ async def test_checkpoint_policy_declines(coord: Coordinator) -> None:
         def should_checkpoint(self, **kw):
             return False
 
+        def is_hard_compaction(self, n):
+            return False
+
     coord._checkpoint_policy = _Policy()
     assert await coord._maybe_checkpoint_orchestration(tick=5) is False
 
@@ -356,12 +366,94 @@ async def test_checkpoint_taken_compacts_memory(coord: Coordinator) -> None:
         def should_checkpoint(self, **kw):
             return True
 
+        def is_hard_compaction(self, n):
+            return False
+
     coord._checkpoint_policy = _Policy()
     took = await coord._maybe_checkpoint_orchestration(tick=12, phase_changed=True)
     assert took is True
     # next turn re-seeds from the compacted memory
     assert coord._orchestration_seeded is False
     assert coord.shared_state.orchestration_memory
+    # rollback ring captured the record (long-run #1)
+    assert len(coord.shared_state.orchestration_memory_history) == 1
+
+
+def _always_checkpoint(coord: Coordinator) -> None:
+    class _Policy:
+        def should_checkpoint(self, **kw):
+            return True
+
+        def is_hard_compaction(self, n):  # default: not hard
+            return False
+
+    coord._checkpoint_policy = _Policy()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_degenerate_non_hard_skips_and_preserves(coord: Coordinator) -> None:
+    import time
+
+    # Non-JSON reply → degenerate; not near the window → skip compaction.
+    _make_conversational(coord, raw_text="just prose, no JSON object here")
+    coord._checkpoint_enabled = True
+    coord._orchestration_seeded = True
+    coord._run_started_monotonic = time.monotonic()
+    coord.shared_state.orchestration_memory = {"current_plan": "keep me"}
+    _always_checkpoint(coord)
+
+    took = await coord._maybe_checkpoint_orchestration(tick=7)
+    assert took is False
+    # conversation NOT reset (history preserved) and prior memory untouched
+    assert coord._orchestration_seeded is True
+    assert coord.shared_state.orchestration_memory == {"current_plan": "keep me"}
+    assert coord._consec_degenerate_ckpt == 1
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_degenerate_hard_uses_fallback(coord: Coordinator) -> None:
+    import time
+
+    _make_conversational(coord, raw_text="still no JSON")
+    coord._checkpoint_enabled = True
+    coord._orchestration_seeded = True
+    coord._run_started_monotonic = time.monotonic()
+    coord.shared_state.phase = "EXPLORE"
+
+    class _Policy:
+        def should_checkpoint(self, **kw):
+            return True
+
+        def is_hard_compaction(self, n):  # near the window → force
+            return True
+
+    coord._checkpoint_policy = _Policy()
+    took = await coord._maybe_checkpoint_orchestration(tick=20)
+    # hard path compacts via deterministic fallback even on a degenerate reply
+    assert took is True
+    assert coord._orchestration_seeded is False
+    assert coord.shared_state.orchestration_memory.get("current_plan", "").startswith("[auto]")
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_resets_tracker(coord: Coordinator) -> None:
+    import time
+
+    _make_conversational(coord)
+    coord._checkpoint_enabled = True
+    coord._orchestration_seeded = True
+    coord._run_started_monotonic = time.monotonic()
+    coord._checkpoint_tracker.chars_since_last = 999
+    _always_checkpoint(coord)
+
+    async def _boom(**kw):
+        raise RuntimeError("backend down")
+
+    coord.backends["orchestration"].run = _boom  # type: ignore[assignment]
+    took = await coord._maybe_checkpoint_orchestration(tick=30)
+    assert took is False
+    # tracker reset even on failure → no checkpoint storm next tick (#2)
+    assert coord._checkpoint_tracker.chars_since_last == 0
 
 
 # -- _compose_prompt advisory + telemetry append paths ----------------------

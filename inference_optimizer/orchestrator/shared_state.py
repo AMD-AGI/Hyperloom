@@ -736,6 +736,11 @@ class SharedState:
     # Orchestration working memory — durable compacted reasoning snapshot for compaction + crash-recovery rebuild; Coordinator-only writer, not in session_breakdown.
     orchestration_memory: dict[str, Any] = field(default_factory=dict)
 
+    # Bounded rollback ring of prior good ``orchestration_memory`` records (#1);
+    # capped at 10 by the Coordinator. Lets a later degenerate compaction be
+    # recovered from a prior snapshot via INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK.
+    orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
+
     # Non-field instance attr (set in load_or_init / save): session dir used by
     # breakdown instrumentation. Plain class attr => not a dataclass field, so
     # asdict()/state.json never serialize it.
