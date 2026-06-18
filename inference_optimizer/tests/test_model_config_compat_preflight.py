@@ -869,6 +869,18 @@ def test_private_quant_mlx_affine_blocks(tmp_path):
     assert reason is not None and "MLX" in reason
 
 
+def test_private_quant_no_method_blocks(tmp_path):
+    # quantization_config carries bits/group_size but no quant_method/mode;
+    # sglang raises "Unknown quantization method: ''" in engine init.
+    m = tmp_path / "no_method"
+    _write_config(
+        m, model_type="llama", max_position_embeddings=32768,
+        quantization_config={"group_size": 64, "bits": 8},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "quant_method" in reason
+
+
 def test_private_quant_mxtq_blocks(tmp_path):
     m = tmp_path / "mxtq"
     _write_config(

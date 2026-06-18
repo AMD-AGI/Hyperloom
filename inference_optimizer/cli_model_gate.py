@@ -781,6 +781,18 @@ def _detect_private_quant(model_path: str, data: dict) -> str | None:
                 "quantization_config 'mode: affine/mlx' with no quant_method is "
                 "an MLX (mx.quantize) checkpoint with no vLLM/sglang loader."
             )
+        # quantization_config carries real quant params (bits/group_size/...) but
+        # declares no quant_method: sglang can't pick a loader and raises
+        # "Unknown quantization method: ''" in engine init.
+        if not method and any(
+            qc.get(k) is not None
+            for k in ("bits", "group_size", "weight_format", "weight_bits")
+        ):
+            return (
+                "quantization_config declares quant params (e.g. bits/group_size) "
+                "but no quant_method; sglang/vLLM cannot select a loader and "
+                "fails engine init with \"Unknown quantization method: ''\"."
+            )
         declared_supported = bool(method)
     # A declared supported quant_method (awq/gptq/compressed-tensors/...)
     # legitimately ships '.scales'/'.biases'; the MLX weight-index tell only
