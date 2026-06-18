@@ -117,7 +117,7 @@ def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> N
         variant_outcome={
             "outcome": "KEEP",
             "variant_name": "disable_radix",
-            "variant": {"extra_sglang_args": "--disable-radix-cache"},
+            "variant": {"extra_server_args": "--disable-radix-cache"},
             "metrics": {"gain_pct": 0.66, "output_throughput": 6700.0},
         },
     )
@@ -144,7 +144,7 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
         framework=_FW,
         framework_version=_FWV,
         precision=_PREC,
-        best_config={"extra_sglang_args": "--page-size 32"},
+        best_config={"extra_server_args": "--page-size 32"},
         best_throughput=7000.0,
     )
     task = SimpleNamespace(kind="explore", task_id="t-weaker", params={})
@@ -154,13 +154,13 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
         variant_outcome={
             "outcome": "KEEP",
             "variant_name": "small_gain",
-            "variant": {"extra_sglang_args": "--disable-radix-cache"},
+            "variant": {"extra_server_args": "--disable-radix-cache"},
             "metrics": {"gain_pct": 0.1, "output_throughput": 6600.0},
         },
     )
     row = coord.cortex_kb.get_recipe(canonical_id=cid)
     bc = row.get("best_config") or {}
-    assert bc.get("extra_sglang_args") == "--page-size 32"
+    assert bc.get("extra_server_args") == "--page-size 32"
     assert float(row.get("best_throughput") or 0.0) == 7000.0
 
 

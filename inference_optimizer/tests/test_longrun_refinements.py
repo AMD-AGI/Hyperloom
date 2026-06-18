@@ -44,7 +44,7 @@ def test_decaying_keep_threshold_multi_node_scales_by_two():
         single = ps.decaying_keep_threshold_pct(n)
         multi = ps.decaying_keep_threshold_pct(n, multi_node=True)
         assert multi == pytest.approx(2.0 * single)
-    # N=1 multi-node reproduces the legacy 2.0% baseline.
+    # macro_cycle=0 (N=1 in the formula) reproduces the legacy 2.0% baseline.
     assert ps.decaying_keep_threshold_pct(0, multi_node=True) == pytest.approx(2.0)
 
 
@@ -95,6 +95,29 @@ def test_suprathreshold_gain_resets_streak(monkeypatch):
     assert reloop is True
 
 
+def test_all_saturated_directions_stop_reloop(monkeypatch):
+    monkeypatch.setenv(CYCLIC_ENV, "1")
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_SATURATION_CONVERGENCE", raising=False)
+    st = _sweep_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
+    st.saturated_directions = {
+        "kernel_switch_specialist": {"saturated": True},
+        "comm_specialist": {"saturated": True},
+    }
+    reloop, ev = ps.should_reloop_to_explore(st)
+    assert reloop is False
+    assert ev["reloop_blocked"] == "all_directions_saturated"
+
+
+def test_saturation_convergence_env_can_disable(monkeypatch):
+    monkeypatch.setenv(CYCLIC_ENV, "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SATURATION_CONVERGENCE", "0")
+    st = _sweep_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
+    st.saturated_directions = {"kernel_switch_specialist": {"saturated": True}}
+    reloop, ev = ps.should_reloop_to_explore(st)
+    assert reloop is True
+    assert ev.get("reloop_blocked") != "all_directions_saturated"
+
+
 # ==========================================================================
 # Absolute per-phase cap + 14-day ceiling for unbounded runs
 # ==========================================================================
@@ -129,6 +152,7 @@ def test_unbounded_explore_exits_when_cap_exceeded(monkeypatch):
         phase=ps.PHASE_EXPLORE,
         max_minutes=0,
         phase_started_unix=now - (cap + 10),
+        phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
     )
     out = ps.exit_normal_explore(st, now_unix=now)
     assert out is not None

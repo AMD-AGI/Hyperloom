@@ -171,6 +171,20 @@ exit 0
 """
     elif behavior == "crash":
         body += "exit 3\n"
+    elif behavior == "partial_then_crash":
+        # WS1: write an incremental checkpoint to the *partial* file (which must
+        # NOT trigger reap), then die before writing the final done.json — the
+        # dispatcher should recover the partial as the best-so-far result.
+        body += f"""
+cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
+{payload_json}
+EOF
+exit 3
+"""
+    elif behavior == "hang":
+        # Sleep past any small wall budget without writing done.json; the
+        # reaper's wall-clock kill must terminate it.
+        body += 'sleep 600\n'
     else:
         raise ValueError(f"unknown behavior {behavior!r}")
     script_path.write_text(body, encoding="utf-8")
@@ -493,6 +507,80 @@ async def test_subprocess_path_isolates_writes_to_worktree(
     assert (worktree / "patches" / "001_test.patch").exists()
     assert not (fake_framework_repo / "patches" / "001_test.patch").exists()
     assert not (fake_framework_repo / "dummy.txt").exists()
+
+
+# WS1 — incremental checkpoint recovery + explicit wall budget
+@pytest.mark.asyncio
+async def test_subprocess_recovers_partial_when_no_final(
+    tmp_path: Path,
+    fake_framework_repo: Path,
+):
+    """A specialist that wrote only the incremental partial (then died before
+    the final done.json) surfaces the partial as a non-empty result rather than
+    being discarded as an empty crash."""
+    bin_dir = tmp_path / "bin"
+    fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_crash")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    config = SpecialistSubprocessConfig(
+        claude_executable=str(fake_claude),
+        model="",
+        framework_source_roots=(str(fake_framework_repo),),
+        per_turn_max_seconds=15.0,
+        poll_interval_seconds=0.2,
+    )
+    runner = SpecialistRunner(
+        subprocess_config=config,
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    ctx = _make_runner_ctx("t-spec-partial")
+
+    result = await runner.run(ctx)
+    # Non-empty payload recovered from the partial → treated as a real result.
+    assert result.status == "succeeded"
+    assert result.specialist_done["empty"] is False
+    assert result.specialist_done.get("_recovered_from_partial") is True
+    assert result.specialist_done["proposal_set"]
+
+
+@pytest.mark.asyncio
+async def test_wall_budget_overrides_legacy_max_seconds(
+    tmp_path: Path,
+    fake_framework_repo: Path,
+):
+    """A small Coordinator-injected ``wall_budget_sec`` must kill a hung
+    specialist well before the legacy ``max_turns × per_turn`` ceiling (here
+    2 × 15 = 30s)."""
+    bin_dir = tmp_path / "bin"
+    fake_claude = _make_fake_claude(bin_dir, behavior="hang")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    config = SpecialistSubprocessConfig(
+        claude_executable=str(fake_claude),
+        model="",
+        framework_source_roots=(str(fake_framework_repo),),
+        per_turn_max_seconds=15.0,
+        poll_interval_seconds=0.2,
+    )
+    runner = SpecialistRunner(
+        subprocess_config=config,
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    ctx = _make_runner_ctx("t-spec-budget")
+    ctx.extra["wall_budget_sec"] = 1.0
+
+    started = time.monotonic()
+    result = await runner.run(ctx)
+    elapsed = time.monotonic() - started
+
+    # Killed by the 1s budget, not the 30s legacy ceiling.
+    assert elapsed < 15.0
+    assert result.status in ("stale", "empty_synthesised")
+    assert "timeout" in (result.error or "")
 
 
 class _FakeProc:

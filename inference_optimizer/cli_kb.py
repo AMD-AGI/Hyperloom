@@ -114,11 +114,19 @@ def _build_recipe_kb_dispatcher(
     if bool(getattr(args, "degraded_kb", False)):
         return RecipeKB(local=local_store, remote=None)  # opt-out: no network
 
-    # Aggregated read remote (opt-in: RECIPE_KB_REMOTE=both). Fans reads across
-    # gbrain (GBRAIN_*) and the cortex kb-service (--cortex-kb-url /
-    # $CORTEX_KB_URL), then dedups/field-merges same-cid rows. Writes remain
-    # local-only; mirroring policy is handled only by the gbrain-only path.
-    if os.environ.get("RECIPE_KB_REMOTE", "").strip().lower() == "both":
+    # Read-remote mode. Default is ``auto`` (unset): dual gbrain+cortex reads
+    # whenever BOTH are configured, otherwise fall through to the single
+    # configured remote (or local-only) — i.e. dual-read is the default without
+    # destabilising the single-remote contract when only one KB is wired.
+    # Explicit overrides: ``both`` always composites the configured source(s);
+    # ``gbrain`` reads gbrain only; any other explicit value (e.g. ``cortex``)
+    # / empty-string forces the single cortex remote path below.
+    kb_remote_mode = (os.environ.get("RECIPE_KB_REMOTE", "") or "").strip().lower() or "auto"
+
+    # Aggregated read remote. Fans reads across gbrain (GBRAIN_*) and the cortex
+    # kb-service (--cortex-kb-url / $CORTEX_KB_URL), then dedups/field-merges
+    # same-cid rows. Writes remain local-only; mirroring is the gbrain-only path.
+    if kb_remote_mode in ("both", "auto"):
         from .recipe_kb.composite_remote import CompositeRemoteRecipeClient
         from .recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
 
@@ -134,11 +142,25 @@ def _build_recipe_kb_dispatcher(
         if cortex_url:
             sources.append(RemoteRecipeClient(kb_url=cortex_url, foreground=True, enabled=True))
             names.append("cortex")
-        if sources:
+        if kb_remote_mode == "both":
+            # Explicit: always composite around whatever is configured (even a
+            # single source); local-only when nothing is wired.
+            if sources:
+                return RecipeKB(
+                    local=local_store,
+                    remote=CompositeRemoteRecipeClient(sources, names=names),
+                )
+            return RecipeKB(local=local_store, remote=None)
+        # auto: only composite when ≥2 remotes are reachable; a single remote
+        # keeps its bare client (preserves the single-remote read contract),
+        # and zero remotes falls through to the local-only path below.
+        if len(sources) >= 2:
             return RecipeKB(
                 local=local_store,
                 remote=CompositeRemoteRecipeClient(sources, names=names),
             )
+        if len(sources) == 1:
+            return RecipeKB(local=local_store, remote=sources[0])
         return RecipeKB(local=local_store, remote=None)
 
     # gbrain read-side remote (opt-in: RECIPE_KB_REMOTE=gbrain + GBRAIN_*).
@@ -334,6 +356,17 @@ def _bootstrap_knowledge_plane(
                 exc,
             )
 
+    # Read-only KB-graph MCP advertised to specialists as the ``cortex_kb``
+    # server. Default endpoint is the gbrain MCP (GBRAIN_BASE_URL/mcp + bearer
+    # GBRAIN_TOKEN); an explicit HYPERLOOM_SPECIALIST_KB_MCP_URL /
+    # HYPERLOOM_SPECIALIST_KB_MCP_TOKEN overrides it. Empty => disabled
+    # (mcp__cortex_kb__* tools are stripped from the specialist whitelist).
+    kb_mcp_url, kb_mcp_headers = _resolve_specialist_kb_mcp(args)
+    if kb_mcp_url:
+        print(f"Specialist KB MCP: {kb_mcp_url} (cortex_kb, read-only)")
+    else:
+        print("Specialist KB MCP: DISABLED (no GBRAIN_* / HYPERLOOM_SPECIALIST_KB_MCP_URL)")
+
     # cortex_kb=None per the local-kb design (KB reads go via RecipeKB).
     return KnowledgePlane.from_clients(
         cortex_kb=None,
@@ -341,4 +374,36 @@ def _bootstrap_knowledge_plane(
         domain_repos=load_domain_repos(),
         pr_feed_window_days=window_days,
         pr_monitor_mcp_url=pr_mcp_url,
+        cortex_kb_mcp_url=kb_mcp_url,
+        cortex_kb_mcp_headers=kb_mcp_headers,
     )
+
+
+def _resolve_specialist_kb_mcp(args: Any) -> tuple[str, dict[str, str]]:
+    """Resolve the specialist read-only KB-graph (``cortex_kb``) MCP endpoint.
+
+    Precedence: explicit ``--specialist-kb-mcp-url`` /
+    ``$HYPERLOOM_SPECIALIST_KB_MCP_URL`` (token from
+    ``$HYPERLOOM_SPECIALIST_KB_MCP_TOKEN``), else the gbrain MCP derived from
+    ``$GBRAIN_BASE_URL`` (+ ``/mcp``) with a bearer ``$GBRAIN_TOKEN``.
+
+    Args:
+        args: Parsed CLI namespace.
+
+    Returns:
+        A ``(url, headers)`` pair; ``("", {})`` when nothing is configured.
+    """
+    override = (
+        (getattr(args, "specialist_kb_mcp_url", None) or "").strip()
+        or (os.environ.get("HYPERLOOM_SPECIALIST_KB_MCP_URL", "") or "").strip()
+    )
+    if override:
+        token = (os.environ.get("HYPERLOOM_SPECIALIST_KB_MCP_TOKEN", "") or "").strip()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        return override, headers
+
+    gbrain_base = (os.environ.get("GBRAIN_BASE_URL", "") or "").strip().rstrip("/")
+    gbrain_token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
+    if gbrain_base and gbrain_token:
+        return f"{gbrain_base}/mcp", {"Authorization": f"Bearer {gbrain_token}"}
+    return "", {}

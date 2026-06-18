@@ -32,9 +32,6 @@ ALLOWED_FILES: dict[str, str] = {
     "field names",
     "inference_optimizer/orchestrator/action_executors/_grid_runner.py": "GridVariant(extra_sglang_args=...) back-compat kwarg",
     "inference_optimizer/orchestrator/shared_state.py": "_migrate_legacy_extra_sglang_args_keys walker + state.json transform",
-    "inference_optimizer/orchestrator/action_executors/_explore_roofline_filter.py": "roofline filter reads canonical extra_server_args with a "
-    "read-only legacy extra_sglang_args fallback for pre-rename "
-    "variant objects",
     "inference_optimizer/orchestrator/research_hints.py": "priors-match scorer builds a token blob from variant fields and "
     "reads the legacy extra_sglang_args key alongside the canonical "
     "extra_server_args so pre-rename variant dicts still match",
@@ -59,7 +56,6 @@ ALLOWED_FILES: dict[str, str] = {
     # tests + this guard itself + the per-sub-agent shim tests.
     "inference_optimizer/tests/test_payload_aliases.py": "compat helper test surface",
     "inference_optimizer/tests/test_back_compat_legacy_field_name.py": "back-compat regression tests",
-    "inference_optimizer/tests/test_grid_runner.py": "GridVariant back-compat tests exercise extra_sglang_args kwarg",
     "inference_optimizer/tests/test_coordinator_kb_writes.py": "recipe write-back regression test asserts best_config / "
     "what_worked emit the KB-legacy extra_sglang_args field read "
     "from canonical state",
@@ -139,13 +135,41 @@ _SKIP_DIRECTORIES: tuple[str, ...] = (
 _LEGACY_PATTERN = re.compile(r"extra_sglang_args")
 
 
+def _git_tracked_files() -> set[str] | None:
+    """Repo-relative POSIX paths tracked by git, or ``None`` when git is unavailable.
+
+    The guard is about *repo* writer sites, so untracked local artifacts
+    (gitignored scratch notes, ``reference_sessions/`` runtime dumps, etc.)
+    must not trip it. ``None`` falls back to a raw filesystem scan.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "ls-files", "-z"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, ValueError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return {p for p in (proc.stdout or "").split("\0") if p}
+
+
 def _iter_repo_files() -> list[Path]:
-    """All non-binary, non-skipped repo files we want to scan."""
+    """All non-binary, non-skipped, git-tracked repo files we want to scan."""
+    tracked = _git_tracked_files()
     out: list[Path] = []
     for path in _REPO_ROOT.rglob("*"):
         if not path.is_file():
             continue
         rel = path.relative_to(_REPO_ROOT).as_posix()
+        # Only scan tracked source; skip untracked / gitignored local artifacts.
+        if tracked is not None and rel not in tracked:
+            continue
         if any(rel.startswith(skip) for skip in _SKIP_DIRECTORIES):
             continue
         # Limit to text-shaped suffixes so we don't accidentally try to

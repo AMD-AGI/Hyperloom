@@ -384,10 +384,12 @@ def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
     assert len(PR_MONITOR_MCP_TOOLS) == 12
 
 
-def test_default_specialist_tools_exclude_orphan_cortex_kb_readonly():
-    """Cortex KB has no MCP surface; advertising its read-only tool names caused orphan calls, so they're kept out of the default whitelist (importable for PolicyGate)."""
+def test_default_specialist_tools_include_cortex_kb_readonly():
+    """The cortex_kb MCP server (gbrain KB-graph) now backs these read-only tool
+    names, so they live in the default whitelist; they are stripped at resolve
+    time when the KB-graph MCP is not wired (KnowledgePlane.cortex_enabled)."""
     for t in CORTEX_KB_READONLY_MCP_TOOLS:
-        assert t not in DEFAULT_SPECIALIST_TOOLS
+        assert t in DEFAULT_SPECIALIST_TOOLS
 
 
 def test_specialist_runner_strips_pr_monitor_when_plane_disabled():
@@ -421,12 +423,80 @@ def test_specialist_runner_keeps_pr_monitor_when_plane_enabled():
         assert t in tools
 
 
+def test_specialist_runner_keeps_cortex_kb_when_mcp_wired():
+    """When the KB-graph (cortex_kb) MCP URL is configured the read-only tools survive."""
+    plane = KnowledgePlane.from_clients(
+        cortex_kb=None,
+        pr_monitor=PRMonitorClient.from_args(enabled=False),
+        cortex_kb_mcp_url="http://gbrain.test/mcp",
+        cortex_kb_mcp_headers={"Authorization": "Bearer t"},
+    )
+    assert plane.cortex_enabled is True
+    assert plane.cortex_specialist_mcp_url() == "http://gbrain.test/mcp"
+    assert plane.cortex_specialist_mcp_headers() == {"Authorization": "Bearer t"}
+    runner = SpecialistRunner(
+        backend_factory=lambda d: None,
+        knowledge_plane=plane,
+    )
+    tools = runner._resolve_tools()
+    for t in CORTEX_KB_READONLY_MCP_TOOLS:
+        assert t in tools
+
+
 def test_specialist_runner_without_plane_keeps_default_tools():
     """Back-compat: callers without a KnowledgePlane keep every default tool."""
     runner = SpecialistRunner(backend_factory=lambda d: None)
     tools = runner._resolve_tools()
     for t in DEFAULT_SPECIALIST_TOOLS:
         assert t in tools
+
+
+# 5b. Specialist MCP config writer (pr_monitor + cortex_kb servers)
+def test_mcp_config_writes_cortex_kb_server_with_headers(tmp_path):
+    from inference_optimizer.orchestrator.specialist_mcp_config import (
+        SPECIALIST_MCP_CONFIG_FILENAME,
+        write_specialist_mcp_config,
+    )
+
+    path = write_specialist_mcp_config(
+        session_dir=tmp_path,
+        pr_monitor_mcp_url="http://pr.test/mcp/",
+        cortex_kb_mcp_url="http://gbrain.test/mcp",
+        cortex_kb_mcp_headers={"Authorization": "Bearer secret"},
+    )
+    assert path is not None and path.name == SPECIALIST_MCP_CONFIG_FILENAME
+    cfg = json.loads(path.read_text())
+    servers = cfg["mcpServers"]
+    assert servers["pr_monitor"] == {"type": "http", "url": "http://pr.test/mcp/"}
+    assert servers["cortex_kb"]["type"] == "http"
+    assert servers["cortex_kb"]["url"] == "http://gbrain.test/mcp"
+    assert servers["cortex_kb"]["headers"] == {"Authorization": "Bearer secret"}
+
+
+def test_mcp_config_omits_cortex_kb_when_url_absent(tmp_path):
+    from inference_optimizer.orchestrator.specialist_mcp_config import (
+        write_specialist_mcp_config,
+    )
+
+    path = write_specialist_mcp_config(
+        session_dir=tmp_path,
+        pr_monitor_mcp_url="http://pr.test/mcp/",
+    )
+    assert path is not None
+    cfg = json.loads(path.read_text())
+    assert "cortex_kb" not in cfg["mcpServers"]
+    assert "pr_monitor" in cfg["mcpServers"]
+
+
+def test_mcp_config_returns_none_when_nothing_wireable(tmp_path):
+    from inference_optimizer.orchestrator.specialist_mcp_config import (
+        write_specialist_mcp_config,
+    )
+
+    assert (
+        write_specialist_mcp_config(session_dir=tmp_path, pr_monitor_mcp_url="")
+        is None
+    )
 
 
 # 6. KnowledgePlane cache reset
