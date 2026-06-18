@@ -2224,6 +2224,67 @@ def test_classify_patchability_rejects_missing_source_file():
     assert "source file not resolved" in reason
 
 
+def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
+    """RCA root cause 2: a csrc/cpp_itfs/*.py host launcher (device code is in a
+    sibling .cuh/.cpp.jinja) must be skipped, not edited."""
+    src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
+    # Make the reusable-root gate pass deterministically regardless of host env.
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/wekafs/aiter/",))
+    reusable, reason = tla.classify_patchability(
+        {"name": "paged_attention_ragged", "source_file": src, "source_type": "python"},
+    )
+    assert reusable is False
+    assert "cpp_itfs host launcher" in reason
+
+
+def test_library_token_pairing():
+    """RCA root cause 2: library detection keeps kernel<->benchmark same-lib."""
+    assert tla._library_token("/sgl-workspace/aiter/op_tests/test_activation.py") == "aiter"
+    # sgl-kernel / sgl_kernel normalize to sglang.
+    assert tla._library_token("/sgl-workspace/sglang/sgl-kernel/include/hip/x.cuh") == "sglang"
+    assert tla._library_token("/sgl-workspace/sglang/python/sglang/srt/x.py") == "sglang"
+    assert tla._library_token("/random/path/foo.py") == ""
+    # A sglang kernel and an aiter test are different libraries -> must not pair.
+    src = "/sgl-workspace/sglang/sgl-kernel/include/hip/hip_act_and_mul.cuh"
+    test = "/sgl-workspace/aiter/op_tests/test_activation.py"
+    assert tla._library_token(src) != tla._library_token(test)
+
+
+def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypatch):
+    """aiter .cu/.cuh device sources are patchable even when source_type is
+    'unknown' (classifier ran before source_file resolved). Enables forge to
+    optimize aiter::mha_batch_prefill etc."""
+    src = "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu"
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
+    reusable, reason = tla.classify_patchability(
+        {"name": "aiter::mha_batch_prefill", "source_file": src, "source_type": "unknown"},
+    )
+    assert reusable is True, reason
+
+
+def test_classify_patchability_still_rejects_aiter_py_dispatcher(monkeypatch):
+    """aten::mm -> aiter tuned_gemm.py is a dispatcher (real GEMM is a compiled
+    CK/hipBLASLt lib); editing the .py does nothing, so it stays non-patchable."""
+    src = "/sgl-workspace/aiter/aiter/tuned_gemm.py"
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
+    reusable, reason = tla.classify_patchability(
+        {"name": "aten::mm", "source_file": src, "source_type": "python",
+         "library": "pytorch native"},
+    )
+    assert reusable is False
+
+
+def test_classify_patchability_keeps_cpp_itfs_device_source(monkeypatch):
+    """The real device source (.cuh) under cpp_itfs stays reusable."""
+    src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_kernels.cuh"
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/wekafs/aiter/",))
+    reusable, reason = tla.classify_patchability(
+        {"name": "paged_attention", "source_file": src, "source_type": "hip_cpp"},
+    )
+    assert reusable is True
+    assert reason == ""
+
+
 def test_classify_patchability_rejects_vendor_blas_name_markers():
     """Vendor BLAS / collective name markers are rejected even under a reusable framework root."""
     for marker_name in (
