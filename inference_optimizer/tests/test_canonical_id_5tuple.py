@@ -27,9 +27,9 @@ from inference_optimizer.recipe_snapshot_constants import (
 )
 
 
-# Shape — mhfvp ordering, six segments, ``inference:`` prefix
+# Shape — mhfvp+mt+arch ordering, eight segments, ``inference:`` prefix
 def test_canonical_id_shape_is_mhfvp_with_inference_prefix() -> None:
-    """``inference:{model}:{hw}:{fw}:{fwver}:{precision}`` — six segments."""
+    """``inference:{model}:{hw}:{fw}:{fwver}:{precision}:{model_type}:{arch}`` — eight segments."""
     cid = recipe_canonical_id(
         model="Qwen3-30B-A3B",
         hardware="MI355X",
@@ -37,9 +37,16 @@ def test_canonical_id_shape_is_mhfvp_with_inference_prefix() -> None:
         framework_version="0.4.5",
         precision="fp8",
     )
-    assert cid == "inference:qwen3-30b-a3b:mi355x:sglang:0.4.5:fp8"
+    assert cid == "inference:qwen3-30b-a3b:mi355x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8"
     assert cid.split(":") == [
-        "inference", "qwen3-30b-a3b", "mi355x", "sglang", "0.4.5", "fp8",
+        "inference",
+        "qwen3-30b-a3b",
+        "mi355x",
+        "sglang",
+        "unknown_model_type",
+        "unknown_arch",
+        "0.4.5",
+        "fp8",
     ]
 
 
@@ -94,11 +101,16 @@ def test_canonical_id_normalises_whitespace_and_slashes() -> None:
         framework_version="0.4 5",
         precision="fp 8",
     )
-    assert cid == "inference:a_b:mi_355x:sg_lang:0.4_5:fp_8"
+    assert cid == "inference:a_b:mi_355x:sg_lang:unknown_model_type:unknown_arch:0.4_5:fp_8"
 
 
 # Defaults — every empty component substitutes the documented slug
 def test_canonical_id_substitutes_defaults_for_each_empty_component() -> None:
+    from inference_optimizer.recipe_snapshot_constants import (
+        DEFAULT_MODEL_TYPE_SLUG,
+        DEFAULT_ARCHITECTURES_SLUG,
+    )
+
     cid = recipe_canonical_id(
         model="",
         hardware="",
@@ -111,6 +123,8 @@ def test_canonical_id_substitutes_defaults_for_each_empty_component() -> None:
         f"{DEFAULT_MODEL_SLUG}:"
         f"{DEFAULT_HARDWARE_SLUG}:"
         f"{DEFAULT_FRAMEWORK_SLUG}:"
+        f"{DEFAULT_MODEL_TYPE_SLUG}:"
+        f"{DEFAULT_ARCHITECTURES_SLUG}:"
         f"{DEFAULT_FRAMEWORK_VERSION_SLUG}:"
         f"{DEFAULT_PRECISION_SLUG}"
     )
@@ -132,6 +146,11 @@ def test_canonical_id_treats_whitespace_only_as_empty() -> None:
 
 def test_canonical_id_partial_defaults_keep_explicit_components() -> None:
     """Explicit components survive verbatim; only missing slots get defaults."""
+    from inference_optimizer.recipe_snapshot_constants import (
+        DEFAULT_MODEL_TYPE_SLUG,
+        DEFAULT_ARCHITECTURES_SLUG,
+    )
+
     cid = recipe_canonical_id(
         model="m",
         hardware="",
@@ -141,16 +160,30 @@ def test_canonical_id_partial_defaults_keep_explicit_components() -> None:
     )
     parts = cid.split(":")
     assert parts == [
-        "inference", "m", DEFAULT_HARDWARE_SLUG, "sglang",
-        DEFAULT_FRAMEWORK_VERSION_SLUG, "fp8",
+        "inference",
+        "m",
+        DEFAULT_HARDWARE_SLUG,
+        "sglang",
+        DEFAULT_MODEL_TYPE_SLUG,
+        DEFAULT_ARCHITECTURES_SLUG,
+        DEFAULT_FRAMEWORK_VERSION_SLUG,
+        "fp8",
     ]
 
 
-# canonical_labels — 5-key dict mirroring the canonical_id
+# canonical_labels — 7-key dict mirroring the canonical_id
 def test_canonical_labels_keys_match_documented_constants() -> None:
+    from inference_optimizer.recipe_snapshot_constants import (
+        F_LABEL_MODEL_TYPE,
+        F_LABEL_ARCHITECTURES,
+    )
+
     labels = canonical_labels(
-        model="m", hardware="h", framework="f",
-        framework_version="v", precision="p",
+        model="m",
+        hardware="h",
+        framework="f",
+        framework_version="v",
+        precision="p",
     )
     assert set(labels.keys()) == {
         F_LABEL_MODEL,
@@ -158,6 +191,8 @@ def test_canonical_labels_keys_match_documented_constants() -> None:
         F_LABEL_FRAMEWORK,
         F_LABEL_FRAMEWORK_VERSION,
         F_LABEL_PRECISION,
+        F_LABEL_MODEL_TYPE,
+        F_LABEL_ARCHITECTURES,
     }
 
 
@@ -178,24 +213,36 @@ def test_canonical_labels_values_match_canonical_id_components() -> None:
         precision="bf16",
     )
     parts = cid.split(":")[1:]  # drop ``inference``
-    assert labels[F_LABEL_MODEL]             == parts[0]
-    assert labels[F_LABEL_HARDWARE]          == parts[1]
-    assert labels[F_LABEL_FRAMEWORK]         == parts[2]
-    assert labels[F_LABEL_FRAMEWORK_VERSION] == parts[3]
-    assert labels[F_LABEL_PRECISION]         == parts[4]
+    assert labels[F_LABEL_MODEL] == parts[0]
+    assert labels[F_LABEL_HARDWARE] == parts[1]
+    assert labels[F_LABEL_FRAMEWORK] == parts[2]
+    assert labels[F_LABEL_FRAMEWORK_VERSION] == parts[5]
+    assert labels[F_LABEL_PRECISION] == parts[6]
 
 
 def test_canonical_labels_substitutes_defaults_for_empty() -> None:
+    from inference_optimizer.recipe_snapshot_constants import (
+        DEFAULT_MODEL_TYPE_SLUG,
+        DEFAULT_ARCHITECTURES_SLUG,
+        F_LABEL_MODEL_TYPE,
+        F_LABEL_ARCHITECTURES,
+    )
+
     labels = canonical_labels(
-        model="", hardware="", framework="",
-        framework_version="", precision="",
+        model="",
+        hardware="",
+        framework="",
+        framework_version="",
+        precision="",
     )
     assert labels == {
-        F_LABEL_MODEL:             DEFAULT_MODEL_SLUG,
-        F_LABEL_HARDWARE:          DEFAULT_HARDWARE_SLUG,
-        F_LABEL_FRAMEWORK:         DEFAULT_FRAMEWORK_SLUG,
+        F_LABEL_MODEL: DEFAULT_MODEL_SLUG,
+        F_LABEL_HARDWARE: DEFAULT_HARDWARE_SLUG,
+        F_LABEL_FRAMEWORK: DEFAULT_FRAMEWORK_SLUG,
         F_LABEL_FRAMEWORK_VERSION: DEFAULT_FRAMEWORK_VERSION_SLUG,
-        F_LABEL_PRECISION:         DEFAULT_PRECISION_SLUG,
+        F_LABEL_PRECISION: DEFAULT_PRECISION_SLUG,
+        F_LABEL_MODEL_TYPE: DEFAULT_MODEL_TYPE_SLUG,
+        F_LABEL_ARCHITECTURES: DEFAULT_ARCHITECTURES_SLUG,
     }
 
 
@@ -207,9 +254,7 @@ def test_detect_framework_version_returns_default_for_blank_framework() -> None:
 
 def test_detect_framework_version_returns_default_for_unknown_framework() -> None:
     """Frameworks not in the allow-list never trigger an import."""
-    assert detect_framework_version("not-a-real-framework") == (
-        DEFAULT_FRAMEWORK_VERSION_SLUG
-    )
+    assert detect_framework_version("not-a-real-framework") == (DEFAULT_FRAMEWORK_VERSION_SLUG)
 
 
 def test_detect_framework_version_reads_dunder_version(

@@ -41,7 +41,7 @@ class CollectiveNameDetectionTests(unittest.TestCase):
             "all_to_all_dispatch",
             "rccl_broadcast",
             "broadcast_kernel",
-            "nccl_send",   # NCCL p2p still routes through NCCL collectives
+            "nccl_send",  # NCCL p2p still routes through NCCL collectives
             "rccl_AllToAll",
         ]:
             self.assertTrue(kernel_name_implies_multigpu(name), msg=name)
@@ -54,11 +54,11 @@ class CollectiveNameDetectionTests(unittest.TestCase):
             "gemm_a8w8_blockscale",
             "fused_moe",
             "flash_attention_v3",
-            "reduce_max",       # reduce only, not reduce_scatter
+            "reduce_max",  # reduce only, not reduce_scatter
             "reduce_sum_kernel",
             "reduce_kernel",
-            "smallreduce",      # NOT a word-bounded "all_reduce"
-            "tall_gemm",        # NOT a bounded "all_gather"
+            "smallreduce",  # NOT a word-bounded "all_reduce"
+            "tall_gemm",  # NOT a bounded "all_gather"
             "broadcastable_check",  # boundary: "broadcast" only matches when followed by "_"
             "",
         ]:
@@ -70,14 +70,10 @@ class CollectiveNameDetectionTests(unittest.TestCase):
                     self.assertFalse(kernel_name_implies_multigpu(name))
 
     def test_normalisation_handles_camel_case_and_delims(self) -> None:
-        self.assertEqual(_normalise_kernel_name("CustomAllReduce"),
-                         "custom_all_reduce")
-        self.assertEqual(_normalise_kernel_name("rccl.AllGather"),
-                         "rccl_all_gather")
-        self.assertEqual(_normalise_kernel_name("triton-all-to-all-fwd"),
-                         "triton_all_to_all_fwd")
-        self.assertEqual(_normalise_kernel_name("__leading_underscores"),
-                         "leading_underscores")
+        self.assertEqual(_normalise_kernel_name("CustomAllReduce"), "custom_all_reduce")
+        self.assertEqual(_normalise_kernel_name("rccl.AllGather"), "rccl_all_gather")
+        self.assertEqual(_normalise_kernel_name("triton-all-to-all-fwd"), "triton_all_to_all_fwd")
+        self.assertEqual(_normalise_kernel_name("__leading_underscores"), "leading_underscores")
         self.assertEqual(_normalise_kernel_name(""), "")
 
     def test_returns_false_on_empty_or_none_like(self) -> None:

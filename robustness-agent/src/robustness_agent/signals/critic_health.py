@@ -27,7 +27,6 @@ from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 
 
-
 @dataclass
 class CriticHealthConfig:
     """Tunables for :func:`evaluate_critic_health_signals`.
@@ -84,8 +83,10 @@ def evaluate_critic_health_signals(
 # E1 — KB outage streak
 # ---------------------------------------------------------------------------
 
+
 def _kb_outage_symptoms(
-    data: SourceData, cfg: CriticHealthConfig,
+    data: SourceData,
+    cfg: CriticHealthConfig,
 ) -> list[Symptom]:
     """E1: fire ``critic_kb_outage`` for a streak of KB-unreachable judges.
 
@@ -151,12 +152,25 @@ def _kb_outage_symptoms(
 # E2 — critic_unavailable verdict streak
 # ---------------------------------------------------------------------------
 
+
 def _unavailable_streak_symptoms(
     ctx: ReactorContext,
     data: SourceData,
     cfg: CriticHealthConfig,
 ) -> list[Symptom]:
-    """Count consecutive ``critic_unavailable`` verdicts across coordinator_events + inbox."""
+    """Detect a streak of consecutive ``critic_unavailable`` verdicts.
+
+    Scans ``coordinator_events`` plus the reactor inbox for the trailing
+    run of unavailable review verdicts.
+
+    Args:
+        ctx: Reactor context (supplies the inbox).
+        data: Collected source data (coordinator events).
+        cfg: Critic-health configuration thresholds.
+
+    Returns:
+        A list with one :class:`Symptom` when the streak trips, else empty.
+    """
     rows: list[dict[str, Any]] = []
     for event in data.coordinator_events:
         if not isinstance(event, dict):
@@ -216,8 +230,10 @@ def _unavailable_streak_symptoms(
 # E4 — workdir prune stuck
 # ---------------------------------------------------------------------------
 
+
 def _prune_stuck_symptoms(
-    data: SourceData, cfg: CriticHealthConfig,
+    data: SourceData,
+    cfg: CriticHealthConfig,
 ) -> list[Symptom]:
     """E4: fire ``critic_prune_stuck`` when the workdir count leaks past cap.
 
@@ -264,10 +280,20 @@ def _prune_stuck_symptoms(
 # E5 — runtime-cli timeout
 # ---------------------------------------------------------------------------
 
+
 def _runtime_stuck_symptoms(
-    data: SourceData, cfg: CriticHealthConfig,
+    data: SourceData,
+    cfg: CriticHealthConfig,
 ) -> list[Symptom]:
-    """Collapse ``runtime.cli .* timed out`` log hits into a critic-specific symptom."""
+    """Collapse ``runtime.cli .* timed out`` log hits into one symptom.
+
+    Args:
+        data: Collected source data (logs).
+        cfg: Critic-health configuration thresholds.
+
+    Returns:
+        A list with one :class:`Symptom` when timeouts are found, else empty.
+    """
     errors = data.local_log_errors
     if not isinstance(errors, list) or not errors:
         return []

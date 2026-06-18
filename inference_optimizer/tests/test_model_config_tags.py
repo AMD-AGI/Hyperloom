@@ -32,11 +32,14 @@ def _write_config(model_dir: Path, payload: Any) -> Path:
 
 # 1. _load_model_config_tags — happy path + soft-degrade matrix
 def test_load_config_tags_valid(tmp_path: Path) -> None:
-    _write_config(tmp_path / "m", {
-        "architectures": ["LlamaForCausalLM"],
-        "model_type": "llama",
-        "hidden_size": 4096,
-    })
+    _write_config(
+        tmp_path / "m",
+        {
+            "architectures": ["LlamaForCausalLM"],
+            "model_type": "llama",
+            "hidden_size": 4096,
+        },
+    )
     out = _load_model_config_tags(str(tmp_path / "m"))
     assert out == {"architectures": ["LlamaForCausalLM"], "model_type": "llama"}
 
@@ -60,10 +63,13 @@ def test_load_config_tags_non_dict_returns_empty(tmp_path: Path) -> None:
 
 
 def test_load_config_tags_scalar_architectures_wrapped(tmp_path: Path) -> None:
-    _write_config(tmp_path / "m", {
-        "architectures": "LlamaForCausalLM",
-        "model_type": "llama",
-    })
+    _write_config(
+        tmp_path / "m",
+        {
+            "architectures": "LlamaForCausalLM",
+            "model_type": "llama",
+        },
+    )
     out = _load_model_config_tags(str(tmp_path / "m"))
     assert out["architectures"] == ["LlamaForCausalLM"]
 
@@ -78,10 +84,13 @@ def test_load_config_tags_omits_empty_fields(tmp_path: Path) -> None:
 
 
 def test_load_config_tags_drops_blank_entries(tmp_path: Path) -> None:
-    _write_config(tmp_path / "m", {
-        "architectures": ["LlamaForCausalLM", "", "  "],
-        "model_type": "  llama  ",
-    })
+    _write_config(
+        tmp_path / "m",
+        {
+            "architectures": ["LlamaForCausalLM", "", "  "],
+            "model_type": "  llama  ",
+        },
+    )
     out = _load_model_config_tags(str(tmp_path / "m"))
     assert out["architectures"] == ["LlamaForCausalLM"]
     assert out["model_type"] == "llama"
@@ -119,10 +128,13 @@ def kb(tmp_path: Path) -> RecipeKB:
 
 def _cid(state: _FakeSharedState, workload: str, hw: str) -> str:
     return recipe_canonical_id(
-        model=workload, hardware=hw,
+        model=workload,
+        hardware=hw,
         framework=state.framework,
         framework_version=state.framework_version,
         precision=state.precision,
+        model_type=str(getattr(state, "model_type", "") or ""),
+        architectures=getattr(state, "model_architectures", None) or [],
     )
 
 
@@ -134,8 +146,10 @@ def test_t0_anchor_stamps_architecture_tags(kb: RecipeKB, tmp_path: Path) -> Non
         model_type="llama",
     )
     run_t0_anchor(
-        kb, state,
-        workload="Llama-3.1-8B-MyFinetune", hw="MI300X",
+        kb,
+        state,
+        workload="Llama-3.1-8B-MyFinetune",
+        hw="MI300X",
         extra_attrs={"framework": "sglang"},
         session_dir=sd,
     )
@@ -148,14 +162,17 @@ def test_t0_anchor_stamps_architecture_tags(kb: RecipeKB, tmp_path: Path) -> Non
 
 
 def test_t0_anchor_skips_empty_architecture_tags(
-    kb: RecipeKB, tmp_path: Path,
+    kb: RecipeKB,
+    tmp_path: Path,
 ) -> None:
     sd = tmp_path / "session"
     sd.mkdir()
     state = _FakeSharedState()  # no config.json tags
     run_t0_anchor(
-        kb, state,
-        workload="m", hw="mi300x",
+        kb,
+        state,
+        workload="m",
+        hw="mi300x",
         extra_attrs={"framework": "sglang"},
         session_dir=sd,
     )

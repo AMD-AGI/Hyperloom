@@ -59,13 +59,21 @@ class _StubTaskRegistry:
         self.calls: list[dict] = []
 
     async def create_or_return_existing(
-        self, *, kind, params, idempotency_key, **kwargs,
+        self,
+        *,
+        kind,
+        params,
+        idempotency_key,
+        **kwargs,
     ):
         # ``**kwargs`` absorbs newer registry kwargs without per-arg churn.
-        self.calls.append({
-            "kind": kind, "params": dict(params),
-            "idempotency_key": idempotency_key,
-        })
+        self.calls.append(
+            {
+                "kind": kind,
+                "params": dict(params),
+                "idempotency_key": idempotency_key,
+            }
+        )
         task = _StubTask(
             task_id=f"task-{idempotency_key}",
             kind=kind,
@@ -110,12 +118,16 @@ def _warm_recipe_t1(
     what_failed: list | None = None,
 ) -> dict:
     """Build a fake warm_start_recipe payload; ``expected_gain_pct`` lands in ``attrs.sessions[0].gain_pct`` (FIX-2)."""
-    recipe_sessions = sessions if sessions is not None else [
-        {"session_id": "prior-session-A", "gain_pct": expected_gain_pct, "stack_len": 1},
-    ]
+    recipe_sessions = (
+        sessions
+        if sessions is not None
+        else [
+            {"session_id": "prior-session-A", "gain_pct": expected_gain_pct, "stack_len": 1},
+        ]
+    )
     attrs: dict = {
-        "model":     "DeepSeek-R1",
-        "hardware":  "MI300X",
+        "model": "DeepSeek-R1",
+        "hardware": "MI300X",
         "framework": "sglang",
         "best_config": {
             "extra_sglang_args": extra_sglang_args,
@@ -159,8 +171,7 @@ def _warm_recipe_v2_arbor(
                 "extra_envs": dict(extra_envs or {}),
             },
             "sessions": [
-                {"session_id": "prior-A", "gain_pct": expected_gain_pct,
-                 "stack_len": 1},
+                {"session_id": "prior-A", "gain_pct": expected_gain_pct, "stack_len": 1},
             ],
         },
     }
@@ -238,7 +249,8 @@ async def test_warm_replay_skips_when_confidence_below_threshold(tmp_path):
     coord = _make_coord(
         tmp_path,
         warm_start_recipe=_warm_recipe_t1(
-            confidence=0.55, tier="T3_same_family",
+            confidence=0.55,
+            tier="T3_same_family",
         ),
     )
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
@@ -326,7 +338,9 @@ async def test_warm_replay_prefers_warm_start_context_recommended_replay(tmp_pat
         },
     }
     coord = _make_coord(
-        tmp_path, warm_start_recipe=recipe, warm_start_context=context,
+        tmp_path,
+        warm_start_recipe=recipe,
+        warm_start_context=context,
     )
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
     assert task is not None
@@ -346,7 +360,9 @@ async def test_warm_replay_falls_back_to_recipe_when_context_not_hit(tmp_path):
     )
     context = {"status": "seed_only", "recommended_replay": {}}
     coord = _make_coord(
-        tmp_path, warm_start_recipe=recipe, warm_start_context=context,
+        tmp_path,
+        warm_start_recipe=recipe,
+        warm_start_context=context,
     )
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
     assert task is not None
@@ -369,10 +385,12 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
         "expected_gain_pct": 25.0,
         "replay_task_id": "task-warm-replay-prelude",
     }
-    task = _StubTask(params={
-        "extra_sglang_args": "--attention-backend AITER",
-        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
-    })
+    task = _StubTask(
+        params={
+            "extra_sglang_args": "--attention-backend AITER",
+            "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        }
+    )
     # Measured 23% gain (600 → 738) — above 25% × 0.8 = 20% threshold.
     result = {"status": "succeeded", "output_throughput": 738.0}
     coord._promote_warm_replay(result, task=task)
@@ -396,6 +414,48 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert coord.shared_state.current_best["tput"] == 738.0
 
 
+def test_promote_warm_replay_double_run_uses_single_round_anchor(tmp_path):
+    """Double-run replay: current_best.tput / stack.tput / gain MUST use the
+    single-round (warmup) value, NOT the hot measure — so explore/sweep
+    variants (measured single-round) are judged against a comparable bar.
+    The hot measure is retained only under ``hot_tput`` for reporting.
+    """
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "warm_recipe_tier": "exact",
+        "warm_recipe_conf": 0.85,
+        "expected_gain_pct": 25.0,
+        "replay_task_id": "task-warm-replay-prelude",
+    }
+    task = _StubTask(
+        params={
+            "extra_sglang_args": "--attention-backend AITER",
+            "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        }
+    )
+    # Hot measure 738 (+23%) is discarded for the anchor; the single-round
+    # warmup 690 (+15% vs baseline 600) is the fair comparison value.
+    result = {
+        "status": "succeeded",
+        "output_throughput": 738.0,
+        "warmup_round_tput": 690.0,
+    }
+    coord._promote_warm_replay(result, task=task)
+
+    cb = coord.shared_state.current_best
+    assert cb["action"] == "warm_replay"
+    # Critical invariant: explore/sweep anchor is single-round, not hot.
+    assert cb["tput"] == 690.0
+    assert cb["hot_tput"] == 738.0
+    entry = coord.shared_state.optimization_stack[0]
+    assert entry["tput"] == 690.0
+    assert entry["hot_tput"] == 738.0
+    assert entry["gain_pct"] == 15.0
+    assert coord.shared_state.cumulative_gain == 15.0
+    assert coord.shared_state.cumulative_gain_validated == 15.0
+
+
 def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
     """Any replay tput above baseline seeds the stack (policy A), even below the historical reproduce bar."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
@@ -404,10 +464,12 @@ def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
         "expected_gain_pct": 25.0,
         "warm_recipe_tier": "exact",
     }
-    task = _StubTask(params={
-        "extra_sglang_args": "--attention-backend AITER",
-        "baseline_tput_anchor": 600.0,
-    })
+    task = _StubTask(
+        params={
+            "extra_sglang_args": "--attention-backend AITER",
+            "baseline_tput_anchor": 600.0,
+        }
+    )
     # +10% vs baseline; below 25% × 0.8 historical bar but still adopted.
     result = {"status": "succeeded", "output_throughput": 660.0}
     coord._promote_warm_replay(result, task=task)
@@ -428,10 +490,12 @@ def test_promote_warm_replay_no_gain_is_drift(tmp_path):
         "expected_gain_pct": 25.0,
         "warm_recipe_tier": "exact",
     }
-    task = _StubTask(params={
-        "extra_sglang_args": "--attention-backend AITER",
-        "baseline_tput_anchor": 600.0,
-    })
+    task = _StubTask(
+        params={
+            "extra_sglang_args": "--attention-backend AITER",
+            "baseline_tput_anchor": 600.0,
+        }
+    )
     result = {"status": "succeeded", "output_throughput": 600.0}
     coord._promote_warm_replay(result, task=task)
 
@@ -484,16 +548,24 @@ def test_promote_warm_replay_failed_records_outcome(tmp_path):
 def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     # A failed replay must NOT be "unpromotable" — only the promote path clears in_flight.
-    assert coord._is_promotable_result(
-        "replay_warm_recipe", {"status": "failed", "error_class": "crash"},
-    ) is True, (
+    assert (
+        coord._is_promotable_result(
+            "replay_warm_recipe",
+            {"status": "failed", "error_class": "crash"},
+        )
+        is True
+    ), (
         "failed replay must route to _promote_warm_replay so the in_flight "
         "flag is cleared; otherwise PRELUDE never exits"
     )
     # A succeeded replay is of course promotable too.
-    assert coord._is_promotable_result(
-        "replay_warm_recipe", {"status": "succeeded", "output_throughput": 700.0},
-    ) is True
+    assert (
+        coord._is_promotable_result(
+            "replay_warm_recipe",
+            {"status": "succeeded", "output_throughput": 700.0},
+        )
+        is True
+    )
 
 
 @pytest.mark.asyncio
@@ -521,8 +593,7 @@ async def test_failed_replay_clears_in_flight_via_full_routing(tmp_path):
         await coord._handle_unpromotable_result(task, failed)
 
     assert warm_replay_in_flight(coord.shared_state) is False, (
-        "failed replay left warm_replay_in_flight True → PRELUDE would "
-        "never exit"
+        "failed replay left warm_replay_in_flight True → PRELUDE would never exit"
     )
     assert coord.shared_state.warm_replay_outcome["status"] == "failed"
 
@@ -562,9 +633,7 @@ async def test_prelude_initial_analysis_enqueued_after_warm_replay_finishes(
 
     await coord._maybe_enqueue_prelude_initial_analysis_after_baseline()
     assert len(coord.tasks.calls) == 2
-    assert coord.tasks.calls[1]["idempotency_key"] == (
-        "internal-analysis-prelude_initial"
-    )
+    assert coord.tasks.calls[1]["idempotency_key"] == ("internal-analysis-prelude_initial")
     assert coord.shared_state.auto_roofline_pending_task_id
 
 
@@ -627,9 +696,13 @@ def test_inject_warm_recipe_history_v2_arbor_top_level(tmp_path):
             "canonical_id": "inference:deepseek-r1:mi300x:sglang:0.4.5:fp8",
             "model": "deepseek-r1",
             "what_failed": [
-                {"name": "fp4_kv_cache",
-                 "extra_sglang_args": "--kv-cache-dtype fp4",
-                 "extra_envs": {}, "gain_pct": -8.0, "error_class": "regress"},
+                {
+                    "name": "fp4_kv_cache",
+                    "extra_sglang_args": "--kv-cache-dtype fp4",
+                    "extra_envs": {},
+                    "gain_pct": -8.0,
+                    "error_class": "regress",
+                },
             ],
         },
     }
@@ -645,10 +718,14 @@ def test_inject_warm_recipe_history_v2_arbor_top_level(tmp_path):
 def test_inject_warm_recipe_history_is_idempotent(tmp_path):
     """Resume safety: re-invoking the injector after the one-shot flag is set must not re-append rows."""
     recipe = _warm_recipe_t1(
-        what_failed=[{
-            "name": "x", "extra_sglang_args": "--bad-flag",
-            "extra_envs": {}, "gain_pct": -10.0,
-        }],
+        what_failed=[
+            {
+                "name": "x",
+                "extra_sglang_args": "--bad-flag",
+                "extra_envs": {},
+                "gain_pct": -10.0,
+            }
+        ],
     )
     coord = _make_coord(tmp_path, warm_start_recipe=recipe)
     coord.shared_state.explore_search = {}
@@ -665,22 +742,29 @@ def test_inject_warm_recipe_history_dedupes_with_existing_ledger(tmp_path):
     from inference_optimizer.orchestrator.action_executors._canonical_fingerprint import (
         canonical_fingerprint,
     )
+
     failed_args = "--kv-cache-dtype fp4"
     pre_existing_fp = canonical_fingerprint(failed_args, {})
     recipe = _warm_recipe_t1(
-        what_failed=[{
-            "name": "fp4", "extra_sglang_args": failed_args,
-            "extra_envs": {}, "gain_pct": -8.0,
-        }],
+        what_failed=[
+            {
+                "name": "fp4",
+                "extra_sglang_args": failed_args,
+                "extra_envs": {},
+                "gain_pct": -8.0,
+            }
+        ],
     )
     coord = _make_coord(tmp_path, warm_start_recipe=recipe)
     # Simulate an in-session ledger that already records this fingerprint.
     coord.shared_state.explore_search = {
-        "rejected": [{
-            "name": "explore_round_1_X",
-            "fingerprint": pre_existing_fp,
-            "reason": "stack_unstable",
-        }],
+        "rejected": [
+            {
+                "name": "explore_round_1_X",
+                "fingerprint": pre_existing_fp,
+                "reason": "stack_unstable",
+            }
+        ],
     }
     added = coord._inject_warm_recipe_history_into_ledger()
     assert added == 0
@@ -711,9 +795,9 @@ async def test_warm_replay_pulls_expected_gain_from_sessions_max(tmp_path):
     """The historical gain anchor is the MAX of ``attrs.sessions[].gain_pct``."""
     recipe = _warm_recipe_t1(
         sessions=[
-            {"session_id": "older",   "gain_pct": 12.0, "stack_len": 1},
-            {"session_id": "best",    "gain_pct": 28.0, "stack_len": 4},
-            {"session_id": "newer",   "gain_pct": 20.0, "stack_len": 2},
+            {"session_id": "older", "gain_pct": 12.0, "stack_len": 1},
+            {"session_id": "best", "gain_pct": 28.0, "stack_len": 4},
+            {"session_id": "newer", "gain_pct": 20.0, "stack_len": 2},
         ],
     )
     coord = _make_coord(tmp_path, warm_start_recipe=recipe)
@@ -740,7 +824,7 @@ async def test_warm_replay_falls_back_to_flat_gain_pct_for_arbor_seed(tmp_path):
         "recipe": {
             "attrs": {
                 "best_config": {"extra_sglang_args": "--foo", "extra_envs": {}},
-                "gain_pct": 18.0,   # flat — no sessions[]
+                "gain_pct": 18.0,  # flat — no sessions[]
             },
         },
     }
@@ -757,9 +841,11 @@ def test_promote_warm_replay_cumulative_gain_uses_tput_ratio(tmp_path):
         "expected_gain_pct": 25.0,
         "warm_recipe_tier": "exact",
     }
-    task = _StubTask(params={
-        "extra_sglang_args": "--attention-backend AITER",
-    })
+    task = _StubTask(
+        params={
+            "extra_sglang_args": "--attention-backend AITER",
+        }
+    )
     # baseline 600, measured 738 → gain = 23% exactly via tput ratio.
     result = {"status": "succeeded", "output_throughput": 738.0}
     coord._promote_warm_replay(result, task=task)

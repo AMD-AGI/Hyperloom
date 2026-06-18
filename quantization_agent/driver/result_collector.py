@@ -50,10 +50,10 @@ class ValidationSteps:
     run / crashed early, not that the step was skipped on purpose.
     """
 
-    auxiliary: str | None = None   # Step 1
-    md5: str | None = None         # Step 2
-    config: str | None = None      # Step 3
-    fuzzy: str | None = None       # Step 4
+    auxiliary: str | None = None  # Step 1
+    md5: str | None = None  # Step 2
+    config: str | None = None  # Step 3
+    fuzzy: str | None = None  # Step 4
 
 
 @dataclass(frozen=True)
@@ -85,12 +85,12 @@ class CollectedArtifacts:
     source_eval_present: bool
     quantized_eval_present: bool
     eval_report_present: bool
-    eval_report_data: dict | None       # parsed eval_report.json (or None)
-    eval_skipped_reason: str | None     # contents of eval_skipped.txt if present
+    eval_report_data: dict | None  # parsed eval_report.json (or None)
+    eval_skipped_reason: str | None  # contents of eval_skipped.txt if present
 
     # SKILL.md control-plane files
-    last_phase: str | None              # contents of last_phase.txt
-    blocked_reason: str | None          # contents of blocked.md
+    last_phase: str | None  # contents of last_phase.txt
+    blocked_reason: str | None  # contents of blocked.md
     fix_hypothesis_attempts: tuple[int, ...] = field(default_factory=tuple)
 
 
@@ -107,6 +107,15 @@ _STEP_LINE_RE = re.compile(
 
 
 def _parse_validation_report(text: str) -> ValidationSteps:
+    """Parse the validator's Markdown report into per-step statuses.
+
+    Args:
+        text: Contents of ``validation_report.md``.
+
+    Returns:
+        A :class:`ValidationSteps` with the auxiliary, MD5, config, and fuzzy
+        step statuses (``ok`` / ``FAIL`` / ``skipped`` / ``None`` if absent).
+    """
     by_num: dict[str, str] = {}
     for m in _STEP_LINE_RE.finditer(text):
         # Normalize to lower-case "ok"/"fail"/"skipped" for downstream compares.
@@ -123,6 +132,14 @@ def _parse_validation_report(text: str) -> ValidationSteps:
 
 
 def _read_text(path: Path) -> str | None:
+    """Read a UTF-8 text file, returning ``None`` if it cannot be read.
+
+    Args:
+        path: File to read.
+
+    Returns:
+        The file contents, or ``None`` when the file is missing or unreadable.
+    """
     try:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -132,6 +149,17 @@ def _read_text(path: Path) -> str | None:
 
 
 def _read_json(path: Path) -> tuple[dict | None, str | None]:
+    """Read and parse a JSON file.
+
+    Args:
+        path: File to read.
+
+    Returns:
+        A ``(data, error)`` tuple. On success ``data`` is the parsed object and
+        ``error`` is ``None``; on a decode failure ``data`` is ``None`` and
+        ``error`` is a human-readable message. A missing file yields
+        ``(None, None)``.
+    """
     raw = _read_text(path)
     if raw is None:
         return None, None
@@ -144,9 +172,17 @@ def _read_json(path: Path) -> tuple[dict | None, str | None]:
 def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | None]:
     """Read ``run_manifest.yaml`` and pull ``outputs.quantized_model_dir``.
 
-    Returns ``(path, manifest_present, parse_error)``. PyYAML is imported
-    lazily so the agent stays installable without it — falling back to the
-    ``nice_to_have_skipped`` (#20) outcome in that case.
+    PyYAML is imported lazily so the agent stays installable without it —
+    falling back to the ``nice_to_have_skipped`` (#20) outcome in that case.
+
+    Args:
+        workspace: Workspace directory containing ``run_manifest.yaml``.
+
+    Returns:
+        A ``(path, manifest_present, parse_error)`` tuple. ``path`` is the
+        resolved quantized-model directory (or ``None``), ``manifest_present``
+        indicates the manifest file existed, and ``parse_error`` carries a
+        reason string when parsing failed.
     """
 
     manifest = workspace / "run_manifest.yaml"
@@ -179,6 +215,15 @@ def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | No
 
 
 def _has_any(directory: Path, names: Iterable[str]) -> bool:
+    """Return whether any of the named files exists in ``directory``.
+
+    Args:
+        directory: Directory to check.
+        names: Candidate file names.
+
+    Returns:
+        ``True`` if at least one named file exists, otherwise ``False``.
+    """
     for name in names:
         if (directory / name).is_file():
             return True
@@ -186,6 +231,15 @@ def _has_any(directory: Path, names: Iterable[str]) -> bool:
 
 
 def _has_glob(directory: Path, patterns: Iterable[str]) -> bool:
+    """Return whether any glob pattern matches a file in ``directory``.
+
+    Args:
+        directory: Directory to search.
+        patterns: Glob patterns to test.
+
+    Returns:
+        ``True`` if at least one pattern matches an entry, otherwise ``False``.
+    """
     for pat in patterns:
         for _ in directory.glob(pat):
             return True
@@ -198,6 +252,12 @@ def _scan_hypothesis_attempts(workspace: Path) -> tuple[int, ...]:
     The classifier uses these to decide if SKILL.md actually diagnosed a fix
     before the retry was attempted (precondition for incrementing the
     retry counter — see §A.10).
+
+    Args:
+        workspace: Workspace directory to scan.
+
+    Returns:
+        The sorted attempt numbers ``N`` found on disk (empty if none).
     """
 
     pattern = re.compile(r"^fix_hypothesis_attempt_(\d+)\.md$")
@@ -213,6 +273,15 @@ def _scan_hypothesis_attempts(workspace: Path) -> tuple[int, ...]:
 
 
 def _strict_validation_enabled(env: dict[str, str] | None = None) -> bool:
+    """Return whether strict validation mode is enabled.
+
+    Args:
+        env: Environment mapping to read from; defaults to ``os.environ``.
+
+    Returns:
+        ``True`` unless ``STRICT_VALIDATION_ENV`` is explicitly set to a
+        falsy value (``0``, ``false``, ``no``, or empty).
+    """
     raw = (env if env is not None else os.environ).get(STRICT_VALIDATION_ENV, "1")
     return raw.strip().lower() not in ("0", "false", "no", "")
 
@@ -221,25 +290,39 @@ def _strict_validation_enabled(env: dict[str, str] | None = None) -> bool:
 # public entry
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def collect_artifacts(
     workspace: Path,
     *,
     env: dict[str, str] | None = None,
 ) -> CollectedArtifacts:
+    """Scan a run workspace and summarize the on-disk artifacts.
+
+    Inspects the run manifest, quantized model directory, validation report,
+    eval report, and retry/hypothesis markers to build the evidence record the
+    outcome classifier consumes.
+
+    Args:
+        workspace: Per-run workspace directory to inspect.
+        env: Environment mapping used for feature flags; defaults to
+            ``os.environ``.
+
+    Returns:
+        A :class:`CollectedArtifacts` describing which expected outputs are
+        present and any parse errors encountered.
+    """
     workspace = Path(workspace)
 
     qdir, manifest_present, manifest_err = _resolve_quantized_dir(workspace)
 
     quantized_dir_exists = bool(qdir and qdir.is_dir())
     has_config = bool(quantized_dir_exists and (qdir / "config.json").is_file())  # type: ignore[union-attr]
-    has_weights = bool(quantized_dir_exists and _has_glob(qdir, _WEIGHT_GLOBS))   # type: ignore[arg-type]
+    has_weights = bool(quantized_dir_exists and _has_glob(qdir, _WEIGHT_GLOBS))  # type: ignore[arg-type]
     has_tokenizer = bool(quantized_dir_exists and _has_any(qdir, _TOKENIZER_FILES))  # type: ignore[arg-type]
 
     validation_text = _read_text(workspace / "validation_report.md")
     validation_present = validation_text is not None
-    validation_steps = (
-        _parse_validation_report(validation_text) if validation_text else ValidationSteps()
-    )
+    validation_steps = _parse_validation_report(validation_text) if validation_text else ValidationSteps()
 
     eval_data, _ = _read_json(workspace / "eval_report.json")
 

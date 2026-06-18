@@ -27,18 +27,17 @@ def _init_repo(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update(
-        GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t.local",
-        GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t.local",
+        GIT_AUTHOR_NAME="t",
+        GIT_AUTHOR_EMAIL="t@t.local",
+        GIT_COMMITTER_NAME="t",
+        GIT_COMMITTER_EMAIL="t@t.local",
     )
-    subprocess.run(["git", "init", "-b", "main", str(path)],
-                   check=True, capture_output=True, env=env)
+    subprocess.run(["git", "init", "-b", "main", str(path)], check=True, capture_output=True, env=env)
     pkg = path / "vllm" / "model_executor" / "models"
     pkg.mkdir(parents=True)
     (pkg / "qwen3.py").write_text("def f():\n    return 1\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(path), "add", "."],
-                   check=True, capture_output=True, env=env)
-    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"],
-                   check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"], check=True, capture_output=True, env=env)
 
 
 _PATCH_EXISTING = """\
@@ -131,7 +130,8 @@ def test_vet_patches_drops_missing_target_keeps_stale(tmp_path: Path):
     ok = tmp_path / "ok.patch"
     ok.write_text(_PATCH_EXISTING, encoding="utf-8")
     kept, dropped, grounding = vet_patches(
-        [str(miss), str(ok)], base_checkout=repo,
+        [str(miss), str(ok)],
+        base_checkout=repo,
     )
     assert kept == [str(ok)]
     assert len(dropped) == 1

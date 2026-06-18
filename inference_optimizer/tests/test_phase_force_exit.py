@@ -150,7 +150,8 @@ def test_force_exit_both_triggers_fire():
     )
     assert fired is True
     assert set(evidence["fired_reasons"]) >= {
-        "session_remaining", "phase_remaining_pct",
+        "session_remaining",
+        "phase_remaining_pct",
     }
 
 
@@ -177,10 +178,7 @@ def test_exit_normal_explore_force_exit_takes_priority_over_plateau():
     )
     # Seed enough plateau-shaped data that a plateau judgment would
     # otherwise fire (3 empty rounds + low cumulative gain).
-    state.specialist_rounds = [
-        {"round_id": i, "empty_streak": i + 1, "proposal_count": 0}
-        for i in range(3)
-    ]
+    state.specialist_rounds = [{"round_id": i, "empty_streak": i + 1, "proposal_count": 0} for i in range(3)]
     result = phase_state.exit_normal_explore(state)
     assert result is not None
     reason, evidence = result
@@ -261,12 +259,8 @@ def test_interleave_narrows_force_exit_hours(monkeypatch):
     )
     fired, evidence = phase_state.should_force_exit_explore(state)
     assert fired is False
-    assert evidence["hours_remaining_threshold"] == (
-        phase_state.DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE
-    )
-    assert evidence["budget_pct_threshold"] == (
-        phase_state.DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE
-    )
+    assert evidence["hours_remaining_threshold"] == (phase_state.DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE)
+    assert evidence["budget_pct_threshold"] == (phase_state.DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE)
     assert evidence["interleave_aware_ir6"] is True
 
 
@@ -296,7 +290,8 @@ def test_interleave_respects_explicit_override(monkeypatch):
     )
     # Operator explicitly wants the 3h reservation even under interleave.
     fired, evidence = phase_state.should_force_exit_explore(
-        state, hours_remaining_threshold=3.0001,
+        state,
+        hours_remaining_threshold=3.0001,
     )
     assert fired is True  # 2.5h remaining < 3.0001h explicit threshold
     assert evidence["hours_remaining_threshold"] == 3.0001

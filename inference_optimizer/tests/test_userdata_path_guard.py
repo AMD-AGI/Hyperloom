@@ -40,14 +40,18 @@ def _args_without_overrides() -> argparse.Namespace:
 
 # USER_DATA_PATH SET: never returns /workspace/hyperloom
 def test_workspace_root_returns_user_data_path_when_set(
-    clean_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    clean_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     assert paths.workspace_root() == tmp_path
 
 
 def test_kb_root_under_user_data_path_when_set(
-    clean_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    clean_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """With the env set, the local-KB root lands under it and never contains the pod-local default."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
@@ -72,16 +76,13 @@ def test_no_warning_emitted_when_set(
 
 # USER_DATA_PATH UNSET: loud fallback to /workspace/hyperloom
 def test_workspace_root_falls_back_and_warns_when_unset(
-    clean_env: None, caplog: pytest.LogCaptureFixture,
+    clean_env: None,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.WARNING, logger="inference_optimizer.paths"):
         result = paths.workspace_root()
     assert result == paths.DEFAULT_SESSION_DIR == Path(_DEFAULT)
-    warnings = [
-        r for r in caplog.records
-        if r.levelno == logging.WARNING
-        and paths.ENV_USER_DATA_PATH in r.message
-    ]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and paths.ENV_USER_DATA_PATH in r.message]
     assert warnings, "expected a loud USER_DATA_PATH-unset warning"
 
 
@@ -92,18 +93,15 @@ def test_kb_root_falls_back_when_unset(clean_env: None) -> None:
 
 
 def test_unset_warning_is_emitted_once(
-    clean_env: None, caplog: pytest.LogCaptureFixture,
+    clean_env: None,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Hot-path guard: the warning fires at most once per process so it doesn't drown logs."""
     with caplog.at_level(logging.WARNING, logger="inference_optimizer.paths"):
         paths.workspace_root()
         paths.workspace_root()
         paths.workspace_root()
-    warnings = [
-        r for r in caplog.records
-        if r.levelno == logging.WARNING
-        and paths.ENV_USER_DATA_PATH in r.message
-    ]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and paths.ENV_USER_DATA_PATH in r.message]
     assert len(warnings) == 1
 
 
@@ -126,10 +124,9 @@ def test_manifest_warns_when_dependency_is_pod_local(
     with caplog.at_level(logging.WARNING, logger="inference_optimizer.manifest"):
         manifest._describe_dep("MAGPIE_DIR")
 
-    assert any(
-        "MAGPIE_DIR" in r.message and "pod-local" in r.message
-        for r in caplog.records
-    ), "expected a loud pod-local escape warning"
+    assert any("MAGPIE_DIR" in r.message and "pod-local" in r.message for r in caplog.records), (
+        "expected a loud pod-local escape warning"
+    )
 
 
 def test_manifest_does_not_warn_for_persistent_shared_checkout(

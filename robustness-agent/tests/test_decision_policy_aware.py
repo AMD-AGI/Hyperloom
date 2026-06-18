@@ -31,6 +31,7 @@ def policy() -> PolicyAware:
 # Happy path — every builder output should be emit-safe
 # ---------------------------------------------------------------------------
 
+
 def test_heartbeat_passes(policy: PolicyAware):
     policy.assert_payload_complete(build_heartbeat())
 
@@ -92,6 +93,7 @@ def test_update_state_passes(policy: PolicyAware):
 # Role gate
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "intent_type",
     [
@@ -111,6 +113,7 @@ def test_role_blocks_disallowed_intents(intent_type, policy: PolicyAware):
 # ---------------------------------------------------------------------------
 # Required-field gate
 # ---------------------------------------------------------------------------
+
 
 def test_alert_missing_severity_is_payload_error(policy: PolicyAware):
     intent = Intent(type=IntentType.ALERT, payload={"summary": "x"})
@@ -233,6 +236,7 @@ def test_send_message_missing_topic(policy: PolicyAware):
 # ---------------------------------------------------------------------------
 # validate_all collects every violation
 # ---------------------------------------------------------------------------
+
 
 def test_validate_all_collects_multiple_violations(policy: PolicyAware):
     bad = Intent(

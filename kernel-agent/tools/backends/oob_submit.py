@@ -20,12 +20,10 @@ from ray_runtime import (
     ensure_ray_cluster,
     isolated_compile_cache_env,
     quiet_ray_init,
-    safe_runtime_env,
 )
 
 
-def _safety_system_prompt(kernel_repo: str, budget_minutes: float = 30.0,
-                          num_gpus: int = 1) -> str:
+def _safety_system_prompt(kernel_repo: str, budget_minutes: float = 30.0, num_gpus: int = 1) -> str:
     """Build the safety/system prompt enforced on the OOB sub-agent.
 
     Encodes the hard rules (absolute output paths, no writes outside the
@@ -43,16 +41,14 @@ def _safety_system_prompt(kernel_repo: str, budget_minutes: float = 30.0,
     Returns:
         str: The fully rendered system-prompt text.
     """
-    forbidden = (kernel_repo
-                 or "/sgl-workspace, /opt, /usr, /etc, "
-                    "/sgl-workspace/aiter, /sgl-workspace/sglang")
+    forbidden = kernel_repo or "/sgl-workspace, /opt, /usr, /etc, /sgl-workspace/aiter, /sgl-workspace/sglang"
     soft_deadline = max(1, int(budget_minutes * 0.85))
-    gpu_hint = (
-        f"You have {num_gpus} GPU(s) available. "
-        + ("For multi-GPU benchmarks use `torchrun --nproc_per_node="
-           f"{num_gpus} ...` or set HIP_VISIBLE_DEVICES to the assigned ids "
-           "(see the `gpu_ids` line in the prompt body).\n"
-           if num_gpus > 1 else "Single-GPU sandbox; no torchrun needed.\n")
+    gpu_hint = f"You have {num_gpus} GPU(s) available. " + (
+        "For multi-GPU benchmarks use `torchrun --nproc_per_node="
+        f"{num_gpus} ...` or set HIP_VISIBLE_DEVICES to the assigned ids "
+        "(see the `gpu_ids` line in the prompt body).\n"
+        if num_gpus > 1
+        else "Single-GPU sandbox; no torchrun needed.\n"
     )
     base = (
         "You are a kernel optimization agent running inside a sandboxed workspace. "
@@ -85,10 +81,17 @@ def _safety_system_prompt(kernel_repo: str, budget_minutes: float = 30.0,
     return base
 
 
-def _build_cmd(agent: str, prompt_file: Path, output_dir: Path,
-               source_file: str, max_turns: int, timeout_s: int,
-               extra_files: list[str] | None = None,
-               kernel_repo: str = "", num_gpus: int = 1) -> list[str]:
+def _build_cmd(
+    agent: str,
+    prompt_file: Path,
+    output_dir: Path,
+    source_file: str,
+    max_turns: int,
+    timeout_s: int,
+    extra_files: list[str] | None = None,
+    kernel_repo: str = "",
+    num_gpus: int = 1,
+) -> list[str]:
     """Assemble the ``oob run`` argument vector.
 
     Args:
@@ -115,14 +118,22 @@ def _build_cmd(agent: str, prompt_file: Path, output_dir: Path,
     if not shutil.which("oob"):
         raise FileNotFoundError("oob CLI not in PATH; run install.sh")
     cmd = [
-        "oob", "run", "-a", agent,
-        "--prompt-file", str(prompt_file),
-        "--max-turns", str(max_turns),
-        "--timeout", str(timeout_s),
-        "--system-prompt", _safety_system_prompt(
-            kernel_repo, budget_minutes=timeout_s / 60.0, num_gpus=num_gpus),
-        "--json", "--no-live",
-        "-o", str(output_dir),
+        "oob",
+        "run",
+        "-a",
+        agent,
+        "--prompt-file",
+        str(prompt_file),
+        "--max-turns",
+        str(max_turns),
+        "--timeout",
+        str(timeout_s),
+        "--system-prompt",
+        _safety_system_prompt(kernel_repo, budget_minutes=timeout_s / 60.0, num_gpus=num_gpus),
+        "--json",
+        "--no-live",
+        "-o",
+        str(output_dir),
     ]
     if source_file:
         cmd.extend(["-f", source_file])
@@ -133,7 +144,18 @@ def _build_cmd(agent: str, prompt_file: Path, output_dir: Path,
 
 
 def _parse_oob_init(stdout: str) -> dict[str, str]:
-    """Extract cwd / session_id / thread_id from oob run --json output (trailing summary, else ndjson init)."""
+    """Extract workspace and session identifiers from ``oob run`` JSON output.
+
+    Prefers the trailing oob-run JSON summary, falling back to the ndjson init
+    record.
+
+    Args:
+        stdout: The captured stdout from ``oob run --json``.
+
+    Returns:
+        A dict with ``cli_workspace``, ``session_id``, and ``thread_id`` keys
+        (empty strings when not found).
+    """
     info = {"cli_workspace": "", "session_id": "", "thread_id": ""}
     if not stdout:
         return info
@@ -163,7 +185,7 @@ def _parse_oob_init(stdout: str) -> dict[str, str]:
                 depth -= 1
                 if depth == 0:
                     try:
-                        evt = json.loads(stdout[i:end + 1])
+                        evt = json.loads(stdout[i : end + 1])
                     except json.JSONDecodeError:
                         break
                     if isinstance(evt, dict) and evt.get("workspace"):
@@ -190,10 +212,17 @@ def _parse_oob_init(stdout: str) -> dict[str, str]:
     return info
 
 
-def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: str,
-                max_turns: int, num_gpus: int, timeout_s: int,
-                extra_files: list[str] | None = None,
-                kernel_repo: str = "") -> dict:
+def run_via_ray(
+    agent: str,
+    prompt_file: Path,
+    output_dir: Path,
+    source_file: str,
+    max_turns: int,
+    num_gpus: int,
+    timeout_s: int,
+    extra_files: list[str] | None = None,
+    kernel_repo: str = "",
+) -> dict:
     """Run an OOB submission inside a Ray GPU task.
 
     Initializes Ray (quietly), renders the safety system prompt, then
@@ -218,41 +247,91 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
             ``thread_id`` attribution keys.
     """
     import ray
-    runtime_env = quiet_ray_init(
-        num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
-    system_prompt_text = _safety_system_prompt(
-        kernel_repo, budget_minutes=timeout_s / 60.0, num_gpus=num_gpus)
+
+    runtime_env = quiet_ray_init(num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
+    system_prompt_text = _safety_system_prompt(kernel_repo, budget_minutes=timeout_s / 60.0, num_gpus=num_gpus)
 
     @ray.remote(num_gpus=num_gpus)
-    def _task(agent: str, prompt_file_str: str, output_dir_str: str,
-              source_file: str, max_turns: int, timeout_s: int,
-              extra_files: list[str], system_prompt: str) -> dict:
+    def _task(
+        agent: str,
+        prompt_file_str: str,
+        output_dir_str: str,
+        source_file: str,
+        max_turns: int,
+        timeout_s: int,
+        extra_files: list[str],
+        system_prompt: str,
+    ) -> dict:
+        """Run one out-of-box (OOB) agent attempt inside a Ray worker.
+
+        Self-contained because Ray workers do not inherit the driver's
+        ``sys.path``; GPU visibility and compile caches are set up here.
+
+        Args:
+            agent: Agent identifier to run.
+            prompt_file_str: Path to the prompt file.
+            output_dir_str: Output directory for this attempt.
+            source_file: Path to the kernel source file.
+            max_turns: Maximum agent turns.
+            timeout_s: Per-attempt timeout in seconds.
+            extra_files: Additional files to make available to the agent.
+            system_prompt: System prompt text for the run.
+
+        Returns:
+            A result dict with ``returncode``, ``stdout``/``stdout_tail``,
+            ``stderr_tail``, ``gpu_ids``, ``elapsed_s``, and ``cmd`` (return
+            code ``127`` when the ``oob`` CLI is missing on the worker).
+        """
         # Self-contained: workers don't share the driver sys.path.
-        import os as _os, shutil as _shutil, subprocess as _sp, time as _t
+        import os as _os
+        import shutil as _shutil
+        import subprocess as _sp
+        import time as _t
+
         if not _shutil.which("oob"):
             return {
-                "returncode": 127, "stdout_tail": "", "stdout": "",
+                "returncode": 127,
+                "stdout_tail": "",
+                "stdout": "",
                 "stderr_tail": "oob CLI not in PATH on Ray worker",
-                "gpu_ids": "", "elapsed_s": 0.0, "cmd": [],
+                "gpu_ids": "",
+                "elapsed_s": 0.0,
+                "cmd": [],
             }
-        gpu_ids = (_os.environ.get("ROCR_VISIBLE_DEVICES")
-                   or _os.environ.get("HIP_VISIBLE_DEVICES")
-                   or _os.environ.get("CUDA_VISIBLE_DEVICES")
-                   or "0")
+        gpu_ids = (
+            _os.environ.get("ROCR_VISIBLE_DEVICES")
+            or _os.environ.get("HIP_VISIBLE_DEVICES")
+            or _os.environ.get("CUDA_VISIBLE_DEVICES")
+            or "0"
+        )
         # Per-attempt compile caches so a co-running GEAK ladder can't clobber
         # this run's aiter/triton/inductor artifacts (see isolated_compile_cache_env).
-        for _var, _sub in (("TRITON_CACHE_DIR", "triton"),
-                           ("AITER_ROOT_DIR", "aiter"),
-                           ("TORCHINDUCTOR_CACHE_DIR", "inductor")):
+        for _var, _sub in (
+            ("TRITON_CACHE_DIR", "triton"),
+            ("AITER_ROOT_DIR", "aiter"),
+            ("TORCHINDUCTOR_CACHE_DIR", "inductor"),
+        ):
             _cdir = _os.path.join(output_dir_str, ".cache", _sub)
             _os.makedirs(_cdir, exist_ok=True)
             _os.environ[_var] = _cdir
-        cmd = ["oob", "run", "-a", agent,
-               "--prompt-file", prompt_file_str,
-               "--max-turns", str(max_turns),
-               "--timeout", str(timeout_s),
-               "--system-prompt", system_prompt,
-               "--json", "--no-live", "-o", output_dir_str]
+        cmd = [
+            "oob",
+            "run",
+            "-a",
+            agent,
+            "--prompt-file",
+            prompt_file_str,
+            "--max-turns",
+            str(max_turns),
+            "--timeout",
+            str(timeout_s),
+            "--system-prompt",
+            system_prompt,
+            "--json",
+            "--no-live",
+            "-o",
+            output_dir_str,
+        ]
         if source_file:
             cmd.extend(["-f", source_file])
         for ef in extra_files or []:
@@ -288,8 +367,14 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
             }
 
     ref = _task.options(num_gpus=num_gpus, runtime_env=runtime_env).remote(
-        agent, str(prompt_file), str(output_dir), source_file, max_turns, timeout_s,
-        list(extra_files or []), system_prompt_text,
+        agent,
+        str(prompt_file),
+        str(output_dir),
+        source_file,
+        max_turns,
+        timeout_s,
+        list(extra_files or []),
+        system_prompt_text,
     )
     result = ray.get(ref)
     # Parse the oob init line for exact workspace attribution (no mtime races).
@@ -297,10 +382,17 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
     return result
 
 
-def run_via_cli(agent: str, prompt_file: Path, output_dir: Path, source_file: str,
-                max_turns: int, timeout_s: int,
-                extra_files: list[str] | None = None,
-                kernel_repo: str = "", num_gpus: int = 1) -> dict:
+def run_via_cli(
+    agent: str,
+    prompt_file: Path,
+    output_dir: Path,
+    source_file: str,
+    max_turns: int,
+    timeout_s: int,
+    extra_files: list[str] | None = None,
+    kernel_repo: str = "",
+    num_gpus: int = 1,
+) -> dict:
     """Run an OOB submission directly via subprocess (no Ray).
 
     Builds the command via :func:`_build_cmd`, runs it with the current
@@ -323,17 +415,28 @@ def run_via_cli(agent: str, prompt_file: Path, output_dir: Path, source_file: st
             ``stderr_tail``, ``stdout``, ``gpu_ids``, ``elapsed_s``,
             ``cmd``, plus merged attribution keys.
     """
-    cmd = _build_cmd(agent, prompt_file, output_dir, source_file, max_turns, timeout_s,
-                     extra_files=extra_files, kernel_repo=kernel_repo, num_gpus=num_gpus)
-    gpu_ids = os.environ.get("ROCR_VISIBLE_DEVICES") \
-        or os.environ.get("HIP_VISIBLE_DEVICES") \
-        or os.environ.get("CUDA_VISIBLE_DEVICES") or "0"
+    cmd = _build_cmd(
+        agent,
+        prompt_file,
+        output_dir,
+        source_file,
+        max_turns,
+        timeout_s,
+        extra_files=extra_files,
+        kernel_repo=kernel_repo,
+        num_gpus=num_gpus,
+    )
+    gpu_ids = (
+        os.environ.get("ROCR_VISIBLE_DEVICES")
+        or os.environ.get("HIP_VISIBLE_DEVICES")
+        or os.environ.get("CUDA_VISIBLE_DEVICES")
+        or "0"
+    )
     # Per-attempt compile caches (see isolated_compile_cache_env).
     child_env = isolated_compile_cache_env(output_dir)
     started = time.time()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout_s + 60, env=child_env)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 60, env=child_env)
         result = {
             "returncode": proc.returncode,
             "stdout_tail": (proc.stdout or "")[-4000:],
@@ -362,10 +465,18 @@ def run_via_cli(agent: str, prompt_file: Path, output_dir: Path, source_file: st
     return result
 
 
-def submit(agent: str, prompt_file: Path, output_dir: Path, source_file: str = "",
-           max_turns: int = 100, timeout_s: int = 1800, num_gpus: int = 1,
-           prefer_ray: bool = True, extra_files: list[str] | None = None,
-           kernel_repo: str = "") -> dict:
+def submit(
+    agent: str,
+    prompt_file: Path,
+    output_dir: Path,
+    source_file: str = "",
+    max_turns: int = 100,
+    timeout_s: int = 1800,
+    num_gpus: int = 1,
+    prefer_ray: bool = True,
+    extra_files: list[str] | None = None,
+    kernel_repo: str = "",
+) -> dict:
     """Submit an OOB run, preferring Ray with a CLI fallback.
 
     Ensures the output directory exists, then (when ``prefer_ray``)
@@ -389,15 +500,45 @@ def submit(agent: str, prompt_file: Path, output_dir: Path, source_file: str = "
         dict: The result mapping from the chosen submission path.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Placement precedence: ssh (Dynamo multi-node, env-gated) > ray > cli.
+    # ssh_placement_active() is True ONLY when the orchestrator set
+    # KERNEL_AGENT_GPU_PLACEMENT=ssh (Dynamo backend); ray/cli paths below are
+    # byte-for-byte unchanged otherwise.
+    try:
+        from ssh_runtime import ssh_placement_active, run_oob_over_ssh
+    except Exception:  # noqa: BLE001 — ssh_runtime optional; never block ray/cli
+        ssh_placement_active = lambda: False  # noqa: E731
+        run_oob_over_ssh = None  # bound for the (never-taken) branch below
+    if ssh_placement_active():
+        return run_oob_over_ssh(
+            agent,
+            prompt_file,
+            output_dir,
+            source_file,
+            max_turns,
+            num_gpus,
+            timeout_s,
+            extra_files=extra_files,
+            kernel_repo=kernel_repo,
+            system_prompt_text=_safety_system_prompt(kernel_repo, budget_minutes=timeout_s / 60.0, num_gpus=num_gpus),
+        )
     if prefer_ray:
         try:
             import ray  # noqa: F401
+
             # ensure_ray_cluster starts a fresh head if `ray status` fails (no-op when healthy).
-            ensure_ray_cluster(num_gpus=num_gpus,
-                               log_path=output_dir / "ray_lifecycle.log")
-            return run_via_ray(agent, prompt_file, output_dir, source_file,
-                               max_turns, num_gpus, timeout_s,
-                               extra_files=extra_files, kernel_repo=kernel_repo)
+            ensure_ray_cluster(num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
+            return run_via_ray(
+                agent,
+                prompt_file,
+                output_dir,
+                source_file,
+                max_turns,
+                num_gpus,
+                timeout_s,
+                extra_files=extra_files,
+                kernel_repo=kernel_repo,
+            )
         except Exception as exc:
             return {
                 "returncode": 1,
@@ -412,8 +553,17 @@ def submit(agent: str, prompt_file: Path, output_dir: Path, source_file: str = "
                 "elapsed_s": 0.0,
                 "cmd": [],
             }
-    return run_via_cli(agent, prompt_file, output_dir, source_file, max_turns, timeout_s,
-                       extra_files=extra_files, kernel_repo=kernel_repo, num_gpus=num_gpus)
+    return run_via_cli(
+        agent,
+        prompt_file,
+        output_dir,
+        source_file,
+        max_turns,
+        timeout_s,
+        extra_files=extra_files,
+        kernel_repo=kernel_repo,
+        num_gpus=num_gpus,
+    )
 
 
 def main() -> int:
@@ -427,8 +577,9 @@ def main() -> int:
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--source-file", default="")
-    parser.add_argument("--extra-file", action="append", default=[],
-                        help="Additional file copied into the OOB workspace (repeatable)")
+    parser.add_argument(
+        "--extra-file", action="append", default=[], help="Additional file copied into the OOB workspace (repeatable)"
+    )
     parser.add_argument("--max-turns", type=int, default=100)
     parser.add_argument("--timeout-s", type=int, default=1800)
     parser.add_argument("--num-gpus", type=int, default=1)
