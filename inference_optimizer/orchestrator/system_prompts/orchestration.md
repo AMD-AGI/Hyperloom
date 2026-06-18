@@ -125,8 +125,8 @@ propose / delegate explore / specialist / integrate_patch so kernel
 insights and config refinements can be interleaved within a single
 phase. The phase chain stays monotonic; only the per-phase action
 contract is widened. Caveat: in KERNEL, do not interleave to
-`explore` / `specialist` while `has_keep_pending_integrate=true` —
-`integrate` the pending KEEPs first so their e2e gain is validated
+`explore` / `specialist` while `has_keep_pending_integrate=true`
+(kernel KEEP queue not yet drained) — `integrate` the pending KEEPs first so their e2e gain is validated
 before any explore round measures `current_best` (see the KERNEL
 phase entry below).
 
@@ -258,8 +258,8 @@ grid-runner entry):
     is auto-managed (not proposable); see "Roofline" below.
 
     **Drain pending KEEPs before interleaving away.** When
-    `has_keep_pending_integrate=true` (see the `pending_keep_kernels=`
-    state line), those kernels have a verified micro-speedup but are NOT
+    `has_keep_pending_integrate=true` (kernel KEEP queue; see the
+    `pending_keep_kernels=` state line), those kernels have a verified micro-speedup but are NOT
     yet in `optimization_stack` and have NOT been e2e re-baselined. You
     MUST first `integrate` each `pending_keep_kernels` entry (REQUEST
     `kind='integrate'`, patch → re-baseline → KEEP/REVERT) and drain the

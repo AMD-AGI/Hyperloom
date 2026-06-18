@@ -44,6 +44,7 @@ async def measure_stack_rebench(
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
     result_dir: str | None = None,
+    magpie_python: str | None = None,
     server_lifecycle: dict[str, Any] | None = None,
 ) -> StackRebenchResult:
     """Run ``variant`` once on the stack and grade it against the floor."""
@@ -58,6 +59,7 @@ async def measure_stack_rebench(
         gpu_type=gpu_type,
         benchmark_script=benchmark_script,
         result_dir=result_dir,
+        magpie_python=magpie_python,
         server_lifecycle=server_lifecycle,
     )
     rb = results[0] if results else None

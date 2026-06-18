@@ -808,6 +808,7 @@ class IntegratePatchExecutor:
                 ),
             }
         extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or extra.get("state")
         # Specialist workspace conventionally at runs/specialist/<id>/.
         specialist_workspace = self.session_dir / "runs" / "specialist" / specialist_task_id
         if not specialist_workspace.is_dir():
@@ -900,6 +901,24 @@ class IntegratePatchExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
+        # Long-run #4: mark the non-transactional integrate window before any
+        # framework tree mutation. The Coordinator clears this after promoting
+        # the final KEEP/REVERT/APPLY_FAILED result into SharedState.
+        if shared_state is not None:
+            try:
+                shared_state.pending_integrate = {
+                    "specialist_task_id": specialist_task_id,
+                    "task_id": str(getattr(ctx.task, "task_id", "") or ""),
+                    "patches": [str(p) for p in patch_paths],
+                    "config_changes": dict(config_changes),
+                    "framework_source_root": str(framework_root or ""),
+                    "workspace": str(output_root),
+                    "ts": _now_iso(),
+                }
+                shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — sentinel is best-effort
+                log.exception("integrate_patch: failed to persist pending_integrate sentinel")
+
         # Stage 1: apply patches (best-effort with -3 fallback).
         applied: list[Path] = []
         apply_errors: list[dict[str, str]] = []
@@ -945,7 +964,6 @@ class IntegratePatchExecutor:
         # ``integrate_patch_requires_critic_verdict`` already gates the
         # delegate; this is belt-and-braces for paths that bypass PolicyGate
         # (legacy resume / test injection). No-ops when SharedState is absent.
-        shared_state = extra.get("shared_state") or extra.get("state")
         if shared_state is not None and not params.get("bypass_critic"):
             try:
                 recorded = shared_state.get_specialist_patch_verdict(
@@ -1457,6 +1475,7 @@ class IntegratePatchExecutor:
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
             result_dir=override_result_dir,
+            magpie_python=params.get("magpie_python") or None,
         )
         accuracy_pass = (
             self._grade_accuracy(rebench.workspace, params.get("accuracy_baseline")) if rebench.workspace else None

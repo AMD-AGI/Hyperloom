@@ -55,14 +55,6 @@ def context_window_for_model(model: str) -> int:
     """
     return MODEL_CONTEXT_WINDOWS.get((model or "").strip(), DEFAULT_MODEL_CONTEXT_WINDOW)
 
-
-_MEMORY_KEYS: tuple[str, ...] = (
-    "current_plan",
-    "hypotheses",
-    "tried_and_why",
-    "pending",
-    "learnings",
-)
 # Content fields that carry forward when a checkpoint reply omits them (#1):
 # scalar plan + list threads. ``learnings`` accumulates separately.
 _MEMORY_LIST_KEYS: tuple[str, ...] = ("hypotheses", "tried_and_why", "pending")

@@ -15,7 +15,7 @@ import re
 from typing import Any, Iterable
 
 
-# Direction names match ``roofline_snapshot._SATURATION_LABEL_MAP``:
+# Direction names match the roofline direction vocabulary used in prompts:
 # ``compute`` / ``memory`` / ``host_overhead`` / ``comm``.
 _FLAG_TO_DIRECTIONS: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
     (re.compile(r"(?<!\S)--num-continuous-decode-steps(?!\S)"), frozenset({"host_overhead"})),

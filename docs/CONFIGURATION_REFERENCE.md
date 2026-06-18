@@ -201,6 +201,15 @@ To get the single "total tokens for this run" number, read
 
 ---
 
+## 9. Long-run / roofline convergence tuning
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_SATURATION_WITHIN_PCT` | `95.0` | Roofline ceiling threshold used by `direction_saturation()`. A dominant direction is marked saturated when achieved throughput is at least this percentage of the relevant roofline ceiling. Values outside `(0, 100]` fall back to `95.0`. |
+| `INFERENCE_OPTIMIZER_SATURATION_CONVERGENCE` | enabled | Set to `0`/`false`/`no`/`off` to disable the cyclic-phase stop condition that blocks another macro-cycle when every tracked roofline domain is saturated. |
+
+---
+
 ## 10. Variables intentionally **not** exposed
 
 These are read by `os.environ` somewhere in the codebase but are

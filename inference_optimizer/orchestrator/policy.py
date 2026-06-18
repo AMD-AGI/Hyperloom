@@ -457,6 +457,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",
         "cumulative_gain_validated_stack_len",
+        "pending_integrate",
+        "resume_pending_revalidation",
         "baseline_tput",
         "baseline_accuracy",
         "session_id",
@@ -503,6 +505,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "no_gain_cycle_streak",
         "pending_bottleneck_switch",
         "last_cycle_bottleneck",
+        "saturated_directions",
+        "bottleneck_shift",
+        "cycle_strategy_log",
         # operator-facing lifecycle event log (#266). Coordinator-only writer
         # (SharedState.record_lifecycle_event); LLM update_state must not be
         # able to forge "phase X finished, outputs at <path>" events.

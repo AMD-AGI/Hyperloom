@@ -65,7 +65,7 @@ def test_policy_char_budget_trigger():
     assert p.should_checkpoint(
         ticks_since_last=0,
         minutes_since_last=0,
-        chars_since_last=400_000,
+        chars_since_last=om.DEFAULT_CHECKPOINT_CHAR_BUDGET,
         phase_changed=False,
     )
 
@@ -200,10 +200,13 @@ def test_tracker_reset():
 # ---- batch-1 #3: context-token guardrail ----
 
 
-def test_context_window_known_and_unknown():
+def test_context_window_known_and_unknown(monkeypatch):
     assert context_window_for_model("claude-opus-4-8") == 200_000
-    assert context_window_for_model("") == om.DEFAULT_MODEL_CONTEXT_WINDOW
-    assert context_window_for_model("totally-unknown") == om.DEFAULT_MODEL_CONTEXT_WINDOW
+    monkeypatch.setattr(om, "DEFAULT_MODEL_CONTEXT_WINDOW", 123_456)
+    monkeypatch.setitem(om.MODEL_CONTEXT_WINDOWS, "unit-known-window", 234_567)
+    assert context_window_for_model("unit-known-window") == 234_567
+    assert context_window_for_model("") == 123_456
+    assert context_window_for_model("totally-unknown") == 123_456
 
 
 def test_policy_context_token_soft_trigger():
@@ -336,6 +339,9 @@ def test_deterministic_memory_fallback_is_non_degenerate():
     fb = deterministic_memory_fallback(_FakeState())
     assert "EXPLORE" in fb["current_plan"]
     assert "cycle=2" in fb["current_plan"]
+    assert "best_tput=1234.5" in fb["current_plan"]
+    assert "validated_gain=12.34%" in fb["current_plan"]
+    assert fb["tried_and_why"] == ["stack has 2 accepted change(s)"]
     assert not is_degenerate_checkpoint(fb)
 
 

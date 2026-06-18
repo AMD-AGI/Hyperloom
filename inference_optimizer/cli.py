@@ -4498,9 +4498,9 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="specialist_per_turn_max_seconds",
         type=float,
         default=float(os.environ.get("INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS", "600") or "600"),
-        help="Wall-clock cap per specialist turn (default 600s). Used "
-        "by the robustness stale-scan to detect stuck specialists "
-        ".",
+        help="Wall-clock fallback ceiling per specialist task when no "
+        "explicit wall_budget_sec is provided (legacy backstop, default "
+        "600s; production dispatches use the WS1 wall-clock budget).",
     )
     # specialist dispatch shape
     opt.add_argument(
