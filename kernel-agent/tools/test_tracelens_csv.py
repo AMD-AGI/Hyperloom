@@ -344,10 +344,10 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
     assert tla.is_reusable_native_kernel(candidate) is True
     # Without CURSOR_API_KEY: recommendation excludes cursor (auto-skip).
     monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex"]
     # With CURSOR_API_KEY: cursor is appended to the recommendation tail.
     monkeypatch.setenv("CURSOR_API_KEY", "crsr_test_dummy")
-    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex", "cursor"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex", "cursor"]
 
 
 def test_recommend_backends_includes_geak_for_python_source():
@@ -358,7 +358,7 @@ def test_recommend_backends_includes_geak_for_python_source():
         "source_type": "python",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex"]
 
 
 def test_recommend_backends_includes_geak_for_unknown_source():
@@ -369,11 +369,11 @@ def test_recommend_backends_includes_geak_for_unknown_source():
         "source_type": "unknown",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex"]
 
 
-def test_recommend_backends_geak_is_first_in_ladder():
-    """Invariant: when GEAK is in the ladder, it is FIRST."""
+def test_recommend_backends_geak_precedes_llm_backends():
+    """Invariant: forge leads, GEAK precedes the claude/codex LLM backends."""
     candidate = {
         "name": "some_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/x.py",
@@ -381,7 +381,8 @@ def test_recommend_backends_geak_is_first_in_ladder():
         "reusable_native_kernel": True,
     }
     ladder = tla.recommend_backends(candidate)
-    assert ladder and ladder[0] == "geak", f"GEAK must be first in the ladder, got {ladder}"
+    assert ladder[:2] == ["forge", "geak"], f"forge then GEAK must lead the ladder, got {ladder}"
+    assert ladder.index("geak") < ladder.index("claude"), ladder
 
 
 def test_unknown_source_root_is_not_reusable_native():
