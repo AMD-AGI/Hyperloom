@@ -1246,17 +1246,9 @@ class PolicyGate:
         if not action_name or action_name not in _GEMM_TUNING_ACTIONS:
             return
         # Dynamically check if forge backend lifts the FP8 gate.
-        gemm_backend = (
-            os.environ.get("GEMM_TUNING_BACKEND") or ""
-        ).strip().lower()
-        if not gemm_backend:
-            order = os.environ.get("KERNEL_OPT_BACKEND_ORDER") or ""
-            for item in order.split(","):
-                name = item.strip().lower()
-                if name in ("forge", "geak"):
-                    gemm_backend = name
-                    break
-        if gemm_backend == "forge":
+        from .kernel_request_handlers import _resolve_gemm_tuning_backend
+
+        if _resolve_gemm_tuning_backend({}) == "forge":
             return  # forge handles eligibility internally; no FP8 gate.
         state = self.shared_state
         if state is None:

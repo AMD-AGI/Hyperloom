@@ -2777,7 +2777,6 @@ class Coordinator:
 
         backend = str(result.get("backend") or "geak").strip().lower()
         requires_e2e = bool(result.get("requires_e2e_validation", False))
-        tuned_tput = baseline * speedup
         ts = datetime.now(timezone.utc).isoformat()
 
         # Resolve extra_envs: forge provides recommended_env/extra_envs;
@@ -2785,7 +2784,6 @@ class Coordinator:
         if backend == "forge":
             extra_envs = dict(result.get("extra_envs") or result.get("recommended_env") or {})
             tuned_file = ""
-            # Use first artifact path as tuned_file for dedup.
             artifacts = result.get("artifacts") or {}
             if isinstance(artifacts, dict) and artifacts:
                 tuned_file = str(next(iter(artifacts.values()), ""))
@@ -2800,6 +2798,25 @@ class Coordinator:
             variant_name = "a8w8_blockscale_tuned_gemm"
 
         final_report = str(result.get("final_report_path") or "")
+
+        if requires_e2e:
+            # Forge micro-only: do NOT promote tput or cumulative_gain
+            # (micro speedup != E2E speedup). Only record the extra_envs
+            # so downstream explore picks them up for E2E validation.
+            self.shared_state.current_best = {
+                "action": "gemm_tuning",
+                "tput": baseline,  # keep baseline as-is; E2E will update
+                "variant_name": variant_name,
+                "tuned_file": tuned_file,
+                "final_report_path": final_report,
+                "workspace": result.get("workspace"),
+                "extra_envs": extra_envs,
+                "requires_e2e_validation": True,
+            }
+            return
+
+        # GEAK path: E2E already validated internally.
+        tuned_tput = baseline * speedup
         existing = {
             str(item.get("tuned_file") or "")
             for item in (self.shared_state.optimization_stack or [])
@@ -2816,7 +2833,6 @@ class Coordinator:
             "workspace": result.get("workspace"),
             "extra_envs": extra_envs,
             "backend": backend,
-            "requires_e2e_validation": requires_e2e,
             "source": "kernel_entry_auto",
             "ts": ts,
         }
@@ -2838,13 +2854,11 @@ class Coordinator:
             "extra_envs": extra_envs,
         }
         self.shared_state.cumulative_gain = (speedup - 1.0) * 100.0
-        if not requires_e2e:
-            # GEAK's tuned benchmark is end-to-end serving, so it's already validated.
-            self.shared_state.cumulative_gain_validated = self.shared_state.cumulative_gain
-            self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(
-                self.shared_state.optimization_stack or []
-            )
+        self.shared_state.cumulative_gain_validated = self.shared_state.cumulative_gain
+        self.shared_state.cumulative_gain_validated_ts = ts
+        self.shared_state.cumulative_gain_validated_stack_len = len(
+            self.shared_state.optimization_stack or []
+        )
 
     def _should_continue_kernel_after_gemm(self) -> bool:
         """Decide whether to run source-level kernel_opt right after GEMM tuning.

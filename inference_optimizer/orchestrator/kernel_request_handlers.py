@@ -19,7 +19,9 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -1218,25 +1220,12 @@ def _resolve_gemm_tuning_backend(payload: dict) -> str:
     ).strip().lower()
     if raw in ("forge", "geak"):
         return raw
-    order_raw = (
-        os.environ.get("KERNEL_OPT_BACKEND_ORDER")
-        or os.environ.get("KERNEL_OPT_BACKENDS")
-        or ""
-    )
-    if order_raw:
-        for item in order_raw.split(","):
-            name = item.strip().lower()
-            if name == "forge":
-                return "forge"
-            if name == "geak":
-                return "geak"
-    return "forge"
+    # Default: geak (backward compatible; forge requires explicit opt-in).
+    return "geak"
 
 
 def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
     """Parse FORGE_GEMM_TUNE_RESULT_BEGIN/END sentinel block from stdout."""
-    import re
-
     m = re.search(
         r"FORGE_GEMM_TUNE_RESULT_BEGIN\s*\n(.*?)\nFORGE_GEMM_TUNE_RESULT_END",
         stdout,
@@ -1252,8 +1241,6 @@ def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
 
 def _forge_gemm_tune_available() -> bool:
     """Check if forge-gemm-tune CLI is importable or on PATH."""
-    import shutil
-
     if shutil.which("forge-gemm-tune"):
         return True
     try:
