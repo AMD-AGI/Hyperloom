@@ -12,9 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
-import fnmatch
 import functools
-import glob
 import gzip
 import json
 import os
@@ -68,18 +66,22 @@ from _paths import workspace_root
 # curated JSON that is the ground truth (it may be edited over time). This block
 # is the single reader of that JSON.
 #
-# Resolution by ``kind``:
-#   * ``single``    -> one (or, defensively, several) editable ``.cu``.
-#   * ``dispatch``  -> exactly one of N routes runs; the route is chosen by
-#                      fnmatch-ing the device ``Kernel Name`` against
-#                      ``routes[].match``.
-#   * ``composite`` -> several sub-kernels that all run; every ``resolved`` /
-#                      ``patchable`` route is a separate optimization target
-#                      (fan-out -> one GEAK run each).
+# Each entry stores, per container, the device kernels seen under ``vllm`` /
+# ``sglang`` as ``{device_kernel_name: {kernel_source_path, kernel_source_line,
+# kernel_kind, patchable}}``. Routability is *derived* (no stored ``status``): an
+# op is routable iff its selected container holds a ``patchable`` kernel whose
+# ``kernel_source_path`` is an editable source -- native ``.cu``/``.cuh``/``.hip``
+# or a repo ``.py`` Triton kernel (inductor-generated ``.py`` is excluded).
 #
-# Paths are taken straight from the JSON's absolute path fields (``abs_path`` or
-# ``abs_path_sglang`` / ``abs_path_vllm``), selected by the candidate's
-# framework. ``rel_path`` is intentionally ignored.
+# Resolution by ``kind``:
+#   * ``single``    -> the container's editable source(s); N sources fan out to
+#                      one GEAK run each.
+#   * ``dispatch``  -> the single kernel whose name matches the trace device
+#                      ``Kernel Name``.
+#   * ``composite`` -> all editable kernels in the container run (fan-out).
+#
+# ``kernel_source_path`` values are absolute. A dictionary miss returns ``None``
+# so the caller falls back to the ``.py`` launcher + shapes (GEAK handles it).
 # ---------------------------------------------------------------------------
 
 # Vendored ground-truth dictionary (committed under tools/data/).
@@ -186,80 +188,6 @@ class OpResolution:
         self.stamp_onto(item)
 
 
-def _normalize_op_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """Bridge the data schema (nested ``{fw:{device_kernel:{kernel_source_path}}}``)
-    to the schema the resolver consumes (``status``/``abs_path``/``routes``).
-
-    The committed ``op_to_source.json`` stores each op's editable source NESTED as
-    ``sglang``/``vllm`` -> ``{<device_kernel_name>: {kernel_source_path, patchable}}``,
-    but :class:`OpResolver` only emits sources when ``status == "resolved"`` and
-    reads ``abs_path`` / ``abs_path_sglang`` / ``abs_path_vllm`` (single) or
-    ``routes[].match`` + per-route ``abs_path`` (dispatch). Without this bridge every
-    op resolves to ``status=None`` / empty sources (the cu_mapping WIP schema-mismatch
-    bug). This converts in-place, idempotently:
-      * 1 device-kernel across fw containers  -> single entry with abs_path_{sglang,vllm}
-      * >1 distinct device-kernels            -> dispatch entry with routes[].match
-    Already-normalized entries (those carrying ``status``/``abs_path``/``routes``) pass through.
-    """
-    if not isinstance(entry, dict):
-        return entry
-    # Already in resolver schema -> leave as-is.
-    if entry.get("status") or entry.get("routes") or entry.get("abs_path") \
-            or entry.get("abs_path_sglang") or entry.get("abs_path_vllm"):
-        return entry
-    # Collect (device_kernel_name, source_path, framework, patchable) from nested fw maps.
-    leaves: list[tuple[str, str, str, Any]] = []
-    for fw in ("sglang", "vllm"):
-        fw_map = entry.get(fw)
-        if not isinstance(fw_map, dict):
-            continue
-        for dk_name, leaf in fw_map.items():
-            if not isinstance(leaf, dict):
-                continue
-            path = leaf.get("kernel_source_path") or leaf.get("abs_path")
-            if path:
-                leaves.append((str(dk_name), str(path), fw, leaf.get("patchable")))
-    if not leaves:
-        return entry  # no editable source recorded -> leave unresolved (no-kernel/triton/etc.)
-    out = dict(entry)
-    distinct_kernels = {dk for dk, _p, _fw, _pa in leaves}
-    if len(distinct_kernels) <= 1:
-        # Single editable source — resolve directly, split by container so
-        # _select_paths picks whichever .cu is actually present on disk.
-        out["kind"] = "single"
-        out["status"] = _ROUTABLE_STATUS
-        out.setdefault("framework", "aiter")
-        sgl = [p for _dk, p, fw, _pa in leaves if fw == "sglang"]
-        vll = [p for _dk, p, fw, _pa in leaves if fw == "vllm"]
-        if sgl:
-            out["abs_path_sglang"] = sgl
-        if vll:
-            out["abs_path_vllm"] = vll
-        if not sgl and not vll:
-            out["abs_path"] = [p for _dk, p, _fw, _pa in leaves]
-        out["patchable"] = any(bool(pa) for _dk, _p, _fw, pa in leaves) or entry.get("patchable")
-    else:
-        # Multiple device kernels -> dispatch by device_kernel_name glob.
-        out["kind"] = "dispatch"
-        routes = []
-        for dk, p, fw, pa in leaves:
-            routes.append({
-                # Escape + strip so the device-kernel name matches as a literal:
-                # fnmatch treats [ ] ? * as metachars (would silently break or
-                # over-broaden self-matching for templated kernels), and the
-                # resolver strip()s the lookup name (so trailing whitespace in
-                # the stored name must be stripped here too).
-                "match": glob.escape(dk.strip()),
-                "status": _ROUTABLE_STATUS,
-                ("abs_path_sglang" if fw == "sglang" else "abs_path_vllm" if fw == "vllm" else "abs_path"): [p],
-                "patchable": pa,
-                "framework": "aiter",
-            })
-        out["routes"] = routes
-        out["default"] = {"status": "unresolved"}
-    return out
-
-
 @lru_cache(maxsize=1)
 def load_mapping() -> dict[str, Any]:
     """Load and cache the vendored ground-truth ``data/op_to_source.json``.
@@ -267,41 +195,77 @@ def load_mapping() -> dict[str, Any]:
     Returns:
         The parsed mapping (op name -> entry), or ``{}`` if unreadable.
 
-    Each entry is passed through :func:`_normalize_op_entry` so the committed
-    nested ``{fw:{device_kernel:{kernel_source_path}}}`` data is bridged to the
-    resolver's ``status``/``abs_path``/``routes`` schema (fixes the cu_mapping
-    schema-mismatch where every op resolved to empty).
+    The committed JSON stores each op's editable source NESTED as
+    ``sglang``/``vllm`` -> ``{<device_kernel_name>: {kernel_source_path, ...}}``,
+    which :class:`OpResolver` reads directly (no schema bridging).
     """
     try:
         with open(_OP_TO_SOURCE_JSON, encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
         return {}
-    if not isinstance(data, dict):
-        return {}
-    return {op: _normalize_op_entry(entry) for op, entry in data.items()}
+    return data if isinstance(data, dict) else {}
 
 
-def _as_path_list(value: Any) -> list[str]:
-    """Normalize a path field (str | list | null) to a list of non-empty strings."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value] if value.strip() else []
-    if isinstance(value, list):
-        return [p for p in value if isinstance(p, str) and p.strip()]
-    return []
+# Editable source extensions: native device code plus repo-resident Triton .py.
+_NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip")
+_PY_DIST_ROOT = "/usr/local/lib/python3.12/dist-packages/"
+
+
+def _absolutize_source(path: str) -> str:
+    """Best-effort absolutize a kernel source path (JSON is pre-absolutized; defensive)."""
+    if not path:
+        return path
+    return path if path.startswith("/") else _PY_DIST_ROOT + path
+
+
+def _is_editable_source(path: str | None, kernel_kind: str | None) -> bool:
+    """True for an editable kernel source: native ``.cu``/``.cuh``/``.hip`` or a repo ``.py`` Triton kernel.
+
+    Inductor-generated Triton (``triton_inductor_generated`` / ``/tmp/torchinductor``)
+    is excluded: it is regenerated code, not an editable repo source.
+    """
+    if not path:
+        return False
+    low = path.lower()
+    if low.endswith(_NATIVE_SOURCE_EXTS):
+        return True
+    if low.endswith(".py"):
+        if kernel_kind == "triton_inductor_generated":
+            return False
+        if "torchinductor" in path or path.startswith("/tmp/"):
+            return False
+        return True
+    return False
+
+
+def _nonrewritable_reason(entry: dict[str, Any]) -> str:
+    """Derive a skip reason for an entry with no editable source (audit/classify)."""
+    kinds = {
+        str((info or {}).get("kernel_kind") or "")
+        for cont in ("vllm", "sglang")
+        for info in (entry.get(cont) or {}).values()
+    }
+    kinds.discard("")
+    if kinds and kinds <= {"triton_inductor_generated"}:
+        return "inductor-generated kernels (no editable source)"
+    return "no editable native/triton source"
 
 
 class OpResolver:
-    """Reads the ground-truth dictionary and resolves a CPU op to its ``.cu``.
+    """Reads the ground-truth dictionary and resolves a CPU op to its editable source.
 
-    Resolution by ``kind``: ``single`` -> the entry's editable source(s);
-    ``dispatch`` -> the one route whose ``match`` glob fits the device kernel
-    name (else the ``default``); ``composite`` -> a fan-out of per-route
-    sub-resolutions that all run. Paths come straight from the JSON's
-    ``abs_path`` / ``abs_path_sglang`` / ``abs_path_vllm`` fields; ``rel_path``
-    is never used.
+    The JSON stores, per op, the device kernels seen in each container under
+    ``vllm`` / ``sglang`` as ``{device_kernel_name: {kernel_source_path, ...}}``.
+    Routability is derived (no stored ``status``): an op is routable iff its
+    selected container has at least one ``patchable`` kernel whose
+    ``kernel_source_path`` is an editable source (see :func:`_is_editable_source`).
+
+    Resolution by ``kind``: ``single`` -> the container's editable source(s)
+    (fanned out one GEAK run each); ``dispatch`` -> the single kernel whose name
+    matches the trace ``device_kernel_name``; ``composite`` -> a fan-out over all
+    editable kernels in the container. A dictionary miss returns ``None`` so the
+    caller falls back to the ``.py`` launcher + shapes (GEAK handles it).
     """
 
     def __init__(self, mapping: dict[str, Any]):
@@ -318,23 +282,33 @@ class OpResolver:
         entry = self.mapping.get(op_name)
         if entry is None:
             return None
-        # ``framework`` selects the container path (sglang/vllm); the entry's own
-        # ``framework`` field (the kernel owner) flows into OpResolution.framework
-        # via ``_node`` but must not override the container selector.
         kind = str(entry.get("kind") or "single")
         if kind == "dispatch":
             return self._dispatch(op_name, entry, framework, device_kernel_name)
         if kind == "composite":
             return self._composite(op_name, entry, framework)
-        return self._node(op_name, entry, framework, kind="single")
+        return self._single(op_name, entry, framework)
 
-    def _select_paths(self, node: dict[str, Any], framework: str | None) -> list[str]:
-        """Pick the absolute editable path(s) for ``node``.
+    @staticmethod
+    def _container_sources(container: dict[str, Any] | None) -> list[str]:
+        """Editable, patchable source paths for one container (dedup, order-preserving)."""
+        out: list[str] = []
+        for info in (container or {}).values():
+            if not isinstance(info, dict) or not info.get("patchable"):
+                continue
+            path = info.get("kernel_source_path")
+            if not _is_editable_source(path, info.get("kernel_kind")):
+                continue
+            abs_path = _absolutize_source(str(path))
+            if abs_path not in out:
+                out.append(abs_path)
+        return out
 
-        For a split per-container entry (``abs_path_sglang`` / ``abs_path_vllm``),
-        route to whichever container's source is installed on disk. Only when both
-        or neither are present do we fall back to the ``framework`` hint, then to
-        sglang. Single ``abs_path`` entries resolve regardless.
+    def _select_sources(self, entry: dict[str, Any], framework: str | None) -> list[str]:
+        """Pick the editable source list, routing to the installed container.
+
+        When both containers carry editable sources, prefer whichever is present
+        on disk; otherwise honor the ``framework`` hint, then sglang.
         """
         def present(path: str) -> bool:
             try:
@@ -342,45 +316,49 @@ class OpResolver:
             except OSError:
                 return False
 
+        sgl = self._container_sources(entry.get("sglang"))
+        vll = self._container_sources(entry.get("vllm"))
+        if not (sgl or vll):
+            return []
+        sgl_present = any(present(p) for p in sgl)
+        vll_present = any(present(p) for p in vll)
+        if sgl_present and not vll_present:
+            return sgl
+        if vll_present and not sgl_present:
+            return vll
         fw = (framework or "").strip().lower()
-        sgl = _as_path_list(node.get("abs_path_sglang"))
-        vll = _as_path_list(node.get("abs_path_vllm"))
-        if sgl or vll:
-            sgl_present = any(present(p) for p in sgl)
-            vll_present = any(present(p) for p in vll)
-            if sgl_present and not vll_present:
-                return sgl
-            if vll_present and not sgl_present:
-                return vll
-            if fw == "vllm" and vll:
-                return vll
-            if fw == "sglang" and sgl:
-                return sgl
-            return sgl or vll
-        return _as_path_list(node.get("abs_path"))
+        if fw == "vllm" and vll:
+            return vll
+        if fw == "sglang" and sgl:
+            return sgl
+        return sgl or vll
 
-    def _node(
-        self,
-        op_name: str,
-        node: dict[str, Any],
-        framework: str | None,
-        *,
-        kind: str,
-        matched_route: str | None = None,
+    def _single(
+        self, op_name: str, entry: dict[str, Any], framework: str | None,
     ) -> OpResolution:
-        """Build an :class:`OpResolution` from a single entry or route node."""
-        status = str(node.get("status") or "unresolved")
-        sources = self._select_paths(node, framework) if status == _ROUTABLE_STATUS else []
+        """Resolve a ``single`` entry to its editable source(s)."""
+        sources = self._select_sources(entry, framework)
+        if sources:
+            return OpResolution(
+                op_name=op_name, kind="single", status=_ROUTABLE_STATUS,
+                patchable=True, framework=framework, sources=sources,
+            )
         return OpResolution(
-            op_name=op_name,
-            kind=kind,
-            status=status,
-            patchable=node.get("patchable"),
-            framework=node.get("framework") or framework,
-            sources=sources,
-            reason=str(node.get("reason") or node.get("label") or ""),
-            matched_route=matched_route,
+            op_name=op_name, kind="single", status="non_rewritable",
+            patchable=False, framework=framework, sources=[],
+            reason=_nonrewritable_reason(entry),
         )
+
+    @staticmethod
+    def _kernel_matches(trace_name: str, key: str) -> bool:
+        """Loosely match a trace device kernel name against a JSON kernel-symbol key.
+
+        Keys are (often truncated) mangled symbols; the trace name may be a plain
+        or differently truncated form, so accept either as a substring of the other.
+        """
+        if not trace_name or not key:
+            return False
+        return trace_name == key or trace_name in key or key in trace_name
 
     def _dispatch(
         self,
@@ -389,39 +367,56 @@ class OpResolver:
         framework: str | None,
         device_kernel_name: str | None,
     ) -> OpResolution:
-        """Resolve a ``dispatch`` entry by matching the device kernel name to a route."""
+        """Resolve a ``dispatch`` entry by matching the trace device kernel name to one kernel."""
         name = (device_kernel_name or "").strip()
         if name:
-            for route in entry.get("routes") or []:
-                pattern = str(route.get("match") or "")
-                if pattern and fnmatch.fnmatch(name, pattern):
-                    return self._node(
-                        op_name, route, framework,
-                        kind="dispatch", matched_route=pattern,
+            fw = (framework or "").strip().lower()
+            containers = (
+                [entry.get("vllm"), entry.get("sglang")]
+                if fw != "sglang"
+                else [entry.get("sglang"), entry.get("vllm")]
+            )
+            for container in containers:
+                for kname, info in (container or {}).items():
+                    if not isinstance(info, dict) or not self._kernel_matches(name, kname):
+                        continue
+                    path = info.get("kernel_source_path")
+                    if info.get("patchable") and _is_editable_source(path, info.get("kernel_kind")):
+                        return OpResolution(
+                            op_name=op_name, kind="dispatch", status=_ROUTABLE_STATUS,
+                            patchable=True, framework=framework,
+                            sources=[_absolutize_source(str(path))], matched_route=kname,
+                        )
+                    return OpResolution(
+                        op_name=op_name, kind="dispatch", status="non_rewritable",
+                        patchable=False, framework=framework, sources=[],
+                        reason="dispatch route has no editable source", matched_route=kname,
                     )
-        default = entry.get("default") or {"status": "unresolved"}
-        return self._node(op_name, default, framework, kind="dispatch")
+        return OpResolution(
+            op_name=op_name, kind="dispatch", status="unresolved",
+            patchable=None, framework=framework, sources=[],
+        )
 
     def _composite(
         self, op_name: str, entry: dict[str, Any], framework: str | None,
     ) -> OpResolution:
-        """Resolve a ``composite`` entry into a fan-out of per-route resolutions."""
+        """Resolve a ``composite`` entry into a fan-out over its editable kernels."""
+        sources = self._select_sources(entry, framework)
         fanout = [
-            self._node(
-                op_name, route, framework, kind="composite",
-                matched_route=str(route.get("match") or "") or None,
+            OpResolution(
+                op_name=op_name, kind="composite", status=_ROUTABLE_STATUS,
+                patchable=True, framework=framework, sources=[src],
             )
-            for route in entry.get("routes") or []
+            for src in sources
         ]
-        routable = [r for r in fanout if r.is_routable]
         return OpResolution(
             op_name=op_name,
             kind="composite",
-            status=_ROUTABLE_STATUS if routable else "non_rewritable",
-            patchable=bool(routable),
+            status=_ROUTABLE_STATUS if fanout else "non_rewritable",
+            patchable=bool(fanout),
             framework=framework,
             sources=[],
-            reason="" if routable else "composite: no rewritable routes",
+            reason="" if fanout else "composite: no editable sources",
             fanout=fanout,
         )
 
@@ -2247,7 +2242,7 @@ def _expand_op_fanout(top: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Framework comes from ``HYPERLOOM_FRAMEWORK`` (an explicit override for the
     rare/offline case where both or neither container source is on disk); in a
-    real container ``OpResolver._select_paths`` picks the installed path.
+    real container ``OpResolver._select_sources`` picks the installed path.
     """
     framework = os.environ.get("HYPERLOOM_FRAMEWORK", "").strip().lower() or None
     expanded: list[dict[str, Any]] = []
