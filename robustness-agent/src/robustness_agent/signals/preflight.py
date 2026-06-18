@@ -25,7 +25,6 @@ from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
 
-
 # ---------------------------------------------------------------------------
 # Static physics tables — conservative engineering values, env-overridable.
 # ---------------------------------------------------------------------------
@@ -35,44 +34,50 @@ GPU_HBM_GIB: dict[str, float] = {
     "mi300x": 192.0,
     "mi325x": 256.0,
     "mi355x": 288.0,
-    "b200":   192.0,
-    "h200":   141.0,
-    "h100":   80.0,
-    "a100":   80.0,
+    "b200": 192.0,
+    "h200": 141.0,
+    "h100": 80.0,
+    "a100": 80.0,
 }
 
 # Bytes per parameter, indexed by manifest ``precision`` (incl. int-quant family).
 PRECISION_BYTES_PER_PARAM: dict[str, float] = {
-    "fp32":  4.0,
-    "fp16":  2.0,
-    "bf16":  2.0,
-    "fp8":   1.0,
-    "int8":  1.0,
-    "fp4":   0.5,
-    "int4":  0.5,
-    "awq":   0.5,   # 4-bit AWQ packs 8 weights per 32-bit word.
-    "gptq":  0.5,
+    "fp32": 4.0,
+    "fp16": 2.0,
+    "bf16": 2.0,
+    "fp8": 1.0,
+    "int8": 1.0,
+    "fp4": 0.5,
+    "int4": 0.5,
+    "awq": 0.5,  # 4-bit AWQ packs 8 weights per 32-bit word.
+    "gptq": 0.5,
 }
 
 # Per-token KV cache bytes per model class (rough averages; override via $HYPERLOOM_KV_BYTES).
 KV_BYTES_PER_TOKEN: dict[str, float] = {
-    "dense":        16.0,
-    "moe_swa":      4.0,
-    "moe_mla":      0.5,
-    "moe_mla_nsa":  0.5,
+    "dense": 16.0,
+    "moe_swa": 4.0,
+    "moe_mla": 0.5,
+    "moe_mla_nsa": 0.5,
 }
 
 # Fixed activation / scratch buffer per GPU (GiB); 8 GiB covers MoE steady-state.
 DEFAULT_ACTIVATION_BUF_GIB: float = 8.0
 
 # Model-name regex matching ``-671B`` / ``-7b`` / `` 3.5B`` size tokens.
-_PARAM_BILLIONS_RE: re.Pattern[str] = re.compile(
-    r"(?<![A-Za-z0-9])(?P<n>\d+(?:\.\d+)?)\s*[Bb](?![A-Za-z])"
-)
+_PARAM_BILLIONS_RE: re.Pattern[str] = re.compile(r"(?<![A-Za-z0-9])(?P<n>\d+(?:\.\d+)?)\s*[Bb](?![A-Za-z])")
 
 
 def extract_params_billions(model_name: str) -> float | None:
-    """Best-effort parse of ``-<N>B`` from a model name (first match; ``None`` if absent)."""
+    """Best-effort parse of ``-<N>B`` parameter count from a model name.
+
+    Args:
+        model_name: The model name to parse.
+
+    Returns:
+        The parameter count in billions (first match), or ``None`` when
+        absent or unparseable.
+    """
     if not model_name:
         return None
     match = _PARAM_BILLIONS_RE.search(model_name)
@@ -98,13 +103,20 @@ class HeadroomBreakdown:
 
 
 def compute_headroom_gib(
-    manifest: dict[str, Any], *,
+    manifest: dict[str, Any],
+    *,
     activation_buf_gib: float = DEFAULT_ACTIVATION_BUF_GIB,
 ) -> HeadroomBreakdown | None:
     """Project per-GPU HBM headroom from manifest metadata.
 
-    Returns ``None`` when a required field (model size, precision, gpu_type, ``tp``) is
-    unresolved; the C1 detector treats ``None`` as "skip — not enough data to judge".
+    Args:
+        manifest: Run manifest with model / workload / GPU metadata.
+        activation_buf_gib: Reserved activation buffer per GPU, in GiB.
+
+    Returns:
+        A :class:`HeadroomBreakdown`, or ``None`` when a required field
+        (model size, precision, gpu_type, ``tp``) is unresolved — the C1
+        detector treats ``None`` as "skip — not enough data to judge".
     """
     if not isinstance(manifest, dict) or not manifest:
         return None
@@ -136,11 +148,11 @@ def compute_headroom_gib(
 
     # Weights split across TP; 5% overhead for pool reservation / shards / launch temporaries.
     total_weights_bytes = params_b * 1_000_000_000 * bytes_per_param * 1.05
-    weights_gib = (total_weights_bytes / float(tp)) / (1024 ** 3)
+    weights_gib = (total_weights_bytes / float(tp)) / (1024**3)
 
     # KV cache for the in-flight batch; shards over TP (heads are sharded).
     total_kv_bytes = kv_bpt * max_model_len * conc
-    kv_cache_gib = (total_kv_bytes / float(tp)) / (1024 ** 3)
+    kv_cache_gib = (total_kv_bytes / float(tp)) / (1024**3)
 
     required_gib = weights_gib + kv_cache_gib + activation_buf_gib
     headroom_gib = hbm_gib - required_gib
@@ -162,7 +174,17 @@ def amdahl_e2e_ceiling(
     optimizable_pct: float,
     single_kernel_speedup: float,
 ) -> float:
-    """Amdahl's law best-case E2E speedup ratio (1.0 = none); caller converts via ``(ratio - 1.0) * 100``."""
+    """Compute Amdahl's-law best-case end-to-end speedup ratio.
+
+    The caller converts to a percentage via ``(ratio - 1.0) * 100``.
+
+    Args:
+        optimizable_pct: Percent of runtime that is optimizable (0-100).
+        single_kernel_speedup: Speedup factor for the optimizable portion.
+
+    Returns:
+        The best-case E2E speedup ratio (``1.0`` means no speedup).
+    """
     p = max(0.0, min(1.0, optimizable_pct / 100.0))
     s = max(1.0, float(single_kernel_speedup))
     serial = 1.0 - p
@@ -174,6 +196,7 @@ def amdahl_e2e_ceiling(
 # ===========================================================================
 # C1 — Model-GPU fit detector
 # ===========================================================================
+
 
 @dataclass
 class ModelGpuFitConfig:
@@ -218,16 +241,16 @@ class ModelGpuFitDetector:
         if self._state_view is None:
             return
         # tuple → list for JSON round-tripping.
-        self._state_view.save({
-            "fired_fingerprint": (
-                list(self._fired_fingerprint)
-                if self._fired_fingerprint is not None
-                else None
-            ),
-        })
+        self._state_view.save(
+            {
+                "fired_fingerprint": (list(self._fired_fingerprint) if self._fired_fingerprint is not None else None),
+            }
+        )
 
     def evaluate(
-        self, ctx: ReactorContext, data: SourceData,
+        self,
+        ctx: ReactorContext,
+        data: SourceData,
     ) -> list[Symptom]:
         """Emit ``model_gpu_infeasible`` once per session if the model won't fit.
 
@@ -251,7 +274,8 @@ class ModelGpuFitDetector:
         if fingerprint == self._fired_fingerprint:
             return []
         breakdown = compute_headroom_gib(
-            manifest, activation_buf_gib=self._config.activation_buf_gib,
+            manifest,
+            activation_buf_gib=self._config.activation_buf_gib,
         )
         if breakdown is None:
             # Insufficient data — record the fingerprint to avoid retrying until manifest changes.
@@ -267,7 +291,9 @@ class ModelGpuFitDetector:
         return [self._build_symptom(manifest, breakdown)]
 
     def _build_symptom(
-        self, manifest: dict[str, Any], breakdown: HeadroomBreakdown,
+        self,
+        manifest: dict[str, Any],
+        breakdown: HeadroomBreakdown,
     ) -> Symptom:
         """Construct the ``model_gpu_infeasible`` symptom from the projection.
 
@@ -343,7 +369,16 @@ def _manifest_fingerprint(manifest: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _recommend_tp(breakdown: HeadroomBreakdown) -> int:
-    """Smallest power-of-two TP clearing ``required_gib`` (operator hint; assumes weights dominate KV)."""
+    """Recommend the smallest power-of-two TP that clears the HBM budget.
+
+    Operator hint only; assumes weights dominate KV and ignores KV scaling.
+
+    Args:
+        breakdown: The per-GPU headroom breakdown.
+
+    Returns:
+        A suggested tensor-parallel degree (power of two).
+    """
     if breakdown.hbm_gib <= 0 or breakdown.weights_gib <= 0:
         return 8
     # Weights shrink ~linearly with TP; ignore KV scaling for the hint.
@@ -360,6 +395,7 @@ def _recommend_tp(breakdown: HeadroomBreakdown) -> int:
 # ===========================================================================
 # C2 — Amdahl kernel-ceiling detector
 # ===========================================================================
+
 
 @dataclass
 class AmdahlCeilingConfig:
@@ -395,11 +431,7 @@ class AmdahlCeilingDetector:
         # Disk-backed dedup; ``fired_mtime`` re-evaluates only on a fresh kernel_breakdown.json.
         loaded = state_view.load() if state_view is not None else {}
         raw_mtime = loaded.get("fired_mtime")
-        self._fired_mtime: float | None = (
-            float(raw_mtime)
-            if isinstance(raw_mtime, (int, float))
-            else None
-        )
+        self._fired_mtime: float | None = float(raw_mtime) if isinstance(raw_mtime, (int, float)) else None
 
     def _persist(self) -> None:
         """Write the last fired breakdown mtime to the state view, if any."""
@@ -408,7 +440,9 @@ class AmdahlCeilingDetector:
         self._state_view.save({"fired_mtime": self._fired_mtime})
 
     def evaluate(
-        self, ctx: ReactorContext, data: SourceData,
+        self,
+        ctx: ReactorContext,
+        data: SourceData,
     ) -> list[Symptom]:
         """Fire ``amdahl_kernel_ceiling_low`` when kernel opt can't move E2E.
 
@@ -439,10 +473,7 @@ class AmdahlCeilingDetector:
             self._persist()
             return []
         cfg = self._config
-        optimizable_pct = sum(
-            float(tier_pcts.get(name) or 0.0)
-            for name in cfg.optimizable_tier_names
-        )
+        optimizable_pct = sum(float(tier_pcts.get(name) or 0.0) for name in cfg.optimizable_tier_names)
         ceiling_ratio = amdahl_e2e_ceiling(
             optimizable_pct=optimizable_pct,
             single_kernel_speedup=cfg.single_kernel_speedup,
@@ -453,12 +484,14 @@ class AmdahlCeilingDetector:
         self._persist()
         if ceiling_pct >= cfg.min_e2e_ceiling_pct:
             return []
-        return [self._build_symptom(
-            tier_pcts=tier_pcts,
-            optimizable_pct=optimizable_pct,
-            ceiling_pct=ceiling_pct,
-            breakdown=breakdown,
-        )]
+        return [
+            self._build_symptom(
+                tier_pcts=tier_pcts,
+                optimizable_pct=optimizable_pct,
+                ceiling_pct=ceiling_pct,
+                breakdown=breakdown,
+            )
+        ]
 
     def _build_symptom(
         self,
@@ -501,8 +534,7 @@ class AmdahlCeilingDetector:
             subject={},  # session-wide
             source="local",
             suggestion=(
-                "prune_branch(kernel_opt); allocate remaining budget to "
-                "params/sweep where Amdahl ceiling is higher"
+                "prune_branch(kernel_opt); allocate remaining budget to params/sweep where Amdahl ceiling is higher"
             ),
         )
 
@@ -510,6 +542,7 @@ class AmdahlCeilingDetector:
 # ===========================================================================
 # C3 — Cold-start budget exhaustion (stateless cross-signal)
 # ===========================================================================
+
 
 @dataclass
 class ColdStartConfig:
@@ -538,7 +571,8 @@ def _resolve_cold_start_minutes(cfg: ColdStartConfig) -> float:
     if cfg.cold_start_minutes is not None:
         return float(cfg.cold_start_minutes)
     raw = os.environ.get(
-        "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC", "3600",
+        "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
+        "3600",
     )
     try:
         return float(raw) / 60.0

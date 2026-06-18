@@ -69,12 +69,14 @@ def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
 
 def test_prepare_review_propagates_known_actions(reviewer):
     rev, kb, sm = reviewer
-    bundle = rev.prepare_review({
-        "kind": "coordinator_inbox",
-        "session_id": "sess_known",
-        "raw_prompt": _PROMPT_WITH_TWO_PROPOSALS,
-        "options": {"known_actions": ["sweep", "baseline", "validate_stack"]},
-    })
+    bundle = rev.prepare_review(
+        {
+            "kind": "coordinator_inbox",
+            "session_id": "sess_known",
+            "raw_prompt": _PROMPT_WITH_TWO_PROPOSALS,
+            "options": {"known_actions": ["sweep", "baseline", "validate_stack"]},
+        }
+    )
     assert bundle.review_constraints["known_actions"] == [
         "baseline",
         "sweep",
@@ -207,13 +209,15 @@ def test_prepare_review_unknown_action_falls_back_to_evidence_producer(reviewer)
 def test_prepare_review_no_proposals_uses_strict_default(reviewer):
     """``critic_decision_request`` has no inbox proposals, so the legacy strict checklist stays the safe default."""
     rev, _, _ = reviewer
-    bundle = rev.prepare_review({
-        "kind": "critic_decision_request",
-        "session_id": "sess_nop",
-        "context": {"model": "qwen3-14b", "framework": "sglang"},
-        "messages": [{"role": "coordinator", "content": "decide"}],
-        "decision": {"summary": "land patch x"},
-    })
+    bundle = rev.prepare_review(
+        {
+            "kind": "critic_decision_request",
+            "session_id": "sess_nop",
+            "context": {"model": "qwen3-14b", "framework": "sglang"},
+            "messages": [{"role": "coordinator", "content": "decide"}],
+            "decision": {"summary": "land patch x"},
+        }
+    )
     constraints = bundle.review_constraints
     assert constraints["approve_requires"] == [
         "comparable_before_after_benchmark",
@@ -228,32 +232,36 @@ def test_prepare_review_no_proposals_uses_strict_default(reviewer):
 
 def test_prepare_review_skips_kb_when_critical_context_missing(reviewer):
     rev, kb, sm = reviewer
-    bundle = rev.prepare_review({
-        "kind": "critic_decision_request",
-        "session_id": "sess_b",
-        "messages": [{"role": "coordinator", "content": "decide"}],
-        "decision": {"summary": "adopt patch x"},
-    })
+    bundle = rev.prepare_review(
+        {
+            "kind": "critic_decision_request",
+            "session_id": "sess_b",
+            "messages": [{"role": "coordinator", "content": "decide"}],
+            "decision": {"summary": "adopt patch x"},
+        }
+    )
     assert bundle.required_context == ["model", "framework"]
     assert bundle.kb_read_skipped_reason == "missing_critical_context"
 
 
 def test_prepare_review_returns_kb_priors_per_proposal(reviewer):
     rev, kb, sm = reviewer
-    kb.upsert({
-        "scope": {
-            "org": "hyperloom",
-            "framework": "sglang",
-            "model": "qwen3-14b",
-            "model_family": "qwen",
-            "workload": "decode",
-            "precision": "fp8",
-        },
-        "kind": "pitfall",
-        "slug": "active-path-unproven-pitfall",
-        "importance": 0.5,
-        "metadata": {"topic": "active path"},
-    })
+    kb.upsert(
+        {
+            "scope": {
+                "org": "hyperloom",
+                "framework": "sglang",
+                "model": "qwen3-14b",
+                "model_family": "qwen",
+                "workload": "decode",
+                "precision": "fp8",
+            },
+            "kind": "pitfall",
+            "slug": "active-path-unproven-pitfall",
+            "importance": 0.5,
+            "metadata": {"topic": "active path"},
+        }
+    )
     prompt = (
         "=== Shared session state ===\n"
         "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
@@ -267,9 +275,12 @@ def test_prepare_review_returns_kb_priors_per_proposal(reviewer):
 def test_prepare_review_filters_already_reviewed_proposals(reviewer):
     rev, kb, sm = reviewer
     sm.mark_reviewed("sess_dedup", "aaa1", "approve")
-    bundle = rev.prepare_review(_coordinator_request(
-        _PROMPT_WITH_TWO_PROPOSALS, "sess_dedup",
-    ))
+    bundle = rev.prepare_review(
+        _coordinator_request(
+            _PROMPT_WITH_TWO_PROPOSALS,
+            "sess_dedup",
+        )
+    )
     proposal_ids = sorted(p["msg_id"] for p in bundle.proposals)
     assert proposal_ids == ["bbb2"]
 
@@ -322,10 +333,7 @@ def test_commit_review_invalid_verdict_raises(reviewer):
 def test_commit_review_no_proposals_emits_heartbeat(reviewer):
     rev, kb, sm = reviewer
     prompt = (
-        "=== Shared session state ===\n"
-        "model=qwen3-14b framework=sglang\n"
-        "=== Inbox for critic ===\n"
-        "(no new messages)\n"
+        "=== Shared session state ===\nmodel=qwen3-14b framework=sglang\n=== Inbox for critic ===\n(no new messages)\n"
     )
     rev.prepare_review(_coordinator_request(prompt, "sess_e"))
     outcome = rev.commit_review(
@@ -363,16 +371,21 @@ def test_commit_review_persists_to_kb_when_flagged(reviewer):
 
 def test_decision_request_prepare_with_full_context(reviewer):
     rev, kb, sm = reviewer
-    bundle = rev.prepare_review({
-        "kind": "critic_decision_request",
-        "session_id": "sess_g",
-        "messages": [{"role": "coordinator", "content": "adopt patch x?"}],
-        "context": {
-            "model": "deepseek-r1-0528-fp8", "framework": "sglang",
-            "model_family": "deepseek", "workload": "decode", "precision": "fp8",
-        },
-        "decision": {"summary": "adopt patch x"},
-    })
+    bundle = rev.prepare_review(
+        {
+            "kind": "critic_decision_request",
+            "session_id": "sess_g",
+            "messages": [{"role": "coordinator", "content": "adopt patch x?"}],
+            "context": {
+                "model": "deepseek-r1-0528-fp8",
+                "framework": "sglang",
+                "model_family": "deepseek",
+                "workload": "decode",
+                "precision": "fp8",
+            },
+            "decision": {"summary": "adopt patch x"},
+        }
+    )
     assert bundle.required_context == []
     assert bundle.kb_read_skipped_reason is None
 
@@ -384,8 +397,11 @@ def test_decision_request_commit_emits_decision_review(reviewer):
         "session_id": "sess_h",
         "messages": [{"role": "coordinator", "content": "adopt?"}],
         "context": {
-            "model": "deepseek-r1-0528-fp8", "framework": "sglang",
-            "model_family": "deepseek", "workload": "decode", "precision": "fp8",
+            "model": "deepseek-r1-0528-fp8",
+            "framework": "sglang",
+            "model_family": "deepseek",
+            "workload": "decode",
+            "precision": "fp8",
         },
         "decision": {"summary": "adopt patch x"},
     }
@@ -405,12 +421,14 @@ def test_decision_request_commit_emits_decision_review(reviewer):
 
 def test_init_session_records_event(reviewer):
     rev, kb, sm = reviewer
-    out = rev.init_session({
-        "kind": "critic_decision_request",
-        "session_id": "sess_init",
-        "context": {"model": "qwen3-14b", "framework": "sglang"},
-        "messages": [],
-    })
+    out = rev.init_session(
+        {
+            "kind": "critic_decision_request",
+            "session_id": "sess_init",
+            "context": {"model": "qwen3-14b", "framework": "sglang"},
+            "messages": [],
+        }
+    )
     assert out["session_id"] == "sess_init"
     events = sm.list_events("sess_init")
     assert events and events[0]["kind"] == "init_session"
@@ -418,19 +436,32 @@ def test_init_session_records_event(reviewer):
 
 def test_close_session_writes_kb_drafts_when_provided(reviewer):
     rev, kb, sm = reviewer
-    rev.init_session({
-        "kind": "critic_decision_request",
-        "session_id": "sess_close",
-        "context": {
-            "model": "qwen3-14b", "framework": "sglang",
-            "model_family": "qwen", "workload": "decode", "precision": "fp8",
-        },
-        "messages": [],
-    })
+    rev.init_session(
+        {
+            "kind": "critic_decision_request",
+            "session_id": "sess_close",
+            "context": {
+                "model": "qwen3-14b",
+                "framework": "sglang",
+                "model_family": "qwen",
+                "workload": "decode",
+                "precision": "fp8",
+            },
+            "messages": [],
+        }
+    )
     outcome = rev.close_session(
-        {"kind": "critic_decision_request", "session_id": "sess_close",
-         "context": {"model": "qwen3-14b", "framework": "sglang",
-                     "model_family": "qwen", "workload": "decode", "precision": "fp8"}},
+        {
+            "kind": "critic_decision_request",
+            "session_id": "sess_close",
+            "context": {
+                "model": "qwen3-14b",
+                "framework": "sglang",
+                "model_family": "qwen",
+                "workload": "decode",
+                "precision": "fp8",
+            },
+        },
         kb_draft={
             "kb_drafts": [
                 {
@@ -450,14 +481,22 @@ def test_close_session_writes_kb_drafts_when_provided(reviewer):
 
 def test_kb_priors_cache_hit_avoids_second_kb_call(reviewer):
     rev, kb, sm = reviewer
-    kb.upsert({
-        "scope": {
-            "org": "hyperloom", "framework": "sglang", "model": "qwen3-14b",
-            "model_family": "qwen", "workload": "decode", "precision": "fp8",
-        },
-        "kind": "pitfall", "slug": "active-path-unproven-pitfall", "importance": 0.5,
-        "metadata": {"topic": "active path"},
-    })
+    kb.upsert(
+        {
+            "scope": {
+                "org": "hyperloom",
+                "framework": "sglang",
+                "model": "qwen3-14b",
+                "model_family": "qwen",
+                "workload": "decode",
+                "precision": "fp8",
+            },
+            "kind": "pitfall",
+            "slug": "active-path-unproven-pitfall",
+            "importance": 0.5,
+            "metadata": {"topic": "active path"},
+        }
+    )
     prompt = (
         "=== Shared session state ===\n"
         "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
@@ -469,3 +508,148 @@ def test_kb_priors_cache_hit_avoids_second_kb_call(reviewer):
     bundle = rev.prepare_review(_coordinator_request(prompt, "sess_cache_e2e"))
     # KB is now empty, but the bundle still has priors from the cache hit.
     assert bundle.kb_priors_by_proposal["aaa"]
+
+
+# -----------------------------------------------------------------
+# Optional substrate KB /v2/reasoning/assess enrichment
+# -----------------------------------------------------------------
+class _FakeAssess:
+    """Records assess() calls and returns a canned verdict."""
+
+    def __init__(self, verdict=None):
+        self.verdict = (
+            verdict
+            if verdict is not None
+            else {
+                "reasonable": "supported",
+                "verdicts": [],
+                "summary": {"confirmed": 1},
+            }
+        )
+        self.calls = []
+
+    def assess(self, *, focus, params=None, envs=None, args=""):
+        self.calls.append({"focus": focus, "params": params, "envs": envs, "args": args})
+        return self.verdict
+
+
+_PROMPT_WITH_LEVERS = (
+    "=== Shared session state ===\n"
+    "model=Qwen3-14B framework=sglang baseline_tput=1200\n"
+    "=== Inbox for critic ===\n"
+    "  seq=1 msg_id=lev1 from=orchestration topic=proposal payload="
+    "{'action_name': 'sweep', 'params': {'kv_cache_dtype': 'fp8', "
+    "'extra_envs': {'VLLM_USE_AITER': '1'}, 'extra_server_args': '--quantization fp8'}}\n"
+)
+
+
+def test_kb_assess_skipped_when_unconfigured(tmp_path, monkeypatch):
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    sm = SessionMemory(root=tmp_path / "sm")
+    kb = InMemoryKBClient()
+    writer = KBWriter(kb, session_memory=sm)
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    # no CORTEX_KB_URL → no assess client built from env
+    assert rev.kb_assess_client is None
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_noassess"))
+    assert bundle.kb_assess_by_proposal == {}
+
+
+def test_kb_assess_injected_when_client_configured(tmp_path):
+    sm = SessionMemory(root=tmp_path / "sm")
+    kb = InMemoryKBClient()
+    writer = KBWriter(kb, session_memory=sm)
+    fake = _FakeAssess()
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer, kb_assess_client=fake)
+
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_assess"))
+
+    assert "lev1" in bundle.kb_assess_by_proposal
+    assert bundle.kb_assess_by_proposal["lev1"]["reasonable"] == "supported"
+    # focus mapped from merged context
+    call = fake.calls[0]
+    assert call["focus"]["model"] == "Qwen3-14B"
+    assert call["focus"]["framework"] == "sglang"
+    # levers split out of payload params
+    assert call["params"] == {"kv_cache_dtype": "fp8"}
+    assert call["envs"] == {"VLLM_USE_AITER": "1"}
+    assert call["args"] == "--quantization fp8"
+
+
+def test_kb_assess_skips_proposal_without_levers(tmp_path):
+    sm = SessionMemory(root=tmp_path / "sm")
+    kb = InMemoryKBClient()
+    writer = KBWriter(kb, session_memory=sm)
+    fake = _FakeAssess()
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer, kb_assess_client=fake)
+
+    # baseline proposal carries no params/envs/args → no assess call
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_nolevers"))
+    assert bundle.kb_assess_by_proposal == {}
+    assert fake.calls == []
+
+
+# -----------------------------------------------------------------
+# KB trace audit fields (kb_assess_trace / kb_priors_trace)
+# -----------------------------------------------------------------
+def test_kb_assess_trace_not_configured(tmp_path, monkeypatch):
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    sm = SessionMemory(root=tmp_path / "sm")
+    writer = KBWriter(InMemoryKBClient(), session_memory=sm)
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_t1"))
+    assert bundle.kb_assess_trace["configured"] is False
+    assert bundle.kb_assess_trace["skipped_reason"] == "not_configured"
+
+
+def test_kb_assess_trace_records_requests(tmp_path):
+    sm = SessionMemory(root=tmp_path / "sm")
+    writer = KBWriter(InMemoryKBClient(), session_memory=sm)
+    fake = _FakeAssess()
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer, kb_assess_client=fake)
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_t2"))
+    trace = bundle.kb_assess_trace
+    assert trace["configured"] is True
+    assert trace["skipped_reason"] is None
+    assert trace["focus"]["model"] == "Qwen3-14B"
+    assert trace["verdict_count"] == 1
+    req = trace["requests"][0]
+    assert req["msg_id"] == "lev1"
+    assert req["params_keys"] == ["kv_cache_dtype"]
+    assert req["responded"] is True
+    assert req["reasonable"] == "supported"
+
+
+def test_kb_priors_trace_records_scope_and_requests(tmp_path):
+    sm = SessionMemory(root=tmp_path / "sm")
+    kb = InMemoryKBClient()
+    kb.upsert(
+        {
+            "scope": {
+                "org": "hyperloom",
+                "framework": "sglang",
+                "model": "qwen3-14b",
+                "model_family": "qwen",
+                "workload": "decode",
+                "precision": "fp8",
+            },
+            "kind": "pitfall",
+            "slug": "active-path-unproven-pitfall",
+            "importance": 0.5,
+            "metadata": {"topic": "active path"},
+        }
+    )
+    writer = KBWriter(kb, session_memory=sm)
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    prompt = (
+        "=== Shared session state ===\n"
+        "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
+        "=== Inbox for critic ===\n"
+        "  seq=1 msg_id=aaa from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
+    )
+    bundle = rev.prepare_review(_coordinator_request(prompt, "sess_pt"))
+    trace = bundle.kb_priors_trace
+    assert trace["configured"] is True
+    assert trace["mode"] == "per_proposal"
+    assert trace["scope_filter"].get("model") == "qwen3-14b"
+    assert any(r["msg_id"] == "aaa" for r in trace["requests"])

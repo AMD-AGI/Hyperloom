@@ -29,7 +29,6 @@ from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 
 
-
 @dataclass
 class StateIntegrityConfig:
     """Tunables for :func:`evaluate_state_integrity_signals`."""
@@ -40,7 +39,7 @@ class StateIntegrityConfig:
     # I3 — min stale-lease age before firing, to avoid racing the reaper.
     stale_lease_min_age_s: float = 60.0
     # I4 — agent-file thresholds.
-    inbox_bloat_warn_bytes: int = 100 * 1024 * 1024     # 100 MiB
+    inbox_bloat_warn_bytes: int = 100 * 1024 * 1024  # 100 MiB
     inbox_bloat_critical_bytes: int = 500 * 1024 * 1024  # 500 MiB
 
 
@@ -79,6 +78,7 @@ def evaluate_state_integrity_signals(
 # ---------------------------------------------------------------------------
 # I1 — state.json corruption
 # ---------------------------------------------------------------------------
+
 
 def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
     """I1: fire ``state_json_corrupt`` when ``state.json`` is unreadable.
@@ -132,8 +132,10 @@ def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
 # I2 — coordinator.db-wal bloat
 # ---------------------------------------------------------------------------
 
+
 def _wal_bloat_symptoms(
-    si: dict[str, Any], cfg: StateIntegrityConfig,
+    si: dict[str, Any],
+    cfg: StateIntegrityConfig,
 ) -> list[Symptom]:
     """I2: fire ``coordinator_wal_bloat`` when the SQLite WAL grows too large.
 
@@ -163,9 +165,9 @@ def _wal_bloat_symptoms(
             name="coordinator_wal_bloat",
             severity=severity,
             summary=(
-                f"coordinator.db-wal at {wal_bytes / (1024 ** 3):.2f} GiB "
-                f"(warn={cfg.wal_bytes_warn_threshold / (1024 ** 3):.1f} GiB / "
-                f"crit={cfg.wal_bytes_critical_threshold / (1024 ** 3):.1f} GiB)"
+                f"coordinator.db-wal at {wal_bytes / (1024**3):.2f} GiB "
+                f"(warn={cfg.wal_bytes_warn_threshold / (1024**3):.1f} GiB / "
+                f"crit={cfg.wal_bytes_critical_threshold / (1024**3):.1f} GiB)"
             ),
             evidence={
                 "wal_bytes": wal_bytes,
@@ -188,6 +190,7 @@ def _wal_bloat_symptoms(
 # ---------------------------------------------------------------------------
 # I3 — stale leases (holder PID dead but lease not released)
 # ---------------------------------------------------------------------------
+
 
 def _stale_lease_symptoms(
     ctx: ReactorContext,
@@ -218,11 +221,7 @@ def _stale_lease_symptoms(
         # Skip recently-acquired leases (reaper hasn't run); coerce
         # unix-seconds or ISO ``acquired_at``.
         acquired_unix = _coerce_unix(entry.get("acquired_at"))
-        age_s = (
-            (now - acquired_unix)
-            if acquired_unix is not None and now > 0
-            else cfg.stale_lease_min_age_s + 1.0
-        )
+        age_s = (now - acquired_unix) if acquired_unix is not None and now > 0 else cfg.stale_lease_min_age_s + 1.0
         if age_s < cfg.stale_lease_min_age_s:
             continue
         task_id = str(entry.get("task_id") or "unknown")
@@ -279,10 +278,9 @@ def _coerce_unix(value: Any) -> float | None:
             return float(value)
         except ValueError:
             from datetime import datetime
+
             try:
-                return datetime.fromisoformat(
-                    value.replace("Z", "+00:00")
-                ).timestamp()
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
             except ValueError:
                 return None
     return None
@@ -292,8 +290,10 @@ def _coerce_unix(value: Any) -> float | None:
 # I4 — inbox / outbox bloat
 # ---------------------------------------------------------------------------
 
+
 def _inbox_bloat_symptoms(
-    si: dict[str, Any], cfg: StateIntegrityConfig,
+    si: dict[str, Any],
+    cfg: StateIntegrityConfig,
 ) -> list[Symptom]:
     """I4: fire ``inbox_bloat`` for agent inbox/outbox files over threshold.
 
@@ -330,8 +330,8 @@ def _inbox_bloat_symptoms(
                     severity=severity,
                     summary=(
                         f"agent {role!r} {kind}.jsonl at "
-                        f"{size / (1024 ** 2):.0f} MiB (warn="
-                        f"{cfg.inbox_bloat_warn_bytes / (1024 ** 2):.0f} MiB)"
+                        f"{size / (1024**2):.0f} MiB (warn="
+                        f"{cfg.inbox_bloat_warn_bytes / (1024**2):.0f} MiB)"
                     ),
                     evidence={
                         "role": role,
@@ -344,8 +344,7 @@ def _inbox_bloat_symptoms(
                     subject={"role": role, "kind": kind},
                     source="local",
                     suggestion=(
-                        "Coordinator should roll the agent log; per-tick "
-                        "JSONL parsing cost is now O(file_size)"
+                        "Coordinator should roll the agent log; per-tick JSONL parsing cost is now O(file_size)"
                     ),
                 )
             )
@@ -355,6 +354,7 @@ def _inbox_bloat_symptoms(
 # ---------------------------------------------------------------------------
 # I5 — coordinator zombie (PID dead but state.json says running)
 # ---------------------------------------------------------------------------
+
 
 def _coordinator_zombie_symptoms(si: dict[str, Any]) -> list[Symptom]:
     """I5: fire ``coordinator_zombie`` when the PID is dead but no stop reason.
@@ -396,9 +396,7 @@ def _coordinator_zombie_symptoms(si: dict[str, Any]) -> list[Symptom]:
             evidence={
                 "recorded_pid": pid,
                 "pid_file": coord.get("pid_file"),
-                "state_json_valid": (
-                    bool(state.get("valid")) if isinstance(state, dict) else None
-                ),
+                "state_json_valid": (bool(state.get("valid")) if isinstance(state, dict) else None),
                 "stop_reason": stop_reason or "(empty)",
             },
             subject={},

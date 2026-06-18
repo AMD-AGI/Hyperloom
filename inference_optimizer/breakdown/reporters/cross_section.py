@@ -20,17 +20,17 @@ __all__ = ["GlobalFacts", "build_global_facts"]
 class GlobalFacts:
     """One-shot fact pack the LLM uses to build the executive summary."""
 
-    headline: str                       # 1-line "baseline X → final Y = +Z%"
+    headline: str  # 1-line "baseline X → final Y = +Z%"
     stop_reason: str
     elapsed_minutes: float | None
     objective: dict[str, Any]
-    workload_summary: str               # "DeepSeek-R1 vllm fp8 tp=8 conc=64 isl=osl=1024"
-    gain_attribution_lines: list[str]   # "100% via 1 backends KEEP (flag_x)"
+    workload_summary: str  # "DeepSeek-R1 vllm fp8 tp=8 conc=64 isl=osl=1024"
+    gain_attribution_lines: list[str]  # "100% via 1 backends KEEP (flag_x)"
     capabilities_not_attempted: list[str]
     capabilities_kept: list[str]
-    kernel_pipeline_funnel: dict[str, int]   # detected/recommended/optimized/adopted/...
+    kernel_pipeline_funnel: dict[str, int]  # detected/recommended/optimized/adopted/...
     data_quality_flags: list[str]
-    attribution_method: str             # "validated" | "best-effort reconstructed" | "missing"
+    attribution_method: str  # "validated" | "best-effort reconstructed" | "missing"
 
     def as_prompt_dict(self) -> dict[str, Any]:
         """Serialize the fact pack to a plain dict for the LLM prompt.
@@ -97,9 +97,7 @@ def _workload_summary(workload: dict[str, Any]) -> str:
     conc = workload.get("conc")
     isl = workload.get("isl")
     osl = workload.get("osl")
-    return (
-        f"{model} {fw} {prec} tp={tp} conc={conc} isl={isl} osl={osl}"
-    )
+    return f"{model} {fw} {prec} tp={tp} conc={conc} isl={isl} osl={osl}"
 
 
 def _gain_attribution_lines(
@@ -109,22 +107,29 @@ def _gain_attribution_lines(
 
     Priority: validated ``source_breakdown`` split, then single-entry
     ``final.action_path``, then best-effort ``optimization_stack``.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        A tuple of the human-readable attribution lines and a label
+        describing the method used to derive them.
     """
     attribution = breakdown.get("attribution") or {}
     sb = attribution.get("source_breakdown") or {}
     total = _to_float(sb.get("validated_total_pct"))
     sources = {
         "backends": _to_float(sb.get("backends_pct_of_total")),
-        "params":   _to_float(sb.get("params_pct_of_total")),
-        "explore":  _to_float(sb.get("explore_pct_of_total")),
-        "geak":     _to_float(sb.get("geak_pct_of_total")),
-        "oob":      _to_float(sb.get("oob_pct_of_total")),
-        "sweep":    _to_float(sb.get("sweep_pct_of_total")),
+        "params": _to_float(sb.get("params_pct_of_total")),
+        "explore": _to_float(sb.get("explore_pct_of_total")),
+        "geak": _to_float(sb.get("geak_pct_of_total")),
+        "oob": _to_float(sb.get("oob_pct_of_total")),
+        "sweep": _to_float(sb.get("sweep_pct_of_total")),
     }
     nonzero = {k: v for k, v in sources.items() if v and v != 0}
     if nonzero and total:
         lines = [
-            f"{k}: {v:.2f}% of total (={(v/total*100):.0f}% share of {total:.2f}%)"
+            f"{k}: {v:.2f}% of total (={(v / total * 100):.0f}% share of {total:.2f}%)"
             for k, v in sorted(nonzero.items(), key=lambda kv: -kv[1])
         ]
         return lines, "validated"
@@ -141,8 +146,7 @@ def _gain_attribution_lines(
         )
     if len(path) > 1 and gain_v is not None and gain_v > 0:
         return (
-            [f"{gain_v:.2f}% spread across {len(path)} stack entries: " +
-             ", ".join(str(p) for p in path)],
+            [f"{gain_v:.2f}% spread across {len(path)} stack entries: " + ", ".join(str(p) for p in path)],
             "best-effort reconstructed from optimization_stack",
         )
     if gain_v in (None, 0.0):
@@ -166,13 +170,13 @@ def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
     """
     kl = breakdown.get("kernel_lifecycle") or {}
     return {
-        "detected":    len(kl.get("detected") or []),
+        "detected": len(kl.get("detected") or []),
         "recommended": len(kl.get("recommended") or []),
-        "optimized":   len(kl.get("optimized") or []),
-        "adopted":     len(kl.get("adopted") or []),
-        "partial":     len(kl.get("partial") or []),
-        "reverted":    len(kl.get("reverted") or []),
-        "rejected":    len(kl.get("rejected") or []),
+        "optimized": len(kl.get("optimized") or []),
+        "adopted": len(kl.get("adopted") or []),
+        "partial": len(kl.get("partial") or []),
+        "reverted": len(kl.get("reverted") or []),
+        "rejected": len(kl.get("rejected") or []),
     }
 
 
@@ -180,7 +184,15 @@ def _data_quality_flags(
     breakdown: dict[str, Any],
     rendered: list[RenderedSection],
 ) -> list[str]:
-    """Collect de-duplicated data-quality warnings from renderers + global cross-section checks."""
+    """Collect de-duplicated data-quality warnings from renderers + global cross-section checks.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+        rendered: Rendered sections whose warnings are folded in.
+
+    Returns:
+        A de-duplicated list of data-quality flag strings.
+    """
     flags: list[str] = []
     seen: set[str] = set()
 

@@ -15,6 +15,7 @@ from inference_optimizer.orchestrator.shared_state import (
 
 # pruned families + policy denial book-keeping
 
+
 class TestPolicyDenialAndPruned:
     def test_add_pruned_family_is_idempotent(self):
         s = SharedState()
@@ -28,19 +29,28 @@ class TestPolicyDenialAndPruned:
     def test_record_policy_denial_tracks_streak(self):
         s = SharedState()
         first = s.record_policy_denial(
-            action_name="kernel_opt", rule="cooldown",
-            hint="hint", intent_type="propose_action", tick=1,
+            action_name="kernel_opt",
+            rule="cooldown",
+            hint="hint",
+            intent_type="propose_action",
+            tick=1,
         )
         second = s.record_policy_denial(
-            action_name="kernel_opt", rule="cooldown",
-            hint="hint", intent_type="propose_action", tick=2,
+            action_name="kernel_opt",
+            rule="cooldown",
+            hint="hint",
+            intent_type="propose_action",
+            tick=2,
         )
         assert first == 1 and second == 2
         # Resetting drops the matching streak rows.
         s.reset_policy_denial_streak("kernel_opt")
         again = s.record_policy_denial(
-            action_name="kernel_opt", rule="cooldown",
-            hint="hint", intent_type="propose_action", tick=3,
+            action_name="kernel_opt",
+            rule="cooldown",
+            hint="hint",
+            intent_type="propose_action",
+            tick=3,
         )
         assert again == 1
 
@@ -66,8 +76,11 @@ class TestPolicyDenialAndPruned:
         s = SharedState()
         for tick in range(60):
             s.record_policy_denial(
-                action_name="x", rule="r",
-                hint="h", intent_type="propose_action", tick=tick,
+                action_name="x",
+                rule="r",
+                hint="h",
+                intent_type="propose_action",
+                tick=tick,
             )
         assert len(s.policy_denial_history) == 50
 
@@ -78,8 +91,11 @@ class TestPolicyDenialAndPruned:
         s = SharedState()
         for tick in range(4):
             s.record_policy_denial(
-                action_name=f"a{tick}", rule="rule",
-                hint=f"hint-{tick}", intent_type="propose_action", tick=tick,
+                action_name=f"a{tick}",
+                rule="rule",
+                hint=f"hint-{tick}",
+                intent_type="propose_action",
+                tick=tick,
             )
         summary = s.to_policy_denial_summary(top_k=2)
         # Newest two rows surface in the summary.
@@ -88,6 +104,7 @@ class TestPolicyDenialAndPruned:
 
 
 # apply_changes
+
 
 class TestApplyChanges:
     def test_empty_changes_returns_empty(self):
@@ -107,25 +124,33 @@ class TestApplyChanges:
 
 # kernel-patch identity helpers
 
+
 class TestKernelPatchIdentity:
     def test_resolves_explicit_payload(self):
         s = SharedState()
-        kid, patch, target, args = s._resolve_kernel_patch_identity({
-            "kernel_id": "k1",
-            "patch_path": "/tmp/k1.py",
-            "target_file": "/srv/k1.py",
-            "extra_server_args": " --foo 1 ",
-        })
+        kid, patch, target, args = s._resolve_kernel_patch_identity(
+            {
+                "kernel_id": "k1",
+                "patch_path": "/tmp/k1.py",
+                "target_file": "/srv/k1.py",
+                "extra_server_args": " --foo 1 ",
+            }
+        )
         assert (kid, patch, target, args) == (
-            "k1", "/tmp/k1.py", "/srv/k1.py", "--foo 1",
+            "k1",
+            "/tmp/k1.py",
+            "/srv/k1.py",
+            "--foo 1",
         )
 
     def test_falls_back_to_last_kernel_opt_patch(self):
         s = SharedState()
         s.last_kernel_opt = {"kernel_id": "k1", "best_artifact_path": "/srv/best.py"}
-        kid, patch, target, args = s._resolve_kernel_patch_identity({
-            "kernel_id": "k1",
-        })
+        kid, patch, target, args = s._resolve_kernel_patch_identity(
+            {
+                "kernel_id": "k1",
+            }
+        )
         assert patch == "/srv/best.py"
         assert kid == "k1"
         assert target == ""
@@ -138,24 +163,30 @@ class TestKernelPatchIdentity:
 
     def test_kernel_patch_key_concatenates_fields(self):
         s = SharedState()
-        key = s.kernel_patch_key({
-            "kernel_id": "k1",
-            "patch_path": "/srv/k1.py",
-            "extra_server_args": "--a 1",
-        })
+        key = s.kernel_patch_key(
+            {
+                "kernel_id": "k1",
+                "patch_path": "/srv/k1.py",
+                "extra_server_args": "--a 1",
+            }
+        )
         assert key == "k1|/srv/k1.py|--a 1"
 
     def test_find_rejected_kernel_patch_lookup(self):
         s = SharedState()
-        s.rejected_kernel_patches.append({
-            "key": "k1|/srv/k1.py|--a 1",
-            "reason": "no_e2e_gain",
-        })
-        hit = s.find_rejected_kernel_patch({
-            "kernel_id": "k1",
-            "patch_path": "/srv/k1.py",
-            "extra_server_args": "--a 1",
-        })
+        s.rejected_kernel_patches.append(
+            {
+                "key": "k1|/srv/k1.py|--a 1",
+                "reason": "no_e2e_gain",
+            }
+        )
+        hit = s.find_rejected_kernel_patch(
+            {
+                "kernel_id": "k1",
+                "patch_path": "/srv/k1.py",
+                "extra_server_args": "--a 1",
+            }
+        )
         assert hit and hit["reason"] == "no_e2e_gain"
 
     def test_find_rejected_kernel_patch_missing_returns_none(self):
@@ -163,6 +194,7 @@ class TestKernelPatchIdentity:
 
 
 # load_or_init / save round-trip
+
 
 class TestPersistence:
     def test_load_or_init_returns_default_when_missing(self, tmp_path):
@@ -190,17 +222,20 @@ class TestPersistence:
 
 # Per-action attempt audit trail (record_action_attempt + <action>_attempts)
 
+
 @pytest.mark.parametrize(
     "action,metric_key,metric_kind",
     [
         ("baseline", "output_throughput", "output_throughput"),
-        ("profile",  "output_throughput", "output_throughput"),
-        ("sweep",    "output_throughput", "output_throughput"),
-        ("explore",  "best_gain_pct",     "gain_pct"),
+        ("profile", "output_throughput", "output_throughput"),
+        ("sweep", "output_throughput", "output_throughput"),
+        ("explore", "best_gain_pct", "gain_pct"),
     ],
 )
 def test_record_action_attempt_succeeded_populates_last_and_history(
-    action, metric_key, metric_kind,
+    action,
+    metric_key,
+    metric_kind,
 ):
     s = SharedState()
     entry = s.record_action_attempt(
@@ -352,6 +387,7 @@ def test_save_load_round_trips_attempt_fields(tmp_path):
 
 # Global last_action_failures rolling log
 
+
 def test_record_action_failure_basic_fields():
     s = SharedState()
     s.record_action_failure(
@@ -402,9 +438,7 @@ def test_record_action_failure_caps_at_default():
             result={"error_class": "no_report", "error": f"err{i}"},
         )
     assert len(s.last_action_failures) == _DEFAULT_LAST_FAILURES
-    assert s.last_action_failures[-1]["task_id"] == (
-        f"t-{_DEFAULT_LAST_FAILURES + 2}"
-    )
+    assert s.last_action_failures[-1]["task_id"] == (f"t-{_DEFAULT_LAST_FAILURES + 2}")
     assert s.last_action_failures[0]["task_id"] == "t-3"
 
 
@@ -418,9 +452,7 @@ def test_to_prompt_summary_shows_last_three_failures_with_suffix():
         )
     txt = s.to_prompt_summary()
     assert "last_action_failures=" in txt
-    line = next(
-        l for l in txt.splitlines() if l.startswith("last_action_failures=")
-    )
+    line = next(l for l in txt.splitlines() if l.startswith("last_action_failures="))
     assert "[baseline/no_report" in line
     assert "[explore/no_report" in line
     assert "[+2 earlier]" in line

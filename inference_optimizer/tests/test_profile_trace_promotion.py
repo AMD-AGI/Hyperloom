@@ -59,8 +59,7 @@ async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch)
         }
 
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.action_executors.profile."
-        "BaselineExecutor.__call__",
+        "inference_optimizer.orchestrator.action_executors.profile.BaselineExecutor.__call__",
         fake_call,
     )
     # ``profile`` is no longer registered; mirror RooflineExecutor by passing the
@@ -78,6 +77,68 @@ async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch)
     )
     assert result["status"] == "failed"
     assert result["error_class"] == "no_trace_files"
+
+
+def test_capture_sidecar_traces_excludes_main_trace(tmp_path):
+    """#575: capture sidecar scan finds bs_*/graph_capture but not *.trace.json.gz."""
+    from inference_optimizer.orchestrator.action_executors.profile import (
+        _capture_sidecar_traces_for_dir,
+    )
+
+    cap = tmp_path / "torch_trace" / "capture_traces"
+    cap.mkdir(parents=True)
+    (cap / "bs_1_rank0.json.gz").write_bytes(b"x")
+    (cap / "bs_512_rank0.json.gz").write_bytes(b"x")
+    (cap / "graph_capture_rank_0.json.gz").write_bytes(b"x")
+    # A real main trace must NOT be returned by the sidecar scan.
+    (tmp_path / "torch_trace" / "merged-foo.trace.json.gz").write_bytes(b"x")
+
+    out = _capture_sidecar_traces_for_dir(tmp_path / "torch_trace")
+    names = {p.name for p in out}
+    assert names == {"bs_1_rank0.json.gz", "bs_512_rank0.json.gz", "graph_capture_rank_0.json.gz"}
+
+
+@pytest.mark.asyncio
+async def test_profile_executor_falls_back_to_capture_sidecars(tmp_path, monkeypatch):
+    """#575: SGLang capture-only (bs_*_rank0.json.gz, no *.trace.json.gz) succeeds via fallback."""
+    user_data = tmp_path / "user_data"
+    user_data.mkdir()
+    monkeypatch.setenv("USER_DATA_PATH", str(user_data))
+    sandbox = tmp_path / "leak_sandbox"
+    sandbox.mkdir()
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
+
+    workspace = tmp_path / "ws"
+    capture = workspace / "torch_trace" / "capture_traces"
+    capture.mkdir(parents=True)
+    (capture / "bs_1_rank0.json.gz").write_bytes(b"fake-capture")
+    (capture / "bs_512_rank0.json.gz").write_bytes(b"fake-capture")
+
+    async def fake_call(self, ctx):
+        return {
+            "status": "succeeded",
+            "workspace": str(workspace),
+        }
+
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.action_executors.profile.BaselineExecutor.__call__",
+        fake_call,
+    )
+    task = Task(
+        task_id="prof-capture-only",
+        kind="profile",
+        state="queued",
+        params={},
+        idempotency_key="prof-capture-only",
+    )
+    result = await ProfileExecutor()(
+        RunnerContext(task=task, lease=None, extra={"workspace": str(workspace)}),
+    )
+    assert result["status"] == "succeeded"
+    assert result["profile_trace_selection_reason"] == "capture_only_fallback"
+    assert result["trace_dir"] == str(workspace / "torch_trace")
+    assert result["main_trace_path"] == str(workspace / "torch_trace")
+    assert len(result["trace_files"]) == 2
 
 
 @pytest.mark.asyncio

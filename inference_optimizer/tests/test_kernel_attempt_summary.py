@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from inference_optimizer.orchestrator.kernel_attempt_summary import (
     CATEGORY_ATTEMPTED_REJECTED,
@@ -46,11 +45,7 @@ def _top15_entry(
         "bound_type": bound_type,
         "arithmetic_intensity": arithmetic_intensity,
         "reusable_native_kernel": reusable,
-        "recommended_backends": (
-            list(backends)
-            if backends is not None
-            else ["geak", "claude", "codex"]
-        ),
+        "recommended_backends": (list(backends) if backends is not None else ["geak", "claude", "codex"]),
         "kernel_category": "test",
     }
 
@@ -81,8 +76,7 @@ def _attempt_entry(
         "compile_passed": compile_passed,
         "correctness_passed": correctness_passed,
         "history": [
-            {"decision": decision, "micro": micro, "status": status,
-             "ts": "2026-05-29T12:00:00+00:00"},
+            {"decision": decision, "micro": micro, "status": status, "ts": "2026-05-29T12:00:00+00:00"},
         ],
     }
 
@@ -104,8 +98,7 @@ def _make_state(
     state.kernel_opt_attempts = dict(attempts or {})
     state.rejected_kernel_ids = list(rejected_ids or [])
     state.optimization_stack = [
-        {"action": "integrate", "kernel_id": kid, "ts": "2026-05-29T12:00:00+00:00"}
-        for kid in (integrated_kids or [])
+        {"action": "integrate", "kernel_id": kid, "ts": "2026-05-29T12:00:00+00:00"} for kid in (integrated_kids or [])
     ]
     if last_kernel_opt is not None:
         state.last_kernel_opt = last_kernel_opt
@@ -120,9 +113,7 @@ def _write_backend_results(
     backends: list[dict[str, Any]],
 ) -> None:
     """Write a kernel-agent ``results/<kid>.json`` with the given backend rows."""
-    results_dir = (
-        session_dir / "kernel-agent" / "runs" / session_id / "results"
-    )
+    results_dir = session_dir / "kernel-agent" / "runs" / session_id / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
     (results_dir / f"{kernel_id}.json").write_text(
         json.dumps({"kernel_id": kernel_id, "attempts": backends}),
@@ -133,8 +124,7 @@ def _write_backend_results(
 # Categories
 def test_unattempted_no_source_classifies_vendor_lib_ops(tmp_path: Path) -> None:
     state = _make_state(
-        top15=[_top15_entry("k001", name="aten::mm", source_file="",
-                             reusable=False, backends=[])],
+        top15=[_top15_entry("k001", name="aten::mm", source_file="", reusable=False, backends=[])],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     assert out["totals"]["unattempted"] == 1
@@ -142,14 +132,12 @@ def test_unattempted_no_source_classifies_vendor_lib_ops(tmp_path: Path) -> None
     row = out["by_kernel"][0]
     assert row["category"] == CATEGORY_UNATTEMPTED
     assert row["unattempted_reason"] == UNATTEMPTED_NO_SOURCE
-    assert "vendor-library" in row["unattempted_detail"].lower() \
-        or "vendor" in row["unattempted_detail"].lower()
+    assert "vendor-library" in row["unattempted_detail"].lower() or "vendor" in row["unattempted_detail"].lower()
 
 
 def test_unattempted_not_reusable_distinct_from_no_source(tmp_path: Path) -> None:
     state = _make_state(
-        top15=[_top15_entry("k001", source_file="/some/file.py",
-                             reusable=False, backends=[])],
+        top15=[_top15_entry("k001", source_file="/some/file.py", reusable=False, backends=[])],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     assert out["by_kernel"][0]["unattempted_reason"] == UNATTEMPTED_NOT_REUSABLE
@@ -157,8 +145,7 @@ def test_unattempted_not_reusable_distinct_from_no_source(tmp_path: Path) -> Non
 
 def test_unattempted_no_backend_when_reusable_but_empty_recs(tmp_path: Path) -> None:
     state = _make_state(
-        top15=[_top15_entry("k001", source_file="/some/file.py",
-                             reusable=True, backends=[])],
+        top15=[_top15_entry("k001", source_file="/some/file.py", reusable=True, backends=[])],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     assert out["by_kernel"][0]["unattempted_reason"] == UNATTEMPTED_NO_BACKEND
@@ -167,10 +154,14 @@ def test_unattempted_no_backend_when_reusable_but_empty_recs(tmp_path: Path) -> 
 def test_attempted_rejected_revert_classifies_correctly(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001", gpu_pct=43.9, efficiency_pct=48.4)],
-        attempts={"k001": _attempt_entry(
-            decision="REVERT", rejected_reason="revert_decision",
-            compile_passed=False, correctness_passed=False,
-        )},
+        attempts={
+            "k001": _attempt_entry(
+                decision="REVERT",
+                rejected_reason="revert_decision",
+                compile_passed=False,
+                correctness_passed=False,
+            )
+        },
         rejected_ids=["k001"],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
@@ -198,9 +189,13 @@ def test_keep_pending_classifies_correctly(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001")],
         attempts={"k001": _attempt_entry(decision="KEEP", micro=1.20)},
-        last_kernel_opt={"kernel_id": "k001", "decision": "KEEP",
-                         "micro_speedup": 1.20, "compile_passed": True,
-                         "correctness_passed": True},
+        last_kernel_opt={
+            "kernel_id": "k001",
+            "decision": "KEEP",
+            "micro_speedup": 1.20,
+            "compile_passed": True,
+            "correctness_passed": True,
+        },
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     assert out["totals"]["keep_pending"] == 1
@@ -212,9 +207,13 @@ def test_keep_pending_classifies_correctly(tmp_path: Path) -> None:
 def test_in_flight_classifies_correctly(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001")],
-        attempts={"k001": _attempt_entry(
-            decision="PARTIAL", partial=1, rejected_reason="",
-        )},
+        attempts={
+            "k001": _attempt_entry(
+                decision="PARTIAL",
+                partial=1,
+                rejected_reason="",
+            )
+        },
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     assert out["totals"]["in_flight"] == 1
@@ -227,21 +226,23 @@ def test_backend_ladder_loaded_from_kernel_agent_results(tmp_path: Path) -> None
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
-        attempts={"k001": _attempt_entry(
-            decision="REVERT", rejected_reason="revert_decision",
-            compile_passed=False,
-        )},
+        attempts={
+            "k001": _attempt_entry(
+                decision="REVERT",
+                rejected_reason="revert_decision",
+                compile_passed=False,
+            )
+        },
         rejected_ids=["k001"],
     )
     _write_backend_results(
-        session_dir, "sid1", "k001",
+        session_dir,
+        "sid1",
+        "k001",
         backends=[
-            {"backend": "geak", "status": "failed",
-             "attempt_id": "geak-1", "optimized_path": ""},
-            {"backend": "claude", "status": "failed",
-             "attempt_id": "claude-1", "optimized_path": ""},
-            {"backend": "codex", "status": "failed",
-             "attempt_id": "codex-1", "optimized_path": ""},
+            {"backend": "geak", "status": "failed", "attempt_id": "geak-1", "optimized_path": ""},
+            {"backend": "claude", "status": "failed", "attempt_id": "claude-1", "optimized_path": ""},
+            {"backend": "codex", "status": "failed", "attempt_id": "codex-1", "optimized_path": ""},
         ],
     )
     out = build_kernel_optimization_summary(state, session_dir)
@@ -257,18 +258,19 @@ def test_backend_ladder_loaded_from_kernel_agent_results(tmp_path: Path) -> None
 def test_backend_ladder_missing_dir_marks_unavailable(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001")],
-        attempts={"k001": _attempt_entry(
-            decision="REVERT", rejected_reason="revert_decision",
-            compile_passed=False,
-        )},
+        attempts={
+            "k001": _attempt_entry(
+                decision="REVERT",
+                rejected_reason="revert_decision",
+                compile_passed=False,
+            )
+        },
         rejected_ids=["k001"],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     row = out["by_kernel"][0]
     assert row["backend_ladder"] == []
-    assert row["backend_ladder_unavailable_reason"] == (
-        "kernel_agent_results_dir_missing"
-    )
+    assert row["backend_ladder_unavailable_reason"] == ("kernel_agent_results_dir_missing")
     assert out["failure_reason_breakdown"]["ladder_unavailable"] == 1
 
 
@@ -279,10 +281,13 @@ def test_backend_ladder_malformed_json_falls_back_safely(tmp_path: Path) -> None
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
-        attempts={"k001": _attempt_entry(
-            decision="REVERT", rejected_reason="revert_decision",
-            compile_passed=False,
-        )},
+        attempts={
+            "k001": _attempt_entry(
+                decision="REVERT",
+                rejected_reason="revert_decision",
+                compile_passed=False,
+            )
+        },
         rejected_ids=["k001"],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
@@ -296,29 +301,30 @@ def test_backend_ladder_with_artifact_marks_partial(tmp_path: Path) -> None:
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
-        attempts={"k001": _attempt_entry(
-            decision="REVERT", rejected_reason="revert_decision",
-            compile_passed=True, correctness_passed=False, micro=1.05,
-        )},
+        attempts={
+            "k001": _attempt_entry(
+                decision="REVERT",
+                rejected_reason="revert_decision",
+                compile_passed=True,
+                correctness_passed=False,
+                micro=1.05,
+            )
+        },
         rejected_ids=["k001"],
     )
     _write_backend_results(
-        tmp_path, "sid1", "k001",
+        tmp_path,
+        "sid1",
+        "k001",
         backends=[
-            {"backend": "geak", "status": "completed",
-             "attempt_id": "geak-1",
-             "optimized_path": "/tmp/optimized.cu"},
-            {"backend": "claude", "status": "failed",
-             "attempt_id": "claude-1", "optimized_path": ""},
+            {"backend": "geak", "status": "completed", "attempt_id": "geak-1", "optimized_path": "/tmp/optimized.cu"},
+            {"backend": "claude", "status": "failed", "attempt_id": "claude-1", "optimized_path": ""},
         ],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     breakdown = out["failure_reason_breakdown"]
     assert breakdown["ladder_all_failed"] == 0
-    assert (
-        breakdown["correctness_failed"] == 1
-        or breakdown["speedup_below_threshold"] == 1
-    )
+    assert breakdown["correctness_failed"] == 1 or breakdown["speedup_below_threshold"] == 1
 
 
 # Top takeaways + glossary
@@ -326,30 +332,26 @@ def test_top_takeaways_highlight_highest_gpu_pct_missed(tmp_path: Path) -> None:
     state = _make_state(
         session_id="sid1",
         top15=[
-            _top15_entry("k001", name="aiter::ck_moe_stage1",
-                          gpu_pct=43.9, efficiency_pct=48.4),
-            _top15_entry("k002", name="aiter::rmsnorm",
-                          gpu_pct=1.4, efficiency_pct=15.5),
+            _top15_entry("k001", name="aiter::ck_moe_stage1", gpu_pct=43.9, efficiency_pct=48.4),
+            _top15_entry("k002", name="aiter::rmsnorm", gpu_pct=1.4, efficiency_pct=15.5),
         ],
         attempts={
-            "k001": _attempt_entry(decision="REVERT",
-                                    rejected_reason="revert_decision",
-                                    compile_passed=False),
-            "k002": _attempt_entry(decision="REVERT",
-                                    rejected_reason="revert_decision",
-                                    compile_passed=False),
+            "k001": _attempt_entry(decision="REVERT", rejected_reason="revert_decision", compile_passed=False),
+            "k002": _attempt_entry(decision="REVERT", rejected_reason="revert_decision", compile_passed=False),
         },
         rejected_ids=["k001", "k002"],
     )
     _write_backend_results(
-        tmp_path, "sid1", "k001",
-        backends=[{"backend": "geak", "status": "failed",
-                   "attempt_id": "geak-1", "optimized_path": ""}],
+        tmp_path,
+        "sid1",
+        "k001",
+        backends=[{"backend": "geak", "status": "failed", "attempt_id": "geak-1", "optimized_path": ""}],
     )
     _write_backend_results(
-        tmp_path, "sid1", "k002",
-        backends=[{"backend": "geak", "status": "failed",
-                   "attempt_id": "geak-1", "optimized_path": ""}],
+        tmp_path,
+        "sid1",
+        "k002",
+        backends=[{"backend": "geak", "status": "failed", "attempt_id": "geak-1", "optimized_path": ""}],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     joined = " ".join(out["top_takeaways"])
@@ -370,8 +372,13 @@ def test_zero_attempts_session_does_not_crash(tmp_path: Path) -> None:
     state = _make_state(top15=[])
     out = build_kernel_optimization_summary(state, tmp_path)
     assert out["totals"] == {
-        "top_candidates": 0, "attempted": 0, "integrated": 0,
-        "keep_pending": 0, "rejected": 0, "in_flight": 0, "unattempted": 0,
+        "top_candidates": 0,
+        "attempted": 0,
+        "integrated": 0,
+        "keep_pending": 0,
+        "rejected": 0,
+        "in_flight": 0,
+        "unattempted": 0,
     }
     assert out["by_kernel"] == []
     assert out["top_takeaways"][0].startswith("No kernels were attempted")
@@ -381,9 +388,9 @@ def test_attempt_without_top15_still_listed(tmp_path: Path) -> None:
     """Kernels with an attempts ledger but absent from the current top15 are still surfaced."""
     state = _make_state(
         top15=[],
-        attempts={"k_obsolete": _attempt_entry(decision="REVERT",
-                                                rejected_reason="revert_decision",
-                                                compile_passed=False)},
+        attempts={
+            "k_obsolete": _attempt_entry(decision="REVERT", rejected_reason="revert_decision", compile_passed=False)
+        },
         rejected_ids=["k_obsolete"],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
@@ -393,20 +400,22 @@ def test_attempt_without_top15_still_listed(tmp_path: Path) -> None:
 
 # Issue: summary buried failure root-cause in details file
 def _write_full_kernel_result(
-    session_dir: Path, session_id: str, kernel_id: str,
-    *, attempts: list[dict[str, Any]],
+    session_dir: Path,
+    session_id: str,
+    kernel_id: str,
+    *,
+    attempts: list[dict[str, Any]],
     verification: dict[str, Any] | None = None,
 ) -> None:
     """Like _write_backend_results but also supports the top-level verification block."""
-    results_dir = (
-        session_dir / "kernel-agent" / "runs" / session_id / "results"
-    )
+    results_dir = session_dir / "kernel-agent" / "runs" / session_id / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
     body: dict[str, Any] = {"kernel_id": kernel_id, "attempts": attempts}
     if verification is not None:
         body["verification"] = verification
     (results_dir / f"{kernel_id}.json").write_text(
-        json.dumps(body), encoding="utf-8",
+        json.dumps(body),
+        encoding="utf-8",
     )
 
 
@@ -415,24 +424,27 @@ def test_produced_artifact_excludes_stdout_log_path(tmp_path: Path) -> None:
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001", gpu_pct=50.0)],
-        attempts={"k001": _attempt_entry(decision="REVERT",
-                                          rejected_reason="max_failures",
-                                          compile_passed=False)},
+        attempts={"k001": _attempt_entry(decision="REVERT", rejected_reason="max_failures", compile_passed=False)},
         rejected_ids=["k001"],
     )
     _write_full_kernel_result(
-        tmp_path, "sid1", "k001",
-        attempts=[{
-            "backend": "geak", "status": "failed", "attempt_id": "g1",
-            "optimized_path": "/workspace/optimized/geak-78bd_stdout.log",
-            "returncode": 1, "elapsed_s": 213.5,
-        }],
+        tmp_path,
+        "sid1",
+        "k001",
+        attempts=[
+            {
+                "backend": "geak",
+                "status": "failed",
+                "attempt_id": "g1",
+                "optimized_path": "/workspace/optimized/geak-78bd_stdout.log",
+                "returncode": 1,
+                "elapsed_s": 213.5,
+            }
+        ],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     ladder = out["by_kernel"][0]["backend_ladder"]
-    assert ladder[0]["produced_artifact"] is False, (
-        f"stdout log should not count as artifact: {ladder[0]}"
-    )
+    assert ladder[0]["produced_artifact"] is False, f"stdout log should not count as artifact: {ladder[0]}"
 
 
 def test_backend_ladder_elapsed_uses_elapsed_s_field(tmp_path: Path) -> None:
@@ -440,18 +452,23 @@ def test_backend_ladder_elapsed_uses_elapsed_s_field(tmp_path: Path) -> None:
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
-        attempts={"k001": _attempt_entry(decision="REVERT",
-                                          rejected_reason="max_failures",
-                                          compile_passed=False)},
+        attempts={"k001": _attempt_entry(decision="REVERT", rejected_reason="max_failures", compile_passed=False)},
         rejected_ids=["k001"],
     )
     _write_full_kernel_result(
-        tmp_path, "sid1", "k001",
-        attempts=[{
-            "backend": "geak", "status": "failed", "attempt_id": "g1",
-            "optimized_path": "/workspace/optimized/v1.cu",
-            "returncode": 1, "elapsed_s": 213.5,
-        }],
+        tmp_path,
+        "sid1",
+        "k001",
+        attempts=[
+            {
+                "backend": "geak",
+                "status": "failed",
+                "attempt_id": "g1",
+                "optimized_path": "/workspace/optimized/v1.cu",
+                "returncode": 1,
+                "elapsed_s": 213.5,
+            }
+        ],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     ladder = out["by_kernel"][0]["backend_ladder"]
@@ -463,24 +480,29 @@ def test_backend_ladder_classifies_timeout(tmp_path: Path) -> None:
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
-        attempts={"k001": _attempt_entry(decision="REVERT",
-                                          rejected_reason="max_failures",
-                                          compile_passed=False)},
+        attempts={"k001": _attempt_entry(decision="REVERT", rejected_reason="max_failures", compile_passed=False)},
         rejected_ids=["k001"],
     )
     _write_full_kernel_result(
-        tmp_path, "sid1", "k001",
-        attempts=[{
-            "backend": "claude", "status": "failed", "attempt_id": "c1",
-            "optimized_path": "/workspace/optimized/c1_stdout.log",
-            "returncode": 1, "elapsed_s": 483.4,
-            "stdout_tail": (
-                'status: running -> failed\n'
-                '{"task_id": "abc",\n  "status": "failed",\n'
-                '  "error_message": "Timed out after 480s",\n'
-                '  "partial_outputs": []}\n'
-            ),
-        }],
+        tmp_path,
+        "sid1",
+        "k001",
+        attempts=[
+            {
+                "backend": "claude",
+                "status": "failed",
+                "attempt_id": "c1",
+                "optimized_path": "/workspace/optimized/c1_stdout.log",
+                "returncode": 1,
+                "elapsed_s": 483.4,
+                "stdout_tail": (
+                    "status: running -> failed\n"
+                    '{"task_id": "abc",\n  "status": "failed",\n'
+                    '  "error_message": "Timed out after 480s",\n'
+                    '  "partial_outputs": []}\n'
+                ),
+            }
+        ],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     row = out["by_kernel"][0]["backend_ladder"][0]
@@ -493,24 +515,29 @@ def test_backend_ladder_classifies_preprocess_failed(tmp_path: Path) -> None:
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
-        attempts={"k001": _attempt_entry(decision="REVERT",
-                                          rejected_reason="max_failures",
-                                          compile_passed=False)},
+        attempts={"k001": _attempt_entry(decision="REVERT", rejected_reason="max_failures", compile_passed=False)},
         rejected_ids=["k001"],
     )
     _write_full_kernel_result(
-        tmp_path, "sid1", "k001",
-        attempts=[{
-            "backend": "geak", "status": "failed", "attempt_id": "g1",
-            "optimized_path": "/workspace/optimized/g1_stdout.log",
-            "returncode": 1, "elapsed_s": 213.5,
-            "stdout_tail": (
-                "minisweagent.run.preprocess_v3.adapter: INFO: v3 "
-                "preprocess completed in 184.0s (success=False, errors=1)\n"
-                "minisweagent.run.mini: INFO:  starting\n"
-                "minisweagent.run.mini: INFO:  completed: ran\n"
-            ),
-        }],
+        tmp_path,
+        "sid1",
+        "k001",
+        attempts=[
+            {
+                "backend": "geak",
+                "status": "failed",
+                "attempt_id": "g1",
+                "optimized_path": "/workspace/optimized/g1_stdout.log",
+                "returncode": 1,
+                "elapsed_s": 213.5,
+                "stdout_tail": (
+                    "minisweagent.run.preprocess_v3.adapter: INFO: v3 "
+                    "preprocess completed in 184.0s (success=False, errors=1)\n"
+                    "minisweagent.run.mini: INFO:  starting\n"
+                    "minisweagent.run.mini: INFO:  completed: ran\n"
+                ),
+            }
+        ],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     row = out["by_kernel"][0]["backend_ladder"][0]
@@ -525,9 +552,7 @@ def test_backend_ladder_preprocess_failed_with_line_wrapped_stdout(
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
-        attempts={"k001": _attempt_entry(decision="REVERT",
-                                          rejected_reason="max_failures",
-                                          compile_passed=False)},
+        attempts={"k001": _attempt_entry(decision="REVERT", rejected_reason="max_failures", compile_passed=False)},
         rejected_ids=["k001"],
     )
     wrapped_stdout = (
@@ -537,19 +562,24 @@ def test_backend_ladder_preprocess_failed_with_line_wrapped_stdout(
         "  > minisweagent.run.mini: INFO:  starting\n"
     )
     _write_full_kernel_result(
-        tmp_path, "sid1", "k001",
-        attempts=[{
-            "backend": "geak", "status": "failed", "attempt_id": "g1",
-            "optimized_path": "/workspace/optimized/g1_stdout.log",
-            "returncode": 1, "elapsed_s": 108.7,
-            "stdout_tail": wrapped_stdout,
-        }],
+        tmp_path,
+        "sid1",
+        "k001",
+        attempts=[
+            {
+                "backend": "geak",
+                "status": "failed",
+                "attempt_id": "g1",
+                "optimized_path": "/workspace/optimized/g1_stdout.log",
+                "returncode": 1,
+                "elapsed_s": 108.7,
+                "stdout_tail": wrapped_stdout,
+            }
+        ],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     row = out["by_kernel"][0]["backend_ladder"][0]
-    assert row.get("error_class") == "preprocess_failed", (
-        f"wrapped log should still classify: {row}"
-    )
+    assert row.get("error_class") == "preprocess_failed", f"wrapped log should still classify: {row}"
 
 
 def test_render_attempted_row_pulls_verification_from_result_file(
@@ -559,19 +589,27 @@ def test_render_attempted_row_pulls_verification_from_result_file(
     state = _make_state(
         session_id="sid1",
         top15=[_top15_entry("k001")],
-        attempts={"k001": _attempt_entry(decision="REVERT",
-                                          rejected_reason="max_failures",
-                                          compile_passed=None,
-                                          correctness_passed=None)},
+        attempts={
+            "k001": _attempt_entry(
+                decision="REVERT", rejected_reason="max_failures", compile_passed=None, correctness_passed=None
+            )
+        },
         rejected_ids=["k001"],
     )
     _write_full_kernel_result(
-        tmp_path, "sid1", "k001",
-        attempts=[{
-            "backend": "codex", "status": "partial", "attempt_id": "x1",
-            "optimized_path": "/workspace/optimized/v1.cu",
-            "returncode": 1, "elapsed_s": 483.3,
-        }],
+        tmp_path,
+        "sid1",
+        "k001",
+        attempts=[
+            {
+                "backend": "codex",
+                "status": "partial",
+                "attempt_id": "x1",
+                "optimized_path": "/workspace/optimized/v1.cu",
+                "returncode": 1,
+                "elapsed_s": 483.3,
+            }
+        ],
         verification={
             "compile_passed": True,
             "correctness_passed": False,
@@ -592,46 +630,53 @@ def test_failure_breakdown_classifies_by_error_class(tmp_path: Path) -> None:
     """failure_reason_breakdown uses error_class buckets so root causes aren't buried in 'other'."""
     state = _make_state(
         session_id="sid1",
-        top15=[_top15_entry("k001", gpu_pct=10.0),
-               _top15_entry("k002", gpu_pct=20.0)],
+        top15=[_top15_entry("k001", gpu_pct=10.0), _top15_entry("k002", gpu_pct=20.0)],
         attempts={
-            "k001": _attempt_entry(decision="REVERT",
-                                    rejected_reason="max_failures",
-                                    compile_passed=False),
-            "k002": _attempt_entry(decision="REVERT",
-                                    rejected_reason="max_failures",
-                                    compile_passed=False),
+            "k001": _attempt_entry(decision="REVERT", rejected_reason="max_failures", compile_passed=False),
+            "k002": _attempt_entry(decision="REVERT", rejected_reason="max_failures", compile_passed=False),
         },
         rejected_ids=["k001", "k002"],
     )
     _write_full_kernel_result(
-        tmp_path, "sid1", "k001",
-        attempts=[{
-            "backend": "geak", "status": "failed", "attempt_id": "g1",
-            "optimized_path": "/workspace/optimized/g1_stdout.log",
-            "returncode": 1,
-            "stdout_tail": (
-                "v3 preprocess completed in 100s (success=False, errors=2)"
-            ),
-        }],
+        tmp_path,
+        "sid1",
+        "k001",
+        attempts=[
+            {
+                "backend": "geak",
+                "status": "failed",
+                "attempt_id": "g1",
+                "optimized_path": "/workspace/optimized/g1_stdout.log",
+                "returncode": 1,
+                "stdout_tail": ("v3 preprocess completed in 100s (success=False, errors=2)"),
+            }
+        ],
     )
     _write_full_kernel_result(
-        tmp_path, "sid1", "k002",
+        tmp_path,
+        "sid1",
+        "k002",
         attempts=[
-            {"backend": "claude", "status": "failed", "attempt_id": "c1",
-             "optimized_path": "/workspace/optimized/c1_stdout.log",
-             "returncode": 1,
-             "stdout_tail": '"error_message": "Timed out after 480s"'},
-            {"backend": "codex", "status": "failed", "attempt_id": "x1",
-             "optimized_path": "/workspace/optimized/x1_stdout.log",
-             "returncode": 1,
-             "stdout_tail": '"error_message": "Timed out after 480s"'},
+            {
+                "backend": "claude",
+                "status": "failed",
+                "attempt_id": "c1",
+                "optimized_path": "/workspace/optimized/c1_stdout.log",
+                "returncode": 1,
+                "stdout_tail": '"error_message": "Timed out after 480s"',
+            },
+            {
+                "backend": "codex",
+                "status": "failed",
+                "attempt_id": "x1",
+                "optimized_path": "/workspace/optimized/x1_stdout.log",
+                "returncode": 1,
+                "stdout_tail": '"error_message": "Timed out after 480s"',
+            },
         ],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     breakdown = out["failure_reason_breakdown"]
     assert breakdown.get("preprocess_failed") == 1, breakdown
     assert breakdown.get("timeout") == 1, breakdown
-    assert breakdown.get("other", 0) == 0, (
-        f"new buckets should absorb root causes, leaving other empty: {breakdown}"
-    )
+    assert breakdown.get("other", 0) == 0, f"new buckets should absorb root causes, leaving other empty: {breakdown}"

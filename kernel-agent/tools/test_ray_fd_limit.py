@@ -31,7 +31,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
 
 TOOLS_DIR = Path(__file__).resolve().parent
 BACKENDS_DIR = TOOLS_DIR / "backends"
@@ -68,7 +67,7 @@ class _FakeResource:
         if self._hard == self.RLIM_INFINITY:
             return False  # no ceiling
         if value == self.RLIM_INFINITY:
-            return True   # asking for unlimited under a finite cap
+            return True  # asking for unlimited under a finite cap
         return value > self._hard
 
     def getrlimit(self, which):
@@ -144,7 +143,9 @@ def test_ensure_fd_limit_clamps_to_low_hard_limit_and_warns(monkeypatch):
 
     warnings: list = []
     monkeypatch.setattr(
-        ray_runtime, "_fd_limit_warn", lambda msg: warnings.append(msg),
+        ray_runtime,
+        "_fd_limit_warn",
+        lambda msg: warnings.append(msg),
         raising=False,
     )
 
@@ -166,7 +167,9 @@ def test_ensure_fd_limit_unlimited_hard_targets_min_soft_without_warning(monkeyp
 
     warnings: list = []
     monkeypatch.setattr(
-        ray_runtime, "_fd_limit_warn", lambda msg: warnings.append(msg),
+        ray_runtime,
+        "_fd_limit_warn",
+        lambda msg: warnings.append(msg),
         raising=False,
     )
 
@@ -191,7 +194,9 @@ def test_ensure_fd_limit_unlimited_soft_is_noop(monkeypatch):
 
     warnings: list = []
     monkeypatch.setattr(
-        ray_runtime, "_fd_limit_warn", lambda msg: warnings.append(msg),
+        ray_runtime,
+        "_fd_limit_warn",
+        lambda msg: warnings.append(msg),
         raising=False,
     )
 
@@ -213,13 +218,11 @@ def test_ensure_ray_cluster_runs_fd_preflight_before_ray_start(monkeypatch):
 
     kinds = [kind for kind, _ in events]
     assert "setrlimit" in kinds, (
-        "ensure_ray_cluster must run an RLIMIT_NOFILE preflight before "
-        "starting Ray (issue #433)"
+        "ensure_ray_cluster must run an RLIMIT_NOFILE preflight before starting Ray (issue #433)"
     )
     assert "ray_start" in kinds
     assert kinds.index("setrlimit") < kinds.index("ray_start"), (
-        "fd-limit preflight must run BEFORE 'ray start' so the raylet "
-        "inherits the raised limit"
+        "fd-limit preflight must run BEFORE 'ray start' so the raylet inherits the raised limit"
     )
 
 
@@ -234,8 +237,7 @@ def test_force_restart_local_cluster_runs_fd_preflight_before_ray_start(monkeypa
 
     kinds = [kind for kind, _ in events]
     assert "setrlimit" in kinds, (
-        "force_restart_local_cluster must run an RLIMIT_NOFILE preflight "
-        "before starting Ray (issue #433)"
+        "force_restart_local_cluster must run an RLIMIT_NOFILE preflight before starting Ray (issue #433)"
     )
     assert "ray_start" in kinds
     assert kinds.index("setrlimit") < kinds.index("ray_start")

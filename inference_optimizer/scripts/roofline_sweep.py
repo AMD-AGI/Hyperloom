@@ -60,6 +60,17 @@ class LaunchTemplate:
 
 
 def load_session_state(session_dir: Path) -> dict[str, Any]:
+    """Load a session's ``state.json``.
+
+    Args:
+        session_dir: Hyperloom session directory.
+
+    Returns:
+        The parsed state mapping.
+
+    Raises:
+        SystemExit: If ``state.json`` is missing.
+    """
     state_path = session_dir / "state.json"
     if not state_path.is_file():
         raise SystemExit(f"state.json not found at {state_path}")
@@ -73,6 +84,16 @@ def extract_templates(state: dict[str, Any]) -> tuple[LaunchTemplate, LaunchTemp
     state.current_best.extra_server_args + extra_envs. The optimized
     template is the hard KPI of this sweep — when empty, the caller
     should refuse to run.
+
+    Args:
+        state: The parsed session ``state.json`` mapping.
+
+    Returns:
+        The ``(baseline, optimized)`` launch templates.
+
+    Raises:
+        SystemExit: If ``current_best`` carries neither extra args nor envs
+            (the session accepted no optimization).
     """
     cb = state.get("current_best") or {}
     opt_args = (cb.get("extra_server_args") or "").strip()
@@ -108,6 +129,18 @@ class SglangServer:
         gpu_id: int,
         ready_timeout_sec: int = 900,
     ) -> None:
+        """Initialize the sglang server wrapper.
+
+        Args:
+            model_path: Path to the model to serve.
+            tp: Tensor-parallel size.
+            port: Port to bind the server on.
+            extra_args: Extra server CLI args (space-separated).
+            extra_envs: Extra environment variables for the server process.
+            log_path: File to capture server stdout/stderr.
+            gpu_id: Physical GPU id to pin via ``ROCR_VISIBLE_DEVICES``.
+            ready_timeout_sec: Max seconds to wait for the server to be ready.
+        """
         self.model_path = model_path
         self.tp = tp
         self.port = port
@@ -119,8 +152,18 @@ class SglangServer:
         self.proc: subprocess.Popen | None = None
 
     def __enter__(self) -> "SglangServer":
+        """Launch the server process and block until it is ready.
+
+        Returns:
+            This server instance.
+
+        Raises:
+            RuntimeError: If the server dies or never becomes ready.
+        """
         cmd = [
-            sys.executable, "-m", "sglang.launch_server",
+            sys.executable,
+            "-m",
+            "sglang.launch_server",
             f"--model-path={self.model_path}",
             "--host=0.0.0.0",
             f"--port={self.port}",
@@ -149,21 +192,29 @@ class SglangServer:
         log = self.log_path.open("w", encoding="utf-8")
         print(f"[server] launching: {' '.join(cmd)}", flush=True)
         self.proc = subprocess.Popen(
-            cmd, env=env, stdout=log, stderr=subprocess.STDOUT,
+            cmd,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
         )
         self._wait_ready()
         return self
 
     def _wait_ready(self) -> None:
+        """Poll the health endpoint until the server is ready or times out.
+
+        Raises:
+            RuntimeError: If the server process dies or does not become ready
+                within ``ready_timeout_sec``.
+        """
         import urllib.request
+
         deadline = time.time() + self.ready_timeout_sec
         url = f"http://127.0.0.1:{self.port}/health_generate"
         while time.time() < deadline:
             if self.proc is None or self.proc.poll() is not None:
-                raise RuntimeError(
-                    f"sglang server died during startup; see {self.log_path}"
-                )
+                raise RuntimeError(f"sglang server died during startup; see {self.log_path}")
             try:
                 with urllib.request.urlopen(url, timeout=2) as r:
                     if r.status < 500:
@@ -172,11 +223,14 @@ class SglangServer:
             except Exception:
                 pass
             time.sleep(5)
-        raise RuntimeError(
-            f"sglang server did not become ready in {self.ready_timeout_sec}s"
-        )
+        raise RuntimeError(f"sglang server did not become ready in {self.ready_timeout_sec}s")
 
     def __exit__(self, *_exc: Any) -> None:
+        """Terminate the server process group on context exit.
+
+        Args:
+            *_exc: Exception info from the ``with`` block (unused).
+        """
         if self.proc is None:
             return
         try:
@@ -192,6 +246,11 @@ class SglangServer:
 
     @property
     def base_url(self) -> str:
+        """Return the server's local base URL.
+
+        Returns:
+            The ``http://127.0.0.1:<port>`` base URL for this server.
+        """
         return f"http://127.0.0.1:{self.port}"
 
 
@@ -199,27 +258,62 @@ class SglangServer:
 # bench_serving
 # ---------------------------------------------------------------------------
 def run_bench(
-    *, base_url: str, model_path: str, conc: int, isl: int, osl: int,
-    num_prompts: int, dataset: str, output_dir: Path, port: int,
+    *,
+    base_url: str,
+    model_path: str,
+    conc: int,
+    isl: int,
+    osl: int,
+    num_prompts: int,
+    dataset: str,
+    output_dir: Path,
+    port: int,
 ) -> dict[str, Any]:
     """Invoke ``sglang.bench_serving`` once; return parsed metrics dict.
 
     Returns ``{}`` on subprocess failure (caller can mark as OOM/ERROR).
+
+    Args:
+        base_url: Base URL of the running sglang server.
+        model_path: Path to the served model.
+        conc: Max concurrency for the benchmark.
+        isl: Input sequence length.
+        osl: Output sequence length.
+        num_prompts: Number of prompts to send.
+        dataset: Benchmark dataset name.
+        output_dir: Directory for the per-conc ``bench_conc<N>.jsonl`` output.
+        port: Server port (informational).
+
+    Returns:
+        The parsed metrics dict from the last bench line, or ``{}`` on
+        subprocess failure or unreadable/empty output.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     out_file = output_dir / f"bench_conc{conc}.jsonl"
     cmd = [
-        sys.executable, "-m", "sglang.bench_serving",
-        "--backend", "sglang",
-        "--base-url", base_url,
-        "--model", model_path,
-        "--dataset-name", dataset,
-        "--random-input-len", str(isl),
-        "--random-output-len", str(osl),
-        "--random-range-ratio", "1.0",
-        "--num-prompts", str(num_prompts),
-        "--max-concurrency", str(conc),
-        "--output-file", str(out_file),
+        sys.executable,
+        "-m",
+        "sglang.bench_serving",
+        "--backend",
+        "sglang",
+        "--base-url",
+        base_url,
+        "--model",
+        model_path,
+        "--dataset-name",
+        dataset,
+        "--random-input-len",
+        str(isl),
+        "--random-output-len",
+        str(osl),
+        "--random-range-ratio",
+        "1.0",
+        "--num-prompts",
+        str(num_prompts),
+        "--max-concurrency",
+        str(conc),
+        "--output-file",
+        str(out_file),
         "--disable-tqdm",
     ]
     print(f"[bench] conc={conc} num_prompts={num_prompts} -> {out_file}", flush=True)
@@ -245,9 +339,30 @@ def run_bench(
 # Ceiling per concurrency
 # ---------------------------------------------------------------------------
 def compute_ceiling(
-    *, model_meta: Any, gpu_type: str, num_gpus: int,
-    conc: int, isl: int, osl: int,
+    *,
+    model_meta: Any,
+    gpu_type: str,
+    num_gpus: int,
+    conc: int,
+    isl: int,
+    osl: int,
 ) -> float:
+    """Compute the theoretical peak output throughput for one concurrency.
+
+    Thin wrapper over :func:`compute_theoretical_peak_output_tok_per_sec` that
+    unpacks the model metadata fields.
+
+    Args:
+        model_meta: Loaded model metadata (weights, layers, KV shape, ...).
+        gpu_type: GPU type key into the hardware specs.
+        num_gpus: Number of GPUs (tensor-parallel size).
+        conc: Concurrency level.
+        isl: Input sequence length.
+        osl: Output sequence length.
+
+    Returns:
+        The theoretical peak output tokens/second.
+    """
     return compute_theoretical_peak_output_tok_per_sec(
         gpu_type=gpu_type,
         num_gpus=num_gpus,
@@ -270,50 +385,100 @@ def compute_ceiling(
 # Sweep one template across all concurrencies (single server reuse)
 # ---------------------------------------------------------------------------
 def sweep_one_template(
-    *, tmpl: LaunchTemplate, model_path: str, model_meta: Any,
-    gpu_type: str, tp: int, gpu_id: int, port: int, isl: int, osl: int,
-    concs: list[int], dataset: str, num_prompts_factor: int,
+    *,
+    tmpl: LaunchTemplate,
+    model_path: str,
+    model_meta: Any,
+    gpu_type: str,
+    tp: int,
+    gpu_id: int,
+    port: int,
+    isl: int,
+    osl: int,
+    concs: list[int],
+    dataset: str,
+    num_prompts_factor: int,
     output_dir: Path,
 ) -> list[dict[str, Any]]:
+    """Sweep a launch template across all concurrencies on one reused server.
+
+    Args:
+        tmpl: Launch template (baseline or optimized).
+        model_path: Path to the model to serve.
+        model_meta: Loaded model metadata used for ceiling computation.
+        gpu_type: GPU type key.
+        tp: Tensor-parallel size.
+        gpu_id: Physical GPU id to pin.
+        port: Server port.
+        isl: Input sequence length.
+        osl: Output sequence length.
+        concs: Concurrency levels to benchmark.
+        dataset: Benchmark dataset name.
+        num_prompts_factor: ``num_prompts = max(conc * factor, 16)``.
+        output_dir: Directory for server/bench logs.
+
+    Returns:
+        One result row per concurrency with measured throughput, ceiling, MBU,
+        and status.
+    """
     rows: list[dict[str, Any]] = []
     server_log = output_dir / f"server_{tmpl.label}.log"
     bench_out_dir = output_dir / f"bench_{tmpl.label}"
     with SglangServer(
-        model_path=model_path, tp=tp, port=port,
-        extra_args=tmpl.extra_server_args, extra_envs=tmpl.extra_envs,
-        log_path=server_log, gpu_id=gpu_id,
+        model_path=model_path,
+        tp=tp,
+        port=port,
+        extra_args=tmpl.extra_server_args,
+        extra_envs=tmpl.extra_envs,
+        log_path=server_log,
+        gpu_id=gpu_id,
     ) as srv:
         for conc in concs:
             num_prompts = max(conc * num_prompts_factor, 16)
             metrics = run_bench(
-                base_url=srv.base_url, model_path=model_path, conc=conc,
-                isl=isl, osl=osl, num_prompts=num_prompts, dataset=dataset,
-                output_dir=bench_out_dir, port=port,
+                base_url=srv.base_url,
+                model_path=model_path,
+                conc=conc,
+                isl=isl,
+                osl=osl,
+                num_prompts=num_prompts,
+                dataset=dataset,
+                output_dir=bench_out_dir,
+                port=port,
             )
             ceiling = compute_ceiling(
-                model_meta=model_meta, gpu_type=gpu_type, num_gpus=tp,
-                conc=conc, isl=isl, osl=osl,
+                model_meta=model_meta,
+                gpu_type=gpu_type,
+                num_gpus=tp,
+                conc=conc,
+                isl=isl,
+                osl=osl,
             )
             if not metrics:
-                rows.append({
-                    "conc": conc, "config": tmpl.label,
-                    "measured_tps": None, "ceiling_tps": ceiling,
-                    "target_70_tps": ceiling * 0.70, "mbu_pct": None,
-                    "status": "FAILED_OR_OOM",
-                })
+                rows.append(
+                    {
+                        "conc": conc,
+                        "config": tmpl.label,
+                        "measured_tps": None,
+                        "ceiling_tps": ceiling,
+                        "target_70_tps": ceiling * 0.70,
+                        "mbu_pct": None,
+                        "status": "FAILED_OR_OOM",
+                    }
+                )
                 continue
-            measured = float(
-                metrics.get("output_throughput")
-                or metrics.get("output_token_throughput")
-                or 0.0
+            measured = float(metrics.get("output_throughput") or metrics.get("output_token_throughput") or 0.0)
+            rows.append(
+                {
+                    "conc": conc,
+                    "config": tmpl.label,
+                    "measured_tps": measured,
+                    "ceiling_tps": ceiling,
+                    "target_70_tps": ceiling * 0.70,
+                    "mbu_pct": (measured / ceiling * 100.0) if ceiling > 0 else None,
+                    "status": "OK",
+                }
             )
-            rows.append({
-                "conc": conc, "config": tmpl.label,
-                "measured_tps": measured, "ceiling_tps": ceiling,
-                "target_70_tps": ceiling * 0.70,
-                "mbu_pct": (measured / ceiling * 100.0) if ceiling > 0 else None,
-                "status": "OK",
-            })
             print(
                 f"[sweep] {tmpl.label} conc={conc:>3} measured={measured:8.1f} "
                 f"ceiling={ceiling:8.1f} MBU={(measured / ceiling * 100.0) if ceiling > 0 else 0:5.1f}%",
@@ -326,6 +491,12 @@ def sweep_one_template(
 # Output: csv + svg
 # ---------------------------------------------------------------------------
 def write_csv(rows: list[dict[str, Any]], csv_path: Path) -> None:
+    """Write sweep result rows to a CSV file.
+
+    Args:
+        rows: Result rows from :func:`sweep_one_template`.
+        csv_path: Destination CSV path (parents created as needed).
+    """
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     fields = ["conc", "config", "measured_tps", "ceiling_tps", "target_70_tps", "mbu_pct", "status"]
     with csv_path.open("w", newline="", encoding="utf-8") as f:
@@ -336,16 +507,45 @@ def write_csv(rows: list[dict[str, Any]], csv_path: Path) -> None:
 
 
 def plot_svg(
-    rows: list[dict[str, Any]], svg_path: Path, *,
-    model_label: str, gpu_label: str, tp: int, isl: int, osl: int,
+    rows: list[dict[str, Any]],
+    svg_path: Path,
+    *,
+    model_label: str,
+    gpu_label: str,
+    tp: int,
+    isl: int,
+    osl: int,
     target_ratio: float = 0.70,
 ) -> None:
+    """Render the dual-panel throughput/MBU roofline chart as SVG.
+
+    Args:
+        rows: Sweep result rows.
+        svg_path: Destination SVG path.
+        model_label: Model name shown in the title.
+        gpu_label: GPU label shown in the title.
+        tp: Tensor-parallel size shown in the title.
+        isl: Input sequence length shown in the title.
+        osl: Output sequence length shown in the title.
+        target_ratio: Roofline fraction drawn as the target line.
+    """
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     concs = sorted({r["conc"] for r in rows})
+
     def _series(label: str, key: str) -> list[float | None]:
+        """Return per-concurrency values for one config/metric.
+
+        Args:
+            label: Config label (``baseline`` / ``optimized``).
+            key: Metric key to extract from each row.
+
+        Returns:
+            A list aligned with ``concs``; ``None`` where a value is missing.
+        """
         out: list[float | None] = []
         for c in concs:
             row = next((r for r in rows if r["conc"] == c and r["config"] == label), None)
@@ -363,7 +563,10 @@ def plot_svg(
     has_opt = any(v is not None for v in opt_meas)
 
     fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(12, 9), gridspec_kw={"height_ratios": [3, 2]},
+        2,
+        1,
+        figsize=(12, 9),
+        gridspec_kw={"height_ratios": [3, 2]},
     )
 
     # Upper panel: throughput.
@@ -378,8 +581,7 @@ def plot_svg(
     ax1.set_xlabel("Concurrency")
     ax1.set_ylabel("output_throughput (tok/s)")
     ax1.set_title(
-        f"Throughput: Measured vs Roofline\n"
-        f"{model_label} | {gpu_label} (TP={tp}) | ISL={isl} OSL={osl}",
+        f"Throughput: Measured vs Roofline\n{model_label} | {gpu_label} (TP={tp}) | ISL={isl} OSL={osl}",
         fontsize=11,
     )
     ax1.grid(True, alpha=0.3)
@@ -387,6 +589,7 @@ def plot_svg(
 
     # Lower panel: MBU bars.
     import numpy as np
+
     x = np.arange(len(concs))
     bar_w = 0.38
     base_vals = [v or 0 for v in base_mbu]
@@ -396,7 +599,7 @@ def plot_svg(
         ax2.bar(x + bar_w / 2, opt_vals, bar_w, label="optimized", color="#2ca02c")
     else:
         ax2.bar(x, base_vals, bar_w * 1.4, label="baseline", color="#1f77b4")
-    ax2.axhline(70.0, color="#ff7f0e", linestyle=":", label=f"70% target")
+    ax2.axhline(70.0, color="#ff7f0e", linestyle=":", label="70% target")
     ax2.axhline(100.0, color="#d62728", linestyle="--", label="100% = HBM ceiling")
     ax2.set_xticks(x)
     ax2.set_xticklabels([str(c) for c in concs])
@@ -409,14 +612,26 @@ def plot_svg(
 
     # Annotate measured values on top panel.
     for c, v in zip(concs, base_meas):
-        if v: ax1.annotate(f"{v:.0f}", (c, v), textcoords="offset points",
-                            xytext=(0, -14), ha="center", fontsize=8, color="#1f77b4")
+        if v:
+            ax1.annotate(
+                f"{v:.0f}",
+                (c, v),
+                textcoords="offset points",
+                xytext=(0, -14),
+                ha="center",
+                fontsize=8,
+                color="#1f77b4",
+            )
     for c, v in zip(concs, opt_meas):
-        if v: ax1.annotate(f"{v:.0f}", (c, v), textcoords="offset points",
-                            xytext=(0, 8), ha="center", fontsize=8, color="#2ca02c")
+        if v:
+            ax1.annotate(
+                f"{v:.0f}", (c, v), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=8, color="#2ca02c"
+            )
     for c, v in zip(concs, ceiling):
-        if v: ax1.annotate(f"{v:.0f}", (c, v), textcoords="offset points",
-                            xytext=(8, 0), ha="left", fontsize=8, color="#d62728")
+        if v:
+            ax1.annotate(
+                f"{v:.0f}", (c, v), textcoords="offset points", xytext=(8, 0), ha="left", fontsize=8, color="#d62728"
+            )
 
     fig.tight_layout()
     svg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -429,11 +644,17 @@ def plot_svg(
 # CLI
 # ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the roofline concurrency sweep.
+
+    Args:
+        argv: Argument list to parse; defaults to ``sys.argv`` when ``None``.
+
+    Returns:
+        Process exit code (``0`` on success).
+    """
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--session-dir", required=True, type=Path,
-                    help="Hyperloom session directory (contains state.json)")
-    ap.add_argument("--concs", default="1,2,4,8,16,32,64,128",
-                    help="Comma-separated concurrency list")
+    ap.add_argument("--session-dir", required=True, type=Path, help="Hyperloom session directory (contains state.json)")
+    ap.add_argument("--concs", default="1,2,4,8,16,32,64,128", help="Comma-separated concurrency list")
     ap.add_argument("--isl", type=int, default=1024)
     ap.add_argument("--osl", type=int, default=1024)
     ap.add_argument("--tp", type=int, default=1)
@@ -441,17 +662,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--gpu-type", choices=sorted(HW_SPECS), default="mi355x")
     ap.add_argument("--port", type=int, default=30100)
     ap.add_argument("--dataset", default="random")
-    ap.add_argument("--num-prompts-factor", type=int, default=4,
-                    help="num_prompts = max(conc × factor, 16)")
-    ap.add_argument("--output-prefix", default=None,
-                    help="Base path for csv/svg; default = <session_dir>/roofline_sweep")
-    ap.add_argument("--skip-bench", action="store_true",
-                    help="Compute ceilings + plot only (uses existing csv)")
-    ap.add_argument("--baseline-only", action="store_true",
-                    help="Sweep only the vanilla baseline template (use when "
-                         "the session accepted no optimization, e.g. all "
-                         "explore/kernel_opt REVERTed). Skips the optimized "
-                         "line; chart shows Measured vs Roofline vs target.")
+    ap.add_argument("--num-prompts-factor", type=int, default=4, help="num_prompts = max(conc × factor, 16)")
+    ap.add_argument(
+        "--output-prefix", default=None, help="Base path for csv/svg; default = <session_dir>/roofline_sweep"
+    )
+    ap.add_argument("--skip-bench", action="store_true", help="Compute ceilings + plot only (uses existing csv)")
+    ap.add_argument(
+        "--baseline-only",
+        action="store_true",
+        help="Sweep only the vanilla baseline template (use when "
+        "the session accepted no optimization, e.g. all "
+        "explore/kernel_opt REVERTed). Skips the optimized "
+        "line; chart shows Measured vs Roofline vs target.",
+    )
     args = ap.parse_args(argv)
 
     session_dir: Path = args.session_dir.expanduser().resolve()
@@ -466,9 +689,7 @@ def main(argv: list[str] | None = None) -> int:
 
     concs = [int(c) for c in args.concs.split(",") if c.strip()]
     out_prefix = (
-        Path(args.output_prefix).expanduser().resolve()
-        if args.output_prefix
-        else session_dir / "roofline_sweep"
+        Path(args.output_prefix).expanduser().resolve() if args.output_prefix else session_dir / "roofline_sweep"
     )
     csv_path = out_prefix.with_suffix(".csv")
     svg_path = out_prefix.with_suffix(".svg")
@@ -478,11 +699,14 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"--skip-bench but no csv at {csv_path}")
         with csv_path.open("r", encoding="utf-8") as f:
             rows = [
-                {**r, "conc": int(r["conc"]),
-                 "measured_tps": float(r["measured_tps"]) if r["measured_tps"] else None,
-                 "ceiling_tps": float(r["ceiling_tps"]) if r["ceiling_tps"] else None,
-                 "target_70_tps": float(r["target_70_tps"]) if r["target_70_tps"] else None,
-                 "mbu_pct": float(r["mbu_pct"]) if r["mbu_pct"] else None}
+                {
+                    **r,
+                    "conc": int(r["conc"]),
+                    "measured_tps": float(r["measured_tps"]) if r["measured_tps"] else None,
+                    "ceiling_tps": float(r["ceiling_tps"]) if r["ceiling_tps"] else None,
+                    "target_70_tps": float(r["target_70_tps"]) if r["target_70_tps"] else None,
+                    "mbu_pct": float(r["mbu_pct"]) if r["mbu_pct"] else None,
+                }
                 for r in csv.DictReader(f)
             ]
     else:
@@ -496,20 +720,33 @@ def main(argv: list[str] | None = None) -> int:
             templates = [tmpl_base, tmpl_opt]
         rows: list[dict[str, Any]] = []
         for tmpl in templates:
-            rows.extend(sweep_one_template(
-                tmpl=tmpl, model_path=model_path, model_meta=model_meta,
-                gpu_type=args.gpu_type, tp=args.tp, gpu_id=args.gpu_id, port=args.port,
-                isl=args.isl, osl=args.osl, concs=concs, dataset=args.dataset,
-                num_prompts_factor=args.num_prompts_factor,
-                output_dir=out_prefix.parent / "_sweep_logs",
-            ))
+            rows.extend(
+                sweep_one_template(
+                    tmpl=tmpl,
+                    model_path=model_path,
+                    model_meta=model_meta,
+                    gpu_type=args.gpu_type,
+                    tp=args.tp,
+                    gpu_id=args.gpu_id,
+                    port=args.port,
+                    isl=args.isl,
+                    osl=args.osl,
+                    concs=concs,
+                    dataset=args.dataset,
+                    num_prompts_factor=args.num_prompts_factor,
+                    output_dir=out_prefix.parent / "_sweep_logs",
+                )
+            )
         write_csv(rows, csv_path)
 
     plot_svg(
-        rows, svg_path,
+        rows,
+        svg_path,
         model_label=state.get("model_name") or Path(model_path).name,
-        gpu_label=args.gpu_type.upper(), tp=args.tp,
-        isl=args.isl, osl=args.osl,
+        gpu_label=args.gpu_type.upper(),
+        tp=args.tp,
+        isl=args.isl,
+        osl=args.osl,
     )
     return 0
 

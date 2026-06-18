@@ -46,6 +46,7 @@ def _ns(**overrides) -> argparse.Namespace:
         robustness_backend=None,
         robustness_workload_uid=None,
         robustness_disable_local_probe=None,
+        robustness_disable_server_probe=None,
         robustness_enable_cluster_pod_metrics=None,
         robustness_pod_metrics_categories=None,
     )
@@ -55,6 +56,7 @@ def _ns(**overrides) -> argparse.Namespace:
 
 # _build_robustness_options — multi-node cluster policy
 
+
 def test_single_node_emits_no_multi_node_options():
     """Default 1-node call passes nothing extra into request.options."""
     options = _build_robustness_options(_ns())
@@ -63,11 +65,13 @@ def test_single_node_emits_no_multi_node_options():
 
 def test_single_node_passes_server_url_and_llm_rca():
     """Existing operator-supplied flags still propagate verbatim."""
-    options = _build_robustness_options(_ns(
-        nodes=1,
-        robustness_server_url="http://robustness.svc:8080",
-        robustness_llm_rca=True,
-    ))
+    options = _build_robustness_options(
+        _ns(
+            nodes=1,
+            robustness_server_url="http://robustness.svc:8080",
+            robustness_llm_rca=True,
+        )
+    )
     assert options == {
         "robustness_server_url": "http://robustness.svc:8080",
         "llm_rca_enabled": True,
@@ -102,6 +106,40 @@ def test_multi_node_bumps_no_levers_floor_to_60_minutes():
     assert "progress_no_levers_min_minutes" not in single
 
 
+def test_single_node_disable_server_probe_opt_in():
+    """``--robustness-disable-server-probe`` on single-node turns OFF only the
+    127.0.0.1:8888 probe (auto_probe_inference_server=False) and emits nothing
+    else multi-node (LocalProbe otherwise stays fully active)."""
+    options = _build_robustness_options(
+        _ns(nodes=1, robustness_disable_server_probe=True),
+    )
+    assert options == {"auto_probe_inference_server": False}
+    assert "disable_local_probe" not in options
+    assert "progress_no_levers_min_minutes" not in options
+
+
+def test_single_node_disable_server_probe_absent_by_default():
+    """Without the flag, single-node never touches auto_probe_inference_server."""
+    options = _build_robustness_options(_ns(nodes=1))
+    assert "auto_probe_inference_server" not in options
+
+
+def test_single_node_explicit_keep_server_probe():
+    """``--no-robustness-disable-server-probe`` forces the probe ON explicitly."""
+    options = _build_robustness_options(
+        _ns(nodes=1, robustness_disable_server_probe=False),
+    )
+    assert options["auto_probe_inference_server"] is True
+
+
+def test_multi_node_explicit_keep_server_probe_overrides_default():
+    """Multi-node operator can re-enable the 8888 probe explicitly."""
+    options = _build_robustness_options(
+        _ns(nodes=2, robustness_disable_server_probe=False),
+    )
+    assert options["auto_probe_inference_server"] is True
+
+
 def test_multi_node_respects_explicit_opt_out():
     """Operator can override the multi-node cluster defaults explicitly."""
     options = _build_robustness_options(
@@ -117,10 +155,12 @@ def test_multi_node_respects_explicit_opt_out():
 
 def test_multi_node_preserves_operator_flags():
     """Multi-node auto-disable must coexist with explicit operator flags."""
-    options = _build_robustness_options(_ns(
-        nodes=4,
-        robustness_server_url="http://robustness.svc:8080",
-    ))
+    options = _build_robustness_options(
+        _ns(
+            nodes=4,
+            robustness_server_url="http://robustness.svc:8080",
+        )
+    )
     assert options == {
         "robustness_server_url": "http://robustness.svc:8080",
         "nodes": 4,
@@ -176,6 +216,7 @@ def test_nodes_zero_or_none_treated_as_single_node():
 
 
 # _resolve_robustness_choice — multi-node auto-downgrade to mock
+
 
 def test_resolve_choice_single_node_default_keeps_agent():
     """Default path on single-node stays ``"agent"`` to preserve real LocalProbe coverage."""

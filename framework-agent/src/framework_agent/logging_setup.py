@@ -30,9 +30,7 @@ from typing import Any, Iterator
 
 # All module loggers descend from this root so one configure call propagates.
 _ROOT_NAME = "framework_agent"
-_DEFAULT_FMT = (
-    "%(asctime)s %(levelname)-5s %(name)s :: %(message)s"
-)
+_DEFAULT_FMT = "%(asctime)s %(levelname)-5s %(name)s :: %(message)s"
 _LEVEL_ENVS: tuple[str, ...] = (
     "FRAMEWORK_EXPLORER_LOG_LEVEL",
     "FRAMEWORK_AGENT_LOG_LEVEL",
@@ -94,14 +92,14 @@ class _JsonLineFormatter(logging.Formatter):
             str: A JSON object encoded as a single line.
         """
         payload: dict[str, Any] = {
-            "ts":     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
-            "level":  record.levelname,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
+            "level": record.levelname,
             "logger": record.name,
-            "msg":    record.getMessage(),
+            "msg": record.getMessage(),
         }
         for k, v in record.__dict__.items():
             if k.startswith("extra_"):
-                payload[k[len("extra_"):]] = v
+                payload[k[len("extra_") :]] = v
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)
@@ -118,12 +116,17 @@ def configure_logging(
 
     Idempotent: each call clears previously attached handlers so re-running
     does not stack duplicates.
+
+    Args:
+        level: Log level (name or int); resolved from env when ``None``.
+        json_output: Force JSON line output; resolved from env when ``None``.
+        log_file: Optional file path to also write logs to.
+        quiet_third_party: Raise noisy third-party loggers to WARNING.
+
+    Returns:
+        The configured root logger.
     """
-    use_json = (
-        json_output
-        if json_output is not None
-        else os.environ.get(_JSON_ENV, "").strip() in ("1", "true", "yes")
-    )
+    use_json = json_output if json_output is not None else os.environ.get(_JSON_ENV, "").strip() in ("1", "true", "yes")
     effective_level = _resolve_level(level)
     resolved_file = log_file if log_file is not None else os.environ.get(_FILE_ENV)
 
@@ -199,8 +202,15 @@ def stage_log(
 ) -> Iterator[dict[str, Any]]:
     """Bracket a per-stage block with start/done/failed envelopes.
 
-    Yields a mutable dict so the caller can attach result metrics (e.g.
-    ``ctx["throughput"] = 1234.5``) before the ``done`` envelope fires.
+    Args:
+        logger: Logger to emit the stage envelopes on.
+        stage: Stage name included in each envelope.
+        candidate: Optional candidate ref for context.
+        **fields: Extra structured fields attached to the envelopes.
+
+    Yields:
+        A mutable dict so the caller can attach result metrics (e.g.
+        ``ctx["throughput"] = 1234.5``) before the ``done`` envelope fires.
     """
     started = time.monotonic()
     base: dict[str, Any] = {"stage": stage}
@@ -219,7 +229,9 @@ def stage_log(
         ctx["error_msg"] = str(exc)[:240]
         logger.exception(
             "stage.failed %s wall=%.1fs %s",
-            stage, wall, type(exc).__name__,
+            stage,
+            wall,
+            type(exc).__name__,
             extra={f"extra_{k}": v for k, v in ctx.items()},
         )
         raise
@@ -228,7 +240,8 @@ def stage_log(
         ctx.setdefault("wall_sec", round(wall, 3))
         logger.info(
             "stage.done %s wall=%.1fs",
-            stage, wall,
+            stage,
+            wall,
             extra={f"extra_{k}": v for k, v in ctx.items()},
         )
 
