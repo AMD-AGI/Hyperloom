@@ -2349,57 +2349,6 @@ def _is_pybind_shim(source_file: str) -> bool:
     return "PYBIND11_MODULE" in text or "pybind11" in text
 
 
-# ---------------------------------------------------------------------------
-# PR-K: aiter @compile_ops launcher → device source promotion.
-#
-# aiter ships ``@compile_ops("module_<x>", gen_func=...)`` decorators on its
-# top-level Python wrappers under ``aiter/ops/`` (e.g. ``aiter/ops/moe_op.py``
-# for the ``ck_moe_stage1/2`` family). Trace events name the wrapper as the
-# call-site, so torch.profiler / TraceLens propagate ``aiter/ops/moe_op.py``
-# as the kernel's ``source_file`` — but the actual compute lives in
-# ``csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu`` (codegen entry
-# that hipcc compiles into ``module_moe_ck2stages_*.so`` under
-# ``<aiter>/jit/build/``). Rewriting the wrapper is a no-op at runtime
-# because the compiled .so bypasses the wrapper via the @compile_ops
-# dispatch path. Hyperloom Qwen3-30B-A3B-Base sessions burned 5+ rounds on
-# wrapper rewrites that GEAK/Codex correctly compiled but had zero E2E
-# effect (REVERT @-2.66%); the fix is to promote the wrapper to the
-# device-source ``.cu`` BEFORE handing the candidate to the LLM.
-#
-# Scope is intentionally narrow: only kernels whose name matches one of the
-# entries in :data:`_AITER_COMPILE_OPS_PROMOTIONS` get promoted, and only
-# when the corresponding ``.cu`` exists on disk under the resolved
-# ``kernel_repo``. Anything else falls through with the wrapper unchanged
-# (LLM still gets the original signal — better than a fabricated guess).
-# ---------------------------------------------------------------------------
-# Each entry: (kernel_name_substring_lowercase, ordered_csrc_relpaths_to_try).
-# First on-disk match wins. Order matters when a kernel name matches multiple
-# patterns or when several ``.cu`` files implement variants of the same op.
-_AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    # ck_moe_stage1/2 — the .cu is the @compile_ops codegen entry (jit/build invalidated by PR-K before rebuild).
-    ("ck_moe_stage", ("csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",)),
-    # fmoe_fp8_blockscale_g1u1 — fused MoE ASM entrypoint used by W4A8/MXFP4 expert GEMM.
-    ("fmoe_fp8_blockscale", ("csrc/py_itfs_cu/asm_fmoe.cu",)),
-    # topk_softmax decode kernels.
-    ("topk_softmax_group", ("csrc/kernels/topk_softmax_kernels_group.cu",)),
-    ("topk_softmax", ("csrc/kernels/topk_softmax_kernels.cu",)),
-    # moe_align_block_size — pre-GEMM expert routing prep.
-    ("moe_align_block_size", ("csrc/kernels/moe_align_block_size_kernels.cu",)),
-    # moe_fused_gate — gating + top-k in fused form.
-    ("moe_fused_gate", ("csrc/kernels/moe_fused_gate.cu",)),
-    # rmsnorm — fused add + rmsnorm + quantization kernel (dense / MoE shared).
-    (
-        "rmsnorm",
-        (
-            "csrc/kernels/rmsnorm_quant_kernels.cu",
-            "csrc/py_itfs_ck/rmsnorm_ck_kernels.cu",
-        ),
-    ),
-)
-
-# Fallback aiter editable-checkout root when find_repo_root can't resolve from a wheel-install wrapper (no csrc/).
-_AITER_FALLBACK_REPO = "/sgl-workspace/aiter"
-
 # Framework package-inner roots for resolving relative launcher paths.
 # TraceLens emits paths like "ops/rmsnorm.py" relative to the package dir,
 # not the repo root. These are tried when _resolve_launcher_to_abs_source fails.
@@ -2407,124 +2356,6 @@ _PACKAGE_INNER_ROOTS = (
     "/sgl-workspace/aiter/aiter",
     "/sgl-workspace/sglang/python/sglang",
 )
-
-_AITER_COMPILE_OPS_LAUNCHERS = (
-    "aiter/ops/",
-    "aiter/fused_moe.py",
-    "aiter/fused_moe_bf16_asm.py",
-    "aiter/fused_moe_dp_shared_expert.py",
-)
-
-
-def _normalize_tracelens_launcher_source(source_file: str) -> str:
-    """Strip TraceLens line/symbol suffixes from launcher paths."""
-    return re.sub(r"\(\d+\):.*$", "", source_file.replace(os.sep, "/")).strip()
-
-
-def _is_aiter_compile_ops_launcher(source_file: str) -> bool:
-    """Match known aiter launchers without accepting path-prefix lookalikes."""
-    return any(
-        source_file.startswith(marker) or f"/{marker}" in source_file
-        for marker in _AITER_COMPILE_OPS_LAUNCHERS
-    )
-
-
-def upgrade_aiter_compile_ops_launcher(
-    source_file: str,
-    kernel_name: str,
-    kernel_repo: str,
-) -> str:
-    """Promote an aiter ``@compile_ops`` Python wrapper to the device ``.cu``.
-
-    Promotes when source_file is a known aiter ``@compile_ops`` Python
-    launcher, kernel_name matches a
-    :data:`_AITER_COMPILE_OPS_PROMOTIONS` pattern, and the ``.cu`` exists
-    under kernel_repo (or :data:`_AITER_FALLBACK_REPO`).
-
-    Args:
-        source_file: The candidate's resolved source path.
-        kernel_name: The kernel name used for pattern matching.
-        kernel_repo: The resolved kernel repo root.
-
-    Returns:
-        The promoted device ``.cu`` path, or ``source_file`` unchanged when no
-        promotion applies.
-    """
-    if not source_file or not kernel_name:
-        return source_file
-    s = _normalize_tracelens_launcher_source(source_file)
-    if not s.endswith(".py") or not _is_aiter_compile_ops_launcher(s):
-        return source_file
-
-    name_lower = kernel_name.lower()
-    matched_pattern: str | None = None
-    matched_relpaths: tuple[str, ...] = ()
-    for pattern, relpaths in _AITER_COMPILE_OPS_PROMOTIONS:
-        if pattern in name_lower:
-            matched_pattern = pattern
-            matched_relpaths = relpaths
-            break
-    if matched_pattern is None:
-        return source_file
-
-    candidate_repos: list[str] = []
-    if kernel_repo:
-        candidate_repos.append(kernel_repo)
-    elif source_file:
-        derived = find_repo_root(source_file)
-        if derived:
-            candidate_repos.append(derived)
-    if _AITER_FALLBACK_REPO not in candidate_repos:
-        candidate_repos.append(_AITER_FALLBACK_REPO)
-
-    seen: set[str] = set()
-    for repo_str in candidate_repos:
-        if not repo_str or repo_str in seen:
-            continue
-        seen.add(repo_str)
-        repo = Path(repo_str)
-        if not repo.is_dir():
-            continue
-        for relpath in matched_relpaths:
-            candidate = repo / relpath
-            if candidate.is_file():
-                return str(candidate)
-    return source_file
-
-
-_SGL_KERNEL_DEVICE_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (
-        "silu_and_mul",
-        ("/sgl-workspace/sglang/sgl-kernel/include/hip/hip_act_and_mul.cuh",),
-    ),
-)
-
-
-def upgrade_sgl_kernel_launcher(source_file: str, kernel_name: str) -> str:
-    """Promote known sgl-kernel Python launchers to reusable HIP source.
-
-    Args:
-        source_file: The candidate's resolved source path.
-        kernel_name: The kernel name used for pattern matching.
-
-    Returns:
-        The promoted reusable HIP source path, or ``source_file`` unchanged
-        when no promotion applies.
-    """
-    if not source_file or not kernel_name:
-        return source_file
-    source_posix = source_file.replace(os.sep, "/")
-    if "sgl-kernel/python/sgl_kernel/" not in source_posix:
-        return source_file
-    name_lower = kernel_name.lower()
-    for marker, candidates in _SGL_KERNEL_DEVICE_PROMOTIONS:
-        if marker not in name_lower:
-            continue
-        for candidate in candidates:
-            if Path(candidate).is_file():
-                return candidate
-    return source_file
-
 
 def upgrade_pybind_shim_source(source_file: str, kernel_name: str, kernel_repo: str) -> str:
     """Promote a tiny pybind11 shim to the real device source.
@@ -3662,43 +3493,40 @@ def _finalize_candidates(
             # Curated verdict: not rewritable. Keep the .py launcher as context but
             # let classify_patchability honor the dictionary's reason.
             res.stamp_onto(item)
-        if not item.get("source_file"):
-            item["source_file"] = locate_source_via_grep(item["name"])
-        # Promote a tiny pybind shim TU to the real device code.
-        item["kernel_repo"] = find_repo_root(item.get("source_file", ""))
-        item["source_file"] = upgrade_pybind_shim_source(
-            item.get("source_file", ""), item["name"], item.get("kernel_repo", "")
-        )
-        # PR-K: aiter @compile_ops launcher → device source promotion. Capture the wrapper
-        # before the upgrade; only set launcher_source_file when promotion changed the path.
-        wrapper_before_promotion = item.get("source_file", "")
-        item["source_file"] = upgrade_aiter_compile_ops_launcher(
-            wrapper_before_promotion, item["name"], item.get("kernel_repo", "")
-        )
-        if item["source_file"] != wrapper_before_promotion:
-            item["launcher_source_file"] = wrapper_before_promotion
-            item["source_promoted_from_launcher"] = True
-        wrapper_before_sgl_promotion = item.get("source_file", "")
-        item["source_file"] = upgrade_sgl_kernel_launcher(
-            wrapper_before_sgl_promotion,
-            item["name"],
-        )
-        if item["source_file"] != wrapper_before_sgl_promotion:
-            item["launcher_source_file"] = wrapper_before_sgl_promotion
-            item["source_promoted_from_launcher"] = True
-        # Re-resolve repo in case the upgraded path lives in a different repo.
-        item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
-        item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
-        # PR #668 FlyDSL pseudo-ops carry no real source_file; inject the real FlyDSL
-        # MoE kernel source before the patchability gate so FlyDSL routes to GEAK.
-        if item["source_type"] == "flydsl":
-            _sf = str(item.get("source_file") or "").strip()
-            if (not _sf) or (not os.path.isfile(_sf)):
-                _fb = _resolve_flydsl_source_fallback()
-                if _fb:
-                    item["source_file"] = _fb
-                    item["kernel_repo"] = find_repo_root(_fb) or item.get("kernel_repo", "")
-                    item["flydsl_source_from_fallback"] = True
+        # Legacy fallback resolution runs ONLY for genuinely unmaintained ops:
+        # a dictionary miss (res is None) or an unresolved dispatch (entry exists
+        # but the trace gave no device_kernel_name to pick a route). An in-dict
+        # non_rewritable/no_kernel verdict is authoritative ground truth, so we
+        # keep its .py launcher as context and do NOT grep/promote -- otherwise a
+        # heuristic could rewrite source_file to a path the dictionary already
+        # rejected (classify_patchability would still block GEAK, leaving the
+        # candidate cosmetically inconsistent).
+        if res is None or res.status == "unresolved":
+            if not item.get("source_file"):
+                item["source_file"] = locate_source_via_grep(item["name"])
+            # Promote a tiny pybind shim TU to the real device code.
+            item["kernel_repo"] = find_repo_root(item.get("source_file", ""))
+            item["source_file"] = upgrade_pybind_shim_source(
+                item.get("source_file", ""), item["name"], item.get("kernel_repo", "")
+            )
+            # Re-resolve repo in case the upgraded path lives in a different repo.
+            item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
+            item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
+            # PR #668 FlyDSL pseudo-ops carry no real source_file; inject the real FlyDSL
+            # MoE kernel source before the patchability gate so FlyDSL routes to GEAK.
+            if item["source_type"] == "flydsl":
+                _sf = str(item.get("source_file") or "").strip()
+                if (not _sf) or (not os.path.isfile(_sf)):
+                    _fb = _resolve_flydsl_source_fallback()
+                    if _fb:
+                        item["source_file"] = _fb
+                        item["kernel_repo"] = find_repo_root(_fb) or item.get("kernel_repo", "")
+                        item["flydsl_source_from_fallback"] = True
+        else:
+            # In-dict non-routable verdict: keep the launcher as context and just
+            # compute the metadata the steps below need (no source rewrite).
+            item["kernel_repo"] = find_repo_root(item.get("source_file", ""))
+            item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
         # Downgrade thin .so/.co dispatch wrappers to vendor_binary so recommend_backends() drops them.
         if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
             item["name"], item.get("source_file", "")
