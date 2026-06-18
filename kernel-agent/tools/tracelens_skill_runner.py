@@ -633,6 +633,27 @@ def _extract_data_table(body: str) -> list[list[str]]:
     return rows
 
 
+_KERNEL_LABEL_RE = re.compile(r"^\s*Kernel\s+\d+\s*:\s*", re.IGNORECASE)
+
+
+def _parse_kernel_name_cell(raw: str) -> list[str]:
+    """Parse the ``Kernel Name`` cell into clean device kernel names.
+
+    The going-forward report may list several kernels per row as
+    ``Kernel 1: a<br>Kernel 2: b``; split those on ``<br>`` and strip the
+    ``Kernel N:`` labels. A single bare kernel name passes through. Placeholders
+    (``-`` / ``—``) and empties are dropped.
+    """
+    if not raw:
+        return []
+    names: list[str] = []
+    for piece in raw.replace("<br>", "\n").split("\n"):
+        name = _KERNEL_LABEL_RE.sub("", piece).strip()
+        if name and name not in {"-", "—"} and name not in names:
+            names.append(name)
+    return names
+
+
 def _row_to_candidate(
     headers: list[str],
     cells: list[str],
@@ -682,12 +703,13 @@ def _row_to_candidate(
     kernel_path = record.get("kernel path", "").strip()
     if kernel_path in {"-", "—"}:
         kernel_path = ""
-    # Device kernel symbol (TraceLens "Kernel Name" column, an appended extra):
-    # the mangled __global__ name used to disambiguate dispatch ops in the
-    # op -> .cu resolver. Placeholders normalize to "".
-    device_kernel_name = record.get("kernel name", "").strip()
-    if device_kernel_name in {"-", "—"}:
-        device_kernel_name = ""
+    # Device kernel symbol(s) (TraceLens "Kernel Name" column, an appended extra):
+    # the mangled __global__ name(s) used to disambiguate dispatch ops in the
+    # op -> source resolver. The going-forward report may list several kernels per
+    # row ("Kernel 1: a<br>Kernel 2: b"); keep the full list and use the first for
+    # dispatch matching. Placeholders normalize to "".
+    device_kernel_names = _parse_kernel_name_cell(record.get("kernel name", ""))
+    device_kernel_name = device_kernel_names[0] if device_kernel_names else ""
     # Promote a framework-relative launcher path to its absolute on-disk source so the
     # patchability gate passes; verbatim launcher kept on tracelens_launcher_path below.
     resolved_source_file = kernel_path
@@ -718,8 +740,10 @@ def _row_to_candidate(
         "source_file": resolved_source_file,
         # PR-B §1: keep raw Kernel Path verbatim so aggregation's AST resolution survives _finalize_candidates' source_file overwrite.
         "tracelens_launcher_path": kernel_path,
-        # Device kernel symbol for dispatch resolution (op -> .cu); "" when absent.
+        # Device kernel symbol for dispatch resolution (op -> source); "" when absent.
         "device_kernel_name": device_kernel_name,
+        # Full list when the row names multiple kernels (composite); [] when absent.
+        "device_kernel_names": device_kernel_names,
         "source_type": "tracelens_report",
         "shapes": shapes,
         "tracelens_category": category,
