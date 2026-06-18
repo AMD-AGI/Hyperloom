@@ -80,6 +80,13 @@ from _paths import workspace_root
 #                      ``Kernel Name``.
 #   * ``composite`` -> all editable kernels in the container run (fan-out).
 #
+# ``single`` and ``composite`` route IDENTICALLY (both dedup the container's
+# editable sources by path and emit one GEAK run per distinct file); they differ
+# only in ownership semantics -- ``single`` is one logical op whose kernels are
+# its own (variants/phases that may span files), while ``composite`` is an
+# explicit fusion of heterogeneous, independently-owned kernels. ``dispatch`` is
+# the only kind that changes the resolved result (it narrows to one kernel).
+#
 # ``kernel_source_path`` values are absolute. A dictionary miss returns ``None``
 # so the caller falls back to the ``.py`` launcher + shapes (GEAK handles it).
 # ---------------------------------------------------------------------------
@@ -94,6 +101,10 @@ _ROUTABLE_STATUS = "resolved"
 # observed in, e.g. ``aiter::fmoe_g1u1 (prefill)``. The mapping is keyed by the
 # bare op name, so strip a trailing phase tag before the (exact) dict lookup.
 _PHASE_SUFFIX_RE = re.compile(r"\s*\((?:prefill|decode|prefilldecode|mixed)\)\s*$")
+
+# Editable source extensions: native device code plus repo-resident Triton .py.
+_NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip")
+_PY_DIST_ROOT = "/usr/local/lib/python3.12/dist-packages/"
 
 
 @dataclass
@@ -151,6 +162,11 @@ class OpResolution:
         ``single``/``dispatch`` with N ``sources`` yields N leaves (one per
         ``.cu``); a non-routable resolution yields none. Each leaf routes to its
         own GEAK run via :attr:`primary_source`.
+
+        ``single`` (N flat ``sources``) and ``composite`` (N ``fanout``
+        sub-routes) therefore expand to the same set of leaves -- one per
+        distinct editable file; the two kinds differ only in ownership
+        semantics, not in the leaves produced here.
         """
         if self.kind == "composite" and self.fanout:
             return [
@@ -207,11 +223,6 @@ def load_mapping() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-# Editable source extensions: native device code plus repo-resident Triton .py.
-_NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip")
-_PY_DIST_ROOT = "/usr/local/lib/python3.12/dist-packages/"
-
-
 def _absolutize_source(path: str) -> str:
     """Best-effort absolutize a kernel source path (JSON is pre-absolutized; defensive)."""
     if not path:
@@ -266,6 +277,12 @@ class OpResolver:
     matches the trace ``device_kernel_name``; ``composite`` -> a fan-out over all
     editable kernels in the container. A dictionary miss returns ``None`` so the
     caller falls back to the ``.py`` launcher + shapes (GEAK handles it).
+
+    ``single`` and ``composite`` route identically (both dedup the selected
+    container's editable sources and run one GEAK pass per distinct file). The
+    distinction is purely semantic ownership: ``single`` is one logical op's own
+    kernels (variants/phases), ``composite`` is an explicit fusion of distinct,
+    independently-owned kernels. Only ``dispatch`` changes the resolved result.
     """
 
     def __init__(self, mapping: dict[str, Any]):
