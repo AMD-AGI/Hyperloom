@@ -1763,9 +1763,13 @@ class Coordinator:
                 if task_id and str(payload.get("task_id") or "") != task_id:
                     continue
                 res = payload.get("result") or {}
+                # Require an explicit integrate_patch kind: an empty-kind wildcard
+                # could misclassify a non-integrate event that happens to share
+                # this task_id as a kept integrate result, skipping rollback of a
+                # half-applied patch. (Matches _resume_recover_orphaned_keeps.)
                 if (
                     isinstance(res, dict)
-                    and str(res.get("kind") or payload.get("kind") or "") in {"integrate_patch", ""}
+                    and str(res.get("kind") or payload.get("kind") or "") == "integrate_patch"
                     and str(res.get("status") or "").lower() == "kept"
                 ):
                     kept_res = res
