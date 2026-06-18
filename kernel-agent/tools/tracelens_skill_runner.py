@@ -22,6 +22,9 @@ from typing import Any, Callable, Iterable
 DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 
+# Strips a ``Kernel N:`` label prefix from a kernel-name cell piece.
+_KERNEL_LABEL_RE = re.compile(r"^\s*Kernel\s+\d+\s*:\s*", re.IGNORECASE)
+
 
 # Upstream TraceLens category enum (orchestrator_prepare.py CATEGORY_SKILL_MAP) → GEAK labels.
 UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
@@ -631,9 +634,6 @@ def _extract_data_table(body: str) -> list[list[str]]:
         cells = [cell.strip() for cell in stripped.split("|")[1:-1]]
         rows.append(cells)
     return rows
-
-
-_KERNEL_LABEL_RE = re.compile(r"^\s*Kernel\s+\d+\s*:\s*", re.IGNORECASE)
 
 
 def _parse_kernel_name_cell(raw: str) -> list[str]:
