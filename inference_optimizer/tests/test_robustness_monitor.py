@@ -277,7 +277,9 @@ def test_monitor_does_not_resume_during_startup_grace(tmp_path):
     out, err = _run_monitor_briefly(env, seconds=3.0)
     combined = out + err
     assert "within startup grace" in combined, combined
-    assert "resuming" not in combined, combined
+    # The grace line itself ends with "not resuming"; assert the real resume
+    # action marker is absent rather than the bare word "resuming".
+    assert "optimizer stopped (no terminal marker)" not in combined, combined
 
 
 @pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")
@@ -315,7 +317,7 @@ def test_monitor_does_not_resume_when_owner_pid_alive(tmp_path):
         )
         out, err = _run_monitor_briefly(env, seconds=3.0)
         combined = out + err
-        assert "resuming" not in combined, combined
+        assert "optimizer stopped (no terminal marker)" not in combined, combined
     finally:
         live.terminate()
         live.wait(timeout=10)
@@ -345,4 +347,4 @@ def test_monitor_requires_consecutive_dead_confirmations(tmp_path):
     out, err = _run_monitor_briefly(env, seconds=2.5)
     combined = out + err
     assert "dead signal 1/5" in combined, combined
-    assert "resuming" not in combined, combined
+    assert "optimizer stopped (no terminal marker)" not in combined, combined
