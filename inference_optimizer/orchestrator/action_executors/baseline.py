@@ -932,9 +932,18 @@ class BaselineExecutor:
         effective_inferencex_path = _ensure_local_inferencex(ix_env, mirror_key=str(output_dir)) if ix_env else ""
 
         timeout_sec = self._resolve_timeout(params)
-        # Model path: task.params['model_path'] > $MODEL_PATH; if neither,
-        # leave the YAML's hardcoded `model:` for fixture-based tests.
-        resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
+        # Model path: task.params['model_path'] > $MODEL_PATH > SharedState;
+        # if none, leave the YAML's hardcoded `model:` for fixture-based tests.
+        # Read live state from ctx.extra (Coordinator path: the executor is a
+        # module-level singleton with self.shared_state=None), mirroring the
+        # eager-fallback resolution above; the fallback stops a real run (params
+        # + env both unset) from leaking the YAML bare model name into
+        # --model-path, which sglang treats as an HF repo id.
+        resolved_model = (
+            str(params.get("model_path") or "").strip()
+            or os.environ.get("MODEL_PATH", "").strip()
+            or str(getattr(live_shared_state, "model_path", "") or "").strip()
+        )
         # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
