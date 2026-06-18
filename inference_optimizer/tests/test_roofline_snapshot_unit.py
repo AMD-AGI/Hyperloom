@@ -125,6 +125,29 @@ def test_compute_within_and_gap():
     assert gap == 20.0
 
 
+def test_direction_saturation_threshold(monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_SATURATION_WITHIN_PCT", raising=False)
+    snap = {
+        "compute_pct": 80.0,
+        "idle_pct": 1.0,
+        "comm_pct": 2.0,
+        "within_roofline_pct": 95.0,
+        "gap_to_roofline_pct": 5.0,
+        "roofline_bound_kind": "compute",
+    }
+    out = rs.direction_saturation(snap)
+    assert out["direction"] == "compute"
+    assert out["saturated"] is True
+    assert out["domain_hint"]["domain"] == "kernel_switch_specialist"
+
+
+def test_direction_saturation_missing_within_not_saturated(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SATURATION_WITHIN_PCT", "90")
+    out = rs.direction_saturation({"comm_pct": 99.0})
+    assert out["direction"] == "comm"
+    assert out["saturated"] is False
+
+
 # ---- build_roofline_snapshot ----
 
 
