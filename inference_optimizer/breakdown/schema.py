@@ -1436,7 +1436,7 @@ class OptimizationStackEntry(TypedDict, total=False):
 
     Always-present fields: ``action`` / ``variant_name`` /
     ``candidate_extra_server_args`` / ``extra_envs`` / ``tput`` / ``ts`` /
-    ``workspace``. GEMM-tuning entries add ``tuned_file`` /
+    ``workspace``. GEMM-tuning entries add ``engine`` / ``tuned_file`` /
     ``final_report_path`` / ``source``. Other optionals: ``gain_pct`` /
     ``kernel_id`` / ``fingerprint`` / ``provenance`` / ``task_id`` /
     ``validated`` (within the last full-stack rebench).
@@ -1451,6 +1451,8 @@ class OptimizationStackEntry(TypedDict, total=False):
     workspace: str | None
     validated: bool
     # gemm_tuning evidence
+    # Tuning engine provenance: "geak" today; a forge-backed tuner will set "forge".
+    engine: str
     tuned_file: str
     final_report_path: str
     source: str
@@ -1464,6 +1466,92 @@ class OptimizationStackEntry(TypedDict, total=False):
     # explore KEEPs); specialist dial.
     operation_kind: str
     scope: str
+
+
+# GEMM tuning — top-level section for the fixed FP8 block-scale GEMM tuning
+# stage that runs at KERNEL entry. A peer of the source-level kernel rewrite
+# lanes; engine-tagged so the GEAK tuner ("geak") and a future forge-backed
+# tuner ("forge") share one home. Gain is mirrored here (optimization-layer
+# convenience) while ``attribution`` stays the authoritative roll-up.
+class GemmTuningRun(TypedDict, total=False):
+    """One GEMM-tuning run, keyed by the produced ``tuned_file`` CSV.
+
+    A run is a config search over many GEMM shapes (not a single-kernel
+    rewrite); its artifact is a dispatch CSV consumed via the
+    ``AITER_CONFIG_GEMM_A8W8_BLOCKSCALE`` env, not a kernel patch.
+
+    Attributes:
+        engine (str): Tuning engine provenance — ``"geak"`` today; a
+            forge-backed tuner records ``"forge"``.
+        status (str): Tool status (``ok`` / ``complete`` / ``skipped`` / ...).
+        decision (str): ``KEEP`` / ``REVERT``.
+        source (str): What triggered the run (``kernel_entry_auto`` / ...).
+        ts (str): ISO UTC timestamp of the run record.
+        precision (str): Workload precision (``fp8``).
+        framework (str): Serving framework (``sglang``).
+        gpu_type (str): Target GPU (``mi355x`` / ...).
+        tp (int): Tensor-parallel degree (locked workload knob).
+        conc (int): Concurrency (locked workload knob).
+        isl (int): Input sequence length (locked workload knob).
+        osl (int): Output sequence length (locked workload knob).
+        libtype (str): Tuner library family (``ck`` / ``cktile`` / ``all``).
+        baseline_tput (float | None): Pre-tuning throughput reference.
+        best_speedup (float | None): Tuned / baseline throughput ratio.
+        gain_pct (float | None): ``(best_speedup - 1) * 100``; mirrors
+            the optimization-stack KEEP gain for this run.
+        tuned_tput (float | None): ``baseline_tput * best_speedup``.
+        tuned_file (str): Absolute path to the produced dispatch CSV.
+        final_report_path (str): Absolute path to ``final_report.json``.
+        workspace (str): Run workspace directory.
+        adopted (bool): Whether this run's ``tuned_file`` landed as a KEEP
+            in ``optimization_stack``.
+        summary (dict[str, Any]): Tool-reported summary passthrough.
+        shapes (list[dict[str, Any]]): Optional per-shape CSV rows
+            (``M`` / ``N`` / ``K`` / ``libtype`` / ``kernelId`` / ``splitK`` /
+            ``us`` / ``tflops``); empty until a producer emits them.
+    """
+
+    engine: str
+    status: str
+    decision: str
+    source: str
+    ts: str
+    precision: str
+    framework: str
+    gpu_type: str
+    tp: int
+    conc: int
+    isl: int
+    osl: int
+    libtype: str
+    baseline_tput: float | None
+    best_speedup: float | None
+    gain_pct: float | None
+    tuned_tput: float | None
+    tuned_file: str
+    final_report_path: str
+    workspace: str
+    adopted: bool
+    summary: dict[str, Any]
+    shapes: list[dict[str, Any]]
+
+
+class GemmTuning(TypedDict, total=False):
+    """Top-level GEMM-tuning section envelope.
+
+    Attributes:
+        runs (list[GemmTuningRun]): Every GEMM-tuning run this session
+            recorded, newest-last, across engines.
+        adopted_engine (str): Engine of the KEEP that won (``""`` if none).
+        adopted_tuned_file (str): ``tuned_file`` of the adopted KEEP.
+        total_gain_pct (float): Summed gain of adopted runs; mirrors
+            ``attribution.phase_breakdown.gemm_tuning`` for convenience.
+    """
+
+    runs: list[GemmTuningRun]
+    adopted_engine: str
+    adopted_tuned_file: str
+    total_gain_pct: float
 
 
 # Kernel Roofline — hot-kernel table for the dashboard, mirroring
@@ -1837,6 +1925,8 @@ class SessionBreakdown(TypedDict, total=False):
         kb_provenance (KBProvenance): Cortex KB integration audit.
         specialist_runs (list[SpecialistRound]): Specialist sub-agent dispatch records.
         optimization_stack (list[OptimizationStackEntry]): Raw KEEP ledger passthrough.
+        gemm_tuning (GemmTuning): Fixed FP8 GEMM-tuning stage, engine-tagged
+            (geak today, forge later); empty {} on non-fp8/sglang or old sessions.
         kernel_roofline (KernelRoofline): Hot-kernel table for the dashboard.
         roofline (list[dict[str, Any]]): Per-snapshot roofline comparison list for
             the markdown report's ``## Roofline`` section.
@@ -1877,6 +1967,11 @@ class SessionBreakdown(TypedDict, total=False):
     # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``
     # with full per-entry evidence; the stack-derived sections summarise it.
     optimization_stack: list["OptimizationStackEntry"]
+    # Fixed FP8 block-scale GEMM-tuning stage (KERNEL entry). Engine-tagged
+    # (geak today, forge later) top-level section; gain mirrored here while
+    # ``attribution`` stays authoritative. Additive optional — empty {} on
+    # non-fp8/sglang sessions and on sessions that predate it.
+    gemm_tuning: GemmTuning
     # Hot-kernel table (spec §1), mirror of ``reports/kernel_roofline.json``.
     kernel_roofline: KernelRoofline
     # Kernel-agent attempt outcome summary (spec §A1); empty → dashboard hides Block 1.
