@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-name: SaFE Optimize Tiny (count-filler)
+name: 
 
 # Scheduled/manual entrypoint for the count-filler pool, hosted off-repo at
 #   $WEKAFS_CHENYI_DIR/ci-candidates/sub100_lt12b_pulse_notrun.json
@@ -14,7 +14,7 @@ name: SaFE Optimize Tiny (count-filler)
 # INDEPENDENTLY of the large-B production cron (optimize-submit.yml's own
 # schedule, which sweeps the gt100 rotate pool twice a day).
 #
-# Cadence: 200 models per batch, 6h optimizer budget each, 4 runs/day (every
+# Cadence: 240 models per batch, 6h optimizer budget each, 4 runs/day (every
 # 6h), all submitted to the sandbox workspace.
 #
 # The candidates JSON lives on /wekafs (RO-mounted on the hyperloom runners)
@@ -55,7 +55,7 @@ jobs:
       # hyperloom runners RO-mount /wekafs).
       CANDIDATES_FILE: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
       CANDIDATES_PATH: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
-      BATCH_SIZE: '200'
+      BATCH_SIZE: '240'
       # Count-filler runs go to the sandbox workspace only.
       SUBMIT_WORKSPACES: core42-sandbox
     steps:
@@ -111,7 +111,7 @@ jobs:
 
           echo "Dispatching optimize-submit.yml on ref=${ref}"
           echo "Count-filler pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
-          echo "Batch size: ${BATCH_SIZE}; max_parallel=200; submit_workspaces=${SUBMIT_WORKSPACES}"
+          echo "Batch size: ${BATCH_SIZE}; max_parallel=${BATCH_SIZE}; submit_workspaces=${SUBMIT_WORKSPACES}"
 
           payload=$(python3 - <<'PY'
           import json
@@ -126,7 +126,7 @@ jobs:
                   "batch_size": os.environ["BATCH_SIZE"],
                   "exclude_leaderboard": "false",
                   "exclude_active_workflows": "true",
-                  "max_parallel": "200",
+                  "max_parallel": os.environ["BATCH_SIZE"],
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
                   "task_timeout_min": "420",
                   "max_hours": "6",
