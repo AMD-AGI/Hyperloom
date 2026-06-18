@@ -1,1870 +1,1883 @@
 {
   "TopK": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/eb/cebcieel7cglzcehyxwk4ybzyaewmipk5dvlbqgv6gtfzwkmgcsk.py"
+    "patchable": true,
+    "vllm": {
+      "_topk_forward.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/eb/cebcieel7cglzcehyxwk4ybzyaewmipk5dvlbqgv6gtfzwkmgcsk.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "_C::silu_and_mul": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": "csrc/libtorch_stable/activation_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "vllm/model_executor/layers/fused_moe/activation.py(94): apply_moe_activation"
     ],
-    "abs_path": "/sgl-workspace/aiter/csrc/kernels/activation_kernels.cu"
+    "patchable": true,
+    "vllm": {
+      "_ZN4vllm18act_and_mul_kernelIN3c108BFloat16E15__hip_bfloat162TnPFT_RKS4_EXadL_ZNSsilu_kernelIS2_EES4_S6_EETnPFT0_RKSA_EX": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/activation_kernels.cu",
+        "kernel_source_line": "24",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "_C_cache_ops::reshape_and_cache": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": "csrc/libtorch_stable/cache_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "vllm/_custom_ops.py(2486): reshape_and_cache"
     ],
-    "abs_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/cache_kernels.cu"
+    "patchable": true,
+    "vllm": {
+      "void vllm::reshape_and_cache_kernel<__hip_bfloat16, __hip_bfloat16, (vllm::Fp8KVCacheDataType)0>(__hip_bfloat16 const*,": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/cache_kernels.cu",
+        "kernel_source_line": "176",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "_C_cache_ops::reshape_and_cache_flash": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": "csrc/libtorch_stable/cache_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "vllm/_custom_ops.py(2508): reshape_and_cache_flash"
     ],
-    "abs_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/cache_kernels.cu"
+    "patchable": true,
+    "vllm": {
+      "void vllm::reshape_and_cache_flash_kernel<__hip_bfloat16, __hip_bfloat16, (vllm::Fp8KVCacheDataType)0>(__hip_bfloat16 co": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/cache_kernels.cu",
+        "kernel_source_line": "252",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "_C_custom_ar::all_reduce": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": "csrc/custom_all_reduce.cuh",
-    "status": "resolved",
-    "patchable": true,
-    "method": "curated_override",
-    "confidence": "high",
     "python_launcher_path": [
       "vllm/_custom_ops.py(2726): all_reduce"
     ],
-    "abs_path_sglang": "/sgl-workspace/aiter/csrc/kernels/quick_all_reduce.cu",
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quick_all_reduce.cu"
+    "patchable": true,
+    "vllm": {
+      "void vllm::cross_device_reducestage<__hip_bfloat16, 2>(vllm::RankData*, vllm::RankSignals, vllm::Signal*, __hip_bfloat16": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/include/custom_all_reduce.cuh",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "__amd_rocclr_copyBuffer.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/include/custom_all_reduce.cuh",
+        "kernel_source_line": "9",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void vllm::cross_device_reducestage<__hip_bfloat16, 4>(vllm::RankData*, vllm::RankSignals, vllm::Signal*, __hip_bfloat16": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/include/custom_all_reduce.cuh",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void vllm::cross_device_reducestage<float, 4>(vllm::RankData*, vllm::RankSignals, vllm::Signal*, float*, int, int) [clon": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/include/custom_all_reduce.cuh",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void vllm::cross_device_reducestage<__hip_bfloat16, 8>(vllm::RankData*, vllm::RankSignals, vllm::Signal*, __hip_bfloat16": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/include/custom_all_reduce.cuh",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "_moe_C::moe_align_block_size": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": "csrc/libtorch_stable/moe/moe_align_sum_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "vllm/_custom_ops.py(2133): moe_align_block_size"
     ],
-    "abs_path": [
-      "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/lora/moe_lora_align_kernel.cu",
-      "/sgl-workspace/aiter/csrc/kernels/moe_align_block_size_kernels.cu"
-    ]
+    "patchable": true,
+    "vllm": {
+      "void vllm::moe::moe_align_block_size_kernel<int>(int const*, int*, int*, int*, int*, int, int, int, int, unsigned long, ": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/moe_align_block_size_kernels.cu",
+        "kernel_source_line": "39",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void vllm::moe::count_and_sort_expert_tokens_kernel<int>(int const*, int*, int*, int*, unsigned long, int, int, int, boo": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/lora/moe_lora_align_kernel.cu",
+        "kernel_source_line": "356",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "aiter::_fused_qk_rmsnorm_kernel": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/fused_qk_norm.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "aiter/ops/fused_qk_norm_rope_cache_quant.py(69): fused_qk_rmsnorm"
     ],
-    "abs_path": "/sgl-workspace/aiter/csrc/kernels/fused_qk_norm.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN5aiter23fused_qk_rmsnorm_kernelIDF16bLi256ELi8ELb1ELi1EEEvPT_S2_PKS1_S4_S4_S4_ffiiiiiii": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/fused_qk_norm.cu",
+        "kernel_source_line": "21",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::add_rmsnorm": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/rmsnorm_quant_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "aiter/ops/rmsnorm.py(76): rmsnorm2d_fwd_with_add"
     ],
-    "abs_path_sglang": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/rmsnorm_quant_kernels.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "void aiter::add_rmsnorm_quant_kernel<half, half, 256, 8, true, false, true, 1>(half*, half*, float*, half*, half*, half*": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi32ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::add_rmsnorm_quant": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/rmsnorm_quant_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/layers/communicator.py(106): _fused_rmsnorm_fp8_per_token_quant"
     ],
-    "abs_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/rmsnorm_quant_kernels.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDB8_Li256ELi24ELb1ELb1ELb1ELi1EEEvPT0_PT_PfS5_S5_S5_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::biased_grouped_topk_hip": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/topk_softmax_kernels_group.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "aiter/ops/topk.py(75): biased_grouped_topk"
     ],
-    "abs_path_sglang": "/sgl-workspace/aiter/csrc/kernels/topk_softmax_kernels_group.cu",
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/topk_softmax_kernels_group.cu"
+    "patchable": true,
+    "vllm": {
+      "void aiter::grouped_topk_kernel<float, float __vector(4), 8, true, true, false>(float*, float const*, float*, int*, unsi": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/topk_softmax_kernels_group.cu",
+        "kernel_source_line": "311",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "void aiter::grouped_topk_kernel<float, float __vector(4), 1, true, true, false>(float*, float const*, float*, int*, unsi": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/topk_softmax_kernels_group.cu",
+        "kernel_source_line": "311",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {
+      "void aiter::grouped_topk_opt_sort_kernel<c10::BFloat16, float __vector(4), 8, true, true, false>(c10::BFloat16*, c10::BF": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/topk_softmax_kernels_group.cu",
+        "kernel_source_line": "620",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "void aiter::grouped_topk_kernel<float, float __vector(4), 1, true, true, false>(float*, float const*, float*, int*, unsi": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/topk_softmax_kernels_group.cu",
+        "kernel_source_line": "311",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::ck_moe_stage1": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "aiter_compile_ops",
-    "confidence": "high",
     "python_launcher_path": [
       "aiter/ops/moe_op.py(522): ck_moe_stage1_fwd"
     ],
-    "abs_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu"
+    "patchable": true,
+    "vllm": {
+      "void ck::kernel_moe_gemmlds<ck::GridwiseMoeGemmBlockScale<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::Co": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      },
+      "void ck::kernel_moe_gemm<ck::GridwiseMoeGemm<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::ColumnMajor, ck": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "aiter::ck_moe_stage2": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "aiter_compile_ops",
-    "confidence": "high",
     "python_launcher_path": [
       "aiter/ops/moe_op.py(566): ck_moe_stage2_fwd"
     ],
-    "abs_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu"
+    "patchable": true,
+    "vllm": {
+      "void ck::kernel_moe_gemmlds<ck::GridwiseMoeGemmBlockScale<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::Co": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      },
+      "void ck::kernel_moe_gemm<ck::GridwiseMoeGemm<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::ColumnMajor, ck": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "aiter::dynamic_per_tensor_quant": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/quant_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/fp8_kernel.py(1613): scaled_fp8_quant"
     ],
-    "abs_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "aiter::initializeScale(float*, int, float)": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "135",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_ZN5aiter20data_to_scale_kernelIDF16bDB8_EEvPfPKT_i": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "238",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_ZN5aiter19scaled_quant_kernelIDF16bDB8_EEvPT0_PKT_PKfi": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "18",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::dynamic_per_token_scaled_quant": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/quant_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "aiter/ops/quant.py(257): per_group_quant_hip",
       "aiter/ops/quant.py(291): per_token_quant_hip",
       "aiter/ops/quant.py(324): per_group_quant_hip"
     ],
-    "abs_path_sglang": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quant_kernels.cu"
+    "patchable": true,
+    "vllm": {
+      "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bDB8_Li32EEEvPT0_PfPKT_PKfiliibPKii.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "20",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {
+      "_ZN5aiter37dynamic_per_token_scaled_quant_kernelIDF16bDB8_Li32EEEvPT0_PfPT_PKfiPKii": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "398",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_ZN5aiter37dynamic_per_token_scaled_quant_kernelIDF16bDB8_Li8EEEvPT0_PfPT_PKfiPKii": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "398",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_ZN5aiter37dynamic_per_token_scaled_quant_kernelIDF16bDB8_Li16EEEvPT0_PfPT_PKfiPKii": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "355",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bDB8_Li32EEEvPT0_PfPKT_PKfiliibPKii": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "18",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::fmha_v3_varlen_fwd": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/py_itfs_cu/asm_mha_varlen_fwd.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "aiter_compile_ops",
-    "confidence": "high",
     "python_launcher_path": [
       "aiter/ops/mha.py(2024): _flash_attn_varlen_forward"
     ],
-    "abs_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_varlen_fwd_kernels.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "aiter::fmha_fwd_hd192x128_bf16_causal_rtna_group": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_varlen_fwd_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_asm_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::fmoe_fp8_blockscale_g1u1": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/py_itfs_cu/asm_fmoe.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "aiter_compile_ops",
-    "confidence": "high",
     "python_launcher_path": [
       "aiter/fused_moe.py(367): fused_moestage"
     ],
-    "abs_path": "/sgl-workspace/aiter/csrc/py_itfs_cu/asm_fmoe.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "aiter::fmoe_bf16_blockscaleFp8_g1u1_vs_silutg_psx256": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_cu/asm_fmoe.cu",
+        "kernel_source_line": "5",
+        "kernel_kind": "aiter_asm_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::gemm_a8w8_blockscale_ck": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "aiter_compile_ops",
-    "confidence": "high",
     "python_launcher_path": [
       "aiter/ops/gemm_op_a8w8.py(540): gemm_a8w8_blockscale"
     ],
-    "abs_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale.cu"
+    "patchable": true,
+    "vllm": {
+      "void ck::kernel_gemm_xdl_cshuffle_v3<ck::GridwiseGemmMultiD_ABScale_xdl_cshuffle_v3<ck::tensor_layout::gemm::RowMajor, c": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "aiter::gemm_a8w8_bpreshuffle": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/ck_gemm_a8w8_bpreshuffle/gemm_a8w8_bpreshuffle.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "aiter_compile_ops",
-    "confidence": "high",
     "python_launcher_path": [
       "aiter/ops/gemm_op_a8w8.py(583): gemm_a8w8_bpreshuffle"
     ],
-    "abs_path_sglang": "/sgl-workspace/aiter/csrc/ck_gemm_a8w8_bpreshuffle/gemm_a8w8_bpreshuffle_tune.cu",
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/ck_gemm_a8w8_bpreshuffle/gemm_a8w8_bpreshuffle_tune.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "void ck::kernel_gemm_xdl_cshuffle_v3_multi_d_b_preshufflelds<ck::GridwiseGemmMultiD_xdl_cshuffle_v3_b_preshuffle<ck::ten": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/ck_gemm_a8w8_bpreshuffle/gemm_a8w8_bpreshuffle_tune.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "void ck::kernel_gemm_xdl_cshuffle_v3_multi_d_b_preshuffle<ck::GridwiseGemmMultiD_xdl_cshuffle_v3_b_preshuffle<ck::tensor": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/ck_gemm_a8w8_bpreshuffle/gemm_a8w8_bpreshuffle_tune.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::mha_batch_prefill": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/py_itfs_ck/mha_batch_prefill_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "aiter_compile_ops",
-    "confidence": "high",
     "python_launcher_path": [
       "aiter/ops/mha.py(2859): _mha_batch_prefill"
     ],
-    "abs_path_sglang": "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu",
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN7ck_tile6kentryILi2ENSFmhaBatchPrefillWithPagedKVCacheKernelINSBlockFmhaBatchPrefillPipelineQRKSVSAsyncINSBlockFmhaBa": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu",
+        "kernel_source_line": "12",
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::moe_sorting_fwd": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/py_itfs_ck/moe_sorting_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "aiter_compile_ops",
-    "confidence": "high",
     "python_launcher_path": [
       "aiter/fused_moe.py(26): moe_sorting",
       "aiter/fused_moe.py(27): _moe_sorting_impl"
     ],
-    "abs_path_sglang": "/sgl-workspace/aiter/csrc/py_itfs_ck/moe_sorting_kernels.cu",
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/py_itfs_ck/moe_sorting_kernels.cu"
+    "patchable": true,
+    "vllm": {
+      "void ck_tile::kentry<2, ck_tile::MoeSortingMultiPhaseKernel_P0_v2<ck_tile::MoeSortingProblemMp<int, float, int, 1, false": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/py_itfs_ck/moe_sorting_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      },
+      "void ck_tile::kentry<2, ck_tile::MoeSortingMultiPhaseKernel_P0_v2<ck_tile::MoeSortingProblemMp<int, float, unsigned char": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/py_itfs_ck/moe_sorting_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      },
+      "void ck_tile::kentry<2, ck_tile::MoeSortingKernel<ck_tile::MoeSortingProblemEx<int, float, 2, true, false, false, true,": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/py_itfs_ck/moe_sorting_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {
+      "void ck_tile::kentry<2, ck_tile::MoeSortingMultiPhaseKernel_P0_v2<ck_tile::MoeSortingProblemMp<int, float, int, 1, false": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/moe_sorting_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      },
+      "void ck_tile::kentry<2, ck_tile::MoeSortingClearWorkspaceKernel<ck_tile::MoeSortingClearWorkspaceProblem<false, 1024, 1>": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/moe_sorting_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::rms_norm": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/rmsnorm_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "aiter_compile_ops",
-    "confidence": "high",
     "python_launcher_path": [
       "vllm/_aiter_ops.py(548): _rocm_aiter_rms_norm_impl"
     ],
-    "abs_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/rmsnorm_kernels.cu"
+    "patchable": true,
+    "vllm": {
+      "_ZN7ck_tile6kentryILi1ENSRmsnorm2dFwdINSRmsnorm2dFwdPipelineOnePassINSRmsnorm2dFwdPipelineProblemIDF16bDF16bfDF16bDF16bD": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/rmsnorm_kernels.cu",
+        "kernel_source_line": "78",
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "aiter::rms_norm_cu": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/rmsnorm_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "vllm/_aiter_ops.py(564): _fast_rms_norm"
     ],
-    "abs_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/rmsnorm_kernels.cu"
+    "patchable": true,
+    "vllm": {
+      "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat16 const*, c10::BFloat16 const*, float, int, int) [": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/rmsnorm_kernels.cu",
+        "kernel_source_line": "78",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_ker": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/rmsnorm_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "aiter::rmsnorm": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/rmsnorm_quant_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "aiter/ops/rmsnorm.py(62): rmsnorm2d_fwd"
     ],
-    "abs_path_sglang": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/rmsnorm_quant_kernels.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "void aiter::add_rmsnorm_quant_kernel<half, half, 256, 8, false, false, true, 1>(half*, half*, float*, half*, half*, half": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi8ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi64ELi8ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi32ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::rmsnorm2d_fwd_with_add_ck": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/rmsnorm_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "aiter_compile_ops",
-    "confidence": "high",
     "python_launcher_path": [
       "aiter/ops/rmsnorm.py(76): rmsnorm2d_fwd_with_add"
     ],
-    "abs_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/py_itfs_ck/rmsnorm_ck_kernels.cu"
+    "patchable": true,
+    "vllm": {
+      "_ZN7ck_tile6kentryILi1ENSRmsnorm2dFwdINSRmsnorm2dFwdPipelineOnePassINSRmsnorm2dFwdPipelineProblemIDF16bDF16bfDF16bDF16bD": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/py_itfs_ck/rmsnorm_ck_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "aiter::rmsnorm_quant": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/rmsnorm_quant_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/layers/communicator.py(106): _fused_rmsnorm_fp8_per_token_quant"
     ],
-    "abs_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/rmsnorm_quant_kernels.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDB8_Li256ELi24ELb0ELb1ELb1ELi1EEEvPT0_PT_PfS5_S5_S5_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::rope_cached_positions_2c_fwd_impl": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/rope/general_2c_cached_positions_fwd_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "aiter_compile_ops",
-    "confidence": "high",
     "python_launcher_path": null,
-    "abs_path": "/sgl-workspace/aiter/csrc/kernels/rope/general_1c_cached_positions_fwd_kernels.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "void aiter::kn_entryc_sbhd_cached_indirect_inplace<aiter::OpCachedFwd, 1, true, false, true, true, 1, true, c10::BFloat1": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rope/general_1c_cached_positions_fwd_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "void aiter::kn_entryc_sbhd_cached_indirect_inplace<aiter::OpCachedFwd, 1, true, false, true, true, 4, true, c10::BFloat1": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rope/general_1c_cached_positions_fwd_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "aiter::topk_softmax": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/topk_softmax_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "vllm/_aiter_ops.py(205): _rocm_aiter_topk_softmax_impl"
     ],
-    "abs_path": "/sgl-workspace/aiter/csrc/kernels/topk_softmax_kernels.cu"
-  },
-  "aten::_foreach_copy_": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/model_executor/cuda_graph_runner.py(116): foreach_copy"
-    ],
-    "abs_path": null
-  },
-  "aten::_index_put_impl_": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py(1612): set_kv_buffer"
-    ],
-    "abs_path": null
-  },
-  "aten::_local_scalar_dense": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(661): init_forward_metadata",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(2654): update_single_wrapper"
-    ],
-    "abs_path": null
-  },
-  "aten::_scaled_mm": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/fp8_utils.py(1445): apply_fp8_linear"
-    ],
-    "abs_path": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py"
-  },
-  "aten::add": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "vllm/v1/worker/gpu_model_runner.py(1784): _prepare_inputs",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/fp8_utils.py(1649): apply_fp8_ptpc_linear"
-    ],
-    "abs_path": null
-  },
-  "aten::addmm": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "aiter/tuned_gemm.py(395): torch_gemm"
-    ],
-    "abs_path": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py"
-  },
-  "aten::arange": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/managers/overlap_utils.py(121): alloc_future_indices"
-    ],
-    "abs_path": null
-  },
-  "aten::argmax": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/sampler.py(83): forward"
-    ],
-    "abs_path": null
-  },
-  "aten::bmm": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(342): forward_absorb_core"
-    ],
-    "abs_path": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py"
-  },
-  "aten::cat": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(342): forward_absorb_core",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(2039): forward_extend"
-    ],
-    "abs_path": null
-  },
-  "aten::copy_": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(2039): forward_extend",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/logits_processor.py(983): _copy_logits_to_buffer",
-      "/sgl-workspace/sglang/python/sglang/srt/model_executor/cuda_graph_runner.py(276): populate_from_forward_batch",
-      "/sgl-workspace/sglang/python/sglang/srt/managers/overlap_utils.py(161): store_to_map",
-      "/sgl-workspace/sglang/python/sglang/srt/managers/utils.py(56): copy_to_cpu",
-      "/sgl-workspace/sglang/python/sglang/srt/model_executor/forward_batch_info.py(443): init_new",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(2654): update_single_wrapper",
-      "vllm/v1/worker/gpu_model_runner.py(1784): _prepare_inputs",
-      "vllm/distributed/device_communicators/base_device_communicator.py(182): all_gather",
-      "vllm/v1/utils.py(132): copy_to_gpu",
-      "vllm/v1/attention/backends/gdn_attn.py(148): build",
-      "vllm/v1/worker/gpu_model_runner.py(3201): _preprocess",
-      "vllm/v1/attention/backends/utils.py(761): compute_causal_conv1d_metadata",
-      "vllm/v1/worker/gpu_model_runner.py(1610): _prepare_input_ids",
-      "vllm/v1/worker/utils.py(189): zero_block_ids",
-      "vllm/model_executor/layers/fused_moe/rocm_aiter_fused_moe.py(398): apply",
-      "vllm/model_executor/layers/fused_moe/topk_weight_and_reduce.py(53): apply",
-      "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(342): forward_absorb_core",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/layernorm.py(281): forward_aiter",
-      "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mha.py(409): _set_mla_kv_buffer",
-      "/sgl-workspace/sglang/python/sglang/srt/distributed/parallel_state.py(837): all_gather",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(2747): update_single_wrapper",
-      "vllm/_aiter_ops.py(548): _rocm_aiter_rms_norm_impl",
-      "/sgl-workspace/sglang/python/sglang/srt/models/utils.py(394): _reshape_for_qk_norm",
-      "/sgl-workspace/sglang/python/sglang/srt/models/glm4_moe.py(385): forward"
-    ],
-    "abs_path": null
-  },
-  "aten::cumsum": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(1654): init_forward_metadata_replay_cuda_graph",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/logits_processor.py(404): _get_pruned_states",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(2654): update_single_wrapper",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(2747): update_single_wrapper"
-    ],
-    "abs_path": null
-  },
-  "aten::div": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "triton_kernels/matmul_ogs.py(313): matmul_ogs"
-    ],
-    "abs_path": null
-  },
-  "aten::fill_": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/fp8_kernel.py(1613): scaled_fp8_quant",
-      "vllm/v1/worker/gpu_model_runner.py(1784): _prepare_inputs",
-      "vllm/v1/attention/backends/utils.py(761): compute_causal_conv1d_metadata",
-      "vllm/v1/worker/gpu_model_runner.py(3726): _get_slot_mapping",
-      "vllm/v1/worker/gpu_model_runner.py(2135): _get_block_table",
-      "vllm/v1/worker/gpu_model_runner.py(3201): _preprocess",
-      "/sgl-workspace/sglang/python/sglang/srt/utils/common.py(2874): __init__",
-      "triton_kernels/tensor_details/bitmatrix_details/sum_bitmatrix_rows.py(76): sum_bitmatrix_rows"
-    ],
-    "abs_path": null
-  },
-  "aten::gather": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/unquant.py(103): embedding",
-      "vllm/model_executor/layers/vocab_parallel_embedding.py(71): embedding",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(2039): forward_extend"
-    ],
-    "abs_path": null
-  },
-  "aten::gt": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "vllm/v1/attention/backends/gdn_attn.py(148): build"
-    ],
-    "abs_path": null
-  },
-  "aten::index": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/logits_processor.py(404): _get_pruned_states",
-      "vllm/v1/worker/gpu_model_runner.py(3769): execute_model",
-      "vllm/v1/worker/gpu_model_runner.py(1784): _prepare_inputs",
-      "vllm/v1/worker/gpu_model_runner.py(1610): _prepare_input_ids",
-      "vllm/model_executor/layers/fused_moe/gpt_oss_triton_kernels_moe.py(148): legacy_routing_from_sparsematrix"
-    ],
-    "abs_path": null
-  },
-  "aten::masked_fill_": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "vllm/model_executor/layers/vocab_parallel_embedding.py(464): forward_native",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/vocab_parallel_embedding.py(471): forward"
-    ],
-    "abs_path": null
-  },
-  "aten::max": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(661): init_forward_metadata"
-    ],
-    "abs_path": null
-  },
-  "aten::mm": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/logits_processor.py(883): _compute_lm_head",
-      "aiter/tuned_gemm.py(395): torch_gemm",
-      "/tmp/torchinductor_root/5u/c5ubinz73kf2ljnyu3klkwzylifwqaew32bwfqnesn3qobiefft7.py(640): call",
-      "/sgl-workspace/sglang/python/sglang/srt/models/glm4_moe.py(385): forward"
-    ],
-    "abs_path_sglang": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py",
-    "abs_path_vllm": [
-      "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py",
-      "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py"
-    ]
-  },
-  "aten::mul": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "vllm/model_executor/models/qwen2_moe.py(108): forward",
-      "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(342): forward_absorb_core"
-    ],
-    "abs_path": null
-  },
-  "aten::ne": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "triton_kernels/matmul_ogs.py(313): matmul_ogs"
-    ],
-    "abs_path": null
-  },
-  "aten::neg": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py(2919): _run_batch_inner"
-    ],
-    "abs_path": null
-  },
-  "aten::scatter_": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "vllm/v1/worker/gpu_model_runner.py(1610): _prepare_input_ids"
-    ],
-    "abs_path": null
-  },
-  "aten::sigmoid": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "vllm/model_executor/models/qwen2_moe.py(108): forward"
-    ],
-    "abs_path": null
-  },
-  "aten::sub": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/logits_processor.py(404): _get_pruned_states",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(2654): update_single_wrapper",
-      "vllm/v1/attention/backend.py(416): compute_num_computed_tokens",
-      "vllm/v1/worker/gpu_model_runner.py(1784): _prepare_inputs"
-    ],
-    "abs_path": null
-  },
-  "aten::sum": {
-    "kind": "single",
-    "framework": "aten",
-    "rel_path": null,
-    "label": "PyTorch ATen core - not in framework repos",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "aten",
-    "python_launcher_path": [
-      "vllm/_custom_ops.py(2129): moe_sum",
-      "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(391): _fused_moe_kernel_sequence"
-    ],
-    "abs_path": null
+    "patchable": true,
+    "vllm": {
+      "void vllm::moe::topkGatingSoftmax<bool _Accum, int, ELi512ELi2ELi32E, true>(bool _Accum const*, bool const*, float*, int": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/topk_softmax_kernels.cu",
+        "kernel_source_line": "226",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "hipLaunchKernel->void (anonymous namespace)::clamp_position_kernel<long>(long*, long const*, unsigned long) (Synthetic Op)": {
     "kind": "single",
-    "framework": "other",
-    "rel_path": null,
-    "label": "no device kernel in callstack",
-    "status": "no_kernel",
-    "patchable": null,
-    "method": "none",
     "python_launcher_path": null,
-    "abs_path": null
+    "patchable": false,
+    "vllm": {},
+    "sglang": {
+      "void (anonymous namespace)::clamp_position_kernel<long>(long*, long const*, unsigned long)": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "synthetic_op",
+        "patchable": false
+      }
+    }
   },
   "hipLaunchKernel->void (anonymous namespace)::resolve_future_token_ids_kernel<long>(long*, long const*, unsigned long) (Synthetic Op)": {
     "kind": "single",
-    "framework": "other",
-    "rel_path": null,
-    "label": "no device kernel in callstack",
-    "status": "no_kernel",
-    "patchable": null,
-    "method": "none",
     "python_launcher_path": null,
-    "abs_path": null
+    "patchable": false,
+    "vllm": {},
+    "sglang": {
+      "void (anonymous namespace)::resolve_future_token_ids_kernel<long>(long*, long const*, unsigned long)": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "synthetic_op",
+        "patchable": false
+      }
+    }
   },
   "hipModuleLaunchKernel->_compute_slot_mapping_kernel.kd (Synthetic Op)": {
     "kind": "single",
-    "framework": "other",
-    "rel_path": null,
-    "label": "no device kernel in callstack",
-    "status": "no_kernel",
-    "patchable": null,
-    "method": "none",
     "python_launcher_path": null,
-    "abs_path": null
+    "patchable": false,
+    "vllm": {
+      "_compute_slot_mapping_kernel.kd": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "triton_kernel",
+        "patchable": false
+      }
+    },
+    "sglang": {}
   },
   "hipModuleLaunchKernel->_zero_kv_blocks_kernel.kd (Synthetic Op)": {
     "kind": "single",
-    "framework": "other",
-    "rel_path": null,
-    "label": "no device kernel in callstack",
-    "status": "no_kernel",
-    "patchable": null,
-    "method": "none",
     "python_launcher_path": null,
-    "abs_path": null
+    "patchable": false,
+    "vllm": {
+      "_zero_kv_blocks_kernel.kd": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "triton_kernel",
+        "patchable": false
+      }
+    },
+    "sglang": {}
   },
   "hipModuleLaunchKernel->create_flashinfer_kv_indices_triton (Synthetic Op)": {
     "kind": "single",
-    "framework": "other",
-    "rel_path": null,
-    "label": "no device kernel in callstack",
-    "status": "no_kernel",
-    "patchable": null,
-    "method": "none",
     "python_launcher_path": null,
-    "abs_path": null
+    "patchable": false,
+    "vllm": {},
+    "sglang": {
+      "create_flashinfer_kv_indices_triton": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "synthetic_op",
+        "patchable": false
+      }
+    }
   },
   "pseudo_mla_decode_fwd": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/py_itfs_cu/asm_mla.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "curated_override",
-    "confidence": "high",
     "python_launcher_path": null,
-    "abs_path": [
-      "/sgl-workspace/aiter/csrc/py_itfs_cu/asm_mla.cu",
-      "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py"
-    ]
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "aiter::mla_dec_stage1_bf16_a16w16_subQ16_mqa16": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_cu/asm_mla.cu",
+        "kernel_source_line": "4",
+        "kernel_kind": "aiter_asm_kernel",
+        "patchable": true
+      },
+      "_fwd_kernel_stage2_asm": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py",
+        "kernel_source_line": "2919",
+        "kernel_kind": "unknown",
+        "patchable": true
+      }
+    }
   },
   "pseudo_op::moe_gptq_awq_down": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py"
+    "patchable": true,
+    "vllm": {
+      "fused_moe_kernel_gptq_awq.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "pseudo_op::moe_gptq_awq_up": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py"
+    "patchable": true,
+    "vllm": {
+      "fused_moe_kernel_gptq_awq.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "pseudo_op::moe_triton_unfused_down": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/eb/cebcieel7cglzcehyxwk4ybzyaewmipk5dvlbqgv6gtfzwkmgcsk.py"
+    "patchable": true,
+    "vllm": {
+      "_matmul_ogs_NNT_bf16xbf16xmxfp4x256x128x1.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/eb/cebcieel7cglzcehyxwk4ybzyaewmipk5dvlbqgv6gtfzwkmgcsk.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "pseudo_op::moe_triton_unfused_up": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/eb/cebcieel7cglzcehyxwk4ybzyaewmipk5dvlbqgv6gtfzwkmgcsk.py"
+    "patchable": true,
+    "vllm": {
+      "_matmul_ogs_NNT_bf16xbf16xmxfp4x256x128x1_swiglu.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/eb/cebcieel7cglzcehyxwk4ybzyaewmipk5dvlbqgv6gtfzwkmgcsk.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "sgl_kernel::moe_align_block_size": {
     "kind": "single",
-    "framework": "sglang",
-    "rel_path": "sgl-kernel/csrc/moe/moe_align_kernel.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "sgl_kernel/moe.py(6): moe_align_block_size"
     ],
-    "abs_path_sglang": [
-      "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/lora/moe_lora_align_kernel.cu",
-      "/sgl-workspace/aiter/csrc/kernels/moe_align_block_size_kernels.cu"
-    ],
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/moe_align_block_size_kernels.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "void moe_align_block_size_kernel<int>(int const*, int*, int*, int*, int, int, unsigned long, int*, bool, int, int)": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/moe_align_block_size_kernels.cu",
+        "kernel_source_line": "40",
+        "kernel_kind": "sgl_kernel_hip",
+        "patchable": true
+      },
+      "void count_and_sort_expert_tokens_kernel<int>(int const*, int*, int*, unsigned long)": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/moe_align_block_size_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "sgl_kernel_hip",
+        "patchable": true
+      }
+    }
   },
   "sgl_kernel::qr_all_reduce": {
     "kind": "single",
-    "framework": "sglang",
-    "rel_path": "sgl-kernel/csrc/allreduce/quick_all_reduce.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "curated_override",
-    "confidence": "high",
     "python_launcher_path": [
       "sgl_kernel/allreduce.py(78): qr_all_reduce"
     ],
-    "abs_path_sglang": "/sgl-workspace/aiter/csrc/kernels/quick_all_reduce.cu",
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quick_all_reduce.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "void quickreduce::allreduce_prototype_twoshot<quickreduce::AllReduceTwoshot<__half, quickreduce::CodecQ8<__half, 8>, tru": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quick_all_reduce.cu",
+        "kernel_source_line": "9",
+        "kernel_kind": "sgl_quickreduce_hip",
+        "patchable": true
+      }
+    }
   },
   "sgl_kernel::rotary_embedding": {
     "kind": "single",
-    "framework": "sglang",
-    "rel_path": "sgl-kernel/csrc/elementwise/pos_enc.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "sgl_kernel/elementwise.py(327): rotary_embedding"
     ],
-    "abs_path_sglang": "/sgl-workspace/aiter/csrc/kernels/cache_kernels.cu",
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/cache_kernels.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "void rotary_embedding_kernel<c10::BFloat16, true>(long const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16 const*, int": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/cache_kernels.cu",
+        "kernel_source_line": "1629",
+        "kernel_kind": "sgl_kernel_hip",
+        "patchable": true
+      },
+      "void rotary_embedding_kernel<c10::Half, true>(long const*, c10::Half*, c10::Half*, c10::Half const*, int, long, long, lo": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/cache_kernels.cu",
+        "kernel_source_line": "1649",
+        "kernel_kind": "sgl_kernel_hip",
+        "patchable": true
+      }
+    }
   },
   "sgl_kernel::silu_and_mul": {
     "kind": "single",
-    "framework": "sglang",
-    "rel_path": "sgl-kernel/csrc/elementwise/activation.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
     "python_launcher_path": [
       "sgl_kernel/elementwise.py(258): silu_and_mul"
     ],
-    "abs_path_sglang": "/sgl-workspace/aiter/csrc/kernels/activation_kernels.cu",
-    "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/activation_kernels.cu"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN7sgl_hip10activation18act_and_mul_kernelI14__hip_bfloat16TnPFT_RKS3_EXadL_Z4siluIS2_ES3_S5_EEEEvPS3_PS4_i": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/activation_kernels.cu",
+        "kernel_source_line": "32",
+        "kernel_kind": "sgl_kernel_hip",
+        "patchable": true
+      },
+      "_ZN7sgl_hip10activation18act_and_mul_kernelI6__halfTnPFT_RKS3_EXadL_Z4siluIS2_ES3_S5_EEEEvPS3_PS4_i": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/activation_kernels.cu",
+        "kernel_source_line": "24",
+        "kernel_kind": "sgl_kernel_hip",
+        "patchable": true
+      }
+    }
   },
   "sglang::reg_all_gather_into_tensor": {
     "kind": "single",
-    "framework": "sglang",
-    "rel_path": null,
-    "label": "RCCL/NCCL library, no editable .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "nccl",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/distributed/parallel_state.py(816): all_gather_into_tensor"
     ],
-    "abs_path_sglang": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py",
-    "abs_path_vllm": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "ncclDevKernel_Generic(ncclDevKernelArgsStorage<4096ul>)": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py",
+        "kernel_source_line": "2919",
+        "kernel_kind": "nccl_collective",
+        "patchable": true
+      }
+    }
   },
   "sglang::store_cache": {
     "kind": "single",
-    "framework": "sglang",
-    "rel_path": "python/sglang/jit_kernel/csrc/elementwise/kvcache.cuh",
-    "status": "resolved",
-    "patchable": true,
-    "method": "curated_override",
-    "confidence": "high",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py(90): _set_kv_buffer_impl"
     ],
-    "abs_path_sglang": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py",
-    "abs_path_vllm": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "void (anonymous namespace)::store_kvcache<2048l, 4, false, long>((anonymous namespace)::StoreKVCacheParams)": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py",
+        "kernel_source_line": "2919",
+        "kernel_kind": "sglang_jit_kernel",
+        "patchable": true
+      },
+      "void (anonymous namespace)::store_kvcache<512l, 1, false, long>((anonymous namespace)::StoreKVCacheParams)": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py",
+        "kernel_source_line": "2919",
+        "kernel_kind": "sglang_jit_kernel",
+        "patchable": true
+      },
+      "void (anonymous namespace)::store_kvcache<256l, 1, false, long>((anonymous namespace)::StoreKVCacheParams)": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py",
+        "kernel_source_line": "2919",
+        "kernel_kind": "sglang_jit_kernel",
+        "patchable": true
+      }
+    }
   },
   "sglang_profiler::attention_paged_attention_ragged": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/attention.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
-    "note": "cross-repo: launched from sglang profiler, kernel lives in aiter",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(2435): forward_decode"
     ],
-    "abs_path_sglang": [
-      "/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu",
-      "/sgl-workspace/aiter/csrc/kernels/attention.cu"
-    ],
-    "abs_path_vllm": [
-      "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/attention_ragged.cu",
-      "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/attention.cu"
-    ]
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "void paged_attention_ll4mi_QKV_mfma16_kernel<0, __hip_bfloat16, __hip_bfloat16, (vllm::Fp8KVCacheDataType)0, 1, 128, 256": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu",
+        "kernel_source_line": "341",
+        "kernel_kind": "aiter_ck_kernel",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_reduce_kernel<__hip_bfloat16, __hip_bfloat16, 128, 128, 256, 1, false>(__hip_bfloat16*, float": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_Z39paged_attention_ll4mi_QKV_mfma16_kernelILi0EDF16_DF16_LN4vllm18Fp8KVCacheDataTypeE0ELi1ELi128ELi256ELb0ELi8ELi1EN7ck": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "410",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "_Z35paged_attention_ll4mi_reduce_kernelIDF16_DF16_Li128ELi128ELi256ELi1ELb0EEvPT0_PKfS3_PKT_PKiS8_iiS3_": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(91): forward_absorb_prepare"
     ],
-    "abs_path": "/sgl-workspace/aiter/aiter/ops/triton/_triton_kernels/gemm/batched/batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant.py"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_kernel_HAS_BIAS_BLOCK_SIZE_M_BLOCK_SIZE_N_BLOCK": {
+        "kernel_source_path": "/sgl-workspace/aiter/aiter/ops/triton/_triton_kernels/gemm/batched/batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant.py",
+        "kernel_source_line": "32",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      }
+    }
   },
   "sglang_profiler::forward_batch_info_compute_position_triton": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/model_executor/forward_batch_info.py(1123): compute_position"
     ],
-    "abs_path_sglang": "/sgl-workspace/sglang/python/sglang/srt/model_executor/forward_batch_info.py",
-    "abs_path_vllm": "/sgl-workspace/sglang/python/sglang/srt/model_executor/forward_batch_info.py"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "compute_position_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/model_executor/forward_batch_info.py",
+        "kernel_source_line": "1142",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      }
+    }
   },
   "sglang_profiler::fused_moe_triton_kernels_fused_append_shared_experts": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/layers/moe/topk.py(1061): _post_process_topk_ids"
     ],
-    "abs_path_sglang": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
-    "abs_path_vllm": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_fused_append_shared_experts_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
+        "kernel_source_line": "1065",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      }
+    }
   },
   "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel": {
     "kind": "single",
-    "framework": "aiter",
-    "rel_path": "csrc/kernels/quant_kernels.cu",
-    "status": "resolved",
-    "patchable": true,
-    "method": "symbol_grep",
-    "confidence": "medium",
-    "note": "cross-repo: launched from sglang profiler, kernel lives in aiter",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(391): _fused_moe_kernel_sequence"
     ],
-    "abs_path_sglang": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
-      "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu"
-    ],
-    "abs_path_vllm": [
-      "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
-      "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quant_kernels.cu"
-    ]
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN5aiter37dynamic_per_token_scaled_quant_kernelIDF16bDB8_Li32EEEvPT0_PfPT_PKfiPKii": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "398",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      },
+      "fused_moe_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
+        "kernel_source_line": "702",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "_ZN5aiter37dynamic_per_token_scaled_quant_kernelIDF16bDB8_Li8EEEvPT0_PfPT_PKfiPKii": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "398",
+        "kernel_kind": "aiter_cu_kernel",
+        "patchable": true
+      }
+    }
   },
   "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/fp8_utils.py(760): aiter_w8a8_block_fp8_linear"
     ],
-    "abs_path": "/sgl-workspace/aiter/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a8w8_blockscale.py"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_gemm_a8w8_blockscale_kernel_GROUP_K_GROUP_N_BLOCK_SIZE_M_BLOCK_SIZE_N_BLOCK_SIZE_K_GROUP_SIZE_M_NUM_KSPLIT_SPLITK_BLOCK": {
+        "kernel_source_path": "/sgl-workspace/aiter/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a8w8_blockscale.py",
+        "kernel_source_line": "46",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      }
+    }
   },
   "sglang_profiler::utils_concat_and_cast_mha_k_triton": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mha.py(486): _concat_and_cast_mha_k"
     ],
-    "abs_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/utils.py"
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "concat_and_cast_mha_k_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/utils.py",
+        "kernel_source_line": "153",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      }
+    }
   },
   "triton_per_fused_1": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": [
-      "/tmp/torchinductor_root/eu/ceu5lua3hj4qmx7i566sz2yuqwc6lnhclvu4pryfuevfaim2czxa.py",
-      "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "triton_per_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_per_fused__to_copy_mean_pow_view_0": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py"
+    "patchable": true,
+    "vllm": {
+      "triton_per_fused__to_copy_mean_pow_view.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_0": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path_sglang": [
-      "/tmp/torchinductor_root/3h/c3hdtyxnkmnjpf6okrds2hqon6ewhp5tdbv5ocqmftymb2yfnyrg.py",
-      "/tmp/torchinductor_root/tv/ctvaaj4f5gz3emaxmdfaqfd23r6w2h3iheeh4rhphixswye3y6jq.py",
-      "/tmp/torchinductor_root/zw/czww7hz5ne2deqyruncozexty33utp6xtycvaxrcq3bhdhwhgn4w.py",
-      "/tmp/torchinductor_root/ke/ckeldphj2yast4b3hwll3xwlxnuxezqjrkz4sh6mhzecjtxrn7pe.py",
-      "/tmp/torchinductor_root/sy/csycncxt6cjj5c5bjksubsyyzed24r7vforpr2qx3npqq47hyvqu.py"
-    ],
-    "abs_path_vllm": "/tmp/torchinductor_root/eb/cebcieel7cglzcehyxwk4ybzyaewmipk5dvlbqgv6gtfzwkmgcsk.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/eb/cebcieel7cglzcehyxwk4ybzyaewmipk5dvlbqgv6gtfzwkmgcsk.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_1": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": [
-      "/tmp/torchinductor_root/hs/chswuvg5zjlnxmbqcevadzwvz6wcrutmsj4pijm7plcuantgr4of.py",
-      "/tmp/torchinductor_root/nr/cnrb3pwkfshqy3g6qrfkqlinm2xll7qal2jcaol3rbhrevfgs4he.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/hs/chswuvg5zjlnxmbqcevadzwvz6wcrutmsj4pijm7plcuantgr4of.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_2": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path_sglang": [
-      "/tmp/torchinductor_root/3h/c3hdtyxnkmnjpf6okrds2hqon6ewhp5tdbv5ocqmftymb2yfnyrg.py",
-      "/tmp/torchinductor_root/ke/ckeldphj2yast4b3hwll3xwlxnuxezqjrkz4sh6mhzecjtxrn7pe.py"
-    ],
-    "abs_path_vllm": [
-      "/tmp/torchinductor_root/5u/c5ubinz73kf2ljnyu3klkwzylifwqaew32bwfqnesn3qobiefft7.py",
-      "/tmp/torchinductor_root/2x/c2xv2vxhhky6hayut7ofb2d67wbzk3e3ihrgivyt4lgcv36vcci2.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/5u/c5ubinz73kf2ljnyu3klkwzylifwqaew32bwfqnesn3qobiefft7.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_3": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": [
-      "/tmp/torchinductor_root/zw/czww7hz5ne2deqyruncozexty33utp6xtycvaxrcq3bhdhwhgn4w.py",
-      "/tmp/torchinductor_root/3h/c3hdtyxnkmnjpf6okrds2hqon6ewhp5tdbv5ocqmftymb2yfnyrg.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/3h/c3hdtyxnkmnjpf6okrds2hqon6ewhp5tdbv5ocqmftymb2yfnyrg.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_4": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": [
-      "/tmp/torchinductor_root/tv/ctvaaj4f5gz3emaxmdfaqfd23r6w2h3iheeh4rhphixswye3y6jq.py",
-      "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py",
-      "/tmp/torchinductor_root/zw/czww7hz5ne2deqyruncozexty33utp6xtycvaxrcq3bhdhwhgn4w.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_5": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_6": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": [
-      "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py",
-      "/tmp/torchinductor_root/eu/ceu5lua3hj4qmx7i566sz2yuqwc6lnhclvu4pryfuevfaim2czxa.py",
-      "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py",
-      "/tmp/torchinductor_root/sy/csycncxt6cjj5c5bjksubsyyzed24r7vforpr2qx3npqq47hyvqu.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_8": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/sy/csycncxt6cjj5c5bjksubsyyzed24r7vforpr2qx3npqq47hyvqu.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/sy/csycncxt6cjj5c5bjksubsyyzed24r7vforpr2qx3npqq47hyvqu.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused__to_copy_0": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/5u/c5ubinz73kf2ljnyu3klkwzylifwqaew32bwfqnesn3qobiefft7.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused__to_copy.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/5u/c5ubinz73kf2ljnyu3klkwzylifwqaew32bwfqnesn3qobiefft7.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused__to_copy__unsafe_view_add_clone_mean_mul_pow_rocm_unquantized_gemm_rsqrt_silu_view_2": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/eu/ceu5lua3hj4qmx7i566sz2yuqwc6lnhclvu4pryfuevfaim2czxa.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused__to_copy__unsafe_view_add_clone_mean_mul_pow_rocm_unquantized_gemm_rsqrt_silu_view.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/eu/ceu5lua3hj4qmx7i566sz2yuqwc6lnhclvu4pryfuevfaim2czxa.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused__to_copy_add_mean_mul_pow_rocm_unquantized_gemm_rsqrt_silu_view_1": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused__to_copy_add_mean_mul_pow_rocm_unquantized_gemm_rsqrt_silu_view.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused__to_copy_add_mean_mul_pow_rocm_unquantized_gemm_rsqrt_silu_view_2": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused__to_copy_add_mean_mul_pow_rocm_unquantized_gemm_rsqrt_silu_view.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused__to_copy_rocm_unquantized_gemm_0": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/ry/cryehst42u5fu4chor6mtvlqkxlub22quakdqb25npcbu7orgvg6.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused__to_copy_rocm_unquantized_gemm.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/ry/cryehst42u5fu4chor6mtvlqkxlub22quakdqb25npcbu7orgvg6.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused__unsafe_view_clone_split_with_sizes_view_4": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/3h/c3hdtyxnkmnjpf6okrds2hqon6ewhp5tdbv5ocqmftymb2yfnyrg.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused__unsafe_view_clone_split_with_sizes_view.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/3h/c3hdtyxnkmnjpf6okrds2hqon6ewhp5tdbv5ocqmftymb2yfnyrg.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused__unsafe_view_clone_split_with_sizes_view_5": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/zw/czww7hz5ne2deqyruncozexty33utp6xtycvaxrcq3bhdhwhgn4w.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused__unsafe_view_clone_split_with_sizes_view.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/zw/czww7hz5ne2deqyruncozexty33utp6xtycvaxrcq3bhdhwhgn4w.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused__unsafe_view_clone_split_with_sizes_view_7": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused__unsafe_view_clone_split_with_sizes_view.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_add_all_reduce_bitwise_and_bitwise_not_bitwise_or_embedding_ge_lt_masked_fill_mul_sub_unsqueeze_0": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": [
-      "/tmp/torchinductor_root/nr/cnrb3pwkfshqy3g6qrfkqlinm2xll7qal2jcaol3rbhrevfgs4he.py",
-      "/tmp/torchinductor_root/hs/chswuvg5zjlnxmbqcevadzwvz6wcrutmsj4pijm7plcuantgr4of.py",
-      "/tmp/torchinductor_root/2x/c2xv2vxhhky6hayut7ofb2d67wbzk3e3ihrgivyt4lgcv36vcci2.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused_add_all_reduce_bitwise_and_bitwise_not_bitwise_or_embedding_ge_lt_masked_fill_mul_sub_unsqueeze.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/hs/chswuvg5zjlnxmbqcevadzwvz6wcrutmsj4pijm7plcuantgr4of.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_add_all_reduce_mul_1": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/5u/c5ubinz73kf2ljnyu3klkwzylifwqaew32bwfqnesn3qobiefft7.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused_add_all_reduce_mul.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/5u/c5ubinz73kf2ljnyu3klkwzylifwqaew32bwfqnesn3qobiefft7.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_add_bitwise_and_bitwise_not_bitwise_or_ge_lt_mul_sub_0": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path_sglang": [
-      "/tmp/torchinductor_root/d3/cd3q6ndf57x3ckp7jkf5lbm5nann4z3tgmcnhmurswdj7xdqtnau.py",
-      "/tmp/torchinductor_root/7k/c7kvwkgtn6mytkez5lsw6iaoc357wulxw4hfezdthj5cqmtqpyfg.py",
-      "/tmp/torchinductor_root/pt/cptktlhjih6e7bma2osnhypostuih6wqyhyjfl53pgefg7sx6ng5.py"
-    ],
-    "abs_path_vllm": "/tmp/torchinductor_root/vk/cvkh5rk7xbhh4tjoov6g7vz6tz5g4nwptm5v5oz2y7rm74xnhjem.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused_add_bitwise_and_bitwise_not_bitwise_or_ge_lt_mul_sub.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/pt/cptktlhjih6e7bma2osnhypostuih6wqyhyjfl53pgefg7sx6ng5.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {
+      "triton_poi_fused_add_bitwise_and_bitwise_not_bitwise_or_ge_lt_mul_sub": {
+        "kernel_source_path": "/tmp/torchinductor_root/vk/cvkh5rk7xbhh4tjoov6g7vz6tz5g4nwptm5v5oz2y7rm74xnhjem.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    }
   },
   "triton_poi_fused_mul_rocm_unquantized_gemm_sigmoid_view_0": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": [
-      "/tmp/torchinductor_root/vz/cvzogijomjy6ennimqa2jspubiynobtdq5w6wdzjvgledgpsdoyx.py",
-      "/tmp/torchinductor_root/tm/ctmixhn7lvkbwin3e3weh7fcivg2hflep4pjv4go5hhdgdkcnr3x.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused_mul_rocm_unquantized_gemm_sigmoid_view.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/vz/cvzogijomjy6ennimqa2jspubiynobtdq5w6wdzjvgledgpsdoyx.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_mul_rocm_unquantized_gemm_silu_slice_0": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/3r/c3r2l7zfosodxtmuvakmf5x3xxx2jlayefzrbxw5cjohhorimfqn.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused_mul_rocm_unquantized_gemm_silu_slice.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/3r/c3r2l7zfosodxtmuvakmf5x3xxx2jlayefzrbxw5cjohhorimfqn.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_mul_rocm_unquantized_gemm_silu_slice_2": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/tv/ctvaaj4f5gz3emaxmdfaqfd23r6w2h3iheeh4rhphixswye3y6jq.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused_mul_rocm_unquantized_gemm_silu_slice.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/tv/ctvaaj4f5gz3emaxmdfaqfd23r6w2h3iheeh4rhphixswye3y6jq.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_mul_rocm_unquantized_gemm_silu_slice_4": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/eu/ceu5lua3hj4qmx7i566sz2yuqwc6lnhclvu4pryfuevfaim2czxa.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused_mul_rocm_unquantized_gemm_silu_slice.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/eu/ceu5lua3hj4qmx7i566sz2yuqwc6lnhclvu4pryfuevfaim2czxa.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_poi_fused_mul_silu_slice_0": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path_sglang": "/tmp/torchinductor_root/p7/cp7pnkkqat6fikvsebhxeyoirrgbbl6jqk2wz335flw4z7s6zmbx.py",
-    "abs_path_vllm": "/tmp/torchinductor_root/pv/cpvhskecyzygkowxixgfbp3yeazxibhitnang23dn7d7ofwqeqjx.py"
+    "patchable": true,
+    "vllm": {
+      "triton_poi_fused_mul_silu_slice.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/pv/cpvhskecyzygkowxixgfbp3yeazxibhitnang23dn7d7ofwqeqjx.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused_1": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path_sglang": [
-      "/tmp/torchinductor_root/3h/c3hdtyxnkmnjpf6okrds2hqon6ewhp5tdbv5ocqmftymb2yfnyrg.py",
-      "/tmp/torchinductor_root/ke/ckeldphj2yast4b3hwll3xwlxnuxezqjrkz4sh6mhzecjtxrn7pe.py"
-    ],
-    "abs_path_vllm": "/tmp/torchinductor_root/2x/c2xv2vxhhky6hayut7ofb2d67wbzk3e3ihrgivyt4lgcv36vcci2.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/3h/c3hdtyxnkmnjpf6okrds2hqon6ewhp5tdbv5ocqmftymb2yfnyrg.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused_5": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused_7": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/sy/csycncxt6cjj5c5bjksubsyyzed24r7vforpr2qx3npqq47hyvqu.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/sy/csycncxt6cjj5c5bjksubsyyzed24r7vforpr2qx3npqq47hyvqu.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused__to_copy_add_copy__mean_mul_pow_rocm_unquantized_gemm_rsqrt_3": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused__to_copy_add_copy__mean_mul_pow_rocm_unquantized_gemm_rsqrt.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused__to_copy_add_copy__mean_mul_pow_rocm_unquantized_gemm_rsqrt_5": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/sy/csycncxt6cjj5c5bjksubsyyzed24r7vforpr2qx3npqq47hyvqu.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused__to_copy_add_copy__mean_mul_pow_rocm_unquantized_gemm_rsqrt.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/sy/csycncxt6cjj5c5bjksubsyyzed24r7vforpr2qx3npqq47hyvqu.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused__to_copy_add_copy__mean_mul_pow_rsqrt_2": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": [
-      "/tmp/torchinductor_root/vz/cvzogijomjy6ennimqa2jspubiynobtdq5w6wdzjvgledgpsdoyx.py",
-      "/tmp/torchinductor_root/zw/czww7hz5ne2deqyruncozexty33utp6xtycvaxrcq3bhdhwhgn4w.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused__to_copy_add_copy__mean_mul_pow_rsqrt.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/vz/cvzogijomjy6ennimqa2jspubiynobtdq5w6wdzjvgledgpsdoyx.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused__to_copy_add_copy__mean_mul_pow_rsqrt_3": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": [
-      "/tmp/torchinductor_root/tv/ctvaaj4f5gz3emaxmdfaqfd23r6w2h3iheeh4rhphixswye3y6jq.py",
-      "/tmp/torchinductor_root/tm/ctmixhn7lvkbwin3e3weh7fcivg2hflep4pjv4go5hhdgdkcnr3x.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused__to_copy_add_copy__mean_mul_pow_rsqrt.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/tm/ctmixhn7lvkbwin3e3weh7fcivg2hflep4pjv4go5hhdgdkcnr3x.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused__to_copy_add_copy__mean_mul_pow_rsqrt_4": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused__to_copy_add_copy__mean_mul_pow_rsqrt.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused__to_copy_add_copy__mean_mul_pow_rsqrt_5": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/eu/ceu5lua3hj4qmx7i566sz2yuqwc6lnhclvu4pryfuevfaim2czxa.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused__to_copy_add_copy__mean_mul_pow_rsqrt.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/eu/ceu5lua3hj4qmx7i566sz2yuqwc6lnhclvu4pryfuevfaim2czxa.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused__to_copy_add_mean_moe_forward_shared_mul_pow_rsqrt_1": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/zw/czww7hz5ne2deqyruncozexty33utp6xtycvaxrcq3bhdhwhgn4w.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused__to_copy_add_mean_moe_forward_shared_mul_pow_rsqrt.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/zw/czww7hz5ne2deqyruncozexty33utp6xtycvaxrcq3bhdhwhgn4w.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused__to_copy_add_mean_moe_forward_shared_mul_pow_rsqrt_2": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused__to_copy_add_mean_moe_forward_shared_mul_pow_rsqrt.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/ih/cih6chjqsos6bdd7cmozeyihkhfsji7wsz2bhdpjnnfmwc25fp52.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused__to_copy_add_mean_moe_forward_shared_mul_pow_rsqrt_3": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused__to_copy_add_mean_moe_forward_shared_mul_pow_rsqrt.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/v4/cv4auakxps3j6fpdm6epg4ic5lpjizkr6upzax3sugz2jl6yqfxi.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused__to_copy_add_mean_mul_pow_rocm_unquantized_gemm_rsqrt_1": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/tv/ctvaaj4f5gz3emaxmdfaqfd23r6w2h3iheeh4rhphixswye3y6jq.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused__to_copy_add_mean_mul_pow_rocm_unquantized_gemm_rsqrt.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/tv/ctvaaj4f5gz3emaxmdfaqfd23r6w2h3iheeh4rhphixswye3y6jq.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "triton_red_fused__to_copy_add_mean_mul_pow_rocm_unquantized_gemm_rsqrt_3": {
     "kind": "single",
-    "framework": "triton",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": null,
-    "abs_path": "/tmp/torchinductor_root/eu/ceu5lua3hj4qmx7i566sz2yuqwc6lnhclvu4pryfuevfaim2czxa.py"
+    "patchable": true,
+    "vllm": {
+      "triton_red_fused__to_copy_add_mean_mul_pow_rocm_unquantized_gemm_rsqrt.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/eu/ceu5lua3hj4qmx7i566sz2yuqwc6lnhclvu4pryfuevfaim2czxa.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "vllm::gdn_attention_core": {
     "kind": "composite",
-    "framework": "vllm",
-    "routes": [
-      {
-        "match": "_causal_conv1d_fwd_kernel*",
-        "rel_path": null,
-        "label": "Triton JIT kernel - Python source, no .cu",
-        "status": "non_rewritable",
-        "patchable": false,
-        "reason": "triton"
-      },
-      {
-        "match": "_causal_conv1d_update_kernel*",
-        "rel_path": null,
-        "label": "Triton JIT kernel - Python source, no .cu",
-        "status": "non_rewritable",
-        "patchable": false,
-        "reason": "triton"
-      }
-    ],
-    "default": {
-      "status": "unresolved"
-    },
     "python_launcher_path": [
       "vllm/compilation/caching.py(210): __call__"
     ],
-    "abs_path": [
-      "vllm/model_executor/layers/fla/ops/chunk_delta_h.py",
-      "vllm/model_executor/layers/mamba/ops/causal_conv1d.py",
-      "vllm/model_executor/layers/fla/ops/wy_fast.py",
-      "vllm/model_executor/layers/fla/ops/fused_recurrent.py",
-      "vllm/model_executor/layers/fla/ops/chunk_o.py",
-      "vllm/model_executor/layers/fla/ops/solve_tril.py",
-      "vllm/model_executor/layers/fla/ops/l2norm.py",
-      "vllm/model_executor/layers/fla/ops/index.py",
-      "vllm/model_executor/layers/mamba/gdn_linear_attn.py",
-      "vllm/model_executor/layers/fla/ops/cumsum.py",
-      "vllm/model_executor/layers/fla/ops/chunk_scaled_dot_kkt.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "_causal_conv1d_update_kernel.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/mamba/ops/causal_conv1d.py",
+        "kernel_source_line": "1069",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "fused_recurrent_gated_delta_rule_packed_decode_kernel.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/fused_recurrent.py",
+        "kernel_source_line": "338",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "_causal_conv1d_fwd_kernel.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/mamba/ops/causal_conv1d.py",
+        "kernel_source_line": "468",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_ker": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "torch_native_hip",
+        "patchable": false
+      },
+      "fused_gdn_gating_kernel.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/mamba/gdn_linear_attn.py",
+        "kernel_source_line": "1013",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "l2norm_fwd_kernel2.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/l2norm.py",
+        "kernel_source_line": "95",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "__amd_rocclr_copyBuffer.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/mamba/gdn_linear_attn.py",
+        "kernel_source_line": "667",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "chunk_local_cumsum_scalar_kernel.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/cumsum.py",
+        "kernel_source_line": "161",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "chunk_scaled_dot_kkt_fwd_kernel.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/chunk_scaled_dot_kkt.py",
+        "kernel_source_line": "101",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "mergex16_tox64_inverse_kernel.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/solve_tril.py",
+        "kernel_source_line": "506",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "recompute_w_u_fwd_kernel.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/wy_fast.py",
+        "kernel_source_line": "119",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "chunk_gated_delta_rule_fwd_kernel_h_blockdim64.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/chunk_delta_h.py",
+        "kernel_source_line": "281",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "chunk_fwd_kernel_o.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/chunk_o.py",
+        "kernel_source_line": "141",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "vllm::moe_forward->_bitmatrix_metadata_compute_stage1.kd (Synthetic Op)": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": null,
-    "label": "no device kernel in callstack",
-    "status": "no_kernel",
-    "patchable": null,
-    "method": "none",
     "python_launcher_path": null,
-    "abs_path": null
+    "patchable": false,
+    "vllm": {
+      "_bitmatrix_metadata_compute_stage1.kd": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "triton_kernel",
+        "patchable": false
+      }
+    },
+    "sglang": {}
   },
   "vllm::moe_forward->_bitmatrix_metadata_compute_stage2.kd (Synthetic Op)": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": null,
-    "label": "no device kernel in callstack",
-    "status": "no_kernel",
-    "patchable": null,
-    "method": "none",
     "python_launcher_path": null,
-    "abs_path": null
+    "patchable": false,
+    "vllm": {
+      "_bitmatrix_metadata_compute_stage2.kd": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "triton_kernel",
+        "patchable": false
+      }
+    },
+    "sglang": {}
   },
   "vllm::moe_forward->_ragged_tensor_metadata_compute.kd (Synthetic Op)": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": null,
-    "label": "no device kernel in callstack",
-    "status": "no_kernel",
-    "patchable": null,
-    "method": "none",
     "python_launcher_path": null,
-    "abs_path": null
+    "patchable": false,
+    "vllm": {
+      "_ragged_tensor_metadata_compute.kd": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "triton_kernel",
+        "patchable": false
+      }
+    },
+    "sglang": {}
   },
   "vllm::moe_forward->_ragged_tensor_metadata_memset.kd (Synthetic Op)": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": null,
-    "label": "no device kernel in callstack",
-    "status": "no_kernel",
-    "patchable": null,
-    "method": "none",
     "python_launcher_path": null,
-    "abs_path": null
+    "patchable": false,
+    "vllm": {
+      "_ragged_tensor_metadata_memset.kd": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "triton_kernel",
+        "patchable": false
+      }
+    },
+    "sglang": {}
   },
   "vllm::moe_forward->_reduce.kd (Synthetic Op)": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": null,
-    "label": "no device kernel in callstack",
-    "status": "no_kernel",
-    "patchable": null,
-    "method": "none",
     "python_launcher_path": null,
-    "abs_path": null
+    "patchable": false,
+    "vllm": {
+      "_reduce.kd": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "triton_kernel",
+        "patchable": false
+      }
+    },
+    "sglang": {}
   },
   "vllm::moe_forward->_sum_bitmatrix_rows.kd (Synthetic Op)": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": null,
-    "label": "no device kernel in callstack",
-    "status": "no_kernel",
-    "patchable": null,
-    "method": "none",
     "python_launcher_path": null,
-    "abs_path": null
+    "patchable": false,
+    "vllm": {
+      "_sum_bitmatrix_rows.kd": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "triton_kernel",
+        "patchable": false
+      }
+    },
+    "sglang": {}
   },
   "vllm::rocm_aiter_rmsnorm_fp8_group_quant": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": [
       "/tmp/torchinductor_root/2x/c2xv2vxhhky6hayut7ofb2d67wbzk3e3ihrgivyt4lgcv36vcci2.py(1065): call"
     ],
-    "abs_path": "/tmp/torchinductor_root/2x/c2xv2vxhhky6hayut7ofb2d67wbzk3e3ihrgivyt4lgcv36vcci2.py"
+    "patchable": true,
+    "vllm": {
+      "_fused_rms_fp8_group_quant_kernel.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/2x/c2xv2vxhhky6hayut7ofb2d67wbzk3e3ihrgivyt4lgcv36vcci2.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": [
       "/tmp/torchinductor_root/ry/cryehst42u5fu4chor6mtvlqkxlub22quakdqb25npcbu7orgvg6.py(954): call"
     ],
-    "abs_path": "/tmp/torchinductor_root/ry/cryehst42u5fu4chor6mtvlqkxlub22quakdqb25npcbu7orgvg6.py"
+    "patchable": true,
+    "vllm": {
+      "_fused_rms_fp8_group_quant_kernel.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/ry/cryehst42u5fu4chor6mtvlqkxlub22quakdqb25npcbu7orgvg6.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "vllm::rocm_aiter_triton_add_rmsnorm_pad": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": [
       "/tmp/torchinductor_root/eb/cebcieel7cglzcehyxwk4ybzyaewmipk5dvlbqgv6gtfzwkmgcsk.py(433): call"
     ],
-    "abs_path": "/tmp/torchinductor_root/eb/cebcieel7cglzcehyxwk4ybzyaewmipk5dvlbqgv6gtfzwkmgcsk.py"
+    "patchable": true,
+    "vllm": {
+      "_fused_add_rmsnorm_pad.kd": {
+        "kernel_source_path": "/tmp/torchinductor_root/eb/cebcieel7cglzcehyxwk4ybzyaewmipk5dvlbqgv6gtfzwkmgcsk.py",
+        "kernel_source_line": null,
+        "kernel_kind": "triton_inductor_generated",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "vllm::rocm_unquantized_gemm": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": null,
-    "label": "rocBLAS/Tensile asm GEMM library, no editable .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "tensile",
     "python_launcher_path": [
       "vllm/model_executor/parameter.py(122): __torch_function__",
       "vllm/model_executor/layers/utils.py(197): rocm_unquantized_gemm"
     ],
-    "abs_path_sglang": "",
-    "abs_path_vllm": ""
+    "patchable": false,
+    "vllm": {},
+    "sglang": {}
   },
   "vllm::unified_attention_with_output": {
     "kind": "dispatch",
-    "framework": "vllm",
-    "routes": [
-      {
-        "match": "paged_attention_ll4mi*",
-        "rel_path": "csrc/rocm/attention.cu",
-        "status": "resolved",
-        "patchable": true,
-        "method": "symbol_grep",
-        "confidence": "medium",
-        "abs_path_vllm": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/attention.cu"
-      },
-      {
-        "match": "*_fwd_kernel*",
-        "rel_path": null,
-        "label": "Triton JIT kernel - Python source, no .cu",
-        "status": "non_rewritable",
-        "patchable": false,
-        "reason": "triton"
-      }
-    ],
-    "default": {
-      "status": "unresolved"
-    },
     "python_launcher_path": [
       "vllm/compilation/caching.py(210): __call__"
     ],
-    "abs_path_sglang": [
-      "vllm/v1/attention/ops/prefix_prefill.py",
-      "vllm/v1/attention/ops/chunked_prefill_paged_decode.py"
-    ],
-    "abs_path_vllm": [
-      "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/attention.cu",
-      "/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/_triton_kernels/attention/unified_attention.py",
-      "/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/prefix_prefill.py",
-      "/usr/local/lib/python3.12/dist-packages/vllm/_custom_ops.py"
-    ]
+    "patchable": true,
+    "vllm": {
+      "kernel_paged_attentiond.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/chunked_prefill_paged_decode.py",
+        "kernel_source_line": "250",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "_fwd_kernel.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/prefix_prefill.py",
+        "kernel_source_line": "634",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_QKV_mfma16_kernel<__hip_bfloat16, __hip_bfloat16, (vllm::Fp8KVCacheDataType)0, __hip_bfloat16": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/attention.cu",
+        "kernel_source_line": "410",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_reduce_kernel<__hip_bfloat16, __hip_bfloat16, 128, 128, 256, 1>(__hip_bfloat16*, float const*": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/_custom_ops.py",
+        "kernel_source_line": "202",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      },
+      "kernel_unified_attentiond.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/_triton_kernels/attention/unified_attention.py",
+        "kernel_source_line": "11",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   },
   "vllm::unified_kv_cache_update": {
     "kind": "single",
-    "framework": "vllm",
-    "rel_path": null,
-    "label": "Triton JIT kernel - Python source, no .cu",
-    "status": "non_rewritable",
-    "patchable": false,
-    "method": "non_rewritable_class",
-    "reason": "triton",
     "python_launcher_path": [
       "vllm/compilation/caching.py(210): __call__"
     ],
-    "abs_path": "vllm/v1/attention/ops/triton_reshape_and_cache_flash.py"
+    "patchable": true,
+    "vllm": {
+      "reshape_and_cache_kernel_flash.kd": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/triton_reshape_and_cache_flash.py",
+        "kernel_source_line": "114",
+        "kernel_kind": "triton_kernel",
+        "patchable": true
+      }
+    },
+    "sglang": {}
   }
 }
