@@ -74,6 +74,7 @@ from .policy import (
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from .gpu_pool import (
+    GPU_LEASE_TTL_GRACE,
     SpecialistGpuPool,
     resolve_gpu_specialist_devices,
 )
@@ -471,6 +472,13 @@ class Coordinator:
                 _set_lane_capacity(self.db.raw, "research_lane", cap)
         except Exception:  # noqa: BLE001 — non-fatal; default seed wins
             log.exception("failed to sync research_lane_capacity to leases DB")
+        # WS2: gpu_research_lane stays capacity-1 (strictly serial GPU
+        # specialists). The co-acquisition lock model can't express a
+        # multi-holder lane that is also mutually exclusive with the cap-1
+        # serving lanes, so a single GPU specialist holds the whole machine at a
+        # time (gpu_count up to the whole machine); the GPU pool partitions the
+        # physical cards within that one lease. The seed default (1) is correct;
+        # no runtime sync needed.
         # `strict_paths` defers to the env flag (on in production, off in tests).
         self.policy = PolicyGate(
             role_registry=self.role_registry,
@@ -494,19 +502,73 @@ class Coordinator:
         # Orchestration working-memory checkpoint policy + tracker (plan Step 4).
         from . import orchestration_memory as _orch_mem
 
-        self._checkpoint_policy = _orch_mem.CheckpointPolicy()
+        # Context-token guardrail (#3): derive soft/hard budgets from the
+        # orchestration model's window × fraction (env-overridable). Falls back to
+        # a conservative 200k window for unknown models; 0 budgets => token
+        # triggers disabled (char/tick/time cadence still applies).
+        def _ckpt_fraction(env_key: str, default: float) -> float:
+            try:
+                v = float(os.environ.get(env_key, "").strip() or default)
+            except (TypeError, ValueError):
+                v = default
+            return v if 0.0 < v <= 1.0 else default
+
+        _orch_model = str(getattr(self.backends.get("orchestration"), "model", "") or "")
+        _ctx_window = _orch_mem.context_window_for_model(_orch_model)
+        _soft_frac = _ckpt_fraction(
+            "INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION",
+            _orch_mem.DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION,
+        )
+        _hard_frac = _ckpt_fraction(
+            "INFERENCE_OPTIMIZER_CTX_HARD_FRACTION",
+            _orch_mem.DEFAULT_CONTEXT_TOKEN_HARD_FRACTION,
+        )
+        self._checkpoint_policy = _orch_mem.CheckpointPolicy(
+            context_token_soft=int(_ctx_window * _soft_frac),
+            context_token_hard=int(_ctx_window * _hard_frac),
+        )
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
+        # Consecutive degenerate checkpoint replies (#1); resets on a good one.
+        self._consec_degenerate_ckpt: int = 0
         # Disable checkpointing entirely via env.
         self._checkpoint_enabled: bool = os.environ.get(
             "INFERENCE_OPTIMIZER_DISABLE_ORCH_CHECKPOINT",
             "",
         ).strip().lower() not in {"1", "true", "yes", "on"}
         # Seed memory rendered into the next full SEED push (resume recovery source).
-        self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(
-            dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
-        )
+        # Operator rollback (#1): INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK=<n>
+        # re-seeds from the n-th-from-newest history snapshot instead of the live
+        # memory, to recover when the most recent compaction(s) lost a key thread.
+        _seed_memory = dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
+        _rollback_raw = os.environ.get("INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK", "").strip()
+        if _rollback_raw:
+            try:
+                _n = int(_rollback_raw)
+                _hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
+                if _n >= 1 and len(_hist) >= _n:
+                    _seed_memory = dict(_hist[-_n])
+                    self.shared_state.orchestration_memory = _seed_memory
+                    log.warning(
+                        "Coordinator: orchestration memory rolled back to history[-%d] "
+                        "(of %d snapshots)",
+                        _n,
+                        len(_hist),
+                    )
+                else:
+                    log.warning(
+                        "Coordinator: ORCH_MEMORY_ROLLBACK=%s out of range (history has %d); "
+                        "using live memory",
+                        _rollback_raw,
+                        len(_hist),
+                    )
+            except (TypeError, ValueError):
+                log.warning(
+                    "Coordinator: invalid ORCH_MEMORY_ROLLBACK=%r; using live memory",
+                    _rollback_raw,
+                )
+        self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(_seed_memory)
         # No-progress circuit-breaker telemetry (plan Step 6); threshold = high-severity cutoff.
         self._progress_marker: dict[str, Any] = {}
         try:
@@ -923,12 +985,21 @@ class Coordinator:
         tracker = self._checkpoint_tracker
         ticks_since = max(0, tick - tracker.last_tick)
         minutes_since = max(0.0, now_min - tracker.last_minute_mark)
-        # Approximate conversation growth from recorded prompt char counts since last reset.
-        if not force and not self._checkpoint_policy.should_checkpoint(
-            ticks_since_last=ticks_since,
-            minutes_since_last=minutes_since,
-            chars_since_last=tracker.chars_since_last,
-            phase_changed=phase_changed,
+        # Hard context-token guardrail: near the window we MUST compact even when
+        # the LLM summary is degenerate (deterministic fallback) to avoid overflow.
+        hard = self._checkpoint_policy.is_hard_compaction(tracker.context_tokens_now)
+        # Authoritative growth signal is the context-token water level; the char
+        # count is a fallback for backends that don't report token usage.
+        if (
+            not force
+            and not hard
+            and not self._checkpoint_policy.should_checkpoint(
+                ticks_since_last=ticks_since,
+                minutes_since_last=minutes_since,
+                chars_since_last=tracker.chars_since_last,
+                phase_changed=phase_changed,
+                context_tokens_now=tracker.context_tokens_now,
+            )
         ):
             return False
 
@@ -944,6 +1015,48 @@ class Coordinator:
             )
             raw_text = getattr(result, "raw_text", "") or ""
             parsed = _orch_mem.parse_checkpoint_reply(raw_text)
+            degenerate = _orch_mem.is_degenerate_checkpoint(parsed)
+            cur_phase = str(getattr(self.shared_state, "phase", "") or "")
+            # Path 1 — degenerate reply, NOT near the window: skip compaction.
+            # Preserve the live conversation + prior memory (a forgetful summary
+            # must never blank the plan or drop the history). Still reset the
+            # tracker so we don't immediately retry next tick (checkpoint storm).
+            if degenerate and not hard:
+                self._consec_degenerate_ckpt += 1
+                tracker.reset(tick=tick, minute_mark=now_min, phase=cur_phase)
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "orchestration_checkpoint_degraded",
+                        "tick": tick,
+                        "consecutive": self._consec_degenerate_ckpt,
+                        "parse_error": str(parsed.get("parse_error", "") or ""),
+                    },
+                )
+                # Repeated degeneracy: raise the observation's severity so the
+                # operator/robustness sees it (advisory, P3_19 style — never
+                # auto-changes strategy, and does not hijack the alert intent).
+                if self._consec_degenerate_ckpt >= 3:
+                    await self._record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": "orchestration_checkpoint_degraded",
+                            "severity": "medium",
+                            "tick": tick,
+                            "consecutive": self._consec_degenerate_ckpt,
+                            "detail": "orchestration checkpoint summaries repeatedly degenerate",
+                        },
+                    )
+                return False
+            # Path 2 — degenerate but near the window: compact anyway using a
+            # deterministic fallback synthesised from authoritative state, so the
+            # conversation is reset and never overflows.
+            if degenerate and hard:
+                parsed = _orch_mem.deterministic_memory_fallback(self.shared_state)
+            # Path 3 (and post-fallback): a usable summary — compact for real.
+            self._consec_degenerate_ckpt = 0
             seq = 0
             try:
                 row = self.bus.db.fetchone_sync("SELECT COALESCE(MAX(seq), 0) AS s FROM events")
@@ -957,6 +1070,14 @@ class Coordinator:
                 previous=dict(getattr(self.shared_state, "orchestration_memory", {}) or {}),
             )
             self.shared_state.orchestration_memory = record
+            # Append to the rollback ring (bounded) so a later bad compaction can
+            # be recovered from a prior good snapshot (long-run #1).
+            try:
+                hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
+                hist.append(record)
+                self.shared_state.orchestration_memory_history = hist[-10:]
+            except Exception:  # noqa: BLE001 — history is best-effort
+                log.exception("Coordinator: failed to append orchestration_memory_history")
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001
@@ -967,7 +1088,7 @@ class Coordinator:
             tracker.reset(
                 tick=tick,
                 minute_mark=now_min,
-                phase=str(getattr(self.shared_state, "phase", "") or ""),
+                phase=cur_phase,
             )
             await self._record_observation(
                 "coordinator",
@@ -978,11 +1099,23 @@ class Coordinator:
                     "seq": seq,
                     "checkpoint_count": record.get("checkpoint_count", 0),
                     "phase_changed": bool(phase_changed),
+                    "hard_compaction": bool(hard),
+                    "context_tokens": int(tracker.context_tokens_now),
                 },
             )
             return True
         except Exception:  # noqa: BLE001 — never let a checkpoint kill the loop
             log.exception("Coordinator: orchestration checkpoint failed")
+            # Reset the tracker even on failure so a transient backend error
+            # (e.g. gateway 401) can't trigger a checkpoint storm next tick.
+            try:
+                tracker.reset(
+                    tick=tick,
+                    minute_mark=now_min,
+                    phase=str(getattr(self.shared_state, "phase", "") or ""),
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return False
 
     def _attach_orchestration_context_tools(self) -> None:
@@ -1349,6 +1482,467 @@ class Coordinator:
             "verdicts_seen": len(verdicts),
         }
 
+    def _materialize_stack_config_for_resume(self) -> dict[str, Any]:
+        """Rebuild cumulative launch args/envs from ``optimization_stack``."""
+        stack = [e for e in (getattr(self.shared_state, "optimization_stack", []) or []) if isinstance(e, dict)]
+        args = ""
+        envs: dict[str, str] = {}
+        tput: float | None = None
+        variant_name = ""
+        action = "resume_reconstructed"
+        workspace = None
+        for entry in stack:
+            candidate = str(entry.get("candidate_extra_server_args") or "").strip()
+            full = str(entry.get("extra_server_args") or entry.get("extra_sglang_args") or "").strip()
+            args = _merge_cumulative_extra_sglang_args(args, candidate, full)
+            raw_envs = entry.get("extra_envs") or {}
+            if isinstance(raw_envs, Mapping):
+                envs.update({str(k): str(v) for k, v in raw_envs.items()})
+            if isinstance(entry.get("tput"), (int, float)) and float(entry["tput"]) > 0:
+                tput = float(entry["tput"])
+            variant_name = str(entry.get("variant_name") or variant_name or "")
+            action = str(entry.get("action") or action)
+            workspace = entry.get("workspace") or workspace
+        return {
+            "action": action,
+            "variant_name": variant_name,
+            "extra_server_args": args,
+            "extra_envs": envs,
+            "tput": tput,
+            "workspace": workspace,
+            "optimization_stack": stack,
+        }
+
+    async def _resume_consistency_pass(self) -> dict[str, Any]:
+        """One-shot resume audit + recovery for stack/current_best consistency.
+
+        Order matters: recover half-applied / orphaned KEEPs FIRST (they mutate
+        the stack), then reconcile ``current_best`` against the resulting stack,
+        then compensate the validation watermark by enqueuing a single
+        full-stack end-to-end rebench. Idempotent — only runs on a resumed
+        session and every recovery step dedupes, so a second pass is a no-op.
+        """
+        if not self._resumed_from.get("is_resume"):
+            return {"skipped": True, "reason": "not_resume"}
+        state = self.shared_state
+        report: dict[str, Any] = {
+            "skipped": False,
+            "fixes": [],
+            "warnings": [],
+        }
+        # (1) Half-applied integrate window (long-run #4 Gap C): replay the
+        # missing stack append or roll back the partial patch BEFORE anything
+        # reads the stack, so the rest of the pass sees the recovered truth.
+        await self._resume_recover_pending_integrate(report)
+        # (2) Orphaned KEEPs (long-run #4 Gap B): replay integrate_patch KEEPs
+        # that crashed before the append landed; surface ambiguous ones loudly.
+        await self._resume_recover_orphaned_keeps(report)
+
+        # (3) current_best <-> stack reconcile (after 1/2 may have grown stack).
+        stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
+        cb = state.current_best if isinstance(state.current_best, dict) else {}
+        if stack:
+            rebuilt = self._materialize_stack_config_for_resume()
+            cb_args = str(cb.get("extra_server_args") or "")
+            cb_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()} if isinstance(cb.get("extra_envs"), Mapping) else {}
+            if cb_args != rebuilt["extra_server_args"] or cb_envs != rebuilt["extra_envs"]:
+                # The append-only stack is authoritative; a disagreeing
+                # current_best is the inconsistency, recorded distinctly from the
+                # rebuild fix so operators can see a stale best was detected.
+                report["warnings"].append(
+                    {
+                        "kind": "resume_inconsistent_current_best",
+                        "current_best_args": cb_args,
+                        "stack_args": rebuilt["extra_server_args"],
+                    }
+                )
+                new_cb = dict(cb)
+                new_cb.update(
+                    {
+                        "action": rebuilt["action"],
+                        "variant_name": rebuilt["variant_name"],
+                        "extra_server_args": rebuilt["extra_server_args"],
+                        "extra_envs": rebuilt["extra_envs"],
+                        "optimization_stack": list(stack),
+                        "source": "resume_consistency_rebuild_from_stack",
+                    }
+                )
+                if rebuilt["tput"] is not None and not isinstance(new_cb.get("tput"), (int, float)):
+                    new_cb["tput"] = rebuilt["tput"]
+                if rebuilt["workspace"] and not new_cb.get("workspace"):
+                    new_cb["workspace"] = rebuilt["workspace"]
+                state.current_best = new_cb
+                report["fixes"].append("rebuilt_current_best_config_from_stack")
+        elif cb:
+            # Legacy sessions before the append-only stack existed are still
+            # recoverable; seed once instead of dropping a possibly valid best.
+            before = len(getattr(state, "optimization_stack", []) or [])
+            state.seed_stack_from_current_best()
+            after = len(getattr(state, "optimization_stack", []) or [])
+            if after > before:
+                report["fixes"].append("seeded_stack_from_legacy_current_best")
+            else:
+                report["warnings"].append({"kind": "current_best_without_stack"})
+
+        # (4) Validation-watermark compensation (long-run #4 Gap A): unvalidated
+        # KEEPs (claimed gain not yet end-to-end confirmed) → flag + enqueue ONE
+        # full-stack rebench. The flag + watermark are reconciled from the
+        # measured tput when that rebench promotes (see _promote_to_shared_state).
+        stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
+        vlen = int(getattr(state, "cumulative_gain_validated_stack_len", 0) or 0)
+        if vlen < len(stack):
+            state.resume_pending_revalidation = True
+            report["warnings"].append(
+                {
+                    "kind": "resume_unvalidated_keeps",
+                    "validated_stack_len": vlen,
+                    "stack_len": len(stack),
+                }
+            )
+            try:
+                fix = await self._enqueue_internal_stack_rebench(reason="resume_unvalidated_keeps")
+                report["fixes"].append({"kind": "queued_resume_stack_rebench", **fix})
+            except Exception:  # noqa: BLE001
+                log.exception("Coordinator: failed to enqueue resume stack rebench")
+                report["warnings"].append({"kind": "resume_stack_rebench_enqueue_failed"})
+
+        if os.environ.get("INFERENCE_OPTIMIZER_RESUME_REVERIFY_BEST", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            cb_now = state.current_best if isinstance(state.current_best, dict) else {}
+            cb_args = str(cb_now.get("extra_server_args") or "").strip()
+            cb_envs = cb_now.get("extra_envs") if isinstance(cb_now.get("extra_envs"), Mapping) else {}
+            if cb_args or cb_envs:
+                try:
+                    tput = cb_now.get("tput")
+                    params: dict[str, Any] = {
+                        "source": "resume_reverify_best",
+                        "reason": "resume_reverify_best",
+                        "grid": [
+                            {
+                                "name": "resume_current_best",
+                                "extra_args": cb_args,
+                                "extra_envs": dict(cb_envs),
+                                "provenance": "resume_reverify_best",
+                                "note": "env-requested post-resume current_best recheck",
+                            }
+                        ],
+                        "base_tput": float(tput) if isinstance(tput, (int, float)) and tput > 0 else 0.0,
+                        "enable_stack_rebench": False,
+                    }
+                    if state.baseline_config_path:
+                        params["config_path"] = state.baseline_config_path
+                    task, existing = await self.tasks.create_or_return_existing(
+                        kind="explore",
+                        params=params,
+                        idempotency_key="resume-reverify-current-best",
+                    )
+                    report["fixes"].append(
+                        {
+                            "kind": "queued_resume_reverify_best",
+                            "task_id": task.task_id,
+                            "existing": bool(existing),
+                        }
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("Coordinator: failed to queue resume current_best reverify")
+                    report["warnings"].append({"kind": "resume_reverify_best_enqueue_failed"})
+            else:
+                report["warnings"].append({"kind": "resume_reverify_best_no_config"})
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception("Coordinator: resume consistency save failed")
+        await self._record_observation("coordinator", "observation", {"kind": "resume_consistency", **report})
+        return report
+
+    def _replay_keep_from_result(self, kind: str, result: dict[str, Any]) -> bool:
+        """Replay a recorded KEEP delegated-result into current_best/stack.
+
+        Reconstructs the winning-variant dict from a persisted ``delegated_result``
+        and routes it through :meth:`_lift_to_current_best`, which dedupes by
+        ``(action, variant_name)`` — so replay is idempotent. Used by both the
+        pending-integrate (Gap C) and orphaned-KEEP (Gap B) resume recovery
+        paths. Returns ``True`` only when a new stack entry was appended.
+
+        Args:
+            kind: The originating action kind (``integrate_patch`` / ``explore``
+                / ``framework_pr``).
+            result: The recorded delegated result payload for that KEEP.
+
+        Returns:
+            ``True`` when the replay appended a new stack entry, else ``False``.
+        """
+        if not isinstance(result, dict):
+            return False
+        tput = result.get("output_throughput")
+        if not (isinstance(tput, (int, float)) and float(tput) > 0):
+            return False
+        if kind == "explore":
+            bv_src = result.get("best_variant")
+            if not isinstance(bv_src, dict) or not bv_src.get("name"):
+                return False
+            bv = dict(bv_src)
+        elif kind == "integrate_patch":
+            sid = str(result.get("specialist_task_id") or "")
+            if not sid:
+                return False
+            bv = {
+                "name": sid,
+                "candidate_extra_server_args": "",
+                "extra_envs": dict(result.get("config_changes_applied") or {}),
+                "tput": float(tput),
+                "workspace": result.get("workspace"),
+                "provenance": "integrate_patch",
+                "scope": "source_patch",
+            }
+        else:
+            return False
+        before = len(self.shared_state.optimization_stack or [])
+        self._lift_to_current_best(kind, float(tput), bv)
+        return len(self.shared_state.optimization_stack or []) > before
+
+    def _resume_rollback_pending_integrate(self, pending: dict[str, Any]) -> dict[str, Any]:
+        """Reverse-apply a half-applied integrate patch set (Gap C rollback).
+
+        Best-effort ``git apply -R`` of every patch recorded on the
+        ``pending_integrate`` sentinel into the framework source tree, so a
+        crash AFTER ``git apply`` but BEFORE the bench/KEEP cannot leak a partial
+        change into later launches. A patch that is not currently applied simply
+        fails the reverse ``--check`` and is reported, not retried.
+
+        Args:
+            pending: The ``pending_integrate`` sentinel dict.
+
+        Returns:
+            A summary ``{"reversed": [...], "failed": [...]}``.
+        """
+        from .action_executors.integrate_patch import _git_apply_reverse
+
+        summary: dict[str, Any] = {"reversed": [], "failed": []}
+        root = str(pending.get("framework_source_root") or "").strip()
+        patches = [str(p) for p in (pending.get("patches") or []) if str(p).strip()]
+        if not root or not patches:
+            return summary
+        root_path = Path(root)
+        for patch in patches:
+            try:
+                ok, err = _git_apply_reverse(root_path, Path(patch))
+            except Exception as exc:  # noqa: BLE001 — rollback is best-effort
+                summary["failed"].append({"patch": patch, "error": repr(exc)})
+                continue
+            if ok:
+                summary["reversed"].append(patch)
+            else:
+                summary["failed"].append({"patch": patch, "error": err})
+        return summary
+
+    async def _resume_recover_pending_integrate(self, report: dict[str, Any]) -> None:
+        """Recover a crashed integrate_patch window from the sentinel (Gap C).
+
+        Three-way decision keyed on whether a ``kept`` delegated-result exists
+        for the sentinel's task: replay the missing append (crashed after KEEP),
+        roll back the half-applied patch (crashed after apply, before KEEP), or
+        clear a stale sentinel. The sentinel is always cleared afterwards.
+
+        Args:
+            report: The resume report dict to append fixes/warnings to.
+        """
+        state = self.shared_state
+        pending = getattr(state, "pending_integrate", {}) or {}
+        if not (isinstance(pending, dict) and pending):
+            return
+        task_id = str(pending.get("task_id") or "")
+        kept_res: dict[str, Any] | None = None
+        try:
+            for msg in await self.bus.tail(topic="delegated_result", n=10_000):
+                payload = msg.payload or {}
+                if task_id and str(payload.get("task_id") or "") != task_id:
+                    continue
+                res = payload.get("result") or {}
+                # Require an explicit integrate_patch kind: an empty-kind wildcard
+                # could misclassify a non-integrate event that happens to share
+                # this task_id as a kept integrate result, skipping rollback of a
+                # half-applied patch. (Matches _resume_recover_orphaned_keeps.)
+                if (
+                    isinstance(res, dict)
+                    and str(res.get("kind") or payload.get("kind") or "") == "integrate_patch"
+                    and str(res.get("status") or "").lower() == "kept"
+                ):
+                    kept_res = res
+                    break
+        except Exception:  # noqa: BLE001
+            log.exception("Coordinator: pending_integrate kept-result scan failed")
+        if kept_res is not None:
+            appended = self._replay_keep_from_result("integrate_patch", kept_res)
+            report["fixes"].append(
+                {"kind": "replayed_pending_integrate", "task_id": task_id, "appended": bool(appended)}
+            )
+        else:
+            summary = self._resume_rollback_pending_integrate(pending)
+            if summary.get("reversed"):
+                report["fixes"].append(
+                    {"kind": "rolled_back_pending_integrate", "task_id": task_id, **summary}
+                )
+            elif summary.get("failed"):
+                report["warnings"].append(
+                    {"kind": "pending_integrate_rollback_failed", "task_id": task_id, **summary}
+                )
+            else:
+                report["fixes"].append({"kind": "cleared_stale_pending_integrate", "task_id": task_id})
+        state.pending_integrate = {}
+
+    async def _resume_recover_orphaned_keeps(self, report: dict[str, Any]) -> None:
+        """Recover / surface KEEPs present in the event log but absent from the stack (Gap B).
+
+        ``integrate_patch`` KEEPs are well-defined (a ``kept`` status means the
+        single-variant bench + accuracy gate passed and the patch was committed),
+        so a kept-but-absent one is a crash before the append landed → replay it
+        (idempotent), unless its run workspace is gone → discard + alert. ``explore``
+        / ``framework_pr`` KEEPs are ambiguous (KEEP_UNSTABLE eviction can drop a
+        kept explore variant from the stack), so they are surfaced as a
+        ``medium`` alert rather than resurrected. Whatever the stack ends up as
+        is re-validated by the Gap A full-stack rebench.
+
+        Args:
+            report: The resume report dict to append fixes/warnings to.
+        """
+        state = self.shared_state
+        try:
+            stack_keys = {
+                (str(e.get("action") or ""), str(e.get("variant_name") or ""))
+                for e in (state.optimization_stack or [])
+                if isinstance(e, dict)
+            }
+            seen: set[tuple[str, str]] = set()
+            for msg in await self.bus.tail(topic="delegated_result", n=10_000):
+                payload = msg.payload or {}
+                kind = str(payload.get("kind") or "")
+                res = payload.get("result") or {}
+                if not isinstance(res, dict) or str(res.get("status") or "").lower() != "kept":
+                    continue
+                if kind == "integrate_patch":
+                    variant = str(res.get("specialist_task_id") or "")
+                elif kind == "framework_pr":
+                    cand = res.get("candidate") or {}
+                    variant = str(
+                        (cand.get("candidate_id") if isinstance(cand, dict) else "")
+                        or (cand.get("pr_url") if isinstance(cand, dict) else "")
+                        or ""
+                    )
+                elif kind == "explore":
+                    bv = res.get("best_variant") or {}
+                    variant = str((bv.get("name") if isinstance(bv, dict) else "") or "")
+                else:
+                    continue
+                key = (kind, variant)
+                if not variant or key in stack_keys or key in seen:
+                    continue
+                seen.add(key)
+                if kind == "integrate_patch":
+                    workspace = str(res.get("workspace") or "").strip()
+                    if workspace and not Path(workspace).exists():
+                        report["warnings"].append(
+                            {
+                                "kind": "orphaned_keep_discarded",
+                                "orphan_kind": kind,
+                                "variant": variant,
+                                "task_id": payload.get("task_id"),
+                                "reason": "workspace_missing",
+                            }
+                        )
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "orphaned_keep_discarded",
+                                "severity": "medium",
+                                "orphan_kind": kind,
+                                "variant": variant,
+                            },
+                        )
+                    elif self._replay_keep_from_result(kind, res):
+                        stack_keys.add(key)
+                        report["fixes"].append(
+                            {"kind": "replayed_orphaned_keep", "orphan_kind": kind, "variant": variant}
+                        )
+                    else:
+                        report["warnings"].append(
+                            {"kind": "orphaned_keep_replay_noop", "orphan_kind": kind, "variant": variant}
+                        )
+                else:
+                    # explore / framework_pr: ambiguous vs eviction — never
+                    # resurrect; surface for the operator.
+                    report["warnings"].append(
+                        {
+                            "kind": "orphaned_keep",
+                            "orphan_kind": kind,
+                            "variant": variant,
+                            "task_id": payload.get("task_id"),
+                        }
+                    )
+                    await self._record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": "orphaned_keep",
+                            "severity": "medium",
+                            "orphan_kind": kind,
+                            "variant": variant,
+                        },
+                    )
+        except Exception:  # noqa: BLE001
+            log.exception("Coordinator: orphaned KEEP resume recovery failed")
+
+    async def _enqueue_internal_stack_rebench(self, *, reason: str) -> dict[str, Any]:
+        """Enqueue one full-stack end-to-end rebench of the cumulative config (Gap A).
+
+        Builds a single-variant ``explore`` task from the stack-materialized
+        launch args/envs, benched against ``baseline_tput`` so the measured
+        delta becomes the validated cumulative gain. Tagged
+        ``source=resume_stack_revalidate`` so ``_promote_to_shared_state``
+        reconciles ``cumulative_gain_validated_stack_len`` + clears
+        ``resume_pending_revalidation`` from the measured throughput. Idempotent
+        via a fixed idempotency key.
+
+        Args:
+            reason: Human-readable reason stamped on the task params.
+
+        Returns:
+            A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
+        """
+        rebuilt = self._materialize_stack_config_for_resume()
+        args = str(rebuilt.get("extra_server_args") or "").strip()
+        envs = rebuilt.get("extra_envs") or {}
+        if not (args or envs):
+            return {"skipped": True, "reason": "empty_stack"}
+        params: dict[str, Any] = {
+            "source": "resume_stack_revalidate",
+            "reason": reason,
+            "grid": [
+                {
+                    "name": "resume_stack_revalidate",
+                    "extra_args": args,
+                    "extra_envs": dict(envs),
+                    "provenance": "resume_stack_revalidate",
+                    "note": "post-resume full-stack end-to-end revalidation",
+                }
+            ],
+            "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+            "enable_stack_rebench": False,
+        }
+        if self.shared_state.baseline_config_path:
+            params["config_path"] = self.shared_state.baseline_config_path
+        task, existing = await self.tasks.create_or_return_existing(
+            kind="explore",
+            params=params,
+            idempotency_key="resume-stack-revalidate",
+        )
+        return {"task_id": task.task_id, "existing": bool(existing)}
+
     @property
     def resumed_from(self) -> dict[str, Any]:
         """Read-only snapshot of resume detection (set by ``__init__``).
@@ -1622,6 +2216,163 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: _on_phase_entered hook failed")
 
+    def _negative_ledger_domain_counts(self, *, recent_cycles: int = 3) -> dict[str, int]:
+        """Summarise recent negative explore-ledger pressure by specialist domain."""
+        state = self.shared_state
+        cur_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        search = getattr(state, "explore_search", {}) or {}
+        rows: list[Any] = []
+        if isinstance(search, dict):
+            tested = search.get("tested") or {}
+            if isinstance(tested, dict):
+                rows.extend(tested.values())
+            rejected = search.get("rejected") or []
+            if isinstance(rejected, list):
+                rows.extend(rejected)
+        counts: dict[str, int] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                cycle = int(row.get("cycle", cur_cycle) or 0)
+            except (TypeError, ValueError):
+                cycle = cur_cycle
+            if cycle < max(0, cur_cycle - recent_cycles + 1):
+                continue
+            domain = str(
+                row.get("domain")
+                or row.get("specialist_domain")
+                or row.get("source_domain")
+                or row.get("provenance")
+                or ""
+            ).strip()
+            if not domain:
+                continue
+            counts[domain] = counts.get(domain, 0) + 1
+        return counts
+
+    def _plan_cycle_focus(self) -> dict[str, Any]:
+        """Pick an advisory specialist-domain focus for the current macro-cycle."""
+        from .roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+
+        state = self.shared_state
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        domains = sorted({v[0] for v in BOTTLENECK_DOMAIN_HINTS.values()} | {"freeform_specialist"})
+        scores: dict[str, float] = {d: 0.0 for d in domains}
+        reasons: dict[str, list[str]] = {d: [] for d in domains}
+        shift = getattr(state, "bottleneck_shift", {}) or {}
+        to_domain = str(shift.get("to_domain") or "").strip()
+        if to_domain:
+            scores.setdefault(to_domain, 0.0)
+            reasons.setdefault(to_domain, [])
+            scores[to_domain] += 5.0
+            reasons[to_domain].append(f"matches current bottleneck shift to {shift.get('to') or to_domain}")
+        sat = getattr(state, "saturated_directions", {}) or {}
+        if isinstance(sat, dict):
+            for domain, row in sat.items():
+                if not isinstance(row, dict):
+                    continue
+                d = str(domain or row.get("domain") or "").strip()
+                if not d:
+                    continue
+                scores.setdefault(d, 0.0)
+                reasons.setdefault(d, [])
+                if bool(row.get("saturated")):
+                    scores[d] -= 100.0
+                    reasons[d].append(
+                        f"saturated at {row.get('within_pct')}% within roofline; deprioritized"
+                    )
+                else:
+                    scores[d] += 1.0
+                    reasons[d].append("not saturated in latest roofline snapshot")
+        log_rows = list(getattr(state, "cycle_strategy_log", []) or [])
+        tried = {str(r.get("focus") or "") for r in log_rows if isinstance(r, dict)}
+        for row in log_rows:
+            if not isinstance(row, dict):
+                continue
+            domain = str(row.get("focus") or "").strip()
+            if not domain:
+                continue
+            scores.setdefault(domain, 0.0)
+            reasons.setdefault(domain, [])
+            gd = row.get("gain_delta")
+            if isinstance(gd, (int, float)):
+                scores[domain] += max(-2.0, min(3.0, float(gd)))
+                reasons[domain].append(f"historical cycle gain_delta={float(gd):+.2f}%")
+        for domain in domains:
+            if domain not in tried:
+                scores[domain] += 1.5
+                reasons[domain].append("exploration bonus: not yet used as cycle focus")
+        negative_counts = self._negative_ledger_domain_counts()
+        for domain, count in negative_counts.items():
+            scores.setdefault(domain, 0.0)
+            reasons.setdefault(domain, [])
+            penalty = min(4.0, 0.5 * float(count))
+            scores[domain] -= penalty
+            reasons[domain].append(f"recent negative ledger count={count} penalty={penalty:.1f}")
+        focus = max(scores.items(), key=lambda kv: (kv[1], kv[0]))[0] if scores else "freeform_specialist"
+        rationale_bits = reasons.get(focus) or ["fallback focus; no stronger cycle-level evidence"]
+        return {
+            "cycle": cycle,
+            "focus": focus,
+            "score": round(float(scores.get(focus, 0.0)), 3),
+            "rationale": "; ".join(rationale_bits[:4]),
+            "bottleneck_at_start": str(shift.get("to") or self.shared_state.current_top_bottleneck() or ""),
+            "saturated_at_start": sorted(
+                str(k)
+                for k, v in (sat.items() if isinstance(sat, dict) else [])
+                if isinstance(v, dict) and bool(v.get("saturated"))
+            ),
+            "gain_at_start": float(getattr(state, "gain_at_cycle_start", 0.0) or 0.0),
+            "gain_delta": None,
+        }
+
+    def _record_cycle_strategy_for_current_cycle(self) -> None:
+        """Append/update the advisory cycle-strategy row for the current cycle."""
+        state = self.shared_state
+        planned = self._plan_cycle_focus()
+        log_rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
+        cycle = int(planned.get("cycle", 0) or 0)
+        replaced = False
+        for idx, row in enumerate(log_rows):
+            if int(row.get("cycle", -1) or -1) == cycle:
+                merged = dict(row)
+                merged.update(planned)
+                log_rows[idx] = merged
+                replaced = True
+                break
+        if not replaced:
+            log_rows.append(planned)
+        state.cycle_strategy_log = log_rows[-50:]
+
+    def _cycle_strategy_seed_block(self) -> str:
+        """Render persisted cycle focus facts for orchestration SEED prompts."""
+        rows = [r for r in (getattr(self.shared_state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
+        if not rows:
+            return ""
+        cur_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        current = next((r for r in reversed(rows) if int(r.get("cycle", -1) or -1) == cur_cycle), rows[-1])
+        lines = [
+            f"=== Cycle {cur_cycle} strategy ===",
+            f"focus={current.get('focus') or '(none)'} score={current.get('score', 0)}",
+        ]
+        rationale = str(current.get("rationale") or "").strip()
+        if rationale:
+            lines.append(f"rationale: {rationale}")
+        saturated = current.get("saturated_at_start") or []
+        if saturated:
+            lines.append(f"saturated_at_start={saturated}")
+        prior = [r for r in rows if int(r.get("cycle", -1) or -1) != cur_cycle][-5:]
+        if prior:
+            lines.append("previous cycles:")
+            for row in prior:
+                lines.append(
+                    f"  - cycle={row.get('cycle')} focus={row.get('focus')} "
+                    f"gain_delta={row.get('gain_delta')} saturated={row.get('saturated_at_start') or []}"
+                )
+        lines.append("Advisory only: use this as a prior, not a dispatch gate.")
+        return "\n".join(lines)
+
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
         """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK_PR or EXPLORE).
 
@@ -1638,6 +2389,17 @@ class Coordinator:
         """
         state = self.shared_state
         prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        try:
+            prev_delta = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0) - float(
+                getattr(state, "gain_at_cycle_start", 0.0) or 0.0
+            )
+            rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
+            for row in rows:
+                if int(row.get("cycle", -1) or -1) == prior_cycle and row.get("gain_delta") is None:
+                    row["gain_delta"] = round(prev_delta, 6)
+            state.cycle_strategy_log = rows[-50:]
+        except Exception:  # noqa: BLE001 — advisory bookkeeping only
+            log.exception("Coordinator: cycle_strategy gain_delta backfill failed")
         state.macro_cycle = prior_cycle + 1
         # R7: carry the effective no-gain streak computed by should_reloop.
         if isinstance(evidence, dict) and "no_gain_cycle_streak_effective" in evidence:
@@ -1668,6 +2430,10 @@ class Coordinator:
         # and intentionally preserved.)
         state.last_sweep = {}
         state.last_conc_sweep = {}
+        try:
+            self._record_cycle_strategy_for_current_cycle()
+        except Exception:  # noqa: BLE001 — focus is advisory only
+            log.exception("Coordinator: cycle strategy planning failed on reloop")
         log.info(
             "Coordinator: macro-cycle reloop %d → %d (no_gain_streak=%d, gain_anchor=%.4f)",
             prior_cycle,
@@ -4684,7 +5450,8 @@ class Coordinator:
                 "sources; do not benchmark or patch."
             ),
             "gap_layer": "research",
-            "max_turns": 10,
+            # WS1: depth is bounded by the wall-clock budget, not by turns —
+            # omit max_turns so the scout runs to a deliverable conclusion.
             "source": "coordinator_internal",
             "reason": str(reason),
             "seen_pr_ids": seen,
@@ -4917,7 +5684,7 @@ class Coordinator:
                 "exhausted ones).\n" + (digest or "(no digest)")
             ),
             "gap_layer": "research",
-            "max_turns": 8,
+            # WS1: bounded by the wall-clock budget, not by turns.
             "source": "coordinator_internal",
             "reason": "plateau_trajectory_review",
             "readonly": True,
@@ -5112,6 +5879,7 @@ class Coordinator:
         if not (self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]):
             return
         await self.replay_for_resume()
+        await self._resume_consistency_pass()
 
     async def _pump_framework_pr_phase_safely(self, *, caller: str) -> None:
         """Best-effort FRAMEWORK_PR pump wrapper shared by tick and run.
@@ -5494,12 +6262,10 @@ class Coordinator:
         """
         backend = self.backends[agent_name]
         prompt = await self._compose_prompt(agent_name)
-        # Accumulate orchestration prompt size as a proxy for conversation growth (plan Step 4).
-        if agent_name == "orchestration" and self._orchestration_conversational():
-            try:
-                self._checkpoint_tracker.chars_add(len(prompt))
-            except Exception:  # noqa: BLE001
-                pass
+        # Conversation-growth accounting happens AFTER the turn returns, from the
+        # backend's reported token usage (see below) — a delta-prompt char count
+        # before the call badly undercounts the cached history in a persistent
+        # conversation (#3).
         sys_prompt = await self._load_system_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp the timeline keys onto backends that self-write their trace row
@@ -5568,6 +6334,26 @@ class Coordinator:
         # prompt+response for this reactor turn. Separate file from the
         # token ledger; same best-effort posture.
         self._record_reactor_conversation(agent_name, result)
+        # Context-token water level (#3): the persistent conversation's true size
+        # is the backend's reported input usage (input + cache_read +
+        # cache_creation). Fall back to a full-turn char accumulation only when
+        # the backend reports no usage (e.g. codex), never the old delta-only.
+        if agent_name == "orchestration" and self._orchestration_conversational():
+            try:
+                md = getattr(result, "metadata", None) or {}
+                it = md.get("input_tokens")
+                cr = md.get("cache_read_input_tokens")
+                cc = md.get("cache_creation_input_tokens")
+                if it is not None or cr is not None or cc is not None:
+                    self._checkpoint_tracker.set_context_tokens(
+                        int(it or 0) + int(cr or 0) + int(cc or 0)
+                    )
+                else:
+                    self._checkpoint_tracker.chars_add(
+                        len(prompt) + len(getattr(result, "raw_text", "") or "")
+                    )
+            except Exception:  # noqa: BLE001 — accounting must never break routing
+                pass
         # Completed orchestration turn means SEED delivered; flip flag so later turns send DELTA (plan Step 3).
         if agent_name == "orchestration":
             self._orchestration_seeded = True
@@ -5795,6 +6581,14 @@ class Coordinator:
         if agent_name == "orchestration":
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
+            if push_full:
+                try:
+                    cycle_strategy_block = self._cycle_strategy_seed_block()
+                except Exception:  # noqa: BLE001 — advisory only
+                    log.exception("Coordinator: cycle strategy seed render failed")
+                    cycle_strategy_block = ""
+                if cycle_strategy_block:
+                    sections.append(cycle_strategy_block)
             if self._run_deadline is not None and self._run_started_monotonic is not None:
                 remaining_min = max(
                     0.0,
@@ -6529,7 +7323,7 @@ class Coordinator:
         return await self.router._handle_single_verdict(source=source, pending=pending, verdict=verdict, reasoning=reasoning)
 
     def _inject_explore_runtime_params(self, params: dict) -> None:
-        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides. Knobs: baseline_runtime_sec + explore_overtime_kill_ratio (Fix E soft_deadline), variant_timeout_sec, variant_timeout_safety_margin, roofline_saturation_snapshot (advisory).
+        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides. Knobs: baseline_runtime_sec + explore_overtime_kill_ratio (Fix E soft_deadline), variant_timeout_sec, variant_timeout_safety_margin.
 
         Args:
             params: The explore-task params dict mutated in place; existing keys
@@ -6569,19 +7363,6 @@ class Coordinator:
             params.setdefault(
                 "variant_timeout_safety_margin",
                 safety_margin_override,
-            )
-        history = list(
-            getattr(
-                self.shared_state,
-                "roofline_saturation_history",
-                [],
-            )
-            or []
-        )
-        if history and isinstance(history[-1], dict):
-            params.setdefault(
-                "roofline_saturation_snapshot",
-                dict(history[-1]),
             )
         # Thread the persisted explore_search ledger so ExploreExecutor's canonical_fingerprint dedup has cross-turn memory; setdefault keeps an explicit override.
         es = getattr(self.shared_state, "explore_search", None)
@@ -7757,21 +8538,51 @@ class Coordinator:
         state = self.shared_state
         if not _phase_state.is_cyclic_phases_enabled():
             return ""
-        if not bool(getattr(state, "pending_bottleneck_switch", False)):
-            return ""
         if (getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_EXPLORE:
+            return ""
+        sat = getattr(state, "saturated_directions", {}) or {}
+        saturated = {
+            str(k): v
+            for k, v in (sat.items() if isinstance(sat, dict) else [])
+            if isinstance(v, dict) and bool(v.get("saturated"))
+        }
+        rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        focus_row = next((r for r in reversed(rows) if int(r.get("cycle", -1) or -1) == cycle), {})
+        has_switch = bool(getattr(state, "pending_bottleneck_switch", False))
+        if not has_switch and not saturated and not focus_row:
             return ""
         prev = str(getattr(state, "last_cycle_bottleneck", "") or "")
         cur_top = state.current_top_bottleneck()
         direction, pct = self._dominant_roofline_direction()
-        lines: list[str] = [
-            "The previous macro-cycle plateaued; redirect this cycle to a "
-            "different bottleneck instead of re-mining the exhausted one.",
-        ]
+        lines: list[str] = []
+        if has_switch:
+            lines.append(
+                "The previous macro-cycle plateaued; redirect this cycle to a "
+                "different bottleneck instead of re-mining the exhausted one."
+            )
+        if saturated:
+            lines.append("Roofline ceiling signal: one or more lever families are saturated; deprioritize them.")
+            for domain, row in sorted(saturated.items()):
+                lines.append(
+                    f"  saturated_domain={domain} direction={row.get('direction')} "
+                    f"within={row.get('within_pct')}% threshold={row.get('threshold_pct')}%"
+                )
+        if focus_row:
+            lines.append(
+                f"  suggested_cycle_focus={focus_row.get('focus')} "
+                f"score={focus_row.get('score')} rationale={focus_row.get('rationale')}"
+            )
         if prev:
             lines.append(f"  plateaued_bottleneck={prev} (avoid re-targeting)")
         if cur_top:
             lines.append(f"  current_top_bottleneck={cur_top}")
+        shift = getattr(state, "bottleneck_shift", {}) or {}
+        if isinstance(shift, dict) and (shift.get("from") or shift.get("to")):
+            lines.append(
+                f"  bottleneck_shift: {shift.get('from') or 'unknown'} → {shift.get('to') or 'unknown'} "
+                f"(within_delta={shift.get('within_delta')} gap_delta={shift.get('gap_delta')})"
+            )
         if direction:
             from .roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
@@ -7783,7 +8594,6 @@ class Coordinator:
                 )
             else:
                 lines.append(f"  dominant_direction={direction} ({pct:.1f}%)")
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
         lines.append(
             f"  macro_cycle={cycle}; KEEP'd variants stay de-duped permanently, "
             "but prior sub-threshold variants whose measured gain now meets the "
@@ -8764,30 +9574,29 @@ class Coordinator:
                     if isinstance(needs_gpu_raw, str)
                     else bool(needs_gpu_raw)
                 )
+                # WS1: explicit wall-clock budget replaces the old
+                # ``max_seconds = max_turns × per_turn`` ceiling (which became
+                # ~1000×600 once the turn cap was lifted). Lane-tiered base ×
+                # ``macro_cycle`` amplification, hard-capped at 4h. macro_cycle
+                # is 0 for ≤24h bounded runs (``is_long_run`` gate), so those
+                # always get the base value and never degrade.
+                extra_context["wall_budget_sec"] = self._specialist_wall_budget_sec(
+                    needs_gpu=needs_gpu,
+                )
                 if needs_gpu:
                     try:
                         gpu_count = int(params.get("gpu_count", 1) or 1)
                     except (TypeError, ValueError):
                         gpu_count = 1
-                    try:
-                        max_turns = int(params.get("max_turns", 8) or 8)
-                    except (TypeError, ValueError):
-                        max_turns = 8
-                    try:
-                        per_turn_s = float(
-                            params.get("specialist_per_turn_max_seconds")
-                            or os.environ.get(
-                                "INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS",
-                                "600",
-                            )
-                            or 600.0
-                        )
-                    except (TypeError, ValueError):
-                        per_turn_s = 600.0
-                    gpu_ttl_sec = max(
-                        int(task.lease_ttl_sec or 0),
-                        int(max(1, max_turns) * max(1.0, per_turn_s)),
-                    )
+                    # WS2: TTL re-sourced to the WS1 wall budget (the old
+                    # ``max_turns × per_turn`` ceiling became ~1000×600 once the
+                    # turn cap was lifted). Iron law: the agent's wall-budget
+                    # kill (= the budget) must fire at or before the GPU lease
+                    # TTL, which in turn must not outlive the gpu_research_lane
+                    # lease TTL. Both are computed by ``_gpu_lease_ttl_sec`` (here
+                    # and in intent_router) so they cannot drift apart — the cards
+                    # are never reclaimed while the agent is still computing.
+                    gpu_ttl_sec = self._gpu_lease_ttl_sec(int(task.lease_ttl_sec or 0))
                     gpu_lease = await self.gpu_specialist_pool.try_acquire(
                         count=gpu_count,
                         holder_id=task.task_id,
@@ -8808,16 +9617,112 @@ class Coordinator:
                 (
                     task,
                     asyncio.create_task(
-                        self.sub.run_task(
+                        self._run_dispatched_with_gpu_release(
                             task,
                             prebound_lease=lease,
                             extra_context=extra_context,
+                            gpu_lease=gpu_lease,
                         ),
                     ),
                     gpu_lease,
                 )
             )
         return spawned
+
+    async def _run_dispatched_with_gpu_release(
+        self,
+        task: Task,
+        *,
+        prebound_lease: Any,
+        extra_context: dict[str, Any],
+        gpu_lease: Any,
+    ) -> "SubAgentResult":
+        """Run a dispatched task, releasing its GPU lease in a structured finally.
+
+        C1 liveness: binding the GPU-lease release to the asyncio task's own
+        lifecycle (rather than relying solely on the pump loop walking to
+        :meth:`_reap_dispatched_task`) guarantees the cards are freed when the
+        run completes — normally, on error, or on cancellation — even if the
+        pump coroutine is cancelled or the reap never runs. Combined with the
+        TTL reaper (``gpu_specialist_pool.reap_expired``) this is the
+        ``finally + TTL`` double insurance that keeps a crashed/cancelled GPU
+        specialist from pinning the serving cards forever. The lock-lane lease
+        already has its own ``finally`` in ``sub_agent_runner.run_task``.
+
+        ``release`` is idempotent (a no-op DELETE), so the belt-and-suspenders
+        release in :meth:`_reap_dispatched_task` remains harmless.
+
+        Args:
+            task: The dispatched task.
+            prebound_lease: The already-acquired resource-lane lease (or None).
+            extra_context: Per-task context (wall budget, gpu ids, …).
+            gpu_lease: The GPU specialist lease to release, or None.
+
+        Returns:
+            SubAgentResult: The result from ``sub.run_task``.
+        """
+        try:
+            return await self.sub.run_task(
+                task,
+                prebound_lease=prebound_lease,
+                extra_context=extra_context,
+            )
+        finally:
+            if gpu_lease is not None:
+                try:
+                    await self.gpu_specialist_pool.release(gpu_lease)
+                except Exception:  # noqa: BLE001 — defensive cleanup; TTL backstops
+                    log.exception(
+                        "dispatcher: finally GPU-lease release failed for task=%s",
+                        task.task_id,
+                    )
+
+    def _specialist_wall_budget_sec(self, *, needs_gpu: bool) -> float:
+        """Compute the WS1 explicit wall-clock budget for a specialist task.
+
+        Replaces the legacy ``max_seconds = max_turns × per_turn`` ceiling that
+        was implicitly disabled once the turn cap was lifted to ~1000. The
+        budget is a lane-tiered base (cpu 10min / gpu 60min) amplified by the
+        macro-cycle count and hard-capped at 4h::
+
+            budget_min = min(base × (macro_cycle + 1), 240)
+
+        ``macro_cycle`` only grows on long/unbounded runs (``is_long_run`` >24h
+        gate), so ≤24h bounded runs always get the base value (cpu 10 / gpu 60)
+        and never degrade.
+
+        Args:
+            needs_gpu: Whether the specialist holds a GPU lease (selects the
+                60min GPU lane base vs the 10min cpu base).
+
+        Returns:
+            float: The wall-clock budget in seconds.
+        """
+        base_min = 60.0 if needs_gpu else 10.0
+        macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        budget_min = min(base_min * (macro_cycle + 1), 240.0)
+        return budget_min * 60.0
+
+    def _gpu_lease_ttl_sec(self, floor_ttl_sec: int = 0) -> int:
+        """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.
+
+        The iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — both the
+        GPU-pool lease (dispatch) and the lane lease (intent_router) must outlive
+        the agent's WS1 wall-budget kill, so both are sourced from the same
+        ``wall_budget × (1 + GPU_LEASE_TTL_GRACE)`` here to keep them from
+        drifting apart.
+
+        Args:
+            floor_ttl_sec: A lower bound (e.g. the registry / existing
+                ``lease_ttl_sec``) the computed TTL is raised to.
+
+        Returns:
+            int: ``max(floor_ttl_sec, wall_budget × (1 + grace))``.
+        """
+        return max(
+            int(floor_ttl_sec or 0),
+            int(self._specialist_wall_budget_sec(needs_gpu=True) * (1.0 + GPU_LEASE_TTL_GRACE)),
+        )
 
     async def _reap_dispatched_task(
         self,
@@ -9742,6 +10647,56 @@ class Coordinator:
             best_winner = result.get("best_variant")
             best_tput = result.get("output_throughput")
             promoted = False
+            # Long-run #4 (Gap A): a post-resume full-stack revalidation confirms
+            # the EXISTING cumulative stack rather than adding a variant, so it
+            # never "promotes" (the lift dedupes). Reconcile the validation
+            # watermark + clear the resume_pending_revalidation flag directly
+            # from the measured tput, and flag drift when the cumulative result
+            # no longer reproduces the recorded current_best.
+            # A post-resume revalidation task (full-stack ``resume_stack_revalidate``
+            # or env-gated current_best ``resume_reverify_best``) confirms the
+            # EXISTING cumulative stack rather than adding a variant, so it never
+            # "promotes". Reconcile the validation watermark + clear the
+            # ``resume_pending_revalidation`` flag from the measured tput — but
+            # ONLY when the rebench actually produced a valid measurement, so a
+            # failed/empty rebench leaves the flag set and reports keep warning.
+            _revalidate_sources = {"resume_stack_revalidate", "resume_reverify_best"}
+            if task is not None and str((task.params or {}).get("source") or "") in _revalidate_sources:
+                measured = result.get("output_throughput")
+                measured_ok = isinstance(measured, (int, float)) and measured > 0
+                if measured_ok and self.shared_state.baseline_tput > 0:
+                    self.shared_state.cumulative_gain_validated = (
+                        (float(measured) - self.shared_state.baseline_tput)
+                        / self.shared_state.baseline_tput
+                        * 100.0
+                    )
+                    self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                    self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                    cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                    recorded = cb_rec.get("tput")
+                    try:
+                        floor = float(os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip() or 95.0)
+                    except (TypeError, ValueError):
+                        floor = 95.0
+                    if (
+                        isinstance(recorded, (int, float))
+                        and recorded > 0
+                        and float(measured) < float(recorded) * floor / 100.0
+                    ):
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "current_best_drift",
+                                "severity": "high",
+                                "measured_tput": float(measured),
+                                "recorded_tput": float(recorded),
+                                "floor_pct": floor,
+                            },
+                        )
+                if measured_ok:
+                    self.shared_state.resume_pending_revalidation = False
+                changed = True
             if isinstance(winners, list) and winners:
                 for winner in winners:
                     if not isinstance(winner, dict):
@@ -9781,7 +10736,7 @@ class Coordinator:
                 log.exception("depth: note_explore_outcome failed")
             if promoted:
                 # explore inlines the per-KEEP rebench, so promote it into cumulative_gain_validated +
-                # advance validated_stack_len so the TODO 4 stack-rebench guard clears immediately.
+                # advance validated_stack_len so the long-run #4 unvalidated-stack guard clears immediately.
                 if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
                     validated_gain = (
                         (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
@@ -9806,6 +10761,54 @@ class Coordinator:
                 "output_throughput": best_tput,
                 "keep_unstable_count": len(result.get("keep_unstable_in_stack") or []),
                 "explore_grid_exhausted": bool(result.get("explore_grid_exhausted")),
+            }
+        elif task_kind == "integrate_patch":
+            status = str(result.get("status") or "")
+            new_tput = result.get("output_throughput")
+            kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
+            if kept_flag:
+                specialist_task_id = str(result.get("specialist_task_id") or "")
+                lift = {
+                    "name": specialist_task_id or "integrate_patch_keep",
+                    "candidate_extra_server_args": "",
+                    "extra_envs": dict(result.get("config_changes_applied") or {}),
+                    "tput": float(new_tput),
+                    "workspace": result.get("workspace"),
+                    "provenance": "integrate_patch",
+                    "scope": "source_patch",
+                }
+                self._lift_to_current_best("integrate_patch", float(new_tput), lift)
+                if self.shared_state.baseline_tput > 0:
+                    validated_gain = (
+                        (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
+                    )
+                    self.shared_state.cumulative_gain_validated = float(validated_gain)
+                    self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                    self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                    self.shared_state.resume_pending_revalidation = False
+                    await self._maybe_enqueue_watermark_roofline(
+                        reason="integrate_keep_watermark",
+                    )
+                changed = True
+            # Clear long-run #4 sentinel after the task outcome has been
+            # observed. On a crash before this point, resume sees it and audits.
+            if isinstance(getattr(self.shared_state, "pending_integrate", None), dict):
+                pending = self.shared_state.pending_integrate
+                if not pending or str(pending.get("task_id") or "") in {
+                    "",
+                    str(getattr(task, "task_id", "") or ""),
+                }:
+                    self.shared_state.pending_integrate = {}
+                    changed = True
+            audit_decision = "promoted" if kept_flag else "discarded"
+            audit_extras = {
+                "status": status,
+                "specialist_task_id": result.get("specialist_task_id"),
+                "output_throughput": new_tput,
+                "delta_pct": result.get("delta_pct"),
+                "accuracy_pass": result.get("accuracy_pass"),
+                "patches_applied": result.get("patches_applied") or [],
+                "patches_reverted": result.get("patches_reverted") or [],
             }
         elif task_kind == "framework_pr":
             # FRAMEWORK_PR per-candidate result: append a progress row, update the batch max-gain stat, and on

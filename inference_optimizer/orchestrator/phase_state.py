@@ -205,9 +205,16 @@ _INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset(
 def is_phase_interleave_enabled() -> bool:
     """Return True when EXPLORE↔KERNEL interleave is enabled (default OFF; env opt-in knob).
 
+    Interleave lets specialists in EXPLORE trigger KERNEL-class actions (and
+    KERNEL reach back to explore/specialist/integrate_patch) without waiting for
+    the phase machine. It is OFF by default (strict per-phase channel); set
+    ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` to an explicit on value
+    (``1``/``true``/``yes``/``on``) to enable it.
+
     Returns:
-        bool: True when ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` is one of
-        ``1``/``true``/``yes``/``on`` (case-insensitive); False otherwise.
+        bool: True only when ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` is one
+        of ``1``/``true``/``yes``/``on`` (case-insensitive); False otherwise
+        (including unset/empty).
     """
     raw = (os.environ.get(PHASE_INTERLEAVE_ENV) or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -490,6 +497,7 @@ DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
 # A macro-cycle "gained" when validated cumulative gain rose by more than this
 # (percentage points); guards against float noise being read as progress.
 DEFAULT_CYCLE_MIN_GAIN_PCT: float = 1e-6
+SATURATION_CONVERGENCE_ENV: str = "INFERENCE_OPTIMIZER_SATURATION_CONVERGENCE"
 
 # Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle so
 # late cycles can still capture small wins while the run still converges once
@@ -660,6 +668,24 @@ def should_reloop_to_explore(
     if (cycle + 1) >= int(max_cycles):
         evidence["reloop_blocked"] = "max_cycles"
         return False, evidence
+
+    # Long-run #10: physical ceiling convergence. If every roofline family that
+    # has dominated across cycles is now within its configured roofline
+    # saturation threshold, stop cleanly instead of relooping on noise-floor
+    # 0.1% gains. Env escape hatch restores the pure gain-based behavior.
+    sat_conv_enabled = os.environ.get(SATURATION_CONVERGENCE_ENV, "").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    sat = getattr(state, "saturated_directions", {}) or {}
+    if sat_conv_enabled and isinstance(sat, dict) and sat:
+        rows = [v for v in sat.values() if isinstance(v, dict)]
+        if rows and all(bool(v.get("saturated")) for v in rows):
+            evidence["reloop_blocked"] = "all_directions_saturated"
+            evidence["saturated_directions"] = sorted(str(k) for k in sat.keys())
+            return False, evidence
 
     # R7 global convergence.
     if effective_streak >= int(no_gain_cycles):

@@ -344,6 +344,20 @@ def test_dead_c_mission_summary_tag_points_at_explore():
     assert "validate_stack" not in text
 
 
+def test_mission_summary_surfaces_resume_pending_revalidation():
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    s = SharedState(
+        baseline_tput=100.0,
+        optimization_stack=[{"action": "integrate_patch", "variant_name": "p1"}],
+        cumulative_gain_validated_stack_len=1,
+        resume_pending_revalidation=True,
+    )
+    text = s.to_mission_summary()
+    assert "resume_pending_revalidation=true" in text
+    assert "recheck current stack" in text
+
+
 def test_dead_c_robustness_md_prune_branch_family_list():
     """KB_gaps/Dead-C — the Robustness ``prune_branch`` family list drops retired ``validate_stack`` / ``backends`` / ``params`` and keeps ``explore``."""
     from inference_optimizer.paths import asset_system_prompts_dir

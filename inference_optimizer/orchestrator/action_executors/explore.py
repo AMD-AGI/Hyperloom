@@ -52,7 +52,6 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from ._canonical_fingerprint import canonical_fingerprint, workload_signature
-from ._explore_roofline_filter import compute_saturation_advisory
 from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
@@ -64,6 +63,7 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
+from ._stack_rebench import measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -820,31 +820,7 @@ class ExploreExecutor:
             len(skipped_dup),
         )
 
-        # Roofline saturation advisory (annotates, never drops): flags
-        # variants targeting only already-saturated directions so the
-        # Orchestration prompt can reprioritise without code dropping work.
-        roofline_advisory: list[dict[str, Any]] = []
-        saturation_snapshot = params.get("roofline_saturation_snapshot")
-        if isinstance(saturation_snapshot, dict) and saturation_snapshot and runnable:
-            roofline_advisory = compute_saturation_advisory(
-                runnable,
-                saturation_snapshot,
-            )
-            if roofline_advisory:
-                log.info(
-                    "explore roofline advisory: %d/%d variants flagged as likely_saturated (saturated=%s)",
-                    len(roofline_advisory),
-                    len(runnable),
-                    ",".join(
-                        sorted(
-                            d
-                            for d, p in saturation_snapshot.items()
-                            if isinstance(p, (int, float)) and float(p) >= 80.0
-                        )
-                    ),
-                )
-
-        # Multi-node grid shaping (companion to the roofline gate above).
+        # Multi-node grid shaping.
         # Both helpers short-circuit on ``is_multi_node() is False``: the
         # invalid filter returns ``(list(grid), [])`` and reorder preserves the
         # original order, so the single-node ``runnable`` is bit-for-bit
@@ -1122,8 +1098,6 @@ class ExploreExecutor:
                             # comparable; otherwise a fresh cold boot. No
                             # ``soft_deadline_sec`` (parity with the legacy
                             # rebench).
-                            rebench_slot = slot / "stack_rebench"
-                            rebench_slot.mkdir(parents=True, exist_ok=True)
                             rebench_variant = GridVariant(
                                 name=f"{gv.name}__stack_rebench",
                                 extra_server_args=gv.extra_server_args,
@@ -1139,11 +1113,13 @@ class ExploreExecutor:
                                 if lifecycle_eligible
                                 else None
                             )
-                            rebench_results = await run_grid(
-                                base_yaml_path=config_path,
+                            rebench = await measure_stack_rebench(
+                                config_path=config_path,
                                 base_extra_args=stack_extra_args,
-                                grid=[rebench_variant],
-                                output_root=rebench_slot,
+                                variant=rebench_variant,
+                                base_tput=base_tput,
+                                stable_threshold_pct=stack_stable_threshold_pct,
+                                output_slot=slot / "stack_rebench",
                                 variant_timeout_sec=timeout_sec,
                                 model_path=resolved_model,
                                 gpu_type=resolved_gpu,
@@ -1151,21 +1127,13 @@ class ExploreExecutor:
                                 result_dir=override_result_dir,
                                 server_lifecycle=round2_lifecycle,
                             )
-                            rb = rebench_results[0] if rebench_results else None
-
-                            if rb is not None and rb.status == "succeeded":
-                                stack_rebench_tput = rb.output_throughput
-                                stack_rebench_workspace = rb.workspace
-                                stack_rebench_warnings = list(rb.nonfatal_warnings)
-                            elif rb is not None:
-                                stack_rebench_warnings.append(f"stack_rebench_failed:{(rb.error or '')[-120:]}")
-                            else:
-                                stack_rebench_warnings.append("stack_rebench_no_result")
-
-                            stable_floor = base_tput * (1.0 + stack_stable_threshold_pct / 100.0)
+                            stack_rebench_tput = rebench.tput
+                            stack_rebench_workspace = rebench.workspace
+                            stack_rebench_warnings = rebench.warnings
+                            stable_floor = rebench.stable_floor
                             # KEEP_UNSTABLE: rebench missed the stability floor —
                             # evict the KEEP and treat as REVERT.
-                            if stack_rebench_tput is None or stack_rebench_tput < stable_floor:
+                            if not rebench.stable:
                                 log.warning(
                                     "explore: variant %s KEEP -> KEEP_UNSTABLE "
                                     "(stack_rebench_tput=%s vs stable_floor=%.2f "
@@ -1448,7 +1416,6 @@ class ExploreExecutor:
             "losers": losers,
             "keep_unstable_in_stack": keep_unstable,
             "skipped_dup": skipped_dup,
-            "roofline_advisory": roofline_advisory,
             # flat per-variant outcomes.
             "per_variant_outcomes": per_variant_outcomes,
             "explore_search_update": search_update,

@@ -170,3 +170,37 @@ def test_cli_kb_both_mode_builds_composite(tmp_path, monkeypatch) -> None:
     assert kb.remote._names == ["gbrain", "cortex"]
     assert len(kb.remote._sources) == 2
     assert kb.remote.returns_arbor_shape is True
+
+
+def test_cli_kb_auto_default_composites_when_both_configured(tmp_path, monkeypatch) -> None:
+    """Unset RECIPE_KB_REMOTE (auto) composites when BOTH gbrain + cortex are wired."""
+    from inference_optimizer.cli_kb import _build_recipe_kb_dispatcher
+    from inference_optimizer.recipe_kb.composite_remote import CompositeRemoteRecipeClient
+
+    monkeypatch.delenv("RECIPE_KB_REMOTE", raising=False)
+    monkeypatch.setenv("GBRAIN_BASE_URL", "http://gbrain.invalid")
+    monkeypatch.setenv("GBRAIN_TOKEN", "token")
+    monkeypatch.setenv("CORTEX_KB_URL", "http://cortex.invalid")
+
+    kb = _build_recipe_kb_dispatcher(
+        argparse.Namespace(degraded_kb=False, cortex_kb_url=None, local_kb_root=str(tmp_path))
+    )
+    assert isinstance(kb.remote, CompositeRemoteRecipeClient)
+    assert kb.remote._names == ["gbrain", "cortex"]
+
+
+def test_cli_kb_auto_default_single_remote_when_only_cortex(tmp_path, monkeypatch) -> None:
+    """Unset RECIPE_KB_REMOTE (auto) keeps the bare single cortex remote when gbrain is absent."""
+    from inference_optimizer.cli_kb import _build_recipe_kb_dispatcher
+    from inference_optimizer.recipe_kb import RemoteRecipeClient
+
+    monkeypatch.delenv("RECIPE_KB_REMOTE", raising=False)
+    monkeypatch.delenv("GBRAIN_BASE_URL", raising=False)
+    monkeypatch.delenv("GBRAIN_TOKEN", raising=False)
+    monkeypatch.setenv("CORTEX_KB_URL", "http://cortex.invalid")
+
+    kb = _build_recipe_kb_dispatcher(
+        argparse.Namespace(degraded_kb=False, cortex_kb_url=None, local_kb_root=str(tmp_path))
+    )
+    assert isinstance(kb.remote, RemoteRecipeClient)
+    assert kb.remote.kb_url == "http://cortex.invalid"
