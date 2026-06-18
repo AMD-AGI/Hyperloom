@@ -866,6 +866,48 @@ def collect_session(
     }
 
 
+# §1b session_meta enrichment
+def collect_session_meta(
+    manifest: dict[str, Any],
+    session_section: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Collect the §1b ``session_meta`` enrichment block.
+
+    Historically this block was injected post-export by ``ci/optimize_submit.py``
+    (``_backfill_ci_metrics_file``), so any session that never went through that
+    CI path landed in pulse without a ``session_meta``. The exporter now always
+    emits it straight from the manifest + resolved §1 ``session`` section, so the
+    block no longer depends on CI; the CI step degrades to a gap-filler for the
+    fields the sandbox could not know (e.g. ``category``).
+
+    Args:
+        manifest (dict[str, Any]): Parsed ``manifest.json``.
+        session_section (dict[str, Any]): The already-built §1 ``session`` dict.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: ``{code_revision, image, image_id,
+        session_duration_seconds}``. Mirrors the field contract the CI backfill
+        used so downstream readers (pulse ``sbd_store`` / ``normalize``) resolve
+        the same values whether they came from the exporter or CI.
+    """
+    image = session_section.get("image")
+    image_str = image if isinstance(image, str) and image.strip() else ""
+    elapsed_min = session_section.get("elapsed_minutes")
+    duration_s = (
+        int(round(elapsed_min * 60))
+        if isinstance(elapsed_min, (int, float)) and elapsed_min > 0
+        else 0
+    )
+    return {
+        "code_revision": str(manifest.get("code_revision") or ""),
+        "image": image_str or None,
+        "image_id": image_str.split("/")[-1] if image_str else "",
+        "session_duration_seconds": duration_s,
+    }
+
+
 # §2 Workload
 def collect_workload(
     state: dict[str, Any],

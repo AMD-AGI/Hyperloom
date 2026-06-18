@@ -269,8 +269,20 @@ def build(
     exported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # Section collectors (each catches its own errors via warnings).
-    session_meta = _pick(
+    session_section = _pick(
         "session", _safe_collect("session", lambda: collectors.collect_session(sd, state, manifest, warnings), warnings)
+    )
+    # §1b: author-side ``session_meta`` enrichment. Emitted unconditionally from
+    # the manifest + resolved ``session`` block so the block no longer depends on
+    # the ci/optimize_submit backfill (which only ran on the GHA submit path).
+    session_meta = _pick(
+        "session_meta",
+        _safe_collect(
+            "session_meta",
+            lambda: collectors.collect_session_meta(manifest, session_section, warnings),
+            warnings,
+            default={},
+        ),
     )
     workload = _pick(
         "workload", _safe_collect("workload", lambda: collectors.collect_workload(state, manifest, warnings), warnings)
@@ -526,7 +538,9 @@ def build(
         "schema_version": schema_version,
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
-        "session": session_meta,
+        "session": session_section,
+        # §1b enrichment; always present from the exporter (no longer CI-only).
+        "session_meta": session_meta,
         "workload": workload,
         "baseline": baseline,
         "final": final,
