@@ -171,9 +171,7 @@ def build_reactor_components(
         fallback = LocalProbeSource(
             LocalProbeConfig(
                 session_dir=config.session_dir,
-                process_patterns=tuple(
-                    config.server_process_patterns + config.benchmark_process_patterns
-                ),
+                process_patterns=tuple(config.server_process_patterns + config.benchmark_process_patterns),
                 health_probe_targets=tuple(probe_targets),
                 health_probe_timeout_s=config.health_probe_timeout_s,
                 ray_probe_enabled=config.ray_probe_enabled,
@@ -182,9 +180,7 @@ def build_reactor_components(
                 fd_probe_pid=config.fd_probe_pid,
                 decision_audit_enabled=config.decision_audit_enabled,
                 decision_audit_max_integrate=config.decision_audit_max_integrate,
-                decision_audit_max_oob_attempts=(
-                    config.decision_audit_max_oob_attempts
-                ),
+                decision_audit_max_oob_attempts=(config.decision_audit_max_oob_attempts),
                 preflight_enabled=config.preflight_enabled,
                 critic_health_enabled=config.critic_health_enabled,
                 max_critic_judge_bundles=config.critic_health_max_judge_bundles,
@@ -192,9 +188,7 @@ def build_reactor_components(
                 max_extra_server_logs=config.server_log_max_extra,
                 state_integrity_enabled=config.state_integrity_enabled,
                 external_deps_enabled=config.external_deps_enabled,
-                external_mount_stat_timeout_s=(
-                    config.external_mount_stat_timeout_s
-                ),
+                external_mount_stat_timeout_s=(config.external_mount_stat_timeout_s),
                 external_gateway_probe_url=config.external_gateway_probe_url,
             )
         )
@@ -210,9 +204,7 @@ def build_reactor_components(
     # ladder cooldown, RCA throttle). Built before the classifier, which
     # wires it to all stateful sub-detectors.
     state_store: DetectorStateStore | None = (
-        DetectorStateStore(session_dir=config.session_dir)
-        if config.state_store_enabled
-        else None
+        DetectorStateStore(session_dir=config.session_dir) if config.state_store_enabled else None
     )
 
     classifier = Classifier(
@@ -246,9 +238,7 @@ def build_reactor_components(
             productive_gain_pct=config.budget_productive_gain_pct,
             strategy_drift_pct=config.budget_strategy_drift_pct,
             deadline_warning_minutes=config.budget_deadline_warning_minutes,
-            deadline_hard_cutoff_minutes=(
-                config.budget_deadline_hard_cutoff_minutes
-            ),
+            deadline_hard_cutoff_minutes=(config.budget_deadline_hard_cutoff_minutes),
         ),
         aiter_jit_config=AiterJitConfig(
             cold_so_count=config.aiter_jit_cold_so_count,
@@ -269,18 +259,14 @@ def build_reactor_components(
         ),
         decision_audit_config=DecisionAuditConfig(
             min_keep_gain_pct=config.decision_audit_min_keep_gain_pct,
-            dispatch_bypass_pre_post_epsilon_pct=(
-                config.decision_audit_dispatch_bypass_epsilon_pct
-            ),
+            dispatch_bypass_pre_post_epsilon_pct=(config.decision_audit_dispatch_bypass_epsilon_pct),
         ),
         model_gpu_fit_config=ModelGpuFitConfig(
             min_headroom_pct=config.preflight_min_headroom_pct,
             activation_buf_gib=config.preflight_activation_buf_gib,
         ),
         amdahl_ceiling_config=AmdahlCeilingConfig(
-            single_kernel_speedup=(
-                config.preflight_amdahl_single_kernel_speedup
-            ),
+            single_kernel_speedup=(config.preflight_amdahl_single_kernel_speedup),
             min_e2e_ceiling_pct=config.preflight_amdahl_min_e2e_ceiling_pct,
         ),
         cold_start_config=ColdStartConfig(
@@ -289,59 +275,44 @@ def build_reactor_components(
         ),
         critic_health_config=CriticHealthConfig(
             min_outage_judges=config.critic_health_min_outage_judges,
-            min_unavailable_verdicts=(
-                config.critic_health_min_unavailable_verdicts
-            ),
+            min_unavailable_verdicts=(config.critic_health_min_unavailable_verdicts),
             max_workdir_count=config.critic_health_max_workdir_count,
         ),
         kernel_pipeline_config=KernelPipelineConfig(
-            pending_count_threshold=(
-                config.kernel_pipeline_pending_count_threshold
-            ),
+            pending_count_threshold=(config.kernel_pipeline_pending_count_threshold),
             min_pending_ticks=config.kernel_pipeline_min_pending_ticks,
-            min_geak_sigterm_attempts=(
-                config.kernel_pipeline_min_geak_sigterm_attempts
-            ),
-            min_cursor_401_hits=(
-                config.kernel_pipeline_min_cursor_401_hits
-            ),
-            min_kernels_with_no_progress=(
-                config.kernel_pipeline_min_kernels_with_no_progress
-            ),
+            min_geak_sigterm_attempts=(config.kernel_pipeline_min_geak_sigterm_attempts),
+            min_cursor_401_hits=(config.kernel_pipeline_min_cursor_401_hits),
+            min_kernels_with_no_progress=(config.kernel_pipeline_min_kernels_with_no_progress),
         ),
         state_integrity_config=StateIntegrityConfig(
             wal_bytes_warn_threshold=config.state_wal_bytes_warn_threshold,
-            wal_bytes_critical_threshold=(
-                config.state_wal_bytes_critical_threshold
-            ),
+            wal_bytes_critical_threshold=(config.state_wal_bytes_critical_threshold),
             stale_lease_min_age_s=config.state_stale_lease_min_age_s,
             inbox_bloat_warn_bytes=config.state_inbox_bloat_warn_bytes,
-            inbox_bloat_critical_bytes=(
-                config.state_inbox_bloat_critical_bytes
-            ),
+            inbox_bloat_critical_bytes=(config.state_inbox_bloat_critical_bytes),
         ),
         external_deps_config=ExternalDepsConfig(
             mount_latency_warn_ms=config.external_mount_latency_warn_ms,
-            mount_latency_critical_ms=(
-                config.external_mount_latency_critical_ms
-            ),
+            mount_latency_critical_ms=(config.external_mount_latency_critical_ms),
         ),
     )
 
     ladder = ActionLadder(
         config=ActionLadderConfig(cooldown_ticks=config.cooldown_ticks),
-        state_view=(
-            state_store.view("action_ladder") if state_store else None
-        ),
+        state_view=(state_store.view("action_ladder") if state_store else None),
     )
 
     sink_session_id = session_id or config.session_dir.name or "default"
-    sink = FindingSink(
-        FindingSinkConfig(session_dir=config.session_dir, session_id=sink_session_id)
-    )
+    sink = FindingSink(FindingSinkConfig(session_dir=config.session_dir, session_id=sink_session_id))
 
-    rca_engine: RcaEngine = rca if rca is not None else _build_rca_engine(
-        config, state_store=state_store,
+    rca_engine: RcaEngine = (
+        rca
+        if rca is not None
+        else _build_rca_engine(
+            config,
+            state_store=state_store,
+        )
     )
 
     finalizer = (
@@ -410,9 +381,7 @@ def _build_rca_engine(
             cooldown_seconds=config.llm_rca_cooldown_s,
             max_calls_per_tick=config.llm_rca_max_calls_per_tick,
         ),
-        state_view=(
-            state_store.view("rca_throttle") if state_store else None
-        ),
+        state_view=(state_store.view("rca_throttle") if state_store else None),
     )
     log.info(
         "LLM RCA enabled: model=%s severity_min=%s cooldown=%.1fs max_per_tick=%d",
@@ -490,6 +459,16 @@ class _QuietFallback:
     reason: str
 
     async def fetch(self, ctx: Any) -> SourceData:  # noqa: ARG002 - protocol
+        """Return empty source data describing the disabled local probe.
+
+        Args:
+            ctx: Fetch context supplied by the source protocol; unused because
+                this fallback never collects data.
+
+        Returns:
+            A :class:`SourceData` with no signals, annotated with a
+            ``degraded_reason`` explaining that the local probe is disabled.
+        """
         return SourceData(
             degraded_reason=f"local-probe disabled: {self.reason}",
             sources_used=[self.name],

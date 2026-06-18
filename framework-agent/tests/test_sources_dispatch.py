@@ -27,8 +27,8 @@ def _minimal_request(**overrides) -> ExploreRequest:
 # the CLI accepts (sglang/vllm/atom), so a single-framework regression fails.
 _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
     "sglang": "https://github.com/sgl-project/sglang.git",
-    "vllm":   "https://github.com/ROCm/vllm.git",
-    "atom":   "https://github.com/ROCm/ATOM.git",
+    "vllm": "https://github.com/ROCm/vllm.git",
+    "atom": "https://github.com/ROCm/ATOM.git",
 }
 
 
@@ -294,7 +294,7 @@ def test_resolve_keywords_explicit_overrides_gap() -> None:
     """request.keywords (non-empty) wins over extract_keywords(gap_description)."""
     req = _minimal_request(
         gap_description="improve sglang fp8 MoE on MI300X",  # auto would yield ['fp8','moe','sglang']
-        keywords=["mi300x"],                                  # but explicit wins
+        keywords=["mi300x"],  # but explicit wins
     )
     assert src._resolve_keywords(req) == ["mi300x"]
 
@@ -343,8 +343,8 @@ def test_primus_uses_explicit_keywords(monkeypatch) -> None:
         search_modes=["primus_cortex"],
         max_search_candidates=1,
         primus_cortex={"base_url": "http://x"},
-        gap_description="improve sglang fp8 MoE",   # auto would be 'fp8 moe sglang'
-        keywords=["mi300x"],                         # but explicit wins
+        gap_description="improve sglang fp8 MoE",  # auto would be 'fp8 moe sglang'
+        keywords=["mi300x"],  # but explicit wins
     )
     out = src.enumerate_candidates(req)
     assert captured["query"] == "mi300x", "service query must be the explicit keyword"
@@ -399,8 +399,7 @@ def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch)
     out = src.enumerate_candidates(req)
     refs = [c.ref for c in out]
     assert refs[0] == "PR:99999", (
-        f"dense+mi300x+bf16 gap must promote relevant PR over PR:25769 MegaMoE PR; "
-        f"got order={refs}"
+        f"dense+mi300x+bf16 gap must promote relevant PR over PR:25769 MegaMoE PR; got order={refs}"
     )
     # The MegaMoE PR is not filtered, just demoted.
     assert "PR:25769" in refs

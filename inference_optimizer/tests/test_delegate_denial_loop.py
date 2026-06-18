@@ -80,9 +80,9 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
         assert after == before
         obs = await c.bus.tail(topic="observation")
         denied = [
-            m for m in obs
-            if m.payload.get("kind") == "policy_denied"
-            and m.payload.get("rule") == "duplicate_idempotency_key_running"
+            m
+            for m in obs
+            if m.payload.get("kind") == "policy_denied" and m.payload.get("rule") == "duplicate_idempotency_key_running"
         ]
         assert denied
     finally:
@@ -119,13 +119,20 @@ async def test_policy_denial_streak_records_streak_at_two(session_dir):
         intent = _delegate(action="backends", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
         await c._record_policy_denied(
-            "orchestration", intent, pd, action_name="backends",
+            "orchestration",
+            intent,
+            pd,
+            action_name="backends",
         )
         await c._record_policy_denied(
-            "orchestration", intent, pd, action_name="backends",
+            "orchestration",
+            intent,
+            pd,
+            action_name="backends",
         )
         streak = c.shared_state.policy_denial_streak.get(
-            "backends:duplicate_idempotency_key", 0,
+            "backends:duplicate_idempotency_key",
+            0,
         )
         assert streak >= 2
     finally:
@@ -138,16 +145,24 @@ async def test_policy_denial_streak_no_longer_prunes_family_at_five(session_dir)
     c = _silent_coordinator(session_dir)
     try:
         from inference_optimizer.orchestrator.policy import PolicyDenied
+
         intent = _delegate(action="params", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
         for _ in range(5):
             await c._record_policy_denied(
-                "orchestration", intent, pd, action_name="params",
+                "orchestration",
+                intent,
+                pd,
+                action_name="params",
             )
         assert "params" not in c.shared_state.pruned_families
-        assert c.shared_state.policy_denial_streak.get(
-            "params:duplicate_idempotency_key", 0,
-        ) == 5
+        assert (
+            c.shared_state.policy_denial_streak.get(
+                "params:duplicate_idempotency_key",
+                0,
+            )
+            == 5
+        )
     finally:
         await c.stop()
 
@@ -158,16 +173,24 @@ async def test_policy_denial_streak_no_longer_stops_run_at_ten(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         from inference_optimizer.orchestrator.policy import PolicyDenied
+
         intent = _delegate(action="backends", key="k1")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
         for _ in range(10):
             await c._record_policy_denied(
-                "orchestration", intent, pd, action_name="backends",
+                "orchestration",
+                intent,
+                pd,
+                action_name="backends",
             )
         assert not (c.shared_state.stop_reason or "").strip()
-        assert c.shared_state.policy_denial_streak.get(
-            "backends:duplicate_idempotency_key", 0,
-        ) == 10
+        assert (
+            c.shared_state.policy_denial_streak.get(
+                "backends:duplicate_idempotency_key",
+                0,
+            )
+            == 10
+        )
     finally:
         await c.stop()
 
@@ -177,19 +200,18 @@ async def test_successful_delegate_resets_policy_denial_streak(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         from inference_optimizer.orchestrator.policy import PolicyDenied
+
         intent = _delegate(key="k-reset")
         pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
         await c._record_policy_denied(
-            "orchestration", intent, pd, action_name="long_running",
+            "orchestration",
+            intent,
+            pd,
+            action_name="long_running",
         )
-        assert c.shared_state.policy_denial_streak.get(
-            "long_running:duplicate_idempotency_key"
-        ) == 1
+        assert c.shared_state.policy_denial_streak.get("long_running:duplicate_idempotency_key") == 1
         await c._handle_delegate("orchestration", _delegate(key="fresh-key"))
-        assert not any(
-            k.startswith("long_running:")
-            for k in c.shared_state.policy_denial_streak
-        )
+        assert not any(k.startswith("long_running:") for k in c.shared_state.policy_denial_streak)
     finally:
         await c.stop()
 
@@ -200,7 +222,8 @@ import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import (
-    Intent, IntentType,
+    Intent,
+    IntentType,
 )
 from inference_optimizer.orchestrator.phase_state import (
     PHASE_ALLOWED_ACTIONS,
@@ -277,10 +300,16 @@ def test_request_with_analysis_kind_is_denied(gate, action_name):
 # Supporting infrastructure parity
 def test_phase_explore_allowlist_drops_legacy_actions():
     """The EXPLORE allowlist contains only the canonical action set."""
-    assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset({
-        "explore", "specialist", "integrate_patch",
-        "roofline", "profile", "recover",
-    })
+    assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset(
+        {
+            "explore",
+            "specialist",
+            "integrate_patch",
+            "roofline",
+            "profile",
+            "recover",
+        }
+    )
 
 
 def test_full_enabled_actions_still_contains_explore():
@@ -294,6 +323,7 @@ def test_full_enabled_actions_still_contains_explore():
 def test_cli_real_executors_still_contains_explore_and_sweep():
     """Sanity: the canonical EXPLORE-phase executors stay registered."""
     from inference_optimizer import cli as cli_mod
+
     assert "explore" in cli_mod._REAL_EXECUTORS_FULL
     assert "sweep" in cli_mod._REAL_EXECUTORS_FULL
     assert "baseline" in cli_mod._REAL_EXECUTORS_FULL
@@ -314,21 +344,28 @@ def test_dead_c_mission_summary_tag_points_at_explore():
     assert "validate_stack" not in text
 
 
+def test_mission_summary_surfaces_resume_pending_revalidation():
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    s = SharedState(
+        baseline_tput=100.0,
+        optimization_stack=[{"action": "integrate_patch", "variant_name": "p1"}],
+        cumulative_gain_validated_stack_len=1,
+        resume_pending_revalidation=True,
+    )
+    text = s.to_mission_summary()
+    assert "resume_pending_revalidation=true" in text
+    assert "recheck current stack" in text
+
+
 def test_dead_c_robustness_md_prune_branch_family_list():
     """KB_gaps/Dead-C — the Robustness ``prune_branch`` family list drops retired ``validate_stack`` / ``backends`` / ``params`` and keeps ``explore``."""
     from inference_optimizer.paths import asset_system_prompts_dir
 
-    fragment = (asset_system_prompts_dir() / "robustness.md").read_text(
-        encoding="utf-8"
-    )
-    prune_rows = [
-        ln for ln in fragment.splitlines()
-        if ln.strip().startswith("| `prune_branch")
-    ]
+    fragment = (asset_system_prompts_dir() / "robustness.md").read_text(encoding="utf-8")
+    prune_rows = [ln for ln in fragment.splitlines() if ln.strip().startswith("| `prune_branch")]
     assert prune_rows, "prune_branch table row missing from robustness.md"
     row = prune_rows[0]
     for retired in ("validate_stack", "backends", "params"):
-        assert retired not in row, (
-            f"prune_branch family list still advertises retired {retired!r}"
-        )
+        assert retired not in row, f"prune_branch family list still advertises retired {retired!r}"
     assert "explore" in row

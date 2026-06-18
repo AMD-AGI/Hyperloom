@@ -24,6 +24,7 @@ from .action_executors._grid_runner import (
     run_grid,
 )
 from .action_executors._workload_envs import (
+    FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -54,7 +55,14 @@ DEFAULT_TOTAL_BUDGET_SEC = 9000
 
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
-    """Return ``(has_opt, args, envs)`` from ``state.current_best`` (either non-empty side counts as optimized)."""
+    """Return ``(has_opt, args, envs)`` from ``state.current_best`` (either non-empty side counts as optimized).
+
+    Args:
+        state: Shared run state whose ``current_best`` is inspected.
+
+    Returns:
+        A tuple of ``(has_optimization, extra_server_args, extra_envs)``.
+    """
     cb = state.current_best or {}
     args = str(cb.get("extra_server_args") or "").strip()
     envs_raw = cb.get("extra_envs") or {}
@@ -71,33 +79,56 @@ def _build_grid(
     optimized_args: str,
     optimized_envs: dict[str, str],
 ) -> list[GridVariant]:
-    """Two-arm grid: ``baseline`` × ``optimized`` crossed with every requested CONC."""
+    """Two-arm grid: ``baseline`` × ``optimized`` crossed with every requested CONC.
+
+    Args:
+        concs: Concurrency values to sweep.
+        isl: Input sequence length.
+        osl: Output sequence length.
+        num_prompts_factor: Multiplier applied to each CONC for NUM_PROMPTS.
+        optimized_args: Extra server args for the optimized arm.
+        optimized_envs: Extra environment variables for the optimized arm.
+
+    Returns:
+        The list of grid variants spanning both arms and all concurrencies.
+    """
     arms: list[tuple[str, str, dict[str, str]]] = [
-        ("baseline",  "",              {}),
-        ("optimized", optimized_args,  dict(optimized_envs)),
+        ("baseline", "", {}),
+        ("optimized", optimized_args, dict(optimized_envs)),
     ]
     out: list[GridVariant] = []
     for arm_name, arm_args, arm_envs in arms:
         for conc in concs:
             num_prompts = max(int(conc) * int(num_prompts_factor), int(conc))
             envs = dict(arm_envs)
-            envs.update({
-                "CONC":         str(conc),
-                "ISL":          str(isl),
-                "OSL":          str(osl),
-                "NUM_PROMPTS":  str(num_prompts),
-            })
-            out.append(GridVariant(
-                name=f"{arm_name}_conc{conc}",
-                extra_server_args=arm_args,
-                extra_envs=envs,
-                note=f"arm={arm_name} conc={conc} isl={isl} osl={osl}",
-            ))
+            envs.update(
+                {
+                    "CONC": str(conc),
+                    "ISL": str(isl),
+                    "OSL": str(osl),
+                    "NUM_PROMPTS": str(num_prompts),
+                }
+            )
+            out.append(
+                GridVariant(
+                    name=f"{arm_name}_conc{conc}",
+                    extra_server_args=arm_args,
+                    extra_envs=envs,
+                    note=f"arm={arm_name} conc={conc} isl={isl} osl={osl}",
+                )
+            )
     return out
 
 
 def _budget_skip_result(variant: GridVariant) -> VariantResult:
-    """Synthetic VariantResult for a budget-exhausted variant; ``skipped`` status distinguishes "out of time" from "Magpie crashed"."""
+    """Synthetic VariantResult for a budget-exhausted variant; ``skipped`` status distinguishes "out of time" from "Magpie crashed".
+
+    Args:
+        variant: The grid variant that did not get to run.
+
+    Returns:
+        A ``VariantResult`` marked ``skipped`` with a budget-exhausted error.
+    """
     return VariantResult(
         name=variant.name,
         extra_server_args=variant.extra_server_args,
@@ -113,28 +144,37 @@ def _budget_skip_result(variant: GridVariant) -> VariantResult:
 
 
 def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
-    """Flatten a ``VariantResult`` into one row of the curve."""
+    """Flatten a ``VariantResult`` into one row of the curve.
+
+    Args:
+        v: The variant result to flatten.
+        arm: The arm label (e.g. ``baseline`` or ``optimized``) for the row.
+
+    Returns:
+        A dict of the variant's metrics keyed for the curve row.
+    """
     envs = v.extra_envs or {}
     try:
         conc = int(envs.get("CONC", "0"))
     except (TypeError, ValueError):
         conc = 0
     return {
-        "arm":                arm,
-        "conc":               conc,
-        "status":             v.status,
-        "output_throughput":  v.output_throughput,
+        "arm": arm,
+        "conc": conc,
+        "status": v.status,
+        "output_throughput": v.output_throughput,
         "request_throughput": v.request_throughput,
         "total_token_throughput": v.total_token_throughput,
-        "ttft_mean_ms":       v.ttft_mean_ms,
-        "e2el_mean_ms":       v.e2el_mean_ms,
-        "duration_seconds":   v.duration_seconds,
+        "ttft_mean_ms": v.ttft_mean_ms,
+        "e2el_mean_ms": v.e2el_mean_ms,
+        "duration_seconds": v.duration_seconds,
         "completed_requests": v.completed_requests,
-        "error":              v.error,
-        "error_class":        v.error_class,
-        "killed_overtime":    v.killed_overtime,
-        "workspace":          v.workspace,
-        "report_path":        v.report_path,
+        "error": v.error,
+        "error_class": v.error_class,
+        "killed_overtime": v.killed_overtime,
+        "estimated_output_throughput": v.estimated_output_throughput,
+        "workspace": v.workspace,
+        "report_path": v.report_path,
     }
 
 
@@ -144,7 +184,12 @@ def _build_comparison(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Pair points by CONC, compute per-conc speedup, and aggregate.
 
-    Returns ``(per_conc_rows, summary_dict)``.
+    Args:
+        baseline_points: Curve rows for the baseline arm.
+        optimized_points: Curve rows for the optimized arm.
+
+    Returns:
+        A tuple of ``(per_conc_rows, summary_dict)``.
     """
     by_conc_b = {p["conc"]: p for p in baseline_points}
     by_conc_o = {p["conc"]: p for p in optimized_points}
@@ -160,65 +205,72 @@ def _build_comparison(
         ot = o.get("output_throughput")
         speedup: float | None = None
         delta_pct: float | None = None
-        if (
-            isinstance(bt, (int, float)) and bt > 0
-            and isinstance(ot, (int, float)) and ot > 0
-        ):
+        if isinstance(bt, (int, float)) and bt > 0 and isinstance(ot, (int, float)) and ot > 0:
             speedup = float(ot) / float(bt)
             delta_pct = (speedup - 1.0) * 100.0
             speedups.append(speedup)
             successful_pairs += 1
         else:
             failed_pairs += 1
-        rows.append({
-            "conc":            c,
-            "baseline_tput":   bt,
-            "optimized_tput":  ot,
-            "speedup":         speedup,
-            "delta_pct":       delta_pct,
-            "baseline_status":  b.get("status"),
-            "optimized_status": o.get("status"),
-        })
+        rows.append(
+            {
+                "conc": c,
+                "baseline_tput": bt,
+                "optimized_tput": ot,
+                "speedup": speedup,
+                "delta_pct": delta_pct,
+                "baseline_status": b.get("status"),
+                "optimized_status": o.get("status"),
+            }
+        )
     summary: dict[str, Any] = {
         "successful_pairs": successful_pairs,
-        "failed_pairs":     failed_pairs,
-        "best_conc":         None,
-        "best_speedup":      None,
-        "median_speedup":    None,
-        "mean_speedup":      None,
+        "failed_pairs": failed_pairs,
+        "best_conc": None,
+        "best_speedup": None,
+        "median_speedup": None,
+        "mean_speedup": None,
     }
     if speedups:
         # Best = arg-max speedup over per-conc pairs.
         best_idx, best_val = max(
-            (
-                (i, r["speedup"])
-                for i, r in enumerate(rows)
-                if isinstance(r.get("speedup"), float)
-            ),
+            ((i, r["speedup"]) for i, r in enumerate(rows) if isinstance(r.get("speedup"), float)),
             key=lambda x: x[1],
         )
         sorted_sp = sorted(speedups)
         n = len(sorted_sp)
-        median = (
-            sorted_sp[n // 2] if n % 2 == 1
-            else 0.5 * (sorted_sp[n // 2 - 1] + sorted_sp[n // 2])
+        median = sorted_sp[n // 2] if n % 2 == 1 else 0.5 * (sorted_sp[n // 2 - 1] + sorted_sp[n // 2])
+        summary.update(
+            {
+                "best_conc": rows[best_idx]["conc"],
+                "best_speedup": round(best_val, 4),
+                "median_speedup": round(median, 4),
+                "mean_speedup": round(sum(speedups) / len(speedups), 4),
+            }
         )
-        summary.update({
-            "best_conc":      rows[best_idx]["conc"],
-            "best_speedup":   round(best_val, 4),
-            "median_speedup": round(median, 4),
-            "mean_speedup":   round(sum(speedups) / len(speedups), 4),
-        })
     return rows, summary
 
 
 def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
-    """One row per (arm, conc) — flat columns for spreadsheet pivots."""
+    """One row per (arm, conc) — flat columns for spreadsheet pivots.
+
+    Args:
+        csv_path: Destination CSV path (parent dirs are created).
+        points: Curve rows to write, one per (arm, conc).
+    """
     columns = [
-        "arm", "conc", "status",
-        "output_throughput", "request_throughput", "total_token_throughput",
-        "ttft_mean_ms", "e2el_mean_ms", "duration_seconds",
-        "completed_requests", "error_class", "error",
+        "arm",
+        "conc",
+        "status",
+        "output_throughput",
+        "request_throughput",
+        "total_token_throughput",
+        "ttft_mean_ms",
+        "e2el_mean_ms",
+        "duration_seconds",
+        "completed_requests",
+        "error_class",
+        "error",
     ]
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as fp:
@@ -237,7 +289,20 @@ def _build_roofline_ceiling(
     baseline_points: list[dict[str, Any]],
     optimized_points: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Per-conc decode roofline alongside the measured curves (T_cmp once, T_mem per CONC; MBU% = measured/T_peak×100). ``None`` when model meta / GPU spec is unavailable."""
+    """Per-conc decode roofline alongside the measured curves (T_cmp once, T_mem per CONC; MBU% = measured/T_peak×100). ``None`` when model meta / GPU spec is unavailable.
+
+    Args:
+        state: Shared run state providing model path, precision, GPU type, TP.
+        concs: Concurrency values to compute ceilings for.
+        isl: Input sequence length.
+        osl: Output sequence length.
+        baseline_points: Measured baseline curve rows (for MBU%).
+        optimized_points: Measured optimized curve rows (for MBU%).
+
+    Returns:
+        A roofline ceiling payload dict, or ``None`` when model meta or GPU
+        spec is unavailable.
+    """
     model_path = str(getattr(state, "model_path", "") or "")
     precision = str(getattr(state, "precision", "") or "") or "bf16"
     meta = load_model_meta(model_path, precision_hint=precision)
@@ -296,6 +361,15 @@ def _build_roofline_ceiling(
             t_peak = t_mem
 
         def _mbu_pct(measured: Any) -> float | None:
+            """Express a measured throughput as a percent of peak.
+
+            Args:
+                measured: Measured throughput value.
+
+            Returns:
+                The ratio to ``t_peak`` as a percentage, or ``None`` when
+                inputs are non-positive or invalid.
+            """
             if not isinstance(measured, (int, float)) or measured <= 0:
                 return None
             if t_peak <= 0:
@@ -304,45 +378,55 @@ def _build_roofline_ceiling(
 
         bt = (by_conc_b.get(c) or {}).get("output_throughput")
         ot = (by_conc_o.get(c) or {}).get("output_throughput")
-        rows.append({
-            "conc":              c,
-            "t_mem_tok_s":       round(t_mem, 2),
-            "t_cmp_tok_s":       round(t_cmp, 2),
-            "t_peak_tok_s":      round(t_peak, 2),
-            "bound_kind":        bound_kind,
-            "mbu_baseline_pct":  _mbu_pct(bt),
-            "mbu_optimized_pct": _mbu_pct(ot),
-        })
+        rows.append(
+            {
+                "conc": c,
+                "t_mem_tok_s": round(t_mem, 2),
+                "t_cmp_tok_s": round(t_cmp, 2),
+                "t_peak_tok_s": round(t_peak, 2),
+                "bound_kind": bound_kind,
+                "mbu_baseline_pct": _mbu_pct(bt),
+                "mbu_optimized_pct": _mbu_pct(ot),
+            }
+        )
 
     return {
         "schema_version": 1,
-        "source":         "roofline_ceiling.py",
-        "gpu_type":       gpu_type,
-        "precision":      precision,
-        "tp":             num_gpus,
-        "isl":            isl,
-        "osl":            osl,
+        "source": "roofline_ceiling.py",
+        "gpu_type": gpu_type,
+        "precision": precision,
+        "tp": num_gpus,
+        "isl": isl,
+        "osl": osl,
         "model_meta": {
-            "weight_bytes":        meta.weight_bytes,
+            "weight_bytes": meta.weight_bytes,
             "active_weight_bytes": meta.active_weight_bytes,
-            "num_experts":         meta.num_experts,
-            "experts_per_tok":     meta.experts_per_tok,
+            "num_experts": meta.num_experts,
+            "experts_per_tok": meta.experts_per_tok,
             "expert_weight_bytes": meta.expert_weight_bytes,
-            "num_layers":          meta.num_layers,
-            "num_kv_heads":        meta.num_kv_heads,
-            "head_dim":            meta.head_dim,
-            "weight_dtype_bytes":  meta.weight_dtype_bytes,
+            "num_layers": meta.num_layers,
+            "num_kv_heads": meta.num_kv_heads,
+            "head_dim": meta.head_dim,
+            "weight_dtype_bytes": meta.weight_dtype_bytes,
         },
         "rows": rows,
     }
 
 
 def _skip(reason: str, **extras: Any) -> dict[str, Any]:
-    """Build a non-fatal skip envelope. Reason is operator-readable."""
+    """Build a non-fatal skip envelope. Reason is operator-readable.
+
+    Args:
+        reason: Operator-readable reason for skipping.
+        **extras: Additional key/value fields to merge into the envelope.
+
+    Returns:
+        A skip-status payload dict.
+    """
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "status":         "skipped",
-        "skip_reason":    reason,
+        "status": "skipped",
+        "skip_reason": reason,
     }
     payload.update(extras)
     return payload
@@ -358,7 +442,20 @@ async def run_conc_sweep(
     num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
     write_reports: bool = True,
 ) -> dict[str, Any]:
-    """Run the full conc-sweep post-hook end-to-end (always returns a dict; never raises; no files written when skipped)."""
+    """Run the full conc-sweep post-hook end-to-end (always returns a dict; never raises; no files written when skipped).
+
+    Args:
+        state: Shared run state (baseline, current_best, workload shape).
+        session_dir: Session directory for workspace and report outputs.
+        concs: Concurrency ladder to sweep; ``None`` uses the default ladder.
+        variant_timeout_sec: Per-variant timeout in seconds.
+        total_budget_sec: Total wall-clock budget in seconds; ``<=0`` disables.
+        num_prompts_factor: Multiplier applied to each CONC for NUM_PROMPTS.
+        write_reports: When ``True``, write the JSON/CSV reports to disk.
+
+    Returns:
+        The sweep payload dict (a skip envelope when prerequisites are unmet).
+    """
     session_dir = Path(session_dir)
     # ``None`` → default ladder; an explicit empty list short-circuits via ``empty_conc_list`` below.
     concs = list(concs) if concs is not None else list(DEFAULT_CONCS)
@@ -378,10 +475,7 @@ async def run_conc_sweep(
         return _skip("empty_conc_list")
 
     # Prefer the session's materialized baseline config; fall back to the shipped asset.
-    base_yaml_raw = (
-        str(getattr(state, "baseline_config_path", "") or "").strip()
-        or str(default_baseline_config())
-    )
+    base_yaml_raw = str(getattr(state, "baseline_config_path", "") or "").strip() or str(default_baseline_config())
     base_yaml_path = Path(base_yaml_raw)
     if not base_yaml_path.exists():
         return _skip("baseline_config_missing", config_path=base_yaml_raw)
@@ -391,21 +485,25 @@ async def run_conc_sweep(
     workspace.mkdir(parents=True, exist_ok=True)
 
     # Re-materialize (idempotent) in case we fell back to the shipped asset.
-    resolved_model = (
-        str(getattr(state, "model_path", "") or "").strip()
-        or os.environ.get("MODEL_PATH", "").strip()
-    )
+    resolved_model = str(getattr(state, "model_path", "") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
     resolved_gpu = (
-        str(getattr(state, "gpu_type", "") or "").strip().lower()
-        or os.environ.get("GPU_TYPE", "").strip().lower()
+        str(getattr(state, "gpu_type", "") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
     )
-    base_yaml_path = materialize_config_with_envs(
-        base_yaml_path,
-        workspace,
-        model_path=resolved_model or None,
-        gpu_type=resolved_gpu or None,
-        out_name="conc_sweep_base.with_envs.yaml",
-    )
+    try:
+        base_yaml_path = materialize_config_with_envs(
+            base_yaml_path,
+            workspace,
+            model_path=resolved_model or None,
+            gpu_type=resolved_gpu or None,
+            out_name="conc_sweep_base.with_envs.yaml",
+        )
+    except FrameworkScriptMismatchError as exc:
+        return _skip(
+            "framework_script_mismatch",
+            error_class="framework_script_mismatch",
+            error=str(exc),
+            workspace=str(workspace),
+        )
 
     grid = _build_grid(
         concs=concs,
@@ -421,23 +519,23 @@ async def run_conc_sweep(
     started_at = time.time()
     deadline = started_at + total_budget_sec if has_budget else None
     log.info(
-        "conc_sweep: launching %d variants (concs=%s isl=%d osl=%d "
-        "total_budget=%s)",
-        len(grid), concs, isl, osl,
+        "conc_sweep: launching %d variants (concs=%s isl=%d osl=%d total_budget=%s)",
+        len(grid),
+        concs,
+        isl,
+        osl,
         f"{total_budget_sec}s" if has_budget else "unbounded",
     )
     results: list[VariantResult] = []
     budget_exhausted = False
     for idx, variant in enumerate(grid):
-        remaining = (
-            (deadline - time.time()) if has_budget else None
-        )
+        remaining = (deadline - time.time()) if has_budget else None
         if has_budget and remaining is not None and remaining <= 0:
             budget_exhausted = True
             log.warning(
-                "conc_sweep: total budget exhausted (%ds); marking "
-                "%d remaining variants as skipped",
-                total_budget_sec, len(grid) - idx,
+                "conc_sweep: total budget exhausted (%ds); marking %d remaining variants as skipped",
+                total_budget_sec,
+                len(grid) - idx,
             )
             for v in grid[idx:]:
                 results.append(_budget_skip_result(v))
@@ -483,29 +581,29 @@ async def run_conc_sweep(
     )
 
     payload: dict[str, Any] = {
-        "schema_version":   SCHEMA_VERSION,
-        "status":           "succeeded" if summary["successful_pairs"] else "failed",
-        "session_id":       str(getattr(state, "session_id", "") or session_dir.name),
-        "isl":              isl,
-        "osl":              osl,
-        "tp":               int(getattr(state, "tp", 0) or 0),
-        "concs_requested":  concs,
+        "schema_version": SCHEMA_VERSION,
+        "status": "succeeded" if summary["successful_pairs"] else "failed",
+        "session_id": str(getattr(state, "session_id", "") or session_dir.name),
+        "isl": isl,
+        "osl": osl,
+        "tp": int(getattr(state, "tp", 0) or 0),
+        "concs_requested": concs,
         "baseline": {
             "extra_server_args": "",
-            "extra_envs":        {},
-            "points":            baseline_points,
+            "extra_envs": {},
+            "points": baseline_points,
         },
         "optimized": {
             "extra_server_args": opt_args,
-            "extra_envs":        opt_envs,
-            "points":            optimized_points,
+            "extra_envs": opt_envs,
+            "points": optimized_points,
         },
-        "comparison":      comparison,
-        "summary":         summary,
-        "workspace":       workspace.as_posix(),
-        "elapsed_sec":     round(elapsed_sec, 2),
-        "total_budget_sec":  total_budget_sec if has_budget else None,
-        "budget_exhausted":  budget_exhausted,
+        "comparison": comparison,
+        "summary": summary,
+        "workspace": workspace.as_posix(),
+        "elapsed_sec": round(elapsed_sec, 2),
+        "total_budget_sec": total_budget_sec if has_budget else None,
+        "budget_exhausted": budget_exhausted,
     }
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling
@@ -523,17 +621,38 @@ async def run_conc_sweep(
             encoding="utf-8",
         )
         _write_csv(csv_path, baseline_points + optimized_points)
+        # Author-time breakdown capture: mirror the summary into the recorder.
+        try:
+            from ..breakdown.recorder import instrument
+
+            instrument.record_singleton_section(
+                session_dir,
+                "conc_sweep_summary",
+                payload,
+                producer="conc_sweep",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         # final.json pointer is added by report.py at CLOSE (this action runs before CLOSE).
 
     log.info(
         "conc_sweep: done — successful_pairs=%d failed_pairs=%d best_speedup=%s",
-        summary["successful_pairs"], summary["failed_pairs"], summary["best_speedup"],
+        summary["successful_pairs"],
+        summary["failed_pairs"],
+        summary["best_speedup"],
     )
     return payload
 
 
 def format_summary_line(payload: dict[str, Any]) -> str:
-    """One-line stdout summary for ``_print_final_summary``."""
+    """One-line stdout summary for ``_print_final_summary``.
+
+    Args:
+        payload: The conc-sweep result payload to summarize.
+
+    Returns:
+        A single formatted summary line.
+    """
     status = payload.get("status", "?")
     if status == "skipped":
         return f"  conc_sweep           : skipped ({payload.get('skip_reason', '?')})"
@@ -547,10 +666,7 @@ def format_summary_line(payload: dict[str, Any]) -> str:
     if payload.get("budget_exhausted"):
         budget = payload.get("total_budget_sec")
         suffix = f" [budget_exhausted{f' @{budget}s' if budget else ''}]"
-    parts = [
-        f"  conc_sweep           : {status} "
-        f"(pairs={succ}+{failed}f)"
-    ]
+    parts = [f"  conc_sweep           : {status} (pairs={succ}+{failed}f)"]
     if isinstance(best_speedup, (int, float)) and best_conc is not None:
         parts.append(f"best={best_speedup:.2f}x @ conc={best_conc}")
     if isinstance(median, (int, float)):

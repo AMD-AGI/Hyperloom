@@ -168,9 +168,7 @@ def build_scope(
             scope[key] = _normalise(sc[key])
 
     if require_critical:
-        missing_critical = [
-            k for k in ("model", "framework") if scope[k] == "unknown"
-        ]
+        missing_critical = [k for k in ("model", "framework") if scope[k] == "unknown"]
         if missing_critical:
             raise ScopeError(
                 f"cannot build KB scope: missing critical keys "

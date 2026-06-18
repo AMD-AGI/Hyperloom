@@ -124,10 +124,7 @@ def static_check(harness_path: str) -> tuple[bool, list[str]]:
 
     string_literals = _extract_string_literals(source)
 
-    has_argparse = any(
-        kw in lit for lit in string_literals
-        for kw in ("argparse",)
-    ) or "ArgumentParser" in source
+    has_argparse = any(kw in lit for lit in string_literals for kw in ("argparse",)) or "ArgumentParser" in source
     if not has_argparse:
         if "import argparse" not in source and "ArgumentParser" not in source:
             errors.append("Missing argparse / ArgumentParser")
@@ -185,7 +182,11 @@ def _run_mode(harness_path: str, mode: str, env: dict) -> dict:
     start = time.time()
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=MODE_TIMEOUT, env=env,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=MODE_TIMEOUT,
+            env=env,
         )
         elapsed = time.time() - start
         stdout = proc.stdout or ""

@@ -26,13 +26,13 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     sd = make_session_dir()
     from .conftest import seed_target_analysis_marker
+
     seed_target_analysis_marker(sd)
     return sd
 
 
 def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE,
-                  payload={"topic": "heartbeat", "body_md": "ok"})
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
 
 def _backends_with_mock_critic_and_robustness(
@@ -42,9 +42,9 @@ def _backends_with_mock_critic_and_robustness(
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(plans.get("orchestration", silent), name="o"),
-        "kernel":        MockBackend(plans.get("kernel", silent), name="k"),
-        "critic":        MockCriticBackend(),
-        "robustness":    MockRobustnessBackend(),
+        "kernel": MockBackend(plans.get("kernel", silent), name="k"),
+        "critic": MockCriticBackend(),
+        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -69,10 +69,7 @@ async def test_mock_critic_extracts_msg_id_and_approves():
 @pytest.mark.asyncio
 async def test_mock_critic_dedups_same_proposal():
     backend = MockCriticBackend()
-    prompt = (
-        "Inbox for critic:\n"
-        "  seq=1 msg_id=deadbeef0001 from=orchestration topic=proposal payload={...}"
-    )
+    prompt = "Inbox for critic:\n  seq=1 msg_id=deadbeef0001 from=orchestration topic=proposal payload={...}"
     r1 = await backend.run(prompt)
     r2 = await backend.run(prompt)
     assert len(r1.intents) == 1 and r1.intents[0].type == IntentType.REVIEW_VERDICT
@@ -131,13 +128,19 @@ async def test_mock_robustness_alert_after_n_ticks():
 @pytest.mark.asyncio
 async def test_e2e_mock_critic_closes_proposal_loop(session_dir):
     """Orchestration proposes baseline; mock Critic auto-approves; task gets created."""
-    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "baseline", "predicted_gain_pct": 0.0,
-    })
+    propose = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "baseline",
+            "predicted_gain_pct": 0.0,
+        },
+    )
     plans = {
-        "orchestration": ScriptedPlan(turns=[
-            MockTurn(intents=[propose]),
-        ]),
+        "orchestration": ScriptedPlan(
+            turns=[
+                MockTurn(intents=[propose]),
+            ]
+        ),
     }
     backends = _backends_with_mock_critic_and_robustness(plans)
 
