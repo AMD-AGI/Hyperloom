@@ -1281,7 +1281,18 @@ class SafeOptimizeClient:
             time.sleep(5)
 
         sse_used = False
-        if sid:
+        sf_status = ""
+        # On idle_timeout/stream_error the Claw SSE merely went quiet (a long tool
+        # call, or the agent paused between phases). SaFE often *prematurely* marks
+        # such a task Failed/Interrupted ("optimization report not found") even
+        # though it is still well within budget and may resume to finalize (and
+        # write session_breakdown.json). Do NOT accept an idle-induced terminal as
+        # final: resubscribe and keep waiting, up to a bounded number of
+        # consecutive idle re-entries, before concluding. Only a real Stopped
+        # (sandbox exit), a Succeeded, the deadline, or exhausted retries end it.
+        idle_retries = 0
+        max_idle_retries = int(_env_float("SAFE_OPTIMIZE_SSE_IDLE_RETRIES", 3.0))
+        while sid and time.time() < deadline:
             sse_used = True
             log.info("[task %s] using SSE on clawSessionId=%s", task_id, sid[:8])
             sse_reason = self._sse_wait_until_done(sid, deadline)
@@ -1291,7 +1302,8 @@ class SafeOptimizeClient:
             except Exception:
                 last_task = {}
             sf_status = last_task.get("status", "") if last_task else ""
-            if sf_status in self.TERMINAL_TASK_STATUSES:
+            # A real success is always final.
+            if sf_status == "Succeeded":
                 return sf_status, last_task
             # Stopped = sandbox pod exited (real end-of-task). SaFE's controller
             # lags shutdown by 10-180s, so short-poll up to 5min for its verdict.
@@ -1320,8 +1332,25 @@ class SafeOptimizeClient:
                 return "Succeeded", last_task
             if sse_reason == "deadline":
                 return "Timeout", last_task
-            # idle_timeout / stream_error are inconclusive (the SSE stream goes
-            # quiet during long tool calls), so fall through to SaFE polling.
+            # idle_timeout / stream_error: inconclusive. Resubscribe and keep
+            # waiting (bounded) instead of accepting an idle-induced terminal.
+            if sse_reason in ("idle_timeout", "stream_error") and idle_retries < max_idle_retries and time.time() < deadline:
+                idle_retries += 1
+                log.info(
+                    "[task %s] SSE %s within budget (sf_status=%s) — resubscribing "
+                    "(idle retry %d/%d) instead of concluding on a non-Stopped status",
+                    task_id,
+                    sse_reason,
+                    sf_status or "?",
+                    idle_retries,
+                    max_idle_retries,
+                )
+                time.sleep(min(poll_s, 60))
+                continue
+            # Retries exhausted (or another reason): accept a terminal SaFE
+            # verdict if one exists, else fall through to SaFE polling.
+            if sf_status in self.TERMINAL_TASK_STATUSES:
+                return sf_status, last_task
             log.info(
                 "[task %s] SSE inconclusive (reason=%s, sf_status=%s) — "
                 "falling back to SaFE polling for terminal status",
@@ -1329,6 +1358,7 @@ class SafeOptimizeClient:
                 sse_reason,
                 sf_status or "?",
             )
+            break
 
         # Fallback / continuation: SaFE optimization-API polling.
         if not sse_used:
