@@ -465,7 +465,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     )
     calls: list[tuple[str, str]] = []
 
-    async def fake_single(payload, *, session_dir):
+    async def fake_single(payload, *, session_dir, timeout_override_sec=None):
         kernel_id = payload["kernel_id"]
         backend = payload["backends"]
         calls.append((kernel_id, backend))

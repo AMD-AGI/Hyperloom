@@ -34,6 +34,22 @@ def test_parse_backends_still_rejects_unknown():
         ko.parse_backends("forge,bogus")
 
 
+def test_parse_backends_tolerates_stringified_list():
+    # Hyperloom#601: an upstream dispatch slip can hand the repr() of a Python
+    # list to --backends ("['geak']") instead of a bare name. parse_backends
+    # must recover the inner token rather than rejecting a valid backend.
+    assert ko.parse_backends("['geak']") == ["geak"]
+    assert ko.parse_backends('["geak"]') == ["geak"]
+    assert ko.parse_backends("['geak', 'claude']") == ["geak", "claude"]
+
+
+def test_parse_backends_stringified_list_still_rejects_unknown():
+    # The recovery must not weaken validation: a genuinely-unknown name inside
+    # a stringified list is still rejected.
+    with pytest.raises(ValueError):
+        ko.parse_backends("['bogus']")
+
+
 def test_resolve_gpu_target_env_wins(monkeypatch):
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     assert forge_submit._resolve_gpu_target({"platform": "mi300x"}) == "gfx950"
