@@ -52,7 +52,6 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from ._canonical_fingerprint import canonical_fingerprint, workload_signature
-from ._explore_roofline_filter import compute_saturation_advisory
 from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
@@ -821,31 +820,7 @@ class ExploreExecutor:
             len(skipped_dup),
         )
 
-        # Roofline saturation advisory (annotates, never drops): flags
-        # variants targeting only already-saturated directions so the
-        # Orchestration prompt can reprioritise without code dropping work.
-        roofline_advisory: list[dict[str, Any]] = []
-        saturation_snapshot = params.get("roofline_saturation_snapshot")
-        if isinstance(saturation_snapshot, dict) and saturation_snapshot and runnable:
-            roofline_advisory = compute_saturation_advisory(
-                runnable,
-                saturation_snapshot,
-            )
-            if roofline_advisory:
-                log.info(
-                    "explore roofline advisory: %d/%d variants flagged as likely_saturated (saturated=%s)",
-                    len(roofline_advisory),
-                    len(runnable),
-                    ",".join(
-                        sorted(
-                            d
-                            for d, p in saturation_snapshot.items()
-                            if isinstance(p, (int, float)) and float(p) >= 80.0
-                        )
-                    ),
-                )
-
-        # Multi-node grid shaping (companion to the roofline gate above).
+        # Multi-node grid shaping.
         # Both helpers short-circuit on ``is_multi_node() is False``: the
         # invalid filter returns ``(list(grid), [])`` and reorder preserves the
         # original order, so the single-node ``runnable`` is bit-for-bit
@@ -1441,7 +1416,6 @@ class ExploreExecutor:
             "losers": losers,
             "keep_unstable_in_stack": keep_unstable,
             "skipped_dup": skipped_dup,
-            "roofline_advisory": roofline_advisory,
             # flat per-variant outcomes.
             "per_variant_outcomes": per_variant_outcomes,
             "explore_search_update": search_update,

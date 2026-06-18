@@ -558,6 +558,10 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "gaps",
         # Orchestration working-memory checkpoint; Coordinator-authored (LLM must not self-author durable memory).
         "orchestration_memory",
+        # Bounded rollback ring of prior good orchestration_memory records;
+        # Coordinator-only writer (operator re-seed via env). Locked in lock-step
+        # with its parent so the LLM can't forge/erase rollback snapshots.
+        "orchestration_memory_history",
         # FRAMEWORK_PR per-repo discovery budget; set once, locked against LLM inflation.
         "framework_pr_max_candidates",
         # Advisory model-architecture profile from the SKILL launcher; locked as the sole source of truth.
