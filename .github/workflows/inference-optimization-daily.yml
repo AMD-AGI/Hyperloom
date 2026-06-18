@@ -125,10 +125,15 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.count != '0'
     runs-on: hyperloom-4hhzn
-    # 48h optimizer budget + cold-start + (potentially multi-hour) model
-    # download + register/wait/collect buffer. Must exceed task_timeout_min
-    # (2920) so GitHub does not kill the job before the wait loop returns.
-    timeout-minutes: 3000
+    # GitHub counts this from JOB START, while the optimize_submit.py wait loop
+    # (up to task_timeout_min=2920) only begins AFTER prewarm + submit-jitter +
+    # register, and artifact collection runs after it. Budget a generous buffer
+    # ON TOP of 2920 for those phases — a cold large-model prewarm/download
+    # (e.g. Mixtral ~93G, gemma-4 ~52G; registered:false rows are not pre-staged)
+    # can take well over an hour — so the runner never kills the job mid-wait
+    # while the optimizer is still inside its 48h budget.
+    # 2920 wait + ~6h (prewarm/jitter/register/collect) = 3280.
+    timeout-minutes: 3280
     strategy:
       fail-fast: false
       # The fixed corpus is small (~10 models); dispatch them all at once.
