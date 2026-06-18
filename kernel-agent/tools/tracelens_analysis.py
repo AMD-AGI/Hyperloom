@@ -14,6 +14,7 @@ import asyncio
 import csv
 import fnmatch
 import functools
+import glob
 import gzip
 import json
 import os
@@ -86,6 +87,11 @@ _OP_TO_SOURCE_JSON = Path(__file__).resolve().parent / "data" / "op_to_source.js
 
 # Statuses that mean "we have an editable device source to optimize".
 _ROUTABLE_STATUS = "resolved"
+
+# TraceLens may annotate a candidate op name with the steady-state phase it was
+# observed in, e.g. ``aiter::fmoe_g1u1 (prefill)``. The mapping is keyed by the
+# bare op name, so strip a trailing phase tag before the (exact) dict lookup.
+_PHASE_SUFFIX_RE = re.compile(r"\s*\((?:prefill|decode|prefilldecode|mixed)\)\s*$")
 
 
 @dataclass
@@ -238,7 +244,12 @@ def _normalize_op_entry(entry: dict[str, Any]) -> dict[str, Any]:
         routes = []
         for dk, p, fw, pa in leaves:
             routes.append({
-                "match": dk,
+                # Escape + strip so the device-kernel name matches as a literal:
+                # fnmatch treats [ ] ? * as metachars (would silently break or
+                # over-broaden self-matching for templated kernels), and the
+                # resolver strip()s the lookup name (so trailing whitespace in
+                # the stored name must be stripped here too).
+                "match": glob.escape(dk.strip()),
                 "status": _ROUTABLE_STATUS,
                 ("abs_path_sglang" if fw == "sglang" else "abs_path_vllm" if fw == "vllm" else "abs_path"): [p],
                 "patchable": pa,
@@ -303,6 +314,7 @@ class OpResolver:
         device_kernel_name: str | None = None,
     ) -> OpResolution | None:
         """Resolve ``op_name`` to an :class:`OpResolution`, or ``None`` on a dict miss."""
+        op_name = _PHASE_SUFFIX_RE.sub("", op_name)
         entry = self.mapping.get(op_name)
         if entry is None:
             return None
