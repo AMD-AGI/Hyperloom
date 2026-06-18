@@ -40,10 +40,15 @@ def aiter_repo(tmp_path: Path) -> Path:
     (repo / "aiter" / "ops").mkdir(parents=True)
     (repo / "aiter" / "ops" / "moe_op.py").write_text('"""@compile_ops wrapper around module_moe_ck2stages."""\n')
     (repo / "aiter" / "ops" / "rmsnorm.py").write_text("# Triton wrapper.\n")
+    (repo / "aiter" / "fused_moe.py").write_text("# top-level fused MoE @compile_ops launcher.\n")
 
     (repo / "csrc" / "ck_gemm_moe_2stages_codegen").mkdir(parents=True)
     (repo / "csrc" / "ck_gemm_moe_2stages_codegen" / "gemm_moe_ck2stages.cu").write_text(
         "// codegen entry for module_moe_ck2stages\n"
+    )
+    (repo / "csrc" / "py_itfs_cu").mkdir()
+    (repo / "csrc" / "py_itfs_cu" / "asm_fmoe.cu").write_text(
+        "AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(fmoe_fp8_blockscale_g1u1, ()) {}\n"
     )
     (repo / "csrc" / "kernels").mkdir()
     (repo / "csrc" / "kernels" / "topk_softmax_kernels.cu").write_text("// topk\n")
@@ -79,6 +84,39 @@ def test_promotes_ck_moe_stage2_wrapper_to_codegen_cu(
         str(aiter_repo),
     )
     assert out.endswith("gemm_moe_ck2stages.cu")
+
+
+def test_promotes_fmoe_blockscale_launcher_with_tracelens_suffix(
+    tla,
+    aiter_repo: Path,
+) -> None:
+    wrapper = "aiter/fused_moe.py(367): fused_moestage"
+    out = tla.upgrade_aiter_compile_ops_launcher(
+        wrapper,
+        "aiter::fmoe_fp8_blockscale_g1u1",
+        str(aiter_repo),
+    )
+    assert out == str(aiter_repo / "csrc" / "py_itfs_cu" / "asm_fmoe.cu")
+
+
+@pytest.mark.parametrize(
+    "source_file",
+    [
+        "/some/myaiter/fused_moe.py",
+        "/foo/not_aiter/fused_moe.py",
+    ],
+)
+def test_fmoe_blockscale_launcher_does_not_match_path_prefix_lookalikes(
+    tla,
+    aiter_repo: Path,
+    source_file: str,
+) -> None:
+    out = tla.upgrade_aiter_compile_ops_launcher(
+        source_file,
+        "aiter::fmoe_fp8_blockscale_g1u1",
+        str(aiter_repo),
+    )
+    assert out == source_file
 
 
 @pytest.mark.parametrize(
@@ -131,8 +169,13 @@ def test_promotion_noop_when_source_not_python(tla, aiter_repo: Path) -> None:
 def test_promotion_noop_when_kernel_name_unmatched(
     tla,
     aiter_repo: Path,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     """rmsnorm has no @compile_ops codegen — wrapper is the right target."""
+    empty_fallback = tmp_path / "no_aiter_here"
+    empty_fallback.mkdir()
+    monkeypatch.setattr(tla, "_AITER_FALLBACK_REPO", str(empty_fallback))
     wrapper = aiter_repo / "aiter" / "ops" / "rmsnorm.py"
     out = tla.upgrade_aiter_compile_ops_launcher(
         str(wrapper),
@@ -219,8 +262,13 @@ def test_finalize_candidates_records_launcher_source_file_on_promotion(
 def test_finalize_candidates_no_launcher_field_when_no_promotion(
     tla,
     aiter_repo: Path,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     """When promotion does not fire (rmsnorm), finalize must NOT add ``launcher_source_file`` (else duplicate kernel_url)."""
+    empty_fallback = tmp_path / "no_aiter_here"
+    empty_fallback.mkdir()
+    monkeypatch.setattr(tla, "_AITER_FALLBACK_REPO", str(empty_fallback))
     wrapper = str(aiter_repo / "aiter" / "ops" / "rmsnorm.py")
     candidates = [
         {

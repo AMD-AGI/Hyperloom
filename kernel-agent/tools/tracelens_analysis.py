@@ -1963,6 +1963,8 @@ def _is_pybind_shim(source_file: str) -> bool:
 _AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # ck_moe_stage1/2 — the .cu is the @compile_ops codegen entry (jit/build invalidated by PR-K before rebuild).
     ("ck_moe_stage", ("csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",)),
+    # fmoe_fp8_blockscale_g1u1 — fused MoE ASM entrypoint used by W4A8/MXFP4 expert GEMM.
+    ("fmoe_fp8_blockscale", ("csrc/py_itfs_cu/asm_fmoe.cu",)),
     # topk_softmax decode kernels.
     ("topk_softmax_group", ("csrc/kernels/topk_softmax_kernels_group.cu",)),
     ("topk_softmax", ("csrc/kernels/topk_softmax_kernels.cu",)),
@@ -1991,6 +1993,26 @@ _PACKAGE_INNER_ROOTS = (
     "/sgl-workspace/sglang/python/sglang",
 )
 
+_AITER_COMPILE_OPS_LAUNCHERS = (
+    "aiter/ops/",
+    "aiter/fused_moe.py",
+    "aiter/fused_moe_bf16_asm.py",
+    "aiter/fused_moe_dp_shared_expert.py",
+)
+
+
+def _normalize_tracelens_launcher_source(source_file: str) -> str:
+    """Strip TraceLens line/symbol suffixes from launcher paths."""
+    return re.sub(r"\(\d+\):.*$", "", source_file.replace(os.sep, "/")).strip()
+
+
+def _is_aiter_compile_ops_launcher(source_file: str) -> bool:
+    """Match known aiter launchers without accepting path-prefix lookalikes."""
+    return any(
+        source_file.startswith(marker) or f"/{marker}" in source_file
+        for marker in _AITER_COMPILE_OPS_LAUNCHERS
+    )
+
 
 def upgrade_aiter_compile_ops_launcher(
     source_file: str,
@@ -1999,9 +2021,10 @@ def upgrade_aiter_compile_ops_launcher(
 ) -> str:
     """Promote an aiter ``@compile_ops`` Python wrapper to the device ``.cu``.
 
-    Promotes when source_file is a ``.py`` under ``aiter/ops/``, kernel_name
-    matches a :data:`_AITER_COMPILE_OPS_PROMOTIONS` pattern, and the ``.cu``
-    exists under kernel_repo (or :data:`_AITER_FALLBACK_REPO`).
+    Promotes when source_file is a known aiter ``@compile_ops`` Python
+    launcher, kernel_name matches a
+    :data:`_AITER_COMPILE_OPS_PROMOTIONS` pattern, and the ``.cu`` exists
+    under kernel_repo (or :data:`_AITER_FALLBACK_REPO`).
 
     Args:
         source_file: The candidate's resolved source path.
@@ -2014,8 +2037,8 @@ def upgrade_aiter_compile_ops_launcher(
     """
     if not source_file or not kernel_name:
         return source_file
-    s = source_file.replace(os.sep, "/")
-    if "/aiter/ops/" not in s or not s.endswith(".py"):
+    s = _normalize_tracelens_launcher_source(source_file)
+    if not s.endswith(".py") or not _is_aiter_compile_ops_launcher(s):
         return source_file
 
     name_lower = kernel_name.lower()
