@@ -13,36 +13,123 @@ import re
 from typing import Sequence
 
 
-_TECHNICAL_TERMS = frozenset({
-    "gemm", "moe", "attention", "allreduce", "fp8", "fp16", "bf16", "int8", "int4",
-    "quantization", "quantize", "triton", "ck", "composable_kernel", "aiter",
-    "cudagraph", "cuda_graph", "flashattention", "flash_attn", "flash-attn",
-    "paged_attention", "pagedattention", "rope", "rotary", "kv_cache", "kvcache",
-    "speculative", "spec_decode", "tensor_parallel", "tp", "pipeline_parallel", "pp",
-    "fused", "fusion", "kernel", "hipify", "rocm", "hip", "nccl", "rccl",
-    "allgather", "reducescatter", "reduce_scatter", "all_reduce",
-    "prefill", "decode", "batching", "continuous_batching", "chunked_prefill",
-    "vllm", "sglang", "atom", "trtllm", "tensorrt", "lora", "qlora", "awq", "gptq",
-    "marlin", "w4a16", "w8a8", "smoothquant", "activation_order",
-    "custom_all_reduce", "custom_ar", "radix", "scheduler",
-    # atom-specific surfaces: keeps search relevance on the atom axis
-    # (MTP / EP / aiter routing) instead of collapsing to generic "moe".
-    "mtp", "ep", "moe_ep", "dp_attention", "dp", "kv_cache_dtype",
-    "torch_profiler_dir",
-    # GPU hardware codenames (lowercase; gap is lowercased before lookup).
-    # Critical for relevance ranking so a gap on ``mi300x`` scopes to
-    # AMD-validated PRs instead of e.g. an SM90 (Hopper) MoE kernel.
-    # AMD CDNA accelerators (MI200/300/350 families + gfx IDs + uarch labels):
-    "mi200", "mi210", "mi250", "mi250x",
-    "mi300", "mi300a", "mi300x", "mi325x",
-    "mi350x", "mi355x",
-    "gfx90a", "gfx940", "gfx941", "gfx942", "gfx950",
-    "cdna", "cdna2", "cdna3", "cdna4",
-    # NVIDIA datacenter accelerators (Ampere -> Blackwell + SM IDs + uarch labels):
-    "a100", "h100", "h200", "b100", "b200",
-    "sm80", "sm86", "sm89", "sm90", "sm100",
-    "ampere", "hopper", "blackwell",
-})
+_TECHNICAL_TERMS = frozenset(
+    {
+        "gemm",
+        "moe",
+        "attention",
+        "allreduce",
+        "fp8",
+        "fp16",
+        "bf16",
+        "int8",
+        "int4",
+        "quantization",
+        "quantize",
+        "triton",
+        "ck",
+        "composable_kernel",
+        "aiter",
+        "cudagraph",
+        "cuda_graph",
+        "flashattention",
+        "flash_attn",
+        "flash-attn",
+        "paged_attention",
+        "pagedattention",
+        "rope",
+        "rotary",
+        "kv_cache",
+        "kvcache",
+        "speculative",
+        "spec_decode",
+        "tensor_parallel",
+        "tp",
+        "pipeline_parallel",
+        "pp",
+        "fused",
+        "fusion",
+        "kernel",
+        "hipify",
+        "rocm",
+        "hip",
+        "nccl",
+        "rccl",
+        "allgather",
+        "reducescatter",
+        "reduce_scatter",
+        "all_reduce",
+        "prefill",
+        "decode",
+        "batching",
+        "continuous_batching",
+        "chunked_prefill",
+        "vllm",
+        "sglang",
+        "atom",
+        "trtllm",
+        "tensorrt",
+        "lora",
+        "qlora",
+        "awq",
+        "gptq",
+        "marlin",
+        "w4a16",
+        "w8a8",
+        "smoothquant",
+        "activation_order",
+        "custom_all_reduce",
+        "custom_ar",
+        "radix",
+        "scheduler",
+        # atom-specific surfaces: keeps search relevance on the atom axis
+        # (MTP / EP / aiter routing) instead of collapsing to generic "moe".
+        "mtp",
+        "ep",
+        "moe_ep",
+        "dp_attention",
+        "dp",
+        "kv_cache_dtype",
+        "torch_profiler_dir",
+        # GPU hardware codenames (lowercase; gap is lowercased before lookup).
+        # Critical for relevance ranking so a gap on ``mi300x`` scopes to
+        # AMD-validated PRs instead of e.g. an SM90 (Hopper) MoE kernel.
+        # AMD CDNA accelerators (MI200/300/350 families + gfx IDs + uarch labels):
+        "mi200",
+        "mi210",
+        "mi250",
+        "mi250x",
+        "mi300",
+        "mi300a",
+        "mi300x",
+        "mi325x",
+        "mi350x",
+        "mi355x",
+        "gfx90a",
+        "gfx940",
+        "gfx941",
+        "gfx942",
+        "gfx950",
+        "cdna",
+        "cdna2",
+        "cdna3",
+        "cdna4",
+        # NVIDIA datacenter accelerators (Ampere -> Blackwell + SM IDs + uarch labels):
+        "a100",
+        "h100",
+        "h200",
+        "b100",
+        "b200",
+        "sm80",
+        "sm86",
+        "sm89",
+        "sm90",
+        "sm100",
+        "ampere",
+        "hopper",
+        "blackwell",
+    }
+)
 
 
 def extract_keywords(description: str) -> list[str]:
@@ -50,6 +137,12 @@ def extract_keywords(description: str) -> list[str]:
 
     Whitelist hits first, then CamelCase identifiers; if nothing matched,
     fall back to the first five 3+ letter words so callers get some signal.
+
+    Args:
+        description: The gap description text to mine.
+
+    Returns:
+        A sorted, deduplicated list of keywords.
     """
     tokens = set(re.findall(r"[a-z][a-z0-9_]+", description.lower()))
     keywords = tokens & _TECHNICAL_TERMS
@@ -66,7 +159,13 @@ def score_title_against_keywords(title: str, keywords: Sequence[str]) -> int:
     """Count keywords overlapping the title's tokens, to rerank candidate PRs.
 
     Lowercase, snake_case-aware token split mirrors :func:`extract_keywords`.
-    Returns 0 for an empty title or empty keywords list.
+
+    Args:
+        title: The PR title to score.
+        keywords: Keywords to match against the title.
+
+    Returns:
+        The overlap count; ``0`` for an empty title or keyword list.
     """
     if not keywords or not title:
         return 0
@@ -83,40 +182,99 @@ def score_title_against_keywords(title: str, keywords: Sequence[str]) -> int:
 # picked an MoE/NVIDIA-H20 PR via positive-only overlap); axes below cover that.
 _ANTI_KEYWORDS: dict[str, frozenset[str]] = {
     # Model architecture: dense Transformers vs Mixture-of-Experts.
-    "dense":   frozenset({"moe", "mega_moe", "deepseek", "mixtral", "expert", "ep"}),
+    "dense": frozenset({"moe", "mega_moe", "deepseek", "mixtral", "expert", "ep"}),
     # GPU vendor / uarch: AMD CDNA vs NVIDIA datacenter accelerators.
-    "mi300x":  frozenset({"h100", "h200", "h20", "b100", "b200",
-                          "sm80", "sm86", "sm89", "sm90", "sm100",
-                          "ampere", "hopper", "blackwell", "nvidia"}),
-    "mi300":   frozenset({"h100", "h200", "h20", "b100", "b200",
-                          "sm80", "sm86", "sm89", "sm90", "sm100",
-                          "ampere", "hopper", "blackwell", "nvidia"}),
-    "mi250":   frozenset({"h100", "h200", "sm90", "nvidia", "hopper"}),
-    "mi250x":  frozenset({"h100", "h200", "sm90", "nvidia", "hopper"}),
-    "mi200":   frozenset({"h100", "h200", "sm90", "nvidia", "hopper"}),
-    "mi350x":  frozenset({"h100", "h200", "b100", "b200",
-                          "sm90", "sm100", "nvidia", "blackwell"}),
-    "cdna":    frozenset({"sm80", "sm86", "sm89", "sm90", "sm100",
-                          "ampere", "hopper", "blackwell", "nvidia"}),
-    "cdna3":   frozenset({"sm90", "sm100", "hopper", "blackwell", "nvidia"}),
-    "cdna4":   frozenset({"sm100", "blackwell", "nvidia"}),
-    "rocm":    frozenset({"cuda", "cudnn", "cublas", "tensorrt"}),
+    "mi300x": frozenset(
+        {
+            "h100",
+            "h200",
+            "h20",
+            "b100",
+            "b200",
+            "sm80",
+            "sm86",
+            "sm89",
+            "sm90",
+            "sm100",
+            "ampere",
+            "hopper",
+            "blackwell",
+            "nvidia",
+        }
+    ),
+    "mi300": frozenset(
+        {
+            "h100",
+            "h200",
+            "h20",
+            "b100",
+            "b200",
+            "sm80",
+            "sm86",
+            "sm89",
+            "sm90",
+            "sm100",
+            "ampere",
+            "hopper",
+            "blackwell",
+            "nvidia",
+        }
+    ),
+    "mi250": frozenset({"h100", "h200", "sm90", "nvidia", "hopper"}),
+    "mi250x": frozenset({"h100", "h200", "sm90", "nvidia", "hopper"}),
+    "mi200": frozenset({"h100", "h200", "sm90", "nvidia", "hopper"}),
+    "mi350x": frozenset({"h100", "h200", "b100", "b200", "sm90", "sm100", "nvidia", "blackwell"}),
+    "cdna": frozenset({"sm80", "sm86", "sm89", "sm90", "sm100", "ampere", "hopper", "blackwell", "nvidia"}),
+    "cdna3": frozenset({"sm90", "sm100", "hopper", "blackwell", "nvidia"}),
+    "cdna4": frozenset({"sm100", "blackwell", "nvidia"}),
+    "rocm": frozenset({"cuda", "cudnn", "cublas", "tensorrt"}),
     # Reverse direction: NVIDIA-gap PRs containing AMD-only signals.
-    "h100":    frozenset({"mi200", "mi210", "mi250", "mi250x",
-                          "mi300", "mi300x", "mi325x", "mi350x",
-                          "gfx90a", "gfx940", "gfx941", "gfx942", "gfx950",
-                          "cdna", "cdna2", "cdna3", "cdna4", "rocm"}),
-    "h200":    frozenset({"mi200", "mi210", "mi250", "mi250x",
-                          "mi300", "mi300x", "mi325x", "mi350x",
-                          "gfx940", "gfx942", "gfx950", "cdna3", "cdna4", "rocm"}),
-    "sm90":    frozenset({"mi300", "mi300x", "mi350x",
-                          "gfx940", "gfx942", "gfx950", "cdna3", "cdna4", "rocm"}),
-    "hopper":  frozenset({"mi300", "mi300x", "mi350x", "cdna3", "cdna4", "rocm"}),
+    "h100": frozenset(
+        {
+            "mi200",
+            "mi210",
+            "mi250",
+            "mi250x",
+            "mi300",
+            "mi300x",
+            "mi325x",
+            "mi350x",
+            "gfx90a",
+            "gfx940",
+            "gfx941",
+            "gfx942",
+            "gfx950",
+            "cdna",
+            "cdna2",
+            "cdna3",
+            "cdna4",
+            "rocm",
+        }
+    ),
+    "h200": frozenset(
+        {
+            "mi200",
+            "mi210",
+            "mi250",
+            "mi250x",
+            "mi300",
+            "mi300x",
+            "mi325x",
+            "mi350x",
+            "gfx940",
+            "gfx942",
+            "gfx950",
+            "cdna3",
+            "cdna4",
+            "rocm",
+        }
+    ),
+    "sm90": frozenset({"mi300", "mi300x", "mi350x", "gfx940", "gfx942", "gfx950", "cdna3", "cdna4", "rocm"}),
+    "hopper": frozenset({"mi300", "mi300x", "mi350x", "cdna3", "cdna4", "rocm"}),
     # Quantization regime: full-precision bf16/fp16 vs low-bit / quant PRs.
-    "bf16":    frozenset({"awq", "gptq", "fp8", "fp4", "int4", "int8",
-                          "w4a16", "w8a8", "smoothquant", "marlin"}),
-    "fp16":    frozenset({"fp8", "fp4", "int4", "awq", "gptq"}),
-    "fp8":     frozenset({"bf16", "fp16"}),
+    "bf16": frozenset({"awq", "gptq", "fp8", "fp4", "int4", "int8", "w4a16", "w8a8", "smoothquant", "marlin"}),
+    "fp16": frozenset({"fp8", "fp4", "int4", "awq", "gptq"}),
+    "fp8": frozenset({"bf16", "fp16"}),
 }
 
 
@@ -130,10 +288,16 @@ def score_title_with_anti_signal(
 
     ``positive`` = keyword tokens in the title; ``anti`` = title tokens in the
     anti-set of any active gap keyword (only :data:`_ANTI_KEYWORDS` entries
-    activate). Default ``anti_penalty`` of 2.0 means one anti hit erases two
+    activate). A default ``anti_penalty`` of 2.0 means one anti hit erases two
     positive hits, so a wrong-axis PR ranks below any single correct-axis hit.
-    Clamped to 0.0 so callers can post-filter ``score == 0`` to drop
-    anti-heavy PRs.
+
+    Args:
+        title: The PR title to score.
+        keywords: Active gap keywords driving positive and anti matches.
+        anti_penalty: Weight applied per anti-signal hit.
+
+    Returns:
+        The clamped score (>= 0.0); callers can drop ``score == 0`` PRs.
     """
     if not keywords or not title:
         return 0.0

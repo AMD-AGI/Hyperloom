@@ -36,16 +36,22 @@ def _init_git_repo(path: Path) -> None:
     env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
     subprocess.run(
         ["git", "init", "-b", "main", str(path)],
-        check=True, capture_output=True, env=env,
+        check=True,
+        capture_output=True,
+        env=env,
     )
     (path / "src.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     subprocess.run(
         ["git", "-C", str(path), "add", "."],
-        check=True, capture_output=True, env=env,
+        check=True,
+        capture_output=True,
+        env=env,
     )
     subprocess.run(
         ["git", "-C", str(path), "commit", "-m", "init"],
-        check=True, capture_output=True, env=env,
+        check=True,
+        capture_output=True,
+        env=env,
     )
 
 
@@ -73,8 +79,11 @@ index 0000000..1111111 100644
 
 
 def _make_candidate(
-    *, repo: str = "sgl-project/sglang", pr_number: int = 1234,
-    diff_url: str = "", title: str = "test PR",
+    *,
+    repo: str = "sgl-project/sglang",
+    pr_number: int = 1234,
+    diff_url: str = "",
+    title: str = "test PR",
 ) -> dict[str, Any]:
     return {
         "repo": repo,
@@ -121,7 +130,9 @@ def test_fetch_diff_to_path_succeeds_via_file_url(tmp_path: Path):
     src.write_text(_VALID_PATCH, encoding="utf-8")
     dest = tmp_path / "out" / "got.patch"
     ok, err = _fetch_diff_to_path(
-        f"file://{src}", dest, timeout_sec=5.0,
+        f"file://{src}",
+        dest,
+        timeout_sec=5.0,
     )
     assert ok, err
     assert dest.exists()
@@ -131,7 +142,9 @@ def test_fetch_diff_to_path_succeeds_via_file_url(tmp_path: Path):
 def test_fetch_diff_to_path_fails_on_bad_url(tmp_path: Path):
     dest = tmp_path / "missing.patch"
     ok, err = _fetch_diff_to_path(
-        f"file://{tmp_path / 'does-not-exist.patch'}", dest, timeout_sec=2.0,
+        f"file://{tmp_path / 'does-not-exist.patch'}",
+        dest,
+        timeout_sec=2.0,
     )
     assert not ok
     assert err
@@ -164,10 +177,13 @@ async def test_executor_no_patch_when_no_source_at_all(tmp_path: Path):
         "title": "no source",
         "diff_url": "",
     }
-    ctx = _make_ctx("t-fp-2", {
-        "candidate": cand,
-        "framework_source_root": str(repo),
-    })
+    ctx = _make_ctx(
+        "t-fp-2",
+        {
+            "candidate": cand,
+            "framework_source_root": str(repo),
+        },
+    )
     result = await executor(ctx)
     assert result["status"] == "no_patch"
     assert result["candidate"] == cand
@@ -185,13 +201,16 @@ async def test_executor_no_patch_when_explicit_patches_all_missing(tmp_path: Pat
     executor = FrameworkPrExecutor(session_dir=session_dir)
     cand = _make_candidate()  # carries a real diff_url
     missing = [str(tmp_path / "nope-1.patch"), str(tmp_path / "nope-2.patch")]
-    ctx = _make_ctx("t-fp-no-explicit", {
-        "candidate": cand,
-        "patches": missing,
-        "framework_source_root": str(repo),
-        "batch_id": "batch-001",
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-fp-no-explicit",
+        {
+            "candidate": cand,
+            "patches": missing,
+            "framework_source_root": str(repo),
+            "batch_id": "batch-001",
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
 
     assert result["status"] == "no_patch"
@@ -213,13 +232,16 @@ async def test_executor_apply_only_with_explicit_patch_succeeds(tmp_path: Path):
 
     executor = FrameworkPrExecutor(session_dir=session_dir)
     cand = _make_candidate()
-    ctx = _make_ctx("t-fp-3", {
-        "candidate": cand,
-        "patches": [str(patch_path)],
-        "framework_source_root": str(repo),
-        "batch_id": "batch-001",
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-fp-3",
+        {
+            "candidate": cand,
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "batch_id": "batch-001",
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
 
     assert result["status"] == "applied_no_bench"
@@ -242,12 +264,15 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
 
     executor = FrameworkPrExecutor(session_dir=session_dir)
     cand = _make_candidate()
-    ctx = _make_ctx("t-fp-4", {
-        "candidate": cand,
-        "patches": [str(patch_path)],
-        "framework_source_root": str(repo),
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-fp-4",
+        {
+            "candidate": cand,
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
 
     assert result["status"] == "apply_failed"
@@ -265,15 +290,17 @@ async def test_executor_no_framework_root_returns_apply_failed(tmp_path: Path):
     cand = _make_candidate()
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.framework_pr."
-        "_resolve_framework_root",
+        "inference_optimizer.orchestrator.action_executors.framework_pr._resolve_framework_root",
         return_value=None,
     ):
-        ctx = _make_ctx("t-fp-5", {
-            "candidate": cand,
-            "patches": [str(patch_path)],
-            "apply_only": True,
-        })
+        ctx = _make_ctx(
+            "t-fp-5",
+            {
+                "candidate": cand,
+                "patches": [str(patch_path)],
+                "apply_only": True,
+            },
+        )
         result = await executor(ctx)
 
     assert result["status"] == "apply_failed"
@@ -291,11 +318,14 @@ async def test_executor_fetch_failure_returns_fetch_failed(tmp_path: Path):
     cand = _make_candidate(
         diff_url=f"file://{tmp_path / 'missing-diff.patch'}",
     )
-    ctx = _make_ctx("t-fp-6", {
-        "candidate": cand,
-        "framework_source_root": str(repo),
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-fp-6",
+        {
+            "candidate": cand,
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
     assert result["status"] == "fetch_failed"
     assert result["error_class"] == "diff_fetch_failed"
@@ -333,13 +363,16 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
             {"accuracy_pass": None},
         )
 
-    ctx = _make_ctx("t-fp-keep", {
-        "candidate": cand,
-        "patches": [str(patch_path)],
-        "framework_source_root": str(repo),
-        "base_tput": 1000.0,
-        "keep_threshold_pct": 1.0,
-    })
+    ctx = _make_ctx(
+        "t-fp-keep",
+        {
+            "candidate": cand,
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
@@ -376,24 +409,23 @@ async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
             {"accuracy_pass": None},
         )
 
-    ctx = _make_ctx("t-fp-keep-kb", {
-        "candidate": cand,
-        "patches": [str(patch_path)],
-        "framework_source_root": str(repo),
-        "base_tput": 1000.0,
-        "keep_threshold_pct": 1.0,
-    })
+    ctx = _make_ctx(
+        "t-fp-keep-kb",
+        {
+            "candidate": cand,
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
     assert result["status"] == "kept"
     lessons = kb_root / "lessons.jsonl"
     assert lessons.exists()
-    records = [
-        json.loads(line)
-        for line in lessons.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    records = [json.loads(line) for line in lessons.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(records) == 1
     assert records[0]["outcome"] == "integrated"
     assert records[0]["pr_url"] == cand["pr_url"]
@@ -425,22 +457,23 @@ async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
             {"accuracy_pass": None},
         )
 
-    ctx = _make_ctx("t-fp-revert-kb", {
-        "candidate": cand,
-        "patches": [str(patch_path)],
-        "framework_source_root": str(repo),
-        "base_tput": 1000.0,
-        "keep_threshold_pct": 1.0,
-    })
+    ctx = _make_ctx(
+        "t-fp-revert-kb",
+        {
+            "candidate": cand,
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
     assert result["status"] == "reverted"
     records = [
         json.loads(line)
-        for line in (kb_root / "lessons.jsonl").read_text(
-            encoding="utf-8"
-        ).splitlines()
+        for line in (kb_root / "lessons.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     assert len(records) == 1
@@ -466,13 +499,16 @@ async def test_executor_revert_when_delta_below_threshold(tmp_path: Path):
             {"accuracy_pass": None},
         )
 
-    ctx = _make_ctx("t-fp-revert", {
-        "candidate": cand,
-        "patches": [str(patch_path)],
-        "framework_source_root": str(repo),
-        "base_tput": 1000.0,
-        "keep_threshold_pct": 1.0,
-    })
+    ctx = _make_ctx(
+        "t-fp-revert",
+        {
+            "candidate": cand,
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
@@ -502,13 +538,16 @@ async def test_executor_revert_on_accuracy_regression(tmp_path: Path):
             {"accuracy_pass": False},
         )
 
-    ctx = _make_ctx("t-fp-acc", {
-        "candidate": cand,
-        "patches": [str(patch_path)],
-        "framework_source_root": str(repo),
-        "base_tput": 1000.0,
-        "keep_threshold_pct": 1.0,
-    })
+    ctx = _make_ctx(
+        "t-fp-acc",
+        {
+            "candidate": cand,
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
@@ -533,12 +572,15 @@ async def test_executor_bench_exception_triggers_revert(tmp_path: Path):
     async def boom(self, *, params, output_root, slug):  # noqa: ARG001
         raise RuntimeError("simulated bench crash")
 
-    ctx = _make_ctx("t-fp-boom", {
-        "candidate": cand,
-        "patches": [str(patch_path)],
-        "framework_source_root": str(repo),
-        "base_tput": 1000.0,
-    })
+    ctx = _make_ctx(
+        "t-fp-boom",
+        {
+            "candidate": cand,
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+        },
+    )
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=boom):
         result = await executor(ctx)
 
@@ -587,26 +629,32 @@ async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
             {"accuracy_pass": None},
         )
 
-    ctx_a = _make_ctx("t-fp-keep-a", {
-        "candidate": _make_candidate(pr_number=101, title="A"),
-        "patches": [str(patch_a)],
-        "framework_source_root": str(repo),
-        "base_tput": 1000.0,
-        "keep_threshold_pct": 1.0,
-    })
+    ctx_a = _make_ctx(
+        "t-fp-keep-a",
+        {
+            "candidate": _make_candidate(pr_number=101, title="A"),
+            "patches": [str(patch_a)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=keep_bench):
         res_a = await executor(ctx_a)
     assert res_a["status"] == "kept", res_a
     assert res_a.get("keep_commit_sha"), "KEEP must record commit sha"
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
-    ctx_b = _make_ctx("t-fp-rej-b", {
-        "candidate": _make_candidate(pr_number=102, title="B"),
-        "patches": [str(patch_b)],
-        "framework_source_root": str(repo),
-        "base_tput": 1000.0,
-        "keep_threshold_pct": 1.0,
-    })
+    ctx_b = _make_ctx(
+        "t-fp-rej-b",
+        {
+            "candidate": _make_candidate(pr_number=102, title="B"),
+            "patches": [str(patch_b)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=reject_bench):
         res_b = await executor(ctx_b)
     assert res_b["status"] == "reverted", res_b
@@ -637,23 +685,29 @@ async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
             {"accuracy_pass": None},
         )
 
-    ctx_a = _make_ctx("t-fp-keep-a2", {
-        "candidate": _make_candidate(pr_number=201, title="A"),
-        "patches": [str(patch_a)],
-        "framework_source_root": str(repo),
-        "base_tput": 1000.0,
-        "keep_threshold_pct": 1.0,
-    })
+    ctx_a = _make_ctx(
+        "t-fp-keep-a2",
+        {
+            "candidate": _make_candidate(pr_number=201, title="A"),
+            "patches": [str(patch_a)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=keep_bench):
         res_a = await executor(ctx_a)
     assert res_a["status"] == "kept"
 
-    ctx_b = _make_ctx("t-fp-bad-b2", {
-        "candidate": _make_candidate(pr_number=202, title="B"),
-        "patches": [str(bad_patch)],
-        "framework_source_root": str(repo),
-        "apply_only": True,
-    })
+    ctx_b = _make_ctx(
+        "t-fp-bad-b2",
+        {
+            "candidate": _make_candidate(pr_number=202, title="B"),
+            "patches": [str(bad_patch)],
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
     res_b = await executor(ctx_b)
     assert res_b["status"] == "apply_failed"
 
@@ -674,28 +728,27 @@ def _init_repo_with_pr_branch(path: Path, *, pr_ref: str = "pr-head") -> str:
     """Init ``main`` plus a divergent ``pr_ref`` branch; returns the PR head sha."""
     env = _git_env()
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-b", "main", str(path)],
-                   check=True, capture_output=True, env=env)
+    subprocess.run(["git", "init", "-b", "main", str(path)], check=True, capture_output=True, env=env)
     (path / "src.py").write_text("def f():\n    return 1\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(path), "add", "."],
-                   check=True, capture_output=True, env=env)
-    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"],
-                   check=True, capture_output=True, env=env)
-    subprocess.run(["git", "-C", str(path), "checkout", "-b", pr_ref],
-                   check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(path), "checkout", "-b", pr_ref], check=True, capture_output=True, env=env)
     (path / "src.py").write_text("def f():\n    return 2\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(path), "commit", "-am", "pr head"],
-                   check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(path), "commit", "-am", "pr head"], check=True, capture_output=True, env=env)
     head = subprocess.run(
         ["git", "-C", str(path), "rev-parse", "HEAD"],
-        check=True, capture_output=True, text=True, env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
     ).stdout.strip()
     # Back to main; point origin at ourselves.
-    subprocess.run(["git", "-C", str(path), "checkout", "main"],
-                   check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(path), "checkout", "main"], check=True, capture_output=True, env=env)
     subprocess.run(
         ["git", "-C", str(path), "remote", "add", "origin", str(path)],
-        check=True, capture_output=True, env=env,
+        check=True,
+        capture_output=True,
+        env=env,
     )
     return head
 
@@ -704,10 +757,12 @@ def test_materialize_pr_diff_via_worktree_extracts_net_diff(tmp_path: Path):
     repo = tmp_path / "framework"
     head_sha = _init_repo_with_pr_branch(repo, pr_ref="pr-head")
     dest = tmp_path / "out" / "pr.patch"
-    cand = {"repo": "x/y", "pr_number": 7, "ref": "pr-head",
-            "head_sha": head_sha}
+    cand = {"repo": "x/y", "pr_number": 7, "ref": "pr-head", "head_sha": head_sha}
     ok, err = _materialize_pr_diff_via_worktree(
-        repo, cand, dest, timeout_sec=60.0,
+        repo,
+        cand,
+        dest,
+        timeout_sec=60.0,
     )
     assert ok, err
     text = dest.read_text()
@@ -722,7 +777,10 @@ def test_materialize_pr_diff_empty_when_no_ref(tmp_path: Path):
     _init_repo_with_pr_branch(repo)
     dest = tmp_path / "pr.patch"
     ok, err = _materialize_pr_diff_via_worktree(
-        repo, {"repo": "x/y"}, dest, timeout_sec=30.0,
+        repo,
+        {"repo": "x/y"},
+        dest,
+        timeout_sec=30.0,
     )
     assert not ok
     assert "cannot resolve PR head" in err or "head" in err.lower()
@@ -733,9 +791,8 @@ async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, mon
     """apply_mode=checkout_head extracts the PR's net diff, applies, benches (+10%), KEEPs."""
     # Redirect the KB writeback root so the KEEP record doesn't leak into the real KB.
     import inference_optimizer.orchestrator.kb_writeback as kb_writeback
-    monkeypatch.setattr(
-        kb_writeback, "KB_ROOT", tmp_path / "kb" / "framework_optimization"
-    )
+
+    monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "kb" / "framework_optimization")
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -744,8 +801,12 @@ async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, mon
 
     executor = FrameworkPrExecutor(session_dir=session_dir)
     cand = {
-        "repo": "sgl-project/sglang", "pr_number": 7, "ref": "pr-head",
-        "head_sha": head_sha, "title": "checkout-head PR", "diff_url": "",
+        "repo": "sgl-project/sglang",
+        "pr_number": 7,
+        "ref": "pr-head",
+        "head_sha": head_sha,
+        "title": "checkout-head PR",
+        "diff_url": "",
         "apply_mode": "checkout_head",
     }
 
@@ -755,12 +816,15 @@ async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, mon
             {"accuracy_pass": None},
         )
 
-    ctx = _make_ctx("t-fp-checkout", {
-        "candidate": cand,
-        "framework_source_root": str(repo),
-        "base_tput": 1000.0,
-        "keep_threshold_pct": 1.0,
-    })
+    ctx = _make_ctx(
+        "t-fp-checkout",
+        {
+            "candidate": cand,
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
@@ -780,14 +844,21 @@ async def test_executor_no_diff_url_falls_back_to_checkout_head(tmp_path: Path):
 
     executor = FrameworkPrExecutor(session_dir=session_dir)
     cand = {
-        "repo": "sgl-project/sglang", "pr_number": 7, "ref": "pr-head",
-        "head_sha": head_sha, "title": "no diff_url", "diff_url": "",
+        "repo": "sgl-project/sglang",
+        "pr_number": 7,
+        "ref": "pr-head",
+        "head_sha": head_sha,
+        "title": "no diff_url",
+        "diff_url": "",
     }
-    ctx = _make_ctx("t-fp-nodiffurl", {
-        "candidate": cand,
-        "framework_source_root": str(repo),
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-fp-nodiffurl",
+        {
+            "candidate": cand,
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
     assert result["status"] == "applied_no_bench", result
     assert (repo / "src.py").read_text().endswith("return 2\n")
@@ -812,13 +883,16 @@ async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
             {"accuracy_pass": None},
         )
 
-    ctx = _make_ctx("t-fp-addfile", {
-        "candidate": cand,
-        "patches": [str(patch_path)],
-        "framework_source_root": str(repo),
-        "base_tput": 1000.0,
-        "keep_threshold_pct": 1.0,
-    })
+    ctx = _make_ctx(
+        "t-fp-addfile",
+        {
+            "candidate": cand,
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
@@ -827,7 +901,9 @@ async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
     assert (repo / "new.py").exists()
     status = subprocess.run(
         ["git", "-C", str(repo), "status", "--porcelain"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     assert status == "", f"worktree not clean after KEEP: {status!r}"
 
@@ -840,9 +916,9 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
     repo = tmp_path / "framework"
     _init_git_repo(repo)
     subprocess.run(
-        ["git", "-C", str(repo), "remote", "add", "origin",
-         "https://github.com/sgl-project/sglang.git"],
-        check=True, capture_output=True,
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/sgl-project/sglang.git"],
+        check=True,
+        capture_output=True,
     )
     diff_file = tmp_path / "served.patch"
     diff_file.write_text(_VALID_PATCH, encoding="utf-8")
@@ -856,11 +932,14 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
         "diff_url": f"file://{diff_file}",
         "apply_mode": "checkout_head",  # explicitly requested
     }
-    ctx = _make_ctx("t-fp-crossrepo", {
-        "candidate": cand,
-        "framework_source_root": str(repo),
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-fp-crossrepo",
+        {
+            "candidate": cand,
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
 
     assert result["status"] == "applied_no_bench", result
@@ -873,6 +952,7 @@ def test_framework_pr_executor_imports_clean():
     from inference_optimizer.orchestrator.action_executors import (
         framework_pr as fp_mod,
     )
+
     assert hasattr(fp_mod, "FrameworkPrExecutor")
     assert callable(fp_mod.FrameworkPrExecutor)
 
@@ -880,6 +960,7 @@ def test_framework_pr_executor_imports_clean():
 def test_framework_pr_meta_loads():
     """The action_registry can load actions/_meta/framework_pr.yaml."""
     from inference_optimizer.orchestrator.action_registry import ActionRegistry
+
     reg = ActionRegistry().load()
     fp = reg.get("framework_pr")
     assert fp is not None

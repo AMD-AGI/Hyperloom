@@ -241,9 +241,7 @@ class _HttpTransport:
         if params is not None:
             # Drop ``None`` values so callers can pass through
             # optional query params unconditionally.
-            kwargs["params"] = {
-                k: v for k, v in dict(params).items() if v is not None
-            }
+            kwargs["params"] = {k: v for k, v in dict(params).items() if v is not None}
         for attempt in range(attempts):
             with self._semaphore:
                 try:
@@ -258,9 +256,9 @@ class _HttpTransport:
                     continue
                 if response.status_code >= 500:
                     last_exc = RemoteRecipeClientError(
-                        f"transport 5xx on {method} {path}: "
-                        f"{response.status_code}",
-                        category="transport", status=response.status_code,
+                        f"transport 5xx on {method} {path}: {response.status_code}",
+                        category="transport",
+                        status=response.status_code,
                     )
                     self._backoff(attempt)
                     continue
@@ -270,8 +268,10 @@ class _HttpTransport:
                     category, code, message, details = _parse_error_envelope(response)
                     raise RemoteRecipeClientError(
                         f"{method} {path} -> {response.status_code}: {message}",
-                        category=category, code=code,
-                        status=response.status_code, details=details,
+                        category=category,
+                        code=code,
+                        status=response.status_code,
+                        details=details,
                     )
                 if response.status_code == 204 or not response.content:
                     return {}
@@ -283,13 +283,9 @@ class _HttpTransport:
                         category="unknown",
                         status=response.status_code,
                     ) from exc
-                return (
-                    parsed if isinstance(parsed, dict)
-                    else {"_value": parsed}
-                )
+                return parsed if isinstance(parsed, dict) else {"_value": parsed}
         raise RemoteRecipeClientError(
-            f"transport_exhausted after {attempts} attempts: "
-            f"{method} {path}: {last_exc}",
+            f"transport_exhausted after {attempts} attempts: {method} {path}: {last_exc}",
             category="transport",
         )
 
@@ -379,10 +375,7 @@ class RemoteRecipeClient:
             # Operators opt in to a remote KB only by passing a URL.
             self.enabled = False
         if self.timeout_sec is None:
-            profile_default = (
-                C.FOREGROUND_HTTP_TIMEOUT_SEC if self.foreground
-                else C.DEFAULT_HTTP_TIMEOUT_SEC
-            )
+            profile_default = C.FOREGROUND_HTTP_TIMEOUT_SEC if self.foreground else C.DEFAULT_HTTP_TIMEOUT_SEC
             self.timeout_sec = profile_default
         env_timeout = os.environ.get("CORTEX_KB_HTTP_TIMEOUT_SEC")
         if env_timeout:
@@ -391,10 +384,7 @@ class RemoteRecipeClient:
             except ValueError:
                 pass
         if self.retry_attempts is None:
-            profile_default_retry = (
-                C.FOREGROUND_RETRY_ATTEMPTS if self.foreground
-                else C.DEFAULT_RETRY_ATTEMPTS
-            )
+            profile_default_retry = C.FOREGROUND_RETRY_ATTEMPTS if self.foreground else C.DEFAULT_RETRY_ATTEMPTS
             self.retry_attempts = profile_default_retry
         env_retry = os.environ.get("CORTEX_KB_RETRY_ATTEMPTS")
         if env_retry:
@@ -504,7 +494,8 @@ class RemoteRecipeClient:
         if version is not None:
             params[C.F_VERSION] = int(version)
         resp = self._ensure_transport().request(
-            "GET", path,
+            "GET",
+            path,
             params=params if params else None,
             allow_404=True,
         )
@@ -542,7 +533,9 @@ class RemoteRecipeClient:
             raise ValueError("get_history requires a non-empty canonical_id")
         path = C.format_recipe_path(C.PATH_RECIPE_HISTORY_TPL, canonical_id)
         resp = self._ensure_transport().request(
-            "GET", path, params={C.F_LIMIT: int(limit)},
+            "GET",
+            path,
+            params={C.F_LIMIT: int(limit)},
         )
         if not isinstance(resp, dict):
             return []
@@ -563,7 +556,8 @@ class RemoteRecipeClient:
         if not self.enabled:
             return []
         resp = self._ensure_transport().request(
-            "GET", C.PATH_RECIPES_LIST,
+            "GET",
+            C.PATH_RECIPES_LIST,
             params={C.F_LIMIT: int(limit)},
         )
         if not isinstance(resp, dict):
@@ -592,13 +586,25 @@ class RemoteRecipeClient:
         server-side prefer ranking, so the dispatcher applies a
         client-side rerank over the returned rows; this client only
         forwards the ``required`` filter.
+
+        Args:
+            label_match: Identity labels to filter on.
+            metric_filters: ``{metric: {min, max}}`` bounds to apply.
+            updated_since: Lower bound on ``updated_at``.
+            order_by: Ordering directive forwarded to the server.
+            limit: Maximum number of rows to request.
+            prefer: Accepted for signature parity; ignored here (rerank lives
+                in the dispatcher).
+
+        Returns:
+            The matching recipe rows, or ``[]`` when the client is disabled.
         """
         del prefer  # client-side rerank lives in RecipeKB
         if not self.enabled:
             return []
         body: dict[str, Any] = {
             C.F_ORDER_BY: order_by,
-            C.F_LIMIT:    int(limit),
+            C.F_LIMIT: int(limit),
         }
         if label_match:
             body[C.F_LABEL_MATCH] = dict(label_match)
@@ -607,7 +613,9 @@ class RemoteRecipeClient:
         if updated_since:
             body[C.F_UPDATED_SINCE] = str(updated_since)
         resp = self._ensure_transport().request(
-            "POST", C.PATH_RECIPES_SEARCH, body=body,
+            "POST",
+            C.PATH_RECIPES_SEARCH,
+            body=body,
         )
         if not isinstance(resp, dict):
             return []
@@ -642,7 +650,9 @@ class RemoteRecipeClient:
             raise ValueError("list_attempts requires a non-empty canonical_id")
         path = C.format_recipe_path(C.PATH_RECIPE_ATTEMPTS_TPL, canonical_id)
         resp = self._ensure_transport().request(
-            "GET", path, params={C.F_LIMIT: int(limit)},
+            "GET",
+            path,
+            params={C.F_LIMIT: int(limit)},
         )
         if not isinstance(resp, dict):
             return []
@@ -677,10 +687,13 @@ class RemoteRecipeClient:
                 "list_session_attempts requires a non-empty session_id",
             )
         path = C.PATH_SESSION_ATTEMPTS_TPL.replace(
-            "{session_id}", session_id,
+            "{session_id}",
+            session_id,
         )
         resp = self._ensure_transport().request(
-            "GET", path, params={C.F_LIMIT: int(limit)},
+            "GET",
+            path,
+            params={C.F_LIMIT: int(limit)},
         )
         if not isinstance(resp, dict):
             return []
@@ -714,7 +727,8 @@ class RemoteRecipeClient:
                 "session_summary requires a non-empty session_id",
             )
         path = C.PATH_SESSION_SUMMARY_TPL.replace(
-            "{session_id}", session_id,
+            "{session_id}",
+            session_id,
         )
         resp = self._ensure_transport().request("GET", path)
         return dict(resp) if isinstance(resp, dict) else None

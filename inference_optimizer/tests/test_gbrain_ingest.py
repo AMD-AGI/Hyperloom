@@ -1,6 +1,7 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
 """Unit tests for the local-recipe -> gbrain bulk ingest."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -16,12 +17,17 @@ from inference_optimizer.recipe_kb.gbrain_remote_client import _page_to_recipe
 
 def _recipe(**over: Any) -> dict[str, Any]:
     base = {
-        "canonical_id": "inference:qwen3-32b:mi300x:sglang:0_5_11:fp8",
-        "model": "Qwen3-32B", "hardware": "mi300x", "framework": "sglang",
-        "framework_version": "0_5_11", "precision": "fp8",
+        "canonical_id": "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:0_5_11:fp8",
+        "model": "Qwen3-32B",
+        "hardware": "mi300x",
+        "framework": "sglang",
+        "framework_version": "0_5_11",
+        "precision": "fp8",
         "best_config": {"extra_server_args": "--cuda-graph-max-bs 256", "FOO": "1"},
-        "best_throughput": 5800.5, "validated_gain_pct": 7.8,
-        "authority": "EXPERIENTIAL", "confidence": 0.85,
+        "best_throughput": 5800.5,
+        "validated_gain_pct": 7.8,
+        "authority": "EXPERIENTIAL",
+        "confidence": 0.85,
     }
     base.update(over)
     return base
@@ -43,24 +49,30 @@ def test_scalar_quotes_risky_keeps_barewords() -> None:
 
 def test_recipe_to_page_roundtrips_via_reader() -> None:
     slug, content = recipe_to_page(_recipe())
-    assert slug == "recipe-snapshot/inference/qwen3-32b/mi300x/sglang/0_5_11/fp8"
+    assert slug == "recipe-snapshot/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/0_5_11/fp8"
+    # Check version token quoting survived
     assert content.startswith("---\ntype: recipe\n")
     # the version token must be quoted so it survives YAML parse
     assert 'framework_version: "0_5_11"' in content
     fm = {
         "attrs": {
-            "model": "Qwen3-32B", "hardware": "mi300x", "framework": "sglang",
-            "framework_version": "0_5_11", "precision": "fp8",
+            "model": "Qwen3-32B",
+            "hardware": "mi300x",
+            "framework": "sglang",
+            "framework_version": "0_5_11",
+            "precision": "fp8",
             "best_config_args": "--cuda-graph-max-bs 256",
             "best_config_envs": {"FOO": "1"},
-            "best_throughput": 5800.5, "validated_gain_pct": 7.8,
+            "best_throughput": 5800.5,
+            "validated_gain_pct": 7.8,
         },
-        "authority": "EXPERIENTIAL", "confidence": 0.85,
+        "authority": "EXPERIENTIAL",
+        "confidence": 0.85,
     }
     r = _page_to_recipe(fm)
     # Reader now emits the unified nested KB-interface envelope: champion
     # under ``body.best_config``, throughput under ``metrics``/``body``.
-    assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:0_5_11:fp8"
+    assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:0_5_11:fp8"
     assert r["body"]["best_config"] == {
         "extra_server_args": "--cuda-graph-max-bs 256",
         "extra_envs": {"FOO": "1"},
@@ -70,30 +82,40 @@ def test_recipe_to_page_roundtrips_via_reader() -> None:
 
 def test_best_config_split_unwraps_nested_extra_envs() -> None:
     # Nested extra_envs dict must be unwrapped, not str()'d into one bogus key.
-    args, envs = _best_config_split({
-        "extra_server_args": "--cuda-graph-max-bs 256",
-        "extra_envs": {"SGLANG_X": "1", "FOO": "bar"},
-    })
+    args, envs = _best_config_split(
+        {
+            "extra_server_args": "--cuda-graph-max-bs 256",
+            "extra_envs": {"SGLANG_X": "1", "FOO": "bar"},
+        }
+    )
     assert args == "--cuda-graph-max-bs 256"
     assert envs == {"SGLANG_X": "1", "FOO": "bar"}
     assert "extra_envs" not in envs
 
 
 def test_best_config_split_handles_flat_envs() -> None:
-    args, envs = _best_config_split({
-        "extra_server_args": "--x 1", "FOO": "1", "BAR": "2",
-    })
+    args, envs = _best_config_split(
+        {
+            "extra_server_args": "--x 1",
+            "FOO": "1",
+            "BAR": "2",
+        }
+    )
     assert args == "--x 1"
     assert envs == {"FOO": "1", "BAR": "2"}
 
 
 def test_best_config_split_skips_passthrough_metadata() -> None:
     # name/tput/accuracy are not envs and must not be serialized as such.
-    args, envs = _best_config_split({
-        "extra_server_args": "--x 1",
-        "name": "v1", "tput": 5400.0, "accuracy": 0.9,
-        "extra_envs": {"E": "1"},
-    })
+    args, envs = _best_config_split(
+        {
+            "extra_server_args": "--x 1",
+            "name": "v1",
+            "tput": 5400.0,
+            "accuracy": 0.9,
+            "extra_envs": {"E": "1"},
+        }
+    )
     assert args == "--x 1"
     assert envs == {"E": "1"}
 
@@ -102,10 +124,12 @@ def test_nested_extra_envs_roundtrips_via_reader() -> None:
     # End-to-end: nested-env recipe -> page -> read surfaces canonical extra_envs.
     import yaml
 
-    rec = _recipe(best_config={
-        "extra_server_args": "--cuda-graph-max-bs 256",
-        "extra_envs": {"SGLANG_X": "1"},
-    })
+    rec = _recipe(
+        best_config={
+            "extra_server_args": "--cuda-graph-max-bs 256",
+            "extra_envs": {"SGLANG_X": "1"},
+        }
+    )
     _slug, content = recipe_to_page(rec)
     fm = yaml.safe_load(content.split("---", 2)[1])
     r = _page_to_recipe(fm)
@@ -123,10 +147,14 @@ def test_negative_knowledge_roundtrips() -> None:
     lessons = [{"note": "fp8 baseline already near-optimal"}]
     what_failed = [{"variant": "ncds16", "gain_pct": -0.28}]
     what_worked = [{"flag": "--cuda-graph-max-bs 256", "gain_pct": 0.4}]
-    _slug, content = recipe_to_page(_recipe(
-        pitfalls=pitfalls, lessons=lessons,
-        what_failed=what_failed, what_worked=what_worked,
-    ))
+    _slug, content = recipe_to_page(
+        _recipe(
+            pitfalls=pitfalls,
+            lessons=lessons,
+            what_failed=what_failed,
+            what_worked=what_worked,
+        )
+    )
     fm = yaml.safe_load(content.split("---", 2)[1])
     r = _page_to_recipe(fm)
     # pitfalls / lessons stay top-level in the nested envelope; the
@@ -146,9 +174,16 @@ def test_negative_knowledge_absent_yields_empty() -> None:
     assert r["failures"] == [] and r["findings"] == []
 
 
-def test_recipe_to_page_skips_bare_anchor() -> None:
-    assert recipe_to_page(_recipe(best_config={})) is None
+def test_recipe_to_page_mirrors_bare_anchor_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", raising=False)
+    assert recipe_to_page(_recipe(best_config={})) is not None
     assert recipe_to_page(_recipe(best_config={}, canonical_id="")) is None
+
+
+def test_recipe_to_page_strict_flag_skips_bare_anchor(monkeypatch) -> None:
+    monkeypatch.setenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", "1")
+    assert recipe_to_page(_recipe(best_config={})) is None
+    assert recipe_to_page(_recipe(best_config={}, lessons=[{"statement": "x"}])) is not None
 
 
 class _FakeMcp:
@@ -161,20 +196,22 @@ class _FakeMcp:
         return {}
 
 
-def test_ingest_counts_and_gates() -> None:
+def test_ingest_counts_and_gates(monkeypatch) -> None:
+    monkeypatch.delenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", raising=False)
     recipes = [
         _recipe(),
-        _recipe(canonical_id="inference:a:b:c:d:e", best_config={}),  # anchor -> skip
-        _recipe(canonical_id="inference:m2:mi355x:vllm:v1:fp16",
-                model="m2", hardware="mi355x", framework="vllm"),
+        _recipe(canonical_id="inference:a:b:c:d:e", best_config={}),  # anchor -> mirror
+        _recipe(canonical_id="", best_config={}),  # no cid -> skip
+        _recipe(canonical_id="inference:m2:mi355x:vllm:v1:fp16", model="m2", hardware="mi355x", framework="vllm"),
     ]
     mcp = _FakeMcp()
     stats = ingest_local_to_gbrain(recipes=recipes, mcp=mcp, dry_run=False)
-    assert stats["total"] == 3
-    assert stats["ingested"] == 2
-    assert stats["skipped_no_config"] == 1
+    assert stats["total"] == 4
+    assert stats["ingested"] == 3
+    assert stats["skipped_unmirrorable"] == 1
+    assert stats["skipped_no_config"] == 1  # legacy alias
     assert stats["errors"] == 0
-    assert len(mcp.puts) == 2
+    assert len(mcp.puts) == 3
 
 
 def test_ingest_dry_run_writes_nothing() -> None:
@@ -183,13 +220,16 @@ def test_ingest_dry_run_writes_nothing() -> None:
     assert stats["ingested"] == 1 and mcp.puts == []
 
 
-def test_mirror_recipe_gates_and_writes() -> None:
+def test_mirror_recipe_gates_and_writes(monkeypatch) -> None:
     from inference_optimizer.recipe_kb.gbrain_ingest import mirror_recipe
+
+    monkeypatch.delenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", raising=False)
     mcp = _FakeMcp()
     assert mirror_recipe(_recipe(), mcp) is True and len(mcp.puts) == 1
-    assert mirror_recipe(_recipe(best_config={}), mcp) is False
+    assert mirror_recipe(_recipe(best_config={}), mcp) is True
+    assert len(mcp.puts) == 2
     assert mirror_recipe(_recipe(), None) is False
-    assert len(mcp.puts) == 1
+    assert len(mcp.puts) == 2
 
 
 class _RecordingInner:
@@ -206,6 +246,7 @@ class _RecordingInner:
 
 def test_mirroring_wrapper_local_first_then_mirror() -> None:
     from inference_optimizer.recipe_kb.gbrain_ingest import GbrainMirroringRecipeKB
+
     inner = _RecordingInner()
     mcp = _FakeMcp()
     kb = GbrainMirroringRecipeKB(inner, mcp)

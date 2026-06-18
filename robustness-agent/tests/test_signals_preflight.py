@@ -52,6 +52,7 @@ def _ctx(
 # helpers — pure math
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "name,expected",
     [
@@ -62,7 +63,10 @@ def _ctx(
         ("MiniMax-M2.5", None),
         ("", None),
         ("Mistral-7b-v0.3", 7.0),
-        ("Mixtral-8x22B", None),  # ``8x22B`` — ``2`` is preceded by ``2`` (digit); ``x22`` rejected by ``(?<![A-Za-z0-9])`` boundary. Edge case the heuristic deliberately skips.
+        (
+            "Mixtral-8x22B",
+            None,
+        ),  # ``8x22B`` — ``2`` is preceded by ``2`` (digit); ``x22`` rejected by ``(?<![A-Za-z0-9])`` boundary. Edge case the heuristic deliberately skips.
     ],
 )
 def test_extract_params_billions(name, expected):
@@ -75,9 +79,7 @@ def test_amdahl_e2e_ceiling_well_known_values():
     # 0% optimizable → no gain regardless of single-kernel speedup.
     assert amdahl_e2e_ceiling(optimizable_pct=0, single_kernel_speedup=2.0) == 1.0
     # 30.9% Triton at 1.5x → ceiling ~ 1.117x = 11.7%.
-    assert amdahl_e2e_ceiling(
-        optimizable_pct=30.9, single_kernel_speedup=1.5
-    ) == pytest.approx(1.117, rel=1e-2)
+    assert amdahl_e2e_ceiling(optimizable_pct=30.9, single_kernel_speedup=1.5) == pytest.approx(1.117, rel=1e-2)
 
 
 def test_compute_headroom_gib_basic_mi300x_fits():
@@ -122,17 +124,23 @@ def test_compute_headroom_gib_dsr1_tp1_does_not_fit():
 def test_compute_headroom_gib_returns_none_for_missing_fields():
     assert compute_headroom_gib({}) is None
     assert compute_headroom_gib({"model_name": "no-size-token"}) is None
-    assert compute_headroom_gib({
-        "model_name": "32B",
-        "workload": {"precision": "bf16"},
-        "tp": 8,
-        # missing gpu_type
-    }) is None
+    assert (
+        compute_headroom_gib(
+            {
+                "model_name": "32B",
+                "workload": {"precision": "bf16"},
+                "tp": 8,
+                # missing gpu_type
+            }
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
 # C1 ModelGpuFitDetector
 # ---------------------------------------------------------------------------
+
 
 def _manifest_dsr1_tp1() -> dict:
     return {
@@ -156,9 +164,7 @@ def _manifest_dsr1_tp8() -> dict:
 
 def test_model_gpu_fit_fires_high_on_infeasible():
     det = ModelGpuFitDetector()
-    out = det.evaluate(
-        _ctx(), SourceData(local_manifest=_manifest_dsr1_tp1())
-    )
+    out = det.evaluate(_ctx(), SourceData(local_manifest=_manifest_dsr1_tp1()))
     sym = next(s for s in out if s.name == "model_gpu_infeasible")
     assert sym.severity is SymptomSeverity.HIGH
     assert sym.evidence["headroom_pct"] < 0
@@ -168,9 +174,7 @@ def test_model_gpu_fit_fires_high_on_infeasible():
 
 def test_model_gpu_fit_silent_when_fits():
     det = ModelGpuFitDetector()
-    out = det.evaluate(
-        _ctx(), SourceData(local_manifest=_manifest_dsr1_tp8())
-    )
+    out = det.evaluate(_ctx(), SourceData(local_manifest=_manifest_dsr1_tp8()))
     assert all(s.name != "model_gpu_infeasible" for s in out)
 
 
@@ -209,12 +213,17 @@ def test_model_gpu_fit_silent_on_missing_manifest():
 def test_model_gpu_fit_silent_on_unknown_model_name():
     """No -<N>B token in name → cannot judge feasibility → silent."""
     det = ModelGpuFitDetector()
-    out = det.evaluate(_ctx(), SourceData(local_manifest={
-        "model_name": "MiniMax-M2.5",
-        "gpu_type": "mi300x",
-        "tp": 8,
-        "workload": {"precision": "bf16", "max_model_len": 4096, "conc": 8},
-    }))
+    out = det.evaluate(
+        _ctx(),
+        SourceData(
+            local_manifest={
+                "model_name": "MiniMax-M2.5",
+                "gpu_type": "mi300x",
+                "tp": 8,
+                "workload": {"precision": "bf16", "max_model_len": 4096, "conc": 8},
+            }
+        ),
+    )
     assert all(s.name != "model_gpu_infeasible" for s in out)
 
 
@@ -224,18 +233,24 @@ def test_model_gpu_fit_custom_min_headroom_pct():
     # 32B BF16 on MI300X with TP=2 — ~64 GiB weights / 2 = 32 GiB per gpu
     # plus KV cache & activation — well under 192 GB, headroom ~60%+ →
     # still passes the strict 30% gate.
-    out = det.evaluate(_ctx(), SourceData(local_manifest={
-        "model_name": "Qwen3-32B",
-        "gpu_type": "mi300x",
-        "tp": 2,
-        "workload": {"precision": "bf16", "max_model_len": 4096, "conc": 8},
-    }))
+    out = det.evaluate(
+        _ctx(),
+        SourceData(
+            local_manifest={
+                "model_name": "Qwen3-32B",
+                "gpu_type": "mi300x",
+                "tp": 2,
+                "workload": {"precision": "bf16", "max_model_len": 4096, "conc": 8},
+            }
+        ),
+    )
     assert out == []
 
 
 # ---------------------------------------------------------------------------
 # C2 AmdahlCeilingDetector
 # ---------------------------------------------------------------------------
+
 
 def test_amdahl_ceiling_silent_on_dsr1_case_with_default_threshold():
     """The 2026-05 DSR1-FP8 case (30.9% Triton at 1.5x → ceiling ~11.7%):
@@ -245,7 +260,10 @@ def test_amdahl_ceiling_silent_on_dsr1_case_with_default_threshold():
     det = AmdahlCeilingDetector()
     breakdown = {
         "tier_pcts": {
-            "triton": 30.9, "vendor": 41.6, "framework": 7.4, "comm": 20.1,
+            "triton": 30.9,
+            "vendor": 41.6,
+            "framework": 7.4,
+            "comm": 20.1,
         },
         "total_kernels": 50,
         "kernel_breakdown_path": "/p/kernel_breakdown.json",
@@ -319,9 +337,12 @@ def test_amdahl_ceiling_silent_when_no_breakdown():
 
 def test_amdahl_ceiling_custom_aggressive_thresholds():
     """Tighter 15% ceiling threshold catches the DSR1 30.9% Triton case."""
-    det = AmdahlCeilingDetector(AmdahlCeilingConfig(
-        single_kernel_speedup=1.5, min_e2e_ceiling_pct=15.0,
-    ))
+    det = AmdahlCeilingDetector(
+        AmdahlCeilingConfig(
+            single_kernel_speedup=1.5,
+            min_e2e_ceiling_pct=15.0,
+        )
+    )
     breakdown = {
         "tier_pcts": {"triton": 30.9, "vendor": 41.6, "framework": 7.4, "comm": 20.1},
         "total_kernels": 50,
@@ -337,11 +358,13 @@ def test_amdahl_ceiling_custom_aggressive_thresholds():
 # C3 cold_start_budget_exhausted
 # ---------------------------------------------------------------------------
 
+
 def test_cold_start_fires_when_cold_and_short_budget():
     data = SourceData(local_aiter_jit={"so_count": 5, "jit_dir": "/x"})
     ctx = _ctx(budget_minutes=120.0, remaining_minutes=30.0)
     out = evaluate_cold_start_signals(
-        ctx, data,
+        ctx,
+        data,
         config=ColdStartConfig(cold_so_count=20, cold_start_minutes=60.0),
     )
     sym = next(s for s in out if s.name == "cold_start_budget_exhausted")
@@ -353,7 +376,8 @@ def test_cold_start_silent_when_warm():
     data = SourceData(local_aiter_jit={"so_count": 80})
     ctx = _ctx(budget_minutes=120.0, remaining_minutes=30.0)
     out = evaluate_cold_start_signals(
-        ctx, data,
+        ctx,
+        data,
         config=ColdStartConfig(cold_so_count=20, cold_start_minutes=60.0),
     )
     assert all(s.name != "cold_start_budget_exhausted" for s in out)
@@ -363,7 +387,8 @@ def test_cold_start_silent_with_ample_budget():
     data = SourceData(local_aiter_jit={"so_count": 5})
     ctx = _ctx(budget_minutes=360.0, remaining_minutes=300.0)
     out = evaluate_cold_start_signals(
-        ctx, data,
+        ctx,
+        data,
         config=ColdStartConfig(cold_so_count=20, cold_start_minutes=60.0),
     )
     assert all(s.name != "cold_start_budget_exhausted" for s in out)
@@ -373,7 +398,8 @@ def test_cold_start_silent_in_closing_phase():
     data = SourceData(local_aiter_jit={"so_count": 5})
     ctx = _ctx(remaining_minutes=10.0, closing_phase=True)
     out = evaluate_cold_start_signals(
-        ctx, data,
+        ctx,
+        data,
         config=ColdStartConfig(cold_so_count=20, cold_start_minutes=60.0),
     )
     assert out == []
@@ -383,9 +409,12 @@ def test_cold_start_silent_with_short_budget_below_min():
     data = SourceData(local_aiter_jit={"so_count": 5})
     ctx = _ctx(budget_minutes=20.0, remaining_minutes=10.0)
     out = evaluate_cold_start_signals(
-        ctx, data,
+        ctx,
+        data,
         config=ColdStartConfig(
-            cold_so_count=20, cold_start_minutes=60.0, min_budget_minutes=30.0,
+            cold_so_count=20,
+            cold_start_minutes=60.0,
+            min_budget_minutes=30.0,
         ),
     )
     assert out == []
@@ -393,13 +422,16 @@ def test_cold_start_silent_with_short_budget_below_min():
 
 def test_cold_start_reads_env_when_minutes_unset(monkeypatch):
     monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC", "5400",
+        "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
+        "5400",
     )  # 90 min
     data = SourceData(local_aiter_jit={"so_count": 5})
     ctx = _ctx(budget_minutes=180.0, remaining_minutes=80.0)
     # 80 min remaining < 90 min env cold-start → fire.
     out = evaluate_cold_start_signals(
-        ctx, data, config=ColdStartConfig(cold_so_count=20),
+        ctx,
+        data,
+        config=ColdStartConfig(cold_so_count=20),
     )
     sym = next(s for s in out if s.name == "cold_start_budget_exhausted")
     assert sym.evidence["cold_start_minutes"] == 90.0
@@ -407,7 +439,8 @@ def test_cold_start_reads_env_when_minutes_unset(monkeypatch):
 
 def test_cold_start_silent_when_no_aiter_data():
     out = evaluate_cold_start_signals(
-        _ctx(), SourceData(),
+        _ctx(),
+        SourceData(),
         config=ColdStartConfig(cold_so_count=20, cold_start_minutes=60.0),
     )
     assert out == []

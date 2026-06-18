@@ -59,9 +59,7 @@ def test_atom_auto_tighten_does_not_touch_enable_roofline(capsys):
     for initial in (True, False):
         args = _fresh_args(enable_roofline=initial)
         optimizer_cli._apply_atom_auto_tighten(args)
-        assert args.enable_roofline is initial, (
-            f"enable_roofline={initial} must not be flipped by atom auto-tighten"
-        )
+        assert args.enable_roofline is initial, f"enable_roofline={initial} must not be flipped by atom auto-tighten"
 
 
 def test_atom_auto_tighten_rejects_multi_node():
@@ -81,9 +79,15 @@ def test_atom_auto_tighten_accepts_single_node_explicitly():
 def test_framework_choices_include_atom():
     """Parser-level: --framework atom is accepted by argparse."""
     parser = optimizer_cli._build_parser()
-    parsed = parser.parse_args([
-        "optimize", "--model", "/tmp/m", "--framework", "atom",
-    ])
+    parsed = parser.parse_args(
+        [
+            "optimize",
+            "--model",
+            "/tmp/m",
+            "--framework",
+            "atom",
+        ]
+    )
     assert parsed.framework == "atom"
 
 
@@ -91,9 +95,15 @@ def test_framework_choices_reject_unknown_value():
     """Regression guard: the whitelist must not silently accept unknown frameworks."""
     parser = optimizer_cli._build_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args([
-            "optimize", "--model", "/tmp/m", "--framework", "tensorrt",
-        ])
+        parser.parse_args(
+            [
+                "optimize",
+                "--model",
+                "/tmp/m",
+                "--framework",
+                "tensorrt",
+            ]
+        )
 
 
 # Cross-cutting static guard: purpose narrowed to multi-node guard only.
@@ -102,15 +112,9 @@ def test_atom_auto_tighten_only_purpose_is_multi_node_guard():
     src = inspect.getsource(optimizer_cli._apply_atom_auto_tighten)
     # Strip the docstring before checking; it may reference historical flips.
     body_only = src.split('"""', 2)[-1] if '"""' in src else src
-    assert "args.no_kernel = True" not in body_only, (
-        "auto-tighten body must not flip no_kernel"
-    )
-    assert "args.no_framework = True" not in body_only, (
-        "auto-tighten body must not flip no_framework"
-    )
-    assert "args.enable_roofline" not in body_only, (
-        "auto-tighten body must not touch enable_roofline"
-    )
+    assert "args.no_kernel = True" not in body_only, "auto-tighten body must not flip no_kernel"
+    assert "args.no_framework = True" not in body_only, "auto-tighten body must not flip no_framework"
+    assert "args.enable_roofline" not in body_only, "auto-tighten body must not touch enable_roofline"
     assert "nodes" in body_only
 
 
@@ -120,20 +124,14 @@ def test_atom_auto_tighten_log_line_is_single_line(capsys):
     optimizer_cli._apply_atom_auto_tighten(args)
     out = capsys.readouterr().out
     atom_lines = [l for l in out.splitlines() if "framework=atom" in l]
-    assert len(atom_lines) == 1, (
-        f"expected exactly one atom-context line, got "
-        f"{len(atom_lines)}: {atom_lines!r}"
-    )
+    assert len(atom_lines) == 1, f"expected exactly one atom-context line, got {len(atom_lines)}: {atom_lines!r}"
 
 
 # Forward-looking alias for the multi-node-guard-only behaviour.
 def test_assert_atom_single_node_alias_resolves_to_same_callable():
     """`_assert_atom_single_node` is a forward-looking alias for `_apply_atom_auto_tighten`; both resolve to the same callable."""
     assert hasattr(optimizer_cli, "_assert_atom_single_node")
-    assert (
-        optimizer_cli._assert_atom_single_node
-        is optimizer_cli._apply_atom_auto_tighten
-    )
+    assert optimizer_cli._assert_atom_single_node is optimizer_cli._apply_atom_auto_tighten
 
 
 def test_assert_atom_single_node_alias_exits_on_multi_node(capsys):

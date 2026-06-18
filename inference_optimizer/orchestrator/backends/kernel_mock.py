@@ -71,20 +71,24 @@ class MockKernelBackend:
             kind_match = _KIND_RE.search(raw_payload)
             kind = kind_match.group(1) if kind_match else "unknown"
             self._answered_msg_ids.add(msg_id)
-            intents.append(Intent(
-                type=IntentType.RESPONSE,
-                payload={
-                    "in_reply_to": msg_id,
-                    "kind": f"{kind}_done",
-                    "status": "ok",
-                    "result": {"source": "mock", "chosen": ["mock_kernel_1"]},
-                },
-            ))
+            intents.append(
+                Intent(
+                    type=IntentType.RESPONSE,
+                    payload={
+                        "in_reply_to": msg_id,
+                        "kind": f"{kind}_done",
+                        "status": "ok",
+                        "result": {"source": "mock", "chosen": ["mock_kernel_1"]},
+                    },
+                )
+            )
         if not intents:
-            intents.append(Intent(
-                type=IntentType.SEND_MESSAGE,
-                payload={"topic": "heartbeat", "body_md": "ok (mock kernel)"},
-            ))
+            intents.append(
+                Intent(
+                    type=IntentType.SEND_MESSAGE,
+                    payload={"topic": "heartbeat", "body_md": "ok (mock kernel)"},
+                )
+            )
         return BackendTurnResult(intents=intents, raw_text="(mock kernel)")
 
 

@@ -63,14 +63,30 @@ def find_relevant_prs_smart(
     primus_label: str | None = None,
     include_github: bool = True,
 ) -> list[Candidate]:
-    """Discover candidate PRs across one or more repos (plain-arg version of
-    :func:`framework_agent.sources.enumerate_candidates`).
+    """Discover candidate PRs across one or more repos.
 
-    Each repo is queried via primus_cortex (hard-fail) when
-    ``primus_cortex_url`` is set; GitHub Search is a best-effort secondary
-    when ``include_github=True`` (returns ``[]``, never raises). Results are
-    de-duped by ``(repo_url, ref)`` so primus_cortex wins ties. Returns ``[]``
-    when ``repos`` is empty.
+    Plain-arg version of
+    :func:`framework_agent.sources.enumerate_candidates`. Each repo is
+    queried via primus_cortex (hard-fail) when ``primus_cortex_url`` is set;
+    GitHub Search is a best-effort secondary when ``include_github=True``
+    (returns ``[]``, never raises). Results are de-duped by
+    ``(repo_url, ref)`` so primus_cortex wins ties.
+
+    Args:
+        gap_description: Description used to drive GitHub search relevance.
+        repos: Repos to query; ``None``/empty yields ``[]``.
+        primus_cortex_url: Primus Cortex base URL; enables that source.
+        primus_timeout_sec: Per-request timeout for Primus calls.
+        limit_per_repo: Max candidates per repo per source.
+        primus_state: PR state filter for Primus (e.g. ``"open"``).
+        primus_label: Optional label filter for Primus.
+        include_github: Whether to also query GitHub search.
+
+    Returns:
+        De-duplicated candidate list across all repos and sources.
+
+    Raises:
+        PrimusCortexError: If a Primus query fails when configured.
     """
     if not repos:
         return []
@@ -118,23 +134,32 @@ def fetch_pr_audit_material(
     primus_cortex_url: str,
     primus_timeout_sec: float = 30.0,
 ) -> dict[str, str]:
-    """Download ``pr.patches`` (unified diff) and ``pr_files.json``
-    ({repo, number, files}) for a single PR under ``out_dir``.
+    """Download a PR's audit material (patches + files) under ``out_dir``.
 
-    Returns the absolute paths in a dict. Hard-fails (raises
-    ``PrimusCortexError``) on primus_cortex transport / parse errors.
+    Writes ``pr.patches`` (unified diff) and ``pr_files.json``
+    (``{repo, number, files}``).
+
+    Args:
+        repo_url: Repository URL the PR belongs to.
+        pr_number: PR number to fetch.
+        out_dir: Directory to write the artifacts into (created if needed).
+        primus_cortex_url: Primus Cortex base URL.
+        primus_timeout_sec: Per-request timeout for Primus calls.
+
+    Returns:
+        A dict of absolute artifact paths (``patches_path``,
+        ``files_json_path``).
+
+    Raises:
+        PrimusCortexError: On Primus transport / parse errors.
     """
     out = Path(out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     repo_slug = _repo_slug(repo_url)
-    patches_text = pr_patches(
-        repo_slug, pr_number, base_url=primus_cortex_url, timeout_sec=primus_timeout_sec
-    )
+    patches_text = pr_patches(repo_slug, pr_number, base_url=primus_cortex_url, timeout_sec=primus_timeout_sec)
     patches_path = out / "pr.patches"
     patches_path.write_text(patches_text, encoding="utf-8")
-    files_payload = pr_files(
-        repo_slug, pr_number, base_url=primus_cortex_url, timeout_sec=primus_timeout_sec
-    )
+    files_payload = pr_files(repo_slug, pr_number, base_url=primus_cortex_url, timeout_sec=primus_timeout_sec)
     files_path = out / "pr_files.json"
     files_path.write_text(
         json.dumps(
@@ -210,8 +235,22 @@ def evaluate_candidate_outcome(
 
     Gate logic matches the CLI's winner decision. Inputs accept a dict, a
     Path, or a string path; missing/invalid inputs yield a ``False`` verdict
-    with a reason rather than raising. Returns a dict with keys ``winner``,
-    ``reason``, ``throughput``, ``accuracy``, ``throughput_ratio``, ``completed``.
+    with a reason rather than raising.
+
+    Args:
+        benchmark: Benchmark data (dict, JSON path, or ``None``).
+        accuracy: Accuracy data (dict, JSON path, or ``None``).
+        baseline_throughput: Baseline throughput; must be positive.
+        baseline_accuracy: Baseline accuracy, if accuracy is gated.
+        min_throughput_ratio: Minimum throughput ratio to win.
+        max_accuracy_drop: Maximum tolerated accuracy drop.
+
+    Returns:
+        A dict with keys ``winner``, ``reason``, ``throughput``,
+        ``accuracy``, ``throughput_ratio``, and ``completed``.
+
+    Raises:
+        ValueError: If ``baseline_throughput`` is not a positive float.
     """
     if baseline_throughput is None or baseline_throughput <= 0:
         raise ValueError("baseline_throughput must be a positive float")
@@ -237,9 +276,7 @@ def evaluate_candidate_outcome(
     ratio = throughput / baseline_throughput
     result["throughput_ratio"] = ratio
     if ratio < min_throughput_ratio:
-        result["reason"] = (
-            f"throughput ratio {ratio:.4f} below required {min_throughput_ratio:.4f}"
-        )
+        result["reason"] = f"throughput ratio {ratio:.4f} below required {min_throughput_ratio:.4f}"
         return result
     if baseline_accuracy is not None:
         if acc_value is None:
@@ -247,9 +284,7 @@ def evaluate_candidate_outcome(
             return result
         drop = baseline_accuracy - acc_value
         if drop > max_accuracy_drop:
-            result["reason"] = (
-                f"accuracy drop {drop:.4f} exceeds max {max_accuracy_drop:.4f}"
-            )
+            result["reason"] = f"accuracy drop {drop:.4f} exceeds max {max_accuracy_drop:.4f}"
             return result
     if completed and "/" in completed:
         left, _, right = completed.partition("/")

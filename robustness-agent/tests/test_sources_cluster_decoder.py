@@ -221,9 +221,7 @@ def test_decode_skips_unknown_metrics():
                 results=[
                     _result(
                         "vendor_specific_unknown_metric",
-                        series=[
-                            _series({"gpu": "0"}, [{"timestamp": 1, "value": 1.0}])
-                        ],
+                        series=[_series({"gpu": "0"}, [{"timestamp": 1, "value": 1.0}])],
                     )
                 ],
             )

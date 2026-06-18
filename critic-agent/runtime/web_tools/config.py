@@ -83,11 +83,7 @@ def _parse_csv(raw: str) -> tuple[str, ...]:
     Returns:
         tuple[str, ...]: Non-empty, trimmed, lowercased items.
     """
-    return tuple(
-        item.strip().lower()
-        for item in raw.split(",")
-        if item.strip()
-    )
+    return tuple(item.strip().lower() for item in raw.split(",") if item.strip())
 
 
 def _normalize_provider(raw: str) -> ProviderName:
@@ -150,7 +146,8 @@ class WebToolsConfig:
         provider = _normalize_provider(_env("WEB_SEARCH_PROVIDER", "disabled"))
         fallback_raw = _env("WEB_SEARCH_FALLBACK", "")
         fallback = tuple(
-            p for p in (s.strip().lower() for s in fallback_raw.split(","))
+            p
+            for p in (s.strip().lower() for s in fallback_raw.split(","))
             if p in KNOWN_PROVIDERS and p not in {"disabled", provider}
         )
         return cls(
@@ -161,7 +158,8 @@ class WebToolsConfig:
             search_domain_denylist=_parse_csv(_env("WEB_SEARCH_DOMAIN_DENYLIST", "")),
             search_max_results_cap=max(1, _env_int("WEB_SEARCH_MAX_RESULTS_CAP", 10)),
             search_rate_limit_per_min=max(
-                1, _env_int("WEB_SEARCH_RATE_LIMIT_PER_MIN", 30),
+                1,
+                _env_int("WEB_SEARCH_RATE_LIMIT_PER_MIN", 30),
             ),
             tavily_api_key=_env("TAVILY_API_KEY", ""),
             serper_api_key=_env("SERPER_API_KEY", ""),
@@ -169,13 +167,15 @@ class WebToolsConfig:
             fetch_enabled=_env_bool("WEB_FETCH_ENABLED", False),
             fetch_max_bytes=max(1024, _env_int("WEB_FETCH_MAX_BYTES", 10 * 1024 * 1024)),
             fetch_max_output_chars=max(
-                1024, _env_int("WEB_FETCH_MAX_OUTPUT_CHARS", 50_000),
+                1024,
+                _env_int("WEB_FETCH_MAX_OUTPUT_CHARS", 50_000),
             ),
             fetch_timeout_s=max(1, _env_int("WEB_FETCH_TIMEOUT_S", 60)),
             fetch_domain_denylist=_parse_csv(_env("WEB_FETCH_DOMAIN_DENYLIST", "")),
             fetch_cache_ttl_s=max(0, _env_int("WEB_FETCH_CACHE_TTL_S", 15 * 60)),
             fetch_cache_max_entries=max(
-                1, _env_int("WEB_FETCH_CACHE_MAX_ENTRIES", 256),
+                1,
+                _env_int("WEB_FETCH_CACHE_MAX_ENTRIES", 256),
             ),
         )
 

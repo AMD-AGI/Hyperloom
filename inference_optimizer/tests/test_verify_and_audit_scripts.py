@@ -44,20 +44,22 @@ def _exp_state(*, gain: float = 6.5) -> dict:
         "cumulative_gain_validated": gain,
         "optimization_stack": [
             {"kind": "roofline", "variant_name": ""},
-            {"kind": "params", "variant_name": "two_batch_overlap",
-             "gain_pct": 3.2},
-            {"kind": "comm_optimization", "variant_name": "aiter_allreduce",
-             "gain_pct": 2.1},
+            {"kind": "params", "variant_name": "two_batch_overlap", "gain_pct": 3.2},
+            {"kind": "comm_optimization", "variant_name": "aiter_allreduce", "gain_pct": 2.1},
             {"kind": "roofline", "variant_name": ""},
             {"kind": "params", "variant_name": "torch_compile", "gain_pct": 1.2},
         ],
         "pruned_families": [
-            {"family": "kernel_opt",
-             "reason": "analysis.md snapshot #1 shows compute saturated 91.2%",
-             "source": "orchestration"},
-            {"family": "deep_kernel_analysis",
-             "reason": "comm-bound: rcclAllreduce dominates top operations",
-             "source": "orchestration"},
+            {
+                "family": "kernel_opt",
+                "reason": "analysis.md snapshot #1 shows compute saturated 91.2%",
+                "source": "orchestration",
+            },
+            {
+                "family": "deep_kernel_analysis",
+                "reason": "comm-bound: rcclAllreduce dominates top operations",
+                "source": "orchestration",
+            },
         ],
         "last_trace_analyze": {
             "trace_input": "/tmp/trace.gz",
@@ -66,26 +68,24 @@ def _exp_state(*, gain: float = 6.5) -> dict:
         },
         "baseline_attempts": [{"ts": "2026-05-19T09:30:00+00:00"}],
         "roofline_attempts": [
-            {"ts": "2026-05-19T09:40:00+00:00", "status": "succeeded",
-             "task_id": "t-rf-1"},
-            {"ts": "2026-05-19T10:10:00+00:00", "status": "succeeded",
-             "task_id": "t-rf-2"},
+            {"ts": "2026-05-19T09:40:00+00:00", "status": "succeeded", "task_id": "t-rf-1"},
+            {"ts": "2026-05-19T10:10:00+00:00", "status": "succeeded", "task_id": "t-rf-2"},
         ],
         "profile_attempts": [
             {"ts": "2026-05-19T09:42:00+00:00"},
             {"ts": "2026-05-19T10:12:00+00:00"},
         ],
         "explore_attempts": [
-            {"ts": "2026-05-19T09:50:00+00:00",
-             "extra_server_args": "--known-flag-a --known-flag-c"},
-            {"ts": "2026-05-19T09:55:00+00:00",
-             "extra_server_args": "--known-flag-b"},
+            {"ts": "2026-05-19T09:50:00+00:00", "extra_server_args": "--known-flag-a --known-flag-c"},
+            {"ts": "2026-05-19T09:55:00+00:00", "extra_server_args": "--known-flag-b"},
         ],
         "cumulative_gain_validated_ts": "2026-05-19T10:30:00+00:00",
         "discovered_flags": {
             "sglang": {
                 "backend_flags": [
-                    "--known-flag-a", "--known-flag-b", "--known-flag-c",
+                    "--known-flag-a",
+                    "--known-flag-b",
+                    "--known-flag-c",
                 ],
                 "param_flags": [],
             },
@@ -102,7 +102,8 @@ def _exp_state(*, gain: float = 6.5) -> dict:
 def _write(session_dir: Path, state: dict) -> None:
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "state.json").write_text(
-        json.dumps(state), encoding="utf-8",
+        json.dumps(state),
+        encoding="utf-8",
     )
 
 
@@ -110,10 +111,14 @@ def _write(session_dir: Path, state: dict) -> None:
 def test_verify_pass_when_delta_at_least_5pct(tmp_path, capsys):
     _write(tmp_path / "b", _baseline_state())
     _write(tmp_path / "e", _exp_state(gain=6.5))
-    rc = verify_roofline_v2.main([
-        "--baseline", str(tmp_path / "b"),
-        "--exp", str(tmp_path / "e"),
-    ])
+    rc = verify_roofline_v2.main(
+        [
+            "--baseline",
+            str(tmp_path / "b"),
+            "--exp",
+            str(tmp_path / "e"),
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "VERDICT: PASS" in out
@@ -122,10 +127,14 @@ def test_verify_pass_when_delta_at_least_5pct(tmp_path, capsys):
 def test_verify_partial_when_delta_positive_but_below_5pct(tmp_path, capsys):
     _write(tmp_path / "b", _baseline_state())
     _write(tmp_path / "e", _exp_state(gain=2.0))
-    rc = verify_roofline_v2.main([
-        "--baseline", str(tmp_path / "b"),
-        "--exp", str(tmp_path / "e"),
-    ])
+    rc = verify_roofline_v2.main(
+        [
+            "--baseline",
+            str(tmp_path / "b"),
+            "--exp",
+            str(tmp_path / "e"),
+        ]
+    )
     assert rc == 2
     assert "VERDICT: PARTIAL" in capsys.readouterr().out
 
@@ -133,20 +142,28 @@ def test_verify_partial_when_delta_positive_but_below_5pct(tmp_path, capsys):
 def test_verify_fail_when_delta_non_positive(tmp_path, capsys):
     _write(tmp_path / "b", _baseline_state())
     _write(tmp_path / "e", _exp_state(gain=-1.0))
-    rc = verify_roofline_v2.main([
-        "--baseline", str(tmp_path / "b"),
-        "--exp", str(tmp_path / "e"),
-    ])
+    rc = verify_roofline_v2.main(
+        [
+            "--baseline",
+            str(tmp_path / "b"),
+            "--exp",
+            str(tmp_path / "e"),
+        ]
+    )
     assert rc == 1
     assert "VERDICT: FAIL" in capsys.readouterr().out
 
 
 def test_verify_fail_on_missing_state_json(tmp_path, capsys):
     _write(tmp_path / "b", _baseline_state())
-    rc = verify_roofline_v2.main([
-        "--baseline", str(tmp_path / "b"),
-        "--exp", str(tmp_path / "no-such-dir"),
-    ])
+    rc = verify_roofline_v2.main(
+        [
+            "--baseline",
+            str(tmp_path / "b"),
+            "--exp",
+            str(tmp_path / "no-such-dir"),
+        ]
+    )
     assert rc == 1  # delta gain negative
     out = capsys.readouterr().out
     assert "state.json not found" in out
@@ -156,10 +173,14 @@ def test_verify_fail_on_missing_state_json(tmp_path, capsys):
 def test_verify_renders_v2_quality_criteria(tmp_path, capsys):
     _write(tmp_path / "b", _baseline_state())
     _write(tmp_path / "e", _exp_state(gain=6.5))
-    verify_roofline_v2.main([
-        "--baseline", str(tmp_path / "b"),
-        "--exp", str(tmp_path / "e"),
-    ])
+    verify_roofline_v2.main(
+        [
+            "--baseline",
+            str(tmp_path / "b"),
+            "--exp",
+            str(tmp_path / "e"),
+        ]
+    )
     out = capsys.readouterr().out
     assert "§10.3 v2 quality criteria" in out
     assert "cache_hit_rate ≥ 50%" in out
@@ -173,10 +194,14 @@ def test_verify_renders_v2_quality_criteria(tmp_path, capsys):
 def test_verify_renders_action_seq_for_both_sessions(tmp_path, capsys):
     _write(tmp_path / "b", _baseline_state())
     _write(tmp_path / "e", _exp_state(gain=6.5))
-    verify_roofline_v2.main([
-        "--baseline", str(tmp_path / "b"),
-        "--exp", str(tmp_path / "e"),
-    ])
+    verify_roofline_v2.main(
+        [
+            "--baseline",
+            str(tmp_path / "b"),
+            "--exp",
+            str(tmp_path / "e"),
+        ]
+    )
     out = capsys.readouterr().out
     assert "params:v1" in out
     assert "two_batch_overlap" in out
@@ -186,11 +211,15 @@ def test_verify_renders_action_seq_for_both_sessions(tmp_path, capsys):
 def test_verify_json_emits_structured_summary(tmp_path, capsys):
     _write(tmp_path / "b", _baseline_state())
     _write(tmp_path / "e", _exp_state(gain=6.5))
-    verify_roofline_v2.main([
-        "--baseline", str(tmp_path / "b"),
-        "--exp", str(tmp_path / "e"),
-        "--json",
-    ])
+    verify_roofline_v2.main(
+        [
+            "--baseline",
+            str(tmp_path / "b"),
+            "--exp",
+            str(tmp_path / "e"),
+            "--json",
+        ]
+    )
     captured = capsys.readouterr()
     payload = json.loads(captured.err)
     assert payload["delta"]["cumulative_gain_validated_pct"] == pytest.approx(6.4)
@@ -203,9 +232,12 @@ def test_verify_json_emits_structured_summary(tmp_path, capsys):
 # audit_roofline_decisions — content + JSON
 def test_audit_renders_full_block(tmp_path, capsys):
     _write(tmp_path / "s", _exp_state(gain=6.5))
-    rc = audit_roofline_decisions.main([
-        "--session", str(tmp_path / "s"),
-    ])
+    rc = audit_roofline_decisions.main(
+        [
+            "--session",
+            str(tmp_path / "s"),
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "roofline action timeline" in out
@@ -225,21 +257,28 @@ def test_audit_detects_hallucinated_flag(tmp_path, capsys):
     state = _exp_state(gain=4.0)
     # Drop --known-flag-c from the namespace; it's still used in explore_attempts.
     state["discovered_flags"]["sglang"]["backend_flags"] = [
-        "--known-flag-a", "--known-flag-b",
+        "--known-flag-a",
+        "--known-flag-b",
     ]
     _write(tmp_path / "s", state)
-    audit_roofline_decisions.main([
-        "--session", str(tmp_path / "s"),
-    ])
+    audit_roofline_decisions.main(
+        [
+            "--session",
+            str(tmp_path / "s"),
+        ]
+    )
     out = capsys.readouterr().out
     assert "hallucinated (not in namespace): 1" in out
     assert "--known-flag-c" in out
 
 
 def test_audit_handles_missing_state_json(tmp_path, capsys):
-    rc = audit_roofline_decisions.main([
-        "--session", str(tmp_path / "nope"),
-    ])
+    rc = audit_roofline_decisions.main(
+        [
+            "--session",
+            str(tmp_path / "nope"),
+        ]
+    )
     assert rc == 1
     out = capsys.readouterr().out
     assert "ERROR" in out
@@ -248,9 +287,12 @@ def test_audit_handles_missing_state_json(tmp_path, capsys):
 
 def test_audit_handles_empty_session(tmp_path, capsys):
     _write(tmp_path / "s", _baseline_state())
-    rc = audit_roofline_decisions.main([
-        "--session", str(tmp_path / "s"),
-    ])
+    rc = audit_roofline_decisions.main(
+        [
+            "--session",
+            str(tmp_path / "s"),
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "(no roofline action attempts recorded)" in out
@@ -259,10 +301,13 @@ def test_audit_handles_empty_session(tmp_path, capsys):
 
 def test_audit_json_output_schema(tmp_path, capsys):
     _write(tmp_path / "s", _exp_state(gain=6.5))
-    audit_roofline_decisions.main([
-        "--session", str(tmp_path / "s"),
-        "--json",
-    ])
+    audit_roofline_decisions.main(
+        [
+            "--session",
+            str(tmp_path / "s"),
+            "--json",
+        ]
+    )
     out = capsys.readouterr().out
     payload = json.loads(out)
     assert payload["has_state_json"] is True
@@ -277,15 +322,20 @@ def test_audit_json_output_schema(tmp_path, capsys):
 def test_audit_classifies_main_llm_only_prune(tmp_path, capsys):
     """A prune whose reason mentions no analysis.md keyword is not-grounded."""
     state = _exp_state(gain=4.0)
-    state["pruned_families"].append({
-        "family": "operator_tuning",
-        "reason": "manual operator override no report quoted",
-        "source": "orchestration",
-    })
+    state["pruned_families"].append(
+        {
+            "family": "operator_tuning",
+            "reason": "manual operator override no report quoted",
+            "source": "orchestration",
+        }
+    )
     _write(tmp_path / "s", state)
-    audit_roofline_decisions.main([
-        "--session", str(tmp_path / "s"),
-    ])
+    audit_roofline_decisions.main(
+        [
+            "--session",
+            str(tmp_path / "s"),
+        ]
+    )
     out = capsys.readouterr().out
     assert "operator_tuning" in out
     assert "manual operator override" in out
@@ -296,9 +346,12 @@ def test_audit_cache_hit_rate_zero_when_no_metrics(tmp_path, capsys):
     state = _exp_state(gain=6.5)
     del state["tick_cache_metrics"]
     _write(tmp_path / "s", state)
-    audit_roofline_decisions.main([
-        "--session", str(tmp_path / "s"),
-    ])
+    audit_roofline_decisions.main(
+        [
+            "--session",
+            str(tmp_path / "s"),
+        ]
+    )
     out = capsys.readouterr().out
     assert "[MISS] cache_hit_rate ≥ 50%" in out
     assert "0.0%" in out

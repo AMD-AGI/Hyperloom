@@ -42,7 +42,9 @@ def test_code_patch_keep_resets_counter():
     s.record_intervention(change_type="config", action="explore", task_id="t1")
     s.record_intervention(change_type="config", action="explore", task_id="t2")
     s.record_intervention(
-        change_type="code_patch", action="integrate_patch", task_id="t3",
+        change_type="code_patch",
+        action="integrate_patch",
+        task_id="t3",
     )
     out = s.to_intervention_mix_summary()
     assert "config_keeps=2" in out
@@ -74,10 +76,13 @@ def test_reverted_integrate_patch_records_attempt_not_keep():
         idempotency_key="t-integrate-revert",
     )
 
-    coord._record_intervention_for_task(task, {
-        "status": "reverted",
-        "delta_pct": -1.0,
-    })
+    coord._record_intervention_for_task(
+        task,
+        {
+            "status": "reverted",
+            "delta_pct": -1.0,
+        },
+    )
 
     mix = coord.shared_state.get_intervention_mix()
     assert mix["total_code_patch"] == 0
@@ -90,7 +95,9 @@ def test_config_heavy_zero_patch_renders_counts_without_directive():
     s = SharedState(session_id="im-heavy")
     for i in range(5):
         s.record_intervention(
-            change_type="config", action="explore", task_id=f"t{i}",
+            change_type="config",
+            action="explore",
+            task_id=f"t{i}",
         )
     out = s.to_intervention_mix_summary()
     assert "config_keeps=5" in out

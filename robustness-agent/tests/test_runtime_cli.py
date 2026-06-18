@@ -44,6 +44,7 @@ _REQUEST_HIGH_SEVERITY = {
 # In-process: _run_tick + _coerce_request
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
     from robustness_agent.runtime.cli import _coerce_request, _run_tick
@@ -74,12 +75,10 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
-    """Strategic HIGH symptoms (crash_count_high) emit alert(high) only (escalate/prune auto-emit retired in loosen P3_19)."""
+    """Strategic HIGH symptoms (crash_count_high) emit alert(high) only (escalate/prune auto-emit retired)."""
     from robustness_agent.runtime.cli import _coerce_request, _run_tick
 
-    request = _coerce_request(
-        {**_REQUEST_HIGH_SEVERITY, "options": {"session_dir": str(tmp_path)}}
-    )
+    request = _coerce_request({**_REQUEST_HIGH_SEVERITY, "options": {"session_dir": str(tmp_path)}})
     emit = await _run_tick(request)
     intents = emit["intent_envelope"]["intents"]
     intent_types = {i["intent_type"] for i in intents}
@@ -91,18 +90,15 @@ async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
 async def test_run_tick_propagates_session_id_when_prompt_lacks_it(tmp_path: Path):
     from robustness_agent.runtime.cli import _coerce_request, _run_tick
 
-    prompt = (
-        "=== Shared session state ===\n"
-        "crash_count=0\n"
-        "=== Inbox for robustness ===\n"
-        "(no new messages)\n"
+    prompt = "=== Shared session state ===\ncrash_count=0\n=== Inbox for robustness ===\n(no new messages)\n"
+    request = _coerce_request(
+        {
+            "kind": "coordinator_inbox",
+            "session_id": "sess-fallback",
+            "raw_prompt": prompt,
+            "options": {"session_dir": str(tmp_path)},
+        }
     )
-    request = _coerce_request({
-        "kind": "coordinator_inbox",
-        "session_id": "sess-fallback",
-        "raw_prompt": prompt,
-        "options": {"session_dir": str(tmp_path)},
-    })
     emit = await _run_tick(request)
     assert emit["session_id"] == "sess-fallback"
 
@@ -134,6 +130,7 @@ def test_coerce_request_rejects_empty_raw_prompt():
 # Subprocess: python -m robustness_agent.runtime.cli tick
 # ---------------------------------------------------------------------------
 
+
 def _agent_root() -> Path:
     """Resolve the robustness-agent source root for subprocess PYTHONPATH."""
     return Path(__file__).resolve().parents[1] / "src"
@@ -151,8 +148,16 @@ def _run_subprocess(request_obj: dict, request_path: Path, out_path: Path) -> su
     else:
         env["PYTHONPATH"] = src
     return subprocess.run(
-        [sys.executable, "-m", "robustness_agent.runtime.cli", "tick",
-         "--request", str(request_path), "--out", str(out_path)],
+        [
+            sys.executable,
+            "-m",
+            "robustness_agent.runtime.cli",
+            "tick",
+            "--request",
+            str(request_path),
+            "--out",
+            str(out_path),
+        ],
         capture_output=True,
         text=True,
         timeout=30,
@@ -204,7 +209,10 @@ def test_subprocess_tick_help_smoke():
         env["PYTHONPATH"] = src
     proc = subprocess.run(
         [sys.executable, "-m", "robustness_agent.runtime.cli", "--help"],
-        capture_output=True, text=True, timeout=10, env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
     )
     assert proc.returncode == 0, f"stderr={proc.stderr}"
     assert "tick" in proc.stdout
@@ -213,6 +221,7 @@ def test_subprocess_tick_help_smoke():
 # ---------------------------------------------------------------------------
 # M2 multi-node options plumbing
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
@@ -246,22 +255,25 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(runtime_pkg.cli, "build_reactor_components", _spy_build)
     from robustness_agent.role.reactor import Reactor
+
     monkeypatch.setattr(Reactor, "tick", _zero_tick, raising=True)
 
     from robustness_agent.runtime.cli import _coerce_request, _run_tick
 
-    request = _coerce_request({
-        **_REQUEST_HEARTBEAT,
-        "options": {
-            "session_dir": str(tmp_path),
-            "robustness_server_url": "",
-            "disable_local_probe": True,
-            "enable_cluster_pod_metrics": True,
-            "pod_metrics_categories": "gpu,memory",
-            "workload_uid": "wl-123",
-            "nodes": 4,
-        },
-    })
+    request = _coerce_request(
+        {
+            **_REQUEST_HEARTBEAT,
+            "options": {
+                "session_dir": str(tmp_path),
+                "robustness_server_url": "",
+                "disable_local_probe": True,
+                "enable_cluster_pod_metrics": True,
+                "pod_metrics_categories": "gpu,memory",
+                "workload_uid": "wl-123",
+                "nodes": 4,
+            },
+        }
+    )
     await _run_tick(request)
 
     config = captured["config"]
@@ -270,3 +282,62 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
     assert config.pod_metrics_categories == ("gpu", "memory")
     assert config.workload_uid == "wl-123"
     assert config.nodes == 4
+
+
+@pytest.mark.asyncio
+async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
+    """A drained RCA usage block is surfaced on the emit payload."""
+    from robustness_agent import runtime as runtime_pkg
+    real_build = runtime_pkg.cli.build_reactor_components  # type: ignore[attr-defined]
+
+    usage = {"input_tokens": 12, "output_tokens": 5, "calls": 1,
+             "latency_ms": 30, "model": "claude-opus-4-7"}
+
+    def _spy_build(config, *, rca=None, session_id=None):
+        bundle = real_build(config, rca=rca, session_id=session_id)
+        # Replace the rca engine with a stub that reports usage once.
+        class _StubRca:
+            def drain_usage(self_inner):
+                return usage
+        bundle.components.rca = _StubRca()
+        return bundle
+
+    async def _zero_tick(_self, _ctx):
+        return []
+
+    monkeypatch.setattr(runtime_pkg.cli, "build_reactor_components", _spy_build)
+    from robustness_agent.role.reactor import Reactor
+    monkeypatch.setattr(Reactor, "tick", _zero_tick, raising=True)
+
+    from robustness_agent.runtime.cli import _coerce_request, _run_tick
+    request = _coerce_request({
+        **_REQUEST_HEARTBEAT,
+        "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
+    })
+    emit = await _run_tick(request)
+    assert emit["llm_usage"] == usage
+
+
+@pytest.mark.asyncio
+async def test_run_tick_omits_llm_usage_when_none(tmp_path: Path, monkeypatch):
+    """No RCA call → no ``llm_usage`` key on the emit payload."""
+    from robustness_agent import runtime as runtime_pkg
+    real_build = runtime_pkg.cli.build_reactor_components  # type: ignore[attr-defined]
+
+    def _spy_build(config, *, rca=None, session_id=None):
+        return real_build(config, rca=rca, session_id=session_id)
+
+    async def _zero_tick(_self, _ctx):
+        return []
+
+    monkeypatch.setattr(runtime_pkg.cli, "build_reactor_components", _spy_build)
+    from robustness_agent.role.reactor import Reactor
+    monkeypatch.setattr(Reactor, "tick", _zero_tick, raising=True)
+
+    from robustness_agent.runtime.cli import _coerce_request, _run_tick
+    request = _coerce_request({
+        **_REQUEST_HEARTBEAT,
+        "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
+    })
+    emit = await _run_tick(request)
+    assert "llm_usage" not in emit
