@@ -138,7 +138,9 @@ async def test_resume_consistency_marks_unvalidated_and_rebuilds_current_best(co
 
     report = await coord._resume_consistency_pass()
 
-    assert report["warnings"][0]["kind"] == "resume_unvalidated_keeps"
+    warning_kinds = {w["kind"] for w in report["warnings"]}
+    assert "resume_unvalidated_keeps" in warning_kinds
+    assert "resume_inconsistent_current_best" in warning_kinds
     assert coord.shared_state.resume_pending_revalidation is True
     assert coord.shared_state.current_best["extra_server_args"] == "--a 1 --b 2"
     assert coord.shared_state.current_best["extra_envs"] == {"A": "1", "B": "2"}

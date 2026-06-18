@@ -1543,6 +1543,16 @@ class Coordinator:
             cb_args = str(cb.get("extra_server_args") or "")
             cb_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()} if isinstance(cb.get("extra_envs"), Mapping) else {}
             if cb_args != rebuilt["extra_server_args"] or cb_envs != rebuilt["extra_envs"]:
+                # The append-only stack is authoritative; a disagreeing
+                # current_best is the inconsistency, recorded distinctly from the
+                # rebuild fix so operators can see a stale best was detected.
+                report["warnings"].append(
+                    {
+                        "kind": "resume_inconsistent_current_best",
+                        "current_best_args": cb_args,
+                        "stack_args": rebuilt["extra_server_args"],
+                    }
+                )
                 new_cb = dict(cb)
                 new_cb.update(
                     {
