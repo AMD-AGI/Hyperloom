@@ -128,6 +128,11 @@ _DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak")
 # Soft cap on concurrent kernel-backend coroutines (legacy MI300X 8-GPU fallback; pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_OOB_BUDGET_MINUTES = 60.0
+# Minimum wall-clock a fallback backend needs to do anything useful (and still
+# salvage partial artifacts). When less than this remains in the per-kernel
+# ladder budget, the ladder stops instead of launching a backend it cannot
+# finish. Mirrors the +180s wrapper grace. See Hyperloom#602.
+_KERNEL_LADDER_MIN_BACKEND_SEC = 180
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
 
 
@@ -1660,6 +1665,38 @@ def _optimization_wrapper_timeout_sec(payload: dict) -> int:
     return int(_optimization_budget_minutes(payload) * 60) + 180
 
 
+def _kernel_ladder_budget_sec(payload: dict) -> int:
+    """Total wall-clock budget for one kernel's whole backend ladder.
+
+    The ladder runs its backends sequentially (forge -> geak -> oob fallbacks),
+    each as a subprocess with its own timeout. Without a shared ceiling a
+    backend that hangs to its hard timeout followed by a fallback running its
+    full budget could roughly double a kernel's wall clock and overshoot the
+    KERNEL-phase budget cap (which is only re-checked between orchestration
+    turns, never mid-``run_optimization``). This budget bounds the whole ladder
+    so a fallback only runs within the time left and an exhausted budget exits
+    the ladder cleanly. See Hyperloom#602.
+
+    Priority: payload ``kernel_budget_min`` > env
+    ``KERNEL_OPT_KERNEL_BUDGET_MIN`` > the single-backend wall-clock budget from
+    :func:`_optimization_budget_minutes` (the ladder shares roughly one
+    backend's budget). A +180s grace mirrors the per-subprocess wrapper so the
+    first backend is never capped below its own timeout.
+
+    Args:
+        payload (dict): Request payload carrying optional ``kernel_budget_min``.
+
+    Returns:
+        int: The per-kernel ladder budget in seconds.
+    """
+    minutes = (
+        payload.get("kernel_budget_min")
+        or os.environ.get("KERNEL_OPT_KERNEL_BUDGET_MIN")
+        or _optimization_budget_minutes(payload)
+    )
+    return int(float(minutes) * 60) + 180
+
+
 def _backend_order(payload: dict) -> list[str]:
     """Resolve the ordered list of optimization backends to try.
 
@@ -2087,6 +2124,7 @@ async def _run_backend_ladder(
     backends: list[str],
     *,
     session_dir: Path,
+    deadline: float | None = None,
 ) -> tuple[HandlerResult | None, list[dict[str, Any]]]:
     """Run ``backends`` as a sequential break-on-KEEP ladder.
 
@@ -2096,12 +2134,21 @@ async def _run_backend_ladder(
     short-circuits *its own* ladder and OOB fallbacks (claude -> codex ->
     cursor) only fire when an earlier backend misses a KEEP.
 
+    When ``deadline`` (a :func:`time.monotonic` timestamp) is given, the ladder
+    enforces the per-kernel budget: each backend's subprocess timeout is capped
+    to the time left, and once less than :data:`_KERNEL_LADDER_MIN_BACKEND_SEC`
+    remains the ladder stops rather than launching a fallback it cannot finish.
+    This keeps a backend that hangs to its hard timeout from letting the
+    fallback overshoot the budget. See Hyperloom#602.
+
     Args:
         base_payload: The base request payload shared by every backend.
         candidate: The kernel candidate to optimize.
         kernel_id: The kernel id being optimized.
         backends: The ordered backends to try.
         session_dir: Session directory for workspace and state.
+        deadline: Optional ``time.monotonic`` deadline bounding the whole
+            ladder; ``None`` disables the per-kernel budget cap.
 
     Returns:
         A tuple of ``(best, attempts)`` where ``best`` is the strongest
@@ -2110,14 +2157,33 @@ async def _run_backend_ladder(
     """
     attempts: list[dict[str, Any]] = []
     best: HandlerResult | None = None
-    for backend in backends:
+    for idx, backend in enumerate(backends):
+        timeout_override: int | None = None
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= _KERNEL_LADDER_MIN_BACKEND_SEC:
+                # Not enough of the per-kernel budget left to run another
+                # backend usefully; stop instead of overshooting it. #602
+                log.info(
+                    "kernel %s: per-kernel ladder budget exhausted (%.0fs left); "
+                    "skipping remaining backends %s",
+                    kernel_id,
+                    remaining,
+                    backends[idx:],
+                )
+                break
+            timeout_override = int(remaining)
         child = dict(base_payload)
         child["_single_kernel"] = True
         child["kernel_id"] = kernel_id
         child["backends"] = backend
         child["candidate"] = candidate
         child.setdefault("source_file", candidate.get("source_file"))
-        result = await _run_optimization_single(child, session_dir=session_dir)
+        result = await _run_optimization_single(
+            child,
+            session_dir=session_dir,
+            timeout_override_sec=timeout_override,
+        )
         attempts.append(
             {
                 "backend": backend,
@@ -2171,6 +2237,12 @@ async def _run_kernel_backend_sequence(
     kernel_id = str(candidate.get("kernel_id") or base_payload.get("kernel_id") or "")
     order = _backend_order(base_payload)
 
+    # Bound the whole ladder (all backends for this kernel) to one wall-clock
+    # budget so a backend that hangs to its hard timeout cannot let the
+    # fallback double the kernel's wall clock and overshoot the KERNEL-phase
+    # cap. Each ladder call caps its backends to the time left. See #602.
+    ladder_deadline = time.monotonic() + _kernel_ladder_budget_sec(base_payload)
+
     # Forge edits the live repo in-place (temp branch + per-file restore) and
     # must NOT race with other backends that read/write the same repo. Run it
     # sequentially first; if it KEEPs, short-circuit. Otherwise continue with
@@ -2188,6 +2260,7 @@ async def _run_kernel_backend_sequence(
             kernel_id,
             forge_group,
             session_dir=session_dir,
+            deadline=ladder_deadline,
         )
         if forge_best and _kernel_result_rank(forge_best)[0] > 0:
             best = forge_best
@@ -2206,6 +2279,7 @@ async def _run_kernel_backend_sequence(
                 kernel_id,
                 geak_group,
                 session_dir=session_dir,
+                deadline=ladder_deadline,
             ),
             _run_backend_ladder(
                 base_payload,
@@ -2213,6 +2287,7 @@ async def _run_kernel_backend_sequence(
                 kernel_id,
                 oob_group,
                 session_dir=session_dir,
+                deadline=ladder_deadline,
             ),
         )
         attempts = forge_attempts + geak_attempts + oob_attempts
@@ -2228,6 +2303,7 @@ async def _run_kernel_backend_sequence(
             kernel_id,
             remaining,
             session_dir=session_dir,
+            deadline=ladder_deadline,
         )
         attempts = forge_attempts + attempts
         if best is None and forge_best is not None:
@@ -2369,10 +2445,35 @@ async def _run_optimization_batch(
     return out
 
 
+def _backends_cli_arg(value: Any) -> str:
+    """Normalize a payload ``backends`` field into a bare ``--backends`` value.
+
+    The orchestration payload may carry ``backends`` as a bare string
+    (``"geak"``), a comma-joined string (``"geak,claude"``), or a JSON list
+    (``["geak"]``) when an upstream request serializes it as an array. A list
+    MUST be comma-joined into bare names, never ``str()``-ed into the repr of a
+    list (``"['geak']"``) — the kernel-agent's ``parse_backends`` validator
+    correctly rejects that opaque token and the dispatch fails with the
+    self-contradictory "unsupported backend(s): ['geak']". See Hyperloom#601.
+
+    Args:
+        value: The raw ``payload["backends"]`` value (str / list / tuple / None).
+
+    Returns:
+        A bare, comma-joined backend string (possibly empty).
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(b).strip() for b in value if str(b).strip())
+    return str(value).strip()
+
+
 async def _run_optimization_single(
     payload: dict,
     *,
     session_dir: Path,
+    timeout_override_sec: int | None = None,
 ) -> HandlerResult:
     """Run Hyperloom/kernel-agent's kernel_optimization.py on one kernel.
 
@@ -2422,8 +2523,9 @@ async def _run_optimization_single(
         "--workspace-path",
         workspace_path,
     ]
-    if payload.get("backends"):
-        cmd += ["--backends", str(payload["backends"])]
+    backends_arg = _backends_cli_arg(payload.get("backends"))
+    if backends_arg:
+        cmd += ["--backends", backends_arg]
     if payload.get("source_file"):
         cmd += ["--source-file", str(payload["source_file"])]
     if target_platform:
@@ -2460,13 +2562,17 @@ async def _run_optimization_single(
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     geak_budget_min = _geak_budget_minutes(payload)
-    backend = str(payload.get("backends") or "").strip().lower()
+    backend = backends_arg.lower()
     if backend == "geak" or not backend:
         cmd += ["--geak-budget-min", str(geak_budget_min)]
     if payload.get("budget_minutes") is not None:
         cmd += ["--budget-minutes", str(payload["budget_minutes"])]
     # Allow the tool to handle its own backend timeout and salvage partial artifacts.
     timeout_sec = _optimization_wrapper_timeout_sec(payload)
+    if timeout_override_sec is not None:
+        # The backend ladder caps each subprocess to the time left in the
+        # per-kernel budget so a fallback never overshoots it. See Hyperloom#602.
+        timeout_sec = max(1, min(timeout_sec, int(timeout_override_sec)))
 
     from .action_executors._multi_node_env import is_multi_node
 
@@ -2477,14 +2583,38 @@ async def _run_optimization_single(
 
         await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
 
-    rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
-    result = _shape_tool_result(rc, stdout, stderr)
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
+        result = _shape_tool_result(rc, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        # The kernel-agent subprocess overran the hard outer timeout. Shape a
+        # failed result here instead of letting TimeoutExpired propagate to the
+        # batch wrapper — that wrapper produces a backend-less result, so the
+        # failure was silently bucketed as a GEAK invocation even when a
+        # different optimizer (e.g. claude) actually ran. See Hyperloom#602.
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        result = {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
+        }
     # Stamp source_file / kernel_id from the payload onto the result so the multi-KEEP integrate queue can group same-file KEEPs (the tool may omit them on timeout/crash).
     if isinstance(result, dict):
         if not result.get("kernel_id") and payload.get("kernel_id"):
             result["kernel_id"] = str(payload["kernel_id"])
         if not result.get("source_file") and payload.get("source_file"):
             result["source_file"] = str(payload["source_file"])
+        # Attribute a result that carries no per-backend attempt ladder
+        # (pre-dispatch / infra / timeout) to the backend that actually ran, so
+        # downstream recorders never fall back to a silent GEAK default. Only
+        # when this run dispatched a single, unambiguous backend. See #602.
+        if (
+            backend
+            and "," not in backend
+            and not result.get("backend")
+            and not result.get("attempts")
+        ):
+            result["backend"] = backend
     # Full-trace: mine each geak/oob attempt's stdout log for token usage and
     # append an ``llm_calls.jsonl`` row. Best-effort; a no-op when the backend
     # emits no usage block (claude/codex/cursor account spend elsewhere).
@@ -3688,7 +3818,11 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
                 or (_decision == "REVERT" and bool(_err_class))
             )
             if _failed_predispatch and not _backends:
-                _b = str(result.get("backend") or "").lower() or "geak"
+                # Never default an unattributable failure to GEAK — the backend
+                # that ran is stamped on the result upstream when known; only a
+                # genuine pre-dispatch gating failure (no backend launched)
+                # falls through, and "unknown" reflects that honestly. #602
+                _b = str(result.get("backend") or "").lower() or "unknown"
                 _backends = [_b]
             _dispatched = bool(_attempts) or _failed_predispatch
             instrument.record_kernel_dispatch(
