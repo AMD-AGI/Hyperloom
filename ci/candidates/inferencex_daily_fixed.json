@@ -166,6 +166,30 @@
       "conc": 64,
       "registered": true,
       "note": "Upstream mixed FP4 experts + FP8 dense/attention, tracked as FP8 for the fixed daily pool. Uses the existing single-node vLLM+tp8+conc64 pattern."
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 10,
+      "label": "Mixtral-8x7B-Instruct v0.1",
+      "repo_id": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+      "framework": "vllm",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": false,
+      "note": "MixtralForCausalLM, 8 experts top-2 (~46.7B MoE), BF16 native (no quantization_config), 32k context. MI300X (gfx942) has no native FP4, so run dynamic FP8 (same large-MoE pattern as Qwen3.6). Single-node vLLM+tp8+conc64."
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 11,
+      "label": "Gemma-4 26B-A4B it",
+      "repo_id": "google/gemma-4-26B-A4B-it",
+      "framework": "vllm",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": false,
+      "note": "Gemma4ForConditionalGeneration — MULTIMODAL (vision+audio+text), MoE ~26B total / ~4B active, BF16 native (no quantization_config), 256k (262144) context. New Gemma4 arch is not in sglang's known-arch set, so vLLM. MI300X has no native FP4 -> dynamic FP8. Gated google repo (needs HF_TOKEN with gemma access). CAVEAT: multimodal head + 256k KV cache may need higher tp / context limiting; verify it serves for text-gen before relying on results."
     }
   ]
 }
