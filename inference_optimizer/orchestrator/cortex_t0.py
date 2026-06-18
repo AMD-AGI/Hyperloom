@@ -89,6 +89,77 @@ def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, A
     return prefer
 
 
+def _row_best_config_source(row: Mapping[str, Any] | None) -> str:
+    """Per-path tag for the backend that supplied ``best_config`` on a row.
+
+    Reads the composite remote's ``_field_sources`` / ``_sources`` provenance
+    markers. Returns ``""`` when the row carries no provenance (single-source
+    backend / local-only row), letting the caller fall back to the remote type.
+
+    Args:
+        row (Mapping[str, Any] | None): A merged recipe row (may be empty).
+
+    Returns:
+        str: A short source tag (e.g. ``gbrain`` / ``cortex``), or ``""``.
+    """
+    if not isinstance(row, Mapping):
+        return ""
+    field_sources = row.get("_field_sources")
+    if isinstance(field_sources, Mapping):
+        best_config_src = field_sources.get("best_config")
+        if isinstance(best_config_src, str) and best_config_src:
+            return best_config_src
+        if isinstance(best_config_src, list) and best_config_src:
+            return str(best_config_src[0])
+    sources = row.get("_sources")
+    if isinstance(sources, list) and sources:
+        return str(sources[0])
+    return ""
+
+
+def _warm_recipe_source(
+    row: Mapping[str, Any] | None,
+    kb: Any,
+    *,
+    config_donor: Mapping[str, Any] | None = None,
+    config_donor_tier: str = "",
+) -> str:
+    """Resolve which KB path actually supplied the applied warm recipe.
+
+    Under the composite remote, a merged row carries ``_field_sources`` /
+    ``_sources`` recording which backend supplied each field. When config-donor
+    decoupling (#587) borrows the replayable champion from a same-architecture
+    sibling, the FINAL applied config comes from the donor's path — so prefer
+    the donor's ``best_config`` source whenever a separate donor (tier other
+    than ``self``) supplied it. Otherwise attribute to the identity match's
+    ``best_config`` backend, then its first contributing source, and finally
+    fall back to the dispatcher's remote type. This makes the WarmStartContext
+    attribute the FINAL applied recipe to the correct path (gbrain vs cortex)
+    instead of guessing.
+
+    Args:
+        row (Mapping[str, Any] | None): The identity-match warm recipe row.
+        kb (Any): The RecipeKB dispatcher (for the remote-type fallback).
+        config_donor (Mapping[str, Any] | None): The recipe that supplied the
+            replayable ``best_config``, when borrowed from a sibling.
+        config_donor_tier (str): The donor tier; ``self`` means the identity
+            match supplied its own config (no borrow).
+
+    Returns:
+        str: A short source tag, e.g. ``gbrain`` / ``cortex`` / ``cortex-kb``.
+    """
+    # A borrowed config (donor != identity match) is the FINAL replayed config;
+    # attribute it to the donor's path when provenance is available.
+    if config_donor is not None and config_donor_tier and config_donor_tier != "self":
+        donor_src = _row_best_config_source(config_donor)
+        if donor_src:
+            return donor_src
+    own_src = _row_best_config_source(row)
+    if own_src:
+        return own_src
+    return "gbrain" if _remote_is_gbrain(kb) else "cortex-kb"
+
+
 def _remote_is_gbrain(kb: Any) -> bool:
     """Best-effort source tag for the WarmStartContext.
 
@@ -740,7 +811,12 @@ def run_t0_anchor(
         wsc_status = "seed_only"
     else:
         wsc_status = "hit"
-    warm_source = "gbrain" if _remote_is_gbrain(kb) else "cortex-kb"
+    warm_source = _warm_recipe_source(
+        warm_point,
+        kb,
+        config_donor=config_donor,
+        config_donor_tier=config_donor_tier,
+    )
     try:
         shared_state.warm_start_context = _build_warm_start_context(
             config_donor=config_donor,

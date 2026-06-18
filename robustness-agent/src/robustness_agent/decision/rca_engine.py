@@ -56,6 +56,10 @@ class NoopRcaEngine:
         """
         return ""
 
+    def drain_usage(self) -> dict[str, Any] | None:
+        """No LLM is ever contacted, so there is never any usage to drain."""
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Throttle
@@ -209,6 +213,12 @@ class LlmRcaEngine:
     extra_evidence_provider: Any | None = None
     _owns_client: bool = field(default=False, init=False, repr=False)
     _config_warned: bool = field(default=False, init=False, repr=False)
+    # Token-usage accumulator across the calls made since the last drain, so
+    # the host (Coordinator) can fold the RCA LLM spend into its trace ledger.
+    _usage_in: int = field(default=0, init=False, repr=False)
+    _usage_out: int = field(default=0, init=False, repr=False)
+    _usage_calls: int = field(default=0, init=False, repr=False)
+    _usage_latency_ms: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate config and lazily build the HTTP client and throttle."""
@@ -231,6 +241,29 @@ class LlmRcaEngine:
         """Close the underlying HTTP client if this engine created it."""
         if self._owns_client and self.client is not None:
             await self.client.aclose()
+
+    def drain_usage(self) -> dict[str, Any] | None:
+        """Return + reset the token usage accumulated since the last drain.
+
+        Returns ``{"input_tokens", "output_tokens", "calls", "latency_ms",
+        "model"}`` aggregated over every chat call made this tick, or ``None``
+        when no call was made (so a no-LLM tick stays out of the trace). The
+        host folds this into its LLM ledger as ``component=robustness``.
+        """
+        if self._usage_calls <= 0:
+            return None
+        out: dict[str, Any] = {
+            "input_tokens": self._usage_in,
+            "output_tokens": self._usage_out,
+            "calls": self._usage_calls,
+            "latency_ms": self._usage_latency_ms,
+            "model": self.model,
+        }
+        self._usage_in = 0
+        self._usage_out = 0
+        self._usage_calls = 0
+        self._usage_latency_ms = 0
+        return out
 
     async def summarize(self, symptom: Symptom) -> str:
         """Summarize a symptom via the chat-server, subject to throttling.
@@ -257,6 +290,27 @@ class LlmRcaEngine:
         text = await self._call(symptom)
         self.throttle.record(symptom, now_unix=now_unix)
         return _truncate(text, self.max_chars)
+
+    def _accumulate_usage(self, usage: Any, *, latency_ms: int) -> None:
+        """Fold one chat response's ``usage`` block into the accumulator.
+
+        Counts the call (and its latency) even when the provider omitted a
+        ``usage`` block, so the trace still reflects that an RCA call happened.
+        OpenAI-shape ``prompt_tokens`` / ``completion_tokens`` map onto the
+        canonical in/out counters; bad values contribute 0.
+        """
+        self._usage_calls += 1
+        self._usage_latency_ms += max(0, int(latency_ms))
+        if not isinstance(usage, Mapping):
+            return
+        try:
+            self._usage_in += int(usage.get("prompt_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            self._usage_out += int(usage.get("completion_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            pass
 
     def set_tick(self, tick_id: int) -> None:
         """Hook used by ActionLadder to scope per-tick budgets.
@@ -291,6 +345,7 @@ class LlmRcaEngine:
             "max_tokens": 600,
             "temperature": 0.2,
         }
+        _t0 = time.perf_counter()
         try:
             assert self.client is not None
             resp = await self.client.post("/chat/completions", json=payload)
@@ -300,6 +355,7 @@ class LlmRcaEngine:
         except httpx.RequestError as exc:
             log.warning("LlmRcaEngine: chat-server request failed: %s", exc)
             return ""
+        latency_ms = int((time.perf_counter() - _t0) * 1000)
         if resp.status_code >= 400:
             log.warning(
                 "LlmRcaEngine: chat-server status=%d body=%s",
@@ -312,6 +368,10 @@ class LlmRcaEngine:
         except ValueError:
             log.warning("LlmRcaEngine: chat-server returned non-json body")
             return ""
+        self._accumulate_usage(
+            body.get("usage") if isinstance(body, dict) else None,
+            latency_ms=latency_ms,
+        )
         choices = body.get("choices") if isinstance(body, dict) else None
         if not choices:
             return ""
