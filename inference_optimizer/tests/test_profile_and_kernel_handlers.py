@@ -3007,7 +3007,7 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
     """
     calls: list[str] = []
 
-    async def fake_single(child, *, session_dir):
+    async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
         if backend == "geak":
@@ -3069,7 +3069,7 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
     """When GEAK already KEEPs, the ladder short-circuits (no Claude/Codex)."""
     calls: list[str] = []
 
-    async def fake_single(child, *, session_dir):
+    async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
         if backend == "geak":
@@ -3103,7 +3103,7 @@ async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
 ):
     """If NO backend KEEPs, the ladder picks the highest-micro non-KEEP."""
 
-    async def fake_single(child, *, session_dir):
+    async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         if backend == "geak":
             return {
@@ -3148,7 +3148,7 @@ async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_d
     rewrite than GEAK's first KEEP."""
     calls: list[str] = []
 
-    async def fake_single(child, *, session_dir):
+    async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
         if backend == "geak":
@@ -3199,7 +3199,7 @@ async def test_backend_sequence_parallel_keeps_geak_when_oob_lower(session_dir):
     """GPU-rich mode races both, but if GEAK is the strongest it still
     wins the best-selection contest."""
 
-    async def fake_single(child, *, session_dir):
+    async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         if backend == "geak":
             return {
@@ -3243,7 +3243,7 @@ async def test_backend_sequence_parallel_oob_ladder_still_falls_back(session_dir
     GEAK, with the strongest overall result selected."""
     calls: list[str] = []
 
-    async def fake_single(child, *, session_dir):
+    async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
         if backend == "geak":
@@ -3293,7 +3293,7 @@ async def test_backend_sequence_parallel_noop_without_geak(session_dir):
     still short-circuits on the first KEEP."""
     calls: list[str] = []
 
-    async def fake_single(child, *, session_dir):
+    async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
         return {
@@ -3326,7 +3326,7 @@ async def test_backend_sequence_forge_keep_short_circuits(session_dir):
     """
     calls: list[str] = []
 
-    async def fake_single(child, *, session_dir):
+    async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
         if backend == "forge":
