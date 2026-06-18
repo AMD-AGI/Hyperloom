@@ -4677,6 +4677,8 @@ def _normalize_optimization_stack_entry(
         "validated": bool(validated),
     }
     # gemm_tuning-specific evidence (optional).
+    if "engine" in raw:
+        out["engine"] = str(raw.get("engine") or "")
     if "tuned_file" in raw:
         out["tuned_file"] = str(raw.get("tuned_file") or "")
     if "final_report_path" in raw:
@@ -4694,6 +4696,133 @@ def _normalize_optimization_stack_entry(
     if "task_id" in raw:
         out["task_id"] = str(raw.get("task_id") or "")
     return out
+
+
+def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
+    """Build the top-level ``gemm_tuning`` section from session state; never raises.
+
+    Assembles one run per ``state.gemm_tuning_attempts[]`` entry (falling back
+    to ``last_gemm_tuning`` when the history is absent), tags each with its
+    tuning ``engine`` (``geak`` today, ``forge`` later), and cross-references
+    ``optimization_stack`` so a run whose ``tuned_file`` was kept is marked
+    ``adopted`` with the kept gain. Gain is mirrored here for the optimization
+    layer while ``attribution`` remains the authoritative roll-up.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        dict[str, Any]: A ``GemmTuning`` envelope (``runs`` + adopted summary),
+        or ``{}`` when the session ran no GEMM tuning.
+    """
+    attempts = state.get("gemm_tuning_attempts")
+    if not isinstance(attempts, list) or not attempts:
+        last = state.get("last_gemm_tuning")
+        attempts = [last] if isinstance(last, dict) and last else []
+    if not attempts:
+        return {}
+
+    # tuned_file -> (gain_pct, validated) for KEEPs already in the stack.
+    adopted_gain: dict[str, dict[str, Any]] = {}
+    stack = state.get("optimization_stack")
+    validated_len = 0
+    try:
+        validated_len = int(state.get("cumulative_gain_validated_stack_len") or 0)
+    except (TypeError, ValueError):
+        validated_len = 0
+    if isinstance(stack, list):
+        for idx, item in enumerate(stack):
+            if not isinstance(item, dict) or item.get("action") != "gemm_tuning":
+                continue
+            tf = str(item.get("tuned_file") or "").strip()
+            if not tf:
+                continue
+            adopted_gain[tf] = {
+                "gain_pct": _to_float(item.get("gain_pct")),
+                "validated": idx < validated_len,
+                "engine": str(item.get("engine") or "geak"),
+            }
+
+    baseline_tput = _to_float(state.get("baseline_tput"))
+    knob_tp = state.get("tp")
+    knob_conc = state.get("conc")
+    knob_isl = state.get("isl")
+    knob_osl = state.get("osl")
+    gpu_type = str(state.get("gpu_type") or "").strip()
+    precision = str(state.get("precision") or "").strip()
+    framework = str(state.get("framework") or "").strip()
+
+    runs: list[dict[str, Any]] = []
+    for raw in attempts:
+        if not isinstance(raw, dict):
+            continue
+        engine = str(raw.get("engine") or "geak")
+        speedup = _to_float(raw.get("best_speedup"))
+        gain_pct: float | None = None
+        tuned_tput: float | None = None
+        if speedup is not None:
+            gain_pct = (speedup - 1.0) * 100.0
+            if baseline_tput is not None:
+                tuned_tput = baseline_tput * speedup
+        tuned_file = str(raw.get("tuned_file") or "").strip()
+        adopted = tuned_file in adopted_gain
+        # Prefer the kept gain (validated e2e) when this run was adopted.
+        if adopted and adopted_gain[tuned_file].get("gain_pct") is not None:
+            gain_pct = adopted_gain[tuned_file]["gain_pct"]
+
+        run: dict[str, Any] = {
+            "engine": engine,
+            "status": str(raw.get("status") or ""),
+            "decision": str(raw.get("decision") or ""),
+            "source": str(raw.get("source") or ""),
+            "ts": str(raw.get("ts") or ""),
+            "precision": str(raw.get("precision") or precision),
+            "framework": str(raw.get("framework") or framework),
+            "gpu_type": str(raw.get("gpu_type") or gpu_type),
+            "baseline_tput": baseline_tput,
+            "best_speedup": speedup,
+            "gain_pct": gain_pct,
+            "tuned_tput": tuned_tput,
+            "tuned_file": tuned_file,
+            "final_report_path": str(raw.get("final_report_path") or ""),
+            "workspace": str(raw.get("workspace") or ""),
+            "adopted": adopted,
+        }
+        for knob, val in (("tp", knob_tp), ("conc", knob_conc), ("isl", knob_isl), ("osl", knob_osl)):
+            raw_knob = raw.get(knob)
+            chosen = raw_knob if raw_knob not in (None, "") else val
+            if chosen not in (None, ""):
+                try:
+                    run[knob] = int(chosen)
+                except (TypeError, ValueError):
+                    pass
+        if raw.get("libtype"):
+            run["libtype"] = str(raw.get("libtype"))
+        if isinstance(raw.get("summary"), dict):
+            run["summary"] = raw["summary"]
+        if isinstance(raw.get("shapes"), list):
+            run["shapes"] = raw["shapes"]
+        runs.append(run)
+
+    if not runs:
+        return {}
+
+    adopted_engine = ""
+    adopted_tuned_file = ""
+    total_gain_pct = 0.0
+    for run in runs:
+        if run.get("adopted"):
+            adopted_engine = run.get("engine") or adopted_engine
+            adopted_tuned_file = run.get("tuned_file") or adopted_tuned_file
+            if isinstance(run.get("gain_pct"), (int, float)):
+                total_gain_pct += float(run["gain_pct"])
+
+    return {
+        "runs": runs,
+        "adopted_engine": adopted_engine,
+        "adopted_tuned_file": adopted_tuned_file,
+        "total_gain_pct": round(total_gain_pct, 2),
+    }
 
 
 def collect_source_files(

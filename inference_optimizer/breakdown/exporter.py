@@ -388,6 +388,12 @@ def build(
         "optimization_stack",
         _safe_collect("optimization_stack", lambda: collectors.collect_optimization_stack(state), warnings, default=[]),
     )
+    # Fixed FP8 GEMM-tuning stage, engine-tagged (geak today, forge later);
+    # empty {} on non-fp8/sglang or pre-section sessions.
+    gemm_tuning = _pick(
+        "gemm_tuning",
+        _safe_collect("gemm_tuning", lambda: collectors.collect_gemm_tuning(state), warnings, default={}),
+    )
     # Hot-kernel roofline table (Dashboard §1) from ``<sd>/reports/kernel_roofline.json``.
     kernel_roofline = _pick(
         "kernel_roofline",
@@ -546,6 +552,10 @@ def build(
         "specialist_runs": specialist_runs,
         # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``.
         "optimization_stack": optimization_stack,
+        # Fixed FP8 GEMM-tuning stage (KERNEL entry), engine-tagged (geak
+        # today, forge later). Gain mirrored here; ``attribution`` stays
+        # authoritative. Empty {} on non-fp8/sglang or pre-section sessions.
+        "gemm_tuning": gemm_tuning,
         # Hot-kernel roofline table (spec §1); empty → dashboard hides it.
         "kernel_roofline": kernel_roofline,
         # Kernel-agent attempt outcome summary (spec §A1); empty → hides Block 1.
