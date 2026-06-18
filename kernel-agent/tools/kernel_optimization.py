@@ -617,6 +617,16 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     }
 
     if user_backends:
+        # Geak fallback (RCA root cause A): a forge-only order (e.g.
+        # KERNEL_OPT_BACKEND_ORDER=forge) used to return ["forge"] with no
+        # fallback, so when forge skips a non-triton candidate (or misses a
+        # KEEP) the run produced ZERO optimization. Append geak as a safety net
+        # when forge is requested but geak isn't already in the ladder. Opt out
+        # with FORGE_DISABLE_GEAK_FALLBACK=1 for strict forge-only experiments.
+        disable_fallback = os.environ.get("FORGE_DISABLE_GEAK_FALLBACK", "").strip().lower() in ("1", "true", "yes")
+        if "forge" in user_backends and "geak" not in user_backends and not disable_fallback:
+            user_backends = user_backends + ["geak"]
+            notes["geak_fallback_appended"] = True
         if "geak" in user_backends and not benchmark_available:
             notes["geak_without_benchmark"] = True
         return user_backends, notes
