@@ -9589,16 +9589,10 @@ class Coordinator:
                     # turn cap was lifted). Iron law: the agent's wall-budget
                     # kill (= the budget) must fire at or before the GPU lease
                     # TTL, which in turn must not outlive the gpu_research_lane
-                    # lease TTL (both = budget × (1 + grace), set here and in
-                    # intent_router) — the cards are never reclaimed while the
-                    # agent is still computing.
-                    gpu_ttl_sec = max(
-                        int(task.lease_ttl_sec or 0),
-                        int(
-                            self._specialist_wall_budget_sec(needs_gpu=True)
-                            * (1.0 + GPU_LEASE_TTL_GRACE)
-                        ),
-                    )
+                    # lease TTL. Both are computed by ``_gpu_lease_ttl_sec`` (here
+                    # and in intent_router) so they cannot drift apart — the cards
+                    # are never reclaimed while the agent is still computing.
+                    gpu_ttl_sec = self._gpu_lease_ttl_sec(int(task.lease_ttl_sec or 0))
                     gpu_lease = await self.gpu_specialist_pool.try_acquire(
                         count=gpu_count,
                         holder_id=task.task_id,
@@ -9704,6 +9698,27 @@ class Coordinator:
         macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         budget_min = min(base_min * (macro_cycle + 1), 240.0)
         return budget_min * 60.0
+
+    def _gpu_lease_ttl_sec(self, floor_ttl_sec: int = 0) -> int:
+        """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.
+
+        The iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — both the
+        GPU-pool lease (dispatch) and the lane lease (intent_router) must outlive
+        the agent's WS1 wall-budget kill, so both are sourced from the same
+        ``wall_budget × (1 + GPU_LEASE_TTL_GRACE)`` here to keep them from
+        drifting apart.
+
+        Args:
+            floor_ttl_sec: A lower bound (e.g. the registry / existing
+                ``lease_ttl_sec``) the computed TTL is raised to.
+
+        Returns:
+            int: ``max(floor_ttl_sec, wall_budget × (1 + grace))``.
+        """
+        return max(
+            int(floor_ttl_sec or 0),
+            int(self._specialist_wall_budget_sec(needs_gpu=True) * (1.0 + GPU_LEASE_TTL_GRACE)),
+        )
 
     async def _reap_dispatched_task(
         self,
@@ -10634,9 +10649,18 @@ class Coordinator:
             # watermark + clear the resume_pending_revalidation flag directly
             # from the measured tput, and flag drift when the cumulative result
             # no longer reproduces the recorded current_best.
-            if task is not None and str((task.params or {}).get("source") or "") == "resume_stack_revalidate":
+            # A post-resume revalidation task (full-stack ``resume_stack_revalidate``
+            # or env-gated current_best ``resume_reverify_best``) confirms the
+            # EXISTING cumulative stack rather than adding a variant, so it never
+            # "promotes". Reconcile the validation watermark + clear the
+            # ``resume_pending_revalidation`` flag from the measured tput — but
+            # ONLY when the rebench actually produced a valid measurement, so a
+            # failed/empty rebench leaves the flag set and reports keep warning.
+            _revalidate_sources = {"resume_stack_revalidate", "resume_reverify_best"}
+            if task is not None and str((task.params or {}).get("source") or "") in _revalidate_sources:
                 measured = result.get("output_throughput")
-                if isinstance(measured, (int, float)) and measured > 0 and self.shared_state.baseline_tput > 0:
+                measured_ok = isinstance(measured, (int, float)) and measured > 0
+                if measured_ok and self.shared_state.baseline_tput > 0:
                     self.shared_state.cumulative_gain_validated = (
                         (float(measured) - self.shared_state.baseline_tput)
                         / self.shared_state.baseline_tput
@@ -10666,7 +10690,8 @@ class Coordinator:
                                 "floor_pct": floor,
                             },
                         )
-                self.shared_state.resume_pending_revalidation = False
+                if measured_ok:
+                    self.shared_state.resume_pending_revalidation = False
                 changed = True
             if isinstance(winners, list) and winners:
                 for winner in winners:

@@ -35,7 +35,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..protocol.intent import Intent, IntentType
-from .gpu_pool import GPU_LEASE_TTL_GRACE
 from .message_bus import Message
 from .policy import PolicyDenied
 from .task_registry import Task
@@ -413,13 +412,9 @@ class IntentRouter:
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
                     try:
-                        budget_sec = self._coord._specialist_wall_budget_sec(
-                            needs_gpu=True,
-                        )
-                        ttl = max(
-                            int(ttl or 0),
-                            int(budget_sec * (1.0 + GPU_LEASE_TTL_GRACE)),
-                        )
+                        # Shared with the GPU-pool lease at dispatch so the lane
+                        # lease and the GPU lease TTL never drift apart.
+                        ttl = self._coord._gpu_lease_ttl_sec(int(ttl or 0))
                     except Exception:  # noqa: BLE001 — fall back to registry ttl
                         log.exception(
                             "WS2: failed to re-source gpu_research_lane TTL; "

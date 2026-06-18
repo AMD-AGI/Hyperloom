@@ -4302,6 +4302,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "need to also pass --degraded-kb).",
     )
     opt.add_argument(
+        "--specialist-kb-mcp-url",
+        dest="specialist_kb_mcp_url",
+        type=str,
+        default=None,
+        help="Read-only KB-graph (cortex_kb) MCP endpoint advertised to "
+        "specialist subprocesses; also settable via "
+        "$HYPERLOOM_SPECIALIST_KB_MCP_URL (bearer token from "
+        "$HYPERLOOM_SPECIALIST_KB_MCP_TOKEN). When unset, falls back to "
+        "the gbrain MCP derived from $GBRAIN_BASE_URL (+ /mcp) with a "
+        "$GBRAIN_TOKEN bearer. Specialist KB writes always stay local.",
+    )
+    opt.add_argument(
         "--local-kb-root",
         dest="local_kb_root",
         type=str,

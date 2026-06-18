@@ -153,12 +153,19 @@ RESEARCH_LANE_CEILING_FALLBACK: int = 2
 def detect_gpu_count() -> int:
     """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed.
 
+    ``ROCR_VISIBLE_DEVICES`` is consulted first because it is the canonical ROCm
+    pinning mask per the repo's GPU runner convention (and the CLI preflight
+    drops ``HIP_VISIBLE_DEVICES`` when ROCR is set). Honouring it here keeps the
+    GPU-specialist capacity scoped to the operator's mask instead of the whole
+    machine.
+
     Returns:
-        int: the number of visible GPUs derived from ``HIP_VISIBLE_DEVICES`` /
-            ``CUDA_VISIBLE_DEVICES`` env masks, else the count parsed from
-            ``rocm-smi``; 0 when nothing can be probed.
+        int: the number of visible GPUs derived from the
+            ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES`` /
+            ``CUDA_VISIBLE_DEVICES`` env masks (first one set wins), else the
+            count parsed from ``rocm-smi``; 0 when nothing can be probed.
     """
-    for env_name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+    for env_name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
         raw = os.environ.get(env_name)
         if raw is None:
             continue

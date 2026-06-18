@@ -60,20 +60,49 @@ def _parse_gpu_list(raw: str) -> list[int]:
     return out
 
 
-def resolve_gpu_specialist_devices(capacity: int) -> list[int]:
-    """Resolve the GPU ids available to GPU specialists.
+def _visible_device_mask() -> tuple[list[int], bool]:
+    """Resolve the process's visible-GPU mask as absolute device ids.
 
-    ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` may name an explicit pool;
-    absent → ``range(capacity)``. Capacity zero disables dispatch.
+    Checks ``ROCR_VISIBLE_DEVICES`` first (canonical ROCm pinning per the repo
+    convention; the CLI preflight drops ``HIP_VISIBLE_DEVICES`` when ROCR is
+    set), then ``HIP_VISIBLE_DEVICES`` / ``CUDA_VISIBLE_DEVICES``.
+
+    Returns:
+        ``(ids, present)`` where ``present`` is True when any of the masks is
+        set (even to an empty string, which means "no visible GPUs" → ``[]``);
+        ``present`` is False only when none of the masks is set.
+    """
+    for env_name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        return _parse_gpu_list(raw), True
+    return [], False
+
+
+def resolve_gpu_specialist_devices(capacity: int) -> list[int]:
+    """Resolve the absolute GPU ids available to GPU specialists.
+
+    Precedence:
+
+    1. ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` — explicit operator pool,
+       capped to ``capacity``.
+    2. The process visible-device mask (``ROCR_VISIBLE_DEVICES``, then
+       ``HIP``/``CUDA``), capped to ``capacity``. The leased ids are written
+       verbatim into each specialist subprocess's ``ROCR_VISIBLE_DEVICES``, so
+       scoping the pool to the mask keeps specialists on the operator's pinned
+       cards and never hands them a card outside the serving/benchmark mask.
+    3. No mask set → ``range(capacity)`` (whole-machine ids ``0..capacity-1``).
+
+    Capacity zero disables dispatch.
 
     Args:
         capacity: Maximum number of GPU ids to make available; values ``<= 0``
             disable dispatch.
 
     Returns:
-        The GPU ids available to specialists (explicit pool capped to
-        ``capacity``, else ``range(capacity)``); ``[]`` when capacity is
-        non-positive.
+        The absolute GPU ids available to specialists; ``[]`` when capacity is
+        non-positive or the visible mask is set but empty.
     """
     cap = max(0, int(capacity or 0))
     if cap <= 0:
@@ -81,6 +110,9 @@ def resolve_gpu_specialist_devices(capacity: int) -> list[int]:
     explicit = _parse_gpu_list(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", ""))
     if explicit:
         return explicit[:cap]
+    mask_ids, mask_present = _visible_device_mask()
+    if mask_present:
+        return mask_ids[:cap]
     return list(range(cap))
 
 

@@ -46,17 +46,27 @@ def test_delegate_field_present() -> None:
 
 # -- detect_gpu_count ------------------------------------------------------
 def test_detect_gpu_count_env_mask(monkeypatch) -> None:
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2")
     assert detect_gpu_count() == 3
 
 
+def test_detect_gpu_count_rocr_mask_wins(monkeypatch) -> None:
+    # ROCR is canonical on ROCm and is checked before HIP/CUDA.
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1")
+    assert detect_gpu_count() == 4
+
+
 def test_detect_gpu_count_empty_mask_returns_zero(monkeypatch) -> None:
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "")
     assert detect_gpu_count() == 0
 
 
 def test_detect_gpu_count_rocm_smi_fallback(monkeypatch) -> None:
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
@@ -70,6 +80,7 @@ def test_detect_gpu_count_rocm_smi_fallback(monkeypatch) -> None:
 
 
 def test_detect_gpu_count_rocm_smi_missing(monkeypatch) -> None:
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 

@@ -435,7 +435,7 @@ async def test_resume_consistency_rolls_back_pending_integrate_without_kept(coor
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_clears_stale_pending_integrate(coord: Coordinator) -> None:
+async def test_resume_consistency_clears_stale_pending_integrate_with_specialist_id(coord: Coordinator) -> None:
     # Gap C: a sentinel with no kept result and no patches → cleared as stale.
     coord._resumed_from["is_resume"] = True
     coord.shared_state.pending_integrate = {"task_id": "ti-stale", "specialist_task_id": "spec-stale"}
@@ -491,6 +491,48 @@ async def test_resume_stack_revalidate_promote_clears_flag_and_sets_watermark(co
     assert coord.shared_state.resume_pending_revalidation is False
     assert coord.shared_state.cumulative_gain_validated_stack_len == 1
     assert coord.shared_state.cumulative_gain_validated == pytest.approx(21.0)
+
+
+@pytest.mark.asyncio
+async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinator) -> None:
+    # A revalidation rebench that produced no valid measurement must NOT clear
+    # the pending flag — reports must keep warning until the stack is confirmed.
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.optimization_stack = [
+        {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
+    ]
+    coord.shared_state.cumulative_gain_validated_stack_len = 0
+    task = SimpleNamespace(task_id="tr-fail", params={"source": "resume_stack_revalidate"})
+    await coord._promote_to_shared_state(
+        "explore",
+        {"winners": [], "best_variant": None, "output_throughput": 0.0},
+        task=task,
+    )
+
+    assert coord.shared_state.resume_pending_revalidation is True
+    assert coord.shared_state.cumulative_gain_validated_stack_len == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_reverify_best_promote_clears_flag(coord: Coordinator) -> None:
+    # The env-gated current_best recheck (source=resume_reverify_best) is also a
+    # revalidation source and clears the flag on a valid measurement.
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.optimization_stack = [
+        {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
+    ]
+    coord.shared_state.cumulative_gain_validated_stack_len = 0
+    task = SimpleNamespace(task_id="rb-1", params={"source": "resume_reverify_best"})
+    await coord._promote_to_shared_state(
+        "explore",
+        {"winners": [], "best_variant": None, "output_throughput": 118.0},
+        task=task,
+    )
+
+    assert coord.shared_state.resume_pending_revalidation is False
+    assert coord.shared_state.cumulative_gain_validated_stack_len == 1
 
 
 @pytest.mark.asyncio
