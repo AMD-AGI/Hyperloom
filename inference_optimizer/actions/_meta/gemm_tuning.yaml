@@ -21,8 +21,8 @@ side_effects:
   - workspace_write
   - server_restart
   - writes_config
-preferred_backend: claude
-preferred_model: claude-opus-4-7
+preferred_backend: forge
+preferred_model: null
 max_turns: 25
 lease_ttl_sec: 5400
 description: >

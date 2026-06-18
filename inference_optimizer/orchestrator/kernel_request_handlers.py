@@ -1210,8 +1210,7 @@ def _resolve_gemm_tuning_backend(payload: dict) -> str:
     Precedence:
     1. payload['gemm_tuning_backend']
     2. GEMM_TUNING_BACKEND env var
-    3. First applicable backend in KERNEL_OPT_BACKEND_ORDER
-    4. Default: 'forge'
+    3. Default: 'forge'
     """
     raw = str(
         payload.get("gemm_tuning_backend")
@@ -1220,8 +1219,7 @@ def _resolve_gemm_tuning_backend(payload: dict) -> str:
     ).strip().lower()
     if raw in ("forge", "geak"):
         return raw
-    # Default: geak (backward compatible; forge requires explicit opt-in).
-    return "geak"
+    return "forge"
 
 
 def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
@@ -1479,8 +1477,7 @@ async def run_gemm_tuning_handler(
     Backend selection:
     1. payload['gemm_tuning_backend']
     2. GEMM_TUNING_BACKEND env var
-    3. First of forge/geak in KERNEL_OPT_BACKEND_ORDER
-    4. Default: forge
+    3. Default: 'forge'
 
     Args:
         payload: The GEMM-tuning request payload.
