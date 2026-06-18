@@ -475,3 +475,84 @@ def test_flydsl_compat_untouched_when_no_extract(tmp_path):
     proto.write_text("def something_else():\n    return 1\n")
     assert forge_submit._ensure_flydsl_aiter_compat(str(proto)) is False
     assert "fly_values" not in proto.read_text()
+
+
+# ---- forge_cli_result.json sidecar -> FORGE_LLM_USAGE / FORGE_STEPS ----
+
+
+def _write_forge_sidecar(tmp_path, payload):
+    import json
+    (tmp_path / "forge_cli_result.json").write_text(json.dumps(payload))
+    return tmp_path
+
+
+def test_sidecar_usage_surfaced_without_calls(tmp_path):
+    """The parser only needs token counters; ``calls`` is optional metadata.
+
+    A sidecar that reports aggregate token counters with NO ``calls`` field
+    must still surface so ``submit`` emits FORGE_LLM_USAGE — the previous gate
+    (``usage.get("calls")``) silently dropped it, losing the forge token row.
+    """
+    out_dir = _write_forge_sidecar(tmp_path, {
+        "baseline_ms": 10, "best_ms": 8, "improved": True,
+        "llm_usage": {"input_tokens": 120, "output_tokens": 30},
+    })
+    usage, steps = forge_submit._forge_trace_from_sidecar(out_dir)
+    assert usage == {"input_tokens": 120, "output_tokens": 30}
+    assert steps is None
+
+
+def test_sidecar_usage_surfaced_with_zero_calls(tmp_path):
+    """``calls == 0`` but real token counts present -> still surfaced."""
+    out_dir = _write_forge_sidecar(tmp_path, {
+        "llm_usage": {"input_tokens": 5, "calls": 0},
+    })
+    usage, _ = forge_submit._forge_trace_from_sidecar(out_dir)
+    assert usage["input_tokens"] == 5
+
+
+def test_sidecar_usage_dropped_without_token_counters(tmp_path):
+    """Only metadata, no int-coercible counter -> nothing meaningful to emit."""
+    out_dir = _write_forge_sidecar(tmp_path, {"llm_usage": {"calls": 3}})
+    usage, _ = forge_submit._forge_trace_from_sidecar(out_dir)
+    assert usage is None
+
+
+def test_sidecar_missing_or_non_dict(tmp_path):
+    """No sidecar -> (None, None); a non-dict sidecar -> (None, None)."""
+    assert forge_submit._forge_trace_from_sidecar(tmp_path) == (None, None)
+    (tmp_path / "forge_cli_result.json").write_text("[1, 2, 3]")
+    assert forge_submit._forge_trace_from_sidecar(tmp_path) == (None, None)
+
+
+def test_sidecar_steps_surfaced(tmp_path):
+    out_dir = _write_forge_sidecar(tmp_path, {
+        "steps": {"steps": [{"iteration": 1, "decision": "KEEP"}],
+                  "summary": {"iterations": 1}},
+    })
+    _, steps = forge_submit._forge_trace_from_sidecar(out_dir)
+    assert steps["summary"]["iterations"] == 1
+
+
+def test_sidecar_empty_steps_list_is_none(tmp_path):
+    """An empty ``steps`` list carries no timeline -> not surfaced."""
+    out_dir = _write_forge_sidecar(tmp_path, {"steps": {"steps": []}})
+    _, steps = forge_submit._forge_trace_from_sidecar(out_dir)
+    assert steps is None
+
+
+def test_sidecar_usage_roundtrips_through_parser(tmp_path):
+    """Full contract: sidecar -> _forge_trace_from_sidecar -> FORGE_LLM_USAGE
+    marker (as ``submit`` emits it) -> ``parse_forge_usage`` recovers counters."""
+    import json
+
+    from inference_optimizer.orchestrator.trace.parse_usage import parse_forge_usage
+
+    out_dir = _write_forge_sidecar(tmp_path, {
+        "llm_usage": {"input_tokens": 7, "output_tokens": 11},
+    })
+    usage, _ = forge_submit._forge_trace_from_sidecar(out_dir)
+    marker = "FORGE_LLM_USAGE " + json.dumps(usage, sort_keys=True)
+    recovered = parse_forge_usage(marker)
+    assert recovered["input_tokens"] == 7
+    assert recovered["output_tokens"] == 11

@@ -1246,6 +1246,8 @@ class KBProvenance(TypedDict, total=False):
         warm_start_ts (str): ISO UTC timestamp of warm start.
         warm_start_recipe_seen (bool): Whether a warm recipe was seen.
         warm_start_recipe_tier (str): Tier of the seen warm recipe.
+        warm_start_recipe_source (str): KB path that supplied the applied
+            warm recipe (e.g. ``gbrain`` / ``cortex``); empty when none.
         warm_start_pitfall_count (int): Number of pitfalls injected at warm start.
         warm_start_lesson_count (int): Number of lessons injected at warm start.
         warm_replay (WarmReplayOutcome): Operator-visible warm-replay summary.
@@ -1270,6 +1272,8 @@ class KBProvenance(TypedDict, total=False):
     warm_start_ts: str
     warm_start_recipe_seen: bool
     warm_start_recipe_tier: str
+    # Which KB path (e.g. "gbrain" / "cortex") supplied the applied warm recipe.
+    warm_start_recipe_source: str
     warm_start_pitfall_count: int
     warm_start_lesson_count: int
     warm_replay: WarmReplayOutcome
@@ -1589,13 +1593,19 @@ class DecisionTrace(TypedDict, total=False):
     ``decision_trace`` is one entry per decision (KEEP/REVERT journal row +
     dynamic_action dispatch event) with the LLM calls attributed to it.
     ``token_rollup`` summarises every call by phase / component / total.
-    ``unattributed_tokens`` is the bucket of calls that matched no decision
-    (kept so the per-decision sums + this reconcile to ``session_total``).
+    ``unattributed_tokens`` + ``overhead_tokens`` are the buckets of calls that
+    matched no decision (overhead = expected cross-decision spend; unattributed
+    = a real gap), kept so per-decision sums + these reconcile to
+    ``session_total``.
     """
 
     decision_trace: list[DecisionTraceEntry]
     token_rollup: TokenRollup
     unattributed_tokens: TokenBucket
+    # Inherently cross-decision LLM spend (orchestration / critic / robustness
+    # reactor turns) with no single owning decision — kept separate from
+    # ``unattributed_tokens`` (a genuine attribution gap). Additive/optional.
+    overhead_tokens: TokenBucket
 
 
 # ---------------------------------------------------------------------------
@@ -1631,16 +1641,23 @@ class TokenUsageAttribution(TypedDict, total=False):
     Attributes:
         attributed_to_decisions (TokenUsageBucket): Tokens whose call carried a
             ``task_id`` / ``dyn_id`` that joined to a KEEP/REVERT or
-            dynamic_action decision (e.g. specialist subprocess turns).
-        unattributed (TokenUsageBucket): Tokens from calls with no decision key
-            (orchestration / kernel / critic / proposal_scorer turns — these
-            are LLM-internal, not bound to a single tracked change).
+            dynamic_action decision (e.g. specialist subprocess turns, scorer
+            rounds keyed by their specialist task).
+        overhead (TokenUsageBucket): Inherently cross-decision spend
+            (orchestration / critic / robustness reactor turns) with no single
+            owning decision — expected shared cost, not an attribution gap.
+        unattributed (TokenUsageBucket): Tokens from calls that carried no
+            decision key and are not recognised overhead — a real attribution
+            gap to chase.
         attributed_calls_pct (float): Percentage of calls that were attributed.
+        overhead_calls_pct (float): Percentage of calls classed as overhead.
     """
 
     attributed_to_decisions: TokenUsageBucket
+    overhead: TokenUsageBucket
     unattributed: TokenUsageBucket
     attributed_calls_pct: float
+    overhead_calls_pct: float
 
 
 class TokenUsageTimelineEntry(TypedDict, total=False):
@@ -1672,9 +1689,9 @@ class TokenUsage(TypedDict, total=False):
     """Top-level, discoverable LLM-token-spend summary for the session.
 
     A promoted view over ``decision_trace.token_rollup`` (the full per-call
-    ledger ``reports/trace/llm_calls.jsonl`` + ``ext/*.jsonl``) plus a
-    timeline correlation. Purely derived — no new disk read — so it always
-    reconciles with ``decision_trace``.
+    ledger ``reports/trace/llm_calls.jsonl``) plus a timeline correlation.
+    Purely derived — no new disk read — so it always reconciles with
+    ``decision_trace``.
 
     Attributes:
         session_total (TokenUsageBucket): Whole-session total across every call.
@@ -1731,10 +1748,9 @@ class LangfusePushCounts(TypedDict, total=False):
             conversation text (vs token-only / text-only).
         generations_text_only (int): Generations from a conversation row only.
         generations_token_only (int): Generations from a token row only
-            (the typical out-of-process child case).
+            (an unpaired token half flushed at session end).
         scores_sent (int): Decision Scores created (span- + trace-level).
         spans_opened (int): Phase + agent spans created.
-        ext_shards_read (int): Out-of-process ``ext/*.jsonl`` shards swept at flush.
         errors (int): Swallowed send failures (a Langfuse outage never breaks
             the optimization loop).
     """
@@ -1745,7 +1761,6 @@ class LangfusePushCounts(TypedDict, total=False):
     generations_token_only: int
     scores_sent: int
     spans_opened: int
-    ext_shards_read: int
     errors: int
 
 
