@@ -141,10 +141,13 @@ def _fetch_raw(url: str) -> bytes:
         InferenceXFetchError: On any non-200 status, network failure, or
             transport-level decode error.
     """
-    req = urllib.request.Request(url, headers={
-        "Accept-Encoding": "gzip",
-        "User-Agent":      "inference_optimizer/baseline_comparison",
-    })
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept-Encoding": "gzip",
+            "User-Agent": "inference_optimizer/baseline_comparison",
+        },
+    )
     ctx = _build_ssl_context()
     try:
         with urllib.request.urlopen(req, timeout=_timeout_sec(), context=ctx) as resp:
@@ -200,7 +203,9 @@ def fetch_rows(model: str) -> tuple[list[dict[str, Any]] | None, str]:
             last_err = str(exc)
             log.warning(
                 "inferencex_client: fetch attempt %d/%d failed: %s",
-                attempt, attempts, exc,
+                attempt,
+                attempts,
+                exc,
             )
             if attempt < attempts:
                 time.sleep(0.5 * attempt)

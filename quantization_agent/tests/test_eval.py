@@ -16,6 +16,7 @@ from quantization_agent.driver.eval import (
 # resolve_threshold — priority chain (§3.1)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_resolve_threshold_default_when_nothing_provided(tmp_path):
     t, src = resolve_threshold(tmp_path, acceptable_eval_gap=None)
     assert t == DEFAULT_ACCEPTABLE_GAP
@@ -60,6 +61,7 @@ def test_resolve_threshold_arg_zero_is_respected(tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 # decide — gap acceptance
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _report(gap: float) -> dict:
     return {

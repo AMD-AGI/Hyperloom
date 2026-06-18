@@ -91,9 +91,7 @@ def _resolve_kb_client() -> KBClient:
     if mode == "live":
         base_url = os.environ.get("KB_BASE_URL")
         if not base_url:
-            raise RuntimeAdapterError(
-                "CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not set"
-            )
+            raise RuntimeAdapterError("CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not set")
         return HTTPKBClient(
             base_url=base_url,
             timeout_ms=int(os.environ.get("KB_TIMEOUT_MS", "10000")),

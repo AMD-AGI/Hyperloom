@@ -11,6 +11,7 @@ from inference_optimizer import cli
 
 def test_check_tracelens_cli_passes_when_cli_present(monkeypatch, capsys):
     """All required CLI names resolve via ``shutil.which`` -> silent return."""
+
     def fake_which(name: str) -> str | None:
         if name in cli._TRACELENS_REQUIRED_CLIS:
             return f"/opt/venv/bin/{name}"
@@ -40,7 +41,8 @@ def test_check_tracelens_cli_exits_2_when_cli_missing(monkeypatch, capsys):
 
 
 def test_check_tracelens_cli_error_uses_user_data_path_env(
-    monkeypatch, capsys,
+    monkeypatch,
+    capsys,
 ):
     """Remediation hint should respect ``$USER_DATA_PATH`` override."""
     monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
@@ -53,7 +55,8 @@ def test_check_tracelens_cli_error_uses_user_data_path_env(
 
 
 def test_check_tracelens_cli_error_falls_back_to_default_when_env_unset(
-    monkeypatch, capsys,
+    monkeypatch,
+    capsys,
 ):
     """Without ``$USER_DATA_PATH`` the hint cites the default session dir."""
     monkeypatch.setattr(cli.shutil, "which", lambda _name: None)

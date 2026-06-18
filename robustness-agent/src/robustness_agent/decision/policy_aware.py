@@ -129,8 +129,7 @@ class PolicyAware:
         for field_name in required:
             if field_name not in payload:
                 raise PolicyViolation(
-                    f"intent_type={intent.type.value!r} missing required "
-                    f"payload field {field_name!r}",
+                    f"intent_type={intent.type.value!r} missing required payload field {field_name!r}",
                     rule="payload",
                     hint=f"required fields: {required!r}",
                 )
@@ -179,8 +178,7 @@ class PolicyAware:
         severity = str(payload.get("severity", "")).strip()
         if severity not in ALERT_SEVERITIES:
             raise PolicyViolation(
-                f"alert.severity={severity!r} not in "
-                f"{sorted(ALERT_SEVERITIES)!r}",
+                f"alert.severity={severity!r} not in {sorted(ALERT_SEVERITIES)!r}",
                 rule="payload",
             )
         summary = str(payload.get("summary", "")).strip()
@@ -215,8 +213,7 @@ class PolicyAware:
         severity = payload.get("severity")
         if severity is not None and severity not in ALERT_SEVERITIES:
             raise PolicyViolation(
-                f"escalate severity={severity!r} not in "
-                f"{sorted(ALERT_SEVERITIES)!r}",
+                f"escalate severity={severity!r} not in {sorted(ALERT_SEVERITIES)!r}",
                 rule="payload",
             )
 
@@ -239,8 +236,7 @@ class PolicyAware:
         scope = str(payload.get("scope", "task")).strip()
         if scope not in KILL_TASK_ALLOWED_SCOPES:
             raise PolicyViolation(
-                f"kill_task.scope={scope!r} not in "
-                f"{sorted(KILL_TASK_ALLOWED_SCOPES)!r}",
+                f"kill_task.scope={scope!r} not in {sorted(KILL_TASK_ALLOWED_SCOPES)!r}",
                 rule="kill_scope",
                 hint="upstream v0.6 keeps server / process kills out per IR-5",
             )
@@ -256,14 +252,10 @@ class PolicyAware:
         """
         task_id = str(payload.get("task_id", "")).strip()
         if not task_id:
-            raise PolicyViolation(
-                "force_dispatch.task_id must be non-empty", rule="payload"
-            )
+            raise PolicyViolation("force_dispatch.task_id must be non-empty", rule="payload")
         reason = str(payload.get("reason", "")).strip()
         if not reason:
-            raise PolicyViolation(
-                "force_dispatch.reason must be non-empty", rule="payload"
-            )
+            raise PolicyViolation("force_dispatch.reason must be non-empty", rule="payload")
 
     def _check_prune_branch(self, payload: dict[str, Any]) -> None:
         """Validate a ``prune_branch`` payload.
@@ -276,14 +268,10 @@ class PolicyAware:
         """
         family = str(payload.get("family", "")).strip()
         if not family:
-            raise PolicyViolation(
-                "prune_branch.family must be non-empty", rule="payload"
-            )
+            raise PolicyViolation("prune_branch.family must be non-empty", rule="payload")
         reason = str(payload.get("reason", "")).strip()
         if not reason:
-            raise PolicyViolation(
-                "prune_branch.reason must be non-empty", rule="payload"
-            )
+            raise PolicyViolation("prune_branch.reason must be non-empty", rule="payload")
 
     def _check_delegate(self, payload: dict[str, Any]) -> None:
         """Validate a ``delegate`` payload's action name against the allowlist.
@@ -297,9 +285,7 @@ class PolicyAware:
         """
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
-            raise PolicyViolation(
-                "delegate.action_name must be non-empty", rule="payload"
-            )
+            raise PolicyViolation("delegate.action_name must be non-empty", rule="payload")
         if action_name not in ROBUSTNESS_DELEGATE_ACTIONS:
             raise PolicyViolation(
                 f"delegate.action_name={action_name!r} not allowed for "
@@ -329,15 +315,13 @@ class PolicyAware:
         core_fields = sorted(set(changes.keys()) & CORE_STATE_FIELDS)
         if core_fields:
             raise PolicyViolation(
-                "update_state cannot mutate core state fields: "
-                f"{core_fields!r}",
+                f"update_state cannot mutate core state fields: {core_fields!r}",
                 rule="state_field",
             )
         non_robust = sorted(set(changes.keys()) - ROBUSTNESS_STATE_FIELDS)
         if non_robust:
             raise PolicyViolation(
-                "update_state contains fields outside robustness allowlist: "
-                f"{non_robust!r}",
+                f"update_state contains fields outside robustness allowlist: {non_robust!r}",
                 rule="state_field",
                 hint=f"allowed: {sorted(ROBUSTNESS_STATE_FIELDS)!r}",
             )
@@ -356,7 +340,5 @@ class PolicyAware:
         """
         topic = str(payload.get("topic", "")).strip()
         if not topic:
-            raise PolicyViolation(
-                "send_message.topic must be non-empty", rule="payload"
-            )
+            raise PolicyViolation("send_message.topic must be non-empty", rule="payload")
         # Unknown topics are not rejected (upstream soft-degrades to observation).

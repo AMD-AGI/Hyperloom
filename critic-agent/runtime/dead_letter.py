@@ -176,11 +176,13 @@ class DeadLetter:
                     record = json.loads(line)
                 except json.JSONDecodeError as exc:
                     summary.failed += 1
-                    summary.failed_details.append({
-                        "file": str(path),
-                        "line": lineno,
-                        "reason": f"json: {exc}",
-                    })
+                    summary.failed_details.append(
+                        {
+                            "file": str(path),
+                            "line": lineno,
+                            "reason": f"json: {exc}",
+                        }
+                    )
                     failed_lines.append(line)
                     continue
                 endpoint = record.get("endpoint")
@@ -190,11 +192,13 @@ class DeadLetter:
                     summary.succeeded += 1
                 except Exception as exc:  # noqa: BLE001
                     summary.failed += 1
-                    summary.failed_details.append({
-                        "file": str(path),
-                        "line": lineno,
-                        "reason": str(exc),
-                    })
+                    summary.failed_details.append(
+                        {
+                            "file": str(path),
+                            "line": lineno,
+                            "reason": str(exc),
+                        }
+                    )
                     failed_lines.append(line)
             if delete_on_success:
                 if failed_lines:

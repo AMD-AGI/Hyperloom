@@ -24,7 +24,8 @@ _APPLY_TOOL_PATH = Path(__file__).resolve().parent / "apply_kernel_patch.py"
 @pytest.fixture(scope="module")
 def apply_tool() -> types.ModuleType:
     spec = importlib.util.spec_from_file_location(
-        "_apply_kernel_patch_under_test", _APPLY_TOOL_PATH,
+        "_apply_kernel_patch_under_test",
+        _APPLY_TOOL_PATH,
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -54,7 +55,8 @@ def test_target_is_in_aiter_csrc(apply_tool, target_path: str, expected: bool) -
 
 
 def test_invalidate_skips_when_target_not_aiter_csrc(
-    apply_tool, tmp_path: Path,
+    apply_tool,
+    tmp_path: Path,
 ) -> None:
     """sglang / vllm / non-csrc targets must NOT touch jit/build/."""
     sglang_target = tmp_path / "fake_sglang" / "sgl-kernel" / "csrc" / "x.cu"
@@ -68,7 +70,8 @@ def test_invalidate_skips_when_target_not_aiter_csrc(
 
 
 def test_invalidate_skips_when_jit_build_missing(
-    apply_tool, tmp_path: Path,
+    apply_tool,
+    tmp_path: Path,
 ) -> None:
     """aiter csrc target but no jit/build/ on disk → skipped."""
     target = tmp_path / "aiter_root" / "aiter" / "csrc" / "foo.cu"
@@ -78,14 +81,17 @@ def test_invalidate_skips_when_jit_build_missing(
     backup = tmp_path / "backup"
     fake_jit_build = tmp_path / "aiter_root" / "aiter" / "jit" / "build"
     out = apply_tool._invalidate_aiter_jit_build(
-        target, backup, jit_build_dir_override=fake_jit_build,
+        target,
+        backup,
+        jit_build_dir_override=fake_jit_build,
     )
     assert out["status"] == "skipped"
     assert "does not exist" in out["reason"]
 
 
 def test_invalidate_skips_when_jit_build_empty(
-    apply_tool, tmp_path: Path,
+    apply_tool,
+    tmp_path: Path,
 ) -> None:
     """aiter csrc target + empty jit/build/ → skipped (nothing to move)."""
     target = tmp_path / "aiter_root" / "aiter" / "csrc" / "foo.cu"
@@ -97,7 +103,9 @@ def test_invalidate_skips_when_jit_build_empty(
     fake_jit_build.mkdir(parents=True)
 
     out = apply_tool._invalidate_aiter_jit_build(
-        target, backup, jit_build_dir_override=fake_jit_build,
+        target,
+        backup,
+        jit_build_dir_override=fake_jit_build,
     )
     assert out["status"] == "skipped"
     assert "empty" in out["reason"]
@@ -105,7 +113,8 @@ def test_invalidate_skips_when_jit_build_empty(
 
 
 def test_invalidate_moves_jit_build_when_populated(
-    apply_tool, tmp_path: Path,
+    apply_tool,
+    tmp_path: Path,
 ) -> None:
     """Populated jit/build/ is MOVED (not copied) into backup_dir/jit_build."""
     target = tmp_path / "aiter_root" / "aiter" / "csrc" / "ck_gemm_moe_2stages_codegen" / "gemm_moe_ck2stages.cu"
@@ -121,7 +130,9 @@ def test_invalidate_moves_jit_build_when_populated(
 
     backup = tmp_path / "backup"
     out = apply_tool._invalidate_aiter_jit_build(
-        target, backup, jit_build_dir_override=fake_jit_build,
+        target,
+        backup,
+        jit_build_dir_override=fake_jit_build,
     )
 
     assert out["status"] == "ok"
@@ -129,14 +140,14 @@ def test_invalidate_moves_jit_build_when_populated(
     assert out["backup_path"] == str(backup / "jit_build")
     assert "moved_at" in out
 
-    assert not fake_jit_build.exists(), \
-        "jit/build/ must be moved aside, not copied"
+    assert not fake_jit_build.exists(), "jit/build/ must be moved aside, not copied"
     assert (backup / "jit_build" / "module_moe_ck2stages_b16_b16_silu_no" / "module.so").is_file()
     assert (backup / "jit_build" / "module_moe_topksoftmax_asm" / "module.so").is_file()
 
 
 def test_invalidate_refuses_to_clobber_existing_backup(
-    apply_tool, tmp_path: Path,
+    apply_tool,
+    tmp_path: Path,
 ) -> None:
     """A pre-existing backup_dir/jit_build/ must fail the apply, not overwrite the prior backup."""
     target = tmp_path / "aiter_root" / "aiter" / "csrc" / "foo.cu"
@@ -155,7 +166,9 @@ def test_invalidate_refuses_to_clobber_existing_backup(
     (backup / "jit_build" / "leftover.txt").write_text("stale")
 
     out = apply_tool._invalidate_aiter_jit_build(
-        target, backup, jit_build_dir_override=fake_jit_build,
+        target,
+        backup,
+        jit_build_dir_override=fake_jit_build,
     )
     assert out["status"] == "failed"
     assert "already exists" in out["error"]
@@ -175,7 +188,9 @@ def test_restore_moves_backup_back(apply_tool, tmp_path: Path) -> None:
 
     backup = tmp_path / "backup"
     invalidate = apply_tool._invalidate_aiter_jit_build(
-        target, backup, jit_build_dir_override=fake_jit_build,
+        target,
+        backup,
+        jit_build_dir_override=fake_jit_build,
     )
     assert invalidate["status"] == "ok"
     assert not fake_jit_build.exists()
@@ -188,7 +203,8 @@ def test_restore_moves_backup_back(apply_tool, tmp_path: Path) -> None:
 
 
 def test_restore_clears_regenerated_dir_first(
-    apply_tool, tmp_path: Path,
+    apply_tool,
+    tmp_path: Path,
 ) -> None:
     """Restore must wipe a regenerated jit/build/ before moving the backup back (else shutil.move nests)."""
     target = tmp_path / "aiter_root" / "aiter" / "csrc" / "foo.cu"
@@ -202,7 +218,9 @@ def test_restore_clears_regenerated_dir_first(
 
     backup = tmp_path / "backup"
     invalidate = apply_tool._invalidate_aiter_jit_build(
-        target, backup, jit_build_dir_override=fake_jit_build,
+        target,
+        backup,
+        jit_build_dir_override=fake_jit_build,
     )
     assert invalidate["status"] == "ok"
 
@@ -214,15 +232,12 @@ def test_restore_clears_regenerated_dir_first(
     restore = apply_tool._restore_aiter_jit_build(invalidate)
     assert restore["status"] == "ok"
     assert (fake_jit_build / "module_old" / "v0.so").read_bytes() == b"v0"
-    assert not (fake_jit_build / "module_new").exists(), \
-        "regenerated jit/build/ must be cleared before restore"
+    assert not (fake_jit_build / "module_new").exists(), "regenerated jit/build/ must be cleared before restore"
 
 
 def test_restore_skips_when_no_backup(apply_tool) -> None:
     """A manifest with no jit_build_backup must produce a 'skipped' restore, not a crash."""
-    out = apply_tool._restore_aiter_jit_build(
-        {"status": "skipped", "reason": "target not under aiter/csrc/"}
-    )
+    out = apply_tool._restore_aiter_jit_build({"status": "skipped", "reason": "target not under aiter/csrc/"})
     assert out["status"] == "skipped"
 
     out = apply_tool._restore_aiter_jit_build({})
@@ -230,17 +245,20 @@ def test_restore_skips_when_no_backup(apply_tool) -> None:
 
 
 def test_restore_skips_when_backup_path_missing(
-    apply_tool, tmp_path: Path,
+    apply_tool,
+    tmp_path: Path,
 ) -> None:
     """If the backup vanished between apply and revert, restore must skip cleanly."""
     fake_src = tmp_path / "aiter_root" / "aiter" / "jit" / "build"
     fake_backup = tmp_path / "backup" / "jit_build"
-    out = apply_tool._restore_aiter_jit_build({
-        "status": "ok",
-        "src": str(fake_src),
-        "backup_path": str(fake_backup),
-        "moved_at": "2026-05-24T00:00:00Z",
-    })
+    out = apply_tool._restore_aiter_jit_build(
+        {
+            "status": "ok",
+            "src": str(fake_src),
+            "backup_path": str(fake_backup),
+            "moved_at": "2026-05-24T00:00:00Z",
+        }
+    )
     assert out["status"] == "skipped"
     assert "missing" in out["reason"]
 
@@ -252,12 +270,7 @@ def _write_aiter_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     csrc_dir = repo / "csrc" / "ck_gemm_moe_2stages_codegen"
     csrc_dir.mkdir(parents=True)
     target = csrc_dir / "gemm_moe_ck2stages.cu"
-    target.write_text(
-        '#include <cstdio>\n'
-        'namespace aiter {\n'
-        'void ck_moe_stage1(int x) { printf("v0\\n"); }\n'
-        '}\n'
-    )
+    target.write_text('#include <cstdio>\nnamespace aiter {\nvoid ck_moe_stage1(int x) { printf("v0\\n"); }\n}\n')
 
     jit_build = repo / "aiter" / "jit" / "build"
     jit_build.mkdir(parents=True)
@@ -268,18 +281,14 @@ def _write_aiter_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 def test_apply_then_revert_roundtrip_invalidates_and_restores_jit_cache(
-    apply_tool, tmp_path: Path,
+    apply_tool,
+    tmp_path: Path,
 ) -> None:
     """End-to-end apply → revert cycle (rebuild mocked): jit/build/ moved aside then both source and cache restored."""
     repo, target, jit_build = _write_aiter_repo(tmp_path)
 
     patch_file = tmp_path / "patched.cu"
-    patch_file.write_text(
-        '#include <cstdio>\n'
-        'namespace aiter {\n'
-        'void ck_moe_stage1(int x) { printf("v1\\n"); }\n'
-        '}\n'
-    )
+    patch_file.write_text('#include <cstdio>\nnamespace aiter {\nvoid ck_moe_stage1(int x) { printf("v1\\n"); }\n}\n')
 
     backup_root = tmp_path / "backups"
 
@@ -293,10 +302,10 @@ def test_apply_then_revert_roundtrip_invalidates_and_restores_jit_cache(
         "command": ["fake-rebuild"],
         "cwd": str(repo),
     }
-    with patch.object(apply_tool.importlib.util, "find_spec",
-                      return_value=fake_spec), \
-         patch.object(apply_tool, "_run_rebuild",
-                      return_value=fake_rebuild_ok):
+    with (
+        patch.object(apply_tool.importlib.util, "find_spec", return_value=fake_spec),
+        patch.object(apply_tool, "_run_rebuild", return_value=fake_rebuild_ok),
+    ):
         result = apply_tool.apply_kernel_patch(
             patch_path=patch_file,
             target_file=target,
@@ -308,8 +317,7 @@ def test_apply_then_revert_roundtrip_invalidates_and_restores_jit_cache(
     assert result["status"] == "ok", result
     assert result["jit_build_backup"]["status"] == "ok", result["jit_build_backup"]
     assert result["jit_build_backup"]["src"] == str(jit_build)
-    assert not jit_build.exists(), \
-        "live jit/build/ must be moved aside before rebuild"
+    assert not jit_build.exists(), "live jit/build/ must be moved aside before rebuild"
     backup_jit_build = Path(result["jit_build_backup"]["backup_path"])
     assert (backup_jit_build / "module_moe_ck2stages_b16_b16_silu_no" / "kernel.so").is_file()
     assert "v1" in target.read_text()
@@ -322,22 +330,17 @@ def test_apply_then_revert_roundtrip_invalidates_and_restores_jit_cache(
 
 
 def test_skip_rebuild_does_not_invalidate_jit_build(
-    apply_tool, tmp_path: Path,
+    apply_tool,
+    tmp_path: Path,
 ) -> None:
     """``skip_rebuild=True`` means the operator handles rebuild, so apply must NOT touch jit/build/."""
     repo, target, jit_build = _write_aiter_repo(tmp_path)
 
     patch_file = tmp_path / "patched.cu"
-    patch_file.write_text(
-        '#include <cstdio>\n'
-        'namespace aiter {\n'
-        'void ck_moe_stage1(int x) { printf("v1\\n"); }\n'
-        '}\n'
-    )
+    patch_file.write_text('#include <cstdio>\nnamespace aiter {\nvoid ck_moe_stage1(int x) { printf("v1\\n"); }\n}\n')
 
     fake_spec = types.SimpleNamespace(submodule_search_locations=[str(repo / "aiter")])
-    with patch.object(apply_tool.importlib.util, "find_spec",
-                      return_value=fake_spec):
+    with patch.object(apply_tool.importlib.util, "find_spec", return_value=fake_spec):
         result = apply_tool.apply_kernel_patch(
             patch_path=patch_file,
             target_file=target,

@@ -76,9 +76,7 @@ def _write_manifest(workspace: Path, quantized_dir: Path) -> None:
         "version": "1",
         "outputs": {"quantized_model_dir": str(quantized_dir)},
     }
-    (workspace / "run_manifest.yaml").write_text(
-        yaml.safe_dump(payload), encoding="utf-8"
-    )
+    (workspace / "run_manifest.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
 
 
 def _make_quantized_dir(
@@ -153,9 +151,7 @@ class WorkspaceBuilder:
             _write_manifest(ws, qdir)
 
         if self.include_validation_report:
-            (ws / "validation_report.md").write_text(
-                _VALIDATION_REPORTS[self.validation_tag], encoding="utf-8"
-            )
+            (ws / "validation_report.md").write_text(_VALIDATION_REPORTS[self.validation_tag], encoding="utf-8")
 
         if self.include_eval_report:
             payload = self.eval_report or {
@@ -180,19 +176,13 @@ class WorkspaceBuilder:
             (ws / "blocked.md").write_text(self.blocked_md, encoding="utf-8")
 
         for n in self.fix_hypotheses:
-            (ws / f"fix_hypothesis_attempt_{n}.md").write_text(
-                f"# Fix hypothesis for attempt {n}\n", encoding="utf-8"
-            )
+            (ws / f"fix_hypothesis_attempt_{n}.md").write_text(f"# Fix hypothesis for attempt {n}\n", encoding="utf-8")
 
         if self.requantize_attempts is not None:
-            (ws / "requantize_attempts.txt").write_text(
-                str(self.requantize_attempts), encoding="utf-8"
-            )
+            (ws / "requantize_attempts.txt").write_text(str(self.requantize_attempts), encoding="utf-8")
 
         if self.eval_gap_threshold is not None:
-            (ws / "eval_gap_threshold.txt").write_text(
-                str(self.eval_gap_threshold), encoding="utf-8"
-            )
+            (ws / "eval_gap_threshold.txt").write_text(str(self.eval_gap_threshold), encoding="utf-8")
 
         return ws
 
@@ -212,6 +202,7 @@ def build_workspace(tmp_path: Path) -> Callable[..., Path]:
 # ─────────────────────────────────────────────────────────────────────────────
 # fake SDK
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class FakeMessage:
     def __init__(self, text: str):

@@ -29,12 +29,14 @@ class HealthConfig:
     no_metrics_warn_s: float = 600.0
 
 
-_POD_RUNNING_PHASES: frozenset[str] = frozenset({
-    "Running",
-    "Succeeded",
-    "Pending",  # transient; we do not flag Pending here
-    "",         # missing phase
-})
+_POD_RUNNING_PHASES: frozenset[str] = frozenset(
+    {
+        "Running",
+        "Succeeded",
+        "Pending",  # transient; we do not flag Pending here
+        "",  # missing phase
+    }
+)
 
 
 def evaluate_health_signals(
@@ -71,9 +73,7 @@ def evaluate_health_signals(
             ns = str(pod.get("namespace") or "")
             name = str(pod.get("name") or "")
             role = str(assignment.get("role") or "")
-            severity = (
-                SymptomSeverity.HIGH if phase == "Failed" else SymptomSeverity.MEDIUM
-            )
+            severity = SymptomSeverity.HIGH if phase == "Failed" else SymptomSeverity.MEDIUM
             out.append(
                 Symptom(
                     name="pod_not_running",
@@ -89,9 +89,9 @@ def evaluate_health_signals(
                     subject={"namespace": ns, "name": name, "phase": phase},
                     source="server",
                     suggestion=(
-                        "kill_task on the related task and escalate"
-                        " strategy" if phase == "Failed" else
-                        "escalate_strategy_change to monitor recovery"
+                        "kill_task on the related task and escalate strategy"
+                        if phase == "Failed"
+                        else "escalate_strategy_change to monitor recovery"
                     ),
                 )
             )
@@ -118,10 +118,7 @@ def evaluate_health_signals(
                 Symptom(
                     name="pod_no_metrics",
                     severity=SymptomSeverity.LOW,
-                    summary=(
-                        f"pod {ns}/{name} ({role}) has no metric series for "
-                        f"{int(age)}s"
-                    ),
+                    summary=(f"pod {ns}/{name} ({role}) has no metric series for {int(age)}s"),
                     evidence={
                         "namespace": ns,
                         "name": name,

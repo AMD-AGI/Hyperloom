@@ -69,12 +69,8 @@ def test_no_sglang_or_vllm_paths_in_atom_focus_blocks(domain_key):
     tail = text.find("**Pitfalls", head)
     assert head >= 0 and tail > head, "focus block boundaries not found"
     block = text[head:tail]
-    assert "vllm/v1/" not in block, (
-        f"atom {domain_key} block mentions vllm/v1/: {block!r}"
-    )
-    assert "sglang/python/sglang/srt/" not in block, (
-        f"atom {domain_key} block mentions sglang srt: {block!r}"
-    )
+    assert "vllm/v1/" not in block, f"atom {domain_key} block mentions vllm/v1/: {block!r}"
+    assert "sglang/python/sglang/srt/" not in block, f"atom {domain_key} block mentions sglang srt: {block!r}"
 
 
 # 3. Cross-framework regression guard — non-atom still renders canonical hints.
@@ -82,8 +78,7 @@ def test_no_sglang_or_vllm_paths_in_atom_focus_blocks(domain_key):
 def test_focus_serving_renders_canonical_paths_under_non_atom(framework):
     text = _render("serving_specialist", framework=framework)
     assert "vllm/v1/" in text or "sglang/python/sglang/srt/" in text, (
-        f"non-atom framework={framework!r} dropped canonical sglang/vllm "
-        "serving hints"
+        f"non-atom framework={framework!r} dropped canonical sglang/vllm serving hints"
     )
 
 
@@ -93,7 +88,8 @@ def test_focus_serving_renders_canonical_paths_under_non_atom(framework):
 )
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom", ""])
 def test_specialist_focus_renders_non_empty_for_all_frameworks(
-    domain_key, framework,
+    domain_key,
+    framework,
 ):
     text = _render(domain_key, framework=framework)
     assert "**What to read first**" in text

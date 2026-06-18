@@ -105,12 +105,14 @@ class MockBackend:
             BaseException: Whatever ``MockTurn.raise_error`` holds for the
                 played-back turn, to simulate backend failures.
         """
-        self.calls.append({
-            "prompt": prompt,
-            "system_prompt": system_prompt,
-            "tools": list(tools or []),
-            "max_turns": max_turns,
-        })
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "tools": list(tools or []),
+                "max_turns": max_turns,
+            }
+        )
         turn = self._next_turn()
         if turn.raise_error is not None:
             raise turn.raise_error
@@ -142,9 +144,12 @@ class MockBackend:
         # Out of script and no fallback → emit a heartbeat so the reactor keeps ticking.
         from ...protocol.intent import Intent as _Intent
         from ...protocol.intent import IntentType as _IT
-        return MockTurn(intents=[
-            _Intent(type=_IT.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
-        ])
+
+        return MockTurn(
+            intents=[
+                _Intent(type=_IT.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+            ]
+        )
 
     @property
     def remaining_turns(self) -> int:

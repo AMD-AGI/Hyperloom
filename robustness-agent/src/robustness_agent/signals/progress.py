@@ -20,7 +20,6 @@ from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
 
-
 @dataclass
 class ProgressConfig:
     """Tunables for :class:`ProgressDetector`.
@@ -67,10 +66,7 @@ class ProgressDetector:
         loaded = state_view.load() if state_view is not None else {}
         raw_history = loaded.get("gain_history") or []
         if isinstance(raw_history, list):
-            self._gain_history: list[float] = [
-                float(v) for v in raw_history
-                if isinstance(v, (int, float))
-            ]
+            self._gain_history: list[float] = [float(v) for v in raw_history if isinstance(v, (int, float))]
         else:
             self._gain_history = []
         # Cap on load to keep memory bounded across restarts.
@@ -85,10 +81,12 @@ class ProgressDetector:
         """Write the gain history and last tick to the state view, if any."""
         if self._state_view is None:
             return
-        self._state_view.save({
-            "gain_history": list(self._gain_history),
-            "last_tick": self._last_tick,
-        })
+        self._state_view.save(
+            {
+                "gain_history": list(self._gain_history),
+                "last_tick": self._last_tick,
+            }
+        )
 
     @property
     def gain_history(self) -> list[float]:
@@ -103,7 +101,9 @@ class ProgressDetector:
         return list(self._gain_history)
 
     def evaluate(
-        self, ctx: ReactorContext, data: SourceData,
+        self,
+        ctx: ReactorContext,
+        data: SourceData,
     ) -> list[Symptom]:
         """Update the gain history and evaluate the B2/B3 stagnation rules.
 
@@ -160,15 +160,12 @@ class ProgressDetector:
         # zero-by-construction case that ``no_levers_found`` owns instead.
         if snap.optimization_stack_size == 0:
             return None
-        window = self._gain_history[-cfg.gain_window_ticks:]
+        window = self._gain_history[-cfg.gain_window_ticks :]
         delta = max(window) - min(window)
         if delta > cfg.gain_epsilon_pct:
             return None
         if window[-1] >= cfg.productive_gain_pct:
-            hint_tail = (
-                "search space looks exhausted; consider proposing "
-                "`report` to lock in the validated gain"
-            )
+            hint_tail = "search space looks exhausted; consider proposing `report` to lock in the validated gain"
         else:
             hint_tail = (
                 "validated_gain still 0 after a full window; consider "

@@ -24,7 +24,8 @@ def _minimal_optimize_args() -> list[str]:
 
 @pytest.mark.parametrize("flag", _RETIRED_FLAGS)
 def test_retired_flag_exits_with_enable_roofline_hint(
-    capsys: pytest.CaptureFixture[str], flag: str,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
 ):
     """Each retired spelling raises ``SystemExit`` and names ``--enable-roofline``."""
     from inference_optimizer.cli import _build_parser
@@ -34,13 +35,9 @@ def test_retired_flag_exits_with_enable_roofline_hint(
         parser.parse_args(_minimal_optimize_args() + [flag])
     assert ei.value.code == 2
     err = capsys.readouterr().err
-    assert flag in err, (
-        f"retired-flag error must name {flag!r} so operators can grep "
-        f"their scripts; got: {err!r}"
-    )
+    assert flag in err, f"retired-flag error must name {flag!r} so operators can grep their scripts; got: {err!r}"
     assert "--enable-roofline" in err, (
-        f"retired-flag error for {flag!r} must point operators at "
-        f"--enable-roofline; got: {err!r}"
+        f"retired-flag error for {flag!r} must point operators at --enable-roofline; got: {err!r}"
     )
 
 
