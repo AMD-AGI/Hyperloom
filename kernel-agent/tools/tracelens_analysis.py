@@ -180,19 +180,95 @@ class OpResolution:
         self.stamp_onto(item)
 
 
+def _normalize_op_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Bridge the data schema (nested ``{fw:{device_kernel:{kernel_source_path}}}``)
+    to the schema the resolver consumes (``status``/``abs_path``/``routes``).
+
+    The committed ``op_to_source.json`` stores each op's editable source NESTED as
+    ``sglang``/``vllm`` -> ``{<device_kernel_name>: {kernel_source_path, patchable}}``,
+    but :class:`OpResolver` only emits sources when ``status == "resolved"`` and
+    reads ``abs_path`` / ``abs_path_sglang`` / ``abs_path_vllm`` (single) or
+    ``routes[].match`` + per-route ``abs_path`` (dispatch). Without this bridge every
+    op resolves to ``status=None`` / empty sources (the cu_mapping WIP schema-mismatch
+    bug). This converts in-place, idempotently:
+      * 1 device-kernel across fw containers  -> single entry with abs_path_{sglang,vllm}
+      * >1 distinct device-kernels            -> dispatch entry with routes[].match
+    Already-normalized entries (those carrying ``status``/``abs_path``/``routes``) pass through.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    # Already in resolver schema -> leave as-is.
+    if entry.get("status") or entry.get("routes") or entry.get("abs_path") \
+            or entry.get("abs_path_sglang") or entry.get("abs_path_vllm"):
+        return entry
+    # Collect (device_kernel_name, source_path, framework, patchable) from nested fw maps.
+    leaves: list[tuple[str, str, str, Any]] = []
+    for fw in ("sglang", "vllm"):
+        fw_map = entry.get(fw)
+        if not isinstance(fw_map, dict):
+            continue
+        for dk_name, leaf in fw_map.items():
+            if not isinstance(leaf, dict):
+                continue
+            path = leaf.get("kernel_source_path") or leaf.get("abs_path")
+            if path:
+                leaves.append((str(dk_name), str(path), fw, leaf.get("patchable")))
+    if not leaves:
+        return entry  # no editable source recorded -> leave unresolved (no-kernel/triton/etc.)
+    out = dict(entry)
+    distinct_kernels = {dk for dk, _p, _fw, _pa in leaves}
+    if len(distinct_kernels) <= 1:
+        # Single editable source — resolve directly, split by container so
+        # _select_paths picks whichever .cu is actually present on disk.
+        out["kind"] = "single"
+        out["status"] = _ROUTABLE_STATUS
+        out.setdefault("framework", "aiter")
+        sgl = [p for _dk, p, fw, _pa in leaves if fw == "sglang"]
+        vll = [p for _dk, p, fw, _pa in leaves if fw == "vllm"]
+        if sgl:
+            out["abs_path_sglang"] = sgl
+        if vll:
+            out["abs_path_vllm"] = vll
+        if not sgl and not vll:
+            out["abs_path"] = [p for _dk, p, _fw, _pa in leaves]
+        out["patchable"] = any(bool(pa) for _dk, _p, _fw, pa in leaves) or entry.get("patchable")
+    else:
+        # Multiple device kernels -> dispatch by device_kernel_name glob.
+        out["kind"] = "dispatch"
+        routes = []
+        for dk, p, fw, pa in leaves:
+            routes.append({
+                "match": dk,
+                "status": _ROUTABLE_STATUS,
+                ("abs_path_sglang" if fw == "sglang" else "abs_path_vllm" if fw == "vllm" else "abs_path"): [p],
+                "patchable": pa,
+                "framework": "aiter",
+            })
+        out["routes"] = routes
+        out["default"] = {"status": "unresolved"}
+    return out
+
+
 @lru_cache(maxsize=1)
 def load_mapping() -> dict[str, Any]:
     """Load and cache the vendored ground-truth ``data/op_to_source.json``.
 
     Returns:
         The parsed mapping (op name -> entry), or ``{}`` if unreadable.
+
+    Each entry is passed through :func:`_normalize_op_entry` so the committed
+    nested ``{fw:{device_kernel:{kernel_source_path}}}`` data is bridged to the
+    resolver's ``status``/``abs_path``/``routes`` schema (fixes the cu_mapping
+    schema-mismatch where every op resolved to empty).
     """
     try:
         with open(_OP_TO_SOURCE_JSON, encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    return {op: _normalize_op_entry(entry) for op, entry in data.items()}
 
 
 def _as_path_list(value: Any) -> list[str]:
