@@ -79,6 +79,7 @@ async def _async_return(value: Any):
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CYCLE_HOURS", raising=False)
     sd = make_session_dir()
     from .conftest import seed_target_analysis_marker
     seed_target_analysis_marker(sd)

@@ -33,7 +33,7 @@ from .specialist_domains import (
     FREEFORM_DOMAIN,
     SPECIALIST_DOMAINS_M5,
     SpecialistDomain,
-    get_domain,
+    domain_for_tag,
     normalize_dispatch_tags,
 )
 from .specialist_subprocess import (
@@ -108,18 +108,21 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
         # Scratch planning surface (no side effects); aligns the specialist tool
         # face with the broader CLI agent toolset.
         "TodoWrite",
+        # Single-layer fan-out of leaf sub-agents. Leaves inherit the parent's
+        # VISIBLE_DEVICES, so they share the parent's GPU lease and cannot
+        # oversubscribe; the leaf agent type itself omits Task (no recursion).
+        "Task",
     )
     + tuple(sorted(_WEB))
     + PR_MONITOR_MCP_TOOLS
+    # Read-only KB-graph query tools (mcp__cortex_kb__*). Stripped at resolve
+    # time when the cortex_kb MCP server is not wired (KnowledgePlane.cortex_enabled).
+    + CORTEX_KB_READONLY_MCP_TOOLS
 )
 
 
 # Tools explicitly denied even if the operator extends the whitelist.
-# ``Task`` is denied so a specialist can never recursively spawn its own
-# sub-agents: child agents would bypass the dispatcher's research_lane /
-# gpu_specialist_pool accounting and oversubscribe GPUs. Recursive fan-out is
-# the Coordinator's responsibility, not the specialist's.
-SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE) | {"Task"}
+SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 
 
 def _now_iso() -> str:
@@ -317,7 +320,6 @@ class SpecialistRunner:
         session_dir: Path | None = None,
         default_tools: tuple[str, ...] = DEFAULT_SPECIALIST_TOOLS,
         default_max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS,
-        per_turn_max_seconds: float = 90.0,
         knowledge_plane: Any = None,
     ):
         """Create a runner.
@@ -332,7 +334,6 @@ class SpecialistRunner:
             session_dir: Session output directory.
             default_tools: Default tool whitelist for specialists.
             default_max_turns: Default per-task max turn budget.
-            per_turn_max_seconds: Per-turn wall-clock soft limit.
             knowledge_plane: KnowledgePlane gating ``mcp__pr_monitor__*`` tools.
 
         Raises:
@@ -353,7 +354,6 @@ class SpecialistRunner:
         self.session_dir = Path(session_dir) if session_dir else None
         self.default_tools = tuple(default_tools)
         self.default_max_turns = int(default_max_turns)
-        self.per_turn_max_seconds = float(per_turn_max_seconds)
         self.knowledge_plane = knowledge_plane
 
     def _resolve_tools(
@@ -457,7 +457,11 @@ class SpecialistRunner:
         domain_key = str(params.get("domain") or "").strip()
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         max_turns = int(params.get("max_turns") or self.default_max_turns)
-        domain = get_domain(domain_key)
+        # B7: resolve by anchor first then key (``domain_for_tag``) so a dispatch
+        # whose ``domain`` carries the KB anchor (e.g. ``communication``) matches
+        # its catalogue entry (``comm_specialist``) instead of silently failing
+        # the key-only ``get_domain`` lookup and dying as ``unknown_domain``.
+        domain = domain_for_tag(domain_key)
         sub_kind = str(params.get("sub_kind") or "").strip()
         profile = resolve_specialist_profile(params)
         task_description = str(params.get("task_description") or "").strip()
@@ -562,6 +566,11 @@ class SpecialistRunner:
                 # Coordinator-injected note when this is a bounded auto-retry
                 # of a prior transient (timeout / crash / stale) attempt.
                 auto_retry_reason=str(params.get("_auto_retry_reason") or ""),
+                # WS1 wall-clock budget (Coordinator-computed, on ctx.extra) +
+                # dispatch start, so the specialist can self-throttle instead of
+                # only finding the deadline when the reaper kills it.
+                wall_budget_sec=float((ctx.extra or {}).get("wall_budget_sec") or 0.0),
+                started_at_iso=datetime.now(timezone.utc).isoformat(),
                 # proposal_set self-curation target (policy.py is the
                 # source of truth); shapes the prompt, not a hard cap.
                 max_proposals=max(1, int(params.get("max_proposals") or DEFAULT_SPECIALIST_MAX_PROPOSALS)),
@@ -902,6 +911,28 @@ class SpecialistRunner:
                 else:
                     tool_violations.append(intent.type.value)
 
+            # WS1 incremental checkpoint: rewrite the partial after every turn
+            # so a budget kill (or any abnormal exit) leaves the best-so-far
+            # result on disk. When the agent has emitted its specialist_done
+            # this round, snapshot that payload; otherwise record progress.
+            if specialist_done_intent is not None:
+                self._write_specialist_done_partial(
+                    workspace,
+                    dict(specialist_done_intent.payload or {}),
+                )
+            else:
+                self._write_specialist_done_partial(
+                    workspace,
+                    {
+                        **build_empty_specialist_done(
+                            gap_canonical_id=gap,
+                            domain=domain.key,
+                            reason="in_progress",
+                        ),
+                        "turns_used": turns_used,
+                    },
+                )
+
             if specialist_done_intent is not None:
                 break
 
@@ -972,6 +1003,11 @@ class SpecialistRunner:
             max_turns=prep.max_turns,
             status="subprocess_starting",
         )
+        # WS1: explicit wall-clock budget injected by the Coordinator at
+        # dispatch (lane-tiered × macro_cycle, capped 4h). When present it
+        # overrides the legacy ``max_turns × per_turn`` ceiling in the reaper.
+        wall_budget_raw = (ctx.extra or {}).get("wall_budget_sec")
+        wall_budget_sec = float(wall_budget_raw) if wall_budget_raw else None
         sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
             task_id=ctx.task.task_id,
             workspace=workspace,
@@ -982,6 +1018,7 @@ class SpecialistRunner:
             allowed_tools=prep.resolved_tools,
             max_turns=prep.max_turns,
             gpu_ids=tuple((ctx.extra or {}).get("gpu_ids") or ()),
+            wall_budget_sec=wall_budget_sec,
         )
         self._append_transcript(
             workspace,
@@ -1408,6 +1445,22 @@ class SpecialistRunner:
         """
         return (workspace / "specialist_done.json") if workspace else None
 
+    def _partial_done_path(self, workspace: Path | None) -> Path | None:
+        """Return the ``specialist_done.partial.json`` path in the workspace.
+
+        WS1 incremental checkpoint target: rewritten atomically as findings
+        accumulate. Distinct from the final ``specialist_done.json`` so the
+        subprocess reaper (which treats the final file's appearance as the exit
+        signal) is never tripped early.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+
+        Returns:
+            Path | None: The partial path, or ``None`` when no workspace.
+        """
+        return (workspace / "specialist_done.partial.json") if workspace else None
+
     def _write_prompt(
         self,
         workspace: Path | None,
@@ -1492,6 +1545,26 @@ class SpecialistRunner:
         tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         os.replace(tmp, path)
 
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+        """Atomically write ``payload`` as pretty JSON to ``path``.
+
+        Writes to a sibling ``.tmp`` then ``os.replace``-s it into place so a
+        concurrent reader (or a high-frequency incremental rewrite under WS1)
+        never observes a half-written file — same pattern as
+        :meth:`_write_heartbeat`.
+
+        Args:
+            path (Path): Destination file path.
+            payload (dict[str, Any]): JSON-serialisable payload to persist.
+        """
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(payload, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+
     def _write_specialist_done(
         self,
         workspace: Path | None,
@@ -1499,7 +1572,8 @@ class SpecialistRunner:
     ) -> None:
         """Write the ``specialist_done.json`` artifact with a timestamp.
 
-        No-ops when no workspace is configured.
+        WS1 (B6): writes atomically (temp + ``os.replace``) so partial files
+        are never read. No-ops when no workspace is configured.
 
         Args:
             workspace (Path | None): The per-task workspace directory.
@@ -1508,13 +1582,29 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        payload_with_ts = {
-            "ts": _now_iso(),
-            **payload,
-        }
-        path.write_text(
-            json.dumps(payload_with_ts, sort_keys=True, indent=2),
-            encoding="utf-8",
+        self._atomic_write_json(path, {"ts": _now_iso(), **payload})
+
+    def _write_specialist_done_partial(
+        self,
+        workspace: Path | None,
+        payload: dict[str, Any],
+    ) -> None:
+        """Atomically (re)write the WS1 incremental checkpoint partial.
+
+        Mirrors :meth:`_write_specialist_done` but targets
+        ``specialist_done.partial.json`` so the final-file reaper exit signal is
+        not tripped. No-ops when no workspace is configured.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+            payload (dict[str, Any]): The best-so-far ``specialist_done`` payload.
+        """
+        path = self._partial_done_path(workspace)
+        if path is None:
+            return
+        self._atomic_write_json(
+            path,
+            {"ts": _now_iso(), "_recovered_from_partial": True, **payload},
         )
 
 
