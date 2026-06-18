@@ -115,6 +115,9 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     )
     + tuple(sorted(_WEB))
     + PR_MONITOR_MCP_TOOLS
+    # Read-only KB-graph query tools (mcp__cortex_kb__*). Stripped at resolve
+    # time when the cortex_kb MCP server is not wired (KnowledgePlane.cortex_enabled).
+    + CORTEX_KB_READONLY_MCP_TOOLS
 )
 
 

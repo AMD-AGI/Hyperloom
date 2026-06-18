@@ -141,9 +141,17 @@ def _build_specialist_executor(
                 pr_mcp_url = knowledge_plane.specialist_mcp_url()
             except AttributeError:
                 pr_mcp_url = ""
+            try:
+                kb_mcp_url = knowledge_plane.cortex_specialist_mcp_url()
+                kb_mcp_headers = knowledge_plane.cortex_specialist_mcp_headers()
+            except AttributeError:
+                kb_mcp_url = ""
+                kb_mcp_headers = {}
             generated = write_specialist_mcp_config(
                 session_dir=session_dir,
                 pr_monitor_mcp_url=pr_mcp_url,
+                cortex_kb_mcp_url=kb_mcp_url,
+                cortex_kb_mcp_headers=kb_mcp_headers,
             )
             if generated is not None:
                 mcp_config_path = str(generated)

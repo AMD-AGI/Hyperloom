@@ -285,12 +285,28 @@ KB_WRITE_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
-#: KB *readonly* surfaces. R5 ``tool_whitelist_role`` requires a specialist sub-agent caller.
+#: KB *readonly* surfaces (the ``cortex_kb`` MCP server is the gbrain knowledge
+#: graph; these are its read-only tools). R5 ``tool_whitelist_role`` requires a
+#: specialist sub-agent caller. Write tools (put_page / delete_page / add_tag /
+#: revert_version / submit_job / …) are deliberately omitted so they never enter
+#: ``--allowedTools``; the local-first write contract is preserved.
 CORTEX_KB_READ_TOOL_NAMES: frozenset[str] = frozenset(
     {
-        "mcp__cortex_kb__traverse",
-        "mcp__cortex_kb__find_recipe",
         "mcp__cortex_kb__query",
+        "mcp__cortex_kb__search",
+        "mcp__cortex_kb__recall",
+        "mcp__cortex_kb__get_page",
+        "mcp__cortex_kb__list_pages",
+        "mcp__cortex_kb__get_chunks",
+        "mcp__cortex_kb__resolve_slugs",
+        "mcp__cortex_kb__traverse_graph",
+        "mcp__cortex_kb__get_links",
+        "mcp__cortex_kb__get_backlinks",
+        "mcp__cortex_kb__get_tags",
+        "mcp__cortex_kb__get_timeline",
+        "mcp__cortex_kb__find_experts",
+        "mcp__cortex_kb__find_trajectory",
+        "mcp__cortex_kb__extract_facts",
     }
 )
 
