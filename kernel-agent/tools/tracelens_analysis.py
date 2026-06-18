@@ -72,6 +72,38 @@ ANALYSIS_ROUTE_AGENT = "agent"
 _VALID_ANALYSIS_ROUTES = {ANALYSIS_ROUTE_DETERMINISTIC, ANALYSIS_ROUTE_AGENT}
 
 
+def _is_safe_litellm_gateway() -> bool:
+    """True when the Claude SDK targets the AMD SAFE/LiteLLM gateway (#574).
+
+    Detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` host or
+    the codebase-wide ``SAFE_API_KEY`` signal; other backends are left alone.
+    """
+    base_url = (
+        os.environ.get("ANTHROPIC_BASE_URL", "")
+        or os.environ.get("OPENAI_BASE_URL", "")
+    ).lower()
+    markers = ("primus-safe", "core42", "litellm", "llm-proxy")
+    return bool(os.environ.get("SAFE_API_KEY")) or any(m in base_url for m in markers)
+
+
+def _resolve_tracelens_model() -> str:
+    """Resolve ``ANTHROPIC_MODEL`` to the gateway's dash-form id (#574).
+
+    Only the strict SAFE/LiteLLM gateway rejects the image's dot form
+    (``Claude-Opus-4.7``); for it, map to dash (``claude-opus-4-7``). Other
+    backends keep the raw id; empty env yields ``""`` (SDK default).
+
+    Returns:
+        The model id to pass to the SDK, normalized only for SAFE/LiteLLM.
+    """
+    raw = os.environ.get("ANTHROPIC_MODEL", "").strip()
+    if not raw:
+        return ""
+    if not _is_safe_litellm_gateway():
+        return raw
+    return raw.lower().replace(".", "-")
+
+
 def _resolve_idle_pct_threshold() -> float:
     """Return the idle-percent gate threshold (default 80.0%).
 
@@ -1134,8 +1166,30 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
         return False, (f"runtime-generated (torch.compile / Inductor cache): {source_file}")
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _reusable_roots()):
-        return False, (f"source not under a reusable framework root: {source_file}")
+        return False, (
+            f"source not under a reusable framework root: {source_file}"
+        )
+    # cpp_itfs host-launcher guard (RCA root cause 2): files under aiter's
+    # csrc/cpp_itfs/ that are .py are host drivers — the real GPU code lives in
+    # sibling .cuh / .cpp.jinja. If the deterministic resolver didn't promote it
+    # to the device source, editing the .py always fails the smoke test ->
+    # REVERT. Skip it so the candidate doesn't burn a forge/geak attempt.
+    if "/csrc/cpp_itfs/" in lower_file and lower_file.endswith(".py"):
+        return False, (
+            f"cpp_itfs host launcher (device code is in sibling .cuh/.cpp.jinja, "
+            f"not this .py): {source_file}"
+        )
     source_type = candidate.get("source_type")
+    # aiter device-source promotion: aiter ships editable and JIT-compiles each
+    # op, so a real .cu/.cuh/.hip kernel under /aiter/ is patchable even when the
+    # upstream classifier left source_type unknown (e.g. aiter::mha_batch_prefill
+    # -> csrc/py_itfs_ck/*.cu). forge edits it in place + AITER_REBUILD recompiles
+    # it. Excludes tuned_gemm.py-style Python dispatchers (real GEMM is a
+    # compiled CK/hipBLASLt lib, editing the .py does nothing).
+    if (source_type not in {"hip_cpp", "triton", "python", "flydsl"}
+            and "/aiter/" in lower_file
+            and lower_file.endswith((".cu", ".cuh", ".hip"))):
+        return True, ""
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}")
     return True, ""
@@ -1727,6 +1781,22 @@ def _known_harness_files(name: str, source_file: str) -> list[Path]:
     return out
 
 
+_LIBRARY_TOKENS = ("aiter", "sglang", "vllm", "flashinfer", "sgl-kernel", "sgl_kernel")
+
+
+def _library_token(path: str) -> str:
+    """Return the library a path belongs to (aiter/sglang/...), else "".
+
+    Used to keep kernel↔benchmark pairing within one library. sgl-kernel and
+    sgl_kernel normalize to "sglang" since they are the sglang kernel package.
+    """
+    low = (path or "").lower()
+    for tok in _LIBRARY_TOKENS:
+        if f"/{tok}/" in low or f"/{tok}." in low:
+            return "sglang" if tok in ("sgl-kernel", "sgl_kernel") else tok
+    return ""
+
+
 def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> list[str]:
     """Find test/benchmark files matching a kernel under a repo's subdirs.
 
@@ -1818,7 +1888,16 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
         """
         low = path_str.lower()
         return any(tag in low for tag in ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_"))
-
+    # Same-library guard (RCA root cause 2): never pair a kernel from one library
+    # with a benchmark from another (e.g. a sglang sgl-kernel .cuh with an aiter
+    # op_test). Editing the kernel then "validating" against an unrelated lib's
+    # op always fails the smoke test -> REVERT. Drop cross-library candidates
+    # when the kernel's library is recognizable.
+    src_lib = _library_token(source_file)
+    if src_lib:
+        same_lib = [s for s in unique if _library_token(s) in (src_lib, "")]
+        if same_lib:
+            unique = same_lib
     unique.sort(key=_is_multigpu)
     return unique[:10]
 
@@ -2125,6 +2204,56 @@ def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any
             continue
         _merge_shape_call(entries, value, shape_count)
     return entries
+
+
+# Recognized dtype tokens that appear as the suffix on a TraceLens ``Args`` /
+# metrics shape entry (e.g. ``(64,5120) bf16``). Permissive: anything after the
+# shape paren is treated as the dtype; this list is only used to recognise a
+# trailing dtype on a paren-less entry.
+_KNOWN_DTYPE_TOKENS = frozenset({
+    "bf16", "fp16", "fp32", "f32", "fp8", "f8", "fp8_e4m3", "fp8_e5m2",
+    "e4m3", "e5m2", "int8", "int4", "int32", "int64", "int", "uint8",
+    "bool", "float", "double", "half",
+})
+
+
+def _split_shape_dtype(entry: Any) -> tuple[str, str]:
+    """Split a TraceLens shape entry ``"(64,5120) bf16"`` into ``("(64,5120)", "bf16")``.
+
+    TraceLens records each kernel arg as ``<shape> [dtype]`` in the analysis.md
+    ``Args`` column (and category metrics ``args``); the dtype is inline. This
+    separates them so the per-arg dtype can be surfaced as a clean, positionally
+    aligned ``input_dtypes`` list (the field that was always defaulted to ``[]``).
+    Non-string / dict entries return ``(str(value), "")``. Empty scalar ``()`` is
+    preserved with an empty dtype so arity stays aligned with the call signature.
+    """
+    if isinstance(entry, dict):
+        entry = entry.get("shape", "")
+    s = str(entry).strip()
+    if not s:
+        return "", ""
+    if s.startswith("("):
+        close = s.find(")")
+        if close != -1:
+            return s[: close + 1].strip(), s[close + 1 :].strip()
+        return s, ""
+    parts = s.rsplit(" ", 1)
+    if len(parts) == 2 and parts[1].lower() in _KNOWN_DTYPE_TOKENS:
+        return parts[0].strip(), parts[1].strip()
+    return s, ""
+
+
+def _dtypes_from_shapes(shapes: Any) -> list[str]:
+    """Ordered per-arg dtype list parsed from a candidate's ``shapes`` strings.
+
+    Positionally aligned with the shapes (one entry per arg, ``""`` when no dtype
+    was captured). Returns ``[]`` when no dtype is present on any entry, so callers
+    keep the existing empty-default behaviour when TraceLens captured none.
+    """
+    if not isinstance(shapes, list):
+        return []
+    dtypes = [_split_shape_dtype(s)[1] for s in shapes]
+    return dtypes if any(dtypes) else []
 
 
 def derive_kernel_category(candidate: dict[str, Any]) -> str:
@@ -4328,7 +4457,14 @@ def enrich_candidates_with_runtime_metadata(
             )
             item["_input_shapes_synthetic"] = True
         item.setdefault("output_shapes", [])
-        item.setdefault("input_dtypes", item.get("dtypes", []) or [])
+        # Per-arg dtypes: TraceLens records them INLINE in each ``shapes`` string
+        # ("(64,5120) bf16"); surface them as a clean, positionally-aligned list so
+        # the GEAK harness allocates the correct-dtype tensors (fp8 weight vs bf16
+        # activation). Falls back to any explicit ``dtypes`` field, then ``[]``.
+        existing_dtypes = item.get("input_dtypes") or item.get("dtypes") or []
+        if not existing_dtypes:
+            existing_dtypes = _dtypes_from_shapes(item.get("shapes", []) or [])
+        item["input_dtypes"] = existing_dtypes
         item.setdefault("output_dtypes", [])
         item.setdefault("runtime_args", {})
         item.setdefault("env_vars", {})
@@ -5351,7 +5487,7 @@ def main() -> int:
                             analysis_mode=args.analysis_mode,
                             capture_folder=capture_folder,
                             budget_minutes=args.budget_minutes,
-                            model=os.environ.get("ANTHROPIC_MODEL", ""),
+                            model=_resolve_tracelens_model(),
                             log=lambda msg: append_log(log_path, msg),
                         )
                     )
