@@ -1,7 +1,7 @@
 name: gemm_tuning
 family: deep_kernel
-cost_minutes_p50: 30.0
-cost_minutes_p75: 60.0
+cost_minutes_p50: 20.0
+cost_minutes_p75: 45.0
 expected_gain_pct: [5.0, 20.0]
 accuracy_risk: 0.10
 crash_risk: 0.10
@@ -25,10 +25,13 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 25
 lease_ttl_sec: 5400
-description: "FP8-only GEAK workflow that tunes aiter A8W8 block-scale GEMM CSV dispatch before source-level kernel rewrite."
+description: >
+  Deterministic GEMM dispatch tuning (forge-gemm-tune) or legacy GEAK A8W8
+  block-scale workflow. Forge supports bf16/fp8/fp4 MoE + dense, sglang + vllm.
+  Backend selected via GEMM_TUNING_BACKEND or KERNEL_OPT_BACKEND_ORDER.
 pipeline_phase: deep
-typical_runtime_min: 30.0
+typical_runtime_min: 20.0
 applicable_when:
-  - "precision == 'fp8'"
-  - "framework == 'sglang'"
-  - "operator_bottleneck_identified"
+  - "framework in ('sglang', 'vllm')"
+  - "(precision == 'fp8' or is_moe or precision in ('bf16', 'fp4'))"
+  - "operator_bottleneck_identified or phase == 'deep'"

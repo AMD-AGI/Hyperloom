@@ -1202,20 +1202,188 @@ exec {shlex.quote(runner)}
     return path
 
 
-async def run_gemm_tuning_handler(
+def _resolve_gemm_tuning_backend(payload: dict) -> str:
+    """Resolve GEMM tuning backend: forge or geak.
+
+    Precedence:
+    1. payload['gemm_tuning_backend']
+    2. GEMM_TUNING_BACKEND env var
+    3. First applicable backend in KERNEL_OPT_BACKEND_ORDER
+    4. Default: 'forge'
+    """
+    raw = str(
+        payload.get("gemm_tuning_backend")
+        or os.environ.get("GEMM_TUNING_BACKEND")
+        or ""
+    ).strip().lower()
+    if raw in ("forge", "geak"):
+        return raw
+    order_raw = (
+        os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+        or os.environ.get("KERNEL_OPT_BACKENDS")
+        or ""
+    )
+    if order_raw:
+        for item in order_raw.split(","):
+            name = item.strip().lower()
+            if name == "forge":
+                return "forge"
+            if name == "geak":
+                return "geak"
+    return "forge"
+
+
+def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
+    """Parse FORGE_GEMM_TUNE_RESULT_BEGIN/END sentinel block from stdout."""
+    import re
+
+    m = re.search(
+        r"FORGE_GEMM_TUNE_RESULT_BEGIN\s*\n(.*?)\nFORGE_GEMM_TUNE_RESULT_END",
+        stdout,
+        re.DOTALL,
+    )
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _forge_gemm_tune_available() -> bool:
+    """Check if forge-gemm-tune CLI is importable or on PATH."""
+    import shutil
+
+    if shutil.which("forge-gemm-tune"):
+        return True
+    try:
+        spec = importlib.util.find_spec("forge_gemm_tune")
+        return spec is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
+
+
+async def _run_forge_gemm_tuning(
     payload: dict,
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Run GEAK's FP8 block-scale GEMM tuning workflow (separate from ``run_optimization``; tunes GEMM dispatch before source-level rewrites).
+    """Deterministic GEMM tuning via forge-gemm-tune CLI.
 
-    Args:
-        payload: The GEMM-tuning request payload.
-        session_dir: Session directory for workspace and state.
-
-    Returns:
-        A ``HandlerResult`` describing the tuning outcome.
+    Supports bf16/fp8/fp4 + sglang/vllm. Only micro-benchmarks;
+    returns recommended_env for Hyperloom E2E validation.
     """
+    from .shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+
+    if not _forge_gemm_tune_available():
+        forge_path = os.environ.get("FORGE_GEMM_TUNE_PATH", "")
+        return {
+            "status": "failed",
+            "error_class": "forge_gemm_tune_not_found",
+            "error": (
+                "forge-gemm-tune CLI not found. Install via "
+                "'pip install -e <path>/forge_gemm_tune' or set FORGE_GEMM_TUNE_PATH."
+                f" (checked: FORGE_GEMM_TUNE_PATH={forge_path!r})"
+            ),
+            "backend": "forge",
+        }
+
+    precision = _normalize_precision(payload.get("precision") or state.precision)
+    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
+
+    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    model_path = str(
+        payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or ""
+    ).strip()
+    if not model_path:
+        return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
+
+    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
+    conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64)
+    gpu_type = str(
+        payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x"
+    ).strip().lower()
+    quant_type = str(payload.get("quant_type") or "auto").strip()
+    tokens = str(payload.get("tokens") or "").strip()
+    mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or 1)
+
+    cmd = [
+        "python3", "-m", "forge_gemm_tune.cli", "run",
+        "--model-path", model_path,
+        "--framework", framework,
+        "--precision", precision or "bf16",
+        "--quant-type", quant_type,
+        "--gpu-type", gpu_type,
+        "--tp", str(tp),
+        "--conc", str(conc),
+        "--mp", str(mp),
+        "--output-dir", str(workspace),
+        "--skip-gpu-check",
+    ]
+    if tokens:
+        cmd.extend(["--tokens", tokens])
+    if payload.get("untuned_csv"):
+        cmd.extend(["--untuned-csv", str(payload["untuned_csv"])])
+    if payload.get("shapes_json"):
+        cmd.extend(["--shapes-json", str(payload["shapes_json"])])
+    if payload.get("tunableop_input"):
+        cmd.extend(["--tunableop-input", str(payload["tunableop_input"])])
+    if payload.get("kernel_signature_log"):
+        cmd.extend(["--kernel-signature-log", str(payload["kernel_signature_log"])])
+
+    timeout = _gemm_tuning_timeout_sec(payload)
+    cmd.extend(["--timeout", str(timeout)])
+
+    rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
+
+    result = _parse_forge_gemm_sentinel(stdout)
+    if result is None:
+        result = _shape_tool_result(rc, stdout, stderr)
+
+    result.setdefault("backend", "forge")
+    result.setdefault("workspace", str(workspace))
+    result.setdefault("precision", precision)
+    result.setdefault("framework", framework)
+    result.setdefault("model_path", model_path)
+
+    # Bridge forge schema → coordinator-consumable schema:
+    # forge returns micro_decision="candidate" with recommended_env;
+    # translate to decision="KEEP" + extra_envs for the promote path.
+    micro = str(result.get("micro_decision") or "").strip().lower()
+    if micro == "candidate" and result.get("recommended_env"):
+        result.setdefault("decision", "KEEP")
+        result.setdefault("extra_envs", dict(result["recommended_env"]))
+        # Derive best_speedup from tuners_run if not already set.
+        if "best_speedup" not in result:
+            best = 1.0
+            for t in result.get("tuners_run") or []:
+                if isinstance(t, dict):
+                    sp = float(t.get("best_micro_speedup") or 1.0)
+                    if sp > best:
+                        best = sp
+            if best > 1.0:
+                result["best_speedup"] = best
+        # Flag that E2E validation is still needed (micro-only).
+        result.setdefault("requires_e2e_validation", True)
+    elif micro in ("no_improvement", "skipped"):
+        result.setdefault("decision", "REVERT")
+    elif micro == "failed":
+        result.setdefault("decision", "REVERT")
+        result.setdefault("status", "failed")
+
+    return result
+
+
+async def _run_geak_gemm_tuning(
+    payload: dict,
+    *,
+    session_dir: Path,
+) -> HandlerResult:
+    """Legacy GEAK FP8 block-scale GEMM tuning (sglang-only)."""
     from .shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -1305,12 +1473,41 @@ async def run_gemm_tuning_handler(
 
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_tuning_timeout_sec(payload))
     result = _shape_tool_result(rc, stdout, stderr)
+    result.setdefault("backend", "geak")
     result.setdefault("workspace", str(workspace))
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
     result.setdefault("model_path", model_path)
     result.setdefault("benchmark_script", benchmark_script)
     return result
+
+
+async def run_gemm_tuning_handler(
+    payload: dict,
+    *,
+    session_dir: Path,
+) -> HandlerResult:
+    """Run GEMM tuning via forge-gemm-tune (deterministic) or GEAK (legacy).
+
+    Backend selection:
+    1. payload['gemm_tuning_backend']
+    2. GEMM_TUNING_BACKEND env var
+    3. First of forge/geak in KERNEL_OPT_BACKEND_ORDER
+    4. Default: forge
+
+    Args:
+        payload: The GEMM-tuning request payload.
+        session_dir: Session directory for workspace and state.
+
+    Returns:
+        A ``HandlerResult`` describing the tuning outcome.
+    """
+    backend = _resolve_gemm_tuning_backend(payload)
+    log.info("run_gemm_tuning: backend=%s", backend)
+
+    if backend == "forge":
+        return await _run_forge_gemm_tuning(payload, session_dir=session_dir)
+    return await _run_geak_gemm_tuning(payload, session_dir=session_dir)
 
 
 async def trace_analyze_handler(

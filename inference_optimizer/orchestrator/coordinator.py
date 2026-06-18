@@ -2689,7 +2689,7 @@ class Coordinator:
             return
 
         log.info(
-            "KERNEL entry: running FP8 GEMM tuning before source-level kernel_opt",
+            "KERNEL entry: running GEMM tuning before source-level kernel_opt",
         )
         self._record_phase_entry_evidence(
             gemm_tuning={"status": "running", "source": "kernel_entry_auto"},
@@ -2751,6 +2751,10 @@ class Coordinator:
         and stamps ``cumulative_gain`` / ``cumulative_gain_validated`` since
         the GEMM benchmark is itself an end-to-end serving measurement.
 
+        For forge-gemm-tune results (``requires_e2e_validation=True``), the
+        entry is promoted but ``cumulative_gain_validated`` is NOT stamped —
+        downstream E2E validation (explore action) must confirm the gain.
+
         Args:
             result (dict[str, Any]): The GEMM tuning handler result; ignored if
                 not a successful KEEP.
@@ -2770,24 +2774,49 @@ class Coordinator:
             return
         if speedup <= 1.0 or baseline <= 0:
             return
+
+        backend = str(result.get("backend") or "geak").strip().lower()
+        requires_e2e = bool(result.get("requires_e2e_validation", False))
         tuned_tput = baseline * speedup
-        tuned_file = str(result.get("tuned_file") or "")
+        ts = datetime.now(timezone.utc).isoformat()
+
+        # Resolve extra_envs: forge provides recommended_env/extra_envs;
+        # GEAK infers from tuned_file.
+        if backend == "forge":
+            extra_envs = dict(result.get("extra_envs") or result.get("recommended_env") or {})
+            tuned_file = ""
+            # Use first artifact path as tuned_file for dedup.
+            artifacts = result.get("artifacts") or {}
+            if isinstance(artifacts, dict) and artifacts:
+                tuned_file = str(next(iter(artifacts.values()), ""))
+            if not tuned_file:
+                tuned_file = str(next(iter(extra_envs.values()), "")) if extra_envs else ""
+            variant_name = "forge_gemm_tuned"
+        else:
+            tuned_file = str(result.get("tuned_file") or "")
+            extra_envs = (
+                {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file} if tuned_file else {}
+            )
+            variant_name = "a8w8_blockscale_tuned_gemm"
+
         final_report = str(result.get("final_report_path") or "")
         existing = {
             str(item.get("tuned_file") or "")
             for item in (self.shared_state.optimization_stack or [])
             if isinstance(item, dict) and item.get("action") == "gemm_tuning"
         }
-        ts = datetime.now(timezone.utc).isoformat()
+
         entry = {
             "action": "gemm_tuning",
-            "variant_name": "a8w8_blockscale_tuned_gemm",
+            "variant_name": variant_name,
             "tuned_file": tuned_file,
             "final_report_path": final_report,
             "gain_pct": (speedup - 1.0) * 100.0,
             "tput": tuned_tput,
             "workspace": result.get("workspace"),
-            "extra_envs": ({"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file} if tuned_file else {}),
+            "extra_envs": extra_envs,
+            "backend": backend,
+            "requires_e2e_validation": requires_e2e,
             "source": "kernel_entry_auto",
             "ts": ts,
         }
@@ -2795,24 +2824,27 @@ class Coordinator:
             self.shared_state.optimization_stack.append(entry)
             self.shared_state.append_stack_gain_entry(
                 action="gemm_tuning",
-                variant_name="a8w8_blockscale_tuned_gemm",
+                variant_name=variant_name,
                 new_tput=tuned_tput,
                 ts=ts,
             )
         self.shared_state.current_best = {
             "action": "gemm_tuning",
             "tput": tuned_tput,
-            "variant_name": "a8w8_blockscale_tuned_gemm",
+            "variant_name": variant_name,
             "tuned_file": tuned_file,
             "final_report_path": final_report,
             "workspace": result.get("workspace"),
-            "extra_envs": entry["extra_envs"],
+            "extra_envs": extra_envs,
         }
         self.shared_state.cumulative_gain = (speedup - 1.0) * 100.0
-        # GEMM's tuned benchmark is end-to-end serving, so it's already a validated stack measurement.
-        self.shared_state.cumulative_gain_validated = self.shared_state.cumulative_gain
-        self.shared_state.cumulative_gain_validated_ts = ts
-        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
+        if not requires_e2e:
+            # GEAK's tuned benchmark is end-to-end serving, so it's already validated.
+            self.shared_state.cumulative_gain_validated = self.shared_state.cumulative_gain
+            self.shared_state.cumulative_gain_validated_ts = ts
+            self.shared_state.cumulative_gain_validated_stack_len = len(
+                self.shared_state.optimization_stack or []
+            )
 
     def _should_continue_kernel_after_gemm(self) -> bool:
         """Decide whether to run source-level kernel_opt right after GEMM tuning.
@@ -6176,10 +6208,11 @@ class Coordinator:
         ).strip().lower() in {"1", "true", "yes", "on"}
 
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
-        """Decide whether FP8 SGLang GEMM tuning must run before kernel_opt.
+        """Decide whether GEMM tuning must run before kernel_opt.
 
-        Only required for ``precision='fp8'`` + ``framework='sglang'`` sessions
-        whose ``last_gemm_tuning`` has not yet reached a terminal status.
+        When using forge-gemm-tune backend: eligible for any framework
+        (sglang/vllm) and any precision with a MoE model or FP8 dense.
+        When using GEAK backend: only FP8 + SGLang (legacy behavior).
 
         Returns:
             bool: ``True`` when GEMM tuning should run before source-level
@@ -6190,7 +6223,27 @@ class Coordinator:
         ss = self.shared_state
         precision = str(getattr(ss, "precision", "") or "").strip().lower()
         framework = str(getattr(ss, "framework", "") or "").strip().lower()
-        if precision != "fp8" or framework != "sglang":
+
+        from .kernel_request_handlers import _resolve_gemm_tuning_backend
+
+        backend = _resolve_gemm_tuning_backend({})
+
+        if backend == "forge":
+            # forge-gemm-tune supports: any MoE model, FP8 dense,
+            # bf16/fp8/fp4 precision, sglang/vllm frameworks.
+            is_moe = bool(getattr(ss, "is_moe", False) or getattr(ss, "model_is_moe", False))
+            eligible = (
+                framework in ("sglang", "vllm", "vllm-aiter")
+                and (
+                    is_moe
+                    or precision in ("fp8", "fp4", "mxfp4")
+                )
+            )
+        else:
+            # GEAK: legacy FP8 + SGLang only.
+            eligible = (precision == "fp8" and framework == "sglang")
+
+        if not eligible:
             return False
         last = getattr(ss, "last_gemm_tuning", {}) or {}
         status = str(last.get("status") or "").strip().lower()

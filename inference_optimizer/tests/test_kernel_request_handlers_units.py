@@ -334,7 +334,8 @@ class TestReusableSourceRootsAtom:
 
 # run_gemm_tuning_handler
 class TestRunGemmTuningHandler:
-    def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path):
+    def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         state = SharedState(precision="bf16", framework="sglang")
         state.save(tmp_path)
 
@@ -344,6 +345,7 @@ class TestRunGemmTuningHandler:
         assert result["error_class"] == "fp8_only_action"
 
     def test_builds_task_file_input_not_task_argv(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         root = tmp_path / "kernel-agent"
         tool = root / "tools" / "gemm_tuning.py"
         tool.parent.mkdir(parents=True)
@@ -404,6 +406,7 @@ class TestRunGemmTuningHandler:
         assert "--input-json" in captured["cmd"]  # type: ignore[operator]
 
     def test_generates_isolated_benchmark_script_when_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         root = tmp_path / "kernel-agent"
         tool = root / "tools" / "gemm_tuning.py"
         tool.parent.mkdir(parents=True)
