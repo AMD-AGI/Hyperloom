@@ -102,7 +102,7 @@
     "sglang": {}
   },
   "_moe_C::moe_align_block_size": {
-    "kind": "single",
+    "kind": "composite",
     "python_launcher_path": [
       "vllm/_custom_ops.py(2133): moe_align_block_size"
     ],
@@ -694,12 +694,6 @@
         "kernel_source_line": "4",
         "kernel_kind": "aiter_asm_kernel",
         "patchable": true
-      },
-      "_fwd_kernel_stage2_asm": {
-        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py",
-        "kernel_source_line": "2919",
-        "kernel_kind": "unknown",
-        "patchable": true
       }
     }
   },
@@ -886,7 +880,7 @@
     }
   },
   "sglang_profiler::attention_paged_attention_ragged": {
-    "kind": "single",
+    "kind": "composite",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/layers/attention/aiter_backend.py(2435): forward_decode"
     ],
@@ -968,7 +962,7 @@
     }
   },
   "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel": {
-    "kind": "single",
+    "kind": "composite",
     "python_launcher_path": [
       "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(391): _fused_moe_kernel_sequence"
     ],
