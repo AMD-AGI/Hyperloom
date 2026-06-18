@@ -495,10 +495,10 @@ def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
 
 
 # --------------------------------------------------------------------------- #
-# Tool surface: TodoWrite is granted, Task is denied (no recursive sub-agent
-# spawn — that would bypass the dispatcher's lane / GPU accounting).
+# Tool surface: TodoWrite and Task are granted (single-layer leaf fan-out;
+# leaves inherit the parent's VISIBLE_DEVICES so they cannot oversubscribe).
 # --------------------------------------------------------------------------- #
-def test_task_tool_denied_and_todowrite_granted():
+def test_task_tool_granted_and_todowrite_granted():
     from inference_optimizer.orchestrator.specialist_runner import (
         DEFAULT_SPECIALIST_TOOLS,
         SPECIALIST_TOOL_DENYLIST,
@@ -506,17 +506,15 @@ def test_task_tool_denied_and_todowrite_granted():
     )
 
     assert "TodoWrite" in DEFAULT_SPECIALIST_TOOLS
-    assert "Task" not in DEFAULT_SPECIALIST_TOOLS
-    assert "Task" in SPECIALIST_TOOL_DENYLIST
+    assert "Task" in DEFAULT_SPECIALIST_TOOLS
+    assert "Task" not in SPECIALIST_TOOL_DENYLIST
 
     runner = SpecialistRunner(backend_factory=lambda *a, **k: None)
 
-    # Default tool surface excludes Task, includes TodoWrite.
+    # Default tool surface includes Task and TodoWrite.
     default_resolved = runner._resolve_tools(None)
-    assert "Task" not in default_resolved
+    assert "Task" in default_resolved
     assert "TodoWrite" in default_resolved
 
-    # Even an operator-extended per-task allowlist cannot re-introduce Task.
     resolved = runner._resolve_tools(["Read", "Task", "TodoWrite", "Bash"])
-    assert "Task" not in resolved
-    assert {"Read", "TodoWrite", "Bash"} <= set(resolved)
+    assert {"Read", "Task", "TodoWrite", "Bash"} <= set(resolved)

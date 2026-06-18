@@ -457,7 +457,9 @@ def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
     )
 
     assert args.specialist_max_turns == DEFAULT_SPECIALIST_MAX_TURNS
-    assert args.specialist_max_turns == 12
+    # WS1: turn cap lifted to "effectively unbounded"; the real stop is the
+    # explicit wall-clock budget, not the turn count.
+    assert args.specialist_max_turns == 1000
     assert args.specialist_per_turn_max_seconds == 600.0
     # Specialist model defaults to None → cli falls back to --claude-model.
     assert args.specialist_model is None

@@ -152,6 +152,27 @@ def test_build_claude_cmd_minimal_no_model_no_mcp(tmp_path: Path) -> None:
     assert "--model" not in cmd
     assert "--mcp-config" not in cmd
     assert "--allowedTools" not in cmd
+    assert "--agents" not in cmd
+
+
+def test_build_claude_cmd_injects_leaf_agents_when_task_allowed(tmp_path: Path) -> None:
+    import json
+
+    from inference_optimizer.orchestrator.specialist_leaf import LEAF_AGENT_NAME
+
+    d = _dispatcher()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    cmd = d._build_claude_cmd(
+        prompt_file=tmp_path / "p.txt",
+        workspace=ws,
+        worktree=None,
+        allowed_tools=("Read", "Bash", "Task"),
+    )
+    agents_idx = cmd.index("--agents") + 1
+    agents = json.loads(cmd[agents_idx])
+    assert LEAF_AGENT_NAME in agents
+    assert "Task" not in agents[LEAF_AGENT_NAME]["tools"]
 
 
 # -- _collect_patches ------------------------------------------------------

@@ -395,6 +395,31 @@ class IntentRouter:
                 from .specialist_profile import resolve_specialist_profile
                 if resolve_specialist_profile(params).grants_bench_tool:
                     lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
+                # WS2: any GPU-holding specialist (not just bench-enabled) must
+                # serialize against serving via gpu_research_lane, else its
+                # cards (range(cap) = the serving cards) would be over-
+                # subscribed against a live server. research_lane is kept for
+                # LLM-concurrency accounting. The lane lease TTL is re-sourced
+                # to the WS1 wall budget (×grace) so it never expires mid-run
+                # and lets serving grab the cards (iron law:
+                # kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL).
+                needs_gpu_raw = params.get("needs_gpu", False)
+                needs_gpu = (
+                    needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
+                    if isinstance(needs_gpu_raw, str)
+                    else bool(needs_gpu_raw)
+                )
+                if needs_gpu:
+                    lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
+                    try:
+                        # Shared with the GPU-pool lease at dispatch so the lane
+                        # lease and the GPU lease TTL never drift apart.
+                        ttl = self._coord._gpu_lease_ttl_sec(int(ttl or 0))
+                    except Exception:  # noqa: BLE001 — fall back to registry ttl
+                        log.exception(
+                            "WS2: failed to re-source gpu_research_lane TTL; "
+                            "using registry default",
+                        )
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind=action_name,
                 params=params,
