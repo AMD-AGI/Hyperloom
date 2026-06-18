@@ -488,7 +488,9 @@ class _FakeVR:
         self.output_throughput = kw.get("output_throughput", 123.0)
         self.ttft_ms = kw.get("ttft_ms", 10.0)
         self.itl_ms = kw.get("itl_ms", 5.0)
-        self.result_dir = kw.get("result_dir", "/tmp/rd")
+        # Mirror the real VariantResult attribute name (``workspace``); the
+        # bench code reads ``r.workspace`` for the accuracy-gate eval dir.
+        self.workspace = kw.get("workspace", "/tmp/rd")
         self.error = kw.get("error", "")
         self.nonfatal_warnings = kw.get("nonfatal_warnings", [])
 
@@ -521,7 +523,7 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
     monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
-        return [_FakeVR(status="succeeded", result_dir=str(tmp_path))]
+        return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
     monkeypatch.setattr(ip, "parse_eval_results", lambda rd: {"accuracy": 0.9})
@@ -542,7 +544,7 @@ async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
-        return [_FakeVR(status="succeeded", result_dir=str(tmp_path))]
+        return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
     # A large accuracy drop must fail the gate (exercises real key + arg order).
@@ -564,7 +566,7 @@ async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeyp
     monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
-        return [_FakeVR(status="succeeded", result_dir=str(tmp_path))]
+        return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
     monkeypatch.setattr(ip, "parse_eval_results", lambda rd: {"accuracy": 0.9})

@@ -250,7 +250,9 @@ SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration
 
 # Free-form (``scope='freeform'``) sanity-gate limits (absorbed from the
 # retired dynamic_specialist wave channel).
-SPECIALIST_FREEFORM_WAVE_MAX: int = 8
+# WS3: relaxed from 8 → 16; the real ceiling is the ``research_lane`` capacity
+# (2×GPU) and the GPU specialist pool, so this is just a coarse sanity tripwire.
+SPECIALIST_FREEFORM_WAVE_MAX: int = 16
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 # Lightweight mechanical red-line tripwire over free-form task descriptions:
 # obviously-destructive host commands a dispatch must never embed. This is a
@@ -265,7 +267,7 @@ _FREEFORM_REDLINE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bshutdown\b|\breboot\b", re.IGNORECASE),
     # Global process cleanup can kill the optimizer's serving / benchmark
     # process; ban pipe-to-kill and killall.
-    re.compile(r"\bps\s+(?:aux|-ef|-e)\b.*\|.*\bkill\b", re.IGNORECASE),
+    re.compile(r"\bps\s+(?:aux|-\w+)\b.*\|.*\bkill\b", re.IGNORECASE),
     re.compile(r"\bpgrep\b.*\|.*\bkill\b", re.IGNORECASE),
     re.compile(r"\bkillall\b", re.IGNORECASE),
 )
@@ -1713,12 +1715,20 @@ class PolicyGate:
                     f"delegate{{action='specialist'}}: max_turns must be int, got {max_turns_raw!r}",
                     rule="specialist_dispatch_source",
                 ) from exc
-            if max_turns <= 0 or max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
+            # WS1: turns are no longer the stop signal — depth is bounded by the
+            # wall-clock budget. ``max_turns=0`` is accepted as "unbounded" (run
+            # to a deliverable conclusion); negatives and values above the
+            # effectively-unbounded hard cap are still rejected.
+            if max_turns < 0 or max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
                 raise PolicyDenied(
                     f"delegate{{action='specialist'}}: max_turns={max_turns} "
-                    f"outside (0, {SPECIALIST_MAX_TURNS_HARD_CAP}]",
+                    f"outside [0, {SPECIALIST_MAX_TURNS_HARD_CAP}]",
                     rule="specialist_dispatch_source",
-                    hint=(f"max_turns must be in (0, {SPECIALIST_MAX_TURNS_HARD_CAP}]; the prompt default is 8."),
+                    hint=(
+                        f"max_turns must be in [0, {SPECIALIST_MAX_TURNS_HARD_CAP}] "
+                        "(0 = unbounded; depth is bounded by the wall-clock "
+                        "budget, so omit max_turns unless capping a probe early)."
+                    ),
                 )
 
         self._validate_specialist_gpu_request(params)

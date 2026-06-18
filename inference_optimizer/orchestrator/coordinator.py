@@ -4814,7 +4814,8 @@ class Coordinator:
                 "sources; do not benchmark or patch."
             ),
             "gap_layer": "research",
-            "max_turns": 10,
+            # WS1: depth is bounded by the wall-clock budget, not by turns —
+            # omit max_turns so the scout runs to a deliverable conclusion.
             "source": "coordinator_internal",
             "reason": str(reason),
             "seen_pr_ids": seen,
@@ -5047,7 +5048,7 @@ class Coordinator:
                 "exhausted ones).\n" + (digest or "(no digest)")
             ),
             "gap_layer": "research",
-            "max_turns": 8,
+            # WS1: bounded by the wall-clock budget, not by turns.
             "source": "coordinator_internal",
             "reason": "plateau_trajectory_review",
             "readonly": True,

@@ -159,7 +159,6 @@ def _build_specialist_executor(
             session_dir=session_dir,
             default_tools=DEFAULT_SPECIALIST_TOOLS,
             default_max_turns=max_turns,
-            per_turn_max_seconds=per_turn_max_seconds,
             knowledge_plane=knowledge_plane,
         )
     else:
@@ -184,7 +183,6 @@ def _build_specialist_executor(
             session_dir=session_dir,
             default_tools=DEFAULT_SPECIALIST_TOOLS,
             default_max_turns=max_turns,
-            per_turn_max_seconds=per_turn_max_seconds,
             knowledge_plane=knowledge_plane,
         )
 

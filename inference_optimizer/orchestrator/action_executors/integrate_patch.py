@@ -1363,14 +1363,18 @@ class IntegratePatchExecutor:
                 "output_throughput": getattr(r, "output_throughput", None),
                 "ttft_ms": getattr(r, "ttft_ms", None),
                 "itl_ms": getattr(r, "itl_ms", None),
-                "result_dir": str(getattr(r, "result_dir", "")),
+                # ``VariantResult`` exposes the benchmark dir as ``workspace``
+                # (there is no ``result_dir`` attribute); using the wrong name
+                # left ``_grade_accuracy`` with an empty path so the accuracy
+                # gate silently skipped on every patch.
+                "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
             }
 
         accuracy_pass: bool | None = None
         if bench.get("status") == "succeeded":
-            accuracy_pass = self._grade_accuracy(bench["result_dir"], params.get("accuracy_baseline"))
+            accuracy_pass = self._grade_accuracy(bench["workspace"], params.get("accuracy_baseline"))
 
         return bench, {"accuracy_pass": accuracy_pass}
 
@@ -1381,7 +1385,13 @@ class IntegratePatchExecutor:
         With a recorded baseline the measured drop is enforced; without one
         (or no eval result) the check is skipped (``None``) and warned loudly.
         """
-        baseline_value = float(baseline_accuracy) if isinstance(baseline_accuracy, (int, float)) else 0.0
+        # Accept numeric strings (e.g. ``"0.85"``) in addition to int/float so a
+        # baseline carried as text is not silently coerced to 0.0 (which would
+        # skip the gate). Non-numeric / missing values fall back to 0.0 (skip).
+        try:
+            baseline_value = float(baseline_accuracy)
+        except (TypeError, ValueError):
+            baseline_value = 0.0
         try:
             eval_results = parse_eval_results(result_dir)
             new_accuracy = eval_results.get("accuracy")

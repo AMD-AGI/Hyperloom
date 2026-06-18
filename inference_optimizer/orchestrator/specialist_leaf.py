@@ -22,6 +22,8 @@ _LEAF_AGENT_PROMPT = (
     "You are a leaf sub-agent dispatched by a specialist for one focused, "
     "single-shot task. Complete it in a single pass: gather what you need "
     "with Read/Grep/Glob/Bash and return a concise, self-contained result. "
+    "Do NOT iterate over multiple rounds or wait for follow-up turns — produce "
+    "your final answer in this one response. "
     "You cannot dispatch further sub-agents. "
     "Default to CPU-only work; if GPUs were allocated to your parent they are "
     "already exposed via the inherited VISIBLE_DEVICES — use only those and "

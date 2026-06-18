@@ -203,14 +203,21 @@ _INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset(
 
 
 def is_phase_interleave_enabled() -> bool:
-    """Return True when EXPLORE↔KERNEL interleave is enabled (default OFF; env opt-in knob).
+    """Return True when EXPLORE↔KERNEL interleave is enabled (WS3: default ON; env opt-out knob).
+
+    WS3 lets specialists in EXPLORE trigger KERNEL-class actions (and KERNEL
+    reach back to explore/specialist/integrate_patch) without waiting for the
+    phase machine. This is now the default; set
+    ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` to an explicit off value
+    (``0``/``false``/``no``/``off``) to restore the strict per-phase channel.
 
     Returns:
-        bool: True when ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` is one of
-        ``1``/``true``/``yes``/``on`` (case-insensitive); False otherwise.
+        bool: False only when ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` is one
+        of ``0``/``false``/``no``/``off`` (case-insensitive); True otherwise
+        (including unset/empty).
     """
     raw = (os.environ.get(PHASE_INTERLEAVE_ENV) or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    return raw not in {"0", "false", "no", "off"}
 
 
 def llm_proposable_actions_for_with_interleave(

@@ -33,7 +33,7 @@ from .specialist_domains import (
     FREEFORM_DOMAIN,
     SPECIALIST_DOMAINS_M5,
     SpecialistDomain,
-    get_domain,
+    domain_for_tag,
     normalize_dispatch_tags,
 )
 from .specialist_subprocess import (
@@ -317,7 +317,6 @@ class SpecialistRunner:
         session_dir: Path | None = None,
         default_tools: tuple[str, ...] = DEFAULT_SPECIALIST_TOOLS,
         default_max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS,
-        per_turn_max_seconds: float = 90.0,
         knowledge_plane: Any = None,
     ):
         """Create a runner.
@@ -332,7 +331,6 @@ class SpecialistRunner:
             session_dir: Session output directory.
             default_tools: Default tool whitelist for specialists.
             default_max_turns: Default per-task max turn budget.
-            per_turn_max_seconds: Per-turn wall-clock soft limit.
             knowledge_plane: KnowledgePlane gating ``mcp__pr_monitor__*`` tools.
 
         Raises:
@@ -353,7 +351,6 @@ class SpecialistRunner:
         self.session_dir = Path(session_dir) if session_dir else None
         self.default_tools = tuple(default_tools)
         self.default_max_turns = int(default_max_turns)
-        self.per_turn_max_seconds = float(per_turn_max_seconds)
         self.knowledge_plane = knowledge_plane
 
     def _resolve_tools(
@@ -457,7 +454,11 @@ class SpecialistRunner:
         domain_key = str(params.get("domain") or "").strip()
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         max_turns = int(params.get("max_turns") or self.default_max_turns)
-        domain = get_domain(domain_key)
+        # B7: resolve by anchor first then key (``domain_for_tag``) so a dispatch
+        # whose ``domain`` carries the KB anchor (e.g. ``communication``) matches
+        # its catalogue entry (``comm_specialist``) instead of silently failing
+        # the key-only ``get_domain`` lookup and dying as ``unknown_domain``.
+        domain = domain_for_tag(domain_key)
         sub_kind = str(params.get("sub_kind") or "").strip()
         profile = resolve_specialist_profile(params)
         task_description = str(params.get("task_description") or "").strip()
