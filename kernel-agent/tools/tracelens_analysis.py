@@ -1166,8 +1166,30 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
         return False, (f"runtime-generated (torch.compile / Inductor cache): {source_file}")
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _reusable_roots()):
-        return False, (f"source not under a reusable framework root: {source_file}")
+        return False, (
+            f"source not under a reusable framework root: {source_file}"
+        )
+    # cpp_itfs host-launcher guard (RCA root cause 2): files under aiter's
+    # csrc/cpp_itfs/ that are .py are host drivers — the real GPU code lives in
+    # sibling .cuh / .cpp.jinja. If the deterministic resolver didn't promote it
+    # to the device source, editing the .py always fails the smoke test ->
+    # REVERT. Skip it so the candidate doesn't burn a forge/geak attempt.
+    if "/csrc/cpp_itfs/" in lower_file and lower_file.endswith(".py"):
+        return False, (
+            f"cpp_itfs host launcher (device code is in sibling .cuh/.cpp.jinja, "
+            f"not this .py): {source_file}"
+        )
     source_type = candidate.get("source_type")
+    # aiter device-source promotion: aiter ships editable and JIT-compiles each
+    # op, so a real .cu/.cuh/.hip kernel under /aiter/ is patchable even when the
+    # upstream classifier left source_type unknown (e.g. aiter::mha_batch_prefill
+    # -> csrc/py_itfs_ck/*.cu). forge edits it in place + AITER_REBUILD recompiles
+    # it. Excludes tuned_gemm.py-style Python dispatchers (real GEMM is a
+    # compiled CK/hipBLASLt lib, editing the .py does nothing).
+    if (source_type not in {"hip_cpp", "triton", "python", "flydsl"}
+            and "/aiter/" in lower_file
+            and lower_file.endswith((".cu", ".cuh", ".hip"))):
+        return True, ""
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}")
     return True, ""
@@ -1759,6 +1781,22 @@ def _known_harness_files(name: str, source_file: str) -> list[Path]:
     return out
 
 
+_LIBRARY_TOKENS = ("aiter", "sglang", "vllm", "flashinfer", "sgl-kernel", "sgl_kernel")
+
+
+def _library_token(path: str) -> str:
+    """Return the library a path belongs to (aiter/sglang/...), else "".
+
+    Used to keep kernel↔benchmark pairing within one library. sgl-kernel and
+    sgl_kernel normalize to "sglang" since they are the sglang kernel package.
+    """
+    low = (path or "").lower()
+    for tok in _LIBRARY_TOKENS:
+        if f"/{tok}/" in low or f"/{tok}." in low:
+            return "sglang" if tok in ("sgl-kernel", "sgl_kernel") else tok
+    return ""
+
+
 def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> list[str]:
     """Find test/benchmark files matching a kernel under a repo's subdirs.
 
@@ -1850,7 +1888,16 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
         """
         low = path_str.lower()
         return any(tag in low for tag in ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_"))
-
+    # Same-library guard (RCA root cause 2): never pair a kernel from one library
+    # with a benchmark from another (e.g. a sglang sgl-kernel .cuh with an aiter
+    # op_test). Editing the kernel then "validating" against an unrelated lib's
+    # op always fails the smoke test -> REVERT. Drop cross-library candidates
+    # when the kernel's library is recognizable.
+    src_lib = _library_token(source_file)
+    if src_lib:
+        same_lib = [s for s in unique if _library_token(s) in (src_lib, "")]
+        if same_lib:
+            unique = same_lib
     unique.sort(key=_is_multigpu)
     return unique[:10]
 
