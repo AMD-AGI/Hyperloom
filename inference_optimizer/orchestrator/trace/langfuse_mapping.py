@@ -23,7 +23,7 @@ it only reshapes dicts and parses timestamps.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 UNPHASED = "(unphased)"
@@ -147,6 +147,29 @@ def parse_ts(ts: str | None) -> datetime | None:
         return None
 
 
+def generation_start(end: datetime | None, latency_ms: Any) -> datetime | None:
+    """Backdate a generation's start by its measured call latency.
+
+    ``end`` is the call's write-time ``ts`` (≈ when the model reply landed);
+    ``latency_ms`` is the wall-clock the call took. Returns ``end - latency``
+    so the Langfuse generation shows a real duration. Falls back to ``end``
+    (zero-width, legacy behaviour) when either input is missing/unparseable
+    or the latency is non-positive.
+    """
+    if end is None:
+        return None
+    try:
+        ms = int(latency_ms)
+    except (TypeError, ValueError):
+        return end
+    if ms <= 0:
+        return end
+    try:
+        return end - timedelta(milliseconds=ms)
+    except (OverflowError, ValueError):
+        return end
+
+
 def utc_second_key(ts: str | None) -> str:
     """Truncate a ts to whole UTC seconds, for cross-file pairing.
 
@@ -258,6 +281,8 @@ def generation_metadata(
         "role": row.get("role"),
         "component": row.get("component"),
         "has_text": has_text,
+        "latency_ms": row.get("latency_ms"),
+        "reviewed_msg_ids": row.get("reviewed_msg_ids"),
     }
 
 
@@ -318,6 +343,7 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
         "fingerprint": dec.get("fingerprint"),
         "metrics": dec.get("metrics"),
         "proposal_scores": dec.get("proposal_scores"),
+        "predicted_gain_pct": dec.get("predicted_gain_pct"),
     }
     # Drop keys the decision didn't carry so the score metadata stays compact.
     meta = {k: v for k, v in meta.items() if v is not None}
@@ -345,7 +371,56 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
             )
         except (TypeError, ValueError):
             pass
+    # Calibration signal: the proposer's predicted gain emitted as its own
+    # NUMERIC score on the SAME decision so a trace can compute the
+    # predicted-vs-realized error directly against ``gain_pct``.
+    predicted = dec.get("predicted_gain_pct")
+    if predicted is not None:
+        try:
+            scores.append({
+                "name": "predicted_gain_pct",
+                "value": float(predicted),
+                "data_type": "NUMERIC",
+                "comment": comment,
+                "metadata": meta,
+            })
+        except (TypeError, ValueError):
+            pass
+    # Calibration signal: the proposal_scorer's pre-decision rating (mean
+    # across raters) emitted as its own NUMERIC score on the SAME decision so
+    # a trace can compare predicted score vs realized ``gain_pct`` directly.
+    pred = _mean_proposal_score(dec.get("proposal_scores"))
+    if pred is not None:
+        scores.append({
+            "name": "proposal_score",
+            "value": pred,
+            "data_type": "NUMERIC",
+            "comment": comment,
+            "metadata": meta,
+        })
     return scores
+
+
+def _mean_proposal_score(proposal_scores: Any) -> float | None:
+    """Mean of the per-rater ``score`` values in a decision's proposal_scores.
+
+    ``proposal_scores`` is the ``[{"rater", "score", "reason"}, ...]`` list the
+    collector attaches from the proposal_scorer ensemble. Returns the mean
+    rater score (0-10), or ``None`` when there are no numeric scores.
+    """
+    if not isinstance(proposal_scores, list):
+        return None
+    vals: list[float] = []
+    for entry in proposal_scores:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            vals.append(float(entry.get("score")))
+        except (TypeError, ValueError):
+            continue
+    if not vals:
+        return None
+    return round(sum(vals) / len(vals), 3)
 
 
 __all__ = [
@@ -357,6 +432,7 @@ __all__ = [
     "derive_trace_id",
     "generation_metadata",
     "generation_name",
+    "generation_start",
     "langfuse_session_id",
     "pair_key",
     "parse_ts",
