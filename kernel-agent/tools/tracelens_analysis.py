@@ -3682,7 +3682,9 @@ def deterministic_extract_hot_kernels(
 
         for member in sorted_members:
             op_name = member.get("operation", "")
-            member_time_ms = member.get("time_ms", 0)
+            # TraceLens may emit null (not just missing) for synthetic ops;
+            # `or 0` guards round(None) on the candidate dict below.
+            member_time_ms = member.get("time_ms") or 0
 
             # Match by (name, time_ms) to avoid collisions when multiple
             # ops share the same name (e.g. many aten::mm instances).
@@ -3700,7 +3702,7 @@ def deterministic_extract_hot_kernels(
                 continue
 
             duration_us = member_time_ms * 1000
-            eff_pct = member.get("efficiency_pct", 0)
+            eff_pct = member.get("efficiency_pct") or 0
 
             launcher_path = full_op.get("launcher_path", "")
             if launcher_path in ("\u2014", "-", ""):
@@ -3728,7 +3730,7 @@ def deterministic_extract_hot_kernels(
                 "duration_us": round(duration_us, 3),
                 "call_count": op_count,
                 "efficiency_percent": round(eff_pct, 2),
-                "impact_score": member.get("impact_score", impact_score),
+                "impact_score": member.get("impact_score") or impact_score,
                 "bound_type": member.get("bound_type", ""),
                 "tracelens_category": category,
                 "tracelens_pitem_rank": global_rank,
@@ -3747,7 +3749,8 @@ def deterministic_extract_hot_kernels(
     # categorizes them as "other" with no efficiency model.
     other_ops = ops_by_category.get("other", [])
     for op in other_ops:
-        time_ms = op.get("time_ms", 0)
+        # Guard null (not just missing) before the numeric compare below.
+        time_ms = op.get("time_ms") or 0
         if time_ms < 1.0:
             continue
 

@@ -4011,3 +4011,48 @@ def test_deterministic_other_bucket_keeps_resolvable_graph_op(
     assert len(result) == 1
     assert result[0]["source_file"] == "/sgl-workspace/aiter/my_triton_kernel.py"
     assert result[0]["duration_us"] == 50000.0
+
+
+def test_deterministic_extract_tolerates_null_efficiency_and_impact(tmp_path):
+    """TraceLens emits null efficiency_pct/impact_score for synthetic ops;
+    extraction must not crash on round(None) and should coerce them to 0."""
+    op_name = "hipLaunchKernel->paged_attention_mfma16_kernel (Synthetic Op)"
+    _write_priority_json(
+        tmp_path,
+        [
+            {
+                "category": "inferenceattention",
+                "global_rank": 1,
+                "impact_score": 12.5,
+                "members": [
+                    {
+                        "operation": op_name,
+                        "time_ms": 520.223,
+                        "efficiency_pct": None,
+                        "impact_score": None,
+                    },
+                ],
+            },
+        ],
+    )
+    _write_metrics_json(
+        tmp_path,
+        "inferenceattention",
+        [
+            {
+                "name": op_name,
+                "time_ms": 520.223,
+                "count": 1,
+                "args": "(1,256,256) bf16",
+                "launcher_path": "",
+            },
+        ],
+    )
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+
+    assert len(result) == 1
+    assert result[0]["efficiency_percent"] == 0
+    # member impact_score is null -> falls back to the finding-level score.
+    assert result[0]["impact_score"] == 12.5
+    assert result[0]["duration_us"] == 520223.0
