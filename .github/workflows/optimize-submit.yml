@@ -37,8 +37,9 @@ on:
   # Rolling downloads>100 pool: 200 models TWICE a day, firing at UTC
   # 04:00 / 16:00 (Beijing 12:00 / 00:00). Each fire submits the
   # NEXT sequential 200-model slice of the rotate pool, now hosted off-repo at
-  # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate_2026-06-17.json
-  # (ordered not-run first; the 449 >12B multimodal models are front-loaded),
+  # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate.json
+  # (a date-less symlink that always points at the latest filtered pool;
+  # ordered not-run first; the 449 >12B multimodal models are front-loaded),
   # stepping batch 0,1,2,... and wrapping at the pool end. Both
   # exclude_leaderboard and exclude_active are OFF on schedule: slices are
   # disjoint, so the whole pool keeps cycling (re-running finished models too).
@@ -207,7 +208,6 @@ jobs:
       count:  ${{ steps.matrix.outputs.count }}
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
-      HF_TOKEN_2:            ${{ secrets.HF_TOKEN_2 }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
       # Rolling cron cycles the downloads>100 pool (every size), ordered with
       # not-yet-run models first so the front-anchored window picks them up
@@ -216,7 +216,7 @@ jobs:
       # active, the window wraps and the whole 2426-model pool keeps repeating.
       # Schedule reads the rotate pool from /wekafs (off-repo, RO-mounted on the
       # hyperloom runners) so the large candidates JSON never bloats the git repo.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_downloads_gt100_rotate_2026-06-17.json', secrets.WEKAFS_CHENYI_DIR) || github.event.inputs.candidates_file }}
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_downloads_gt100_rotate.json', secrets.WEKAFS_CHENYI_DIR) || github.event.inputs.candidates_file }}
       # Schedule leaves batch_index empty so generate_hf_matrix derives a
       # SEQUENTIAL index from the scheduled-fire counter: each cron (UTC
       # 4/16) steps batch 0,1,2,... and wraps, marching the whole pool in
@@ -264,7 +264,6 @@ jobs:
       SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
       HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
       HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
-      HF_TOKEN_2:                       ${{ secrets.HF_TOKEN_2 }}
       SAFE_OPTIMIZE_REGISTER_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_REGISTER_WORKSPACE }}
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
@@ -286,7 +285,6 @@ jobs:
         continue-on-error: true
         env:
           HF_TOKEN:   ${{ secrets.HF_TOKEN }}
-          HF_TOKEN_2: ${{ secrets.HF_TOKEN_2 }}
           MODEL_REPO: ${{ matrix.model }}
         run: |
           set -euo pipefail
