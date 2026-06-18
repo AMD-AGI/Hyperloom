@@ -174,7 +174,7 @@ populate `session_breakdown.json` for downstream consumers
 
 Every breakdown carries a top-level `token_usage` section: a promoted,
 discoverable rollup of LLM token spend derived from the per-call ledger
-(`reports/trace/llm_calls.jsonl` + `ext/*.jsonl`). It is purely derived from
+(`reports/trace/llm_calls.jsonl`). It is purely derived from
 `decision_trace.token_rollup`, so it always reconciles with that section. No
 env var controls it; it is always present (zeroed on pre-trace sessions).
 

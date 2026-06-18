@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..session_paths import runs_dir
+from ..session_paths import runs_dir, specialist_intel_path
 from .backends.base import BackendError
 from ..protocol.intent import Intent, IntentType
 from .specialist_bench import BENCH_TOOL_ENABLED, TOOL_RUN_BENCH
@@ -594,23 +594,54 @@ class SpecialistRunner:
             ),
         )
 
+    @staticmethod
+    def _ctx_tick_phase(ctx: "RunnerContext | None") -> tuple[int | None, str | None]:
+        """Best-effort (tick, phase) from the live SharedState on ``ctx.extra``.
+
+        SubAgentRunner threads the live ``shared_state`` into every executor's
+        ``ctx.extra``; reading ``tick`` / ``phase`` here lets the specialist
+        trace rows carry the real phase/tick instead of leaving the collector
+        to ts-window backfill. Returns ``(None, None)`` when unavailable.
+        """
+        try:
+            extra = getattr(ctx, "extra", None) or {}
+            ss = extra.get("shared_state")
+            if ss is None:
+                return None, None
+            tick = ss.tick
+            phase = ss.phase
+            return (
+                int(tick) if tick is not None else None,
+                (str(phase) or None) if phase else None,
+            )
+        except Exception:  # noqa: BLE001 — telemetry must never break the run
+            return None, None
+
     def _trace_specialist_llm_call(
         self,
         *,
         task_id: str,
         turn: int,
         metadata: dict[str, Any] | None,
+        latency_ms: int | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for an in-process specialist turn.
 
         No-op when ``self.session_dir`` is unset (some test harnesses run
         the runner without a session dir) or the backend reported no token
-        counters. Wrapped broadly so a trace failure never aborts the run.
+        counters. ``latency_ms`` is the measured wall-clock of the turn (the
+        in-process backend call) or the whole subprocess session. Wrapped
+        broadly so a trace failure never aborts the run.
 
         Args:
             task_id: The specialist task id.
             turn: The turn index being traced.
             metadata: Backend turn metadata carrying token counters.
+            latency_ms: Measured wall-clock of the turn, when available.
+            tick: Timeline tick for this turn, when known.
+            phase: Optimization phase for this turn, when known.
         """
         if self.session_dir is None:
             return
@@ -633,6 +664,9 @@ class SpecialistRunner:
                 task_id=task_id,
                 turn=turn,
                 metadata=md,
+                latency_ms=latency_ms,
+                tick=tick,
+                phase=phase,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break the run
@@ -643,12 +677,55 @@ class SpecialistRunner:
                 exc_info=True,
             )
 
+    def _record_specialist_intel(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        tool_calls: list[dict[str, Any]] | None,
+    ) -> None:
+        """Append the specialist's intel/tool calls to ``specialist_intel.jsonl``.
+
+        One row per recovered ``tool_use`` (``{"tool", "query"}``), stamped with
+        ``task_id`` / ``turn`` / ``ts`` so the emitter can backfill each as an
+        ``intel:<tool>`` span under the ``specialist`` agent. No-op without a
+        session dir or when no tool calls were recovered. Best-effort: a trace
+        write must never break the run.
+        """
+        if self.session_dir is None or not tool_calls:
+            return
+        try:
+            path = specialist_intel_path(self.session_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            ts = _now_iso()
+            with path.open("a", encoding="utf-8") as f:
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    row = {
+                        "session_id": self.session_dir.name,
+                        "component": "specialist",
+                        "task_id": task_id,
+                        "turn": turn,
+                        "ts": ts,
+                        "tool": str(call.get("tool") or "tool"),
+                        "query": call.get("query"),
+                    }
+                    f.write(json.dumps(row, sort_keys=True) + "\n")
+        except Exception:  # noqa: BLE001 — trace must never break the run
+            log.debug(
+                "full-trace: specialist intel append failed for "
+                "task_id=%s turn=%s", task_id, turn, exc_info=True,
+            )
+
     def _record_specialist_conversation(
         self,
         *,
         task_id: str,
         turn: int,
         metadata: dict[str, Any] | None,
+        tick: int | None = None,
+        phase: str | None = None,
     ) -> None:
         """Append one ``conversations.jsonl`` row for an in-process specialist
         turn. Persists the full (redacted) prompt + completion the backend put
@@ -672,6 +749,8 @@ class SpecialistRunner:
                 component="specialist",
                 task_id=task_id,
                 turn=turn,
+                tick=tick,
+                phase=phase,
                 model=md.get("model"),
                 prompt=prompt or "",
                 response=response or "",
@@ -748,12 +827,14 @@ class SpecialistRunner:
                     max_turns=max_turns,
                     status="running",
                 )
+                _t0 = time.perf_counter()
                 turn_result = await backend.run(
                     prompt=prep.user_prompt if turn_idx == 1 else combined_prompt,
                     system_prompt=prep.system_prompt,
                     tools=list(prep.resolved_tools),
                     max_turns=1,
                 )
+                _turn_latency_ms = int((time.perf_counter() - _t0) * 1000)
             except BackendError as exc:
                 backend_error = f"backend_error:{exc!r}"
                 self._append_transcript(
@@ -792,15 +873,21 @@ class SpecialistRunner:
             # onto the unified ledger keyed by task_id + turn so the
             # collector can join it to the EXPLORE decision. The production
             # default (subprocess) path is covered separately by B1.
+            _tick, _phase = self._ctx_tick_phase(ctx)
             self._trace_specialist_llm_call(
                 task_id=ctx.task.task_id,
                 turn=turn_idx,
                 metadata=turn_result.metadata,
+                latency_ms=_turn_latency_ms,
+                tick=_tick,
+                phase=_phase,
             )
             self._record_specialist_conversation(
                 task_id=ctx.task.task_id,
                 turn=turn_idx,
                 metadata=turn_result.metadata,
+                tick=_tick,
+                phase=_phase,
             )
 
             # Tool-violation check (defense in depth).
@@ -917,10 +1004,47 @@ class SpecialistRunner:
         # session, so we record turn=1. ``usage`` already uses the four
         # canonical counter names, so the metadata-shaped helper consumes
         # it directly.
-        self._trace_specialist_llm_call(
+        _sub_latency_ms = None
+        if sub_result.elapsed_seconds is not None:
+            try:
+                _sub_latency_ms = int(float(sub_result.elapsed_seconds) * 1000)
+            except (TypeError, ValueError):
+                _sub_latency_ms = None
+        _tick, _phase = self._ctx_tick_phase(ctx)
+        # Prefer per-turn token rows (one ledger row per model turn) when the
+        # stream-json log carried per-message usage; the whole-session latency
+        # lands on the final turn so the per-turn sums still reconcile without
+        # over-counting wall-clock. Fall back to a single cumulative turn=1 row.
+        turn_usages = list(sub_result.turn_usages or [])
+        if len(turn_usages) > 1:
+            last_idx = len(turn_usages) - 1
+            for i, tu in enumerate(turn_usages):
+                md = dict(tu)
+                if sub_result.usage and sub_result.usage.get("model"):
+                    md.setdefault("model", sub_result.usage.get("model"))
+                self._trace_specialist_llm_call(
+                    task_id=ctx.task.task_id,
+                    turn=i + 1,
+                    metadata=md,
+                    latency_ms=_sub_latency_ms if i == last_idx else None,
+                    tick=_tick,
+                    phase=_phase,
+                )
+        else:
+            self._trace_specialist_llm_call(
+                task_id=ctx.task.task_id,
+                turn=1,
+                metadata=sub_result.usage,
+                latency_ms=_sub_latency_ms,
+                tick=_tick,
+                phase=_phase,
+            )
+        # Full-trace intel: persist the tool/intel calls the specialist made so
+        # the trace shows what it read (web/PR/KB/grep), backfilled as spans.
+        self._record_specialist_intel(
             task_id=ctx.task.task_id,
             turn=1,
-            metadata=sub_result.usage,
+            tool_calls=sub_result.tool_calls,
         )
         # Full-trace B1 conversation: pair the parent-held prompt (the CLI
         # never echoes it into the stream-json log) with the assistant reply
@@ -935,6 +1059,8 @@ class SpecialistRunner:
                     "prompt": (prep.system_prompt + "\n---\n" + prep.user_prompt),
                     "response": sub_result.response,
                 },
+                tick=_tick,
+                phase=_phase,
             )
         self._write_heartbeat(
             workspace,

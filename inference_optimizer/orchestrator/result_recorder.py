@@ -97,6 +97,9 @@ class ResultRecorder:
                         "summary": done_payload.get("summary", ""),
                     },
                     proposals=proposals,
+                    task_id=task.task_id,
+                    tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                    phase=(getattr(self.shared_state, "phase", "") or "") or None,
                 )
                 if scores and scores.get("models"):
                     round_entry["ensemble_scores"] = scores
@@ -368,6 +371,9 @@ class ResultRecorder:
             reason=reason,
             task_id=task.task_id,
             tick=int(self.shared_state.tick or 0),
+            predicted_gain_pct=self._coord._predicted_gain(
+                result_dict, getattr(task, "params", None),
+            ),
         ))
 
         if self.cortex_kb is None:
@@ -525,6 +531,11 @@ class ResultRecorder:
             fingerprint=str(variant_outcome.get("fingerprint") or ""),
             metrics=detail_metrics,
             tick=int(self.shared_state.tick or 0),
+            predicted_gain_pct=self._coord._predicted_gain(
+                variant_outcome,
+                variant_attrs if isinstance(variant_attrs, dict) else None,
+                getattr(task, "params", None),
+            ),
         ))
 
         if self.cortex_kb is None:
