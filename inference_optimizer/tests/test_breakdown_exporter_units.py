@@ -134,3 +134,80 @@ class TestCollectSpecialistRuns:
         assert len(row["transcripts"]) == 1
         assert row["transcripts"][0]["task_id"] == "abc123"
         assert row["transcripts"][0]["domain"] == "communication"
+
+
+class TestCollectGemmTuning:
+    def test_empty_when_no_attempts(self):
+        assert col.collect_gemm_tuning({}) == {}
+
+    def test_adopted_run_takes_kept_gain_and_engine(self):
+        state = {
+            "baseline_tput": 1000.0,
+            "tp": 1,
+            "conc": 64,
+            "isl": 128,
+            "osl": 128,
+            "precision": "fp8",
+            "framework": "sglang",
+            "gpu_type": "mi355x",
+            "cumulative_gain_validated_stack_len": 1,
+            "gemm_tuning_attempts": [
+                {
+                    "engine": "geak",
+                    "status": "ok",
+                    "decision": "KEEP",
+                    "source": "kernel_entry_auto",
+                    "best_speedup": 1.28,
+                    "tuned_file": "/w/a8w8.csv",
+                    "final_report_path": "/w/final_report.json",
+                    "workspace": "/w",
+                    "ts": "2026-06-19T00:00:00Z",
+                    "summary": {"best_conc": 64},
+                },
+                {
+                    "engine": "geak",
+                    "status": "complete",
+                    "decision": "REVERT",
+                    "best_speedup": 0.98,
+                    "tuned_file": "/w2/a8w8.csv",
+                    "workspace": "/w2",
+                    "ts": "2026-06-19T00:05:00Z",
+                },
+            ],
+            "optimization_stack": [
+                {
+                    "action": "gemm_tuning",
+                    "engine": "geak",
+                    "tuned_file": "/w/a8w8.csv",
+                    "gain_pct": 28.0,
+                    "tput": 1280.0,
+                },
+            ],
+        }
+        out = col.collect_gemm_tuning(state)
+        assert len(out["runs"]) == 2
+        kept, reverted = out["runs"]
+        assert kept["engine"] == "geak"
+        assert kept["adopted"] is True
+        assert kept["gain_pct"] == 28.0
+        assert kept["tuned_tput"] == 1280.0
+        assert kept["conc"] == 64
+        assert kept["summary"] == {"best_conc": 64}
+        assert reverted["adopted"] is False
+        assert reverted["decision"] == "REVERT"
+        assert out["adopted_engine"] == "geak"
+        assert out["adopted_tuned_file"] == "/w/a8w8.csv"
+        assert out["total_gain_pct"] == 28.0
+
+    def test_engine_defaults_to_geak_and_falls_back_to_last(self):
+        state = {
+            "last_gemm_tuning": {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.1,
+                "tuned_file": "/w/a8w8.csv",
+            },
+        }
+        out = col.collect_gemm_tuning(state)
+        assert len(out["runs"]) == 1
+        assert out["runs"][0]["engine"] == "geak"
