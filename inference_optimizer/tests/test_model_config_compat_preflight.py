@@ -183,6 +183,20 @@ def test_detect_deepseek_v4_unrecognized_blocked(tmp_path):
     assert reason is not None and "not recognized" in reason
 
 
+def test_detect_glm_moe_dsa_unrecognized_blocked(tmp_path):
+    # zai-org-GLM-5.1: Transformers does not recognize glm_moe_dsa →
+    # ModelConfig ValidationError during server init (any GPU).
+    m = tmp_path / "glm_moe_dsa"
+    _write_config(
+        m,
+        model_type="glm_moe_dsa",
+        architectures=["GlmMoeDsaForCausalLM"],
+        max_position_embeddings=131072,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "not recognized" in reason
+
+
 def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):
     # Mistral3 wrapper exposes text_config.model_type=ministral3; vLLM raises KeyError.
     m = tmp_path / "mistral3"
@@ -867,6 +881,18 @@ def test_private_quant_mlx_affine_blocks(tmp_path):
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None and "MLX" in reason
+
+
+def test_private_quant_no_method_blocks(tmp_path):
+    # quantization_config carries bits/group_size but no quant_method/mode;
+    # sglang raises "Unknown quantization method: ''" in engine init.
+    m = tmp_path / "no_method"
+    _write_config(
+        m, model_type="llama", max_position_embeddings=32768,
+        quantization_config={"group_size": 64, "bits": 8},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "quant_method" in reason
 
 
 def test_private_quant_mxtq_blocks(tmp_path):
