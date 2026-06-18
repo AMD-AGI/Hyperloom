@@ -27,7 +27,6 @@ from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
 
-
 @dataclass
 class ExternalDepsConfig:
     """Tunables for :func:`evaluate_external_deps_signals`."""
@@ -109,9 +108,12 @@ def evaluate_external_deps_signals(
     out.extend(_gateway_symptoms(deps.get("gateway") or {}, cfg))
     out.extend(_mount_symptoms(deps.get("mounts") or [], cfg))
     if tracelens_latch is not None:
-        out.extend(_tracelens_symptoms(
-            deps.get("tracelens_cli") or {}, tracelens_latch,
-        ))
+        out.extend(
+            _tracelens_symptoms(
+                deps.get("tracelens_cli") or {},
+                tracelens_latch,
+            )
+        )
     return out
 
 
@@ -119,8 +121,10 @@ def evaluate_external_deps_signals(
 # J1 — Upstream gateway 401 / forbidden
 # ---------------------------------------------------------------------------
 
+
 def _gateway_symptoms(
-    gateway: dict[str, Any], cfg: ExternalDepsConfig,
+    gateway: dict[str, Any],
+    cfg: ExternalDepsConfig,
 ) -> list[Symptom]:
     """J1: fire ``gateway_auth_outage`` when the LLM gateway returns 401/403.
 
@@ -136,9 +140,7 @@ def _gateway_symptoms(
         return []
     status = str(gateway.get("status") or "")
     status_code = gateway.get("status_code")
-    if status == "unauthorized" or (
-        isinstance(status_code, int) and status_code in (401, 403)
-    ):
+    if status == "unauthorized" or (isinstance(status_code, int) and status_code in (401, 403)):
         return [
             Symptom(
                 name="gateway_auth_outage",
@@ -157,8 +159,7 @@ def _gateway_symptoms(
                 subject={},
                 source="local",
                 suggestion=(
-                    "rotate $SAFE_API_KEY at https://llm.amd.com/ and "
-                    "re-export; the upstream key is revoked / expired"
+                    "rotate $SAFE_API_KEY at https://llm.amd.com/ and re-export; the upstream key is revoked / expired"
                 ),
             )
         ]
@@ -169,8 +170,10 @@ def _gateway_symptoms(
 # J2 — WekaFS / external mount degraded
 # ---------------------------------------------------------------------------
 
+
 def _mount_symptoms(
-    mounts: list[Any], cfg: ExternalDepsConfig,
+    mounts: list[Any],
+    cfg: ExternalDepsConfig,
 ) -> list[Symptom]:
     """J2: fire ``wekafs_degraded`` for unreachable or slow external mounts.
 
@@ -202,10 +205,7 @@ def _mount_symptoms(
                 Symptom(
                     name="wekafs_degraded",
                     severity=SymptomSeverity.HIGH,
-                    summary=(
-                        f"mount {env_name}={path!r} unreachable: "
-                        f"{error or 'unknown error'}"
-                    ),
+                    summary=(f"mount {env_name}={path!r} unreachable: {error or 'unknown error'}"),
                     evidence={
                         "env_name": env_name,
                         "path": path,
@@ -250,8 +250,7 @@ def _mount_symptoms(
                 subject={"path": path},
                 source="local",
                 suggestion=(
-                    "WekaFS read latency degrading; if it persists, "
-                    "trace_analyze / OOB CLI requests will time out"
+                    "WekaFS read latency degrading; if it persists, trace_analyze / OOB CLI requests will time out"
                 ),
             )
         )
@@ -261,6 +260,7 @@ def _mount_symptoms(
 # ---------------------------------------------------------------------------
 # J3 — TraceLens CLI missing
 # ---------------------------------------------------------------------------
+
 
 def _tracelens_symptoms(
     cli_info: dict[str, Any],

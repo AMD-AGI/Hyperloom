@@ -16,6 +16,7 @@ from inference_optimizer import manifest as mf
 
 # small helpers
 
+
 class TestObjectiveSummary:
     def test_gain_pct(self):
         ns = argparse.Namespace(target_gain=10.0)
@@ -42,6 +43,7 @@ class TestObjectiveSummary:
 
 # build_session_id
 
+
 class TestBuildSessionId:
     def test_uses_model_name_when_provided(self):
         sid = mf.build_session_id("meta-llama/Llama-3.1-8B")
@@ -56,11 +58,14 @@ class TestBuildSessionId:
 
 # _describe_dep + _build_dependencies
 
+
 class TestDescribeDep:
     def test_unset_env(self, monkeypatch):
         monkeypatch.delenv("MAGPIE_DIR", raising=False)
         assert mf._describe_dep("MAGPIE_DIR") == {
-            "path": "", "commit": "", "remote": "",
+            "path": "",
+            "commit": "",
+            "remote": "",
         }
 
     def test_missing_dir_yields_path_only(self, tmp_path, monkeypatch):
@@ -77,8 +82,24 @@ class TestDescribeDep:
         assert out["commit"] == "abc1234"
         assert out["remote"] == "https://x/y.git"
 
+    def test_first_env_var_wins(self, tmp_path, monkeypatch):
+        """MAGPIE_PATH (preferred) wins over the legacy MAGPIE_DIR fallback."""
+        monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "preferred"))
+        monkeypatch.setenv("MAGPIE_DIR", str(tmp_path / "legacy"))
+        out = mf._describe_dep("MAGPIE_PATH", "MAGPIE_DIR")
+        assert out["path"] == str(tmp_path / "preferred")
+
+    def test_falls_back_to_legacy_env_var(self, tmp_path, monkeypatch):
+        """Only the legacy MAGPIE_DIR is set → fallback is honoured
+        (backward compatibility for the MAGPIE_DIR → MAGPIE_PATH rename)."""
+        monkeypatch.delenv("MAGPIE_PATH", raising=False)
+        monkeypatch.setenv("MAGPIE_DIR", str(tmp_path / "legacy"))
+        out = mf._describe_dep("MAGPIE_PATH", "MAGPIE_DIR")
+        assert out["path"] == str(tmp_path / "legacy")
+
 
 # _detect_image
+
 
 class TestDetectImage:
     def test_returns_env_when_set(self, monkeypatch):
@@ -122,11 +143,21 @@ class TestDetectImage:
 
 # build_manifest end-to-end
 
+
 class TestBuildManifest:
     def test_default_no_args(self, tmp_path, monkeypatch):
-        for var in ("FRAMEWORK", "GPU_TYPE", "ISL", "OSL", "MAX_MODEL_LEN",
-                    "PRECISION", "CONC", "TP", "CLAW_SESSION_ID",
-                    "SANDBOX_USER_ID"):
+        for var in (
+            "FRAMEWORK",
+            "GPU_TYPE",
+            "ISL",
+            "OSL",
+            "MAX_MODEL_LEN",
+            "PRECISION",
+            "CONC",
+            "TP",
+            "CLAW_SESSION_ID",
+            "SANDBOX_USER_ID",
+        ):
             monkeypatch.delenv(var, raising=False)
         out = mf.build_manifest(tmp_path)
         assert out["schema_version"] == mf.SCHEMA_VERSION
@@ -162,8 +193,7 @@ class TestBuildManifest:
 
 class TestWriteAndLoad:
     def test_round_trip(self, tmp_path, monkeypatch):
-        for var in ("FRAMEWORK", "GPU_TYPE", "ISL", "OSL", "MAX_MODEL_LEN",
-                    "PRECISION", "CONC", "TP"):
+        for var in ("FRAMEWORK", "GPU_TYPE", "ISL", "OSL", "MAX_MODEL_LEN", "PRECISION", "CONC", "TP"):
             monkeypatch.delenv(var, raising=False)
         manifest = mf.write_manifest(tmp_path)
         assert (tmp_path / "manifest.json").is_file()

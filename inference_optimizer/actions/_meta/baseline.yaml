@@ -39,8 +39,11 @@ params_schema:
       Bare *.sh file name (no path separators, no shell metacharacters).
       Force-pins benchmark.benchmark_script in the materialized YAML so
       Magpie runs the operator-picked script instead of its runner_type
-      → script auto-selection (e.g. "sglang_mi300x.sh" to bypass
-      dsr1_fp8_mi300x.sh's --result-dir /workspace/ hardcode).
+      → script auto-selection. MUST match the session framework: only pin a
+      "<framework>_<gpu>.sh" for the SAME framework as this run (a vllm run
+      must not pin sglang_*.sh, etc.) — a cross-framework script boots the
+      wrong engine and is rejected by materialize. Use only to bypass a
+      script-specific bug (e.g. a hardcoded --result-dir /workspace/).
   result_dir:
     type: string
     description: |

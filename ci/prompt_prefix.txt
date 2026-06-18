@@ -23,3 +23,4 @@ SAFETY:
 - NEVER run `kill -9 $(ps aux | grep ...)` — this kills the sandbox executor itself.
 - Per-bash timeouts must be <= 120s; use short polling loops rather than one long blocking call.
 - Modification of USER_DATA_PATH environment variable is not allowed.
+- After the prelude, always `cd "$HYPERLOOM_SOURCE_DIR"` and use that checkout as the only Hyperloom source for install, skill docs, CLI execution, and new-session decisions; ignore historical sessions under USER_DATA_PATH before this task's first launch.

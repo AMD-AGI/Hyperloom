@@ -37,9 +37,7 @@ class ClusterFaultConfig:
     """Tunables for the cluster_fault rule."""
 
     # Actionable phases; "Succeeded" is excluded (auto-repair already cleaned up).
-    actionable_phases: frozenset[str] = frozenset(
-        {"Isolating", "Failed"}
-    )
+    actionable_phases: frozenset[str] = frozenset({"Isolating", "Failed"})
     high_workload_threshold: int = 4
     high_gpu_threshold: int = 8
 
@@ -172,15 +170,9 @@ def _suggestion(phase: str, severity: SymptomSeverity, auto_repair: bool) -> str
         str: A short remediation hint tailored to the phase/severity.
     """
     if phase == "Failed":
-        return (
-            "auto-repair failed; delegate(server_lifecycle) or escalate "
-            "strategy to drain affected workloads"
-        )
+        return "auto-repair failed; delegate(server_lifecycle) or escalate strategy to drain affected workloads"
     if severity is SymptomSeverity.HIGH:
-        return (
-            "blast radius is wide; escalate strategy or pause new "
-            "dispatches to the affected node"
-        )
+        return "blast radius is wide; escalate strategy or pause new dispatches to the affected node"
     if auto_repair:
         return "auto-repair in progress; observe and re-evaluate next tick"
     return "monitor the fault; alert orchestration if it persists"

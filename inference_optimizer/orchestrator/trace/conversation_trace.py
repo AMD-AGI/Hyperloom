@@ -41,20 +41,22 @@ log = logging.getLogger(__name__)
 
 
 # Canonical, ordered field contract for one ``conversations.jsonl`` row.
-_ROW_FIELDS: frozenset[str] = frozenset({
-    "session_id",
-    "ts",
-    "component",
-    "role",
-    "task_id",
-    "dyn_id",
-    "tick",
-    "phase",
-    "turn",
-    "model",
-    "prompt",
-    "response",
-})
+_ROW_FIELDS: frozenset[str] = frozenset(
+    {
+        "session_id",
+        "ts",
+        "component",
+        "role",
+        "task_id",
+        "dyn_id",
+        "tick",
+        "phase",
+        "turn",
+        "model",
+        "prompt",
+        "response",
+    }
+)
 
 
 class ConversationRowError(ValueError):
@@ -93,6 +95,12 @@ def redact_secrets(text: str) -> str:
     redacted line still reads sensibly, only the secret material is
     replaced with ``[REDACTED]``. Returns ``text`` unchanged when it
     carries no recognizable secret shape.
+
+    Args:
+        text: Raw text that may embed secret values.
+
+    Returns:
+        The text with recognizable secret values replaced by ``[REDACTED]``.
     """
     if not text:
         return text
@@ -103,10 +111,23 @@ def redact_secrets(text: str) -> str:
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO string.
+
+    Returns:
+        ISO 8601 timestamp in UTC.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _coerce_optional_str(value: Any) -> str | None:
+    """Coerce a value to a non-empty stripped string or ``None``.
+
+    Args:
+        value: Arbitrary value to normalize.
+
+    Returns:
+        The stripped string, or ``None`` if it is empty or ``None``.
+    """
     if value is None:
         return None
     s = str(value).strip()
@@ -114,6 +135,14 @@ def _coerce_optional_str(value: Any) -> str | None:
 
 
 def _coerce_optional_int(value: Any) -> int | None:
+    """Coerce a value to ``int`` or ``None`` if it cannot be parsed.
+
+    Args:
+        value: Arbitrary value to convert.
+
+    Returns:
+        The integer value, or ``None`` on failure.
+    """
     if value is None:
         return None
     try:
@@ -123,7 +152,14 @@ def _coerce_optional_int(value: Any) -> int | None:
 
 
 def _coerce_text(value: Any) -> str:
-    """Normalize a prompt / response field to a (possibly empty) string."""
+    """Normalize a prompt / response field to a (possibly empty) string.
+
+    Args:
+        value: Arbitrary prompt/response value.
+
+    Returns:
+        The value as a string, or ``""`` when ``None``.
+    """
     if value is None:
         return ""
     return value if isinstance(value, str) else str(value)
@@ -152,7 +188,11 @@ class ConversationRecord:
 
     def to_row(self) -> dict[str, Any]:
         """Serialize to the on-disk row dict, stamping ``ts`` and redacting
-        the prompt / response text."""
+        the prompt / response text.
+
+        Returns:
+            The on-disk conversation row dict.
+        """
         return {
             "session_id": str(self.session_id),
             "ts": _now_iso(),
@@ -170,26 +210,27 @@ class ConversationRecord:
 
 
 def _validate_row(row: dict[str, Any]) -> None:
-    """Fail fast if ``row`` deviates from the closed schema."""
+    """Fail fast if ``row`` deviates from the closed schema.
+
+    Args:
+        row: A serialized conversation row dict.
+
+    Raises:
+        ConversationRowError: If the row has extra/missing fields, an empty
+            ``session_id``, or an unknown ``component``.
+    """
     keys = set(row.keys())
     extra = sorted(keys - _ROW_FIELDS)
     missing = sorted(_ROW_FIELDS - keys)
     if extra or missing:
-        raise ConversationRowError(
-            f"conversations row violates closed schema: "
-            f"extra={extra!r} missing={missing!r}"
-        )
+        raise ConversationRowError(f"conversations row violates closed schema: extra={extra!r} missing={missing!r}")
     session_id = row.get("session_id")
     if not isinstance(session_id, str) or not session_id.strip():
-        raise ConversationRowError(
-            f"conversations row requires a non-empty 'session_id'; got "
-            f"{session_id!r}"
-        )
+        raise ConversationRowError(f"conversations row requires a non-empty 'session_id'; got {session_id!r}")
     component = row.get("component")
     if component not in VALID_COMPONENTS:
         raise ConversationRowError(
-            f"conversations row 'component'={component!r} is not one of "
-            f"{sorted(VALID_COMPONENTS)!r}"
+            f"conversations row 'component'={component!r} is not one of {sorted(VALID_COMPONENTS)!r}"
         )
 
 
@@ -208,6 +249,15 @@ def append_conversation(
 
     A schema violation (:class:`ConversationRowError`) is *not* swallowed:
     that is a programming error at the call site and must surface in tests.
+
+    Args:
+        session_dir: Session directory used to resolve the ledger path.
+        record: The conversation record to serialize and append.
+        target: Optional override destination (e.g. an ext shard path);
+            defaults to the session's conversations ledger.
+
+    Raises:
+        ConversationRowError: If the serialized row violates the schema.
     """
     row = record.to_row()
     _validate_row(row)
@@ -219,15 +269,25 @@ def append_conversation(
     except OSError as exc:
         log.warning(
             "conversation_trace: append failed for component=%s session_id=%s: %r",
-            record.component, record.session_id, exc,
+            record.component,
+            record.session_id,
+            exc,
         )
+
+    # Second sink (opt-in): mirror in-process conversation text to Langfuse
+    # live. Skipped for ext/ shards (target set). Best-effort; never raises.
+    if target is None:
+        try:
+            from .langfuse_emitter import get_emitter
+
+            get_emitter(session_dir).record_conversation(row)
+        except Exception:  # noqa: BLE001 — Langfuse must never break the ledger
+            log.debug("conversation_trace: langfuse mirror failed", exc_info=True)
 
 
 # Sanity guard: dataclass fields (minus the write-time ``ts``) must stay
 # in lockstep with the on-disk row schema.
-_DATACLASS_FIELDS: frozenset[str] = frozenset(
-    f.name for f in fields(ConversationRecord)
-)
+_DATACLASS_FIELDS: frozenset[str] = frozenset(f.name for f in fields(ConversationRecord))
 assert _DATACLASS_FIELDS | {"ts"} == _ROW_FIELDS, (
     "ConversationRecord fields drifted from _ROW_FIELDS: "
     f"dataclass={sorted(_DATACLASS_FIELDS)} row={sorted(_ROW_FIELDS)}"

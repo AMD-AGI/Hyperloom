@@ -12,7 +12,6 @@ import argparse
 import json
 from pathlib import Path
 
-import pytest
 
 from inference_optimizer import cli
 
@@ -138,20 +137,14 @@ def test_max_model_len_uses_full_headroom_when_window_large(tmp_path):
     model = tmp_path / "ctx32768"
     _write_config(model, max_position_embeddings=32768)
     # native window is comfortably above desired -> keep ISL+OSL+headroom.
-    assert (
-        cli._resolve_max_model_len(1024, 1024, str(model))
-        == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
-    )
+    assert cli._resolve_max_model_len(1024, 1024, str(model)) == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
 
 
 def test_max_model_len_fallback_when_maxpos_unknown(tmp_path):
     model = tmp_path / "noconfig"
     model.mkdir()
     # No config.json -> cannot clamp -> keep the headroom default (prior behaviour).
-    assert (
-        cli._resolve_max_model_len(1024, 1024, str(model))
-        == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
-    )
+    assert cli._resolve_max_model_len(1024, 1024, str(model)) == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
 
 
 # follow-up #1: the preflight stop_reason must be a canonical STOP_REASON_VOCAB term written via set_stop_reason().
@@ -185,8 +178,8 @@ def test_monitor_offline_vocab_includes_context_window():
     """The robustness monitor's offline STOP_REASON_VOCAB fallback must list the preflight stop_reason so it's treated as terminal."""
     import inference_optimizer
 
-    repo_root = Path(inference_optimizer.__file__).resolve().parents[1]
-    monitor = repo_root / "optimizer_runs" / "robustness_monitor.sh.example"
+    package_root = Path(inference_optimizer.__file__).resolve().parent
+    monitor = package_root / "launcher" / "robustness_monitor.sh.example"
     text = monitor.read_text(encoding="utf-8")
     assert "model_context_window_too_small" in text
 

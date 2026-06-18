@@ -19,18 +19,42 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..orchestrator.optimization_journal import (
+    classify_change_kind,
+    operation_kind_for,
+    proposer_for,
+)
+
 log = logging.getLogger(__name__)
 
 
 # Invocation-record env filter (allowlist + secret-pattern denylist).
 # Only surface workload-influencing knobs; everything else (secrets, host
 # fingerprints, shell aliases) is dropped from the breakdown JSON.
-_ENV_ALLOWLIST_EXACT: frozenset[str] = frozenset({
-    "TP", "FRAMEWORK", "GPU_TYPE", "PRECISION", "CONC", "ISL", "OSL",
-    "MAX_MODEL_LEN", "USER_DATA_PATH", "MODEL_PATH", "MODEL_NAME",
-})
+_ENV_ALLOWLIST_EXACT: frozenset[str] = frozenset(
+    {
+        "TP",
+        "FRAMEWORK",
+        "GPU_TYPE",
+        "PRECISION",
+        "CONC",
+        "ISL",
+        "OSL",
+        "MAX_MODEL_LEN",
+        "USER_DATA_PATH",
+        "MODEL_PATH",
+        "MODEL_NAME",
+    }
+)
 _ENV_ALLOWLIST_PREFIXES: tuple[str, ...] = (
-    "HYPERLOOM_", "VLLM_", "SGLANG_", "RAY_", "HSA_", "ROCM_", "TORCH_", "HF_",
+    "HYPERLOOM_",
+    "VLLM_",
+    "SGLANG_",
+    "RAY_",
+    "HSA_",
+    "ROCM_",
+    "TORCH_",
+    "HF_",
 )
 # Defense-in-depth: strip credential-shaped keys even under allowlisted
 # prefixes (case-insensitive substring match catches ``HF_API_TOKEN`` etc).
@@ -41,16 +65,23 @@ _ENV_DENY_PATTERN = re.compile(
 
 
 def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
-    """Apply the allowlist + secret denylist; returns a fresh ``dict[str, str]`` (values stringified)."""
+    """Apply the allowlist + secret denylist; returns a fresh ``dict[str, str]`` (values stringified).
+
+    Args:
+        envs (dict[str, Any] | None): Raw environment mapping to filter, or
+            ``None``.
+
+    Returns:
+        dict[str, str]: The allowlisted, secret-stripped subset with every
+        value coerced to ``str``. Empty when ``envs`` is not a dict.
+    """
     if not isinstance(envs, dict):
         return {}
     out: dict[str, str] = {}
     for k, v in envs.items():
         if not isinstance(k, str):
             continue
-        keep = (k in _ENV_ALLOWLIST_EXACT) or any(
-            k.startswith(p) for p in _ENV_ALLOWLIST_PREFIXES
-        )
+        keep = (k in _ENV_ALLOWLIST_EXACT) or any(k.startswith(p) for p in _ENV_ALLOWLIST_PREFIXES)
         if not keep:
             continue
         if _ENV_DENY_PATTERN.search(k):
@@ -90,15 +121,27 @@ _LOG_TIMESTAMP_RE = re.compile(
     r"^\s*\[?\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}[^\]]*\]?\s*",
 )
 _PYTHON_CMD_PREFIXES: tuple[str, ...] = (
-    "python", "python3", "vllm", "sglang.launch_server",
-    "inference-optimizer", "ray",
+    "python",
+    "python3",
+    "vllm",
+    "sglang.launch_server",
+    "inference-optimizer",
+    "ray",
 )
 # Server log size cap so the per-line scan stays bounded (covers the startup banner).
 _SERVER_LOG_MAX_BYTES = 256 * 1024
 
 
 def _strip_log_prefix(line: str) -> str:
-    """Strip a leading ``[ts] LEVEL [src.py:NN]`` style prefix (incl. the process tag) from a log line."""
+    """Strip a leading ``[ts] LEVEL [src.py:NN]`` style prefix (incl. the process tag) from a log line.
+
+    Args:
+        line (str): A single raw log line.
+
+    Returns:
+        str: The line with any recognized timestamp / level prefix removed
+        and surrounding whitespace stripped.
+    """
     s = line
     s = _LOG_PREFIX_RE.sub("", s)
     s = _LOG_TIMESTAMP_RE.sub("", s)
@@ -122,7 +165,7 @@ def _starts_with_python_prefix(text: str) -> bool:
     head = text.lstrip()
     for prefix in _PYTHON_CMD_PREFIXES:
         if head.startswith(prefix):
-            tail = head[len(prefix):]
+            tail = head[len(prefix) :]
             if not tail or tail[0] in (" ", "\t", "-", "."):
                 return True
     return False
@@ -132,6 +175,14 @@ def _load_yaml_dict_safe(config_yaml: Path) -> dict | None:
     """Parse ``config_yaml`` to its top-level dict, or ``None`` on miss/failure. Never raises.
 
     Shared by both yaml passes so the file is read at most once.
+
+    Args:
+        config_yaml (Path): The YAML file to parse.
+
+    Returns:
+        dict | None: The decoded top-level mapping, or ``None`` when PyYAML is
+        unavailable, the file fails to read/parse, or the document is not a
+        dict.
     """
     try:
         import yaml  # type: ignore[import-not-found]
@@ -148,7 +199,15 @@ def _load_yaml_dict_safe(config_yaml: Path) -> dict | None:
 
 
 def _yaml_cmd_from_dict(data: dict) -> str:
-    """Find a ``cmd`` / ``command`` / ``launch`` field (top-level or under ``benchmark``); ``""`` on miss."""
+    """Find a ``cmd`` / ``command`` / ``launch`` field (top-level or under ``benchmark``); ``""`` on miss.
+
+    Args:
+        data (dict): The parsed YAML config mapping.
+
+    Returns:
+        str: The first non-empty command string found, or ``""`` when none of
+        the recognized fields hold one.
+    """
     for key in ("cmd", "command", "launch"):
         val = data.get(key)
         if isinstance(val, str) and val.strip():
@@ -167,6 +226,14 @@ def _yaml_benchmark_synthesis(data: dict) -> str:
 
     Returns ``""`` unless both ``benchmark.framework`` and
     ``benchmark.model`` are non-empty.
+
+    Args:
+        data (dict): The parsed YAML config mapping.
+
+    Returns:
+        str: A space-joined ``key=value`` summary (framework / model plus any
+        present precision / tp / gpu / envs), or ``""`` when framework or model
+        is missing.
     """
     bench = data.get("benchmark")
     if not isinstance(bench, dict):
@@ -195,9 +262,7 @@ def _yaml_benchmark_synthesis(data: dict) -> str:
         parts.append(f"gpu={gpu_sel.strip()}")
     envs = bench.get("envs")
     if isinstance(envs, dict) and envs:
-        env_pairs = " ".join(
-            f"{k}={v}" for k, v in envs.items() if isinstance(k, str)
-        )
+        env_pairs = " ".join(f"{k}={v}" for k, v in envs.items() if isinstance(k, str))
         if env_pairs:
             parts.append(f"envs=[{env_pairs}]")
     return " ".join(parts)
@@ -213,6 +278,16 @@ def _extract_framework_args(
     priority order: ``log_non_default_args`` / ``log_args_line`` /
     ``log_python_cmd`` / ``yaml_cmd`` / ``yaml_benchmark`` (synthesized,
     not a literal cmdline) / ``unknown`` (empty args).
+
+    Args:
+        server_log (Path | None): The ``server.log`` to scan, or ``None``.
+        config_yaml (Path | None): The variant config YAML used as a fallback
+            source, or ``None``. Defaults to ``None``.
+
+    Returns:
+        tuple[str, str]: ``(args_string, source)`` — the extracted launch args
+        and a provenance label, with ``("", "unknown")`` when no source yields
+        anything.
     """
     chunk: str = ""
     if server_log is not None:
@@ -239,9 +314,7 @@ def _extract_framework_args(
         if not isinstance(parsed, dict):
             continue
         # Sorted-by-key repr() values: stable across runs, paths stay quoted.
-        formatted = " ".join(
-            f"{k}={parsed[k]!r}" for k in sorted(parsed.keys(), key=str)
-        )
+        formatted = " ".join(f"{k}={parsed[k]!r}" for k in sorted(parsed.keys(), key=str))
         return formatted, "log_non_default_args"
 
     # Pass 1: stable launch-summary headers (survive preceding log noise).
@@ -290,7 +363,16 @@ def _extract_framework_args(
 
 
 def _read_invocation_envs(config_path: Path | None) -> dict[str, str]:
-    """Read ``benchmark.envs`` (or top-level ``envs:``) from a variant config; allowlisted subset, never raises."""
+    """Read ``benchmark.envs`` (or top-level ``envs:``) from a variant config; allowlisted subset, never raises.
+
+    Args:
+        config_path (Path | None): The variant config YAML to read, or
+            ``None``.
+
+    Returns:
+        dict[str, str]: The allowlisted, secret-stripped env subset. Empty when
+        the path is missing, PyYAML is unavailable, or parsing fails.
+    """
     if config_path is None:
         return {}
     try:
@@ -511,6 +593,15 @@ def _benchmark_report_metrics(
 
     Priority: V2 nested (``throughput.*`` / ``latency.<m>.mean_ms``),
     pre-V2 flat top-level, then legacy ``result.<flat>``.
+
+    Args:
+        report (dict[str, Any] | None): A parsed ``benchmark_report.json``, or
+            ``None``.
+
+    Returns:
+        tuple[float | None, float | None, float | None, float | None]:
+        ``(output_throughput, ttft, tpot, e2el)`` with each element ``None``
+        when not present or not numeric.
     """
     if not isinstance(report, dict):
         return (None, None, None, None)
@@ -540,26 +631,22 @@ def _benchmark_report_metrics(
         or report.get("output_throughput")
         or (result_section or {}).get("output_throughput_tok_s")
     )
-    ttft = _to_float(
-        _from_lat("ttft")
-        or report.get("mean_ttft_ms")
-        or (result_section or {}).get("mean_ttft_ms")
-    )
-    tpot = _to_float(
-        _from_lat("tpot")
-        or report.get("mean_tpot_ms")
-        or (result_section or {}).get("mean_tpot_ms")
-    )
-    e2el = _to_float(
-        _from_lat("e2el")
-        or report.get("mean_e2el_ms")
-        or (result_section or {}).get("mean_e2el_ms")
-    )
+    ttft = _to_float(_from_lat("ttft") or report.get("mean_ttft_ms") or (result_section or {}).get("mean_ttft_ms"))
+    tpot = _to_float(_from_lat("tpot") or report.get("mean_tpot_ms") or (result_section or {}).get("mean_tpot_ms"))
+    e2el = _to_float(_from_lat("e2el") or report.get("mean_e2el_ms") or (result_section or {}).get("mean_e2el_ms"))
     return (out_tput, ttft, tpot, e2el)
 
 
 def _benchmark_report_candidates(root: Path) -> list[Path]:
-    """Return benchmark reports under a task/workspace root (handles the several on-disk layouts used over time)."""
+    """Return benchmark reports under a task/workspace root (handles the several on-disk layouts used over time).
+
+    Args:
+        root (Path): The task or workspace directory to search.
+
+    Returns:
+        list[Path]: Candidate ``benchmark_report.json`` paths (direct and
+        glob-matched). Empty when ``root`` does not exist.
+    """
     if not root.exists():
         return []
 
@@ -579,6 +666,14 @@ def _benchmark_report_candidates(root: Path) -> list[Path]:
 
 
 def _latest_benchmark_report(candidates: Iterable[Path]) -> Path | None:
+    """Return the most recently modified existing report among candidates.
+
+    Args:
+        candidates: Candidate report paths.
+
+    Returns:
+        The newest existing path by mtime, or ``None`` when none exist.
+    """
     reports = [p for p in candidates if p.exists()]
     if not reports:
         return None
@@ -587,7 +682,15 @@ def _latest_benchmark_report(candidates: Iterable[Path]) -> Path | None:
 
 
 def _find_benchmark_report(workspace: Path | None) -> Path | None:
-    """Locate the most recent (by mtime) ``benchmark_report.json`` under a task workspace, else ``None``."""
+    """Locate the most recent (by mtime) ``benchmark_report.json`` under a task workspace, else ``None``.
+
+    Args:
+        workspace (Path | None): The task workspace to search, or ``None``.
+
+    Returns:
+        Path | None: The newest matching report, or ``None`` when ``workspace``
+        is ``None`` / missing or no report exists.
+    """
     if workspace is None or not workspace.exists():
         return None
     return _latest_benchmark_report(_benchmark_report_candidates(workspace))
@@ -604,6 +707,18 @@ def _resolve_under_session(
     ``session_dir`` (container paths like ``/workspace/runs/...`` map to the
     wekafs ``<session_dir>/runs/...`` view). Returns the first existing
     path, else ``None``.
+
+    Args:
+        session_dir (Path): The on-disk session root to re-root under.
+        raw (str | None): The (possibly container-rooted) path to resolve, or
+            ``None``.
+        anchors (tuple[str, ...]): Path-segment names whose suffix is re-rooted
+            at ``session_dir``. Defaults to ``("runs", "kernel-agent",
+            "kernel-agent-workspace")``.
+
+    Returns:
+        Path | None: The first existing resolved path, or ``None`` when ``raw``
+        is empty / unusable or nothing resolves.
     """
     if not raw:
         return None
@@ -648,7 +763,15 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 
 
 def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
-    """Recover terminal reason/time from the CLOSE phase transition (next-best when ``state.stop_reason`` wasn't mirrored)."""
+    """Recover terminal reason/time from the CLOSE phase transition (next-best when ``state.stop_reason`` wasn't mirrored).
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        tuple[str, str]: ``(reason, ts)`` from the most recent CLOSE
+        transition, or ``("", "")`` when no such transition exists.
+    """
     history = state.get("phase_history") or []
     if not isinstance(history, list):
         return "", ""
@@ -657,18 +780,24 @@ def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
             continue
         if str(row.get("to_phase") or "").strip().upper() != "CLOSE":
             continue
-        reason = str(
-            row.get("reason")
-            or row.get("stop_reason")
-            or row.get("exit_reason")
-            or ""
-        ).strip()
+        reason = str(row.get("reason") or row.get("stop_reason") or row.get("exit_reason") or "").strip()
         ts = str(row.get("ts") or row.get("entered_ts") or "").strip()
         return reason, ts
     return "", ""
 
 
 def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> bool:
+    """Decide whether the CLOSE-phase stop reason should override the session's.
+
+    Args:
+        stop_reason: The session-level stop reason.
+        close_stop_reason: The CLOSE-phase stop reason.
+
+    Returns:
+        ``True`` when the close reason is more specific — i.e. it is set and the
+        session reason is empty, or the session merely timed out while the close
+        reason did not.
+    """
     if not close_stop_reason:
         return False
     if not stop_reason:
@@ -718,24 +847,22 @@ def collect_session(
             pass
     image = _detect_image_for_session(manifest)
     if image is None:
-        warnings.append(
-            "image: not configured (set HYPERLOOM_IMAGE env var)"
-        )
+        warnings.append("image: not configured (set HYPERLOOM_IMAGE env var)")
     return {
-        "session_id":       str(state.get("session_id") or manifest.get("session_id") or ""),
-        "claw_session_id":  manifest.get("claw_session_id") or state.get("claw_session_id"),
-        "sandbox_user_id":  manifest.get("sandbox_user_id") or state.get("sandbox_user_id"),
-        "created_at_utc":   manifest.get("created_at_utc") or start_ts,
-        "ended_at_utc":     ended_at_utc,
-        "stop_reason":      stop_reason,
-        "max_minutes":      int(state.get("max_minutes") or manifest.get("max_minutes") or 0),
-        "elapsed_minutes":  round(elapsed_min, 2) if elapsed_min is not None else 0.0,
-        "host":             str(manifest.get("host") or ""),
-        "image":            image,
-        "code_revision":    str(manifest.get("code_revision") or ""),
-        "pid":              int(manifest.get("pid") or 0),
-        "session_dir":      str(session_dir),
-        "tick_count":       int(state.get("tick") or 0),
+        "session_id": str(state.get("session_id") or manifest.get("session_id") or ""),
+        "claw_session_id": manifest.get("claw_session_id") or state.get("claw_session_id"),
+        "sandbox_user_id": manifest.get("sandbox_user_id") or state.get("sandbox_user_id"),
+        "created_at_utc": manifest.get("created_at_utc") or start_ts,
+        "ended_at_utc": ended_at_utc,
+        "stop_reason": stop_reason,
+        "max_minutes": int(state.get("max_minutes") or manifest.get("max_minutes") or 0),
+        "elapsed_minutes": round(elapsed_min, 2) if elapsed_min is not None else 0.0,
+        "host": str(manifest.get("host") or ""),
+        "image": image,
+        "code_revision": str(manifest.get("code_revision") or ""),
+        "pid": int(manifest.get("pid") or 0),
+        "session_dir": str(session_dir),
+        "tick_count": int(state.get("tick") or 0),
     }
 
 
@@ -764,19 +891,19 @@ def collect_workload(
     """
     wl = manifest.get("workload") or {}
     return {
-        "framework":         str(state.get("framework") or manifest.get("framework") or ""),
+        "framework": str(state.get("framework") or manifest.get("framework") or ""),
         "framework_version": str(manifest.get("framework_version") or ""),
-        "model_name":        str(state.get("model_name") or manifest.get("model_name") or ""),
-        "model_path":        str(state.get("model_path") or manifest.get("model_path") or ""),
-        "model_class":       str(state.get("model_class") or ""),
-        "gpu_type":          str(state.get("gpu_type") or manifest.get("gpu_type") or ""),
-        "tp":                _to_int(manifest.get("tp")),
-        "conc":              _to_int(wl.get("conc")),
-        "isl":               _to_int(wl.get("isl")),
-        "osl":               _to_int(wl.get("osl")),
-        "max_model_len":     _to_int(wl.get("max_model_len")),
-        "precision":         str(wl.get("precision") or ""),
-        "objective":         dict(manifest.get("objective") or {"kind": "time_only", "value": None}),
+        "model_name": str(state.get("model_name") or manifest.get("model_name") or ""),
+        "model_path": str(state.get("model_path") or manifest.get("model_path") or ""),
+        "model_class": str(state.get("model_class") or ""),
+        "gpu_type": str(state.get("gpu_type") or manifest.get("gpu_type") or ""),
+        "tp": _to_int(manifest.get("tp")),
+        "conc": _to_int(wl.get("conc")),
+        "isl": _to_int(wl.get("isl")),
+        "osl": _to_int(wl.get("osl")),
+        "max_model_len": _to_int(wl.get("max_model_len")),
+        "precision": str(wl.get("precision") or ""),
+        "objective": dict(manifest.get("objective") or {"kind": "time_only", "value": None}),
     }
 
 
@@ -831,7 +958,9 @@ def collect_baseline(
                 for task_dir in baseline_root.iterdir()
                 if task_dir.is_dir()
                 for p in _benchmark_report_candidates(task_dir)
-            ) if baseline_root.exists() else [],
+            )
+            if baseline_root.exists()
+            else [],
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -858,18 +987,20 @@ def collect_baseline(
     for a in attempts:
         if not isinstance(a, dict):
             continue
-        history.append({
-            "ts":            a.get("ts"),
-            "task_id":       a.get("task_id"),
-            "status":        a.get("status"),
-            "decision":      a.get("decision"),
-            "key_metric":    _to_float(a.get("key_metric")),
-            "workspace":     a.get("workspace"),
-            "error_class":   a.get("error_class"),
-            "error_excerpt": a.get("error_excerpt"),
-            "stderr_tail":   a.get("stderr_tail"),
-            "stderr_log_path": a.get("stderr_log_path"),
-        })
+        history.append(
+            {
+                "ts": a.get("ts"),
+                "task_id": a.get("task_id"),
+                "status": a.get("status"),
+                "decision": a.get("decision"),
+                "key_metric": _to_float(a.get("key_metric")),
+                "workspace": a.get("workspace"),
+                "error_class": a.get("error_class"),
+                "error_excerpt": a.get("error_excerpt"),
+                "stderr_tail": a.get("stderr_tail"),
+                "stderr_log_path": a.get("stderr_log_path"),
+            }
+        )
 
     # Disk-walking fallback when state.baseline_attempts is empty; each
     # reconstructed entry is marked ``status="reconstructed"``.
@@ -913,16 +1044,17 @@ def collect_baseline(
                 break
 
     args_str, args_source = _extract_framework_args(
-        server_log_path, config_yaml=config_resolved,
+        server_log_path,
+        config_yaml=config_resolved,
     )
     invocation = {
-        "framework_args":        args_str,
+        "framework_args": args_str,
         "framework_args_source": args_source,
-        "extra_envs":            _read_invocation_envs(config_resolved),
-        "config_path":           _rel(config_resolved, session_dir) if config_resolved else (
-            config_path_raw if config_path_raw else None
-        ),
-        "server_log_path":       _rel(server_log_path, session_dir) if server_log_path else None,
+        "extra_envs": _read_invocation_envs(config_resolved),
+        "config_path": _rel(config_resolved, session_dir)
+        if config_resolved
+        else (config_path_raw if config_path_raw else None),
+        "server_log_path": _rel(server_log_path, session_dir) if server_log_path else None,
     }
     if args_source == "unknown":
         warnings.append(
@@ -933,15 +1065,21 @@ def collect_baseline(
 
     return {
         "throughput_tok_s_per_gpu": _to_float(state.get("baseline_tput")) or 0.0,
-        "accuracy":                 _to_float(state.get("baseline_accuracy")) or 0.0,
-        "ttft_mean_ms":             ttft,
-        "e2el_mean_ms":             e2el,
-        "ttft_e2el_source":         ttft_source,
-        "config_path":              config_path_raw,
-        "benchmark_report_path":    _rel(report_path, session_dir) if report_path else None,
-        "attempts_history":         history,
-        "failure_streak":           int(state.get("baseline_failure_streak") or 0),
-        "invocation":               invocation,
+        "accuracy": _to_float(state.get("baseline_accuracy")) or 0.0,
+        "ttft_mean_ms": ttft,
+        "e2el_mean_ms": e2el,
+        "ttft_e2el_source": ttft_source,
+        "config_path": config_path_raw,
+        "benchmark_report_path": _rel(report_path, session_dir) if report_path else None,
+        "attempts_history": history,
+        "failure_streak": int(state.get("baseline_failure_streak") or 0),
+        # Combined backstop (P5): ALL baseline failures regardless of error_class;
+        # surfaces the fast-fail trigger that per-class streaks alone can hide.
+        "total_failures": int(state.get("baseline_total_failures") or 0),
+        "invocation": invocation,
+        # Standalone baseline-arm roofline ceiling backup (state.json#baseline_roofline_ceiling);
+        # frontend ceiling fallback when the roofline step failed. {} when absent.
+        "roofline_ceiling": state.get("baseline_roofline_ceiling") or {},
     }
 
 
@@ -971,12 +1109,7 @@ def _reconstruct_baseline_attempts(
         return []
     out: list[dict[str, Any]] = []
     reports = sorted(
-        (
-            p
-            for task_dir in root.iterdir()
-            if task_dir.is_dir()
-            for p in _benchmark_report_candidates(task_dir)
-        ),
+        (p for task_dir in root.iterdir() if task_dir.is_dir() for p in _benchmark_report_candidates(task_dir)),
         key=lambda p: p.stat().st_mtime,
     )
     for report_path in reports:
@@ -1001,26 +1134,27 @@ def _reconstruct_baseline_attempts(
         if not ts_iso:
             try:
                 ts_iso = datetime.fromtimestamp(
-                    report_path.stat().st_mtime, tz=timezone.utc,
+                    report_path.stat().st_mtime,
+                    tz=timezone.utc,
                 ).isoformat(timespec="seconds")
             except OSError:
                 ts_iso = ""
         report = _load_json_safe(report_path, warnings)
-        out_tput, _ttft, _tpot, _e2el = _benchmark_report_metrics(
-            report if isinstance(report, dict) else None
+        out_tput, _ttft, _tpot, _e2el = _benchmark_report_metrics(report if isinstance(report, dict) else None)
+        out.append(
+            {
+                "ts": ts_iso,
+                "task_id": task_dir.name,
+                "status": "reconstructed",
+                "decision": "",
+                "key_metric": out_tput,
+                "workspace": _rel(task_dir, session_dir) or str(task_dir),
+                "error_class": None,
+                "error_excerpt": None,
+                "stderr_tail": None,
+                "stderr_log_path": None,
+            }
         )
-        out.append({
-            "ts":           ts_iso,
-            "task_id":      task_dir.name,
-            "status":       "reconstructed",
-            "decision":     "",
-            "key_metric":   out_tput,
-            "workspace":    _rel(task_dir, session_dir) or str(task_dir),
-            "error_class":  None,
-            "error_excerpt": None,
-            "stderr_tail":  None,
-            "stderr_log_path": None,
-        })
     return out
 
 
@@ -1095,46 +1229,64 @@ def collect_final(
         )
 
     invocation = _build_final_invocation(
-        session_dir, state, reconstructed_report, warnings,
+        session_dir,
+        state,
+        reconstructed_report,
+        warnings,
     )
 
     return {
-        "throughput_tok_s_per_gpu":          _to_float(cb.get("tput")),
-        "cumulative_gain_pct_validated":     _to_float(state.get("cumulative_gain_validated")) or 0.0,
+        "throughput_tok_s_per_gpu": _to_float(cb.get("tput")),
+        "cumulative_gain_pct_validated": _to_float(state.get("cumulative_gain_validated")) or 0.0,
         "cumulative_gain_pct_per_round_sum": _to_float(state.get("cumulative_gain")) or 0.0,
-        "validated_at_stack_len":            val_stack_len,
-        "validated_ts":                      str(state.get("cumulative_gain_validated_ts") or ""),
-        "stack_changed_after_validation":    stack_len > val_stack_len > 0,
-        "extra_server_args":                 str(cb.get("extra_server_args") or ""),
-        "extra_envs":                        dict(cb.get("extra_envs") or {}),
-        "action_path":                       action_path,
-        "ttft_mean_ms":                      ttft,
-        "e2el_mean_ms":                      e2el,
-        "ttft_e2el_source":                  ttft_e2el_source,
-        "invocation":                        invocation,
-        "closing_phase_entered":             bool(state.get("closing_started_unix") or 0),
-        "closing_started_unix":              float(state.get("closing_started_unix") or 0.0),
-        "closing_report_task_id":            str(state.get("closing_report_task_id") or ""),
+        "validated_at_stack_len": val_stack_len,
+        "validated_ts": str(state.get("cumulative_gain_validated_ts") or ""),
+        "stack_changed_after_validation": stack_len > val_stack_len > 0,
+        "extra_server_args": str(cb.get("extra_server_args") or ""),
+        "extra_envs": dict(cb.get("extra_envs") or {}),
+        "action_path": action_path,
+        "ttft_mean_ms": ttft,
+        "e2el_mean_ms": e2el,
+        "ttft_e2el_source": ttft_e2el_source,
+        "invocation": invocation,
+        "closing_phase_entered": bool(state.get("closing_started_unix") or 0),
+        "closing_started_unix": float(state.get("closing_started_unix") or 0.0),
+        "closing_report_task_id": str(state.get("closing_report_task_id") or ""),
     }
 
 
 def _find_latest_validate_stack_report(session_dir: Path) -> Path | None:
-    """Most-recent validate_stack benchmark_report.json (authoritative for the final stack's clock)."""
+    """Most-recent validate_stack benchmark_report.json (authoritative for the final stack's clock).
+
+    Args:
+        session_dir (Path): Absolute session root.
+
+    Returns:
+        Path | None: The newest ``benchmark_report.json`` under
+        ``runs/validate_stack/``, or ``None`` when none exist.
+    """
     root = session_dir / "runs" / "validate_stack"
     if not root.exists():
         return None
     return _latest_benchmark_report(
-        p
-        for task_dir in root.iterdir()
-        if task_dir.is_dir()
-        for p in _benchmark_report_candidates(task_dir)
+        p for task_dir in root.iterdir() if task_dir.is_dir() for p in _benchmark_report_candidates(task_dir)
     )
 
 
 def _find_current_best_report(
-    session_dir: Path, state: dict[str, Any],
+    session_dir: Path,
+    state: dict[str, Any],
 ) -> Path | None:
-    """Best-effort benchmark report for ``state.current_best`` (via workspace or action/variant/tput match)."""
+    """Best-effort benchmark report for ``state.current_best`` (via workspace or action/variant/tput match).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        Path | None: The matched report, or ``None`` when ``current_best`` is
+        missing or no report resolves.
+    """
     cb = state.get("current_best") or {}
     if not isinstance(cb, dict):
         return None
@@ -1147,9 +1299,20 @@ def _find_current_best_report(
 
 
 def _find_stack_top_report(
-    session_dir: Path, state: dict[str, Any],
+    session_dir: Path,
+    state: dict[str, Any],
 ) -> Path | None:
-    """Last optimization_stack entry's benchmark_report.json (next-best when no validate_stack run exists)."""
+    """Last optimization_stack entry's benchmark_report.json (next-best when no validate_stack run exists).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        Path | None: The top stack entry's report (via workspace or
+        action/variant/tput match), or ``None`` when the stack is empty or
+        nothing resolves.
+    """
     cb = state.get("current_best") or {}
     stack = state.get("optimization_stack") or []
     if not stack and isinstance(cb, dict):
@@ -1172,9 +1335,20 @@ def _find_stack_top_report(
 
 
 def _find_matching_action_report(
-    session_dir: Path, entry: dict[str, Any],
+    session_dir: Path,
+    entry: dict[str, Any],
 ) -> Path | None:
-    """Match a report under ``runs/<action>/`` by variant name and tput (conservative; tput beats variant, latency-less reports skipped)."""
+    """Match a report under ``runs/<action>/`` by variant name and tput (conservative; tput beats variant, latency-less reports skipped).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        entry (dict[str, Any]): A stack / current_best entry carrying
+            ``action``, ``variant_name``, and ``tput``.
+
+    Returns:
+        Path | None: The best-scoring matching report, or ``None`` when the
+        action is missing or no candidate matches.
+    """
     action = str(entry.get("action") or "").strip()
     if not action:
         return None
@@ -1189,9 +1363,7 @@ def _find_matching_action_report(
         rel = report_path.relative_to(root).as_posix().lower()
         variant_match = bool(variant and variant in rel)
         report = _load_json_safe(report_path, [])
-        out_tput, ttft, _tpot, e2el = _benchmark_report_metrics(
-            report if isinstance(report, dict) else None
-        )
+        out_tput, ttft, _tpot, e2el = _benchmark_report_metrics(report if isinstance(report, dict) else None)
         if ttft is None and e2el is None:
             continue
         tput_match = False
@@ -1215,7 +1387,20 @@ def _build_final_invocation(
     benchmark_report: Path | None,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Best-effort :class:`BenchmarkInvocation` for the final stack run (config = the launched ``*.with_envs.yaml`` sibling)."""
+    """Best-effort :class:`BenchmarkInvocation` for the final stack run (config = the launched ``*.with_envs.yaml`` sibling).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        benchmark_report (Path | None): The resolved final benchmark report
+            whose siblings supply the config / server log, or ``None``.
+        warnings (list[str]): Shared warnings list (mutated in place when args
+            extraction fails).
+
+    Returns:
+        dict[str, Any]: The invocation dict (framework args + source, extra
+        envs, and relative config / server-log paths).
+    """
     config_path: Path | None = None
     server_log_path: Path | None = None
     if benchmark_report is not None:
@@ -1233,7 +1418,8 @@ def _build_final_invocation(
         if log_candidate.exists():
             server_log_path = log_candidate
     args_str, args_source = _extract_framework_args(
-        server_log_path, config_yaml=config_path,
+        server_log_path,
+        config_yaml=config_path,
     )
     if args_source == "unknown":
         warnings.append(
@@ -1242,11 +1428,11 @@ def _build_final_invocation(
             "tried server.log + yaml"
         )
     return {
-        "framework_args":        args_str,
+        "framework_args": args_str,
         "framework_args_source": args_source,
-        "extra_envs":            _read_invocation_envs(config_path),
-        "config_path":           _rel(config_path, session_dir) if config_path else None,
-        "server_log_path":       _rel(server_log_path, session_dir) if server_log_path else None,
+        "extra_envs": _read_invocation_envs(config_path),
+        "config_path": _rel(config_path, session_dir) if config_path else None,
+        "server_log_path": _rel(server_log_path, session_dir) if server_log_path else None,
     }
 
 
@@ -1255,14 +1441,27 @@ def _build_final_invocation(
 # capability tallies. Carries both the merged ``explore`` and the legacy
 # ``backends`` / ``params`` / ``validate_stack`` names; missing lists skip.
 _AUDIT_ACTIONS = (
-    "baseline", "profile", "explore",
-    "backends", "params", "validate_stack",
-    "sweep", "roofline",
+    "baseline",
+    "profile",
+    "explore",
+    "backends",
+    "params",
+    "validate_stack",
+    "sweep",
+    "roofline",
 )
 
 
 def _parse_iso_unix(ts: Any) -> float | None:
-    """Best-effort ISO-8601 -> unix seconds. ``None`` on any failure."""
+    """Best-effort ISO-8601 -> unix seconds. ``None`` on any failure.
+
+    Args:
+        ts (Any): An ISO-8601 string or already-numeric timestamp.
+
+    Returns:
+        float | None: The timestamp in Unix seconds, or ``None`` when ``ts`` is
+        empty or unparseable.
+    """
     if ts is None:
         return None
     if isinstance(ts, (int, float)):
@@ -1284,6 +1483,13 @@ def _iso_z(ts: Any) -> str:
     The journal and ``state.phase_history`` use different suffixes;
     collapsing both keeps display and ``[entered_ts, exit_ts)`` matching
     consistent. Returns the input unchanged when empty/unparseable.
+
+    Args:
+        ts (Any): An ISO-8601 timestamp value (any suffix), or ``None``.
+
+    Returns:
+        str: The canonical ``...Z`` UTC string, ``""`` for empty input, or the
+        original string when it cannot be parsed.
     """
     if ts is None:
         return ""
@@ -1301,13 +1507,25 @@ def _iso_z(ts: Any) -> str:
 
 
 def _load_optimization_journal(
-    session_dir: Path | None, warnings: list[str],
+    session_dir: Path | None,
+    warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Read ``reports/optimization_journal.json`` entries (the canonical action ledger); ``[]`` on legacy sessions."""
+    """Read ``reports/optimization_journal.json`` entries (the canonical action ledger); ``[]`` on legacy sessions.
+
+    Args:
+        session_dir (Path | None): Absolute session root, or ``None``.
+        warnings (list[str]): Shared warnings list (mutated in place on parse
+            failure).
+
+    Returns:
+        list[dict[str, Any]]: The journal ``entries`` list, or ``[]`` when the
+        file is missing / malformed or ``session_dir`` is ``None``.
+    """
     if session_dir is None:
         return []
     data = _load_json_safe(
-        session_dir / "reports" / "optimization_journal.json", warnings,
+        session_dir / "reports" / "optimization_journal.json",
+        warnings,
     )
     if not isinstance(data, dict):
         return []
@@ -1316,7 +1534,15 @@ def _load_optimization_journal(
 
 
 def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
-    """Map one optimization_journal entry to a phase_timeline event (keeps the declared ``phase`` for exact bucketing)."""
+    """Map one optimization_journal entry to a phase_timeline event (keeps the declared ``phase`` for exact bucketing).
+
+    Args:
+        e (dict[str, Any]): One ``optimization_journal.json`` entry.
+
+    Returns:
+        dict[str, Any]: The event row with normalized timestamp, resolved
+        action, metric / decision fields, and a threaded ``extras`` map.
+    """
     metric = e.get("throughput_after")
     metric_kind = "output_throughput" if metric is not None else None
     if metric is None and e.get("gain_pct") is not None:
@@ -1329,23 +1555,37 @@ def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
         action = kind
     else:
         action = change or kind or "other"
-    return {
-        "ts":              _iso_z(e.get("ts")),
-        "action":          action,
-        "task_id":         str(e.get("task_id") or ""),
-        "kernel_id":       None,
-        "status":          "",
-        "decision":        str(e.get("outcome") or ""),
-        "key_metric":      _to_float(metric),
-        "key_metric_kind": metric_kind,
-        "workspace":       None,
-        "error_class":     e.get("error_class"),
-        "phase":           str(e.get("phase") or ""),
-        "change":          change,
-        "extras":          {k: v for k, v in (
+    provenance = str(e.get("provenance") or "")
+    extras = {
+        k: v
+        for k, v in (
             ("variant_name", e.get("variant_name")),
             ("reason", e.get("reason")),
-        ) if v},
+            # Proposer attribution + stable filter label, threaded so the timeline
+            # answers "what / how / who" for each step.
+            ("provenance", provenance),
+            ("proposer", proposer_for(provenance) if provenance else ""),
+            ("scope", str(e.get("scope") or "")),
+            ("fingerprint", str(e.get("fingerprint") or "")),
+            ("operation_kind", operation_kind_for(action, kind)),
+            ("metrics", e.get("metrics") if isinstance(e.get("metrics"), dict) else None),
+        )
+        if v
+    }
+    return {
+        "ts": _iso_z(e.get("ts")),
+        "action": action,
+        "task_id": str(e.get("task_id") or ""),
+        "kernel_id": None,
+        "status": "",
+        "decision": str(e.get("outcome") or ""),
+        "key_metric": _to_float(metric),
+        "key_metric_kind": metric_kind,
+        "workspace": None,
+        "error_class": e.get("error_class"),
+        "phase": str(e.get("phase") or ""),
+        "change": change,
+        "extras": extras,
     }
 
 
@@ -1370,6 +1610,16 @@ def collect_phase_timeline(
     the journal copy winning, then sorted by ``ts``. Passing
     ``session_dir=None`` degrades gracefully to the audit-list scrape
     (used by unit fixtures that have no on-disk journal).
+
+    Args:
+        session_dir (Path | None): Absolute session root, or ``None`` to skip
+            the on-disk journal source.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        list[dict[str, Any]]: The merged, de-duplicated, ts-sorted action
+        events.
     """
     events: list[dict[str, Any]] = []
 
@@ -1386,21 +1636,23 @@ def collect_phase_timeline(
         for entry in attempts:
             if not isinstance(entry, dict):
                 continue
-            events.append({
-                "ts":             entry.get("ts") or "",
-                "action":         action,
-                "task_id":        str(entry.get("task_id") or ""),
-                "kernel_id":      None,
-                "status":         str(entry.get("status") or ""),
-                "decision":       str(entry.get("decision") or ""),
-                "key_metric":     _to_float(entry.get("key_metric")),
-                "key_metric_kind": entry.get("key_metric_kind"),
-                "workspace":      entry.get("workspace"),
-                "error_class":    entry.get("error_class"),
-                "phase":          "",
-                "change":         action,
-                "extras":         dict(entry.get("extras") or {}),
-            })
+            events.append(
+                {
+                    "ts": entry.get("ts") or "",
+                    "action": action,
+                    "task_id": str(entry.get("task_id") or ""),
+                    "kernel_id": None,
+                    "status": str(entry.get("status") or ""),
+                    "decision": str(entry.get("decision") or ""),
+                    "key_metric": _to_float(entry.get("key_metric")),
+                    "key_metric_kind": entry.get("key_metric_kind"),
+                    "workspace": entry.get("workspace"),
+                    "error_class": entry.get("error_class"),
+                    "phase": "",
+                    "change": action,
+                    "extras": dict(entry.get("extras") or {}),
+                }
+            )
 
     # Kernel opt attempts (per-kernel history -> flatten to per-attempt rows)
     kernel_opt = state.get("kernel_opt_attempts") or {}
@@ -1411,21 +1663,23 @@ def collect_phase_timeline(
             for h in ent.get("history") or []:
                 if not isinstance(h, dict):
                     continue
-                events.append({
-                    "ts":          h.get("ts") or ent.get("last_ts") or "",
-                    "action":      "kernel_opt",
-                    "task_id":     "",
-                    "kernel_id":   str(kid),
-                    "status":      "",
-                    "decision":    str(h.get("decision") or ""),
-                    "key_metric":  None,
-                    "key_metric_kind": None,
-                    "workspace":   None,
-                    "error_class": None,
-                    "phase":       "",
-                    "change":      f"kernel_opt:{kid}",
-                    "extras":      {},
-                })
+                events.append(
+                    {
+                        "ts": h.get("ts") or ent.get("last_ts") or "",
+                        "action": "kernel_opt",
+                        "task_id": "",
+                        "kernel_id": str(kid),
+                        "status": "",
+                        "decision": str(h.get("decision") or ""),
+                        "key_metric": None,
+                        "key_metric_kind": None,
+                        "workspace": None,
+                        "error_class": None,
+                        "phase": "",
+                        "change": f"kernel_opt:{kid}",
+                        "extras": {},
+                    }
+                )
 
     # Integrate attempts (decision history per patch key)
     integ = state.get("kernel_integrate_attempts") or {}
@@ -1437,22 +1691,23 @@ def collect_phase_timeline(
                 if not isinstance(a, dict):
                     continue
                 kid = str(ent.get("kernel_id") or "")
-                events.append({
-                    "ts":          a.get("ts") or "",
-                    "action":      "integrate",
-                    "task_id":     "",
-                    "kernel_id":   kid,
-                    "status":      str(a.get("status") or ""),
-                    "decision":    str(a.get("decision") or ""),
-                    "key_metric":  _to_float(a.get("gain_pct")),
-                    "key_metric_kind": "gain_pct",
-                    "workspace":   a.get("workspace"),
-                    "error_class": None,
-                    "phase":       "",
-                    "change":      f"integrate:{kid}",
-                    "extras":      {"patch_path": ent.get("patch_path"),
-                                    "report_path": a.get("report_path")},
-                })
+                events.append(
+                    {
+                        "ts": a.get("ts") or "",
+                        "action": "integrate",
+                        "task_id": "",
+                        "kernel_id": kid,
+                        "status": str(a.get("status") or ""),
+                        "decision": str(a.get("decision") or ""),
+                        "key_metric": _to_float(a.get("gain_pct")),
+                        "key_metric_kind": "gain_pct",
+                        "workspace": a.get("workspace"),
+                        "error_class": None,
+                        "phase": "",
+                        "change": f"integrate:{kid}",
+                        "extras": {"patch_path": ent.get("patch_path"), "report_path": a.get("report_path")},
+                    }
+                )
 
     # Canonicalise every ts to ``...Z`` so mixed-suffix rows dedup and sort consistently.
     for ev in events:
@@ -1478,23 +1733,30 @@ def collect_phase_timeline(
 
 # §6 Capability summary
 def _capability_for_action(
-    state: dict[str, Any], action: str,
+    state: dict[str, Any],
+    action: str,
 ) -> dict[str, Any]:
-    """Per-action capability tally from ``<action>_attempts``, with an ``optimization_stack`` KEEP fallback for V1/partial state."""
+    """Per-action capability tally from ``<action>_attempts``, with an ``optimization_stack`` KEEP fallback for V1/partial state.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        action (str): The action label whose attempts / keeps are tallied.
+
+    Returns:
+        dict[str, Any]: ``{"status", "attempts", "keeps"}`` for the action.
+    """
     attempts_list = state.get(f"{action}_attempts") or []
     n_attempts = len(attempts_list) if isinstance(attempts_list, list) else 0
-    n_keeps = sum(
-        1 for a in attempts_list
-        if isinstance(a, dict) and a.get("decision") in ("promoted", "salvaged")
-    ) if isinstance(attempts_list, list) else 0
+    n_keeps = (
+        sum(1 for a in attempts_list if isinstance(a, dict) and a.get("decision") in ("promoted", "salvaged"))
+        if isinstance(attempts_list, list)
+        else 0
+    )
 
     # Fallback from optimization_stack (adopted entries only), counted per action.
     stack = state.get("optimization_stack") or []
     if isinstance(stack, list):
-        stack_keeps = sum(
-            1 for e in stack
-            if isinstance(e, dict) and str(e.get("action") or "") == action
-        )
+        stack_keeps = sum(1 for e in stack if isinstance(e, dict) and str(e.get("action") or "") == action)
     else:
         stack_keeps = 0
     if stack_keeps > n_keeps:
@@ -1503,15 +1765,11 @@ def _capability_for_action(
         if n_attempts < stack_keeps:
             n_attempts = stack_keeps
 
-    status = (
-        "kept"      if n_keeps > 0 else
-        "tried"     if n_attempts > 0 else
-        "not_attempted"
-    )
+    status = "kept" if n_keeps > 0 else "tried" if n_attempts > 0 else "not_attempted"
     return {
-        "status":   status,
+        "status": status,
         "attempts": n_attempts,
-        "keeps":    n_keeps,
+        "keeps": n_keeps,
     }
 
 
@@ -1520,7 +1778,21 @@ def collect_capability_summary(
     geak_invocations: list[dict[str, Any]],
     oob_invocations: list[dict[str, Any]],
     warnings: list[str],
+    forge_invocations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Summarize kernel-optimization capability outcomes for the breakdown.
+
+    Args:
+        state: Session state mapping.
+        geak_invocations: GEAK backend invocation records.
+        oob_invocations: Out-of-box backend invocation records.
+        warnings: Mutable list that collected warnings are appended to.
+        forge_invocations: Forge backend invocation records (own lane).
+
+    Returns:
+        A capability-summary dict (per-kernel status, attempt and keep counts).
+    """
+    forge_invocations = forge_invocations or []
     # Integrate (e2e) outcome per kernel: a kernel-opt KEEP REVERTED at
     # integrate is not a real adoption, so don't inflate the geak/oob tally.
     integ = state.get("kernel_integrate_attempts") or {}
@@ -1568,13 +1840,12 @@ def collect_capability_summary(
             else:
                 adopted += 1
         status = (
-            "kept"          if adopted > 0 else
-            "reverted"      if reverted > 0 else
-            "attempted"     if attempts > 0 else
-            "not_attempted"
+            "kept" if adopted > 0 else "reverted" if reverted > 0 else "attempted" if attempts > 0 else "not_attempted"
         )
         row: dict[str, Any] = {
-            "status": status, "attempts": attempts, "keeps": adopted,
+            "status": status,
+            "attempts": attempts,
+            "keeps": adopted,
         }
         if reverted:
             row["reverts"] = reverted
@@ -1584,6 +1855,7 @@ def collect_capability_summary(
 
     geak_cap = _from_invocations(geak_invocations)
     oob_cap = _from_invocations(oob_invocations)
+    forge_cap = _from_invocations(forge_invocations)
 
     # Legacy capability rows for archived (pre-merge) sessions; current
     # sessions leave these not_attempted and carry activity under ``explore``.
@@ -1593,9 +1865,7 @@ def collect_capability_summary(
         backends["tested"] = len(backends_search.get("tested") or {})
         if backends_search.get("accepted"):
             backends["best_gain_pct"] = max(
-                (_to_float(v.get("gain_pct")) or 0.0
-                 for v in backends_search["accepted"]
-                 if isinstance(v, dict)),
+                (_to_float(v.get("gain_pct")) or 0.0 for v in backends_search["accepted"] if isinstance(v, dict)),
                 default=None,
             )
 
@@ -1605,16 +1875,12 @@ def collect_capability_summary(
         params["tested"] = len(params_search.get("tested") or {})
         if params_search.get("accepted"):
             params["best_gain_pct"] = max(
-                (_to_float(v.get("gain_pct")) or 0.0
-                 for v in params_search["accepted"]
-                 if isinstance(v, dict)),
+                (_to_float(v.get("gain_pct")) or 0.0 for v in params_search["accepted"] if isinstance(v, dict)),
                 default=None,
             )
 
     validate = _capability_for_action(state, "validate_stack")
-    validate["last_validated_gain_pct"] = _to_float(
-        state.get("cumulative_gain_validated")
-    )
+    validate["last_validated_gain_pct"] = _to_float(state.get("cumulative_gain_validated"))
 
     sweep_cap = _capability_for_action(state, "sweep")
     last_sweep = state.get("last_sweep") or {}
@@ -1622,52 +1888,44 @@ def collect_capability_summary(
         sweep_cap["grid_size"] = _to_int(last_sweep.get("grid_size"))
         bo = last_sweep.get("best_overall")
         if isinstance(bo, dict):
-            sweep_cap["best_throughput"] = _to_float(
-                bo.get("output_throughput") or bo.get("tput")
-            )
+            sweep_cap["best_throughput"] = _to_float(bo.get("output_throughput") or bo.get("tput"))
         if sweep_cap.get("attempts", 0) > 0:
             sweep_cap["status"] = "completed"
 
     # merged explore row carrying the unified explore_search ledger activity.
     explore = _capability_for_action(state, "explore")
-    explore["last_validated_gain_pct"] = _to_float(
-        state.get("cumulative_gain_validated")
-    )
+    explore["last_validated_gain_pct"] = _to_float(state.get("cumulative_gain_validated"))
     explore_search = state.get("explore_search") or {}
     if isinstance(explore_search, dict):
         explore["tested"] = len(explore_search.get("tested") or {})
-        accepted_entries = [
-            v for v in (explore_search.get("accepted") or [])
-            if isinstance(v, dict)
-        ]
+        accepted_entries = [v for v in (explore_search.get("accepted") or []) if isinstance(v, dict)]
         if accepted_entries:
             explore["best_gain_pct"] = max(
                 (_to_float(v.get("gain_pct")) or 0.0 for v in accepted_entries),
                 default=None,
             )
         keep_unstable_count = sum(
-            1 for entry in (explore_search.get("rejected") or [])
-            if isinstance(entry, dict)
-            and entry.get("reason") == "stack_unstable"
+            1
+            for entry in (explore_search.get("rejected") or [])
+            if isinstance(entry, dict) and entry.get("reason") == "stack_unstable"
         )
         if keep_unstable_count:
             explore["keep_unstable_count"] = keep_unstable_count
-        explore["winners_history"] = len(
-            explore_search.get("winners_history") or []
-        )
+        explore["winners_history"] = len(explore_search.get("winners_history") or [])
 
     # specialist row derived from ``specialist_rounds`` (single source, agrees with specialist_runs).
     specialist_row = _specialist_capability_row(state)
     return {
-        "geak":           geak_cap,
-        "oob":            oob_cap,
+        "geak": geak_cap,
+        "oob": oob_cap,
+        "forge": forge_cap,
         # primary post-merge row; backends/params/validate_stack are compat rows.
-        "explore":        explore,
-        "backends":       backends,
-        "params":         params,
-        "sweep":          sweep_cap,
+        "explore": explore,
+        "backends": backends,
+        "params": params,
+        "sweep": sweep_cap,
         "validate_stack": validate,
-        "specialist":     specialist_row,
+        "specialist": specialist_row,
     }
 
 
@@ -1676,14 +1934,21 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
 
     Headline counts aggregate all domains; ``by_specialist`` breaks them
     out per SpecialistDomain.key.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        dict[str, Any]: The specialist capability row (aggregate status /
+        attempts / keeps / tested plus a ``by_specialist`` per-domain map).
     """
     rounds = state.get("specialist_rounds") or []
     if not isinstance(rounds, list) or not rounds:
         return {
-            "status":    "not_attempted",
-            "attempts":  0,
-            "keeps":     0,
-            "tested":    0,
+            "status": "not_attempted",
+            "attempts": 0,
+            "keeps": 0,
+            "tested": 0,
             "by_specialist": _empty_by_specialist_capability(),
         }
 
@@ -1692,8 +1957,7 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
     proposals_kept = 0
     # Per-domain counters seeded with the catalogue for presence-free iteration (unknown domains survive).
     by_specialist_raw: dict[str, dict[str, int]] = {
-        d: {"attempts": 0, "keeps": 0, "tested": 0, "rejected": 0}
-        for d in _SPECIALIST_DOMAIN_KEYS
+        d: {"attempts": 0, "keeps": 0, "tested": 0, "rejected": 0} for d in _SPECIALIST_DOMAIN_KEYS
     }
 
     for r in rounds:
@@ -1710,9 +1974,15 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
             for dom, payload in round_breakdown.items():
                 if not isinstance(payload, dict):
                     continue
-                bucket = by_specialist_raw.setdefault(str(dom), {
-                    "attempts": 0, "keeps": 0, "tested": 0, "rejected": 0,
-                })
+                bucket = by_specialist_raw.setdefault(
+                    str(dom),
+                    {
+                        "attempts": 0,
+                        "keeps": 0,
+                        "tested": 0,
+                        "rejected": 0,
+                    },
+                )
                 bucket["attempts"] += int(payload.get("dispatched") or 0)
                 bucket["keeps"] += int(payload.get("proposals_kept") or 0)
                 bucket["tested"] += int(payload.get("proposals_total") or 0)
@@ -1724,9 +1994,15 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
                 share_total = int(r.get("proposals_total") or 0) // len(domains)
                 share_kept = int(r.get("proposals_kept") or 0) // len(domains)
                 for dom in domains:
-                    bucket = by_specialist_raw.setdefault(str(dom), {
-                        "attempts": 0, "keeps": 0, "tested": 0, "rejected": 0,
-                    })
+                    bucket = by_specialist_raw.setdefault(
+                        str(dom),
+                        {
+                            "attempts": 0,
+                            "keeps": 0,
+                            "tested": 0,
+                            "rejected": 0,
+                        },
+                    )
                     bucket["attempts"] += 1
                     bucket["tested"] += share_total
                     bucket["keeps"] += share_kept
@@ -1751,32 +2027,42 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
         else:
             dom_status = "attempted"
         by_specialist[dom] = {
-            "status":   dom_status,
+            "status": dom_status,
             "attempts": raw["attempts"],
-            "keeps":    raw["keeps"],
-            "tested":   raw["tested"],
+            "keeps": raw["keeps"],
+            "tested": raw["tested"],
         }
 
     return {
-        "status":         status,
-        "attempts":       attempts,
-        "keeps":          proposals_kept,
-        "tested":         proposals_total,
-        "by_specialist":  by_specialist,
+        "status": status,
+        "attempts": attempts,
+        "keeps": proposals_kept,
+        "tested": proposals_total,
+        "by_specialist": by_specialist,
     }
 
 
 def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
-    """Seed every catalogue domain with a not_attempted CapabilityEntry (stable shape, no KeyError-guarding)."""
-    return {
-        d: {"status": "not_attempted", "attempts": 0, "keeps": 0, "tested": 0}
-        for d in _SPECIALIST_DOMAIN_KEYS
-    }
+    """Seed every catalogue domain with a not_attempted CapabilityEntry (stable shape, no KeyError-guarding).
+
+    Returns:
+        dict[str, dict[str, Any]]: One zeroed, ``not_attempted`` capability
+        entry per catalogue specialist-domain key.
+    """
+    return {d: {"status": "not_attempted", "attempts": 0, "keeps": 0, "tested": 0} for d in _SPECIALIST_DOMAIN_KEYS}
 
 
 # §7 / §8 GEAK / OOB invocations
 def _kernel_agent_run_dirs(session_dir: Path) -> list[Path]:
-    """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts, so historical sessions still render."""
+    """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts, so historical sessions still render.
+
+    Args:
+        session_dir (Path): Absolute session root.
+
+    Returns:
+        list[Path]: Every kernel-agent run directory across the canonical and
+        two legacy layouts. Empty when none exist.
+    """
     candidates: list[Path] = []
     # Canonical (current): <sd>/kernel-agent/runs/<sid>/
     new_root = session_dir / "kernel-agent" / "runs"
@@ -1827,10 +2113,7 @@ def _parse_invocation_attempt(
     kid = str(attempt.get("kernel_id") or "")
     backend = str(attempt.get("backend") or "").lower()
     attempt_id = str(
-        attempt.get("attempt_id")
-        or attempt.get("id")
-        or attempt.get("run_id")
-        or "",
+        attempt.get("attempt_id") or attempt.get("id") or attempt.get("run_id") or "",
     )
 
     # Resolve auxiliary paths
@@ -1856,31 +2139,30 @@ def _parse_invocation_attempt(
         # otherwise leave empty; kernel-level decision is stamped later
 
     # Per-attempt speedup (preferred) — falls back to None if not recorded.
-    micro_speedup = _to_float(
-        attempt.get("speedup")
-        or attempt.get("micro_speedup")
-    )
+    micro_speedup = _to_float(attempt.get("speedup") or attempt.get("micro_speedup"))
 
     return {
-        "kernel_id":       kid,
-        "attempt_id":      attempt_id,
-        "run_id":          str(attempt.get("run_id") or run_dir.name),
-        "ts":              str(attempt.get("ts") or attempt.get("started_at") or ""),
-        "backend":         backend,
-        "model":           attempt.get("model"),
+        "kernel_id": kid,
+        "attempt_id": attempt_id,
+        "run_id": str(attempt.get("run_id") or run_dir.name),
+        "ts": str(attempt.get("ts") or attempt.get("started_at") or ""),
+        "backend": backend,
+        "model": attempt.get("model"),
         "kernel_metadata": _shape_kernel_metadata({}, attempt),
-        "prompt_path":     _rel(prompt_path, session_dir) if prompt_path else None,
+        "prompt_path": _rel(prompt_path, session_dir) if prompt_path else None,
         "optimized_files": optimized_files,
-        "result_path":     _rel(result_path, session_dir) if result_path and result_path.exists() else None,
-        "verification_path": _rel(verification_path, session_dir) if verification_path and verification_path.exists() else None,
-        "decision":        decision,
-        "micro_speedup":   micro_speedup,
+        "result_path": _rel(result_path, session_dir) if result_path and result_path.exists() else None,
+        "verification_path": _rel(verification_path, session_dir)
+        if verification_path and verification_path.exists()
+        else None,
+        "decision": decision,
+        "micro_speedup": micro_speedup,
         # compile/correctness are kernel-level; stamped later onto the BEST attempt.
-        "compile_passed":  None,
+        "compile_passed": None,
         "correctness_passed": None,
         "best_artifact_path": None,
-        "error":           attempt.get("error"),
-        "cli_log_path":    None,
+        "error": attempt.get("error"),
+        "cli_log_path": None,
     }
 
 
@@ -1895,6 +2177,14 @@ def _stamp_kernel_level_decisions(
     Reads kernel-level ``results/<kid>.json`` + ``verification/<kid>.json``;
     the best attempt is chosen by backend hint, else highest micro_speedup
     (ties: latest ts). Other attempts keep their per-attempt decision.
+
+    Args:
+        invocations (list[dict[str, Any]]): All parsed per-attempt invocations
+            (mutated in place — the best attempt per kernel is stamped).
+        run_dirs (list[Path]): The kernel-agent run directories the
+            invocations came from.
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place).
     """
     # Group by (run_id, kernel_id); same kid in different run_dirs is separate.
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -1952,10 +2242,7 @@ def _stamp_kernel_level_decisions(
                     None,
                 )
             if best is None and want_backend:
-                cands = [
-                    a for a in atts
-                    if str(a.get("backend") or "").lower() == want_backend
-                ]
+                cands = [a for a in atts if str(a.get("backend") or "").lower() == want_backend]
                 if cands:
                     best = max(cands, key=_attempt_key)
         if best is None:
@@ -1968,44 +2255,65 @@ def _stamp_kernel_level_decisions(
                 best["micro_speedup"] = _to_float(verification.get("micro_speedup"))
             best["compile_passed"] = verification.get("compile_passed")
             best["correctness_passed"] = verification.get("correctness_passed")
-            best["best_artifact_path"] = (
-                verification.get("best_artifact_path")
-                or (result.get("best_artifact_path") if isinstance(result, dict) else None)
+            best["best_artifact_path"] = verification.get("best_artifact_path") or (
+                result.get("best_artifact_path") if isinstance(result, dict) else None
             )
         if isinstance(result, dict) and result.get("cli_log_path"):
             best["cli_log_path"] = result["cli_log_path"]
         # Refresh metadata from the richer result file.
-        best["kernel_metadata"] = _shape_kernel_metadata(result, {
-            "name": best.get("kernel_metadata", {}).get("name"),
-            "source_file": best.get("kernel_metadata", {}).get("source_file"),
-        })
+        best["kernel_metadata"] = _shape_kernel_metadata(
+            result,
+            {
+                "name": best.get("kernel_metadata", {}).get("name"),
+                "source_file": best.get("kernel_metadata", {}).get("source_file"),
+            },
+        )
 
 
 def _shape_kernel_metadata(
     result: dict[str, Any],
     attempt: dict[str, Any],
 ) -> dict[str, Any]:
-    """Best-effort kernel metadata, preferring ``result['kernel_metadata']`` over the attempt's own."""
+    """Best-effort kernel metadata, preferring ``result['kernel_metadata']`` over the attempt's own.
+
+    Args:
+        result (dict[str, Any]): The kernel-level ``results/<kid>.json`` dict
+            (may be empty).
+        attempt (dict[str, Any]): The per-attempt record used as a fallback
+            source.
+
+    Returns:
+        dict[str, Any]: Shaped kernel metadata (name, source file, shapes,
+        gpu_pct, arithmetic_intensity).
+    """
     meta = result.get("kernel_metadata") if isinstance(result, dict) else None
     if isinstance(meta, dict) and meta:
         return {
-            "name":        meta.get("name") or "",
+            "name": meta.get("name") or "",
             "source_file": meta.get("source_file") or result.get("source_file") or "",
-            "shapes":      list(meta.get("shapes") or []),
-            "gpu_pct":     _to_float(meta.get("gpu_pct")),
+            "shapes": list(meta.get("shapes") or []),
+            "gpu_pct": _to_float(meta.get("gpu_pct")),
             "arithmetic_intensity": _to_float(meta.get("arithmetic_intensity")),
         }
     return {
-        "name":        str(attempt.get("name") or ""),
+        "name": str(attempt.get("name") or ""),
         "source_file": str(attempt.get("source_file") or ""),
-        "shapes":      [],
-        "gpu_pct":     None,
+        "shapes": [],
+        "gpu_pct": None,
         "arithmetic_intensity": None,
     }
 
 
 def _infer_run_dir_kernel_id(run_dir: Path) -> str:
-    """Recover the kernel id for a run dir whose attempts omit ``kernel_id``; only when the dir holds a single kid."""
+    """Recover the kernel id for a run dir whose attempts omit ``kernel_id``; only when the dir holds a single kid.
+
+    Args:
+        run_dir (Path): A kernel-agent run directory.
+
+    Returns:
+        str: The single kernel id inferred from ``results`` / ``verification``
+        filenames, or ``""`` when zero or more than one is present.
+    """
     kids: set[str] = set()
     for sub in ("results", "verification"):
         d = run_dir / sub
@@ -2020,16 +2328,23 @@ def _infer_run_dir_kernel_id(run_dir: Path) -> str:
 def collect_kernel_invocations(
     session_dir: Path,
     warnings: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return ``(geak_invocations, oob_invocations)`` from each run dir's ``optimization_attempts.jsonl``, split by ``backend``."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ``(geak_invocations, oob_invocations, forge_invocations)`` from each run dir's ``optimization_attempts.jsonl``, split by ``backend`` into three independent lanes.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        The ``(geak, oob, forge)`` invocation lanes, each sorted by
+        ``(kernel_id, ts)``.
+    """
     all_invocations: list[dict[str, Any]] = []
     run_dirs = _kernel_agent_run_dirs(session_dir)
     for run_dir in run_dirs:
         attempts = _load_jsonl_safe(run_dir / "optimization_attempts.jsonl", warnings)
-        parsed = [
-            _parse_invocation_attempt(att, run_dir, session_dir, warnings)
-            for att in attempts
-        ]
+        parsed = [_parse_invocation_attempt(att, run_dir, session_dir, warnings) for att in attempts]
         # Backfill kernel_id when the jsonl row omitted it, else the
         # invocation can't be attributed or get its decision stamped.
         if any(not (inv.get("kernel_id") or "") for inv in parsed):
@@ -2056,17 +2371,22 @@ def collect_kernel_invocations(
 
     geak: list[dict[str, Any]] = []
     oob: list[dict[str, Any]] = []
+    forge: list[dict[str, Any]] = []
     for inv in all_invocations:
         backend = inv.get("backend") or ""
         if backend == "geak":
             geak.append(inv)
+        elif backend == "forge":
+            forge.append(inv)
         elif backend in ("claude", "codex"):
             oob.append(inv)
         else:
+            # Unknown / legacy backends fall back to the oob lane (forge keeps
+            # its own lane above so it is never mislabeled as oob).
             oob.append(inv)
-    geak.sort(key=lambda e: (e.get("kernel_id") or "", e.get("ts") or ""))
-    oob.sort(key=lambda e: (e.get("kernel_id") or "", e.get("ts") or ""))
-    return geak, oob
+    for lane in (geak, oob, forge):
+        lane.sort(key=lambda e: (e.get("kernel_id") or "", e.get("ts") or ""))
+    return geak, oob, forge
 
 
 # §9 Kernel lifecycle
@@ -2095,12 +2415,23 @@ def _scan_profile_reports(session_dir: Path) -> list[tuple[Path, Path]]:
 
 
 def _read_kernel_candidates(
-    session_dir: Path, state: dict[str, Any], warnings: list[str],
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
 ) -> list[dict[str, Any]]:
     """Return the ``hot_kernels`` array from ``kernel_candidates.json`` (duration/call-count source the report needs).
 
     Resolves via the orchestrator-recorded path, then the new and legacy
     on-disk layouts (glob fallbacks), then ``last_trace_analyze.hot_kernels_top15``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        list[dict[str, Any]]: The resolved ``hot_kernels`` list, or ``[]`` when
+        no source yields a non-empty list.
     """
     sk = state.get("last_trace_analyze") or {}
     raw_path = sk.get("candidates_path") if isinstance(sk, dict) else None
@@ -2118,17 +2449,12 @@ def _read_kernel_candidates(
             except ValueError:
                 continue
     # New layout: <sd>/kernel-agent/runs/<session_id>/.
-    candidate_paths.extend(
-        sorted((session_dir / "kernel-agent").rglob("kernel_candidates.json"))
-    )
+    candidate_paths.extend(sorted((session_dir / "kernel-agent").rglob("kernel_candidates.json")))
     # Legacy double-nested layout, kept so historical sessions rehydrate.
     candidate_paths.append(
-        session_dir / "kernel-agent-workspace" / "kernel-agent"
-        / "runs" / "hyperloom" / "kernel_candidates.json"
+        session_dir / "kernel-agent-workspace" / "kernel-agent" / "runs" / "hyperloom" / "kernel_candidates.json"
     )
-    candidate_paths.extend(
-        sorted((session_dir / "kernel-agent-workspace").rglob("kernel_candidates.json"))
-    )
+    candidate_paths.extend(sorted((session_dir / "kernel-agent-workspace").rglob("kernel_candidates.json")))
     for path in candidate_paths:
         if not path or not path.exists():
             continue
@@ -2150,16 +2476,28 @@ def _read_kernel_candidates(
 def _index_invocations_by_kernel(
     invs: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Fold per-attempt invocations into a per-kernel ``{attempts, best_speedup, decision, last_status}`` summary."""
+    """Fold per-attempt invocations into a per-kernel ``{attempts, best_speedup, decision, last_status}`` summary.
+
+    Args:
+        invs (list[dict[str, Any]]): Per-attempt invocation records.
+
+    Returns:
+        dict[str, dict[str, Any]]: Per-kernel summary keyed by ``kernel_id``.
+    """
     out: dict[str, dict[str, Any]] = {}
     for inv in invs:
         kid = str(inv.get("kernel_id") or "")
         if not kid:
             continue
-        ent = out.setdefault(kid, {
-            "attempts": 0, "best_speedup": None,
-            "decision": "", "last_status": "",
-        })
+        ent = out.setdefault(
+            kid,
+            {
+                "attempts": 0,
+                "best_speedup": None,
+                "decision": "",
+                "last_status": "",
+            },
+        )
         ent["attempts"] += 1
         spd = inv.get("micro_speedup")
         if isinstance(spd, (int, float)):
@@ -2181,15 +2519,32 @@ def _collect_detected_kernels(
     oob: list[dict[str, Any]],
     warnings: list[str],
     *,
+    forge: list[dict[str, Any]] | None = None,
     cap: int | None = None,
 ) -> list[dict[str, Any]]:
     """Build the canonical per-kernel lifecycle row, keyed by ``kernel_id``.
 
     Merges static profile fields (from ``kernel_candidates.json``,
     preferred, else ``benchmark_report.kernel_summary``),
-    ``selected_for_optimization``, per-lane ``geak`` / ``oob`` summaries,
-    ``adopted_by`` (from integrate KEEPs), and ``final_decision``.
+    ``selected_for_optimization``, per-lane ``geak`` / ``oob`` / ``forge``
+    summaries, ``adopted_by`` (from integrate KEEPs), and ``final_decision``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        geak (list[dict[str, Any]]): GEAK-lane invocations.
+        oob (list[dict[str, Any]]): OOB-lane invocations.
+        warnings (list[str]): Shared warnings list (mutated in place).
+        forge (list[dict[str, Any]] | None): Forge-lane invocations. Defaults
+            to ``None`` (treated as empty).
+        cap (int | None): Optional maximum number of rows to return (highest
+            GPU share first). Defaults to ``None`` (no cap).
+
+    Returns:
+        list[dict[str, Any]]: Per-kernel lifecycle rows sorted by descending
+        GPU share, truncated to ``cap`` when given.
     """
+    forge = forge or []
     by_kid: dict[str, dict[str, Any]] = {}
 
     # 1) candidates.json (preferred: has call_count / duration_us).
@@ -2200,21 +2555,21 @@ def _collect_detected_kernels(
         if not kid:
             continue
         by_kid[kid] = {
-            "kernel_id":               kid,
-            "name":                    str(k.get("name") or ""),
-            "gpu_pct":                 _to_float(k.get("gpu_pct")),
-            "duration_us":             _to_float(k.get("duration_us")),
-            "call_count":              int(k.get("call_count") or 0) or None,
-            "bandwidth_util_pct":      _to_float(k.get("bandwidth_utilization_pct")),
-            "compute_util_pct":        _to_float(k.get("compute_utilization_pct")),
-            "kernel_category":         str(k.get("kernel_category") or ""),
-            "bottleneck":              str(k.get("bottleneck") or ""),
-            "arithmetic_intensity":    _to_float(k.get("arithmetic_intensity")),
-            "reusable_native_kernel":  bool(k.get("reusable_native_kernel")),
-            "source_file":             k.get("source_file") or "",
-            "recommended_actions":     list(k.get("recommended_actions") or []),
-            "recommended_backends":    list(k.get("recommended_backends") or []),
-            "optimization_notes":      str(k.get("optimization_notes") or ""),
+            "kernel_id": kid,
+            "name": str(k.get("name") or ""),
+            "gpu_pct": _to_float(k.get("gpu_pct")),
+            "duration_us": _to_float(k.get("duration_us")),
+            "call_count": int(k.get("call_count") or 0) or None,
+            "bandwidth_util_pct": _to_float(k.get("bandwidth_utilization_pct")),
+            "compute_util_pct": _to_float(k.get("compute_utilization_pct")),
+            "kernel_category": str(k.get("kernel_category") or ""),
+            "bottleneck": str(k.get("bottleneck") or ""),
+            "arithmetic_intensity": _to_float(k.get("arithmetic_intensity")),
+            "reusable_native_kernel": bool(k.get("reusable_native_kernel")),
+            "source_file": k.get("source_file") or "",
+            "recommended_actions": list(k.get("recommended_actions") or []),
+            "recommended_backends": list(k.get("recommended_backends") or []),
+            "optimization_notes": str(k.get("optimization_notes") or ""),
         }
 
     # 2) benchmark_report.kernel_summary fallback — pulls in the long
@@ -2233,9 +2588,7 @@ def _collect_detected_kernels(
         kernel_summary = report.get("kernel_summary") or []
         bottlenecks = report.get("top_bottlenecks") or []
         bottleneck_by_kid = {
-            b.get("kernel_id"): b
-            for b in (bottlenecks if isinstance(bottlenecks, list) else [])
-            if isinstance(b, dict)
+            b.get("kernel_id"): b for b in (bottlenecks if isinstance(bottlenecks, list) else []) if isinstance(b, dict)
         }
         for k in kernel_summary if isinstance(kernel_summary, list) else []:
             if not isinstance(k, dict):
@@ -2266,12 +2619,7 @@ def _collect_detected_kernels(
             # it with a residual alias. Mangled C++ symbols (input_kid ==
             # name, len ≫ 16) get a generated alias to keep the table
             # narrow.
-            is_short_alias = (
-                input_kid
-                and input_kid != name_str
-                and len(input_kid) <= 8
-                and input_kid not in by_kid
-            )
+            is_short_alias = input_kid and input_kid != name_str and len(input_kid) <= 8 and input_kid not in by_kid
             if is_short_alias:
                 alias = input_kid
             else:
@@ -2280,23 +2628,23 @@ def _collect_detected_kernels(
             bn = bottleneck_by_kid.get(k.get("kernel_id")) or {}
             t_ms = _to_float(k.get("time_ms"))
             by_kid[alias] = {
-                "kernel_id":              alias,
-                "name":                   name_str,
-                "gpu_pct":                _to_float(k.get("gpu_pct")),
-                "duration_us":            (t_ms * 1000.0) if t_ms is not None else None,
-                "call_count":             None,
-                "bandwidth_util_pct":     None,
-                "compute_util_pct":       None,
-                "kernel_category":        "",
-                "bottleneck":             str(bn.get("bottleneck") or k.get("bottleneck") or ""),
-                "arithmetic_intensity":   _to_float(k.get("arithmetic_intensity")),
+                "kernel_id": alias,
+                "name": name_str,
+                "gpu_pct": _to_float(k.get("gpu_pct")),
+                "duration_us": (t_ms * 1000.0) if t_ms is not None else None,
+                "call_count": None,
+                "bandwidth_util_pct": None,
+                "compute_util_pct": None,
+                "kernel_category": "",
+                "bottleneck": str(bn.get("bottleneck") or k.get("bottleneck") or ""),
+                "arithmetic_intensity": _to_float(k.get("arithmetic_intensity")),
                 "reusable_native_kernel": bool(k.get("reusable_native_kernel")),
-                "source_file":            k.get("source_file") or "",
-                "recommended_actions":    [],
-                "recommended_backends":   [],
-                "optimization_notes":     "",
-                "detected_from_task":     task_dir.name,
-                "benchmark_report_path":  _rel(report_path, session_dir) or str(report_path),
+                "source_file": k.get("source_file") or "",
+                "recommended_actions": [],
+                "recommended_backends": [],
+                "optimization_notes": "",
+                "detected_from_task": task_dir.name,
+                "benchmark_report_path": _rel(report_path, session_dir) or str(report_path),
             }
             name_to_kid[name_str] = alias
 
@@ -2308,6 +2656,7 @@ def _collect_detected_kernels(
     }
     geak_idx = _index_invocations_by_kernel(geak)
     oob_idx = _index_invocations_by_kernel(oob)
+    forge_idx = _index_invocations_by_kernel(forge)
 
     integ = state.get("kernel_integrate_attempts") or {}
     adopted_kids: set[str] = set()
@@ -2327,32 +2676,29 @@ def _collect_detected_kernels(
             elif dec in ("REVERT", "REJECT"):
                 reverted_kids.add(kid)
 
-    rejected_kids = {
-        str(k or "") for k in (state.get("rejected_kernel_ids") or [])
-    } - adopted_kids
+    rejected_kids = {str(k or "") for k in (state.get("rejected_kernel_ids") or [])} - adopted_kids
 
     for kid, entry in by_kid.items():
         entry["selected_for_optimization"] = kid in selected_ids
         entry["geak"] = geak_idx.get(kid)  # None if lane never touched this kid
         entry["oob"] = oob_idx.get(kid)
+        entry["forge"] = forge_idx.get(kid)
         # e2e (integrate) gain so the table shows why a micro-KEPT kernel reverted.
         if kid in integ_gain_by_kid:
             entry["integrate_gain_pct"] = integ_gain_by_kid[kid]
         if kid in adopted_kids:
-            # Disambiguate which lane's patch was kept.
-            g_kept = bool(entry["geak"] and entry["geak"]["decision"] in ("KEEP", "PARTIAL"))
-            o_kept = bool(entry["oob"] and entry["oob"]["decision"] in ("KEEP", "PARTIAL"))
-            if g_kept and not o_kept:
-                entry["adopted_by"] = "geak"
-            elif o_kept and not g_kept:
-                entry["adopted_by"] = "oob"
-            elif g_kept and o_kept:
-                # Prefer the lane with higher micro-speedup.
-                g_spd = (entry["geak"] or {}).get("best_speedup") or 0.0
-                o_spd = (entry["oob"] or {}).get("best_speedup") or 0.0
-                entry["adopted_by"] = "geak" if g_spd >= o_spd else "oob"
+            # Disambiguate which lane's patch was kept. With three lanes, pick
+            # the KEPT lane with the highest micro-speedup; fall back to
+            # 'kernel_agent' when integrate KEPT but no single lane shows a KEEP.
+            kept_lanes: list[tuple[str, float]] = []
+            for lane in ("geak", "oob", "forge"):
+                row = entry.get(lane)
+                if row and row.get("decision") in ("KEEP", "PARTIAL"):
+                    kept_lanes.append((lane, row.get("best_speedup") or 0.0))
+            if kept_lanes:
+                entry["adopted_by"] = max(kept_lanes, key=lambda t: t[1])[0]
             else:
-                # Integrate KEEP but neither lane KEPT: record 'kernel_agent', don't guess.
+                # Integrate KEEP but no lane KEPT: record 'kernel_agent', don't guess.
                 entry["adopted_by"] = "kernel_agent"
             entry["final_decision"] = "kept"
         elif kid in reverted_kids:
@@ -2361,7 +2707,7 @@ def _collect_detected_kernels(
         elif kid in rejected_kids:
             entry["adopted_by"] = None
             entry["final_decision"] = "rejected"
-        elif entry["geak"] or entry["oob"]:
+        elif entry["geak"] or entry["oob"] or entry["forge"]:
             entry["adopted_by"] = None
             entry["final_decision"] = "attempted"
         else:
@@ -2399,15 +2745,17 @@ def _collect_recommended_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
     for entry in sk.get("hot_kernels_top15") or []:
         if not isinstance(entry, dict):
             continue
-        out.append({
-            "kernel_id":            str(entry.get("kernel_id") or ""),
-            "name":                 str(entry.get("name") or ""),
-            "gpu_pct":              _to_float(entry.get("gpu_pct")),
-            "recommended_backends": list(entry.get("recommended_backends") or []),
-            "recommended_actions":  list(entry.get("recommended_actions") or []),
-            "bottleneck":           str(entry.get("bottleneck") or ""),
-            "reusable_native_kernel": bool(entry.get("reusable_native_kernel")),
-        })
+        out.append(
+            {
+                "kernel_id": str(entry.get("kernel_id") or ""),
+                "name": str(entry.get("name") or ""),
+                "gpu_pct": _to_float(entry.get("gpu_pct")),
+                "recommended_backends": list(entry.get("recommended_backends") or []),
+                "recommended_actions": list(entry.get("recommended_actions") or []),
+                "bottleneck": str(entry.get("bottleneck") or ""),
+                "reusable_native_kernel": bool(entry.get("reusable_native_kernel")),
+            }
+        )
     return out
 
 
@@ -2415,10 +2763,11 @@ def _collect_optimized_kernels(
     geak: list[dict[str, Any]],
     oob: list[dict[str, Any]],
     state: dict[str, Any],
+    forge: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Fold per-attempt invocations into per-kernel optimization summaries.
 
-    Aggregates both lanes' attempts per kernel (counts, best micro-speedup,
+    Aggregates all lanes' attempts per kernel (counts, best micro-speedup,
     best artifact, decision history) and cross-references
     ``state.kernel_opt_attempts`` to recover decisions whose on-disk
     verification was rotated away.
@@ -2427,27 +2776,31 @@ def _collect_optimized_kernels(
         geak (list[dict[str, Any]]): GEAK-lane invocations.
         oob (list[dict[str, Any]]): OOB-lane invocations.
         state (dict[str, Any]): Parsed ``state.json``.
+        forge (list[dict[str, Any]] | None): Forge-lane invocations.
 
     Returns:
         list[dict[str, Any]]: Per-kernel optimization summaries sorted by
         ``kernel_id``.
     """
     by_kid: dict[str, dict[str, Any]] = {}
-    for invs in (geak, oob):
+    for invs in (geak, oob, forge or []):
         for inv in invs:
             kid = inv.get("kernel_id") or ""
             if not kid:
                 continue
-            entry = by_kid.setdefault(kid, {
-                "kernel_id": kid,
-                "backend": inv.get("backend") or "",
-                "total_attempts": 0,
-                "successful_attempts": 0,
-                "best_micro_speedup": None,
-                "last_decision": "",
-                "best_artifact_path": None,
-                "attempts_summary": [],
-            })
+            entry = by_kid.setdefault(
+                kid,
+                {
+                    "kernel_id": kid,
+                    "backend": inv.get("backend") or "",
+                    "total_attempts": 0,
+                    "successful_attempts": 0,
+                    "best_micro_speedup": None,
+                    "last_decision": "",
+                    "best_artifact_path": None,
+                    "attempts_summary": [],
+                },
+            )
             entry["total_attempts"] += 1
             spd = inv.get("micro_speedup")
             cur_best = entry["best_micro_speedup"]
@@ -2458,29 +2811,34 @@ def _collect_optimized_kernels(
             if inv.get("decision") in ("KEEP", "PARTIAL"):
                 entry["successful_attempts"] += 1
             entry["last_decision"] = inv.get("decision") or entry["last_decision"]
-            entry["attempts_summary"].append({
-                "attempt_id":   inv.get("attempt_id"),
-                "backend":      inv.get("backend"),
-                "decision":     inv.get("decision"),
-                "micro_speedup": spd,
-                "ts":           inv.get("ts"),
-            })
+            entry["attempts_summary"].append(
+                {
+                    "attempt_id": inv.get("attempt_id"),
+                    "backend": inv.get("backend"),
+                    "decision": inv.get("decision"),
+                    "micro_speedup": spd,
+                    "ts": inv.get("ts"),
+                }
+            )
     # Cross-reference state.kernel_opt_attempts (covers on-disk verification rotated away).
     ko_attempts = state.get("kernel_opt_attempts") or {}
     if isinstance(ko_attempts, dict):
         for kid, ent in ko_attempts.items():
             if not isinstance(ent, dict):
                 continue
-            entry = by_kid.setdefault(kid, {
-                "kernel_id": kid,
-                "backend": "",
-                "total_attempts": 0,
-                "successful_attempts": 0,
-                "best_micro_speedup": None,
-                "last_decision": "",
-                "best_artifact_path": None,
-                "attempts_summary": [],
-            })
+            entry = by_kid.setdefault(
+                kid,
+                {
+                    "kernel_id": kid,
+                    "backend": "",
+                    "total_attempts": 0,
+                    "successful_attempts": 0,
+                    "best_micro_speedup": None,
+                    "last_decision": "",
+                    "best_artifact_path": None,
+                    "attempts_summary": [],
+                },
+            )
             entry["total_attempts"] = max(entry["total_attempts"], int(ent.get("attempts", 0)))
             entry["last_decision"] = entry["last_decision"] or str(ent.get("last_decision") or "")
     return sorted(by_kid.values(), key=lambda e: e.get("kernel_id") or "")
@@ -2508,17 +2866,19 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             if ent.get("last_decision") != "KEEP":
                 continue
-            out.append({
-                "kernel_id":         str(ent.get("kernel_id") or ""),
-                "patch_path":        str(ent.get("patch_path") or ""),
-                "target_file":       str(ent.get("target_file") or ""),
-                "extra_server_args": str(ent.get("extra_server_args") or ""),
-                "e2e_gain_pct":      _to_float(ent.get("best_gain_pct")),
-                "validated":         True,
-                "last_status":       str(ent.get("last_status") or ""),
-                "adopted_at":        str(ent.get("updated_at") or ""),
-                "attempt_count":     int(ent.get("attempt_count") or 0),
-            })
+            out.append(
+                {
+                    "kernel_id": str(ent.get("kernel_id") or ""),
+                    "patch_path": str(ent.get("patch_path") or ""),
+                    "target_file": str(ent.get("target_file") or ""),
+                    "extra_server_args": str(ent.get("extra_server_args") or ""),
+                    "e2e_gain_pct": _to_float(ent.get("best_gain_pct")),
+                    "validated": True,
+                    "last_status": str(ent.get("last_status") or ""),
+                    "adopted_at": str(ent.get("updated_at") or ""),
+                    "attempt_count": int(ent.get("attempt_count") or 0),
+                }
+            )
     return out
 
 
@@ -2542,30 +2902,34 @@ def _collect_rejected_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
         for r in rejected:
             if not isinstance(r, dict):
                 continue
-            out.append({
-                "kernel_id":      str(r.get("kernel_id") or ""),
-                "reason":         str(r.get("reason") or ""),
-                "patch_path":     r.get("patch_path"),
-                "target_file":    r.get("target_file"),
-                "attempt_count":  int(r.get("attempt_count") or 0),
-                "best_gain_pct":  _to_float(r.get("best_gain_pct")),
-                "ts":             str(r.get("ts") or ""),
-            })
+            out.append(
+                {
+                    "kernel_id": str(r.get("kernel_id") or ""),
+                    "reason": str(r.get("reason") or ""),
+                    "patch_path": r.get("patch_path"),
+                    "target_file": r.get("target_file"),
+                    "attempt_count": int(r.get("attempt_count") or 0),
+                    "best_gain_pct": _to_float(r.get("best_gain_pct")),
+                    "ts": str(r.get("ts") or ""),
+                }
+            )
     # also surface rejected_kernel_ids that didn't make it into rejected_kernel_patches
     seen_ids = {entry["kernel_id"] for entry in out if entry.get("kernel_id")}
     for kid in state.get("rejected_kernel_ids") or []:
         kid_s = str(kid or "")
         if not kid_s or kid_s in seen_ids:
             continue
-        out.append({
-            "kernel_id":  kid_s,
-            "reason":     "retired",
-            "patch_path": None,
-            "target_file": None,
-            "attempt_count": 0,
-            "best_gain_pct": None,
-            "ts": "",
-        })
+        out.append(
+            {
+                "kernel_id": kid_s,
+                "reason": "retired",
+                "patch_path": None,
+                "target_file": None,
+                "attempt_count": 0,
+                "best_gain_pct": None,
+                "ts": "",
+            }
+        )
     return out
 
 
@@ -2575,6 +2939,7 @@ def collect_kernel_lifecycle(
     geak: list[dict[str, Any]],
     oob: list[dict[str, Any]],
     warnings: list[str],
+    forge: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Collect the §9 kernel-lifecycle section.
 
@@ -2587,17 +2952,19 @@ def collect_kernel_lifecycle(
         geak (list[dict[str, Any]]): GEAK-lane invocations.
         oob (list[dict[str, Any]]): OOB-lane invocations.
         warnings (list[str]): Shared warnings list (mutated in place).
+        forge (list[dict[str, Any]] | None): Forge-lane invocations (own lane).
 
     Returns:
         dict[str, Any]: ``{"detected", "recommended", "optimized", "adopted",
         "rejected"}`` lists.
     """
+    forge = forge or []
     return {
-        "detected":    _collect_detected_kernels(session_dir, state, geak, oob, warnings),
+        "detected": _collect_detected_kernels(session_dir, state, geak, oob, warnings, forge=forge),
         "recommended": _collect_recommended_kernels(state),
-        "optimized":   _collect_optimized_kernels(geak, oob, state),
-        "adopted":     _collect_adopted_kernels(state),
-        "rejected":    _collect_rejected_kernels(state),
+        "optimized": _collect_optimized_kernels(geak, oob, state, forge),
+        "adopted": _collect_adopted_kernels(state),
+        "rejected": _collect_rejected_kernels(state),
     }
 
 
@@ -2625,8 +2992,11 @@ def _shape_ledger(
     """
     if not isinstance(ledger, dict):
         return {
-            "schema_version": 0, "tested_count": 0,
-            "accepted": [], "rejected": [], "top_by_gain": [],
+            "schema_version": 0,
+            "tested_count": 0,
+            "accepted": [],
+            "rejected": [],
+            "top_by_gain": [],
         }
 
     def _shape_entry(e: Any) -> dict[str, Any]:
@@ -2641,15 +3011,32 @@ def _shape_ledger(
         """
         if not isinstance(e, dict):
             return {}
-        return {
-            "name":              str(e.get("name") or ""),
-            "fingerprint":       str(e.get("fingerprint") or ""),
-            "extra_server_args": str(e.get("extra_server_args") or ""),
-            "extra_envs":        dict(e.get("extra_envs") or {}),
+        args = str(e.get("extra_server_args") or "")
+        envs = dict(e.get("extra_envs") or {})
+        provenance = str(e.get("provenance") or "")
+        # Classify the variant into a stable operation_kind (backend/param/env)
+        # so the ledger can be filtered the same way as the timeline / trace.
+        change_kind = classify_change_kind(
+            "explore",
+            {"extra_server_args": args, "extra_envs": envs},
+        )
+        shaped = {
+            "name": str(e.get("name") or ""),
+            "fingerprint": str(e.get("fingerprint") or ""),
+            "extra_server_args": args,
+            "extra_envs": envs,
             "output_throughput": _to_float(e.get("output_throughput") or e.get("tput")),
-            "gain_pct":          _to_float(e.get("gain_pct")),
-            "ts":                str(e.get("ts") or ""),
+            "gain_pct": _to_float(e.get("gain_pct")),
+            "ts": str(e.get("ts") or ""),
+            "operation_kind": operation_kind_for("explore", change_kind),
         }
+        if provenance:
+            shaped["provenance"] = provenance
+            shaped["proposer"] = proposer_for(provenance)
+        scope = str(e.get("scope") or "")
+        if scope:
+            shaped["scope"] = scope
+        return shaped
 
     accepted = [_shape_entry(e) for e in ledger.get("accepted") or []]
     rejected = [_shape_entry(e) for e in ledger.get("rejected") or []]
@@ -2661,18 +3048,29 @@ def _shape_ledger(
         reverse=True,
     )[:top_n]
     return {
-        "schema_version":  int(ledger.get("schema_version") or 0),
-        "tested_count":    len(tested),
-        "accepted":        accepted,
-        "rejected":        rejected,
-        "top_by_gain":     top_by_gain,
+        "schema_version": int(ledger.get("schema_version") or 0),
+        "tested_count": len(tested),
+        "accepted": accepted,
+        "rejected": rejected,
+        "top_by_gain": top_by_gain,
     }
 
 
 def _patch_winners_history(
-    rows: list[Any], baseline_tput: float | None,
+    rows: list[Any],
+    baseline_tput: float | None,
 ) -> list[dict[str, Any]]:
-    """Fix ``backend_winners_history`` data gaps: fall back to session ``baseline_tput`` for a 0 ``base_tput``, and compute missing per-winner ``gain_pct``."""
+    """Fix ``backend_winners_history`` data gaps: fall back to session ``baseline_tput`` for a 0 ``base_tput``, and compute missing per-winner ``gain_pct``.
+
+    Args:
+        rows (list[Any]): Raw ``backend_winners_history`` rows.
+        baseline_tput (float | None): Session baseline throughput used to
+            patch a zero / missing ``base_tput``.
+
+    Returns:
+        list[dict[str, Any]]: The patched rows with repaired ``base_tput`` and
+        back-filled per-winner ``gain_pct`` where derivable.
+    """
     out: list[dict[str, Any]] = []
     for r in rows:
         if not isinstance(r, dict):
@@ -2712,35 +3110,87 @@ def _patch_winners_history(
     return out
 
 
+def _shape_winners_history(
+    explore_search: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Persist ``explore_search.winners_history`` rows with their join key + source.
+
+    ``_shape_ledger`` drops this history, so without re-emitting it the exported
+    ``explore_search`` carries no ``fingerprint``→``provenance`` map and downstream
+    consumers can't reconstruct ``phase_breakdown.explore.by_domain`` offline.
+
+    Args:
+        explore_search (dict[str, Any] | None): The ``explore_search`` ledger
+            from state, or ``None``.
+
+    Returns:
+        list[dict[str, Any]]: The shaped ``winners_history`` rows (round id,
+        variant, fingerprint, provenance, scope, gain, args/envs, ts). Empty
+        when no history is present.
+    """
+    if not isinstance(explore_search, dict):
+        return []
+    rows = explore_search.get("winners_history")
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for w in rows:
+        if not isinstance(w, dict):
+            continue
+        out.append(
+            {
+                "round_id": str(w.get("round_id") or ""),
+                "variant_name": str(w.get("variant_name") or w.get("name") or ""),
+                "fingerprint": str(w.get("fingerprint") or ""),
+                "provenance": str(w.get("provenance") or ""),
+                "scope": str(w.get("scope") or ""),
+                "gain_pct": _to_float(w.get("gain_pct")),
+                "extra_args": str(w.get("extra_args") or w.get("extra_server_args") or ""),
+                "extra_envs": dict(w.get("extra_envs") or {}),
+                "ts": str(w.get("ts") or ""),
+            }
+        )
+    return out
+
+
 def collect_explore_search(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Collect the explore-phase search summary for the breakdown.
+
+    Args:
+        state: Session state mapping.
+        warnings: Mutable list that collected warnings are appended to.
+
+    Returns:
+        A dict summarizing the explore-phase search activity and outcomes.
+    """
     # Emit all three ledgers (unified explore + legacy params/backends) so
     # breakdown reprocesses both vintages; unused ones shape to empty shells.
     explore_ledger = _shape_ledger(state.get("explore_search"))
+    # Persist provenance+fingerprint winners_history so offline recompute /
+    # downstream can recover the explore specialist attribution.
+    explore_ledger["winners_history"] = _shape_winners_history(state.get("explore_search"))
     explore_ledger["winner_history"] = list(state.get("params_winner_history") or [])
-    explore_ledger["no_promote_streak"] = int(
-        state.get("params_no_promote_streak") or 0
-    )
+    explore_ledger["no_promote_streak"] = int(state.get("params_no_promote_streak") or 0)
 
     params_ledger = _shape_ledger(state.get("params_search"))
     params_ledger["winner_history"] = list(state.get("params_winner_history") or [])
-    params_ledger["no_promote_streak"] = int(
-        state.get("params_no_promote_streak") or 0
-    )
+    params_ledger["no_promote_streak"] = int(state.get("params_no_promote_streak") or 0)
 
     backends_ledger = _shape_ledger(state.get("backends_search"))
 
     baseline_tput = _to_float(state.get("baseline_tput"))
     return {
-        "explore":                 explore_ledger,
-        "params":                  params_ledger,
-        "backends":                backends_ledger,
-        "synergy_attempted":       list(state.get("synergy_attempted") or []),
-        "discovered_flags":        dict(state.get("discovered_flags") or {}),
+        "explore": explore_ledger,
+        "params": params_ledger,
+        "backends": backends_ledger,
+        "synergy_attempted": list(state.get("synergy_attempted") or []),
+        "discovered_flags": dict(state.get("discovered_flags") or {}),
         "backend_winners_history": _patch_winners_history(
-            state.get("backend_winners_history") or [], baseline_tput,
+            state.get("backend_winners_history") or [],
+            baseline_tput,
         ),
     }
 
@@ -2820,16 +3270,16 @@ def _shape_sweep_point(
     elif report is None:
         status = "skipped"
     return {
-        "variant_name":            name,
-        "conc":                    conc,
-        "isl":                     isl_,
-        "osl":                     osl_,
+        "variant_name": name,
+        "conc": conc,
+        "isl": isl_,
+        "osl": osl_,
         "output_throughput_tok_s": out_tput,
-        "ttft_mean_ms":            ttft,
-        "tpot_mean_ms":            tpot,
-        "e2el_mean_ms":            e2el,
-        "status":                  status,
-        "benchmark_report_path":   _rel(report, session_dir) if report else None,
+        "ttft_mean_ms": ttft,
+        "tpot_mean_ms": tpot,
+        "e2el_mean_ms": e2el,
+        "status": status,
+        "benchmark_report_path": _rel(report, session_dir) if report else None,
     }
 
 
@@ -2856,17 +3306,14 @@ def collect_sweep(
     if not isinstance(ls, dict):
         ls = {}
 
-    variants_on_disk = [
-        _shape_sweep_point(v, session_dir, warnings)
-        for v in _scan_sweep_variants(session_dir)
-    ]
+    variants_on_disk = [_shape_sweep_point(v, session_dir, warnings) for v in _scan_sweep_variants(session_dir)]
     return {
-        "grid_size":          _to_int(ls.get("grid_size")) or len(variants_on_disk),
-        "best_overall":       dict(ls.get("best_overall") or {}),
+        "grid_size": _to_int(ls.get("grid_size")) or len(variants_on_disk),
+        "best_overall": dict(ls.get("best_overall") or {}),
         "best_for_each_conc": list(ls.get("best_for_each_conc") or []),
-        "pareto_front":       list(ls.get("pareto_front") or []),
-        "all_variants":       variants_on_disk,
-        "config_path":        ls.get("config_path"),
+        "pareto_front": list(ls.get("pareto_front") or []),
+        "all_variants": variants_on_disk,
+        "config_path": ls.get("config_path"),
     }
 
 
@@ -2901,19 +3348,19 @@ def collect_critic_robustness(
                 iter_n = -1
             review = _load_json_safe(iter_dir / "review.json", warnings) or {}
             emit = _load_json_safe(iter_dir / "emit.json", warnings) or {}
-            critic_iters.append({
-                "iter":               iter_n,
-                "ts":                 str(emit.get("ts") or review.get("ts") or ""),
-                "topic":              str(emit.get("topic") or review.get("topic") or ""),
-                "verdict":            str(review.get("verdict") or emit.get("verdict") or ""),
-                "summary":            str(
-                    review.get("summary") or emit.get("summary") or ""
-                )[:500],
-                "request_path":       _rel(iter_dir / "request.json", session_dir),
-                "judge_bundle_path":  _rel(iter_dir / "judge_bundle.json", session_dir),
-                "emit_path":          _rel(iter_dir / "emit.json", session_dir),
-                "review_path":        _rel(iter_dir / "review.json", session_dir),
-            })
+            critic_iters.append(
+                {
+                    "iter": iter_n,
+                    "ts": str(emit.get("ts") or review.get("ts") or ""),
+                    "topic": str(emit.get("topic") or review.get("topic") or ""),
+                    "verdict": str(review.get("verdict") or emit.get("verdict") or ""),
+                    "summary": str(review.get("summary") or emit.get("summary") or "")[:500],
+                    "request_path": _rel(iter_dir / "request.json", session_dir),
+                    "judge_bundle_path": _rel(iter_dir / "judge_bundle.json", session_dir),
+                    "emit_path": _rel(iter_dir / "emit.json", session_dir),
+                    "review_path": _rel(iter_dir / "review.json", session_dir),
+                }
+            )
 
     robustness_signals: list[dict[str, Any]] = []
     rob_root = session_dir / "robustness-workdir"
@@ -2923,27 +3370,37 @@ def collect_critic_robustness(
                 continue
             signal_data = _load_json_safe(iter_dir / "signal.json", warnings) or {}
             action_data = _load_json_safe(iter_dir / "action.json", warnings) or {}
-            robustness_signals.append({
-                "ts":      str(signal_data.get("ts") or action_data.get("ts") or ""),
-                "signal":  str(signal_data.get("signal") or signal_data.get("kind") or ""),
-                "action":  str(action_data.get("action") or action_data.get("kind") or ""),
-                "workdir": _rel(iter_dir, session_dir) or str(iter_dir),
-            })
+            robustness_signals.append(
+                {
+                    "ts": str(signal_data.get("ts") or action_data.get("ts") or ""),
+                    "signal": str(signal_data.get("signal") or signal_data.get("kind") or ""),
+                    "action": str(action_data.get("action") or action_data.get("kind") or ""),
+                    "workdir": _rel(iter_dir, session_dir) or str(iter_dir),
+                }
+            )
 
     # kb_writes_summary: commit-review counts by verdict, reusing the parsed iters.
     kb_writes_summary = _critic_kb_writes_summary(critic_iters)
 
     return {
-        "critic_iterations":  critic_iters,
+        "critic_iterations": critic_iters,
         "robustness_signals": robustness_signals,
-        "kb_writes_summary":  kb_writes_summary,
+        "kb_writes_summary": kb_writes_summary,
     }
 
 
 def _critic_kb_writes_summary(
     critic_iters: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Build ``critic_robustness.kb_writes_summary`` by counting each iteration's verdict into ``by_verdict``."""
+    """Build ``critic_robustness.kb_writes_summary`` by counting each iteration's verdict into ``by_verdict``.
+
+    Args:
+        critic_iters (list[dict[str, Any]]): The parsed critic-iteration rows.
+
+    Returns:
+        dict[str, Any]: ``{"total", "by_verdict"}`` where ``by_verdict`` counts
+        each non-empty, upper-cased verdict.
+    """
     by_verdict: dict[str, int] = {}
     total = 0
     for entry in critic_iters:
@@ -2953,7 +3410,7 @@ def _critic_kb_writes_summary(
         total += 1
         by_verdict[verdict] = by_verdict.get(verdict, 0) + 1
     return {
-        "total":      total,
+        "total": total,
         "by_verdict": by_verdict,
     }
 
@@ -3081,11 +3538,11 @@ def _aggregate_gpu_monitor(
         return round(max(vals), 2) if vals else 0.0
 
     return {
-        "samples":       len(samples),
-        "avg_power_w":   _avg("power_w") or _avg("power"),
-        "max_power_w":   _max("power_w") or _max("power"),
-        "avg_temp_c":    _avg("temperature_c") or _avg("temperature"),
-        "max_temp_c":    _max("temperature_c") or _max("temperature"),
+        "samples": len(samples),
+        "avg_power_w": _avg("power_w") or _avg("power"),
+        "max_power_w": _max("power_w") or _max("power"),
+        "avg_temp_c": _avg("temperature_c") or _avg("temperature"),
+        "max_temp_c": _max("temperature_c") or _max("temperature"),
         "avg_clock_mhz": _avg("clock_mhz") or _avg("sclk_mhz"),
     }
 
@@ -3099,11 +3556,21 @@ def _collect_lane_timeline(
     One row per lane (capacity, live_holders, lease_expired_count). The
     per-tick holders timeline is deferred; the aggregates suffice for the
     ``benchmark_lane.peak ≤ 1`` invariant check.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on DB
+            errors).
+
+    Returns:
+        list[dict[str, Any]]: One per-lane occupancy row plus a ``__total__``
+        aggregate row. Empty when the coordinator DB is absent / unreadable.
     """
     db_path = session_dir / "storage" / "coordinator.db"
     if not db_path.exists():
         return []
     import sqlite3 as _sqlite3
+
     try:
         conn = _sqlite3.connect(str(db_path), timeout=2.0)
         conn.row_factory = _sqlite3.Row
@@ -3119,11 +3586,11 @@ def _collect_lane_timeline(
         except _sqlite3.OperationalError:
             # Older DB without lane_capacity — fall back to defaults.
             from ..storage.schema import DEFAULT_LANE_CAPACITIES as _DEFAULT
+
             capacities = dict(_DEFAULT)
         try:
             cur = conn.execute(
-                "SELECT lane, COUNT(*) AS n FROM leases "
-                "WHERE expires_at > datetime('now') GROUP BY lane",
+                "SELECT lane, COUNT(*) AS n FROM leases WHERE expires_at > datetime('now') GROUP BY lane",
             )
             holders = {r["lane"]: int(r["n"]) for r in cur.fetchall()}
         except _sqlite3.OperationalError as exc:
@@ -3161,20 +3628,24 @@ def _collect_lane_timeline(
 
     rows: list[dict[str, Any]] = []
     for lane in sorted(set(capacities) | set(holders)):
-        rows.append({
-            "lane":                lane,
-            "capacity":            int(capacities.get(lane, 1)),
-            "live_holders":        int(holders.get(lane, 0)),
-            "lease_expired_count": int(per_lane_expired.get(lane, 0)),
-        })
+        rows.append(
+            {
+                "lane": lane,
+                "capacity": int(capacities.get(lane, 1)),
+                "live_holders": int(holders.get(lane, 0)),
+                "lease_expired_count": int(per_lane_expired.get(lane, 0)),
+            }
+        )
     # Append a totals row for consumers that aggregate across lanes.
     if rows:
-        rows.append({
-            "lane":                "__total__",
-            "capacity":            sum(r["capacity"] for r in rows),
-            "live_holders":        sum(r["live_holders"] for r in rows),
-            "lease_expired_count": int(expired_total),
-        })
+        rows.append(
+            {
+                "lane": "__total__",
+                "capacity": sum(r["capacity"] for r in rows),
+                "live_holders": sum(r["live_holders"] for r in rows),
+                "lease_expired_count": int(expired_total),
+            }
+        )
     return rows
 
 
@@ -3205,17 +3676,15 @@ def collect_telemetry(
         if workspace is not None:
             baseline_report = _find_benchmark_report(workspace)
 
-    profile_reports = [
-        report for _task, report in _scan_profile_reports(session_dir)
-    ]
+    profile_reports = [report for _task, report in _scan_profile_reports(session_dir)]
     all_reports = list(_scan_all_benchmark_reports(session_dir))
 
     return {
         "baseline_report_path": _rel(baseline_report, session_dir) if baseline_report else None,
         "profile_report_paths": [_rel(p, session_dir) or str(p) for p in profile_reports],
-        "torch_trace_paths":    [_rel(p, session_dir) or str(p) for p in _scan_torch_traces(session_dir)],
+        "torch_trace_paths": [_rel(p, session_dir) or str(p) for p in _scan_torch_traces(session_dir)],
         "system_profile_paths": [_rel(p, session_dir) or str(p) for p in _scan_system_profiles(session_dir)],
-        "server_log_paths":     [_rel(p, session_dir) or str(p) for p in _scan_server_logs(session_dir)],
+        "server_log_paths": [_rel(p, session_dir) or str(p) for p in _scan_server_logs(session_dir)],
         "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
         # per-lane occupancy / capacity summary from the leases DB.
         "lane_timeline": _collect_lane_timeline(session_dir, warnings),
@@ -3242,15 +3711,21 @@ def _normalize_specialist_key(provenance: str) -> str:
     ``specialist:<domain>`` → bare ``<domain>``; ``legacy:<action>`` →
     ``legacy_<action>``; ``default_grid`` / ``llm_direct`` pass through;
     empty/unknown → ``"unknown"`` (so by_domain is never keyed by ``""``).
+
+    Args:
+        provenance (str): The raw provenance label.
+
+    Returns:
+        str: The normalized specialist key.
     """
     s = (provenance or "").strip()
     if not s:
         return "unknown"
     if s.startswith("specialist:"):
         # Trust the orchestrator's domain string verbatim (no parallel update needed for new domains).
-        return s[len("specialist:"):] or "unknown"
+        return s[len("specialist:") :] or "unknown"
     if s.startswith("legacy:"):
-        return f"legacy_{s[len('legacy:'):]}"
+        return f"legacy_{s[len('legacy:') :]}"
     return s
 
 
@@ -3300,6 +3775,14 @@ def _promote_legacy_gain_entries(
     Recovers action/variant/ts/args from the parallel
     ``optimization_stack`` and computes ``delta_pct`` against the prior
     entry; ``None`` ledger entries stay ``None`` to keep index alignment.
+
+    Args:
+        state_entries (list[Any]): The legacy numeric gain ledger.
+        state (dict[str, Any]): Parsed ``state.json`` (supplies the parallel
+            ``optimization_stack``).
+
+    Returns:
+        list[dict[str, Any]]: The promoted V1 ``StackGainEntry`` rows.
     """
     stack = state.get("optimization_stack") or []
     out: list[dict[str, Any]] = []
@@ -3312,7 +3795,7 @@ def _promote_legacy_gain_entries(
             cum_after = None
         delta = (cum_after - prev_cum) if cum_after is not None else None
         se = stack[i] if i < len(stack) and isinstance(stack[i], dict) else {}
-        out.append({
+        promoted: dict[str, Any] = {
             "ts": str(se.get("ts") or ""),
             "action": str(se.get("action") or ""),
             "variant_name": se.get("variant_name") or se.get("kernel_id"),
@@ -3321,12 +3804,18 @@ def _promote_legacy_gain_entries(
             "cum_gain_before": prev_cum,
             "cum_gain_after": cum_after,
             "delta_pct": delta,
-            "extra_server_args": str(
-                se.get("extra_server_args")
-                or se.get("candidate_extra_server_args")
-                or ""
-            ),
-        })
+            "extra_server_args": str(se.get("extra_server_args") or se.get("candidate_extra_server_args") or ""),
+        }
+        # Carry the explore join key / source forward when the Coordinator
+        # stamped them, so phase_breakdown.explore.by_domain can attribute
+        # the gain to its specialist provenance instead of ``default_grid``.
+        fp = str(se.get("fingerprint") or se.get("variant_fingerprint") or "")
+        if fp:
+            promoted["fingerprint"] = fp
+        prov = str(se.get("provenance") or "").strip()
+        if prov:
+            promoted["provenance"] = prov
+        out.append(promoted)
         if cum_after is not None:
             prev_cum = cum_after
     return out
@@ -3341,6 +3830,15 @@ def collect_roofline(
 
     Returns ``[]`` when no snapshots exist or on parse failure
     (best-effort; errors recorded in ``warnings``).
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place on build
+            failure).
+
+    Returns:
+        list[dict[str, Any]]: A single-element comparison list (baseline /
+        latest / optional delta), or ``[]`` when no snapshots or on failure.
     """
     snapshots = state.get("roofline_snapshots")
     if not isinstance(snapshots, list) or not snapshots:
@@ -3350,6 +3848,7 @@ def collect_roofline(
         from ..orchestrator.roofline_snapshot import (
             build_roofline_comparison_from_history,
         )
+
         cmp = build_roofline_comparison_from_history(snapshots)
     except Exception as exc:  # noqa: BLE001 — defensive
         warnings.append(
@@ -3378,7 +3877,25 @@ def collect_attribution(
     oob_invocations: list[dict[str, Any]],
     adopted_kernels: list[dict[str, Any]],
     warnings: list[str],
+    forge_invocations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Attribute end-to-end gains to individual optimization-stack entries.
+
+    Prefers the authoritative ``gain_per_stack_entry`` ledger and falls back to
+    reconstructing attribution from the optimization stack.
+
+    Args:
+        state: Session state mapping.
+        geak_invocations: GEAK backend invocation records.
+        oob_invocations: Out-of-box backend invocation records.
+        adopted_kernels: Kernels adopted into the optimized stack.
+        warnings: Mutable list that collected warnings are appended to.
+        forge_invocations: Forge backend invocation records (own lane).
+
+    Returns:
+        An attribution dict mapping stack entries to their measured gains.
+    """
+    forge_invocations = forge_invocations or []
     # Prefer the authoritative ``gain_per_stack_entry`` ledger; else reconstruct from optimization_stack.
     state_entries = state.get("gain_per_stack_entry")
     state_provided = isinstance(state_entries, list) and len(state_entries) > 0
@@ -3401,10 +3918,7 @@ def collect_attribution(
             # Lifted post-hoc, not a per-event capture.
             method = "reconstructed"
         else:
-            all_deltas_set = all(
-                isinstance(e, dict) and e.get("delta_pct") is not None
-                for e in state_entries
-            )
+            all_deltas_set = all(isinstance(e, dict) and e.get("delta_pct") is not None for e in state_entries)
             method = "validated" if all_deltas_set else "reconstructed"
     elif stack_len == 1:
         # Single-entry stack: one unambiguous source of gain.
@@ -3417,9 +3931,13 @@ def collect_attribution(
     # Bucket entries by family for source_breakdown; validated total is the denominator.
     validated_total = _to_float(state.get("cumulative_gain_validated")) or 0.0
     family_totals: dict[str, float] = {
-        "kernel": 0.0, "sweep": 0.0, "other": 0.0,
+        "kernel": 0.0,
+        "sweep": 0.0,
+        "other": 0.0,
         # Legacy buckets for archived (pre-merge) sessions.
-        "backends": 0.0, "params": 0.0, "validate": 0.0,
+        "backends": 0.0,
+        "params": 0.0,
+        "validate": 0.0,
         # unified explore family (subsumes backends + params).
         "explore": 0.0,
         # FRAMEWORK_PR family, kept apart from ``other`` for a dedicated row.
@@ -3436,20 +3954,24 @@ def collect_attribution(
         fam = _action_family(str(e.get("action") or ""))
         family_totals[fam] = family_totals.get(fam, 0.0) + max(delta, 0.0)
 
-    # Split "kernel" between GEAK / OOB based on adopted KEEP entries' backend
+    # Split "kernel" between GEAK / OOB / Forge based on adopted KEEP entries' backend
     geak_kept_kids = {inv.get("kernel_id") for inv in geak_invocations if inv.get("decision") == "KEEP"}
-    oob_kept_kids  = {inv.get("kernel_id") for inv in oob_invocations  if inv.get("decision") == "KEEP"}
+    oob_kept_kids = {inv.get("kernel_id") for inv in oob_invocations if inv.get("decision") == "KEEP"}
+    forge_kept_kids = {inv.get("kernel_id") for inv in forge_invocations if inv.get("decision") == "KEEP"}
     kernel_total = family_totals.get("kernel", 0.0)
     geak_total = 0.0
     oob_total = 0.0
+    forge_total = 0.0
     for k in adopted_kernels:
         kid = k.get("kernel_id")
         gain = _to_float(k.get("e2e_gain_pct")) or 0.0
         if kid in geak_kept_kids:
             geak_total += gain
+        elif kid in forge_kept_kids:
+            forge_total += gain
         elif kid in oob_kept_kids:
             oob_total += gain
-    if geak_total + oob_total == 0.0 and kernel_total > 0.0:
+    if geak_total + oob_total + forge_total == 0.0 and kernel_total > 0.0:
         # Default all-OOB when no KEEP'd adopt entry is on disk.
         oob_total = kernel_total
 
@@ -3472,21 +3994,22 @@ def collect_attribution(
 
     return {
         "gain_per_stack_entry": entries,
-        "method":               method,
+        "method": method,
         "source_breakdown": {
-            "geak_pct_of_total":     round(geak_total, 2),
-            "oob_pct_of_total":      round(oob_total, 2),
+            "geak_pct_of_total": round(geak_total, 2),
+            "oob_pct_of_total": round(oob_total, 2),
+            "forge_pct_of_total": round(forge_total, 2),
             # primary row.
-            "explore_pct_of_total":  round(family_totals.get("explore", 0.0), 2),
+            "explore_pct_of_total": round(family_totals.get("explore", 0.0), 2),
             # FRAMEWORK_PR row; always emitted (0.0 when disabled/empty).
             "framework_pr_pct_of_total": round(family_totals.get("framework_pr", 0.0), 2),
             # GEMM_TUNING row; always emitted (0.0 when non-FP8/skipped/no KEEP).
             "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
             # Legacy rows, kept so archived-session reports reconcile (0.0 on current sessions).
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
-            "params_pct_of_total":   round(family_totals.get("params", 0.0), 2),
-            "sweep_pct_of_total":    round(family_totals.get("sweep", 0.0), 2),
-            "validated_total_pct":   round(validated_total, 2),
+            "params_pct_of_total": round(family_totals.get("params", 0.0), 2),
+            "sweep_pct_of_total": round(family_totals.get("sweep", 0.0), 2),
+            "validated_total_pct": round(validated_total, 2),
         },
         "phase_breakdown": phase_breakdown,
         "notes": notes,
@@ -3503,6 +4026,18 @@ def _collect_phase_breakdown(
     Assigns each KEEP entry to the phase active at its acceptance
     timestamp (explore further splits by domain, kernel by kernel_id).
     Missing phase_history → everything lands under ``unattributed``.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        entries (list[dict[str, Any]]): The per-stack gain-ledger entries.
+        warnings (list[str]): Shared warnings list (mutated in place when
+            ``phase_history`` is empty).
+
+    Returns:
+        dict[str, Any]: Per-phase gain buckets (prelude / framework_pr /
+        explore / kernel / gemm_tuning / sweep / close, plus a conditional
+        ``unattributed``), each with a ``total_gain_pct`` and phase-specific
+        sub-breakdowns.
     """
     # phase timeline lookup: for an entry ts, pick the latest row with ts_unix ≤ ts.
     history = state.get("phase_history") or []
@@ -3564,11 +4099,11 @@ def _collect_phase_breakdown(
         # FRAMEWORK_PR: upstream-PR bake-in phase; by_pr keyed per adopted PR.
         "framework_pr": {"total_gain_pct": 0.0, "by_pr": {}},
         "explore": {"total_gain_pct": 0.0, "by_domain": {}},
-        "kernel":  {"total_gain_pct": 0.0, "by_kernel_id": {}},
+        "kernel": {"total_gain_pct": 0.0, "by_kernel_id": {}},
         # GEMM_TUNING: KERNEL-entry tuner, bucketed apart; by_tuned_file keyed on the produced CSV.
         "gemm_tuning": {"total_gain_pct": 0.0, "by_tuned_file": {}},
-        "sweep":   {"total_gain_pct": 0.0},
-        "close":   {"total_gain_pct": 0.0},
+        "sweep": {"total_gain_pct": 0.0},
+        "close": {"total_gain_pct": 0.0},
         "unattributed": {"total_gain_pct": 0.0},
     }
 
@@ -3584,9 +4119,8 @@ def _collect_phase_breakdown(
             if ts_str:
                 try:
                     from datetime import datetime as _dt
-                    ts = _dt.fromisoformat(
-                        ts_str.replace("Z", "+00:00")
-                    ).timestamp()
+
+                    ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
                 except (TypeError, ValueError):
                     ts = 0.0
         try:
@@ -3614,60 +4148,50 @@ def _collect_phase_breakdown(
                 phase = "unattributed"
         bucket = phase_buckets[phase]
         bucket["total_gain_pct"] = round(
-            float(bucket["total_gain_pct"]) + float(delta), 2,
+            float(bucket["total_gain_pct"]) + float(delta),
+            2,
         )
         if phase == "explore":
             by_domain = bucket.setdefault("by_domain", {})
             fp = str(e.get("fingerprint") or e.get("variant_fingerprint") or "")
-            raw_prov = (
-                provenance_by_fp.get(fp)
-                or str(e.get("provenance") or "")
-                or "default_grid"
-            )
+            raw_prov = provenance_by_fp.get(fp) or str(e.get("provenance") or "") or "default_grid"
             # Normalize to a bare specialist key (see ``_normalize_specialist_key``).
             domain = _normalize_specialist_key(raw_prov)
             by_domain[domain] = round(
-                float(by_domain.get(domain, 0.0)) + float(delta), 2,
+                float(by_domain.get(domain, 0.0)) + float(delta),
+                2,
             )
             # Additive scope split (specialist dial); legacy sessions with no
             # ``scope`` recorded collapse into the ``unspecified`` bucket so
             # the totals still reconcile against ``total_gain_pct``.
             by_scope = bucket.setdefault("by_scope", {})
-            scope_key = (
-                scope_by_fp.get(fp)
-                or str(e.get("scope") or "")
-                or "unspecified"
-            )
+            scope_key = scope_by_fp.get(fp) or str(e.get("scope") or "") or "unspecified"
             by_scope[scope_key] = round(
-                float(by_scope.get(scope_key, 0.0)) + float(delta), 2,
+                float(by_scope.get(scope_key, 0.0)) + float(delta),
+                2,
             )
         elif phase == "kernel":
             by_kid = bucket.setdefault("by_kernel_id", {})
             kid = str(e.get("kernel_id") or e.get("action_kernel_id") or "?")
             by_kid[kid] = round(
-                float(by_kid.get(kid, 0.0)) + float(delta), 2,
+                float(by_kid.get(kid, 0.0)) + float(delta),
+                2,
             )
         elif phase == "framework_pr":
             # Key on the PR ref (variant_name), falling back to ``ref`` then ``?``.
             by_pr = bucket.setdefault("by_pr", {})
-            pr_key = (
-                str(e.get("variant_name") or "").strip()
-                or str(e.get("ref") or "").strip()
-                or "?"
-            )
+            pr_key = str(e.get("variant_name") or "").strip() or str(e.get("ref") or "").strip() or "?"
             by_pr[pr_key] = round(
-                float(by_pr.get(pr_key, 0.0)) + float(delta), 2,
+                float(by_pr.get(pr_key, 0.0)) + float(delta),
+                2,
             )
         elif phase == "gemm_tuning":
             # Key on the tuned CSV path, falling back to ``variant_name`` then ``?``.
             by_tuned = bucket.setdefault("by_tuned_file", {})
-            tuned_key = (
-                str(e.get("tuned_file") or "").strip()
-                or str(e.get("variant_name") or "").strip()
-                or "?"
-            )
+            tuned_key = str(e.get("tuned_file") or "").strip() or str(e.get("variant_name") or "").strip() or "?"
             by_tuned[tuned_key] = round(
-                float(by_tuned.get(tuned_key, 0.0)) + float(delta), 2,
+                float(by_tuned.get(tuned_key, 0.0)) + float(delta),
+                2,
             )
 
     # Drop the unattributed bucket when nothing landed there.
@@ -3675,10 +4199,7 @@ def _collect_phase_breakdown(
         phase_buckets.pop("unattributed", None)
 
     if not timeline:
-        warnings.append(
-            "attribution.phase_breakdown: phase_history empty; gains "
-            "bucketed via action family fallback"
-        )
+        warnings.append("attribution.phase_breakdown: phase_history empty; gains bucketed via action family fallback")
 
     return phase_buckets
 
@@ -3687,7 +4208,18 @@ def _reconstruct_gain_ledger(
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Approximate per-stack contribution (each entry's ``gain_pct`` as its delta) when Coordinator didn't record it; best-effort, see ``attribution.notes``."""
+    """Approximate per-stack contribution (each entry's ``gain_pct`` as its delta) when Coordinator didn't record it; best-effort, see ``attribution.notes``.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (kept for signature
+            symmetry; not mutated here).
+
+    Returns:
+        list[dict[str, Any]]: One reconstructed gain-ledger row per stack
+        entry, with cumulative gain and ``delta_pct``. Empty when there is no
+        ``optimization_stack``.
+    """
     stack = state.get("optimization_stack") or []
     if not isinstance(stack, list):
         return []
@@ -3698,17 +4230,26 @@ def _reconstruct_gain_ledger(
             continue
         delta = _to_float(entry.get("gain_pct"))
         cum_after = cum_before + (delta or 0.0)
-        out.append({
-            "ts":                str(entry.get("ts") or ""),
-            "stack_len_before":  i,
-            "stack_len_after":   i + 1,
-            "action":            str(entry.get("action") or ""),
-            "variant_name":      str(entry.get("variant_name") or ""),
-            "cum_gain_before":   round(cum_before, 4),
-            "cum_gain_after":    round(cum_after, 4),
-            "delta_pct":         delta,
+        row: dict[str, Any] = {
+            "ts": str(entry.get("ts") or ""),
+            "stack_len_before": i,
+            "stack_len_after": i + 1,
+            "action": str(entry.get("action") or ""),
+            "variant_name": str(entry.get("variant_name") or ""),
+            "cum_gain_before": round(cum_before, 4),
+            "cum_gain_after": round(cum_after, 4),
+            "delta_pct": delta,
             "extra_server_args": str(entry.get("extra_server_args") or ""),
-        })
+        }
+        # Preserve the explore join key / source so attribution can resolve the
+        # specialist provenance (else by_domain collapses into ``default_grid``).
+        fp = str(entry.get("fingerprint") or entry.get("variant_fingerprint") or "")
+        if fp:
+            row["fingerprint"] = fp
+        prov = str(entry.get("provenance") or "").strip()
+        if prov:
+            row["provenance"] = prov
+        out.append(row)
         cum_before = cum_after
     return out
 
@@ -3735,20 +4276,34 @@ def collect_roofline_progress(
     list-shaped key. Pure over ``state`` + ``manifest``. Output: ``trajectory[]``
     (baseline + KEEPs, ts-sorted), ceiling/target reference lines from the latest
     snapshot, headline current-best numbers, and a ``snapshots[]`` passthrough.
+
+    Args:
+        session_dir (Path): Absolute session root (kept for a uniform collector
+            signature; the body is pure over state/manifest).
+        state (dict[str, Any]): Parsed ``state.json``.
+        manifest (dict[str, Any]): Parsed ``manifest.json``.
+        warnings (list[str]): Shared warnings list (mutated in place on a
+            trajectory / current-best mismatch).
+
+    Returns:
+        dict[str, Any]: The ``roofline_progress`` section (trajectory, ceiling
+        / target reference lines, headline numbers, and normalized snapshots).
     """
     # Trajectory: baseline + each KEEP.
     baseline_tput = _to_float(state.get("baseline_tput")) or 0.0
     trajectory: list[dict[str, Any]] = []
     if baseline_tput > 0:
-        trajectory.append({
-            "ts":         str(manifest.get("created_at_utc") or ""),
-            "tput":       baseline_tput,
-            "label":      "baseline",
-            "action":     "baseline",
-            "gain_pct":   0.0,
-            "flags":      "",
-            "extra_envs": {},
-        })
+        trajectory.append(
+            {
+                "ts": str(manifest.get("created_at_utc") or ""),
+                "tput": baseline_tput,
+                "label": "baseline",
+                "action": "baseline",
+                "gain_pct": 0.0,
+                "flags": "",
+                "extra_envs": {},
+            }
+        )
 
     stack = state.get("optimization_stack") or []
     if isinstance(stack, list):
@@ -3761,19 +4316,18 @@ def collect_roofline_progress(
             tput = _to_float(entry.get("tput"))
             if tput is None or tput <= 0:
                 continue
-            gain_pct = (
-                ((tput - baseline_tput) / baseline_tput * 100.0)
-                if baseline_tput > 0 else 0.0
+            gain_pct = ((tput - baseline_tput) / baseline_tput * 100.0) if baseline_tput > 0 else 0.0
+            trajectory.append(
+                {
+                    "ts": str(entry.get("ts") or ""),
+                    "tput": tput,
+                    "label": str(entry.get("variant_name") or entry.get("action") or ""),
+                    "action": str(entry.get("action") or ""),
+                    "gain_pct": round(gain_pct, 4),
+                    "flags": str(entry.get("candidate_extra_server_args") or ""),
+                    "extra_envs": dict(entry.get("extra_envs") or {}),
+                }
             )
-            trajectory.append({
-                "ts":         str(entry.get("ts") or ""),
-                "tput":       tput,
-                "label":      str(entry.get("variant_name") or entry.get("action") or ""),
-                "action":     str(entry.get("action") or ""),
-                "gain_pct":   round(gain_pct, 4),
-                "flags":      str(entry.get("candidate_extra_server_args") or ""),
-                "extra_envs": dict(entry.get("extra_envs") or {}),
-            })
 
     # Reference lines: ceiling + target.
     snapshots_raw = state.get("roofline_snapshots") or []
@@ -3785,43 +4339,35 @@ def collect_roofline_progress(
 
     # Use the LATEST snapshot (ceiling refines as the pipeline reruns).
     latest_snap = snapshots[-1] if snapshots else None
-    ceiling_tok = (
-        _to_float(latest_snap.get("theoretical_peak_tok_per_sec"))
-        if latest_snap else None
-    )
+    ceiling_tok = _to_float(latest_snap.get("theoretical_peak_tok_per_sec")) if latest_snap else None
     ceiling_available = ceiling_tok is not None and ceiling_tok > 0
-    target_tok = (
-        round(ceiling_tok * DEFAULT_ROOFLINE_TARGET_RATIO, 4)
-        if ceiling_available else None
-    )
+    target_tok = round(ceiling_tok * DEFAULT_ROOFLINE_TARGET_RATIO, 4) if ceiling_available else None
 
     # Headline numbers.
-    current_best_tput = (
-        trajectory[-1]["tput"] if trajectory else 0.0
-    )
+    current_best_tput = trajectory[-1]["tput"] if trajectory else 0.0
     cumulative_gain_pct = _to_float(state.get("cumulative_gain")) or 0.0
     pct_of_ceiling = (
-        round(current_best_tput / ceiling_tok * 100.0, 4)
-        if ceiling_available and current_best_tput > 0 else None
+        round(current_best_tput / ceiling_tok * 100.0, 4) if ceiling_available and current_best_tput > 0 else None
     )
     pct_of_target = (
         round(current_best_tput / target_tok * 100.0, 4)
-        if (target_tok and target_tok > 0 and current_best_tput > 0) else None
+        if (target_tok and target_tok > 0 and current_best_tput > 0)
+        else None
     )
 
     out: dict[str, Any] = {
-        "ceiling_tok_per_sec":          ceiling_tok,
-        "target_tok_per_sec":           target_tok,
-        "ceiling_ratio_target":         DEFAULT_ROOFLINE_TARGET_RATIO,
-        "ceiling_available":            ceiling_available,
-        "trajectory":                   trajectory,
-        "baseline_tput":                baseline_tput,
-        "current_best_tput":            current_best_tput,
-        "cumulative_gain_pct":          round(cumulative_gain_pct, 4),
-        "current_best_pct_of_ceiling":  pct_of_ceiling,
-        "current_best_pct_of_target":   pct_of_target,
-        "roofline_failure_streak":      _to_int(state.get("roofline_failure_streak")) or 0,
-        "snapshots":                    snapshots,
+        "ceiling_tok_per_sec": ceiling_tok,
+        "target_tok_per_sec": target_tok,
+        "ceiling_ratio_target": DEFAULT_ROOFLINE_TARGET_RATIO,
+        "ceiling_available": ceiling_available,
+        "trajectory": trajectory,
+        "baseline_tput": baseline_tput,
+        "current_best_tput": current_best_tput,
+        "cumulative_gain_pct": round(cumulative_gain_pct, 4),
+        "current_best_pct_of_ceiling": pct_of_ceiling,
+        "current_best_pct_of_target": pct_of_target,
+        "roofline_failure_streak": _to_int(state.get("roofline_failure_streak")) or 0,
+        "snapshots": snapshots,
     }
     if latest_snap:
         out["snapshot_top_bottleneck"] = str(latest_snap.get("top_bottleneck") or "")
@@ -3836,7 +4382,8 @@ def collect_roofline_progress(
     # means the stack wasn't fully promoted (resume mid-promotion).
     cb_tput = _to_float((state.get("current_best") or {}).get("tput"))
     if (
-        cb_tput is not None and cb_tput > 0
+        cb_tput is not None
+        and cb_tput > 0
         and current_best_tput > 0
         and abs(cb_tput - current_best_tput) / max(cb_tput, 1.0) > 0.001
     ):
@@ -3862,26 +4409,26 @@ def _normalize_roofline_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
     top_kernel: dict[str, Any] = {}
     if isinstance(top_kernel_raw, dict):
         top_kernel = {
-            "name":           str(top_kernel_raw.get("name") or ""),
-            "bound_type":     str(top_kernel_raw.get("bound_type") or ""),
+            "name": str(top_kernel_raw.get("name") or ""),
+            "bound_type": str(top_kernel_raw.get("bound_type") or ""),
             "efficiency_pct": _to_float(top_kernel_raw.get("efficiency_pct")) or 0.0,
-            "gpu_pct":        _to_float(top_kernel_raw.get("gpu_pct")) or 0.0,
+            "gpu_pct": _to_float(top_kernel_raw.get("gpu_pct")) or 0.0,
         }
     return {
-        "snapshot_id":                  _to_int(snap.get("snapshot_id")) or 0,
-        "ts":                           str(snap.get("ts") or ""),
-        "achieved_tok_per_sec":         _to_float(snap.get("achieved_tok_per_sec")) or 0.0,
+        "snapshot_id": _to_int(snap.get("snapshot_id")) or 0,
+        "ts": str(snap.get("ts") or ""),
+        "achieved_tok_per_sec": _to_float(snap.get("achieved_tok_per_sec")) or 0.0,
         "theoretical_peak_tok_per_sec": _to_float(snap.get("theoretical_peak_tok_per_sec")) or 0.0,
-        "within_roofline_pct":          _to_float(snap.get("within_roofline_pct")) or 0.0,
-        "gap_to_roofline_pct":          _to_float(snap.get("gap_to_roofline_pct")) or 0.0,
-        "compute_pct":                  _to_float(snap.get("compute_pct")) or 0.0,
-        "idle_pct":                     _to_float(snap.get("idle_pct")) or 0.0,
-        "comm_pct":                     _to_float(snap.get("comm_pct")) or 0.0,
-        "top_bottleneck":               str(snap.get("top_bottleneck") or ""),
-        "top_kernel":                   top_kernel,
-        "analysis_md_path":             str(snap.get("analysis_md_path") or ""),
-        "kernel_roofline_path":         str(snap.get("kernel_roofline_path") or ""),
-        "trace_input":                  str(snap.get("trace_input") or ""),
+        "within_roofline_pct": _to_float(snap.get("within_roofline_pct")) or 0.0,
+        "gap_to_roofline_pct": _to_float(snap.get("gap_to_roofline_pct")) or 0.0,
+        "compute_pct": _to_float(snap.get("compute_pct")) or 0.0,
+        "idle_pct": _to_float(snap.get("idle_pct")) or 0.0,
+        "comm_pct": _to_float(snap.get("comm_pct")) or 0.0,
+        "top_bottleneck": str(snap.get("top_bottleneck") or ""),
+        "top_kernel": top_kernel,
+        "analysis_md_path": str(snap.get("analysis_md_path") or ""),
+        "kernel_roofline_path": str(snap.get("kernel_roofline_path") or ""),
+        "trace_input": str(snap.get("trace_input") or ""),
     }
 
 
@@ -3894,6 +4441,15 @@ def collect_kernel_roofline(
     Missing file → ``{}`` (quiet); malformed → ``{}`` + warning; non-list
     ``kernels`` → ``[]``. Entries are type-coerced so upstream drift
     doesn't break consumers.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on
+            malformed input).
+
+    Returns:
+        dict[str, Any]: The ``kernel_roofline`` section, or ``{}`` when the
+        file is absent / not a JSON object.
     """
     path = session_dir / _KERNEL_ROOFLINE_REL_PATH
     if not path.exists():
@@ -3901,31 +4457,26 @@ def collect_kernel_roofline(
         return {}
     blob = _load_json_safe(path, warnings)
     if not isinstance(blob, dict):
-        warnings.append(
-            f"kernel_roofline: {_KERNEL_ROOFLINE_REL_PATH} is not a JSON object"
-        )
+        warnings.append(f"kernel_roofline: {_KERNEL_ROOFLINE_REL_PATH} is not a JSON object")
         return {}
 
     raw_kernels = blob.get("kernels")
     if raw_kernels is None:
         kernels: list[dict[str, Any]] = []
     elif not isinstance(raw_kernels, list):
-        warnings.append(
-            "kernel_roofline.kernels is not a list; dropping entries"
-        )
+        warnings.append("kernel_roofline.kernels is not a list; dropping entries")
         kernels = []
     else:
-        kernels = [_normalize_kernel_roofline_entry(k) for k in raw_kernels
-                   if isinstance(k, dict)]
+        kernels = [_normalize_kernel_roofline_entry(k) for k in raw_kernels if isinstance(k, dict)]
 
     out: dict[str, Any] = {
-        "schema_version":         _to_int(blob.get("schema_version")) or 1,
-        "source":                 str(blob.get("source") or ""),
-        "analysis_md_path":       str(blob.get("analysis_md_path") or ""),
+        "schema_version": _to_int(blob.get("schema_version")) or 1,
+        "source": str(blob.get("source") or ""),
+        "analysis_md_path": str(blob.get("analysis_md_path") or ""),
         "kernel_candidates_path": str(blob.get("kernel_candidates_path") or ""),
-        "trace_input":            str(blob.get("trace_input") or ""),
-        "trace_input_type":       str(blob.get("trace_input_type") or ""),
-        "kernels":                kernels,
+        "trace_input": str(blob.get("trace_input") or ""),
+        "trace_input_type": str(blob.get("trace_input_type") or ""),
+        "kernels": kernels,
     }
     return out
 
@@ -3940,19 +4491,19 @@ def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
         dict[str, Any]: The entry with all fields coerced to stable types.
     """
     return {
-        "kernel_id":             str(raw.get("kernel_id") or ""),
-        "name":                  str(raw.get("name") or ""),
-        "source_file":           str(raw.get("source_file") or ""),
-        "kernel_category":       str(raw.get("kernel_category") or ""),
-        "bound_type":            str(raw.get("bound_type") or ""),
-        "arithmetic_intensity":  _to_float(raw.get("arithmetic_intensity")) or 0.0,
-        "flops_per_byte":        _to_float(raw.get("flops_per_byte")) or 0.0,
-        "efficiency_percent":    _to_float(raw.get("efficiency_percent")) or 0.0,
-        "gpu_pct":               _to_float(raw.get("gpu_pct")) or 0.0,
-        "call_count":            _to_int(raw.get("call_count")) or 0,
-        "duration_us":           _to_float(raw.get("duration_us")) or 0.0,
+        "kernel_id": str(raw.get("kernel_id") or ""),
+        "name": str(raw.get("name") or ""),
+        "source_file": str(raw.get("source_file") or ""),
+        "kernel_category": str(raw.get("kernel_category") or ""),
+        "bound_type": str(raw.get("bound_type") or ""),
+        "arithmetic_intensity": _to_float(raw.get("arithmetic_intensity")) or 0.0,
+        "flops_per_byte": _to_float(raw.get("flops_per_byte")) or 0.0,
+        "efficiency_percent": _to_float(raw.get("efficiency_percent")) or 0.0,
+        "gpu_pct": _to_float(raw.get("gpu_pct")) or 0.0,
+        "call_count": _to_int(raw.get("call_count")) or 0,
+        "duration_us": _to_float(raw.get("duration_us")) or 0.0,
         "reusable_native_kernel": bool(raw.get("reusable_native_kernel")),
-        "rocprof_roofline":      raw.get("rocprof_roofline"),
+        "rocprof_roofline": raw.get("rocprof_roofline"),
     }
 
 
@@ -3969,6 +4520,15 @@ def collect_kernel_optimization_summary(
     Missing → ``{}`` (quiet); malformed → ``{}`` + warning. Otherwise
     mirrored verbatim (producer additions ride through) apart from shape
     guards on the iterated containers + an added ``report_path``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on
+            malformed input).
+
+    Returns:
+        dict[str, Any]: The mirrored summary section (with a ``report_path``),
+        or ``{}`` when the file is absent / not a JSON object.
     """
     path = session_dir / _KERNEL_OPT_SUMMARY_REL_PATH
     if not path.exists():
@@ -3976,10 +4536,7 @@ def collect_kernel_optimization_summary(
         return {}
     blob = _load_json_safe(path, warnings)
     if not isinstance(blob, dict):
-        warnings.append(
-            f"kernel_optimization_summary: {_KERNEL_OPT_SUMMARY_REL_PATH} "
-            "is not a JSON object"
-        )
+        warnings.append(f"kernel_optimization_summary: {_KERNEL_OPT_SUMMARY_REL_PATH} is not a JSON object")
         return {}
 
     out = dict(blob)
@@ -3988,30 +4545,27 @@ def collect_kernel_optimization_summary(
     if raw_by_kernel is None:
         out["by_kernel"] = []
     elif not isinstance(raw_by_kernel, list):
-        warnings.append(
-            "kernel_optimization_summary.by_kernel is not a list; dropping entries"
-        )
+        warnings.append("kernel_optimization_summary.by_kernel is not a list; dropping entries")
         out["by_kernel"] = []
     else:
         # Drop non-dict rows; pass the rest through verbatim (shapes per §A1.4).
         out["by_kernel"] = [r for r in raw_by_kernel if isinstance(r, dict)]
 
     for key in (
-        "totals", "rejection_breakdown", "unattempted_reason_breakdown",
-        "failure_reason_breakdown", "field_glossary",
+        "totals",
+        "rejection_breakdown",
+        "unattempted_reason_breakdown",
+        "failure_reason_breakdown",
+        "field_glossary",
     ):
         val = out.get(key)
         if val is not None and not isinstance(val, dict):
-            warnings.append(
-                f"kernel_optimization_summary.{key} is not an object; dropping"
-            )
+            warnings.append(f"kernel_optimization_summary.{key} is not an object; dropping")
             out[key] = {}
 
     takeaways = out.get("top_takeaways")
     if takeaways is not None and not isinstance(takeaways, list):
-        warnings.append(
-            "kernel_optimization_summary.top_takeaways is not a list; dropping"
-        )
+        warnings.append("kernel_optimization_summary.top_takeaways is not a list; dropping")
         out["top_takeaways"] = []
 
     out["report_path"] = _rel(path, session_dir) or _KERNEL_OPT_SUMMARY_REL_PATH
@@ -4032,25 +4586,30 @@ def collect_conc_sweep_summary(
     mirrored verbatim (only ``comparison`` shape-guarded) + ``report_path``.
     Do not synthesize the optional blocks the producer omits when
     ``status="skipped"``; pass through exactly what it wrote.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on
+            malformed input).
+
+    Returns:
+        dict[str, Any]: The mirrored conc-sweep summary (with a
+        ``report_path``), or ``{}`` when the file is absent / not a JSON
+        object.
     """
     path = session_dir / _CONC_SWEEP_SUMMARY_REL_PATH
     if not path.exists():
         return {}
     blob = _load_json_safe(path, warnings)
     if not isinstance(blob, dict):
-        warnings.append(
-            f"conc_sweep_summary: {_CONC_SWEEP_SUMMARY_REL_PATH} "
-            "is not a JSON object"
-        )
+        warnings.append(f"conc_sweep_summary: {_CONC_SWEEP_SUMMARY_REL_PATH} is not a JSON object")
         return {}
 
     out = dict(blob)
 
     comparison = out.get("comparison")
     if comparison is not None and not isinstance(comparison, list):
-        warnings.append(
-            "conc_sweep_summary.comparison is not a list; dropping entries"
-        )
+        warnings.append("conc_sweep_summary.comparison is not a list; dropping entries")
         out["comparison"] = []
 
     out["report_path"] = _rel(path, session_dir) or _CONC_SWEEP_SUMMARY_REL_PATH
@@ -4067,6 +4626,13 @@ def collect_optimization_stack(
 
     Each entry is stamped ``validated`` (within
     ``cumulative_gain_validated_stack_len``). Returns ``[]`` when absent.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        list[dict[str, Any]]: One normalized stack entry per KEEP (each flagged
+        ``validated``), or ``[]`` when the stack is absent.
     """
     stack = state.get("optimization_stack") or []
     if not isinstance(stack, list):
@@ -4079,26 +4645,36 @@ def collect_optimization_stack(
     for idx, entry in enumerate(stack):
         if not isinstance(entry, dict):
             continue
-        out.append(
-            _normalize_optimization_stack_entry(entry, validated=idx < validated_len)
-        )
+        out.append(_normalize_optimization_stack_entry(entry, validated=idx < validated_len))
     return out
 
 
 def _normalize_optimization_stack_entry(
-    raw: dict[str, Any], *, validated: bool,
+    raw: dict[str, Any],
+    *,
+    validated: bool,
 ) -> dict[str, Any]:
-    """Coerce one stack entry to the schema shape; unknown fields pass through verbatim (Inv-10.1 fact-layer compat)."""
+    """Coerce one stack entry to the schema shape; unknown fields pass through verbatim (Inv-10.1 fact-layer compat).
+
+    Args:
+        raw (dict[str, Any]): One raw ``optimization_stack`` entry.
+        validated (bool): Whether the entry falls within the validated stack
+            length.
+
+    Returns:
+        dict[str, Any]: The coerced stack entry with optional evidence fields
+        included only when present in ``raw``.
+    """
     # Known fields — coerced types
     out: dict[str, Any] = {
-        "action":                       str(raw.get("action") or ""),
-        "variant_name":                 str(raw.get("variant_name") or ""),
-        "candidate_extra_server_args":  str(raw.get("candidate_extra_server_args") or ""),
-        "extra_envs":                   dict(raw.get("extra_envs") or {}),
-        "tput":                         _to_float(raw.get("tput")),
-        "ts":                           str(raw.get("ts") or ""),
-        "workspace":                    raw.get("workspace"),
-        "validated":                    bool(validated),
+        "action": str(raw.get("action") or ""),
+        "variant_name": str(raw.get("variant_name") or ""),
+        "candidate_extra_server_args": str(raw.get("candidate_extra_server_args") or ""),
+        "extra_envs": dict(raw.get("extra_envs") or {}),
+        "tput": _to_float(raw.get("tput")),
+        "ts": str(raw.get("ts") or ""),
+        "workspace": raw.get("workspace"),
+        "validated": bool(validated),
     }
     # gemm_tuning-specific evidence (optional).
     if "tuned_file" in raw:
@@ -4151,16 +4727,16 @@ def collect_source_files(
     critic = session_dir / "critic-workdir"
     rob = session_dir / "robustness-workdir"
     out: dict[str, Any] = {
-        "manifest":           "manifest.json",
-        "state":              "state.json",
-        "baseline_report":    baseline_path,
-        "critic_workdir":     "critic-workdir" if critic.exists() else None,
+        "manifest": "manifest.json",
+        "state": "state.json",
+        "baseline_report": baseline_path,
+        "critic_workdir": "critic-workdir" if critic.exists() else None,
         "robustness_workdir": "robustness-workdir" if rob.exists() else None,
     }
     # Skip empty list categories so the renderer shows no ``count=0`` rows.
     for key, lst in (
         ("profile_reports", profile_reports),
-        ("sweep_reports",   sweep_reports),
+        ("sweep_reports", sweep_reports),
         ("kernel_attempts", kernel_attempts),
     ):
         if lst:
@@ -4182,6 +4758,18 @@ def collect_phase_segments(
     own ``phase`` when present, else by the ``[entered_ts, exit_ts)``
     window. Empty when ``phase_history`` is missing (readers fall back to
     the flat ``phase_timeline``).
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        phase_timeline (list[dict[str, Any]]): The flat action timeline whose
+            events are attributed into segments.
+        warnings (list[str]): Shared warnings list (mutated in place when a
+            legacy plateau proxy fired).
+
+    Returns:
+        list[dict[str, Any]]: One segment per phase transition (with folded
+        sub-events and attributed actions). Empty when ``phase_history`` is
+        missing.
     """
     history = state.get("phase_history") or []
     if not isinstance(history, list) or not history:
@@ -4192,6 +4780,15 @@ def collect_phase_segments(
     sub_events = [r for r in rows if not str(r.get("to_phase") or "")]
 
     def _unix(row: dict[str, Any]) -> float | None:
+        """Return a row's timestamp as a Unix epoch float.
+
+        Args:
+            row: Event row carrying ``ts_unix`` and/or ``ts``.
+
+        Returns:
+            The ``ts_unix`` value when numeric, else the parsed ISO ``ts``,
+            else ``None``.
+        """
         u = row.get("ts_unix")
         if isinstance(u, (int, float)):
             return float(u)
@@ -4214,22 +4811,33 @@ def collect_phase_segments(
         if entered_unix is not None and exit_unix is not None:
             elapsed = max(0.0, float(exit_unix) - float(entered_unix))
         evidence_dict = dict(row.get("evidence") or {})
-        segments.append({
-            "phase":           str(row.get("to_phase") or ""),
-            "from_phase":      str(row.get("from_phase") or ""),
-            "entered_ts":      entered_ts,
-            "entered_unix":    entered_unix,
-            "exit_ts":         exit_ts,
-            "exit_unix":       exit_unix,
-            "exit_reason":     exit_reason,
-            "evidence":        evidence_dict,
-            "events":          [],
-            "actions":         [],
-            "elapsed_seconds": elapsed,
-        })
+        segments.append(
+            {
+                "phase": str(row.get("to_phase") or ""),
+                "from_phase": str(row.get("from_phase") or ""),
+                "entered_ts": entered_ts,
+                "entered_unix": entered_unix,
+                "exit_ts": exit_ts,
+                "exit_unix": exit_unix,
+                "exit_reason": exit_reason,
+                "evidence": evidence_dict,
+                "events": [],
+                "actions": [],
+                "elapsed_seconds": elapsed,
+            }
+        )
 
     def _owner_by_window(ts: str) -> dict[str, Any] | None:
-        """Return the segment whose ``[entered_ts, exit_ts)`` ISO window holds ``ts`` (lexicographic compare)."""
+        """Return the segment whose ``[entered_ts, exit_ts)`` ISO window holds ``ts`` (lexicographic compare).
+
+        Args:
+            ts (str): An ISO-8601 timestamp.
+
+        Returns:
+            dict[str, Any] | None: The owning segment, the last segment when
+            ``ts`` is empty / past the end, or ``None`` when there are no
+            segments.
+        """
         if not ts:
             return segments[-1] if segments else None
         for s in segments:
@@ -4244,19 +4852,19 @@ def collect_phase_segments(
     # Fold non-transition rows (sub-events) into their containing segment.
     for ev in sub_events:
         ev_evidence = dict(ev.get("evidence") or {})
-        if ev_evidence.get("r09_provisional") or (
-            str(ev_evidence.get("evidence") or "") == "m2_proxy"
-        ):
+        if ev_evidence.get("r09_provisional") or (str(ev_evidence.get("evidence") or "") == "m2_proxy"):
             proxy_seen = True
         ev_ts = _iso_z(ev.get("ts"))
         s = _owner_by_window(ev_ts)
         if s is not None:
-            s["events"].append({
-                "event":  str(ev.get("event") or ev.get("reason") or ""),
-                "reason": str(ev.get("reason") or ""),
-                "ts":     ev_ts,
-                "evidence": ev_evidence,
-            })
+            s["events"].append(
+                {
+                    "event": str(ev.get("event") or ev.get("reason") or ""),
+                    "reason": str(ev.get("reason") or ""),
+                    "ts": ev_ts,
+                    "evidence": ev_evidence,
+                }
+            )
 
     # Attribute timeline actions by declared ``phase``, else the ts window.
     phase_to_segs: dict[str, list[dict[str, Any]]] = {}
@@ -4306,7 +4914,19 @@ def collect_kb_provenance(
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the Cortex KB integration audit, merging SharedState warm-start fields, the NDJSON queue counts, and the audit-log status tail."""
+    """Collect the Cortex KB integration audit, merging SharedState warm-start fields, the NDJSON queue counts, and the audit-log status tail.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        manifest (dict[str, Any]): Parsed ``manifest.json``.
+        warnings (list[str]): Shared warnings list (mutated in place; also used
+            to surface PR-monitor / flusher status markers).
+
+    Returns:
+        dict[str, Any]: The KB-provenance section (warm-start fields, queue
+        counts, audit-status tail, recipe-snapshot reads, and flusher status).
+    """
     from ..session_paths import (
         cortex_audit_jsonl as _audit_path,
         cortex_dead_letter_ndjson as _dl_path,
@@ -4315,6 +4935,7 @@ def collect_kb_provenance(
         cortex_flusher_status_json as _flusher_status_path,
         cortex_pending_ndjson as _pending_path,
         pr_monitor_status_json as _pr_status_path,
+        recipe_snapshot_audit_jsonl as _recipe_audit_path,
     )
 
     # Surface the PR Monitor reachability snapshot via ``warnings`` so it's greppable.
@@ -4324,19 +4945,14 @@ def collect_kb_provenance(
             with pr_status_path.open("r", encoding="utf-8") as f:
                 pr_status = json.load(f)
         except (OSError, json.JSONDecodeError) as exc:
-            warnings.append(
-                f"pr_monitor:status_marker_unreadable:{exc!r}"[:240]
-            )
+            warnings.append(f"pr_monitor:status_marker_unreadable:{exc!r}"[:240])
         else:
             if not pr_status.get("enabled"):
                 warnings.append("pr_monitor:disabled")
             elif not pr_status.get("reachable"):
                 # Dashboard keys the PR Monitor ingress alert on this exact string.
                 url = str(pr_status.get("url") or "")
-                warnings.append(
-                    f"pr_monitor:unreachable:{url}"[:240] if url
-                    else "pr_monitor:unreachable"
-                )
+                warnings.append(f"pr_monitor:unreachable:{url}"[:240] if url else "pr_monitor:unreachable")
 
     def _count_lines(p: Path) -> int:
         """Count non-blank lines in a file, recording read errors.
@@ -4371,10 +4987,7 @@ def collect_kb_provenance(
             if not p.exists():
                 return []
             with p.open("r", encoding="utf-8") as f:
-                rows = [
-                    json.loads(line) for line in f
-                    if line.strip()
-                ]
+                rows = [json.loads(line) for line in f if line.strip()]
             return rows[-n:]
         except (OSError, json.JSONDecodeError) as exc:
             warnings.append(f"kb_provenance: failed to read audit {p}: {exc!r}")
@@ -4391,32 +5004,105 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
+    # Recipe-snapshot / gbrain remote read audit (RecipeKB.audit_hook ->
+    # recipe_snapshot/.audit.jsonl). Summarises whether the snapshot KB was
+    # actually consulted, which backend served it, and how each read resolved.
+    recipe_audit = _read_last_n_audit(_recipe_audit_path(session_dir), n=50)
+    recipe_by_resolution: dict[str, int] = {}
+    recipe_by_remote: dict[str, int] = {}
+    # Per-path (e.g. gbrain vs cortex) attribution derived from the composite
+    # remote's provenance, emitted by the dispatcher audit. ``by_source``
+    # counts how often each path contributed a returned row; ``best_config_by
+    # _source`` counts which path supplied the replayable champion config.
+    recipe_by_source: dict[str, int] = {}
+    recipe_best_config_by_source: dict[str, int] = {}
+    recipe_hits = 0
+    for row in recipe_audit:
+        recipe_by_resolution[str(row.get("resolution") or "unknown")] = (
+            recipe_by_resolution.get(str(row.get("resolution") or "unknown"), 0) + 1
+        )
+        recipe_by_remote[str(row.get("remote") or "unknown")] = (
+            recipe_by_remote.get(str(row.get("remote") or "unknown"), 0) + 1
+        )
+        if row.get("hit"):
+            recipe_hits += 1
+        result = row.get("result") if isinstance(row.get("result"), dict) else {}
+        for src in (result.get("sources") or []):
+            recipe_by_source[str(src)] = recipe_by_source.get(str(src), 0) + 1
+        best_config_src = result.get("best_config_source")
+        for src in (
+            best_config_src if isinstance(best_config_src, list)
+            else [best_config_src] if best_config_src else []
+        ):
+            recipe_best_config_by_source[str(src)] = (
+                recipe_best_config_by_source.get(str(src), 0) + 1
+            )
+
     cortex_sid = (state.get("cortex_session_id") or "").strip()
     warm = state.get("warm_start_recipe") or {}
+    # FINAL reference attribution: which path supplied the warm recipe that was
+    # actually applied this session. Prefer the merged row's field provenance,
+    # then the WarmStartContext source tag set at T0.
+    warm_recipe_row = warm.get("recipe") if isinstance(warm, dict) else {}
+    warm_start_recipe_source = ""
+    # 1) Precise self-case: the merged identity row owns its replayable config,
+    #    so its per-field provenance is the authoritative applied-config source.
+    if isinstance(warm_recipe_row, dict):
+        warm_field_sources = warm_recipe_row.get("_field_sources")
+        if isinstance(warm_field_sources, dict):
+            bc_src = warm_field_sources.get("best_config")
+            if isinstance(bc_src, str) and bc_src:
+                warm_start_recipe_source = bc_src
+            elif isinstance(bc_src, list) and bc_src:
+                warm_start_recipe_source = str(bc_src[0])
+    # 2) Config-donor case: the identity row carries no replayable config (its
+    #    best_config was borrowed from a sibling), so the T0 WarmStartContext
+    #    source — resolved donor-aware in _warm_recipe_source — is authoritative
+    #    over the identity row's generic _sources.
+    if not warm_start_recipe_source:
+        wsc = state.get("warm_start_context") or {}
+        warm_start_recipe_source = str(
+            ((wsc.get("match") or {}).get("source") or "")
+        ) if isinstance(wsc, dict) else ""
+    # 3) Last resort: the identity row's first contributing source.
+    if not warm_start_recipe_source and isinstance(warm_recipe_row, dict):
+        warm_sources = warm_recipe_row.get("_sources")
+        if isinstance(warm_sources, list) and warm_sources:
+            warm_start_recipe_source = str(warm_sources[0])
     pitfalls = state.get("warm_start_pitfalls") or []
     lessons = state.get("warm_start_lessons") or []
     # warm-recipe replay outcome; empty before completion / when --no-warm-replay.
     warm_replay_outcome = state.get("warm_replay_outcome") or {}
 
     out: dict[str, Any] = {
-        "cortex_session_id":      cortex_sid,
-        "warm_start_ts":          state.get("warm_start_ts") or "",
+        "cortex_session_id": cortex_sid,
+        "warm_start_ts": state.get("warm_start_ts") or "",
         "warm_start_recipe_seen": bool(warm and warm.get("raw")),
         "warm_start_recipe_tier": str(warm.get("tier") or "") if isinstance(warm, dict) else "",
+        "warm_start_recipe_source": warm_start_recipe_source,
         "warm_start_pitfall_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
         "warm_start_lesson_count": len(lessons) if isinstance(lessons, list) else 0,
         # operator-visible replay summary, passed through verbatim.
         "warm_replay": dict(warm_replay_outcome) if isinstance(warm_replay_outcome, dict) else {},
-        "warm_replay_attempted":   bool(state.get("warm_replay_attempted")),
-        "warm_history_injected":   bool(state.get("warm_history_injected")),
-        "stack_fingerprint":      manifest.get("stack_fingerprint") or {},
+        "warm_replay_attempted": bool(state.get("warm_replay_attempted")),
+        "warm_history_injected": bool(state.get("warm_history_injected")),
+        "stack_fingerprint": manifest.get("stack_fingerprint") or {},
         "queue": {
-            "pending_lines":     _count_lines(pending_path),
+            "pending_lines": _count_lines(pending_path),
             "flushed_bookmarks": _count_lines(flushed_path),
             "dead_letter_lines": _count_lines(dl_path),
         },
-        "audit_tail_count":     len(audit_tail),
-        "audit_status_counts":  status_counts,
+        "audit_tail_count": len(audit_tail),
+        "audit_status_counts": status_counts,
+        "recipe_snapshot_reads": {
+            "count": len(recipe_audit),
+            "hits": recipe_hits,
+            "by_resolution": recipe_by_resolution,
+            "by_remote": recipe_by_remote,
+            "by_source": recipe_by_source,
+            "best_config_by_source": recipe_best_config_by_source,
+            "tail": recipe_audit[-10:],
+        },
         "flusher_status": _collect_flusher_status(
             session_dir,
             status_path=_flusher_status_path(session_dir),
@@ -4443,18 +5129,30 @@ def _collect_flusher_status(
     pid_path: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Merge the ``.kb_flusher_status.json`` boot marker with a live pid probe into one stable shape."""
+    """Merge the ``.kb_flusher_status.json`` boot marker with a live pid probe into one stable shape.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        status_path (Path): The ``.kb_flusher_status.json`` boot marker path.
+        pid_path (Path): The flusher pid-file path used for the liveness probe.
+        warnings (list[str]): Shared warnings list (mutated in place when the
+            marker is unreadable).
+
+    Returns:
+        dict[str, Any]: The merged flusher-status dict (enabled / spawned /
+        alive / pid / config / reason).
+    """
     base: dict[str, Any] = {
-        "enabled":       False,
-        "spawned":       False,
-        "alive":         False,
-        "pid":           None,
+        "enabled": False,
+        "spawned": False,
+        "alive": False,
+        "pid": None,
         "cortex_kb_url": None,
-        "interval_sec":  0.0,
-        "batch_size":    0,
-        "reason":        "no_marker",
-        "ts":            "",
-        "pid_path":      str(pid_path),
+        "interval_sec": 0.0,
+        "batch_size": 0,
+        "reason": "no_marker",
+        "ts": "",
+        "pid_path": str(pid_path),
     }
     if status_path.exists():
         try:
@@ -4462,15 +5160,20 @@ def _collect_flusher_status(
                 marker = json.load(f)
             if isinstance(marker, dict):
                 for k in (
-                    "enabled", "spawned", "pid", "cortex_kb_url",
-                    "interval_sec", "batch_size", "reason", "ts", "pid_path",
+                    "enabled",
+                    "spawned",
+                    "pid",
+                    "cortex_kb_url",
+                    "interval_sec",
+                    "batch_size",
+                    "reason",
+                    "ts",
+                    "pid_path",
                 ):
                     if k in marker:
                         base[k] = marker[k]
         except (OSError, json.JSONDecodeError) as exc:
-            warnings.append(
-                f"kb_flusher:status_marker_unreadable:{exc!r}"[:240]
-            )
+            warnings.append(f"kb_flusher:status_marker_unreadable:{exc!r}"[:240])
 
     pid_alive = False
     pid_from_file: int | None = None
@@ -4494,7 +5197,15 @@ def _collect_flusher_status(
 
 # specialist_runs section
 def _coerce_round_id(value: Any) -> int | str:
-    """Normalise ``round_id`` to int when purely numeric, else keep the string (empty/None → 0). Never raises."""
+    """Normalise ``round_id`` to int when purely numeric, else keep the string (empty/None → 0). Never raises.
+
+    Args:
+        value (Any): The raw ``round_id`` value.
+
+    Returns:
+        int | str: The integer round id when ``value`` is purely numeric,
+        ``0`` for empty / ``None``, else the original string.
+    """
     if value is None or value == "":
         return 0
     if isinstance(value, bool):
@@ -4521,6 +5232,18 @@ def collect_specialist_runs(
 
     ``include_transcripts`` inlines the transcript bytes under each ref's
     ``body`` (default False = path-only).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place on scan /
+            read failures).
+        include_transcripts (bool): When ``True``, inline each transcript's
+            bytes under its ``body``. Defaults to ``False`` (path-only).
+
+    Returns:
+        list[dict[str, Any]]: One shaped specialist-round row (with transcript
+        refs). Empty when no rounds exist.
     """
     rounds = state.get("specialist_rounds") or []
     if not isinstance(rounds, list) or not rounds:
@@ -4538,9 +5261,7 @@ def collect_specialist_runs(
                 if done_path.exists():
                     by_task[child.name] = done_path
         except OSError as exc:
-            warnings.append(
-                f"specialist_runs: failed to scan {runs_root}: {exc!r}"
-            )
+            warnings.append(f"specialist_runs: failed to scan {runs_root}: {exc!r}")
 
     out: list[dict[str, Any]] = []
     for raw in rounds:
@@ -4551,26 +5272,24 @@ def collect_specialist_runs(
         if not domains and raw.get("domain"):
             domains = [str(raw.get("domain"))]
         entry: dict[str, Any] = {
-            "round_id":          _coerce_round_id(raw.get("round_id")),
-            "dispatched_at":     str(raw.get("dispatched_at") or ""),
-            "completed_at":      str(raw.get("completed_at") or ""),
-            "domains":           domains,
-            "tags":              list(raw.get("tags") or []),
-            "parallelism":       int(raw.get("parallelism") or 0),
-            "proposals_total":   int(raw.get("proposals_total") or 0),
-            "proposals_kept":    int(raw.get("proposals_kept") or 0),
+            "round_id": _coerce_round_id(raw.get("round_id")),
+            "dispatched_at": str(raw.get("dispatched_at") or ""),
+            "completed_at": str(raw.get("completed_at") or ""),
+            "domains": domains,
+            "tags": list(raw.get("tags") or []),
+            "parallelism": int(raw.get("parallelism") or 0),
+            "proposals_total": int(raw.get("proposals_total") or 0),
+            "proposals_kept": int(raw.get("proposals_kept") or 0),
             "proposals_rejected": int(raw.get("proposals_rejected") or 0),
             "proposals_skipped": int(raw.get("proposals_skipped") or 0),
-            "kb_edge_ids":       list(raw.get("kb_edge_ids") or []),
-            "confidence_avg":    _to_float(
-                raw.get("confidence_avg")
-                if raw.get("confidence_avg") is not None
-                else raw.get("confidence")
+            "kb_edge_ids": list(raw.get("kb_edge_ids") or []),
+            "confidence_avg": _to_float(
+                raw.get("confidence_avg") if raw.get("confidence_avg") is not None else raw.get("confidence")
             ),
-            "domain_breakdown":  _normalize_specialist_domain_breakdown(
+            "domain_breakdown": _normalize_specialist_domain_breakdown(
                 raw.get("domain_breakdown"),
             ),
-            "notes":             list(raw.get("notes") or []),
+            "notes": list(raw.get("notes") or []),
         }
         # Attach transcript refs, tolerating a singular ``task_id`` anchor.
         task_ids = list(raw.get("task_ids") or [])
@@ -4590,13 +5309,11 @@ def collect_specialist_runs(
             if include_transcripts:
                 try:
                     ref["body"] = done_path.read_text(
-                        encoding="utf-8", errors="replace",
+                        encoding="utf-8",
+                        errors="replace",
                     )
                 except OSError as exc:
-                    warnings.append(
-                        f"specialist_runs: cannot read transcript "
-                        f"{done_path}: {exc!r}"
-                    )
+                    warnings.append(f"specialist_runs: cannot read transcript {done_path}: {exc!r}")
             transcripts.append(ref)
         entry["transcripts"] = transcripts
         out.append(entry)
@@ -4623,16 +5340,25 @@ def _normalize_specialist_domain_breakdown(
         if not isinstance(payload, dict):
             continue
         norm[str(domain)] = {
-            "dispatched":         int(payload.get("dispatched") or 0),
-            "proposals_total":    int(payload.get("proposals_total") or 0),
-            "proposals_kept":     int(payload.get("proposals_kept") or 0),
+            "dispatched": int(payload.get("dispatched") or 0),
+            "proposals_total": int(payload.get("proposals_total") or 0),
+            "proposals_kept": int(payload.get("proposals_kept") or 0),
             "proposals_rejected": int(payload.get("proposals_rejected") or 0),
         }
     return norm
 
 
 def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
-    """Best-effort domain for ``task_id`` within a round; "" when unmapped (older M5 rounds)."""
+    """Best-effort domain for ``task_id`` within a round; "" when unmapped (older M5 rounds).
+
+    Args:
+        round_entry (dict[str, Any]): One specialist-round record.
+        task_id (str): The task id to resolve a domain for.
+
+    Returns:
+        str: The mapped domain, an unambiguous single tag/domain, or ``""``
+        when it cannot be determined.
+    """
     mapping = round_entry.get("task_domains")
     if isinstance(mapping, dict):
         v = mapping.get(task_id)
@@ -4658,8 +5384,10 @@ _TOKEN_OUT_KEY = "output_tokens"
 _TOKEN_CACHE_CREATE_KEY = "cache_creation_input_tokens"
 _TOKEN_CACHE_READ_KEY = "cache_read_input_tokens"
 _TOKEN_KEYS_ALL: tuple[str, ...] = (
-    _TOKEN_IN_KEY, _TOKEN_OUT_KEY,
-    _TOKEN_CACHE_CREATE_KEY, _TOKEN_CACHE_READ_KEY,
+    _TOKEN_IN_KEY,
+    _TOKEN_OUT_KEY,
+    _TOKEN_CACHE_CREATE_KEY,
+    _TOKEN_CACHE_READ_KEY,
 )
 
 
@@ -4669,6 +5397,13 @@ def _coerce_token(value: Any) -> int:
     The rollup sums tokens, so a missing counter contributes 0 here (the
     ``None``-vs-0 distinction matters only on the raw per-call rows, which
     we preserve verbatim in ``decision_trace.jsonl``).
+
+    Args:
+        value (Any): A raw token-counter value.
+
+    Returns:
+        int: The integer count, or ``0`` when ``value`` is ``None`` / not
+        numeric.
     """
     if value is None:
         return 0
@@ -4679,6 +5414,11 @@ def _coerce_token(value: Any) -> int:
 
 
 def _empty_token_bucket() -> dict[str, int]:
+    """Return a fresh, zeroed token-rollup bucket.
+
+    Returns:
+        A dict with zeroed input/output/cache token totals and call count.
+    """
     return {
         "total_in": 0,
         "total_out": 0,
@@ -4689,29 +5429,41 @@ def _empty_token_bucket() -> dict[str, int]:
 
 
 def _fold_call_into_bucket(bucket: dict[str, int], call: dict[str, Any]) -> None:
+    """Add one call's token counts into a rollup bucket in place.
+
+    Args:
+        bucket: Token bucket to accumulate into (mutated).
+        call: Per-call record carrying token counters.
+    """
     bucket["total_in"] += _coerce_token(call.get(_TOKEN_IN_KEY))
     bucket["total_out"] += _coerce_token(call.get(_TOKEN_OUT_KEY))
-    bucket["total_cache_creation"] += _coerce_token(
-        call.get(_TOKEN_CACHE_CREATE_KEY)
-    )
+    bucket["total_cache_creation"] += _coerce_token(call.get(_TOKEN_CACHE_CREATE_KEY))
     bucket["total_cache_read"] += _coerce_token(call.get(_TOKEN_CACHE_READ_KEY))
     bucket["calls"] += 1
 
 
 def _load_llm_calls(
-    session_dir: Path, warnings: list[str],
+    session_dir: Path,
+    warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Read every LLM-call row: the in-process ledger + all ext shards.
+    """Read every LLM-call row from ``reports/trace/llm_calls.jsonl``.
 
     Merges ``reports/trace/llm_calls.jsonl`` with every
     ``reports/trace/ext/*.jsonl`` shard written by out-of-process children.
     Best-effort: missing files / dirs yield ``[]``; malformed lines are
     skipped by :func:`_load_jsonl_safe`.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on scan
+            failures).
+
+    Returns:
+        list[dict[str, Any]]: Every well-formed LLM-call row across the ledger
+        and ext shards. Empty when no trace files exist.
     """
     trace_root = session_dir / "reports" / "trace"
-    rows: list[dict[str, Any]] = list(
-        _load_jsonl_safe(trace_root / "llm_calls.jsonl", warnings)
-    )
+    rows: list[dict[str, Any]] = list(_load_jsonl_safe(trace_root / "llm_calls.jsonl", warnings))
     ext_dir = trace_root / "ext"
     if ext_dir.is_dir():
         try:
@@ -4724,14 +5476,85 @@ def _load_llm_calls(
     return [r for r in rows if isinstance(r, dict)]
 
 
-def _load_dispatch_history_all(
+def _load_proposal_task_map(
     session_dir: Path, warnings: list[str],
+) -> dict[str, str]:
+    """Read ``reports/trace/proposal_task_map.jsonl`` into ``{msg_id: task_id}``.
+
+    Written by the Coordinator when an approved proposal is materialized into a
+    task. Lets the join attribute a Critic review call (which only carries the
+    reviewed proposal ``msg_id``) to the decision the proposal became. Later
+    rows win on duplicate msg_id. Best-effort: missing file yields ``{}``.
+    """
+    rows = _load_jsonl_safe(
+        session_dir / "reports" / "trace" / "proposal_task_map.jsonl", warnings,
+    )
+    out: dict[str, str] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        mid = str(r.get("proposal_msg_id") or "").strip()
+        tid = str(r.get("task_id") or "").strip()
+        if mid and tid:
+            out[mid] = tid
+    return out
+
+
+def _attribute_critic_calls(
+    calls: list[dict[str, Any]], msg_to_task: dict[str, str],
+) -> None:
+    """Backfill ``task_id`` on Critic review calls from the proposal→task map.
+
+    A Critic reasoning call records the proposal ``msg_id``s it reviewed but not
+    a ``task_id`` (the task is materialized only after approval). We only
+    attribute a call that reviewed exactly ONE proposal which resolves to
+    exactly one task, so it joins that decision through the normal key path.
+
+    A *batch* review (several reviewed msg_ids) judged all of those proposals
+    together, so folding its whole token spend onto a single decision — even
+    when only one of the batch was later materialized (the others rejected /
+    not materialized, so absent from the map) — would over-attribute that
+    decision's cost and under-count overhead. Such batch reviews, plus
+    ambiguous (multiple distinct tasks) or unresolvable reviews, are left
+    unkeyed (→ overhead). The call dicts are mutated in place. No-op when the
+    map is empty.
+    """
+    if not msg_to_task:
+        return
+    for call in calls:
+        if str(call.get("component") or "") != "critic":
+            continue
+        if str(call.get("task_id") or "").strip():
+            continue  # already keyed; respect it
+        reviewed = call.get("reviewed_msg_ids")
+        if not isinstance(reviewed, list):
+            continue
+        reviewed_ids = {m for m in reviewed if isinstance(m, str) and m}
+        resolved = {msg_to_task[m] for m in reviewed_ids if m in msg_to_task}
+        # Single-target review only: a partial mapping (reviewed several, only
+        # one materialized) must NOT collapse the batch's cost onto that one.
+        if len(reviewed_ids) == 1 and len(resolved) == 1:
+            call["task_id"] = next(iter(resolved))
+
+
+def _load_dispatch_history_all(
+    session_dir: Path,
+    warnings: list[str],
 ) -> list[dict[str, Any]]:
     """Read every dynamic_action ``dispatch_history.jsonl`` row.
 
     Walks ``agents/orchestration/dynamic_actions/<dyn_id>/`` and stamps
     each row with its owning ``dyn_id`` so the join can key on it. Returns
     ``[]`` when the dynamic_actions tree is absent (no dynamic actions ran).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place on scan
+            failures).
+
+    Returns:
+        list[dict[str, Any]]: Every dispatch-history row, each stamped with its
+        owning ``dyn_id``. Empty when no dynamic actions ran.
     """
     root = session_dir / "agents" / "orchestration" / "dynamic_actions"
     if not root.is_dir():
@@ -4760,7 +5583,15 @@ def _build_phase_windows(
     Derived from ``state.phase_history`` rows that carry a ``to_phase``
     (real transitions). Used to backfill a call's / decision's phase from
     its ``ts`` when the producer didn't stamp one (out-of-process children,
-    sub-agent runners). Empty when phase_history is missing.
+    sub-agent runners, the proposal_scorer off the dispatch path). Empty when
+    phase_history is missing.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        list[tuple[float, str]]: ``(entered_unix, phase)`` pairs sorted by
+        timestamp. Empty when ``phase_history`` is missing.
     """
     history = state.get("phase_history") or []
     if not isinstance(history, list):
@@ -4783,7 +5614,17 @@ def _build_phase_windows(
 
 
 def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
-    """Return the phase active at ``ts`` per ``windows`` (latest <= ts)."""
+    """Return the phase active at ``ts`` per ``windows`` (latest <= ts).
+
+    Args:
+        ts (Any): An ISO-8601 timestamp (or numeric Unix value).
+        windows (list[tuple[float, str]]): The ``(entered_unix, phase)``
+            timeline from :func:`_build_phase_windows`.
+
+    Returns:
+        str: The latest phase whose boundary is ``<= ts``, or ``""`` when ``ts``
+        is unparseable or the timeline is empty.
+    """
     unix = _parse_iso_unix(ts)
     if unix is None or not windows:
         return ""
@@ -4796,10 +5637,30 @@ def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
     return phase
 
 
+# Components whose unjoined LLM spend is *legitimately* not tied to a single
+# decision (planning / review / monitoring), bucketed as ``overhead`` rather
+# than ``unattributed`` so the attribution ledger separates "expected shared
+# cost" from "a real attribution gap to chase".
+_OVERHEAD_COMPONENTS: frozenset[str] = frozenset({
+    "orchestration",
+    "critic",
+    "robustness",
+})
+
+
 def _decision_key(task_id: str, dyn_id: str) -> str | None:
     """Canonical join key for a decision / call: ``dyn_id`` wins over
     ``task_id`` (a dynamic_action dispatch owns both). ``None`` when
-    neither is present (the call can only be ts-window bucketed)."""
+    neither is present (the call can only be ts-window bucketed).
+
+    Args:
+        task_id (str): The call's / decision's task id.
+        dyn_id (str): The owning dynamic-action id.
+
+    Returns:
+        str | None: ``"dyn:<dyn_id>"`` when a dyn id is present, else
+        ``"task:<task_id>"``, else ``None``.
+    """
     d = (dyn_id or "").strip()
     if d:
         return f"dyn:{d}"
@@ -4807,6 +5668,266 @@ def _decision_key(task_id: str, dyn_id: str) -> str | None:
     if t:
         return f"task:{t}"
     return None
+
+
+def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, int]:
+    """Copy a token bucket and add ``total_in_out`` + ``grand_total``.
+
+    Handles both bucket shapes: the rollup view (split
+    ``total_cache_creation`` / ``total_cache_read``) and the per-decision view
+    (pre-summed ``total_cache``). ``total_in_out`` is prompt+completion only;
+    ``grand_total`` folds in every cache token too.
+
+    Args:
+        bucket (dict[str, Any] | None): A token bucket in either shape, or
+            ``None``.
+
+    Returns:
+        dict[str, int]: A copy of the bucket with added ``total_in_out`` and
+        ``grand_total`` figures.
+    """
+    b = dict(bucket or {})
+    ti = int(b.get("total_in", 0) or 0)
+    to = int(b.get("total_out", 0) or 0)
+    cache = (
+        int(b.get("total_cache", 0) or 0)
+        + int(b.get("total_cache_creation", 0) or 0)
+        + int(b.get("total_cache_read", 0) or 0)
+    )
+    b["total_in_out"] = ti + to
+    b["grand_total"] = ti + to + cache
+    return b
+
+
+def collect_token_usage(
+    decision_trace: dict[str, Any],
+    action_timeline: list[dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Promote the token rollup to a discoverable top-level ``token_usage``.
+
+    Pure / derived: reuses the rollup already computed by
+    :func:`collect_decision_trace` (no second ledger read), so the totals here
+    always reconcile with ``decision_trace``. Adds:
+
+    * ``session_total`` / ``by_component`` / ``by_phase`` — every call, with
+      ``total_in_out`` + ``grand_total`` convenience figures.
+    * ``attribution`` — decision-attributed vs unattributed split (most
+      orchestration / kernel / critic / proposal_scorer turns carry no
+      decision key, so they land in ``unattributed``).
+    * ``timeline`` — each ``action_timeline`` row annotated with the tokens
+      that join to it on ``task_id`` (``None`` when an action has no LLM spend).
+
+    Empty-but-valid (zeroed ``session_total``) when ``decision_trace`` is empty
+    (e.g. a pre-trace session), so downstream readers never KeyError.
+
+    Args:
+        decision_trace (dict[str, Any]): The output of
+            :func:`collect_decision_trace` (supplies the token rollup).
+        action_timeline (list[dict[str, Any]]): The visible action timeline to
+            annotate with joined token figures.
+        warnings (list[str]): Shared warnings list (kept for a uniform
+            collector signature; not mutated here).
+
+    Returns:
+        dict[str, Any]: The ``token_usage`` section (session total, per
+        component / phase, decision-attribution split, and the annotated
+        timeline).
+    """
+    dt = decision_trace if isinstance(decision_trace, dict) else {}
+    rollup = dt.get("token_rollup") or {}
+    session_total = rollup.get("session_total") or _empty_token_bucket()
+    by_component = rollup.get("by_component") or {}
+    by_phase = rollup.get("by_phase") or {}
+    unattributed = dt.get("unattributed_tokens") or _empty_token_bucket()
+    overhead = dt.get("overhead_tokens") or _empty_token_bucket()
+
+    # attributed = session_total - unattributed - overhead, field by field.
+    attributed = _empty_token_bucket()
+    for k in attributed:
+        attributed[k] = (
+            int(session_total.get(k, 0) or 0)
+            - int(unattributed.get(k, 0) or 0)
+            - int(overhead.get(k, 0) or 0)
+        )
+    total_calls = int(session_total.get("calls", 0) or 0)
+    attr_calls = int(attributed.get("calls", 0) or 0)
+    overhead_calls = int(overhead.get("calls", 0) or 0)
+    attributed_calls_pct = (
+        round(100.0 * attr_calls / total_calls, 2) if total_calls else 0.0
+    )
+    overhead_calls_pct = (
+        round(100.0 * overhead_calls / total_calls, 2) if total_calls else 0.0
+    )
+
+    # Per-task token map from the per-decision view (only decision-bearing
+    # task_ids carry tokens — i.e. the attributed subset).
+    tokens_by_task: dict[str, dict[str, Any]] = {}
+    for entry in dt.get("decision_trace") or []:
+        if not isinstance(entry, dict):
+            continue
+        dec = entry.get("decision") or {}
+        tid = str(dec.get("task_id") or dec.get("dyn_id") or "").strip()
+        tok = entry.get("tokens") or {}
+        if tid and int(tok.get("calls", 0) or 0) > 0:
+            tokens_by_task[tid] = tok
+
+    # Annotate the visible action timeline with tokens joined on task_id.
+    timeline: list[dict[str, Any]] = []
+    for act in action_timeline or []:
+        if not isinstance(act, dict):
+            continue
+        tid = str(act.get("task_id") or "").strip()
+        tok = tokens_by_task.get(tid) if tid else None
+        timeline.append(
+            {
+                "task_id": tid or None,
+                "action": str(act.get("action") or act.get("change") or ""),
+                "phase": str(act.get("phase") or ""),
+                "decision": str(act.get("decision") or ""),
+                "ts": str(act.get("ts") or ""),
+                "tokens": _token_convenience(tok) if tok else None,
+            }
+        )
+
+    return {
+        "session_total": _token_convenience(session_total),
+        "by_component": {c: _token_convenience(b) for c, b in by_component.items()},
+        "by_phase": {p: _token_convenience(b) for p, b in by_phase.items()},
+        "attribution": {
+            "attributed_to_decisions": _token_convenience(attributed),
+            "overhead": _token_convenience(overhead),
+            "unattributed": _token_convenience(unattributed),
+            "attributed_calls_pct": attributed_calls_pct,
+            "overhead_calls_pct": overhead_calls_pct,
+        },
+        "timeline": timeline,
+        "source": "reports/trace/llm_calls.jsonl",
+        "correlation": (
+            "timeline[].task_id joins action_timeline[].task_id; components "
+            "without a per-decision task_id (orchestration / kernel / critic / "
+            "proposal_scorer) are counted in session_total/by_component/by_phase "
+            "but appear as tokens=null in timeline (see attribution.unattributed)."
+        ),
+    }
+
+
+def collect_langfuse(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Assemble the ``langfuse`` section: was the trace pushed live, and how much.
+
+    Two-tier source (the breakdown is normally written *before* the
+    session-end ``flush_session``, so the on-disk receipt may not exist yet):
+
+    1. ``reports/trace/langfuse_receipt.json`` if present -- the post-flush
+       receipt with final counts (``receipt_source="receipt_file"``).
+    2. Otherwise a live read of the per-session emitter singleton -- reports
+       the gating + redacted config + in-process running counts
+       (``receipt_source="live_emitter"``, ``counts_final=False``).
+
+    Either way credentials are redacted to host + presence booleans. Never
+    raises: any failure degrades to a minimal ``config_only`` view so the
+    breakdown still records whether the feature was even on.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        manifest (dict[str, Any]): Parsed ``manifest.json``.
+        warnings (list[str]): Shared warnings list (mutated in place on receipt
+            / emitter read failures).
+
+    Returns:
+        dict[str, Any]: The ``langfuse`` section, tagged with a
+        ``receipt_source`` of ``receipt_file`` / ``live_emitter`` /
+        ``config_only`` depending on which tier resolved.
+    """
+    from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+
+    # Tier 1: the persisted post-flush receipt (final counts).
+    try:
+        receipt = lfe.read_receipt(session_dir)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"langfuse: read_receipt failed: {type(exc).__name__}: {exc}")
+        receipt = None
+    if receipt is not None:
+        receipt["receipt_source"] = "receipt_file"
+        return receipt
+
+    # Tier 2: live read of the emitter singleton (pre-flush / in-process).
+    try:
+        section = lfe.get_emitter(session_dir).receipt()
+        section["receipt_source"] = "live_emitter"
+        return section
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"langfuse: live receipt failed: {type(exc).__name__}: {exc}")
+
+    # Tier 3 fallback: config-only view straight from env + manifest, so the
+    # breakdown still records whether the feature was configured at all.
+    from inference_optimizer.orchestrator.trace import trace_env as tenv
+
+    creds = tenv.langfuse_credentials()
+    return {
+        "enabled": False,
+        "disabled_reason": "unknown",
+        "config": {
+            "enable_flag": tenv.langfuse_live_enabled(),
+            "host": creds.get(tenv.ENV_LANGFUSE_HOST),
+            "public_key_set": tenv.ENV_LANGFUSE_PUBLIC_KEY in creds,
+            "secret_key_set": tenv.ENV_LANGFUSE_SECRET_KEY in creds,
+            "sdk_available": None,
+        },
+        "trace_id": None,
+        "session_id": str(manifest.get("claw_session_id") or manifest.get("session_id") or ""),
+        "correlated_on": (
+            "claw_session_id" if str(manifest.get("claw_session_id") or "").strip() else "internal_session_id"
+        ),
+        "counts": {},
+        "counts_final": False,
+        "receipt_source": "config_only",
+    }
+
+
+def _proposal_scores_by_variant(state: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Index ``specialist_rounds[].ensemble_scores`` by variant name.
+
+    Returns ``{variant_name: [{rater, score, reason}, ...]}`` so a decision row
+    can show who scored the proposal and how (the proposal_scorer signal that
+    fed the KEEP/REVERT). Best-effort: shape drift yields an empty map.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        dict[str, list[dict[str, Any]]]: Per-variant rater scores. Empty when
+        no ensemble scores are present.
+    """
+    out: dict[str, list[dict[str, Any]]] = {}
+    rounds = state.get("specialist_rounds")
+    if not isinstance(rounds, list):
+        return out
+    for r in rounds:
+        if not isinstance(r, dict):
+            continue
+        ens = r.get("ensemble_scores")
+        models = ens.get("models") if isinstance(ens, dict) else None
+        if not isinstance(models, dict):
+            continue
+        for slug, per_model in models.items():
+            if not isinstance(per_model, dict):
+                continue
+            for name, cell in per_model.items():
+                if not isinstance(cell, dict) or cell.get("score") is None:
+                    continue
+                out.setdefault(str(name), []).append(
+                    {
+                        "rater": str(slug),
+                        "score": _to_float(cell.get("score")),
+                        "reason": str(cell.get("reason") or ""),
+                    }
+                )
+    return out
 
 
 def collect_decision_trace(
@@ -4817,7 +5938,7 @@ def collect_decision_trace(
     """Join the token ledger to the decision streams into one timeline.
 
     Implements FULL_TRACE_DESIGN §6: read the per-call token rows
-    (``reports/trace/llm_calls.jsonl`` + ``ext/*.jsonl``), read the
+    (``reports/trace/llm_calls.jsonl``), read the
     decision rows (``optimization_journal.json`` KEEP/REVERT entries +
     every dynamic_action ``dispatch_history.jsonl``), then attach each
     decision's LLM calls by the shared ``task_id`` / ``dyn_id`` key, with a
@@ -4832,16 +5953,32 @@ def collect_decision_trace(
     "unattributed_tokens": {...}}``. All-empty (zeroed rollup) when no
     trace files exist, so a session that ran before the trace subsystem
     landed degrades cleanly.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: ``{"decision_trace", "token_rollup",
+        "unattributed_tokens"}`` — the joined timeline plus token rollups.
     """
     calls = _load_llm_calls(session_dir, warnings)
     phase_windows = _build_phase_windows(state)
+    scores_by_variant = _proposal_scores_by_variant(state)
+
+    # Item 2: attribute Critic review calls to the decision their reviewed
+    # proposal became (msg_id -> task_id), so critic spend that served a single
+    # materialized proposal joins that decision instead of landing in overhead.
+    _attribute_critic_calls(calls, _load_proposal_task_map(session_dir, warnings))
 
     # ── Index calls by decision key; orphans (no key) go to a ts list ──
     calls_by_key: dict[str, list[dict[str, Any]]] = {}
     orphan_calls: list[dict[str, Any]] = []
     for call in calls:
         key = _decision_key(
-            str(call.get("task_id") or ""), str(call.get("dyn_id") or ""),
+            str(call.get("task_id") or ""),
+            str(call.get("dyn_id") or ""),
         )
         if key is None:
             orphan_calls.append(call)
@@ -4857,40 +5994,78 @@ def collect_decision_trace(
         key = _decision_key(task_id, "")
         ts = _iso_z(e.get("ts"))
         phase = str(e.get("phase") or "").strip() or _phase_at(ts, phase_windows)
-        decisions.append({
-            "kind": "keep_revert",
-            "key": key,
-            "phase": phase,
-            "tick": e.get("tick"),
-            "ts": ts,
-            "decision": {
-                "component": "orchestration",
-                "change": str(e.get("change") or ""),
-                "outcome": str(e.get("outcome") or ""),
-                "gain_pct": _to_float(e.get("gain_pct")),
-                "task_id": task_id,
-            },
-        })
+        provenance = str(e.get("provenance") or "")
+        change_kind = str(e.get("kind") or "")
+        # ``component`` is now the real proposer (specialist:<domain> / grid /
+        # orchestration) derived from provenance, not a hard-coded constant, so
+        # the decision timeline answers "who proposed this".
+        decision: dict[str, Any] = {
+            "component": proposer_for(provenance) if provenance else "orchestration",
+            "change": str(e.get("change") or ""),
+            "outcome": str(e.get("outcome") or ""),
+            "gain_pct": _to_float(e.get("gain_pct")),
+            "task_id": task_id,
+            "operation_kind": operation_kind_for("", change_kind),
+        }
+        # Predicted (pre-measurement) gain, when the proposer supplied one, so
+        # the decision row carries predicted-vs-realized for calibration.
+        predicted_gain = _to_float(e.get("predicted_gain_pct"))
+        if predicted_gain is not None:
+            decision["predicted_gain_pct"] = predicted_gain
+        if change_kind:
+            decision["kind"] = change_kind
+        if provenance:
+            decision["provenance"] = provenance
+        scope = str(e.get("scope") or "")
+        if scope:
+            decision["scope"] = scope
+        fingerprint = str(e.get("fingerprint") or "")
+        if fingerprint:
+            decision["fingerprint"] = fingerprint
+        detail_metrics = e.get("metrics")
+        if isinstance(detail_metrics, dict) and detail_metrics:
+            decision["metrics"] = detail_metrics
+        variant_name = str(e.get("variant_name") or "")
+        if variant_name:
+            decision["variant_name"] = variant_name
+            # Attach the proposal_scorer signal (who rated this proposal, how)
+            # so the decision step answers "was it scored, by whom, how high".
+            scored = scores_by_variant.get(variant_name)
+            if scored:
+                decision["proposal_scores"] = scored
+        decisions.append(
+            {
+                "kind": "keep_revert",
+                "key": key,
+                "phase": phase,
+                "tick": e.get("tick"),
+                "ts": ts,
+                "decision": decision,
+            }
+        )
     for row in _load_dispatch_history_all(session_dir, warnings):
         dyn_id = str(row.get("dyn_id") or "")
         key = _decision_key(str(row.get("task_id") or ""), dyn_id)
         ts = _iso_z(row.get("ts"))
         phase = _phase_at(ts, phase_windows)
-        decisions.append({
-            "kind": "dynamic_action",
-            "key": key,
-            "phase": phase,
-            "tick": row.get("tick"),
-            "ts": ts,
-            "decision": {
-                "component": "dynamic_action",
-                "event": str(row.get("event") or ""),
-                "dyn_id": dyn_id,
-                "verdict": row.get("verdict"),
-                "outcome": str(row.get("integrate_status") or row.get("terminal_state") or ""),
-                "gain_pct": _to_float(row.get("delta_pct")),
-            },
-        })
+        decisions.append(
+            {
+                "kind": "dynamic_action",
+                "key": key,
+                "phase": phase,
+                "tick": row.get("tick"),
+                "ts": ts,
+                "decision": {
+                    "component": "dynamic_action",
+                    "operation_kind": "dynamic_action",
+                    "event": str(row.get("event") or ""),
+                    "dyn_id": dyn_id,
+                    "verdict": row.get("verdict"),
+                    "outcome": str(row.get("integrate_status") or row.get("terminal_state") or ""),
+                    "gain_pct": _to_float(row.get("delta_pct")),
+                },
+            }
+        )
 
     # ── Attach calls to decisions; build the joined trace ──
     # A given key's calls attach to exactly ONE decision — the first by ts
@@ -4899,7 +6074,7 @@ def collect_decision_trace(
     # empty token buckets so the per-decision sums don't double-count.
     consumed_keys: set[str] = set()
     decision_trace: list[dict[str, Any]] = []
-    for dec in sorted(decisions, key=lambda d: (d.get("ts") or "")):
+    for dec in sorted(decisions, key=lambda d: d.get("ts") or ""):
         key = dec.get("key")
         if key and key in calls_by_key and key not in consumed_keys:
             attached = calls_by_key[key]
@@ -4913,31 +6088,46 @@ def collect_decision_trace(
             comp_bucket = by_component.setdefault(comp, _empty_token_bucket())
             _fold_call_into_bucket(comp_bucket, call)
             _fold_call_into_bucket(agg, call)
-        decision_trace.append({
-            "phase": dec.get("phase") or "",
-            "tick": dec.get("tick"),
-            "ts": dec.get("ts") or "",
-            "decision": dec.get("decision") or {},
-            "tokens": {
-                "by_component": by_component,
-                "total_in": agg["total_in"],
-                "total_out": agg["total_out"],
-                "total_cache": agg["total_cache_creation"] + agg["total_cache_read"],
-                "calls": agg["calls"],
-            },
-        })
+        decision_trace.append(
+            {
+                "phase": dec.get("phase") or "",
+                "tick": dec.get("tick"),
+                "ts": dec.get("ts") or "",
+                "decision": dec.get("decision") or {},
+                "tokens": {
+                    "by_component": by_component,
+                    "total_in": agg["total_in"],
+                    "total_out": agg["total_out"],
+                    "total_cache": agg["total_cache_creation"] + agg["total_cache_read"],
+                    "calls": agg["calls"],
+                },
+            }
+        )
 
     # ── Unjoined calls: keyed calls with no matching decision + orphans ──
     # These still count toward the session total + phase/component rollup so
-    # the books balance, but they don't anchor to a decision row.
+    # the books balance, but they don't anchor to a decision row. We split
+    # them two ways for an honest attribution ledger:
+    #   * ``overhead``      — inherently cross-decision LLM spend (planning /
+    #                         review / monitoring) that legitimately has no
+    #                         single owning decision (orchestration / critic /
+    #                         robustness reactor turns).
+    #   * ``unattributed``  — everything else that *should* have carried a
+    #                         decision key but didn't (a real gap to chase).
     unattributed = _empty_token_bucket()
+    overhead = _empty_token_bucket()
+
+    def _route_unjoined(call: dict[str, Any]) -> dict[str, int]:
+        comp = str(call.get("component") or "")
+        return overhead if comp in _OVERHEAD_COMPONENTS else unattributed
+
     for key, key_calls in calls_by_key.items():
         if key in consumed_keys:
             continue
         for call in key_calls:
-            _fold_call_into_bucket(unattributed, call)
+            _fold_call_into_bucket(_route_unjoined(call), call)
     for call in orphan_calls:
-        _fold_call_into_bucket(unattributed, call)
+        _fold_call_into_bucket(_route_unjoined(call), call)
 
     # ── Rollups: by_phase + by_component + session_total (ALL calls) ──
     by_phase: dict[str, dict[str, int]] = {}
@@ -4946,15 +6136,9 @@ def collect_decision_trace(
     for call in calls:
         comp = str(call.get("component") or "unknown")
         # Phase: prefer the call's own phase, else ts-window backfill.
-        phase = str(call.get("phase") or "").strip() or _phase_at(
-            call.get("ts"), phase_windows
-        ) or "unattributed"
-        _fold_call_into_bucket(
-            by_phase.setdefault(phase, _empty_token_bucket()), call
-        )
-        _fold_call_into_bucket(
-            by_component_roll.setdefault(comp, _empty_token_bucket()), call
-        )
+        phase = str(call.get("phase") or "").strip() or _phase_at(call.get("ts"), phase_windows) or "unattributed"
+        _fold_call_into_bucket(by_phase.setdefault(phase, _empty_token_bucket()), call)
+        _fold_call_into_bucket(by_component_roll.setdefault(comp, _empty_token_bucket()), call)
         _fold_call_into_bucket(session_total, call)
 
     token_rollup = {
@@ -4970,6 +6154,7 @@ def collect_decision_trace(
         "decision_trace": decision_trace,
         "token_rollup": token_rollup,
         "unattributed_tokens": unattributed,
+        "overhead_tokens": overhead,
     }
 
 
@@ -4984,18 +6169,24 @@ def _write_decision_trace_jsonl(
     the collector is the single producer, so a full rewrite is simpler than
     append + dedup and stays consistent with the latest join. Best-effort:
     OSError is recorded in ``warnings`` and swallowed.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        decision_trace (list[dict[str, Any]]): The joined decision-trace rows
+            to write (one JSON object per line).
+        warnings (list[str]): Shared warnings list (mutated in place on write
+            failure).
     """
     target = session_dir / "reports" / "trace" / "decision_trace.jsonl"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         lines = [json.dumps(row, sort_keys=True) for row in decision_trace]
         target.write_text(
-            ("\n".join(lines) + "\n") if lines else "", encoding="utf-8",
+            ("\n".join(lines) + "\n") if lines else "",
+            encoding="utf-8",
         )
     except OSError as exc:
-        warnings.append(
-            f"decision_trace: failed to write {target}: {exc!r}"
-        )
+        warnings.append(f"decision_trace: failed to write {target}: {exc!r}")
 
 
 __all__ = [
@@ -5017,5 +6208,6 @@ __all__ = [
     "collect_specialist_runs",
     "collect_sweep",
     "collect_telemetry",
+    "collect_token_usage",
     "collect_workload",
 ]

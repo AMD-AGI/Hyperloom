@@ -30,6 +30,7 @@ def _ctx(*, inbox=None) -> ReactorContext:
 # E1 — critic_kb_outage
 # ---------------------------------------------------------------------------
 
+
 def test_e1_kb_outage_fires_after_streak():
     critic_health = {
         "workdir_root": "/p/critic-workdir",
@@ -83,17 +84,24 @@ def test_e1_kb_outage_streak_resets_on_clean_judge():
 # E2 — critic_unavailable_streak
 # ---------------------------------------------------------------------------
 
+
 def test_e2_critic_unavailable_streak_fires():
     coord_events = [
-        {"topic": "review_verdict", "agent": "critic",
-         "payload": {"verdict": "needs_review", "source": "critic_unavailable",
-                     "target_proposal_msg_id": "p1"}},
-        {"topic": "review_verdict", "agent": "critic",
-         "payload": {"verdict": "needs_review", "source": "critic_unavailable",
-                     "target_proposal_msg_id": "p2"}},
-        {"topic": "review_verdict", "agent": "critic",
-         "payload": {"verdict": "needs_review", "source": "critic_unavailable",
-                     "target_proposal_msg_id": "p3"}},
+        {
+            "topic": "review_verdict",
+            "agent": "critic",
+            "payload": {"verdict": "needs_review", "source": "critic_unavailable", "target_proposal_msg_id": "p1"},
+        },
+        {
+            "topic": "review_verdict",
+            "agent": "critic",
+            "payload": {"verdict": "needs_review", "source": "critic_unavailable", "target_proposal_msg_id": "p2"},
+        },
+        {
+            "topic": "review_verdict",
+            "agent": "critic",
+            "payload": {"verdict": "needs_review", "source": "critic_unavailable", "target_proposal_msg_id": "p3"},
+        },
     ]
     data = SourceData(coordinator_events=coord_events)
     out = evaluate_critic_health_signals(_ctx(), data)
@@ -105,12 +113,17 @@ def test_e2_critic_unavailable_streak_fires():
 
 def test_e2_critic_unavailable_streak_resets_on_real_critic_verdict():
     coord_events = [
-        {"topic": "review_verdict", "agent": "critic",
-         "payload": {"source": "critic_unavailable", "target_proposal_msg_id": "p1"}},
-        {"topic": "review_verdict", "agent": "critic",
-         "payload": {"source": "critic", "target_proposal_msg_id": "p2"}},
-        {"topic": "review_verdict", "agent": "critic",
-         "payload": {"source": "critic_unavailable", "target_proposal_msg_id": "p3"}},
+        {
+            "topic": "review_verdict",
+            "agent": "critic",
+            "payload": {"source": "critic_unavailable", "target_proposal_msg_id": "p1"},
+        },
+        {"topic": "review_verdict", "agent": "critic", "payload": {"source": "critic", "target_proposal_msg_id": "p2"}},
+        {
+            "topic": "review_verdict",
+            "agent": "critic",
+            "payload": {"source": "critic_unavailable", "target_proposal_msg_id": "p3"},
+        },
     ]
     data = SourceData(coordinator_events=coord_events)
     out = evaluate_critic_health_signals(_ctx(), data)
@@ -120,18 +133,27 @@ def test_e2_critic_unavailable_streak_resets_on_real_critic_verdict():
 
 def test_e2_critic_unavailable_streak_reads_inbox_too():
     inbox = [
-        InboxItem(seq=1, msg_id="m1", from_agent="critic",
-                  topic="review_verdict",
-                  payload={"source": "critic_unavailable",
-                           "target_proposal_msg_id": "p1"}),
-        InboxItem(seq=2, msg_id="m2", from_agent="critic",
-                  topic="review_verdict",
-                  payload={"source": "critic_unavailable",
-                           "target_proposal_msg_id": "p2"}),
-        InboxItem(seq=3, msg_id="m3", from_agent="critic",
-                  topic="review_verdict",
-                  payload={"source": "critic_unavailable",
-                           "target_proposal_msg_id": "p3"}),
+        InboxItem(
+            seq=1,
+            msg_id="m1",
+            from_agent="critic",
+            topic="review_verdict",
+            payload={"source": "critic_unavailable", "target_proposal_msg_id": "p1"},
+        ),
+        InboxItem(
+            seq=2,
+            msg_id="m2",
+            from_agent="critic",
+            topic="review_verdict",
+            payload={"source": "critic_unavailable", "target_proposal_msg_id": "p2"},
+        ),
+        InboxItem(
+            seq=3,
+            msg_id="m3",
+            from_agent="critic",
+            topic="review_verdict",
+            payload={"source": "critic_unavailable", "target_proposal_msg_id": "p3"},
+        ),
     ]
     out = evaluate_critic_health_signals(_ctx(inbox=inbox), SourceData())
     sym = next(s for s in out if s.name == "critic_unavailable_streak")
@@ -142,10 +164,15 @@ def test_e2_critic_unavailable_streak_reads_inbox_too():
 # E4 — critic_prune_stuck
 # ---------------------------------------------------------------------------
 
+
 def test_e4_critic_prune_stuck_fires_at_double_keep_count():
-    data = SourceData(local_critic_health={
-        "workdir_root": "/p", "workdir_count": 150, "recent_judges": [],
-    })
+    data = SourceData(
+        local_critic_health={
+            "workdir_root": "/p",
+            "workdir_count": 150,
+            "recent_judges": [],
+        }
+    )
     out = evaluate_critic_health_signals(_ctx(), data)
     sym = next(s for s in out if s.name == "critic_prune_stuck")
     assert sym.severity is SymptomSeverity.MEDIUM
@@ -153,9 +180,13 @@ def test_e4_critic_prune_stuck_fires_at_double_keep_count():
 
 
 def test_e4_critic_prune_stuck_silent_below_threshold():
-    data = SourceData(local_critic_health={
-        "workdir_root": "/p", "workdir_count": 60, "recent_judges": [],
-    })
+    data = SourceData(
+        local_critic_health={
+            "workdir_root": "/p",
+            "workdir_count": 60,
+            "recent_judges": [],
+        }
+    )
     out = evaluate_critic_health_signals(_ctx(), data)
     assert all(s.name != "critic_prune_stuck" for s in out)
 
@@ -164,11 +195,16 @@ def test_e4_critic_prune_stuck_silent_below_threshold():
 # E5 — critic_runtime_stuck
 # ---------------------------------------------------------------------------
 
+
 def test_e5_critic_runtime_stuck_fires_on_timeout_marker():
-    data = SourceData(local_log_errors=[
-        {"pattern": r"runtime\.cli .* timed out after \d+s",
-         "line": "ERROR: runtime.cli commit-review timed out after 30s"},
-    ])
+    data = SourceData(
+        local_log_errors=[
+            {
+                "pattern": r"runtime\.cli .* timed out after \d+s",
+                "line": "ERROR: runtime.cli commit-review timed out after 30s",
+            },
+        ]
+    )
     out = evaluate_critic_health_signals(_ctx(), data)
     sym = next(s for s in out if s.name == "critic_runtime_stuck")
     assert sym.severity is SymptomSeverity.HIGH
@@ -176,10 +212,11 @@ def test_e5_critic_runtime_stuck_fires_on_timeout_marker():
 
 
 def test_e5_silent_without_runtime_cli_substring():
-    data = SourceData(local_log_errors=[
-        {"pattern": "some_other_pattern",
-         "line": "ERROR: something timed out"},  # no ``runtime.cli``
-    ])
+    data = SourceData(
+        local_log_errors=[
+            {"pattern": "some_other_pattern", "line": "ERROR: something timed out"},  # no ``runtime.cli``
+        ]
+    )
     out = evaluate_critic_health_signals(_ctx(), data)
     assert all(s.name != "critic_runtime_stuck" for s in out)
 
@@ -188,17 +225,23 @@ def test_e5_silent_without_runtime_cli_substring():
 # Custom config
 # ---------------------------------------------------------------------------
 
+
 def test_custom_thresholds_apply():
     cfg = CriticHealthConfig(
-        min_outage_judges=1, min_unavailable_verdicts=1,
-        max_workdir_count=10, min_runtime_stuck_hits=1,
+        min_outage_judges=1,
+        min_unavailable_verdicts=1,
+        max_workdir_count=10,
+        min_runtime_stuck_hits=1,
     )
-    data = SourceData(local_critic_health={
-        "workdir_root": "/p", "workdir_count": 11,
-        "recent_judges": [
-            {"turn_dir": "1", "kb_read_skipped_reason": "kb_unreachable"},
-        ],
-    })
+    data = SourceData(
+        local_critic_health={
+            "workdir_root": "/p",
+            "workdir_count": 11,
+            "recent_judges": [
+                {"turn_dir": "1", "kb_read_skipped_reason": "kb_unreachable"},
+            ],
+        }
+    )
     out = evaluate_critic_health_signals(_ctx(), data, config=cfg)
     names = {s.name for s in out}
     assert "critic_kb_outage" in names

@@ -78,16 +78,29 @@ DEFAULT_MAX_RETRIES = 4
 # 'timeout' are NOT rejected — they're graceful budget-elapsed shutdowns with
 # valid baseline + final metrics.
 _CRASH_STOP_REASONS = {
-    "exception", "error", "failed", "baseline_failed",
-    "oom_killed", "oom", "segfault",
+    "exception",
+    "error",
+    "failed",
+    "baseline_failed",
+    "oom_killed",
+    "oom",
+    "segfault",
 }
 
 
 def is_complete_session(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
-    """Reject incomplete or crashed sessions; returns (ok, reason_if_rejected).
+    """Validate that a session is complete and did not crash.
 
-    A 'good' session needs baseline + final throughput_tok_s_per_gpu > 0 and a
-    stop_reason not in _CRASH_STOP_REASONS ('signal'/'time_exhausted' are kept).
+    A "good" session needs baseline + final ``throughput_tok_s_per_gpu`` > 0
+    and a ``stop_reason`` not in ``_CRASH_STOP_REASONS``
+    (``signal`` / ``time_exhausted`` are kept).
+
+    Args:
+        data: The session breakdown data dict.
+
+    Returns:
+        An ``(ok, reason_if_rejected)`` tuple; ``reason`` is ``None`` when
+        accepted.
     """
     baseline = data.get("baseline") or {}
     final = data.get("final") or {}
@@ -112,10 +125,20 @@ def is_complete_session(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
 # Body construction
 # ---------------------------------------------------------------------------
 
-def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Returns (body, error_msg); body is None on error.
 
-    `body` is the JSON we POST, with keys matching the perf_runs DTO 1:1.
+def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Build the perf_runs POST body from a breakdown file.
+
+    Accepts four layouts (strictest first): bare V2 breakdown, V2 wrapper
+    (``{source, data}``), legacy V1 flat schema, and the universal fallback.
+
+    Args:
+        path: Path to the session breakdown JSON file.
+
+    Returns:
+        A ``(body, error_msg)`` tuple; ``body`` is ``None`` on error and
+        ``error_msg`` carries the reason. The body keys match the perf_runs
+        DTO 1:1.
     """
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -127,8 +150,7 @@ def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     # ({source, data}), legacy V1 flat schema, universal fallback.
     if looks_like_session_breakdown(data):
         pass
-    elif isinstance(data, dict) and isinstance(data.get("data"), dict) and \
-            looks_like_session_breakdown(data["data"]):
+    elif isinstance(data, dict) and isinstance(data.get("data"), dict) and looks_like_session_breakdown(data["data"]):
         data = data["data"]
     elif looks_like_v1_flat_schema(data):
         data = migrate_v1_to_v2(data)
@@ -154,16 +176,33 @@ def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
 
     # Strict client-side validation so no leaderboard column lands NULL/empty:
     # reject blank strings and null numerics (0 gain is a valid no-op result).
-    required_nonblank = ("model_name", "framework", "image", "prec", "category",
-                         "unique_key", "claw_session_id", "status")
-    blank = [k for k in required_nonblank
-             if not (isinstance(row.get(k), str) and row.get(k).strip())]
+    required_nonblank = (
+        "model_name",
+        "framework",
+        "image",
+        "prec",
+        "category",
+        "unique_key",
+        "claw_session_id",
+        "status",
+    )
+    blank = [k for k in required_nonblank if not (isinstance(row.get(k), str) and row.get(k).strip())]
     if blank:
         return None, f"blank_field:{','.join(blank)}"
 
-    required_numeric = ("gain", "baseline_tok_per_s_per_gpu", "opt_tok_per_s_per_gpu",
-                        "tp", "isl", "osl", "conc", "duration_seconds",
-                        "kernel_gain", "param_gain", "backend_gain")
+    required_numeric = (
+        "gain",
+        "baseline_tok_per_s_per_gpu",
+        "opt_tok_per_s_per_gpu",
+        "tp",
+        "isl",
+        "osl",
+        "conc",
+        "duration_seconds",
+        "kernel_gain",
+        "param_gain",
+        "backend_gain",
+    )
     null_num = [k for k in required_numeric if row.get(k) is None]
     if null_num:
         return None, f"null_numeric:{','.join(null_num)}"
@@ -226,8 +265,9 @@ def post_once(endpoint: str, token: str, body: Dict[str, Any], timeout: float) -
         return 599, f"{type(e).__name__}: {e}"
 
 
-def post_with_retry(endpoint: str, token: str, body: Dict[str, Any],
-                    timeout: float, max_retries: int) -> Tuple[int, str, int]:
+def post_with_retry(
+    endpoint: str, token: str, body: Dict[str, Any], timeout: float, max_retries: int
+) -> Tuple[int, str, int]:
     """POST with exponential backoff and full jitter on retriable failures.
 
     Only statuses in ``_RETRIABLE_STATUS`` (plus the synthetic ``599``) are
@@ -264,6 +304,7 @@ def post_with_retry(endpoint: str, token: str, body: Dict[str, Any],
 # Driver
 # ---------------------------------------------------------------------------
 
+
 def iter_files(paths: List[str], scan_dir: Optional[str]) -> List[Path]:
     """Collect unique ``session_breakdown.json`` paths from inputs.
 
@@ -296,8 +337,9 @@ def iter_files(paths: List[str], scan_dir: Optional[str]) -> List[Path]:
     return out
 
 
-def process_file(path: Path, endpoint: str, token: str, timeout: float,
-                 max_retries: int, dry_run: bool) -> Dict[str, Any]:
+def process_file(
+    path: Path, endpoint: str, token: str, timeout: float, max_retries: int, dry_run: bool
+) -> Dict[str, Any]:
     """Build, validate, and (optionally) POST a single breakdown file.
 
     Args:
@@ -314,18 +356,20 @@ def process_file(path: Path, endpoint: str, token: str, timeout: float,
     """
     body, err = build_body(path)
     base_record = {
-        "path":      str(path),
-        "ts":        datetime.now(timezone.utc).isoformat(),
+        "path": str(path),
+        "ts": datetime.now(timezone.utc).isoformat(),
     }
     if err is not None:
         return {**base_record, "ok": False, "error": err}
 
-    base_record.update({
-        "unique_key":      body["unique_key"],
-        "model_name":      body["model_name"],
-        "claw_session_id": body.get("claw_session_id"),
-        "body_size_bytes": len(json.dumps(body, ensure_ascii=False).encode("utf-8")),
-    })
+    base_record.update(
+        {
+            "unique_key": body["unique_key"],
+            "model_name": body["model_name"],
+            "claw_session_id": body.get("claw_session_id"),
+            "body_size_bytes": len(json.dumps(body, ensure_ascii=False).encode("utf-8")),
+        }
+    )
 
     if dry_run:
         return {**base_record, "ok": True, "dry_run": True, "attempts": 0, "status": 0}
@@ -359,23 +403,26 @@ def main() -> int:
     ap.add_argument("paths", nargs="*", help="JSON files or directories")
     ap.add_argument("--dir", help="Recursively scan directory for session_breakdown.json")
     ap.add_argument("--endpoint", default=os.environ.get("PERF_API_ENDPOINT", DEFAULT_ENDPOINT))
-    ap.add_argument("--token", default=os.environ.get("PERF_API_TOKEN", DEFAULT_TOKEN),
-                    help="Authorization header (include 'Bearer ' prefix)")
+    ap.add_argument(
+        "--token",
+        default=os.environ.get("PERF_API_TOKEN", DEFAULT_TOKEN),
+        help="Authorization header (include 'Bearer ' prefix)",
+    )
     ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     ap.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
-    ap.add_argument("--dry-run", action="store_true",
-                    help="Build bodies but do not POST")
-    ap.add_argument("--ledger",
-                    default=f"post_perf_runs_ledger_{datetime.now().strftime('%Y%m%dT%H%M%S')}.jsonl",
-                    help="JSONL file to append per-file outcomes to")
-    ap.add_argument("--limit", type=int, default=None,
-                    help="Only process the first N files (smoke test)")
+    ap.add_argument("--dry-run", action="store_true", help="Build bodies but do not POST")
+    ap.add_argument(
+        "--ledger",
+        default=f"post_perf_runs_ledger_{datetime.now().strftime('%Y%m%dT%H%M%S')}.jsonl",
+        help="JSONL file to append per-file outcomes to",
+    )
+    ap.add_argument("--limit", type=int, default=None, help="Only process the first N files (smoke test)")
     args = ap.parse_args()
 
     files = iter_files(args.paths or [], args.dir)
     if args.limit:
-        files = files[:args.limit]
+        files = files[: args.limit]
     if not files:
         ap.error("no input files (pass paths or --dir)")
 
@@ -394,8 +441,7 @@ def main() -> int:
 
     with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {
-            ex.submit(process_file, f, args.endpoint, args.token,
-                      args.timeout, args.max_retries, args.dry_run): f
+            ex.submit(process_file, f, args.endpoint, args.token, args.timeout, args.max_retries, args.dry_run): f
             for f in files
         }
         for i, fut in enumerate(cf.as_completed(futures), 1):
@@ -423,8 +469,7 @@ def main() -> int:
                 elapsed = time.monotonic() - start
                 rate = i / elapsed if elapsed > 0 else 0
                 print(
-                    f"  [{i}/{len(files)}] ok={ok_count} err={err_count} "
-                    f"rate={rate:.1f}/s elapsed={elapsed:.1f}s",
+                    f"  [{i}/{len(files)}] ok={ok_count} err={err_count} rate={rate:.1f}/s elapsed={elapsed:.1f}s",
                     flush=True,
                 )
 
@@ -435,8 +480,11 @@ def main() -> int:
     if err_samples:
         print("   first errors:")
         for s in err_samples:
-            print(f"     - {s.get('path')}  status={s.get('status')}  "
-                  f"error={s.get('error') or s.get('response','')[:120]}", flush=True)
+            print(
+                f"     - {s.get('path')}  status={s.get('status')}  "
+                f"error={s.get('error') or s.get('response', '')[:120]}",
+                flush=True,
+            )
     print(f"   full ledger: {ledger_path}", flush=True)
     return 0 if err_count == 0 else 1
 

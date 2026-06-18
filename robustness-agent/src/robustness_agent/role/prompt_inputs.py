@@ -73,10 +73,12 @@ _SCALAR_KEYS = {
 
 # Subset of ``_SCALAR_KEYS`` whose presence with a non-``(none)`` value
 # flips :attr:`SharedStateSnapshot.explore_started` to True.
-_EXPLORE_FAMILY_KEYS = frozenset({
-    "last_explore",
-    "last_sweep",
-})
+_EXPLORE_FAMILY_KEYS = frozenset(
+    {
+        "last_explore",
+        "last_sweep",
+    }
+)
 
 # Coordinator Time-budget body line; ``budget=0min`` is the "no wall-clock budget" sentinel.
 _TIME_BUDGET_LINE_RE = re.compile(
@@ -240,6 +242,7 @@ def from_coordinator_prompt(
 # Section splitting
 # ---------------------------------------------------------------------------
 
+
 def _split_sections(prompt: str) -> dict[str, str]:
     """Walk the prompt line-by-line and group lines by section.
 
@@ -283,6 +286,7 @@ def _split_sections(prompt: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Shared state parsing
 # ---------------------------------------------------------------------------
+
 
 def _parse_shared_state(body: str) -> SharedStateSnapshot:
     """Decode the ``=== Shared session state ===`` body into a snapshot.
@@ -353,6 +357,12 @@ def _count_optimization_stack(head: str) -> int:
 
     ``SharedState._format_optimization_stack`` emits ``"(none)"`` (empty) or a
     Python list repr (e.g. ``['baseline:v1', 'integrate:v2']``).
+
+    Args:
+        head: The rendered ``optimization_stack`` head value.
+
+    Returns:
+        The number of stack entries (``0`` when empty/unparseable).
     """
     if not head or head == "(none)":
         return 0
@@ -372,7 +382,12 @@ def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:
     """Decode the ``=== Time budget ===`` section in place onto ``snapshot``.
 
     The Coordinator emits one body line below the header; an absent section
-    leaves defaults so BudgetMonitor / deadline_imminent signals short-circuit.
+    leaves defaults so BudgetMonitor / deadline_imminent signals
+    short-circuit.
+
+    Args:
+        snapshot: Snapshot mutated in place with parsed budget fields.
+        body: The time-budget section body text.
     """
     if not body:
         return
@@ -397,7 +412,7 @@ def _parse_model_line(line: str) -> tuple[str, str]:
         tuple[str, str]: The ``(model_name, model_class)`` pair, with the
         ``(unset)`` sentinel mapped to ``""``.
     """
-    body = line[len("model="):]
+    body = line[len("model=") :]
     name, _, rest = body.partition("  class=")
     name = name.strip()
     klass = rest.strip()
@@ -413,6 +428,12 @@ def _split_double_space(value: str) -> str:
 
     ``to_prompt_summary`` joins two scalars with two spaces
     (``baseline_tput=...  baseline_acc=...``); cut at that boundary.
+
+    Args:
+        value: The raw scalar text possibly containing a trailing neighbour.
+
+    Returns:
+        The value trimmed at the first double-space boundary.
     """
     return value.split("  ", 1)[0].strip()
 
@@ -450,6 +471,7 @@ def _coerce_int(value: str) -> int:
 # ---------------------------------------------------------------------------
 # Inbox parsing
 # ---------------------------------------------------------------------------
+
 
 def _parse_inbox(body: str) -> tuple[list[InboxItem], list[str]]:
     """Parse the inbox section body into items plus parse warnings.

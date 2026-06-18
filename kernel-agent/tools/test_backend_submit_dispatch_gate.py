@@ -40,16 +40,20 @@ def test_geak_submit_calls_ensure_ray_cluster_before_run_via_ray(tmp_output_dir,
 
     def _fake_run_via_ray(*args, **kwargs):
         call_order.append("run_via_ray")
-        return {"returncode": 0, "stdout_tail": "ok", "stderr_tail": "",
-                "gpu_ids": "0", "elapsed_s": 0.1, "cmd": []}
+        return {"returncode": 0, "stdout_tail": "ok", "stderr_tail": "", "gpu_ids": "0", "elapsed_s": 0.1, "cmd": []}
 
-    with mock.patch.object(geak_submit, "ensure_ray_cluster", _fake_ensure), \
-         mock.patch.object(geak_submit, "run_via_ray", _fake_run_via_ray):
+    with (
+        mock.patch.object(geak_submit, "ensure_ray_cluster", _fake_ensure),
+        mock.patch.object(geak_submit, "run_via_ray", _fake_run_via_ray),
+    ):
         prompt = tmp_path / "prompt.md"
         prompt.write_text("noop", encoding="utf-8")
         result = geak_submit.submit(
-            prompt_file=prompt, output_dir=tmp_output_dir,
-            kernel_path="", cost_limit=0.0, num_gpus=1,
+            prompt_file=prompt,
+            output_dir=tmp_output_dir,
+            kernel_path="",
+            cost_limit=0.0,
+            num_gpus=1,
             prefer_ray=True,
         )
 
@@ -58,9 +62,11 @@ def test_geak_submit_calls_ensure_ray_cluster_before_run_via_ray(tmp_output_dir,
 
 
 def test_geak_submit_returns_dispatch_failure_envelope_on_ensure_failure(
-    tmp_output_dir, tmp_path,
+    tmp_output_dir,
+    tmp_path,
 ):
     """When ``ensure_ray_cluster`` fails, ``submit`` returns a dispatch-failure envelope whose ``stderr_tail`` carries the diagnostic hint."""
+
     def _boom(num_gpus=None, log_path=None):
         raise RuntimeError("failed to start Ray; see ray_lifecycle.log")
 
@@ -70,13 +76,18 @@ def test_geak_submit_returns_dispatch_failure_envelope_on_ensure_failure(
         run_via_ray_called["hit"] = True
         return {"returncode": 0}
 
-    with mock.patch.object(geak_submit, "ensure_ray_cluster", _boom), \
-         mock.patch.object(geak_submit, "run_via_ray", _fake_run_via_ray):
+    with (
+        mock.patch.object(geak_submit, "ensure_ray_cluster", _boom),
+        mock.patch.object(geak_submit, "run_via_ray", _fake_run_via_ray),
+    ):
         prompt = tmp_path / "prompt.md"
         prompt.write_text("noop", encoding="utf-8")
         result = geak_submit.submit(
-            prompt_file=prompt, output_dir=tmp_output_dir,
-            kernel_path="", cost_limit=0.0, num_gpus=1,
+            prompt_file=prompt,
+            output_dir=tmp_output_dir,
+            kernel_path="",
+            cost_limit=0.0,
+            num_gpus=1,
             prefer_ray=True,
         )
 
@@ -98,16 +109,29 @@ def test_oob_submit_calls_ensure_ray_cluster_before_run_via_ray(tmp_output_dir, 
 
     def _fake_run_via_ray(*args, **kwargs):
         call_order.append("run_via_ray")
-        return {"returncode": 0, "stdout_tail": "ok", "stderr_tail": "",
-                "stdout": "ok", "gpu_ids": "0", "elapsed_s": 0.1, "cmd": []}
+        return {
+            "returncode": 0,
+            "stdout_tail": "ok",
+            "stderr_tail": "",
+            "stdout": "ok",
+            "gpu_ids": "0",
+            "elapsed_s": 0.1,
+            "cmd": [],
+        }
 
-    with mock.patch.object(oob_submit, "ensure_ray_cluster", _fake_ensure), \
-         mock.patch.object(oob_submit, "run_via_ray", _fake_run_via_ray):
+    with (
+        mock.patch.object(oob_submit, "ensure_ray_cluster", _fake_ensure),
+        mock.patch.object(oob_submit, "run_via_ray", _fake_run_via_ray),
+    ):
         prompt = tmp_path / "prompt.md"
         prompt.write_text("noop", encoding="utf-8")
         result = oob_submit.submit(
-            agent="claude", prompt_file=prompt, output_dir=tmp_output_dir,
-            source_file="", num_gpus=1, prefer_ray=True,
+            agent="claude",
+            prompt_file=prompt,
+            output_dir=tmp_output_dir,
+            source_file="",
+            num_gpus=1,
+            prefer_ray=True,
         )
 
     assert call_order == ["ensure_ray_cluster", "run_via_ray"], call_order
@@ -115,7 +139,8 @@ def test_oob_submit_calls_ensure_ray_cluster_before_run_via_ray(tmp_output_dir, 
 
 
 def test_oob_submit_returns_dispatch_failure_envelope_on_ensure_failure(
-    tmp_output_dir, tmp_path,
+    tmp_output_dir,
+    tmp_path,
 ):
     def _boom(num_gpus=None, log_path=None):
         raise RuntimeError("failed to start Ray; see ray_lifecycle.log")
@@ -126,13 +151,19 @@ def test_oob_submit_returns_dispatch_failure_envelope_on_ensure_failure(
         run_via_ray_called["hit"] = True
         return {"returncode": 0}
 
-    with mock.patch.object(oob_submit, "ensure_ray_cluster", _boom), \
-         mock.patch.object(oob_submit, "run_via_ray", _fake_run_via_ray):
+    with (
+        mock.patch.object(oob_submit, "ensure_ray_cluster", _boom),
+        mock.patch.object(oob_submit, "run_via_ray", _fake_run_via_ray),
+    ):
         prompt = tmp_path / "prompt.md"
         prompt.write_text("noop", encoding="utf-8")
         result = oob_submit.submit(
-            agent="claude", prompt_file=prompt, output_dir=tmp_output_dir,
-            source_file="", num_gpus=1, prefer_ray=True,
+            agent="claude",
+            prompt_file=prompt,
+            output_dir=tmp_output_dir,
+            source_file="",
+            num_gpus=1,
+            prefer_ray=True,
         )
 
     assert result["returncode"] == 1
