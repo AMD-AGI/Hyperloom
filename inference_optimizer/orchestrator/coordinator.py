@@ -2776,8 +2776,10 @@ class Coordinator:
             if isinstance(item, dict) and item.get("action") == "gemm_tuning"
         }
         ts = datetime.now(timezone.utc).isoformat()
+        engine = str(result.get("engine") or "geak")
         entry = {
             "action": "gemm_tuning",
+            "engine": engine,
             "variant_name": "a8w8_blockscale_tuned_gemm",
             "tuned_file": tuned_file,
             "final_report_path": final_report,
@@ -2798,6 +2800,7 @@ class Coordinator:
             )
         self.shared_state.current_best = {
             "action": "gemm_tuning",
+            "engine": engine,
             "tput": tuned_tput,
             "variant_name": "a8w8_blockscale_tuned_gemm",
             "tuned_file": tuned_file,

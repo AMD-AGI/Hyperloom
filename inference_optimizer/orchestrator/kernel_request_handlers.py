@@ -1300,6 +1300,10 @@ async def run_gemm_tuning_handler(
 
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_tuning_timeout_sec(payload))
     result = _shape_tool_result(rc, stdout, stderr)
+    # Tuning engine provenance: this handler drives GEAK's FP8 tuner. A future
+    # forge-backed tuner sets engine="forge" from its own handler; downstream
+    # consumers split tuning stats by this label without restructuring.
+    result.setdefault("engine", "geak")
     result.setdefault("workspace", str(workspace))
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
