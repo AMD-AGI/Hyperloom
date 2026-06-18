@@ -265,12 +265,15 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # backend TRITON) — the unrecognized arch leaves an empty model type.
 # deepseek_v4: confirmed from DeepSeek-V4-Flash server.log ModelConfig
 # validation failure.
+# glm_moe_dsa: confirmed from zai-org-GLM-5.1 server.log ("model type
+# `glm_moe_dsa` but Transformers does not recognize this architecture" →
+# ModelConfig ValidationError in engine init).
 _UNRECOGNIZED_MODEL_TYPES = frozenset({
-    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash",
+    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash", "glm_moe_dsa",
 })
 _UNRECOGNIZED_ARCHITECTURES = frozenset({
     "deepseekv4forcausallm", "glm4moeliteforcausallm",
-    "mimov2flashforcausallm",
+    "mimov2flashforcausallm", "glmmoedsaforcausallm",
 })
 # ministral3 only fails inside a Mistral3 multimodal wrapper (Surpem-Supertron2
 # server.log: vLLM registry raises KeyError('ministral3') for text_config.
