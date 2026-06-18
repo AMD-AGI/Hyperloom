@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import errno
 import json
-import logging
 import os
 import socket
 from contextlib import suppress
@@ -44,9 +43,6 @@ try:  # POSIX runtime (Linux): authoritative flock-based exclusion.
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX dev hosts (e.g. Windows).
     fcntl = None  # type: ignore[assignment]
-
-
-log = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -158,7 +154,8 @@ class SessionLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # os.open returns a non-inheritable fd by default (PEP 446), so spawned
         # serving subprocesses never keep the lock alive past the optimizer.
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        # 0o600: owner-only (the lock body carries pid/host metadata).
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         if fcntl is not None:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

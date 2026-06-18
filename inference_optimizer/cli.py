@@ -613,7 +613,7 @@ def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
     """
     lock = SessionLock(session_dir)
     try:
-        return lock.acquire()
+        lock.acquire()
     except SessionAlreadyRunning as exc:
         print(
             f"ERROR: {exc}. Refusing to start a second optimizer on the same "
@@ -623,6 +623,7 @@ def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
             file=sys.stderr,
         )
         sys.exit(SESSION_BUSY_EXIT_CODE)
+    return lock
 
 
 def _clean_stale_aiter_locks(
