@@ -72,8 +72,12 @@ class SpecialistSubprocessConfig:
     """``--agents`` JSON declaring leaf sub-agent types. None = built-in leaf."""
 
     per_turn_max_seconds: float = 600.0
-    """Wall-clock cap PER LLM turn; multiplied by ``max_turns`` to get the
-    per-task hard timeout."""
+    """Per-turn wall-clock fallback.
+
+    Coordinator-dispatched specialists inject an explicit ``wall_budget_sec``
+    (WS1). Only callers that omit that budget fall back to
+    ``max_turns * per_turn_max_seconds`` as a legacy per-task hard timeout.
+    """
 
     poll_interval_seconds: float = 5.0
     """How often the reaper polls done.json / process exit / heartbeat."""
@@ -103,8 +107,11 @@ class SpecialistSubprocessResult:
     elapsed_seconds: float = 0.0
 
     timed_out: bool = False
-    """True when the dispatcher killed the subprocess past the
-    ``max_turns * per_turn_max_seconds`` ceiling."""
+    """True when the dispatcher killed the subprocess past the wall-clock cap.
+
+    The cap is normally WS1 ``wall_budget_sec``; legacy direct callers fall
+    back to ``max_turns * per_turn_max_seconds`` when no budget is supplied.
+    """
 
     stale_heartbeat: bool = False
     """True when the heartbeat went stale and the dispatcher killed

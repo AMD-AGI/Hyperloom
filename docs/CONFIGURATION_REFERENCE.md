@@ -84,7 +84,7 @@ read them when invoked standalone.
 | `RANDOM_RANGE_RATIO` | unset    | Optional Magpie random-range jitter.                                 |
 | `ROCR_VISIBLE_DEVICES` | inherited | Standard ROCm visible-device mask.                                  |
 | `HIP_VISIBLE_DEVICES` | inherited | Standard HIP visible-device mask.                                   |
-| `RUN_EVAL`        | unset       | When set to a non-empty value, runs the accuracy eval step inside the workload runner. |
+| `RUN_EVAL`        | `true`      | Runs the accuracy eval step inside the workload runner by default. Set to `false`/`0`/`no`/`off` to disable; disabling emits a warning. |
 
 ---
 

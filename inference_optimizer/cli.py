@@ -4715,7 +4715,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio).
     # Default 1.10: kill a single-variant run once wall-clock exceeds baseline by +10% (outcome=KILLED_OVERTIME).
-    # 0 disables (legacy variant_timeout_sec hard cap still applies); gate skips the inlined stack rebench (Q4).
+    # 0 disables (legacy variant_timeout_sec hard cap still applies); overtime kills skip stack rebench.
     def _env_float_or(default: float, env_var: str) -> float:
         """Resolve a float CLI default from an environment variable.
 

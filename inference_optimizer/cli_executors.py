@@ -109,10 +109,14 @@ def _build_specialist_executor(
         DEFAULT_SPECIALIST_TOOLS,
         SpecialistRunner,
     )
+    from .orchestrator.specialist_domains import DEFAULT_SPECIALIST_MAX_TURNS
     from .orchestrator.specialist_subprocess import SpecialistSubprocessConfig
 
     claude_model = (getattr(args, "specialist_model", None) or args.claude_model).strip()
-    max_turns = int(getattr(args, "specialist_max_turns", 8) or 8)
+    max_turns = int(
+        getattr(args, "specialist_max_turns", DEFAULT_SPECIALIST_MAX_TURNS)
+        or DEFAULT_SPECIALIST_MAX_TURNS
+    )
     per_turn_max_seconds = float(getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0)
     dispatch_mode = str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess").strip().lower()
 

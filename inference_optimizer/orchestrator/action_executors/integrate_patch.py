@@ -24,8 +24,9 @@ Inputs (``ctx.task.params``)::
         defaults to DEFAULT_KEEP_THRESHOLD_PCT (1.0), the grid noise floor.
         A KEEP is then re-confirmed by a full-stack rebench unless
         ``enable_stack_rebench`` is False.
-    accuracy_baseline (float | dict, optional) — accuracy gate input;
-        forwarded to the accuracy gate utilities.
+    accuracy_baseline (float, optional) — baseline accuracy for the gate.
+        With a positive baseline the measured drop is enforced; without one,
+        the gate skips with a warning.
     enable_stack_rebench (bool, optional) — when True (default) a KEEP
         is confirmed by a second full-stack rebench (stability floor +
         accuracy) before it is committed.

@@ -450,15 +450,17 @@ no separate `dynamic_action` / `dynamic_specialist` actions:
   real **measure → edit → measure** loop inside its own worktree, so prefer
   `mode=patch + bench=true` (with `needs_gpu`) when you want it to *validate*
   an idea rather than just reason about it.
-- **`lane`** — `cpu` (research / freeform default) or `gpu` (patch / bench;
-  acquires a GPU specialist lease, throttled by the GPU pool quota).
-  `needs_gpu`/`bench` are governed by the **same GPU-pool ceiling for every
-  scope** — a `freeform` specialist that asks for GPU clears the identical
-  `specialist_gpu_pool_disabled` / capacity checks as a domain one (there is no
-  freeform GPU loophole). Any `needs_gpu` specialist (bench or not) takes
-  `gpu_research_lane` and is therefore **mutually exclusive with serving** —
-  it runs in the idle research window and queues behind a live benchmark
-  (see "GPU specialists serialize against serving" above).
+- **`lane`** — `cpu` (research / freeform default) or `gpu` (patch / bench)
+  is a prompt-facing work-style hint. It does **not** acquire hardware by
+  itself: set `needs_gpu=true` (or `bench=true`, which implies it) to request
+  the GPU specialist pool. `needs_gpu`/`bench` are governed by the **same
+  GPU-pool ceiling for every scope** — a `freeform` specialist that asks for
+  GPU clears the identical `specialist_gpu_pool_disabled` / capacity checks as
+  a domain one (there is no freeform GPU loophole). Any `needs_gpu` specialist
+  (bench or not) takes `gpu_research_lane` and is therefore **mutually
+  exclusive with serving** — it runs in the idle research window and queues
+  behind a live benchmark (see "GPU specialists serialize against serving"
+  above).
 
 ### When to pick which scope (co-equal — choose by fit, not by default)
 
@@ -486,7 +488,10 @@ emit_intent({
   intent_type: "delegate",
   payload: {action_name: "specialist", params: {
     tags: ["serving_specialist"], gap_canonical_id: "gap.<...>",
-    sub_kind: "...", max_turns: 8
+    sub_kind: "...",
+    // Depth is bounded by the wall-clock budget, not by turns. Omit
+    // `max_turns` to let the specialist run until it reaches a deliverable
+    // conclusion; set it only to deliberately cap a probe early.
   }}
 })
 ```

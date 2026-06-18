@@ -635,7 +635,9 @@ class SharedState:
     explore_specialist_dispatched_count: int = 0
     # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
     research_lane_capacity: int = 1
-    # GPU pool capacity for needs_gpu specialists (0 disables); locked at session start.
+    # GPU pool capacity for needs_gpu specialists (0 disables); locked at
+    # session start. The dataclass default is a placeholder for tests/direct
+    # construction; the CLI/manifest default is whole-machine GPU detection.
     gpu_specialist_capacity: int = 0
     # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it once acted on.
     pending_escalate_hint: str = ""
