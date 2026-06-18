@@ -851,6 +851,8 @@ def server_args_env_name(framework: str | None) -> str:
         return "EXTRA_ATOM_ARGS"
     if "vllm" in name:
         return "EXTRA_VLLM_ARGS"
+    if "xdit" in name:
+        return "EXTRA_XDIT_ARGS"
     return "EXTRA_SGLANG_ARGS"
 
 

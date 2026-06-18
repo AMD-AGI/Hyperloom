@@ -285,6 +285,9 @@ class SharedState:
     # ``baseline_tput`` carries the only measured number.
     baseline_hot_tput: float = 0.0
     baseline_accuracy: float = 0.0
+    # Baseline benchmark workspace, used as the reference image directory for
+    # the image-diff accuracy gate. Empty for frameworks that gate on lm-eval.
+    baseline_image_dir: str = ""
     baseline_failure_streak: int = 0
     baseline_arg_error_streak: int = 0
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.

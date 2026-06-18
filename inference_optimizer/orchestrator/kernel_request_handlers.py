@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from ..framework_registry import get_capabilities
 from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .trace.parse_usage import parse_geak_usage, parse_oob_json_usage
 
@@ -1300,16 +1301,24 @@ async def trace_analyze_handler(
     if analysis_mode:
         cmd += ["--analysis-mode", str(analysis_mode)]
 
-    # Splitter workload hints. Priority: payload override > baseline metadata > drop the flag (tool keeps its env fallback). Missing hints can cause trace_split_no_steady_state.
-    split_conc = payload.get("split_conc") or workload.get("conc")
-    if split_conc not in (None, ""):
-        cmd += ["--split-conc", str(split_conc).strip()]
-    split_osl = payload.get("split_osl") or workload.get("osl")
-    if split_osl not in (None, ""):
-        cmd += ["--split-osl", str(split_osl).strip()]
-    split_r = payload.get("split_r") or workload.get("random_range_ratio")
-    if split_r not in (None, ""):
-        cmd += ["--split-r", str(split_r).strip()]
+    # Diffusion frameworks have no decode loop, so TraceLens's inference-trace
+    # splitter finds 0 "execution step" / "_dummy_run" markers and fails with
+    # trace_split_no_steady_state. Skip the splitter and analyze the whole trace
+    # directly (the GEMM/attention/roofline analyses don't need steady-state
+    # chunks). The splitter workload hints below are then irrelevant.
+    if get_capabilities(framework).is_diffusion:
+        cmd += ["--skip-split"]
+    else:
+        # Splitter workload hints. Priority: payload override > baseline metadata > drop the flag (tool keeps its env fallback). Missing hints can cause trace_split_no_steady_state.
+        split_conc = payload.get("split_conc") or workload.get("conc")
+        if split_conc not in (None, ""):
+            cmd += ["--split-conc", str(split_conc).strip()]
+        split_osl = payload.get("split_osl") or workload.get("osl")
+        if split_osl not in (None, ""):
+            cmd += ["--split-osl", str(split_osl).strip()]
+        split_r = payload.get("split_r") or workload.get("random_range_ratio")
+        if split_r not in (None, ""):
+            cmd += ["--split-r", str(split_r).strip()]
 
     capture_folder = (
         payload.get("capture_folder")

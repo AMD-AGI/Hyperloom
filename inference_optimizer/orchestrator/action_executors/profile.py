@@ -32,6 +32,7 @@ from typing import Any
 import yaml
 
 from ...compat.payload_aliases import read_extra_server_args
+from ...framework_registry import get_capabilities
 from ...paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
@@ -387,6 +388,9 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
         workspace / "torch_trace",
         workspace / "capture_traces",
         workspace.parent / "capture_traces",
+        # Some frameworks write their trace files directly into the workspace
+        # root rather than a torch_trace/ subdir.
+        workspace,
     ]
 
 
@@ -419,6 +423,8 @@ def _default_profile_config() -> Path:
         name = "profile_atom.yaml"
     elif fw == "vllm":
         name = "profile_vllm.yaml"
+    elif fw == "xdit":
+        name = "profile_xdit.yaml"
     else:
         name = "profile_sglang.yaml"
     return asset_root() / "scripts" / "configs" / name
@@ -857,14 +863,27 @@ class ProfileExecutor(BaselineExecutor):
                     if main_trace.name.startswith("merged-")
                     else "trace_dir_preferred"
                 )
+                framework = str(
+                    getattr(ctx, "framework", "")
+                    or (extra.get("framework") if isinstance(extra, dict) else "")
+                    or os.environ.get("FRAMEWORK", "")
+                )
+                # Diffusion frameworks: the profiling pass is trace-only — it
+                # produces no throughput number, so the shared baseline gate
+                # rejects it as ``invalid_measurement``. For profiling a valid
+                # trace IS the success criterion, so rescue that status here.
+                if (
+                    get_capabilities(framework).is_diffusion
+                    and result.get("status") == "failed"
+                    and result.get("error_class") == "invalid_measurement"
+                ):
+                    result["status"] = "succeeded"
+                    result["error_class"] = ""
+                    result["error"] = ""
+                    result["profile_offline_trace_rescue"] = True
                 # #210: warn if the trace shape suggests PROFILE_EXTRA_BODY
                 # leaked / shape-discovery missing. Read-only; never blocks.
                 try:
-                    framework = str(
-                        getattr(ctx, "framework", "")
-                        or (extra.get("framework") if isinstance(extra, dict) else "")
-                        or ""
-                    )
                     health = _validate_trace_structure(selected_trace_dir, framework)
                     if isinstance(health, dict):
                         result["trace_health"] = health

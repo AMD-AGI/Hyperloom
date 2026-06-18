@@ -28,6 +28,7 @@ from typing import Any
 import yaml
 
 from ...paths import asset_root
+from ...framework_registry import get_capabilities
 from ._grid_runner import (
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
@@ -126,6 +127,8 @@ def default_baseline_config() -> Path:
         name = "baseline_atom.yaml"
     elif fw == "vllm":
         name = "baseline_vllm.yaml"
+    elif fw == "xdit":
+        name = "baseline_xdit.yaml"
     else:
         name = "baseline_sglang.yaml"
     return asset_root() / "scripts" / "configs" / name
@@ -163,6 +166,49 @@ def materialize_config_with_envs(
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
+
+    # ── Command-launched frameworks ───────────────────────────────────────
+    # Frameworks with launch="run_cmd" have no server, no ISL/OSL/CONC/TP, and
+    # no InferenceX — they run $RUN_CMD directly. Emit a minimal Magpie config
+    # carrying framework + run_cmd and return early, bypassing the entire LLM
+    # serving env block below. Server-launched frameworks fall through to the
+    # normal path.
+    framework = str(
+        bench.get("framework") or os.environ.get("FRAMEWORK", "")
+    ).strip().lower()
+    if get_capabilities(framework).launch == "run_cmd":
+        bench["framework"] = framework
+        bench["run_mode"] = "local"
+        if model_path:
+            bench["model"] = str(model_path)
+        elif os.environ.get("MODEL_PATH", "").strip():
+            bench["model"] = os.environ["MODEL_PATH"].strip()
+        run_cmd = (os.environ.get("RUN_CMD", "") or "").strip()
+        if run_cmd:
+            bench["run_cmd"] = run_cmd
+        if gpu_type:
+            bench["runner_type"] = str(gpu_type)
+        # No LLM serving knobs apply here; drop any leaked from the template.
+        bench.pop("envs", None)
+        bench.pop("inferencex_path", None)
+        bench.pop("benchmark_script", None)
+        for key, value in (extra_envs or {}).items():
+            bench.setdefault("envs", {})[str(key)] = str(value)
+        # Per-variant flags arrive via extra_server_args; route them into
+        # EXTRA_XDIT_ARGS so the runner appends them to run_cmd. Merge with any
+        # value extra_envs already set.
+        if server_args:
+            run_cmd_env = bench.setdefault("envs", {})
+            existing = str(run_cmd_env.get("EXTRA_XDIT_ARGS", "")).strip()
+            run_cmd_env["EXTRA_XDIT_ARGS"] = (
+                f"{existing} {server_args}".strip() if existing else server_args
+            )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        materialized = output_dir / out_name
+        with materialized.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, sort_keys=False)
+        return materialized
+
     if model_path:
         bench["model"] = str(model_path)
     precision = os.environ.get("PRECISION", "").strip()

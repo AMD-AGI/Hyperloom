@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ..compat.payload_aliases import read_extra_server_args
+from ..framework_registry import get_capabilities
 from ..recipe_kb import RecipeKB, recipe_canonical_id
 from ..recipe_snapshot_constants import detect_framework_version
 
@@ -3198,6 +3199,15 @@ class Coordinator:
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue a ``sweep`` task on SWEEP entry (§3.2 §5.4). Idempotent via internal-sweep-phase_entry (Inv-2.1); PolicyGate's sweep_phase_singleton then denies LLM-emitted sweep (OOM race)."""
         state = self.shared_state
+        # Frameworks with no search_knobs have nothing to sweep: an ISL/OSL×CONC
+        # sweep is meaningless. Skip the auto-enqueue entirely.
+        if not get_capabilities(state.framework).supports_param_search:
+            log.info(
+                "SWEEP entry (from=%s): framework=%r has no search knobs; "
+                "skipping auto-sweep (no parameter search)",
+                from_phase or "<unknown>", state.framework,
+            )
+            return
         # Bug #7 fix: drain pending KEEP integrates from prior KERNEL so sweep measures full current_best.
         if getattr(state, "has_keep_pending_integrate", False):
             await self._drain_pending_keep_integrates()
@@ -5361,6 +5371,14 @@ class Coordinator:
                 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
+        if pending.action_name == "integrate_patch":
+            # Thread the framework so the accuracy gate can pick lm-eval vs
+            # image-diff; thread the baseline image dir (the image-diff
+            # reference) when one was recorded.
+            params.setdefault("framework", self.shared_state.framework)
+            _bid = self.shared_state.baseline_image_dir
+            if _bid:
+                params.setdefault("baseline_image_dir", _bid)
         lanes, ttl = self._registry_lanes_ttl(pending.action_name)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
@@ -9019,6 +9037,14 @@ class Coordinator:
             if isinstance(acc, (int, float)):
                 self.shared_state.baseline_accuracy = float(acc)
                 changed = True
+            # Frameworks gated on image diff have no lm-eval score: record the
+            # baseline workspace as the reference image directory for the
+            # accuracy gate. Read from the baseline result's workspace.
+            if get_capabilities(self.shared_state.framework).gates_on_image_diff:
+                _ws = result.get("workspace")
+                if isinstance(_ws, str) and _ws:
+                    self.shared_state.baseline_image_dir = _ws
+                    changed = True
             # Persist the materialized YAML so downstream tasks reuse the exact workload contract baseline ran.
             materialized = result.get("materialized_config")
             if isinstance(materialized, str) and materialized:

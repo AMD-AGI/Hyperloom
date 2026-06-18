@@ -44,6 +44,7 @@ from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
     _build_robustness_options,
     _robustness_server_configured,
 )
+from . import framework_registry as _fw_registry
 from .orchestrator.backends import ClaudeBackend
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
@@ -1810,7 +1811,14 @@ def _seed_shared_state(
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
         # SWEEP-phase post-sweep concurrency sweep flags (on by default); see orchestrator/conc_sweep.py.
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
+        # Forced off for frameworks whose search_knobs omit "conc": a
+        # concurrency sweep is meaningless when there is no concurrency knob.
+        conc_sweep_enabled=(
+            bool(getattr(args, "enable_conc_sweep", True))
+            and _fw_registry.get_capabilities(
+                (getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""))
+            ).supports_conc_sweep
+        ),
         conc_sweep_concs=_parse_conc_sweep_concs(args),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
@@ -4188,9 +4196,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
             or "sglang"
         )
-        if framework not in ("sglang", "vllm", "atom"):
+        if not _fw_registry.is_supported(framework):
             print(
-                f"ERROR: --framework must be sglang, vllm, or atom "
+                f"ERROR: --framework must be one of "
+                f"{', '.join(_fw_registry.supported_frameworks())} "
                 f"(got {framework!r}); set $FRAMEWORK accordingly or pass "
                 "--framework",
                 file=sys.stderr,
@@ -4202,6 +4211,24 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # B3: --framework atom auto-tightens incompatible phases (see _apply_atom_auto_tighten).
         if framework == "atom":
             _apply_atom_auto_tighten(args)
+
+        # Frameworks with launch="run_cmd" are driven by a verbatim command,
+        # not by ISL/OSL/CONC/TP. Require --run-cmd and stash it for downstream
+        # config materialization. Server-launched frameworks skip this — they
+        # need no run command.
+        run_cmd = (getattr(args, "run_cmd", None) or os.environ.get("RUN_CMD", "")).strip()
+        if _fw_registry.get_capabilities(framework).launch == "run_cmd":
+            if not run_cmd:
+                print(
+                    f"ERROR: --framework {framework} is launched by a verbatim "
+                    "command and requires --run-cmd (the command to run); set "
+                    "$RUN_CMD or pass --run-cmd",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            os.environ["RUN_CMD"] = run_cmd
+            args.run_cmd = run_cmd
+            print(f"Run command     : {run_cmd}")
 
         # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
         user_specified = (
@@ -4791,14 +4818,27 @@ def _build_parser() -> argparse.ArgumentParser:
              "Magpie does not yet ship sglang_mi325x.sh / vllm_mi325x.sh.",
     )
     opt.add_argument(
-        "--framework", choices=["sglang", "vllm", "atom"], default=None,
+        "--framework", choices=["sglang", "vllm", "atom", "xdit"], default=None,
         help="Inference framework to benchmark / optimize. Resolution order: "
              "--framework > $FRAMEWORK env > sglang (default). Selection is "
              "session-wide; mixing frameworks in a single session is not "
              "supported. NOTE: --framework atom is single-node-only "
              "(``--nodes>=2`` fails fast); profile / roofline, "
              "kernel-agent, and framework-agent are all enabled on atom. "
-             "The auto-tighten guard only enforces ``--nodes 1``.",
+             "The auto-tighten guard only enforces ``--nodes 1``. "
+             "--framework xdit is a command-launched diffusion run: no server, "
+             "no concurrency/param sweep; supply the run command via "
+             "--run-cmd.",
+    )
+    opt.add_argument(
+        "--run-cmd", type=str, default=os.environ.get("RUN_CMD", "") or None,
+        help="Verbatim run command for command-launched frameworks (e.g. "
+             "xdit). Required for those frameworks; ignored for server-launched "
+             "ones. Hyperloom runs this command as-is for baseline/validate, "
+             "pinning the output directory to the session workspace (and adding "
+             "--profile for the profiling pass). Example: --run-cmd 'xdit "
+             "--model /models/flux --ulysses_degree 2 --num_inference_steps 50 "
+             "--prompt \"a cat\"'.",
     )
     opt.add_argument(
         "--nodes", type=int,

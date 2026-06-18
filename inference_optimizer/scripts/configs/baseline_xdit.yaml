@@ -1,0 +1,30 @@
+# Magpie baseline config for xDiT (command-launched diffusion).
+#
+# xDiT has no inference server, no ISL/OSL/CONC/TP, and no InferenceX. The
+# run is driven entirely by `benchmark.run_cmd` — the command passed via
+# --run-cmd. The executor overrides:
+#   - `benchmark.model`      <- --model / $MODEL_PATH (informational)
+#   - `benchmark.run_cmd`    <- $RUN_CMD
+#   - `benchmark.runner_type`<- --gpu-type / $GPU_TYPE / probe
+# Magpie appends `--output_directory=<workspace>` to run_cmd and parses
+# `timings.json` for latency/image. No torch profiler here — the baseline only
+# needs the latency number.
+
+benchmark:
+  framework: xdit
+  model: ""            # OVERRIDDEN at runtime (informational only)
+  run_mode: local
+  run_cmd: ""          # OVERRIDDEN at runtime from $RUN_CMD
+
+  gpu_selection:
+    auto: false
+
+  timeout_seconds: 7200
+
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false

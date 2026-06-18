@@ -1,0 +1,27 @@
+# Magpie profile config for xDiT (command-launched diffusion).
+#
+# Same shape as baseline_xdit.yaml but with torch_profiler ON. Magpie appends
+# `--profile` to run_cmd so xDiT's built-in profiler emits
+# `profile_trace_rank_<N>.json.gz` chrome traces into the workspace, which the
+# kernel agent / TraceLens consume (same trace format as the LLM path).
+# `benchmark.model` / `run_cmd` / `runner_type` are OVERRIDDEN at runtime —
+# see baseline_xdit.yaml header.
+
+benchmark:
+  framework: xdit
+  model: ""            # OVERRIDDEN at runtime (informational only)
+  run_mode: local
+  run_cmd: ""          # OVERRIDDEN at runtime from $RUN_CMD
+
+  gpu_selection:
+    auto: false
+
+  timeout_seconds: 14400
+
+  profiler:
+    torch_profiler:
+      enabled: true                  # ← key difference vs baseline yaml
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false                 # Hyperloom/kernel-agent runs TraceLens

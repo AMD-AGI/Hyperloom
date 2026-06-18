@@ -64,6 +64,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ...framework_registry import get_capabilities
 from ...session_paths import runs_dir
 from ..framework_paths import resolve_source_file_allowlist
 from ..specialist_patch_safety import patch_targets_missing
@@ -929,34 +930,76 @@ class IntegratePatchExecutor:
                 "ttft_ms": getattr(r, "ttft_ms", None),
                 "itl_ms": getattr(r, "itl_ms", None),
                 "result_dir": str(getattr(r, "result_dir", "")),
+                # Magpie writes artifacts (including generated images) into the
+                # variant workspace; the image-diff gate reads from here.
+                "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
                 "nonfatal_warnings": list(
                     getattr(r, "nonfatal_warnings", []) or []
                 ),
             }
 
-        # Accuracy gate runs only on a succeeded bench with a baseline;
-        # else ``None`` (KEEP gate skips the accuracy check).
+        # Accuracy gate runs only on a succeeded bench; the framework's
+        # accuracy_gate capability picks lm-eval vs image-diff. ``None`` =>
+        # gate skipped (KEEP unaffected).
         accuracy_pass: bool | None = None
-        baseline_accuracy = params.get("accuracy_baseline")
-        if (
-            bench.get("status") == "succeeded"
-            and isinstance(baseline_accuracy, (int, float))
-            and float(baseline_accuracy) > 0
-        ):
-            try:
-                eval_results = parse_eval_results(bench["result_dir"])
-                if eval_results.get("score") is not None:
-                    accuracy_pass = accuracy_passed(
-                        eval_results["score"], float(baseline_accuracy),
-                    )
-            except Exception:  # noqa: BLE001
-                log.exception(
-                    "integrate_patch: accuracy gate parse failed; "
-                    "treating as None (gate skipped)"
-                )
+        if bench.get("status") == "succeeded":
+            framework = (
+                str(params.get("framework") or "").strip()
+                or os.environ.get("FRAMEWORK", "")
+            )
+            gate = get_capabilities(framework).accuracy_gate
+            if gate == "image_diff":
+                accuracy_pass = self._image_diff_gate(bench, params)
+            elif gate == "lm_eval":
+                accuracy_pass = self._lm_eval_gate(bench, params)
 
         return bench, {"accuracy_pass": accuracy_pass}
+
+    @staticmethod
+    def _image_diff_gate(
+        bench: dict[str, Any], params: dict[str, Any],
+    ) -> bool | None:
+        """Image-diff accuracy gate. None => skipped (no reference or output)."""
+        baseline_image_dir = str(params.get("baseline_image_dir") or "").strip()
+        # Generated images land in the run workspace (where the run command's
+        # output directory pointed); fall back to result_dir for parity.
+        candidate_dir = bench.get("workspace") or bench.get("result_dir")
+        if not (baseline_image_dir and candidate_dir):
+            return None
+        try:
+            from ._image_diff import image_diff_passed
+            return image_diff_passed(baseline_image_dir, candidate_dir)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "integrate_patch: image-diff gate failed; "
+                "treating as None (gate skipped)"
+            )
+            return None
+
+    @staticmethod
+    def _lm_eval_gate(
+        bench: dict[str, Any], params: dict[str, Any],
+    ) -> bool | None:
+        """lm-eval accuracy gate. None => skipped (no baseline score)."""
+        baseline_accuracy = params.get("accuracy_baseline")
+        if not (
+            isinstance(baseline_accuracy, (int, float))
+            and float(baseline_accuracy) > 0
+        ):
+            return None
+        try:
+            eval_results = parse_eval_results(bench["result_dir"])
+            if eval_results.get("score") is not None:
+                return accuracy_passed(
+                    eval_results["score"], float(baseline_accuracy),
+                )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "integrate_patch: accuracy gate parse failed; "
+                "treating as None (gate skipped)"
+            )
+        return None
 
 
 __all__ = [

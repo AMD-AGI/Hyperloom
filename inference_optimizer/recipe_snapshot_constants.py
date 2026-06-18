@@ -260,6 +260,7 @@ _FRAMEWORK_VERSION_MODULES: Final[dict[str, str]] = {
     "sglang": "sglang",
     "vllm":   "vllm",
     "atom":   "atom",  # vendor-internal; __version__ is often a git hash
+    "xdit":   "xfuser",  # importable package name differs from the slug
 }
 
 
