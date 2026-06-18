@@ -2471,12 +2471,9 @@ def load_op_category_map(
 # whole geak→claude→codex ladder before any harness is built.
 #
 # TraceLens DOES still capture the operands for this kernel: the per-shape rows in
-# ``perf_report_csvs/ops_unique_args.csv`` carry the wrapped invocation's
-# ``Input Dims`` / ``Input type`` (the gate/up and down grouped-GEMM operands).
-# This recovers those operand shapes from that deterministic sidecar so the
-# emitted candidate carries non-empty, trace-anchored ``shapes`` with
-# ``shape_provenance="torch_trace"``. Scoped to the fused-MoE invoke kernel so
-# other ops are untouched.
+# ``perf_report_csvs/ops_unique_args.csv`` carries trace-recorded ``Input Dims``
+# / ``Input type``. Use it to recover missing candidate shapes deterministically
+# by exact op-name match (or fused-MoE marker match for the historical wrapper).
 _FUSED_MOE_KERNEL_MARKER = "invoke_fused_moe_kernel"
 
 # torch ``Input type`` token → compact dtype suffix used by TraceLens shape
@@ -2525,23 +2522,22 @@ def _format_trace_shape(dims: Any, dtype: Any) -> str | None:
     return f"{shape} {suffix}" if suffix else shape
 
 
-def resolve_fused_moe_shapes_from_csv(
+def _resolve_shapes_from_ops_unique_args_csv(
     perf_report_csv_dir: Path | str | None,
+    row_matches: Callable[[str], bool],
 ) -> list[str]:
-    """Recover the fused-MoE expert kernel operand shapes from ``ops_unique_args.csv``.
+    """Recover operand shapes from matching ``ops_unique_args.csv`` rows.
 
-    Reads each per-shape row whose op name embeds ``invoke_fused_moe_kernel`` and
-    parses its ``Input Dims`` / ``Input type`` tuple-of-tuples into TraceLens-style
-    shape strings (e.g. ``(15360,2048) bf16``), deduped across rows in first-seen
-    order.
+    Parses ``Input Dims`` / ``Input type`` tuple-of-tuples into TraceLens-style
+    shape strings (e.g. ``(15360,2048) bf16``), deduped in first-seen order.
 
     Args:
         perf_report_csv_dir: Directory containing ``ops_unique_args.csv``.
+        row_matches: Predicate called with the normalized row name.
 
     Returns:
-        The recovered operand shape strings, or ``[]`` when the sidecar is
-        absent or carries no fused-MoE rows (callers then leave the
-        candidate's empty ``shapes`` untouched).
+        The recovered operand shape strings, or ``[]`` when no trusted rows
+        are available.
     """
     if not perf_report_csv_dir:
         return []
@@ -2554,7 +2550,7 @@ def resolve_fused_moe_shapes_from_csv(
         with csv_path.open(newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 name = str(row.get("name") or "").strip().lower()
-                if _FUSED_MOE_KERNEL_MARKER not in name:
+                if not row_matches(name):
                     continue
                 try:
                     dims = ast.literal_eval(str(row.get("Input Dims") or "").strip() or "()")
@@ -2574,6 +2570,30 @@ def resolve_fused_moe_shapes_from_csv(
     except (OSError, csv.Error):
         return []
     return shapes
+
+
+def resolve_fused_moe_shapes_from_csv(
+    perf_report_csv_dir: Path | str | None,
+) -> list[str]:
+    """Recover the fused-MoE expert-kernel operand shapes from ``ops_unique_args.csv``."""
+    return _resolve_shapes_from_ops_unique_args_csv(
+        perf_report_csv_dir,
+        lambda name: _FUSED_MOE_KERNEL_MARKER in name,
+    )
+
+
+def resolve_shapes_from_csv_for_op(
+    perf_report_csv_dir: Path | str | None,
+    op_name: str,
+) -> list[str]:
+    """Recover operand shapes for a candidate by exact TraceLens op name."""
+    target = str(op_name or "").strip().lower()
+    if not target:
+        return []
+    return _resolve_shapes_from_ops_unique_args_csv(
+        perf_report_csv_dir,
+        lambda name: name == target,
+    )
 
 
 def _is_fused_moe_candidate(item: dict[str, Any]) -> bool:
@@ -3138,6 +3158,11 @@ def _finalize_candidates(
                 _fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
             if _fused_moe_shapes:
                 item["shapes"] = list(_fused_moe_shapes)
+                item["shape_provenance"] = "torch_trace"
+        if not item.get("shapes"):
+            csv_shapes = resolve_shapes_from_csv_for_op(perf_report_csv_dir, str(item.get("name") or ""))
+            if csv_shapes:
+                item["shapes"] = csv_shapes
                 item["shape_provenance"] = "torch_trace"
         # Mark trace-extracted shapes so the dispatch-time validator can tell their provenance.
         if item.get("shapes"):

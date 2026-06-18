@@ -595,8 +595,49 @@ def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
     assert out[0]["shape_provenance"] == "torch_trace"
 
 
+def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_path):
+    """#599: other_bucket fallback candidates use exact op-name CSV shapes."""
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "ops_unique_args.csv").write_text(
+        (
+            "name,op category,Input Dims,Input type\n"
+            "sglang_profiler::attention_paged_attention_ragged_100,other,"
+            '"((64, 32, 128), (2181038080,), (64, 32, 128), '
+            '(1177709, 1, 8, 128), (), (1,), ())",'
+            "\"('c10::BFloat16', 'unsigned char', 'c10::BFloat16', "
+            "'c10::BFloat16', '', 'float', '')\"\n"
+        ),
+        encoding="utf-8",
+    )
+    candidates = [
+        {
+            "name": "sglang_profiler::attention_paged_attention_ragged_100",
+            "duration_us": 170086.617,
+            "call_count": 0,
+            "candidate_source": "other_bucket_fallback",
+            "source_file": "/sgl-workspace/aiter/csrc/cpp_itfs/pa/pa_ragged.py",
+            "source_type": "python",
+            "shapes": [],
+            "tracelens_category": "other",
+        }
+    ]
+
+    out = tla._finalize_candidates(
+        candidates,
+        total_dur=170086.617,
+        perf_report_csv_dir=csv_dir,
+    )
+
+    assert out[0]["shapes"]
+    assert "(64,32,128) bf16" in out[0]["shapes"]
+    assert "(1177709,1,8,128) bf16" in out[0]["shapes"]
+    assert "(1,) f32" in out[0]["shapes"]
+    assert out[0]["shape_provenance"] == "torch_trace"
+
+
 def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
-    """Resolver is scoped: non-MoE ops and MoE candidates that already have shapes are left as-is."""
+    """Unmatched non-MoE ops and already-shaped MoE candidates are left as-is."""
     csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
     candidates = [
         {  # non-MoE op: must NOT be back-filled from the fused-MoE sidecar
