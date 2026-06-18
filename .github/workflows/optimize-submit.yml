@@ -126,6 +126,12 @@ on:
         default: 'local'
         type: choice
         options: [local, claw]
+      framework:
+        description: 'Serving framework override forwarded to optimize_submit.py as --framework. Leave empty to auto-detect from the model config.'
+        required: false
+        default: ''
+        type: choice
+        options: ['', sglang, vllm]
       gpu_type:
         description: 'GPU type tag (overrides SaFE backend default MI355X). Leave empty to use script default (MI300X for core42).'
         required: false
@@ -317,6 +323,7 @@ jobs:
           INPUT_TP:               ${{ github.event.inputs.tp }}
           INPUT_SUBMIT_JITTER_SEC: ${{ github.event.inputs.submit_jitter_sec }}
           INPUT_MODE:             ${{ github.event.inputs.mode }}
+          INPUT_FRAMEWORK:        ${{ github.event.inputs.framework }}
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
@@ -360,6 +367,10 @@ jobs:
             ARGS+=(--tp "${INPUT_TP}")
           fi
           ARGS+=(--mode "${INPUT_MODE:-local}")
+          # Optional framework override — empty keeps the script's auto-detect.
+          if [ -n "${INPUT_FRAMEWORK:-}" ]; then
+            ARGS+=(--framework "${INPUT_FRAMEWORK}")
+          fi
           if [ -n "${INPUT_GPU_TYPE:-}" ]; then
             ARGS+=(--gpu-type "${INPUT_GPU_TYPE}")
           fi
