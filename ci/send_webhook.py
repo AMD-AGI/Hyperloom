@@ -223,12 +223,11 @@ def _build_payload(
     delivered = sum(1 for r in all_rows if r.get("ci_success"))
     safe_succeeded = sum(1 for r in all_rows if r.get("final_status") == "Succeeded")
     with_metrics = sum(
-        1 for r in all_rows
-        if r.get("baseline_tok_per_gpu") is not None
-        and r.get("optimized_tok_per_gpu") is not None
+        1 for r in all_rows if r.get("baseline_tok_per_gpu") is not None and r.get("optimized_tok_per_gpu") is not None
     )
     with_gain = sum(
-        1 for r in all_rows
+        1
+        for r in all_rows
         if (r.get("gain_pct") or 0) > 0
         and r.get("baseline_tok_per_gpu") is not None
         and r.get("optimized_tok_per_gpu") is not None
@@ -262,76 +261,85 @@ def _build_payload(
         },
     ]
 
-    table_rows = [{
-        "type": "TableRow",
-        "style": "accent",
-        "cells": [
-            _cell("Model", "Bolder"),
-            _cell("Stack", "Bolder"),
-            _cell("Params", "Bolder"),
-            _cell("Baseline tok/s/GPU", "Bolder"),
-            _cell("Optimized tok/s/GPU", "Bolder"),
-            _cell("Gain", "Bolder"),
-        ],
-    }]
+    table_rows = [
+        {
+            "type": "TableRow",
+            "style": "accent",
+            "cells": [
+                _cell("Model", "Bolder"),
+                _cell("Stack", "Bolder"),
+                _cell("Params", "Bolder"),
+                _cell("Baseline tok/s/GPU", "Bolder"),
+                _cell("Optimized tok/s/GPU", "Bolder"),
+                _cell("Gain", "Bolder"),
+            ],
+        }
+    ]
     for row in rows:
         gain = row.get("gain_pct")
         gain_text = "-" if gain is None else (_gain_prefix(gain) + ("0%" if gain == 0 else _fmt_pct(gain))).strip()
         stack = f"{row.get('framework') or '-'} {row.get('precision') or '-'} TP={row.get('tp') or '-'}"
-        table_rows.append({
-            "type": "TableRow",
-            "cells": [
-                _cell(_short_model(row.get("model"))),
-                _cell(stack),
-                _cell(_params(row)),
-                _cell(_fmt_num(row.get("baseline_tok_per_gpu"))),
-                _cell(_fmt_num(row.get("optimized_tok_per_gpu"))),
-                _cell(gain_text, color=_gain_color(gain)),
-            ],
-        })
+        table_rows.append(
+            {
+                "type": "TableRow",
+                "cells": [
+                    _cell(_short_model(row.get("model"))),
+                    _cell(stack),
+                    _cell(_params(row)),
+                    _cell(_fmt_num(row.get("baseline_tok_per_gpu"))),
+                    _cell(_fmt_num(row.get("optimized_tok_per_gpu"))),
+                    _cell(gain_text, color=_gain_color(gain)),
+                ],
+            }
+        )
 
-    body.append({
-        "type": "Table",
-        "firstRowAsHeader": True,
-        "showGridLines": True,
-        "columns": [{"width": 6}, {"width": 3}, {"width": 2}, {"width": 3}, {"width": 3}, {"width": 3}],
-        "rows": table_rows,
-    })
+    body.append(
+        {
+            "type": "Table",
+            "firstRowAsHeader": True,
+            "showGridLines": True,
+            "columns": [{"width": 6}, {"width": 3}, {"width": 2}, {"width": 3}, {"width": 3}, {"width": 3}],
+            "rows": table_rows,
+        }
+    )
 
     # Footer: perf-leaderboard publish count on the LAST card only (avoid repeating across chunks).
     # Counts come from the workflow's count step via PERF_PUBLISH_OK / PERF_PUBLISH_TOTAL env vars.
     if part == total_parts:
         try:
-            perf_ok    = int(os.environ.get("PERF_PUBLISH_OK")    or 0)
+            perf_ok = int(os.environ.get("PERF_PUBLISH_OK") or 0)
             perf_total = int(os.environ.get("PERF_PUBLISH_TOTAL") or 0)
         except ValueError:
             perf_ok = perf_total = 0
         if perf_total > 0:
             failed = perf_total - perf_ok
-            tail = (
-                f"perf-leaderboard publish: **{perf_ok}/{perf_total}** sent"
-                + (f" · {failed} failed" if failed else "")
+            tail = f"perf-leaderboard publish: **{perf_ok}/{perf_total}** sent" + (
+                f" · {failed} failed" if failed else ""
             )
-            body.append({
-                "type": "TextBlock",
-                "text": tail,
-                "wrap": True,
-                "isSubtle": True,
-                "spacing": "Small",
-            })
+            body.append(
+                {
+                    "type": "TextBlock",
+                    "text": tail,
+                    "wrap": True,
+                    "isSubtle": True,
+                    "spacing": "Small",
+                }
+            )
 
     return {
         "type": "message",
-        "attachments": [{
-            "contentType": "application/vnd.microsoft.card.adaptive",
-            "content": {
-                "type": "AdaptiveCard",
-                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                "version": "1.5",
-                "msteams": {"width": "Full"},
-                "body": body,
-            },
-        }],
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "type": "AdaptiveCard",
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "version": "1.5",
+                    "msteams": {"width": "Full"},
+                    "body": body,
+                },
+            }
+        ],
     }
 
 
@@ -362,7 +370,7 @@ def main() -> int:
         print("summary has no rows; skipping webhook")
         return 0
 
-    chunks = [rows[i:i + args.rows_per_card] for i in range(0, len(rows), args.rows_per_card)]
+    chunks = [rows[i : i + args.rows_per_card] for i in range(0, len(rows), args.rows_per_card)]
     for idx, chunk in enumerate(chunks, 1):
         body = _build_payload(chunk, rows, idx, len(chunks), args.dashboard_url)
         body_bytes = len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
@@ -371,9 +379,7 @@ def main() -> int:
             args.url,
             json=body,
             timeout=args.timeout,
-            verify=os.environ.get(
-                "SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True)
-            ),
+            verify=os.environ.get("SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True)),
         )
         print(f"Webhook part {idx}: HTTP {response.status_code}")
         if response.status_code >= 300:

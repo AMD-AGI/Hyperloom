@@ -46,38 +46,54 @@ def _init_git_repo(path: Path) -> None:
     env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
     subprocess.run(
         ["git", "init", "-b", "main", str(path)],
-        check=True, capture_output=True, env=env,
+        check=True,
+        capture_output=True,
+        env=env,
     )
     (path / "README.md").write_text("# pr-a2 test repo\n", encoding="utf-8")
     subprocess.run(
         ["git", "-C", str(path), "add", "."],
-        check=True, capture_output=True, env=env,
+        check=True,
+        capture_output=True,
+        env=env,
     )
     subprocess.run(
         ["git", "-C", str(path), "commit", "-m", "init"],
-        check=True, capture_output=True, env=env,
+        check=True,
+        capture_output=True,
+        env=env,
     )
 
 
 def _make_fake_claude(
-    bin_dir: Path, *, behavior: str, payload: dict[str, Any] | None = None,
+    bin_dir: Path,
+    *,
+    behavior: str,
+    payload: dict[str, Any] | None = None,
 ) -> Path:
     """Write a fake ``claude`` executable simulating one of: done_only / done_with_patch / done_with_env / crash."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     script_path = bin_dir / "claude"
-    payload_json = json.dumps(payload or {
-        "gap_canonical_id": "gap.test.example",
-        "domain": "serving_specialist",
-        "proposal_set": [{
-            "name": "fake_variant", "extra_args": "--fake",
-            "extra_envs": {}, "reason": "fake",
-        }],
-        "patches_written": [],
-        "empty": False,
-        "summary": "fake claude subprocess output",
-        "confidence": 0.5,
-    })
-    body = f"""#!/usr/bin/env bash
+    payload_json = json.dumps(
+        payload
+        or {
+            "gap_canonical_id": "gap.test.example",
+            "domain": "serving_specialist",
+            "proposal_set": [
+                {
+                    "name": "fake_variant",
+                    "extra_args": "--fake",
+                    "extra_envs": {},
+                    "reason": "fake",
+                }
+            ],
+            "patches_written": [],
+            "empty": False,
+            "summary": "fake claude subprocess output",
+            "confidence": 0.5,
+        }
+    )
+    body = """#!/usr/bin/env bash
 set -e
 # Parse --add-dir paths (first is worktree, second is workspace).
 ADD_DIRS=()
@@ -87,8 +103,8 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
-WORKTREE="${{ADD_DIRS[0]:-}}"
-WORKSPACE="${{ADD_DIRS[1]:-}}"
+WORKTREE="${ADD_DIRS[0]:-}"
+WORKSPACE="${ADD_DIRS[1]:-}"
 if [[ -n "$WORKTREE" && -f "$WORKTREE/prompt.md" ]]; then
   WORKSPACE="$WORKTREE"
 fi
@@ -101,19 +117,25 @@ EOF
 exit 0
 """
     elif behavior == "done_with_patch":
-        patch_payload = json.dumps({
-            **(payload or {}),
-            "gap_canonical_id": "gap.test.example",
-            "domain": "serving_specialist",
-            "proposal_set": [{
-                "name": "patched_variant", "extra_args": "",
-                "extra_envs": {}, "reason": "see patch",
-            }],
-            "patches_written": ["patches/001_test.patch"],
-            "empty": False,
-            "summary": "fake patch-authoring specialist",
-            "confidence": 0.7,
-        })
+        patch_payload = json.dumps(
+            {
+                **(payload or {}),
+                "gap_canonical_id": "gap.test.example",
+                "domain": "serving_specialist",
+                "proposal_set": [
+                    {
+                        "name": "patched_variant",
+                        "extra_args": "",
+                        "extra_envs": {},
+                        "reason": "see patch",
+                    }
+                ],
+                "patches_written": ["patches/001_test.patch"],
+                "empty": False,
+                "summary": "fake patch-authoring specialist",
+                "confidence": 0.7,
+            }
+        )
         body += f"""
 mkdir -p "$WORKTREE/patches"
 cat > "$WORKTREE/patches/001_test.patch" <<'EOF'
@@ -149,6 +171,20 @@ exit 0
 """
     elif behavior == "crash":
         body += "exit 3\n"
+    elif behavior == "partial_then_crash":
+        # WS1: write an incremental checkpoint to the *partial* file (which must
+        # NOT trigger reap), then die before writing the final done.json — the
+        # dispatcher should recover the partial as the best-so-far result.
+        body += f"""
+cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
+{payload_json}
+EOF
+exit 3
+"""
+    elif behavior == "hang":
+        # Sleep past any small wall budget without writing done.json; the
+        # reaper's wall-clock kill must terminate it.
+        body += 'sleep 600\n'
     else:
         raise ValueError(f"unknown behavior {behavior!r}")
     script_path.write_text(body, encoding="utf-8")
@@ -208,9 +244,7 @@ def test_default_tools_include_write_capabilities():
 
 def test_kb_write_tools_remain_denied():
     """KB lifecycle stays Coordinator-owned (Inv-2 / Inv-6.1)."""
-    for kb_tool in (
-        "mcp__cortex_kb__propose_point",
-    ):
+    for kb_tool in ("mcp__cortex_kb__propose_point",):
         assert kb_tool in SPECIALIST_TOOL_DENYLIST
 
 
@@ -225,7 +259,8 @@ def test_task_allowed_tools_override_default_patch_tools():
 
 # 3. Worktree helpers
 def test_pick_worktree_base_picks_first_git_root(
-    tmp_path: Path, fake_framework_repo: Path,
+    tmp_path: Path,
+    fake_framework_repo: Path,
 ):
     nonrepo = tmp_path / "not-a-repo"
     nonrepo.mkdir()
@@ -242,19 +277,23 @@ def test_pick_worktree_base_returns_none_when_no_repo(tmp_path: Path):
 
 
 def test_setup_worktree_creates_branch_off_base(
-    tmp_path: Path, fake_framework_repo: Path,
+    tmp_path: Path,
+    fake_framework_repo: Path,
 ):
     workspace = tmp_path / "workspace"
     worktree, err = _setup_worktree(
-        fake_framework_repo, workspace / "worktree", "specialist-test1",
+        fake_framework_repo,
+        workspace / "worktree",
+        "specialist-test1",
     )
     assert err == "", err
     assert worktree is not None
     assert worktree.is_dir()
     cp = subprocess.run(
-        ["git", "-C", str(fake_framework_repo), "branch", "--list",
-         "specialist-test1"],
-        capture_output=True, text=True, check=True,
+        ["git", "-C", str(fake_framework_repo), "branch", "--list", "specialist-test1"],
+        capture_output=True,
+        text=True,
+        check=True,
     )
     assert "specialist-test1" in cp.stdout
 
@@ -262,7 +301,8 @@ def test_setup_worktree_creates_branch_off_base(
 # 4. End-to-end subprocess dispatch with the fake `claude` binary
 @pytest.mark.asyncio
 async def test_subprocess_path_harvests_done_file(
-    tmp_path: Path, fake_framework_repo: Path,
+    tmp_path: Path,
+    fake_framework_repo: Path,
 ):
     """The fake ``claude`` writes specialist_done.json; the runner reads it and returns status=succeeded."""
     bin_dir = tmp_path / "bin"
@@ -297,7 +337,8 @@ async def test_subprocess_path_harvests_done_file(
 
 @pytest.mark.asyncio
 async def test_subprocess_path_injects_allocated_gpu_env(
-    tmp_path: Path, fake_framework_repo: Path,
+    tmp_path: Path,
+    fake_framework_repo: Path,
 ):
     bin_dir = tmp_path / "bin"
     fake_claude = _make_fake_claude(bin_dir, behavior="done_with_env")
@@ -330,7 +371,8 @@ async def test_subprocess_path_injects_allocated_gpu_env(
 
 @pytest.mark.asyncio
 async def test_readonly_research_scout_skips_worktree(
-    tmp_path: Path, fake_framework_repo: Path,
+    tmp_path: Path,
+    fake_framework_repo: Path,
 ):
     bin_dir = tmp_path / "bin"
     fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
@@ -350,11 +392,13 @@ async def test_readonly_research_scout_skips_worktree(
         default_max_turns=2,
     )
     ctx = _make_runner_ctx("t-spec-scout")
-    ctx.task.params.update({
-        "domain": "research_scout_specialist",
-        "gap_canonical_id": "gap.research_scout.round0",
-        "readonly": True,
-    })
+    ctx.task.params.update(
+        {
+            "domain": "research_scout_specialist",
+            "gap_canonical_id": "gap.research_scout.round0",
+            "readonly": True,
+        }
+    )
     ctx.task.allowed_tools = ["Read", "Grep", "Glob", "Write"]
 
     result = await runner.run(ctx)
@@ -367,7 +411,8 @@ async def test_readonly_research_scout_skips_worktree(
 
 @pytest.mark.asyncio
 async def test_subprocess_path_collects_patches(
-    tmp_path: Path, fake_framework_repo: Path,
+    tmp_path: Path,
+    fake_framework_repo: Path,
 ):
     """A done file + worktree patch threads the patch path into specialist_done['patches_written']."""
     bin_dir = tmp_path / "bin"
@@ -401,7 +446,8 @@ async def test_subprocess_path_collects_patches(
 
 @pytest.mark.asyncio
 async def test_subprocess_crash_falls_back_to_empty_synthesised(
-    tmp_path: Path, fake_framework_repo: Path,
+    tmp_path: Path,
+    fake_framework_repo: Path,
 ):
     """A crash with no done.json synthesises an empty specialist_done and a stale-like status."""
     bin_dir = tmp_path / "bin"
@@ -431,7 +477,8 @@ async def test_subprocess_crash_falls_back_to_empty_synthesised(
 
 @pytest.mark.asyncio
 async def test_subprocess_path_isolates_writes_to_worktree(
-    tmp_path: Path, fake_framework_repo: Path,
+    tmp_path: Path,
+    fake_framework_repo: Path,
 ):
     """Worktree patches must NOT appear in the base repo's working tree until ``integrate_patch`` applies them."""
     bin_dir = tmp_path / "bin"
@@ -460,6 +507,80 @@ async def test_subprocess_path_isolates_writes_to_worktree(
     assert (worktree / "patches" / "001_test.patch").exists()
     assert not (fake_framework_repo / "patches" / "001_test.patch").exists()
     assert not (fake_framework_repo / "dummy.txt").exists()
+
+
+# WS1 — incremental checkpoint recovery + explicit wall budget
+@pytest.mark.asyncio
+async def test_subprocess_recovers_partial_when_no_final(
+    tmp_path: Path,
+    fake_framework_repo: Path,
+):
+    """A specialist that wrote only the incremental partial (then died before
+    the final done.json) surfaces the partial as a non-empty result rather than
+    being discarded as an empty crash."""
+    bin_dir = tmp_path / "bin"
+    fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_crash")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    config = SpecialistSubprocessConfig(
+        claude_executable=str(fake_claude),
+        model="",
+        framework_source_roots=(str(fake_framework_repo),),
+        per_turn_max_seconds=15.0,
+        poll_interval_seconds=0.2,
+    )
+    runner = SpecialistRunner(
+        subprocess_config=config,
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    ctx = _make_runner_ctx("t-spec-partial")
+
+    result = await runner.run(ctx)
+    # Non-empty payload recovered from the partial → treated as a real result.
+    assert result.status == "succeeded"
+    assert result.specialist_done["empty"] is False
+    assert result.specialist_done.get("_recovered_from_partial") is True
+    assert result.specialist_done["proposal_set"]
+
+
+@pytest.mark.asyncio
+async def test_wall_budget_overrides_legacy_max_seconds(
+    tmp_path: Path,
+    fake_framework_repo: Path,
+):
+    """A small Coordinator-injected ``wall_budget_sec`` must kill a hung
+    specialist well before the legacy ``max_turns × per_turn`` ceiling (here
+    2 × 15 = 30s)."""
+    bin_dir = tmp_path / "bin"
+    fake_claude = _make_fake_claude(bin_dir, behavior="hang")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    config = SpecialistSubprocessConfig(
+        claude_executable=str(fake_claude),
+        model="",
+        framework_source_roots=(str(fake_framework_repo),),
+        per_turn_max_seconds=15.0,
+        poll_interval_seconds=0.2,
+    )
+    runner = SpecialistRunner(
+        subprocess_config=config,
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    ctx = _make_runner_ctx("t-spec-budget")
+    ctx.extra["wall_budget_sec"] = 1.0
+
+    started = time.monotonic()
+    result = await runner.run(ctx)
+    elapsed = time.monotonic() - started
+
+    # Killed by the 1s budget, not the 30s legacy ceiling.
+    assert elapsed < 15.0
+    assert result.status in ("stale", "empty_synthesised")
+    assert "timeout" in (result.error or "")
 
 
 class _FakeProc:
@@ -491,7 +612,8 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
     heartbeat_file = workspace / "heartbeat.json"  # intentionally never written
 
     cfg = SpecialistSubprocessConfig(
-        heartbeat_stale_seconds=1.0, poll_interval_seconds=0.2,
+        heartbeat_stale_seconds=1.0,
+        poll_interval_seconds=0.2,
     )
     disp = SpecialistSubprocessDispatcher(config=cfg)
     proc = _FakeProc()
@@ -522,7 +644,8 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
 
 @pytest.mark.asyncio
 async def test_reap_loop_kills_when_no_activity_at_all(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """With neither heartbeat.json nor process.log activity, the reaper
     still reaps a silent/hung subprocess as stale."""
@@ -532,7 +655,8 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     heartbeat_file = workspace / "heartbeat.json"
 
     cfg = SpecialistSubprocessConfig(
-        heartbeat_stale_seconds=0.5, poll_interval_seconds=0.2,
+        heartbeat_stale_seconds=0.5,
+        poll_interval_seconds=0.2,
     )
     disp = SpecialistSubprocessDispatcher(config=cfg)
     proc = _FakeProc()  # stays alive; only staleness can stop it
@@ -545,7 +669,9 @@ async def test_reap_loop_kills_when_no_activity_at_all(
         p.alive = False
 
     monkeypatch.setattr(
-        SpecialistSubprocessDispatcher, "_kill", staticmethod(_fake_kill),
+        SpecialistSubprocessDispatcher,
+        "_kill",
+        staticmethod(_fake_kill),
     )
 
     outcome = await disp._reap_loop(

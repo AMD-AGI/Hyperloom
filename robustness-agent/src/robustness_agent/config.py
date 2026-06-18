@@ -3,7 +3,7 @@
 """Configuration for the Robustness Agent.
 
 Claw v2 cannot inject env vars, so config is auto-detected: session_dir,
-robust-analyzer endpoint, and LLM endpoint (OPENAI_BASE_URL / SAFE_API_KEY).
+robustness-server endpoint, and LLM endpoint (OPENAI_BASE_URL / SAFE_API_KEY).
 """
 
 from __future__ import annotations
@@ -17,11 +17,6 @@ from typing import Optional
 import httpx
 
 log = logging.getLogger(__name__)
-
-ROBUST_ANALYZER_CANDIDATES: list[str] = [
-    "http://robust-analyzer.primus-robust.svc.cluster.local:8085",
-    "http://robust-analyzer:8085",
-]
 
 # Primary data source: cluster DNS first, then a local dev port-forward.
 ROBUSTNESS_SERVER_CANDIDATES: list[str] = [
@@ -49,9 +44,7 @@ class Config:
 
     Attributes:
         session_dir (Path): Directory containing the session's storage
-            (including ``conductor.db``).
-        robust_analyzer_url (str): Auto-detected robust-analyzer
-            endpoint; empty means local-only mode.
+            (including ``coordinator.db``).
         robustness_server_url (str): Primary M1 data source endpoint;
             empty means skip the server and use only the local probe.
         llm_model (str): Model name used for LLM-driven root-cause
@@ -71,44 +64,26 @@ class Config:
 
     session_dir: Path = field(default_factory=lambda: Path("/tmp/robustness-session"))
 
-    # Filled by auto-detection; empty means local-only mode.
-    robust_analyzer_url: str = ""
-
     # Primary data source; empty means "skip server, only use local probe".
     robustness_server_url: str = ""
 
     @property
-    def conductor_db_path(self) -> Path:
-        """Filesystem path to the session's conductor SQLite database.
+    def coordinator_db_path(self) -> Path:
+        """Filesystem path to the session's Coordinator SQLite database.
 
         Returns:
-            Path: ``session_dir/storage/conductor.db``.
+            Path: ``session_dir/storage/coordinator.db``.
         """
-        return self.session_dir / "storage" / "conductor.db"
-
-    # -- monitoring intervals (seconds) --
-    process_check_interval: float = 10.0
-    gpu_check_interval: float = 15.0
-    disk_check_interval: float = 60.0
-    event_poll_interval: float = 5.0
-    health_check_interval: float = 30.0
+        return self.session_dir / "storage" / "coordinator.db"
 
     # -- thresholds --
-    gpu_vram_warn_pct: float = 90.0
-    gpu_vram_crit_pct: float = 95.0
     gpu_temp_warn_c: float = 85.0
-    gpu_util_drop_pct: float = 50.0
-    disk_usage_warn_pct: float = 85.0
-    disk_usage_crit_pct: float = 95.0
     agent_stall_timeout_s: float = 300.0
-    benchmark_timeout_s: float = 600.0
-    server_start_timeout_s: float = 480.0
 
     # -- LLM for RCA (auto-detected from Claw sandbox env) --
     llm_model: str = "claude-opus-4-7"
     llm_base_url: str = ""
     llm_api_key: str = ""
-    rca_max_turns: int = 10
 
     # -- LLM RCA throttle / activation --
     # ``None`` = auto-enable when llm_base_url + llm_api_key are both set;
@@ -255,10 +230,10 @@ class Config:
 
     # -- I state-integrity signals (2026-05-19) --
     state_integrity_enabled: bool = True
-    state_wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024     # 1 GiB
+    state_wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024  # 1 GiB
     state_wal_bytes_critical_threshold: int = 4 * 1024 * 1024 * 1024  # 4 GiB
     state_stale_lease_min_age_s: float = 60.0
-    state_inbox_bloat_warn_bytes: int = 100 * 1024 * 1024     # 100 MiB
+    state_inbox_bloat_warn_bytes: int = 100 * 1024 * 1024  # 100 MiB
     state_inbox_bloat_critical_bytes: int = 500 * 1024 * 1024  # 500 MiB
 
     # -- J external-deps signals (2026-05-19) --
@@ -282,36 +257,36 @@ class Config:
     # in-memory only (unit tests / single-process drivers).
     state_store_enabled: bool = True
 
-    # -- ring buffer (local mode only) --
-    local_metrics_history_s: int = 3600
-    local_metrics_sample_interval: int = 5
-
     # -- server process patterns --
     # Mirrors ``local_probe._DEFAULT_PROCESS_PATTERNS`` so the
     # gpu_memory_leaked "no live owner" check matches every legitimate VRAM
     # holder; vLLM v1 / Ray / aiter JIT entries are critical or EngineCore-
     # children get mis-classified as "not a server".
-    server_process_patterns: list[str] = field(default_factory=lambda: [
-        # SGLang
-        "sglang.srt",
-        "sglang.launch_server",
-        # vLLM
-        "vllm.entrypoints",
-        "vllm serve",
-        "vllm.v1.engine.core",
-        "vllm.engine.async_llm_engine",
-        "EngineCore",
-        # Magpie / InferenceX
-        "Magpie",
-        "inferencex",
-        # Ray + JIT compilation
-        "ray::IDLE",
-        "raylet",
-        "hipcc",
-    ])
-    benchmark_process_patterns: list[str] = field(default_factory=lambda: [
-        "benchmark_serving",
-    ])
+    server_process_patterns: list[str] = field(
+        default_factory=lambda: [
+            # SGLang
+            "sglang.srt",
+            "sglang.launch_server",
+            # vLLM
+            "vllm.entrypoints",
+            "vllm serve",
+            "vllm.v1.engine.core",
+            "vllm.engine.async_llm_engine",
+            "EngineCore",
+            # Magpie / InferenceX
+            "Magpie",
+            "inferencex",
+            # Ray + JIT compilation
+            "ray::IDLE",
+            "raylet",
+            "hipcc",
+        ]
+    )
+    benchmark_process_patterns: list[str] = field(
+        default_factory=lambda: [
+            "benchmark_serving",
+        ]
+    )
 
     @classmethod
     async def discover(cls) -> "Config":
@@ -325,19 +300,18 @@ class Config:
             Config: A new instance populated with the discovered values.
         """
         session_dir = _discover_session_dir()
-        analyzer_url = await _probe_robust_analyzer()
         server_url = await _probe_robustness_server()
         llm_base_url, llm_api_key = _discover_llm_credentials()
         workload_uid = _discover_workload_uid()
         disable_local_probe = _env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
         enable_cluster_pod_metrics = _env_bool(
-            "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS", False,
+            "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS",
+            False,
         )
         nodes = _env_int("ROBUSTNESS_NODES", 1)
 
         config = cls(
             session_dir=session_dir,
-            robust_analyzer_url=analyzer_url,
             robustness_server_url=server_url,
             llm_base_url=llm_base_url,
             llm_api_key=llm_api_key,
@@ -348,12 +322,11 @@ class Config:
         )
 
         log.info(
-            "Config discovered: session_dir=%s server=%s analyzer=%s llm=%s "
+            "Config discovered: session_dir=%s server=%s llm=%s "
             "nodes=%d workload_uid=%s disable_local_probe=%s "
             "enable_cluster_pod_metrics=%s",
             config.session_dir,
             config.robustness_server_url or "(local-only)",
-            config.robust_analyzer_url or "(local mode)",
             "(configured)" if config.llm_base_url else "(not available)",
             config.nodes,
             config.workload_uid or "(unset)",
@@ -368,7 +341,7 @@ def _discover_session_dir() -> Path:
 
     Checks the ``SESSION_DIR`` environment variable, then the known
     candidate paths and the current working directory for a
-    ``storage/conductor.db`` marker.
+    ``storage/coordinator.db`` marker.
 
     Returns:
         Path: The discovered session directory, or the last candidate
@@ -381,13 +354,13 @@ def _discover_session_dir() -> Path:
             return p
 
     for candidate in SESSION_DIR_CANDIDATES:
-        db = candidate / "storage" / "conductor.db"
+        db = candidate / "storage" / "coordinator.db"
         if db.exists():
             log.info("Session dir discovered at: %s", candidate)
             return candidate
 
     cwd = Path.cwd()
-    db = cwd / "storage" / "conductor.db"
+    db = cwd / "storage" / "coordinator.db"
     if db.exists():
         log.info("Session dir is cwd: %s", cwd)
         return cwd
@@ -395,27 +368,6 @@ def _discover_session_dir() -> Path:
     fallback = SESSION_DIR_CANDIDATES[-1]
     log.warning("No session dir found, using fallback: %s", fallback)
     return fallback
-
-
-async def _probe_robust_analyzer() -> str:
-    """Try known robust-analyzer endpoints, return first reachable one.
-
-    Returns:
-        str: The first candidate URL whose ``/health`` endpoint returns
-        200, or an empty string if none are reachable.
-    """
-    for url in ROBUST_ANALYZER_CANDIDATES:
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as client:
-                resp = await client.get(f"{url}/health")
-                if resp.status_code == 200:
-                    log.info("Robust-analyzer reachable at %s", url)
-                    return url
-        except Exception:
-            continue
-
-    log.info("Robust-analyzer not reachable, will use local provider")
-    return ""
 
 
 async def _probe_robustness_server() -> str:
@@ -455,9 +407,7 @@ def _discover_llm_credentials() -> tuple[str, str]:
     """
     base_url = os.environ.get("OPENAI_BASE_URL", "")
     api_key = (
-        os.environ.get("SAFE_API_KEY", "")
-        or os.environ.get("OPENAI_API_KEY", "")
-        or os.environ.get("LLM_API_KEY", "")
+        os.environ.get("SAFE_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("LLM_API_KEY", "")
     )
     return base_url, api_key
 
@@ -476,6 +426,9 @@ def _discover_workload_uid() -> str:
 
     Lets a RayJob sandbox opt into hierarchy-based pod discovery; single-node
     runs leave every key unset and fall back to ``list_session_pods``.
+
+    Returns:
+        The first non-empty workload-uid env value, or ``""`` if none set.
     """
     for key in _WORKLOAD_UID_ENV_KEYS:
         value = (os.environ.get(key) or "").strip()
@@ -485,6 +438,17 @@ def _discover_workload_uid() -> str:
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean configuration value from the environment.
+
+    Args:
+        name: Name of the environment variable to read.
+        default: Value to return when the variable is unset.
+
+    Returns:
+        ``True`` when the variable is set to one of ``1``, ``true``, ``yes``,
+        or ``on`` (case-insensitive); ``False`` for any other set value; and
+        ``default`` when the variable is unset.
+    """
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -492,6 +456,17 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _env_int(name: str, default: int) -> int:
+    """Read an integer configuration value from the environment.
+
+    Args:
+        name: Name of the environment variable to read.
+        default: Value to return when the variable is unset, empty, or not a
+            valid integer.
+
+    Returns:
+        The parsed integer, or ``default`` when the variable is missing or
+        cannot be parsed.
+    """
     raw = (os.environ.get(name) or "").strip()
     if not raw:
         return default

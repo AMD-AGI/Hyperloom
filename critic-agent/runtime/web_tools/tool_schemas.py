@@ -94,10 +94,7 @@ def _search_schema() -> dict[str, Any]:
                     "blocked_domains": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": (
-                            "Exclude results from these domains. Mutually "
-                            "exclusive with allowed_domains."
-                        ),
+                        "description": ("Exclude results from these domains. Mutually exclusive with allowed_domains."),
                     },
                     "max_results": {
                         "type": "integer",
@@ -108,16 +105,14 @@ def _search_schema() -> dict[str, Any]:
                     "site": {
                         "type": "string",
                         "description": (
-                            "Shorthand for allowed_domains=[site]. Ignored "
-                            "if allowed_domains is non-empty."
+                            "Shorthand for allowed_domains=[site]. Ignored if allowed_domains is non-empty."
                         ),
                     },
                     "freshness": {
                         "type": "string",
                         "enum": ["day", "week", "month", "year", "any"],
                         "description": (
-                            "Bias toward recency. Honored by 3rd-party "
-                            "providers; may be ignored by others."
+                            "Bias toward recency. Honored by 3rd-party providers; may be ignored by others."
                         ),
                     },
                 },
@@ -160,10 +155,7 @@ def _fetch_schema() -> dict[str, Any]:
                     },
                     "raw": {
                         "type": "boolean",
-                        "description": (
-                            "true -> bypass HTML->Markdown conversion "
-                            "(default false)."
-                        ),
+                        "description": ("true -> bypass HTML->Markdown conversion (default false)."),
                     },
                 },
                 "required": ["url"],

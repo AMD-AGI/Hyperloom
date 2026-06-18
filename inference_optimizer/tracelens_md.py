@@ -13,9 +13,7 @@ from __future__ import annotations
 
 import re
 
-_BASE64_IMAGE_PATTERN = re.compile(
-    r"!\[(?P<alt>[^\]]*)\]\(data:image/[^;]+;base64,[^)]+\)"
-)
+_BASE64_IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\(data:image/[^;]+;base64,[^)]+\)")
 
 
 def strip_base64_data_urls(text: str | None) -> str:

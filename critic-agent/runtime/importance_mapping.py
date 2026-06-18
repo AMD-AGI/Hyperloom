@@ -47,11 +47,7 @@ def importance_for_verdict(
     if verdict in ("advise", "needs_review"):
         return _LOW_VERDICT
     if confidence_label == "high":
-        return (
-            _HIGH_VERDICT_WITH_MEASUREMENT
-            if has_measurement
-            else _HIGH_VERDICT_WITHOUT_MEASUREMENT
-        )
+        return _HIGH_VERDICT_WITH_MEASUREMENT if has_measurement else _HIGH_VERDICT_WITHOUT_MEASUREMENT
     if confidence_label == "low":
         return _LOW_VERDICT
     return _MEDIUM_VERDICT if has_measurement else _DEFAULT_VERDICT

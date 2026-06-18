@@ -4,3 +4,5 @@ sphinx>=7.2
 furo>=2024.1.29
 myst-parser>=2.0
 linkify-it-py>=2.0
+# Pin transitive dep above CVE-2026-45409 (affects idna 3.9.0).
+idna>=3.10

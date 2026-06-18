@@ -14,13 +14,15 @@ from framework_agent.models import ExploreRequest
 
 def _req(min_ratio: float = 1.05, max_drop: float = 0.05) -> ExploreRequest:
     """Minimal ExploreRequest for gate / score testing."""
-    return ExploreRequest.from_dict({
-        "framework": "sglang",
-        "repo_url": "https://github.com/x/y.git",
-        "work_dir": "/tmp/x",
-        "baseline": {"throughput": 100.0, "accuracy": 0.9, "completed": "1/1"},
-        "thresholds": {"min_throughput_ratio": min_ratio, "max_accuracy_drop": max_drop},
-    })
+    return ExploreRequest.from_dict(
+        {
+            "framework": "sglang",
+            "repo_url": "https://github.com/x/y.git",
+            "work_dir": "/tmp/x",
+            "baseline": {"throughput": 100.0, "accuracy": 0.9, "completed": "1/1"},
+            "thresholds": {"min_throughput_ratio": min_ratio, "max_accuracy_drop": max_drop},
+        }
+    )
 
 
 # winner_decision -----------------------------------------------------------

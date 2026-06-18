@@ -80,15 +80,18 @@ params_schema:
   max_turns:
     type: integer
     description: |
-      Optional. Hard cap on LLM turns (default 12, hard ceiling 16). PolicyGate
-      R2 ``specialist_max_turns_excess`` rejects values outside (0, 16].
+      Optional. Turn cap (default 1000, hard ceiling 1000; 0 means
+      unbounded). PolicyGate R2 ``specialist_max_turns_excess`` rejects
+      values outside [0, 1000]. Specialist depth is primarily bounded by the
+      explicit wall-clock budget.
   needs_gpu:
     type: boolean
     description: |
-      Optional, default false. Set true only for short GPU experiments or
-      microbenchmarks. GPU specialists receive isolated visible-device
-      env vars from the Coordinator-managed GPU specialist pool. They must
-      not launch persistent serving servers or run Magpie benchmark loops.
+      Optional, default false. Set true for wall-budgeted GPU experiments or
+      microbenchmarks. GPU specialists receive isolated visible-device env
+      vars from the Coordinator-managed GPU specialist pool and serialize
+      against serving via ``gpu_research_lane``. They must not launch
+      persistent serving servers or run Magpie benchmark loops.
   gpu_count:
     type: integer
     description: |

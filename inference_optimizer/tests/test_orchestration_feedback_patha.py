@@ -37,15 +37,18 @@ def test_first_present_picks_first_non_none():
 
 
 def test_format_delegated_result_surfaces_high_signal_fields():
-    line = _format_inbox_event(_msg(
-        "delegated_result",
-        {
-            "task_id": "t1", "kind": "explore", "state": "succeeded",
-            "result": {"status": "ok", "kept": True, "gain_pct": 12.5,
-                       "tokens_per_s": 3400.0},
-            "error": None,
-        },
-    ))
+    line = _format_inbox_event(
+        _msg(
+            "delegated_result",
+            {
+                "task_id": "t1",
+                "kind": "explore",
+                "state": "succeeded",
+                "result": {"status": "ok", "kept": True, "gain_pct": 12.5, "tokens_per_s": 3400.0},
+                "error": None,
+            },
+        )
+    )
     assert "topic=delegated_result" in line
     assert "kind='explore'" in line
     assert "state='succeeded'" in line
@@ -56,30 +59,33 @@ def test_format_delegated_result_surfaces_high_signal_fields():
 
 
 def test_format_delegated_result_with_error_is_truncated():
-    line = _format_inbox_event(_msg(
-        "delegated_result",
-        {"task_id": "t1", "kind": "explore", "state": "failed",
-         "result": {}, "error": "boom " * 200},
-    ))
+    line = _format_inbox_event(
+        _msg(
+            "delegated_result",
+            {"task_id": "t1", "kind": "explore", "state": "failed", "result": {}, "error": "boom " * 200},
+        )
+    )
     assert "state='failed'" in line
     assert "error=" in line
     assert len(line) < 600  # 200-char cap on the error string
 
 
 def test_format_review_verdict_and_denial():
-    verdict = _format_inbox_event(_msg(
-        "review_verdict",
-        {"target_proposal_msg_id": "p9", "verdict": "approve",
-         "reasoning": "looks good"},
-    ))
+    verdict = _format_inbox_event(
+        _msg(
+            "review_verdict",
+            {"target_proposal_msg_id": "p9", "verdict": "approve", "reasoning": "looks good"},
+        )
+    )
     assert "verdict='approve'" in verdict
     assert "target='p9'" in verdict
 
-    denial = _format_inbox_event(_msg(
-        "policy_denial",
-        {"action_name": "kernel_opt", "rule": "phase_incompatible",
-         "hint": "not allowed here"},
-    ))
+    denial = _format_inbox_event(
+        _msg(
+            "policy_denial",
+            {"action_name": "kernel_opt", "rule": "phase_incompatible", "hint": "not allowed here"},
+        )
+    )
     assert "action='kernel_opt'" in denial
     assert "rule='phase_incompatible'" in denial
 
@@ -136,14 +142,28 @@ def test_context_provider_recent_outcomes_delegates_to_reader():
 async def test_recent_outcomes_reader_projects_delegated_results(session_dir):
     c = _silent_coordinator(session_dir)
     try:
-        await c.bus.append_and_seq(Message.new(
-            "coordinator", "*", "delegated_result",
-            {"task_id": "t1", "kind": "explore", "state": "succeeded",
-             "result": {"status": "ok", "gain_pct": 4.0}, "error": None},
-        ))
-        await c.bus.append_and_seq(Message.new(
-            "coordinator", "*", "observation", {"note": "ignored_obs"},
-        ))
+        await c.bus.append_and_seq(
+            Message.new(
+                "coordinator",
+                "*",
+                "delegated_result",
+                {
+                    "task_id": "t1",
+                    "kind": "explore",
+                    "state": "succeeded",
+                    "result": {"status": "ok", "gain_pct": 4.0},
+                    "error": None,
+                },
+            )
+        )
+        await c.bus.append_and_seq(
+            Message.new(
+                "coordinator",
+                "*",
+                "observation",
+                {"note": "ignored_obs"},
+            )
+        )
         out = c._context_recent_outcomes_reader(top_k=5)
         assert "Recent action outcomes" in out
         assert "kind='explore'" in out
@@ -169,6 +189,7 @@ async def test_recent_outcomes_reader_empty(session_dir):
 async def test_inline_whitelist_picks_lane_light_registered_actions(session_dir):
     c = _silent_coordinator(session_dir)
     try:
+
         async def _stub(ctx: RunnerContext) -> dict:
             return {"status": "ok"}
 
@@ -211,7 +232,8 @@ async def test_run_action_now_sync_rejects_non_whitelisted(session_dir):
 
 @pytest.mark.asyncio
 async def test_run_action_now_happy_path_emits_delegated_result(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     c = _silent_coordinator(session_dir)
     try:
@@ -225,11 +247,15 @@ async def test_run_action_now_happy_path_emits_delegated_result(
         # Focus this test on the inline mechanics: stub the whitelist +
         # PolicyGate (both independently covered elsewhere).
         monkeypatch.setattr(
-            c, "_inline_action_whitelist", lambda: frozenset({"inline_probe"}),
+            c,
+            "_inline_action_whitelist",
+            lambda: frozenset({"inline_probe"}),
         )
         monkeypatch.setattr(c.policy, "validate_intent", lambda *a, **k: None)
         monkeypatch.setattr(
-            c, "_sequence_denial_for_action", lambda *a, **k: None,
+            c,
+            "_sequence_denial_for_action",
+            lambda *a, **k: None,
         )
 
         out = await c._run_action_now("inline_probe", {"p": 1})
@@ -251,22 +277,28 @@ async def test_run_action_now_happy_path_emits_delegated_result(
 
 @pytest.mark.asyncio
 async def test_run_action_now_sync_bridges_to_coordinator_loop(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """The sync bridge marshals the coroutine onto the captured
     coordinator loop and returns its rendered result."""
     c = _silent_coordinator(session_dir)
     try:
+
         async def _stub(ctx: RunnerContext) -> dict:
             return {"status": "ok"}
 
         c.sub.register_executor("inline_probe", _stub)
         monkeypatch.setattr(
-            c, "_inline_action_whitelist", lambda: frozenset({"inline_probe"}),
+            c,
+            "_inline_action_whitelist",
+            lambda: frozenset({"inline_probe"}),
         )
         monkeypatch.setattr(c.policy, "validate_intent", lambda *a, **k: None)
         monkeypatch.setattr(
-            c, "_sequence_denial_for_action", lambda *a, **k: None,
+            c,
+            "_sequence_denial_for_action",
+            lambda *a, **k: None,
         )
         # Capture the running loop the way Coordinator.run() does.
         c._coordinator_loop = asyncio.get_running_loop()
@@ -274,7 +306,9 @@ async def test_run_action_now_sync_bridges_to_coordinator_loop(
         # Run the blocking sync bridge in a worker thread so it can wait
         # on the coordinator loop (this loop) via run_coroutine_threadsafe.
         out = await asyncio.to_thread(
-            c._run_action_now_sync, "inline_probe", {},
+            c._run_action_now_sync,
+            "inline_probe",
+            {},
         )
         assert "inline run complete" in out
         assert "state='succeeded'" in out

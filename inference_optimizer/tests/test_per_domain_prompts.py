@@ -42,13 +42,11 @@ def _build(domain_key: str) -> str:
 # 1. Coverage — every catalogue domain has a focus template
 def test_every_domain_has_focus_template():
     for domain in SPECIALIST_DOMAINS:
-        assert domain.key in _DOMAIN_FOCUS_TEMPLATES, (
-            f"missing per-domain template for {domain.key!r}"
-        )
+        assert domain.key in _DOMAIN_FOCUS_TEMPLATES, f"missing per-domain template for {domain.key!r}"
 
 
 def test_specialist_domains_m5_covers_all_active_domains():
-    """The M5 active set covers the full catalogue (seven entries after P3_17 retired session_steward_specialist)."""
+    """The M5 active set covers the full catalogue (seven entries after session_steward_specialist was retired)."""
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
     assert len(SPECIALIST_DOMAINS_M5) == 7
 
@@ -57,7 +55,10 @@ def test_specialist_domains_m5_covers_all_active_domains():
 def test_serving_specialist_mentions_scheduler_and_kv_cache():
     text = _build("serving_specialist")
     for marker in (
-        "serving_specialist", "scheduler", "cuda_graph", "kv_cache",
+        "serving_specialist",
+        "scheduler",
+        "cuda_graph",
+        "kv_cache",
         "max-num-seqs",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
@@ -67,11 +68,11 @@ def test_serving_specialist_has_source_patch_playbook():
     """The serving focus must guide authoring source patches and carry the framework safety priors (ALWAYS_ON / NEVER_TOUCH)."""
     text = _build("serving_specialist")
     for marker in (
-        "Source-patch playbook",   # the code-authoring section
-        "block_manager",            # kv-cache module mapping
-        "add_seq_group",            # upstream call-order contract to preserve
-        "NEVER_TOUCH",              # safety classification from Arbor KB
-        "VLLM_ROCM_USE_AITER",      # ALWAYS_ON umbrella flag
+        "Source-patch playbook",  # the code-authoring section
+        "block_manager",  # kv-cache module mapping
+        "add_seq_group",  # upstream call-order contract to preserve
+        "NEVER_TOUCH",  # safety classification from Arbor KB
+        "VLLM_ROCM_USE_AITER",  # ALWAYS_ON umbrella flag
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
@@ -79,7 +80,10 @@ def test_serving_specialist_has_source_patch_playbook():
 def test_kernel_switch_specialist_mentions_aiter_and_attention_backends():
     text = _build("kernel_switch_specialist")
     for marker in (
-        "kernel_switch_specialist", "aiter", "ROCM_AITER_MLA", "TRITON_MLA",
+        "kernel_switch_specialist",
+        "aiter",
+        "ROCM_AITER_MLA",
+        "TRITON_MLA",
         "CDNA3",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
@@ -88,7 +92,10 @@ def test_kernel_switch_specialist_mentions_aiter_and_attention_backends():
 def test_comm_specialist_mentions_quickreduce_and_topology():
     text = _build("comm_specialist")
     for marker in (
-        "comm_specialist", "QuickReduce", "allreduce", "RCCL",
+        "comm_specialist",
+        "QuickReduce",
+        "allreduce",
+        "RCCL",
         "NCCL_MIN_NCHANNELS",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
@@ -97,8 +104,12 @@ def test_comm_specialist_mentions_quickreduce_and_topology():
 def test_compiler_specialist_mentions_torch_compile_and_triton():
     text = _build("compiler_specialist")
     for marker in (
-        "compiler_specialist", "torch.compile", "inductor", "triton",
-        "AMDGCN", "num_warps",
+        "compiler_specialist",
+        "torch.compile",
+        "inductor",
+        "triton",
+        "AMDGCN",
+        "num_warps",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
@@ -106,7 +117,10 @@ def test_compiler_specialist_mentions_torch_compile_and_triton():
 def test_system_specialist_mentions_kfd_and_rocm_smi():
     text = _build("system_specialist")
     for marker in (
-        "system_specialist", "KFD", "rocm-smi", "HSA_ENABLE_SDMA",
+        "system_specialist",
+        "KFD",
+        "rocm-smi",
+        "HSA_ENABLE_SDMA",
         "numactl",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
@@ -115,8 +129,11 @@ def test_system_specialist_mentions_kfd_and_rocm_smi():
 def test_pr_intel_specialist_mentions_cross_repo_research():
     text = _build("pr_intel_specialist")
     for marker in (
-        "pr_intel_specialist", "cross-repo", "mcp__pr_monitor",
-        "ROCm/aiter", "do NOT propose source patches",
+        "pr_intel_specialist",
+        "cross-repo",
+        "mcp__pr_monitor",
+        "ROCm/aiter",
+        "do NOT propose source patches",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
@@ -126,7 +143,9 @@ def test_pr_intel_specialist_mentions_cross_repo_research():
 async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
     """When the M5 active set covers a domain, the runner must NOT add a generic-template note."""
     from inference_optimizer.orchestrator.backends.mock_backend import (
-        MockBackend, MockTurn, ScriptedPlan,
+        MockBackend,
+        MockTurn,
+        ScriptedPlan,
     )
     from inference_optimizer.protocol.intent import Intent, IntentType
     from inference_optimizer.orchestrator.specialist_runner import SpecialistRunner
@@ -144,9 +163,11 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
         "new_findings": [],
         "residual_questions": [],
     }
-    plan = ScriptedPlan(turns=[
-        MockTurn(intents=[Intent(type=IntentType.SPECIALIST_DONE, payload=done)]),
-    ])
+    plan = ScriptedPlan(
+        turns=[
+            MockTurn(intents=[Intent(type=IntentType.SPECIALIST_DONE, payload=done)]),
+        ]
+    )
     runner = SpecialistRunner(
         backend_factory=lambda d: MockBackend(plan, name="mock"),
         session_dir=tmp_path,
@@ -168,8 +189,7 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
     result = await runner.run(ctx)
     for note in result.notes or []:
         assert "generic prompt template" not in note, (
-            f"PR-A6 should have widened SPECIALIST_DOMAINS_M5 to cover "
-            f"kernel_switch_specialist; got note={note!r}"
+            f"PR-A6 should have widened SPECIALIST_DOMAINS_M5 to cover kernel_switch_specialist; got note={note!r}"
         )
 
 
@@ -202,7 +222,8 @@ from inference_optimizer.orchestrator.policy import (
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from inference_optimizer.orchestrator.resource_lock import (
-    KNOWN_LANES, LANE_CONFLICTS,
+    KNOWN_LANES,
+    LANE_CONFLICTS,
 )
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.specialist_domains import (
@@ -250,9 +271,9 @@ def _valid_done_payload(
     payload = {
         "gap_canonical_id": gap,
         "domain": domain,
-        "proposal_set": proposals if proposals is not None else (
-            [] if empty else [{"name": "v1", "extra_args": "--flag"}]
-        ),
+        "proposal_set": proposals
+        if proposals is not None
+        else ([] if empty else [{"name": "v1", "extra_args": "--flag"}]),
         "empty": empty,
         "summary": "stub run summary",
     }
@@ -265,11 +286,9 @@ def _valid_done_payload(
 
 # 1. specialist_domains catalogue
 def test_specialist_domains_catalogue_has_seven_entries():
-    """P3_17 retired session_steward_specialist; the active catalogue has seven entries."""
+    """session_steward_specialist was retired; the active catalogue has seven entries."""
     assert len(SPECIALIST_DOMAINS) == 7
-    assert SPECIALIST_DOMAIN_KEYS == frozenset(
-        d.key for d in SPECIALIST_DOMAINS
-    )
+    assert SPECIALIST_DOMAIN_KEYS == frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 
 def test_serving_specialist_is_M5_active():
@@ -287,10 +306,12 @@ def test_get_domain_returns_none_for_unknown():
 # 2. intent_parser — SPECIALIST_DONE envelope round-trip
 def test_specialist_done_envelope_passes_validation():
     envelope = {
-        "intents": [{
-            "intent_type": "specialist_done",
-            "payload": _valid_done_payload(),
-        }]
+        "intents": [
+            {
+                "intent_type": "specialist_done",
+                "payload": _valid_done_payload(),
+            }
+        ]
     }
     intents = validate_envelope(envelope)
     assert len(intents) == 1
@@ -300,94 +321,116 @@ def test_specialist_done_envelope_passes_validation():
 def test_specialist_done_envelope_missing_required_field():
     bad_payload = _valid_done_payload()
     bad_payload.pop("summary")
-    envelope = {"intents": [{
-        "intent_type": "specialist_done",
-        "payload": bad_payload,
-    }]}
+    envelope = {
+        "intents": [
+            {
+                "intent_type": "specialist_done",
+                "payload": bad_payload,
+            }
+        ]
+    }
     with pytest.raises(IntentValidationError, match="summary"):
         validate_envelope(envelope)
 
 
 # 3. PolicyGate R2 — specialist_dispatch_source
 def test_R2_orchestration_can_dispatch_specialist(gate):
-    gate.validate_intent("orchestration", Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": "specialist",
-            "params": {
-                "domain": "serving_specialist",
-                "gap_canonical_id": "gap.kv.fp8",
-                "max_turns": 4,
-            },
-        },
-    ))
-
-
-def test_R2_robustness_cannot_dispatch_specialist(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("robustness", Intent(
+    gate.validate_intent(
+        "orchestration",
+        Intent(
             type=IntentType.DELEGATE,
             payload={
                 "action_name": "specialist",
                 "params": {
                     "domain": "serving_specialist",
                     "gap_canonical_id": "gap.kv.fp8",
+                    "max_turns": 4,
                 },
             },
-        ))
+        ),
+    )
+
+
+def test_R2_robustness_cannot_dispatch_specialist(gate):
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "robustness",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={
+                    "action_name": "specialist",
+                    "params": {
+                        "domain": "serving_specialist",
+                        "gap_canonical_id": "gap.kv.fp8",
+                    },
+                },
+            ),
+        )
     assert exc.value.rule == "specialist_dispatch_source"
     assert "Orchestration" in (exc.value.hint or "")
 
 
 def test_R2_unknown_domain_denied(gate):
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": "specialist",
-                "params": {
-                    "domain": "fake_specialist",
-                    "gap_canonical_id": "gap.x",
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={
+                    "action_name": "specialist",
+                    "params": {
+                        "domain": "fake_specialist",
+                        "gap_canonical_id": "gap.x",
+                    },
                 },
-            },
-        ))
+            ),
+        )
     assert exc.value.rule == "specialist_unknown_domain"
     assert "tag" in (exc.value.hint or "")
 
 
 def test_R2_missing_gap_denied(gate):
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": "specialist",
-                "params": {"domain": "serving_specialist"},
-            },
-        ))
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={
+                    "action_name": "specialist",
+                    "params": {"domain": "serving_specialist"},
+                },
+            ),
+        )
     assert exc.value.rule == "specialist_dispatch_source"
     assert "gap" in str(exc.value)
 
 
 def test_R2_max_turns_excess_denied(gate):
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": "specialist",
-                "params": {
-                    "domain": "serving_specialist",
-                    "gap_canonical_id": "gap.x",
-                    "max_turns": SPECIALIST_MAX_TURNS_HARD_CAP + 1,
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={
+                    "action_name": "specialist",
+                    "params": {
+                        "domain": "serving_specialist",
+                        "gap_canonical_id": "gap.x",
+                        "max_turns": SPECIALIST_MAX_TURNS_HARD_CAP + 1,
+                    },
                 },
-            },
-        ))
+            ),
+        )
     assert exc.value.rule == "specialist_dispatch_source"
     assert "max_turns" in str(exc.value)
 
 
-def test_R2_max_turns_zero_denied(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", Intent(
+def test_R2_max_turns_zero_allowed_unbounded(gate):
+    # WS1: max_turns=0 is accepted as "unbounded" (depth bounded by the
+    # wall-clock budget); it must no longer be denied.
+    gate.validate_intent(
+        "orchestration",
+        Intent(
             type=IntentType.DELEGATE,
             payload={
                 "action_name": "specialist",
@@ -397,7 +440,26 @@ def test_R2_max_turns_zero_denied(gate):
                     "max_turns": 0,
                 },
             },
-        ))
+        ),
+    )
+
+
+def test_R2_max_turns_negative_denied(gate):
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={
+                    "action_name": "specialist",
+                    "params": {
+                        "domain": "serving_specialist",
+                        "gap_canonical_id": "gap.x",
+                        "max_turns": -1,
+                    },
+                },
+            ),
+        )
     assert exc.value.rule == "specialist_dispatch_source"
 
 
@@ -405,20 +467,24 @@ def test_R2_specialist_action_skips_unknown_action_registry_path(gate):
     """The synthetic ``specialist`` action_name bypasses the ActionRegistry lookup that would deny it as ``unknown_action``."""
     # Even with an ActionRegistry wired, the specialist branch is checked before the unknown_action gate.
     from inference_optimizer.orchestrator.action_registry import ActionRegistry
+
     gate_with_registry = PolicyGate(
         role_registry=default_role_registry(),
         action_registry=ActionRegistry().load(),
     )
-    gate_with_registry.validate_intent("orchestration", Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": SPECIALIST_ACTION_NAME,
-            "params": {
-                "domain": "serving_specialist",
-                "gap_canonical_id": "gap.x",
+    gate_with_registry.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": SPECIALIST_ACTION_NAME,
+                "params": {
+                    "domain": "serving_specialist",
+                    "gap_canonical_id": "gap.x",
+                },
             },
-        },
-    ))
+        ),
+    )
 
 
 # 4. PolicyGate R3 — specialist_done_source
@@ -432,10 +498,13 @@ def test_R3_specialist_done_from_specialist_agent_ok(gate):
 def test_R3_specialist_done_from_orchestration_denied(gate):
     """Non-``specialist:*`` agents cannot emit specialist_done (the role-matrix gate fires)."""
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", Intent(
-            type=IntentType.SPECIALIST_DONE,
-            payload=_valid_done_payload(),
-        ))
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.SPECIALIST_DONE,
+                payload=_valid_done_payload(),
+            ),
+        )
     assert exc.value.rule == "role"
 
 
@@ -474,7 +543,8 @@ def test_R3_specialist_done_empty_true_requires_reason(gate):
 
 def test_R3_specialist_done_empty_with_proposals_denied(gate):
     payload = _valid_done_payload(
-        empty=True, proposals=[{"name": "should_not_be_here"}],
+        empty=True,
+        proposals=[{"name": "should_not_be_here"}],
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
@@ -486,7 +556,8 @@ def test_R3_specialist_done_empty_with_proposals_denied(gate):
 
 def test_R3_specialist_done_variant_missing_name_denied(gate):
     payload = _valid_done_payload(
-        empty=False, proposals=[{"extra_args": "--no-name"}],
+        empty=False,
+        proposals=[{"extra_args": "--no-name"}],
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
@@ -499,8 +570,7 @@ def test_R3_specialist_done_variant_missing_name_denied(gate):
 def test_R3_specialist_can_emit_send_message_heartbeat(gate):
     gate.validate_intent(
         f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
-        Intent(type=IntentType.SEND_MESSAGE,
-               payload={"topic": "heartbeat", "body_md": "still thinking"}),
+        Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "still thinking"}),
     )
 
 
@@ -508,9 +578,7 @@ def test_R3_specialist_cannot_emit_propose_action(gate):
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
-            Intent(type=IntentType.PROPOSE_ACTION,
-                   payload={"action_name": "explore",
-                            "predicted_gain_pct": 0.0}),
+            Intent(type=IntentType.PROPOSE_ACTION, payload={"action_name": "explore", "predicted_gain_pct": 0.0}),
         )
     assert exc.value.rule == "specialist_done_source"
 
@@ -519,8 +587,7 @@ def test_R3_specialist_missing_task_id_suffix_denied(gate):
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             SPECIALIST_FROM_AGENT_PREFIX,  # no suffix
-            Intent(type=IntentType.SPECIALIST_DONE,
-                   payload=_valid_done_payload()),
+            Intent(type=IntentType.SPECIALIST_DONE, payload=_valid_done_payload()),
         )
     assert exc.value.rule == "specialist_done_source"
 
@@ -594,7 +661,8 @@ def test_prompt_builder_pr_feed_unavailable_renders_explanatory_line():
 def test_prompt_builder_unknown_domain_raises():
     with pytest.raises(ValueError, match="unknown specialist domain"):
         build_specialist_prompts_for_domain(
-            task_id="t", domain_key="nope_specialist",
+            task_id="t",
+            domain_key="nope_specialist",
         )
 
 
@@ -608,9 +676,15 @@ async def test_specialist_runner_happy_path(tmp_path):
             {"name": "kv_fp8", "extra_args": "--kv-cache-dtype fp8"},
         ],
     )
-    plan = ScriptedPlan(turns=[MockTurn(intents=[
-        Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
-    ])])
+    plan = ScriptedPlan(
+        turns=[
+            MockTurn(
+                intents=[
+                    Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
+                ]
+            )
+        ]
+    )
 
     runner = SpecialistRunner(
         backend_factory=lambda domain: MockBackend(plan, name=domain.key),
@@ -681,8 +755,7 @@ async def test_specialist_runner_synthesises_empty_done_on_max_turns(tmp_path):
     gate = PolicyGate(role_registry=default_role_registry())
     gate.validate_intent(
         f"{SPECIALIST_FROM_AGENT_PREFIX}task-stale",
-        Intent(type=IntentType.SPECIALIST_DONE,
-               payload=result.specialist_done),
+        Intent(type=IntentType.SPECIALIST_DONE, payload=result.specialist_done),
     )
 
 
@@ -690,9 +763,11 @@ async def test_specialist_runner_synthesises_empty_done_on_max_turns(tmp_path):
 async def test_specialist_runner_backend_error_synthesises_empty_done(tmp_path):
     from inference_optimizer.orchestrator.backends.base import BackendError
 
-    plan = ScriptedPlan(turns=[
-        MockTurn(raise_error=BackendError("rate limited")),
-    ])
+    plan = ScriptedPlan(
+        turns=[
+            MockTurn(raise_error=BackendError("rate limited")),
+        ]
+    )
     runner = SpecialistRunner(
         backend_factory=lambda domain: MockBackend(plan),
         session_dir=tmp_path,
@@ -736,9 +811,7 @@ async def test_specialist_runner_unknown_domain_synthesises_empty(tmp_path):
 
 def test_specialist_tool_denylist_excludes_kb_write_paths():
     """The denylist still captures every cortex_kb write surface (Coordinator is the sole KB writer); PR-A2 lifted Edit/Write/MultiEdit out so specialists can patch their isolated worktree."""
-    for forbidden in (
-        "mcp__cortex_kb__propose_point",
-    ):
+    for forbidden in ("mcp__cortex_kb__propose_point",):
         assert forbidden in SPECIALIST_TOOL_DENYLIST
         assert forbidden not in DEFAULT_SPECIALIST_TOOLS
     # PR-A2: write tools are in the default whitelist, not the denylist.
@@ -768,25 +841,102 @@ def test_shared_state_specialist_rounds_default_empty():
     assert s.specialist_domain_empty_streak == {}
     assert s.last_specialist == {}
     assert s.research_lane_capacity == 1
+    assert s.rounds_since_last_specialist == {}
+    assert s.rounds_since_last_keep == {}
+
+
+# 8b. Per-anchor coverage counters (point 1)
+def test_domain_round_counters_tick_all_anchors():
+    from inference_optimizer.orchestrator.specialist_domains import (
+        KNOWLEDGE_DOMAIN_TAGS,
+    )
+
+    s = SharedState()
+    s.bump_domain_round_counters()
+    s.bump_domain_round_counters()
+    for anchor in KNOWLEDGE_DOMAIN_TAGS:
+        assert s.rounds_since_last_specialist[anchor] == 2
+        assert s.rounds_since_last_keep[anchor] == 2
+
+
+def test_note_specialist_dispatched_resets_only_its_anchor():
+    s = SharedState()
+    s.bump_domain_round_counters()
+    s.bump_domain_round_counters()
+    # serving_specialist maps to the "framework" kb_anchor.
+    s.note_specialist_dispatched("serving_specialist")
+    assert s.rounds_since_last_specialist["framework"] == 0
+    # A different anchor is untouched.
+    assert s.rounds_since_last_specialist["kernel"] == 2
+    # keep counter is independent of the dispatch reset.
+    assert s.rounds_since_last_keep["framework"] == 2
+
+
+def test_note_domain_keep_resets_keep_counter_by_anchor():
+    s = SharedState()
+    s.bump_domain_round_counters()
+    s.note_domain_keep("framework")
+    assert s.rounds_since_last_keep["framework"] == 0
+    assert s.rounds_since_last_specialist["framework"] == 1
+
+
+def test_best_gap_for_anchor_picks_high_severity_least_attempted():
+    s = SharedState()
+    s.upsert_gap({"canonical_id": "gap.a", "domain_hint": "serving_specialist", "severity": "medium"})
+    s.upsert_gap({"canonical_id": "gap.b", "domain_hint": "framework", "severity": "high"})
+    # framework is serving_specialist's anchor -> both resolve to "framework".
+    assert s.best_gap_for_anchor("framework") == "gap.b"
+    assert s.best_gap_for_anchor("serving_specialist") == "gap.b"
+    # An anchor with no matching gap returns "".
+    assert s.best_gap_for_anchor("communication") == ""
+
+
+def test_stalled_domains_reports_over_threshold_widest_first():
+    s = SharedState()
+    for _ in range(5):
+        s.bump_domain_round_counters()
+    # framework recently dispatched -> below specialist threshold.
+    s.note_specialist_dispatched("framework")
+    s.note_domain_keep("framework")
+    stalled = s.stalled_domains(specialist_threshold=3, keep_threshold=3)
+    assert "framework" not in stalled
+    assert "kernel" in stalled  # never dispatched/kept -> at 5
+    # Ordering: widest gap first, ties broken by anchor name.
+    assert stalled == sorted(
+        stalled,
+        key=lambda a: (
+            -max(
+                s.rounds_since_last_specialist.get(a, 0),
+                s.rounds_since_last_keep.get(a, 0),
+            ),
+            a,
+        ),
+    )
 
 
 def test_record_specialist_round_dedup_by_round_id():
     s = SharedState()
-    s.record_specialist_round({
-        "round_id": "explore-001",
-        "domains": ["serving_specialist"],
-        "proposals_total": 2,
-    })
-    s.record_specialist_round({
-        "round_id": "explore-001",
-        "domains": ["serving_specialist"],
-        "proposals_total": 5,    # updated count
-    })
-    s.record_specialist_round({
-        "round_id": "explore-002",
-        "domains": ["serving_specialist"],
-        "proposals_total": 1,
-    })
+    s.record_specialist_round(
+        {
+            "round_id": "explore-001",
+            "domains": ["serving_specialist"],
+            "proposals_total": 2,
+        }
+    )
+    s.record_specialist_round(
+        {
+            "round_id": "explore-001",
+            "domains": ["serving_specialist"],
+            "proposals_total": 5,  # updated count
+        }
+    )
+    s.record_specialist_round(
+        {
+            "round_id": "explore-002",
+            "domains": ["serving_specialist"],
+            "proposals_total": 1,
+        }
+    )
     assert len(s.specialist_rounds) == 2
     by_round = {r["round_id"]: r for r in s.specialist_rounds}
     assert by_round["explore-001"]["proposals_total"] == 5
@@ -794,27 +944,25 @@ def test_record_specialist_round_dedup_by_round_id():
 
 def test_bump_specialist_domain_empty_streak():
     s = SharedState()
-    assert s.bump_specialist_domain_empty_streak("serving_specialist",
-                                                  empty=True) == 1
-    assert s.bump_specialist_domain_empty_streak("serving_specialist",
-                                                  empty=True) == 2
+    assert s.bump_specialist_domain_empty_streak("serving_specialist", empty=True) == 1
+    assert s.bump_specialist_domain_empty_streak("serving_specialist", empty=True) == 2
     # A non-empty proposal_set resets.
-    assert s.bump_specialist_domain_empty_streak("serving_specialist",
-                                                  empty=False) == 0
+    assert s.bump_specialist_domain_empty_streak("serving_specialist", empty=False) == 0
     # Other domains don't share state.
-    assert s.bump_specialist_domain_empty_streak("kernel_switch_specialist",
-                                                  empty=True) == 1
+    assert s.bump_specialist_domain_empty_streak("kernel_switch_specialist", empty=True) == 1
     assert s.specialist_domain_empty_streak["serving_specialist"] == 0
     assert s.specialist_domain_empty_streak["kernel_switch_specialist"] == 1
 
 
 def test_update_last_specialist_snapshot():
     s = SharedState()
-    s.update_last_specialist({
-        "task_id": "task-001",
-        "domain": "serving_specialist",
-        "status": "succeeded",
-    })
+    s.update_last_specialist(
+        {
+            "task_id": "task-001",
+            "domain": "serving_specialist",
+            "status": "succeeded",
+        }
+    )
     assert s.last_specialist["task_id"] == "task-001"
     # Non-dict inputs are ignored.
     s.update_last_specialist("garbage")  # type: ignore[arg-type]
@@ -824,6 +972,7 @@ def test_update_last_specialist_snapshot():
 def test_research_lane_capacity_is_core_state_field():
     """LLM cannot raise research_lane_capacity mid-flight."""
     from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
+
     assert "research_lane_capacity" in CORE_STATE_FIELDS
     assert "gpu_specialist_capacity" in CORE_STATE_FIELDS
     assert "specialist_rounds" in CORE_STATE_FIELDS

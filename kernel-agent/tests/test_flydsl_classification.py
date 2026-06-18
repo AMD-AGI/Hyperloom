@@ -36,7 +36,10 @@ from tracelens_skill_runner import (  # noqa: E402
 class TestFlyDSLClassification(unittest.TestCase):
     def _write(self, body: str) -> str:
         tmp = tempfile.NamedTemporaryFile(
-            "w", suffix=".py", delete=False, encoding="utf-8",
+            "w",
+            suffix=".py",
+            delete=False,
+            encoding="utf-8",
         )
         tmp.write(body)
         tmp.flush()
@@ -56,37 +59,27 @@ class TestFlyDSLClassification(unittest.TestCase):
         self.assertEqual(source_type_for("my_kernel", path), "flydsl")
 
     def test_detects_flydsl_compiler_import(self) -> None:
-        path = self._write(
-            "from flydsl.compiler import kernel\n"
-            "\n"
-            "@kernel\n"
-            "def f(): pass\n"
-        )
+        path = self._write("from flydsl.compiler import kernel\n\n@kernel\ndef f(): pass\n")
         self.assertTrue(_looks_like_flydsl_source(path))
         self.assertEqual(source_type_for("f", path), "flydsl")
 
     def test_plain_python_is_not_flydsl(self) -> None:
-        path = self._write(
-            "import torch\n"
-            "def add(a, b): return a + b\n"
-        )
+        path = self._write("import torch\ndef add(a, b): return a + b\n")
         self.assertFalse(_looks_like_flydsl_source(path))
         self.assertEqual(source_type_for("add", path), "python")
 
     def test_triton_still_wins_over_flydsl(self) -> None:
         """Triton classification has priority when both signals exist."""
-        path = self._write(
-            "import triton\n"
-            "import triton.language as tl\n"
-            "@triton.jit\n"
-            "def k(): pass\n"
-        )
+        path = self._write("import triton\nimport triton.language as tl\n@triton.jit\ndef k(): pass\n")
         self.assertEqual(source_type_for("triton_kernel", path), "triton")
 
     def test_hip_extension_wins_over_flydsl(self) -> None:
         """``.cu`` / ``.cuh`` files keep ``hip_cpp`` regardless of name."""
         tmp = tempfile.NamedTemporaryFile(
-            "w", suffix=".cu", delete=False, encoding="utf-8",
+            "w",
+            suffix=".cu",
+            delete=False,
+            encoding="utf-8",
         )
         tmp.write("// flydsl mention in a HIP comment\n")
         tmp.flush()
@@ -225,10 +218,12 @@ class TestKernelCategoryDerivation(unittest.TestCase):
 
     def test_derive_existing_categories_unchanged(self) -> None:
         self.assertEqual(
-            derive_kernel_category({"name": "fused_moe_kernel"}), "MoE",
+            derive_kernel_category({"name": "fused_moe_kernel"}),
+            "MoE",
         )
         self.assertEqual(
-            derive_kernel_category({"name": "gemm_a16w16"}), "GEMM",
+            derive_kernel_category({"name": "gemm_a16w16"}),
+            "GEMM",
         )
 
 
@@ -238,6 +233,7 @@ class TestGEAKKernelTypeMapping(unittest.TestCase):
     def setUp(self) -> None:
         sys.path.insert(0, str(ROOT / "tools"))
         import kernel_optimization
+
         self.mod = kernel_optimization
 
     def test_flydsl_source_type_maps_to_flydsl(self) -> None:
@@ -256,7 +252,10 @@ class TestFlyDSLKernelParams(unittest.TestCase):
 
     def _write_source(self, body: str) -> str:
         tmp = tempfile.NamedTemporaryFile(
-            "w", suffix=".py", delete=False, encoding="utf-8",
+            "w",
+            suffix=".py",
+            delete=False,
+            encoding="utf-8",
         )
         tmp.write(body)
         tmp.flush()
@@ -293,19 +292,13 @@ class TestFlyDSLKernelParams(unittest.TestCase):
 
     def test_source_buffer_load_marker_detected(self) -> None:
         path = self._write_source(
-            "import flydsl.expr as fx\n"
-            "from flydsl.expr import rocdl\n"
-            "x = fx.rocdl.make_buffer_tensor(In)\n"
+            "import flydsl.expr as fx\nfrom flydsl.expr import rocdl\nx = fx.rocdl.make_buffer_tensor(In)\n"
         )
         params = _flydsl_kernel_params(path, "mi355x")
         self.assertTrue(params.get("FLYDSL_USES_BUFFER_LOAD"))
 
     def test_source_without_markers_omits_fields(self) -> None:
-        path = self._write_source(
-            "import flydsl.compiler as flyc\n"
-            "@flyc.kernel\n"
-            "def k(): pass\n"
-        )
+        path = self._write_source("import flydsl.compiler as flyc\n@flyc.kernel\ndef k(): pass\n")
         params = _flydsl_kernel_params(path, "mi355x")
         self.assertNotIn("FLYDSL_USES_SMEM", params)
         self.assertNotIn("FLYDSL_USES_BUFFER_LOAD", params)
@@ -341,7 +334,8 @@ class TestFlyDSLKernelParams(unittest.TestCase):
         }
         enrich_candidates_with_runtime_metadata([flydsl_cand, triton_cand], args)
         self.assertEqual(
-            flydsl_cand["kernel_params"]["FLYDSL_TARGET_ARCH"], "gfx950",
+            flydsl_cand["kernel_params"]["FLYDSL_TARGET_ARCH"],
+            "gfx950",
         )
         self.assertTrue(flydsl_cand["kernel_params"]["FLYDSL_USES_SMEM"])
         self.assertFalse(
@@ -356,6 +350,7 @@ class TestCandidateEnvForwarding(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[2]
         sys.path.insert(0, str(repo_root))
         from inference_optimizer.orchestrator import kernel_request_handlers
+
         self.h = kernel_request_handlers
 
     def test_flydsl_prefix_allowed(self) -> None:
@@ -383,6 +378,7 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[2]
         sys.path.insert(0, str(repo_root))
         from inference_optimizer.orchestrator import kernel_request_handlers
+
         self.handlers = kernel_request_handlers
 
     def test_orchestrator_allowlist_has_flydsl(self) -> None:
@@ -409,29 +405,34 @@ class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
 
     def test_pseudo_op_moe_flydsl_stage1_recognised(self) -> None:
         self.assertEqual(
-            source_type_for("pseudo_op::moe_flydsl_stage1", ""), "flydsl",
+            source_type_for("pseudo_op::moe_flydsl_stage1", ""),
+            "flydsl",
         )
 
     def test_pseudo_op_moe_flydsl_stage2_recognised(self) -> None:
         self.assertEqual(
-            source_type_for("pseudo_op::moe_flydsl_stage2", ""), "flydsl",
+            source_type_for("pseudo_op::moe_flydsl_stage2", ""),
+            "flydsl",
         )
 
     def test_generic_pseudo_op_flydsl_recognised(self) -> None:
         self.assertEqual(
-            source_type_for("pseudo_op::flydsl_custom_kernel", ""), "flydsl",
+            source_type_for("pseudo_op::flydsl_custom_kernel", ""),
+            "flydsl",
         )
 
     def test_pseudo_op_marker_wins_over_empty_source(self) -> None:
         """Empty source_file must not block the name-based match."""
         self.assertEqual(
-            source_type_for("pseudo_op::moe_flydsl_stage1", ""), "flydsl",
+            source_type_for("pseudo_op::moe_flydsl_stage1", ""),
+            "flydsl",
         )
 
     def test_unrelated_pseudo_op_falls_back_to_unknown(self) -> None:
         """Only flydsl-flavoured pseudo ops should be claimed."""
         self.assertEqual(
-            source_type_for("pseudo_op::moe_fused_aiter", ""), "unknown",
+            source_type_for("pseudo_op::moe_fused_aiter", ""),
+            "unknown",
         )
 
 
@@ -441,6 +442,7 @@ class TestPseudoOpSourceFallback(unittest.TestCase):
     def setUp(self) -> None:
         sys.path.insert(0, str(ROOT / "tools"))
         import kernel_optimization
+
         self.mod = kernel_optimization
 
     def test_frame_label_candidate_falls_back_to_real_explicit(self) -> None:

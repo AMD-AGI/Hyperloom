@@ -19,6 +19,7 @@ from inference_optimizer.orchestrator.action_executors import _robustness_pulse 
 
 # _enabled()
 
+
 class TestEnabled:
     def test_disabled_inside_pytest_by_default(self):
         assert rp._enabled() is False
@@ -38,6 +39,7 @@ class TestEnabled:
 
 
 # _resolve_session_dir()
+
 
 class TestResolveSessionDir:
     def test_returns_none_when_no_env(self, monkeypatch):
@@ -61,13 +63,15 @@ class TestResolveSessionDir:
 
     def test_returns_none_when_dir_missing(self, monkeypatch, tmp_path):
         monkeypatch.setenv(
-            "ROBUSTNESS_AGENT_SESSION_DIR", str(tmp_path / "ghost"),
+            "ROBUSTNESS_AGENT_SESSION_DIR",
+            str(tmp_path / "ghost"),
         )
         monkeypatch.delenv("SESSION_DIR", raising=False)
         assert rp._resolve_session_dir() is None
 
 
 # _build_request()
+
 
 class TestBuildRequest:
     def test_request_carries_session_dir_and_disables_llm_rca(self, tmp_path):
@@ -87,6 +91,7 @@ class TestBuildRequest:
 
 
 # pulse()
+
 
 class _FakeProc:
     def __init__(self, *, returncode: int = 0, stderr: bytes = b""):
@@ -116,6 +121,7 @@ def _spawn_factory(proc):
         proc.captured_args = args
         proc.captured_kwargs = kwargs
         return proc
+
     return _spawn
 
 
@@ -133,7 +139,9 @@ class TestPulse:
 
     @pytest.mark.asyncio
     async def test_returns_false_when_session_dir_missing(
-        self, monkeypatch, _enable_pulse,
+        self,
+        monkeypatch,
+        _enable_pulse,
     ):
         monkeypatch.delenv("ROBUSTNESS_AGENT_SESSION_DIR", raising=False)
         monkeypatch.delenv("SESSION_DIR", raising=False)
@@ -141,14 +149,19 @@ class TestPulse:
 
     @pytest.mark.asyncio
     async def test_clean_exit_returns_true_and_cleans_tempfile(
-        self, monkeypatch, tmp_path, _enable_pulse,
+        self,
+        monkeypatch,
+        tmp_path,
+        _enable_pulse,
     ):
         sd = tmp_path / "sess"
         sd.mkdir()
         monkeypatch.setenv("ROBUSTNESS_AGENT_SESSION_DIR", str(sd))
         proc = _FakeProc(returncode=0)
         monkeypatch.setattr(
-            asyncio, "create_subprocess_exec", _spawn_factory(proc),
+            asyncio,
+            "create_subprocess_exec",
+            _spawn_factory(proc),
         )
 
         observed: list[str] = []
@@ -166,20 +179,28 @@ class TestPulse:
 
     @pytest.mark.asyncio
     async def test_nonzero_exit_returns_false(
-        self, monkeypatch, tmp_path, _enable_pulse,
+        self,
+        monkeypatch,
+        tmp_path,
+        _enable_pulse,
     ):
         sd = tmp_path / "sess2"
         sd.mkdir()
         monkeypatch.setenv("ROBUSTNESS_AGENT_SESSION_DIR", str(sd))
         proc = _FakeProc(returncode=2, stderr=b"boom")
         monkeypatch.setattr(
-            asyncio, "create_subprocess_exec", _spawn_factory(proc),
+            asyncio,
+            "create_subprocess_exec",
+            _spawn_factory(proc),
         )
         assert await rp.pulse(tick_index=1) is False
 
     @pytest.mark.asyncio
     async def test_subprocess_spawn_failure_returns_false(
-        self, monkeypatch, tmp_path, _enable_pulse,
+        self,
+        monkeypatch,
+        tmp_path,
+        _enable_pulse,
     ):
         sd = tmp_path / "sess3"
         sd.mkdir()
@@ -193,7 +214,10 @@ class TestPulse:
 
     @pytest.mark.asyncio
     async def test_tempfile_failure_returns_false(
-        self, monkeypatch, tmp_path, _enable_pulse,
+        self,
+        monkeypatch,
+        tmp_path,
+        _enable_pulse,
     ):
         sd = tmp_path / "sess4"
         sd.mkdir()
@@ -208,14 +232,19 @@ class TestPulse:
 
     @pytest.mark.asyncio
     async def test_timeout_kills_subprocess(
-        self, monkeypatch, tmp_path, _enable_pulse,
+        self,
+        monkeypatch,
+        tmp_path,
+        _enable_pulse,
     ):
         sd = tmp_path / "sess5"
         sd.mkdir()
         monkeypatch.setenv("ROBUSTNESS_AGENT_SESSION_DIR", str(sd))
         slow = _SlowProc(returncode=0)
         monkeypatch.setattr(
-            asyncio, "create_subprocess_exec", _spawn_factory(slow),
+            asyncio,
+            "create_subprocess_exec",
+            _spawn_factory(slow),
         )
         result = await rp.pulse(tick_index=0, timeout_s=0.05)
         assert result is False
@@ -224,7 +253,10 @@ class TestPulse:
 
     @pytest.mark.asyncio
     async def test_timeout_handles_process_already_gone(
-        self, monkeypatch, tmp_path, _enable_pulse,
+        self,
+        monkeypatch,
+        tmp_path,
+        _enable_pulse,
     ):
         sd = tmp_path / "sess6"
         sd.mkdir()
@@ -236,7 +268,9 @@ class TestPulse:
 
         gone = _GoneProc(returncode=0)
         monkeypatch.setattr(
-            asyncio, "create_subprocess_exec", _spawn_factory(gone),
+            asyncio,
+            "create_subprocess_exec",
+            _spawn_factory(gone),
         )
         assert await rp.pulse(tick_index=0, timeout_s=0.05) is False
         assert gone.waited is True

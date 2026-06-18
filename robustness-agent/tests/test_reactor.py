@@ -51,9 +51,7 @@ def _build_reactor(
     classifier: Classifier | None = None,
     cooldown_ticks: int = 0,
 ) -> tuple[Reactor, FindingSink]:
-    fb = fallback or _FakeSource(
-        "fb", SourceData(coordinator_events=[], sources_used=["fb"])
-    )
+    fb = fallback or _FakeSource("fb", SourceData(coordinator_events=[], sources_used=["fb"]))
     router = DegradeRouter(primary, fb, fail_threshold=2, recheck_interval_s=0.0)
     sink = FindingSink(FindingSinkConfig(session_dir=tmp_path, session_id="sess-1"))
     components = ReactorComponents(
@@ -67,18 +65,22 @@ def _build_reactor(
 
 
 def _build_reactor_with_finalizer(
-    *, tmp_path: Path, session_id: str = "sess-1",
+    *,
+    tmp_path: Path,
+    session_id: str = "sess-1",
 ) -> tuple[Reactor, PostmortemFinalizer]:
     primary = _FakeSource("primary", SourceData(sources_used=["primary"]))
     fallback = _FakeSource("fb", SourceData(sources_used=["fb"]))
     router = DegradeRouter(
-        primary, fallback, fail_threshold=2, recheck_interval_s=0.0,
+        primary,
+        fallback,
+        fail_threshold=2,
+        recheck_interval_s=0.0,
     )
-    sink = FindingSink(
-        FindingSinkConfig(session_dir=tmp_path, session_id=session_id)
-    )
+    sink = FindingSink(FindingSinkConfig(session_dir=tmp_path, session_id=session_id))
     finalizer = PostmortemFinalizer(
-        session_dir=tmp_path, session_id=session_id,
+        session_dir=tmp_path,
+        session_id=session_id,
     )
     components = ReactorComponents(
         router=router,
@@ -235,11 +237,12 @@ async def test_reactor_finalize_optional_when_disabled(tmp_path: Path):
     primary = _FakeSource("primary", SourceData(sources_used=["primary"]))
     fallback = _FakeSource("fb", SourceData(sources_used=["fb"]))
     router = DegradeRouter(
-        primary, fallback, fail_threshold=2, recheck_interval_s=0.0,
+        primary,
+        fallback,
+        fail_threshold=2,
+        recheck_interval_s=0.0,
     )
-    sink = FindingSink(
-        FindingSinkConfig(session_dir=tmp_path, session_id="sess-1")
-    )
+    sink = FindingSink(FindingSinkConfig(session_dir=tmp_path, session_id="sess-1"))
     components = ReactorComponents(
         router=router,
         classifier=Classifier(crash_config=CrashConfig(medium_threshold=2)),
