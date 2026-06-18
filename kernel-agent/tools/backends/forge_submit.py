@@ -1270,6 +1270,74 @@ def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
     return baseline_ms, best_ms, improved, out, loop_exc
 
 
+# Canonical claude/usage token counters (mirrors
+# parse_usage.normalize_usage, the parser that consumes FORGE_LLM_USAGE).
+_FORGE_USAGE_TOKEN_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _usage_has_token_counter(usage: object) -> bool:
+    """True when ``usage`` carries at least one int-coercible canonical counter.
+
+    Mirrors the FORGE_LLM_USAGE consumer's contract
+    (``parse_usage.normalize_usage``): a usage block is meaningful as soon as
+    ANY of the four canonical token counters is present and int-coercible. The
+    per-iteration ``calls`` field is optional metadata, NOT a precondition —
+    gating on it would silently drop a sidecar that reports only aggregate
+    token counters (or ``calls == 0`` with real counts), so the parent emits no
+    FORGE_LLM_USAGE marker and the tracer loses the forge token row entirely.
+    """
+    if not isinstance(usage, dict):
+        return False
+    for key in _FORGE_USAGE_TOKEN_KEYS:
+        value = usage.get(key)
+        if value is None:
+            continue
+        try:
+            int(value)
+            return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | None]:
+    """Recover the forge run's LLM usage + key-step timeline from the CLI sidecar.
+
+    The forge loop now runs in an isolated subprocess (see ``_run_loop_via_cli``),
+    so its in-process ``UsageAccumulator`` / IterationResults are no longer
+    reachable here. When the forge-loop CLI serializes them into
+    ``forge_cli_result.json`` (keys ``llm_usage`` / ``steps``), surface them so
+    ``submit`` can re-emit the canonical FORGE_LLM_USAGE / FORGE_STEPS markers.
+
+    ``llm_usage`` is surfaced as soon as it carries any int-coercible token
+    counter (``calls`` is optional metadata, matching the parser); ``steps`` is
+    surfaced when it carries a non-empty ``steps`` list. Returns
+    ``(llm_usage, steps)``; either is ``None`` when the sidecar is missing /
+    lacks that field (older Forge CLI / no-agent run) -> the markers stay a
+    no-op and the tracer simply records no forge cost/steps.
+    """
+    sidecar = Path(output_dir) / "forge_cli_result.json"
+    try:
+        if not sidecar.exists():
+            return None, None
+        import json as _json
+        parsed = _json.loads(sidecar.read_text())
+    except Exception:  # noqa: BLE001 — best-effort: a bad sidecar is not fatal
+        return None, None
+    if not isinstance(parsed, dict):
+        return None, None
+    usage = parsed.get("llm_usage")
+    usage = usage if _usage_has_token_counter(usage) else None
+    steps = parsed.get("steps")
+    steps = steps if isinstance(steps, dict) and steps.get("steps") else None
+    return usage, steps
+
+
 def submit(source_file: str, prompt_file: Path, output_dir: Path,
            test_command: str = "", source_type: str = "unknown",
            candidate: dict | None = None, num_gpus: int = 1,
@@ -1387,8 +1455,24 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
                                time.time() - started)
         msg = (f"forge done (cli): baseline={baseline_ms} best={best_ms} "
                f"improved={improved} fellow={fellow} gpu={gpu_target}")
+        # Full-trace bridge: when the forge-loop CLI serialized the run's LLM
+        # token spend + key-step timeline into its result sidecar, surface them
+        # as the canonical markers (FORGE_LLM_USAGE / FORGE_STEPS) so the
+        # Hyperloom tracer can attribute forge's cost + decision process — not
+        # just its wall time. Absent on older Forge CLIs -> stays a no-op.
+        forge_usage, forge_steps = _forge_trace_from_sidecar(output_dir)
+        if forge_usage:
+            import json as _json_usage
+            msg += "\nFORGE_LLM_USAGE " + _json_usage.dumps(forge_usage, sort_keys=True)
+        if forge_steps:
+            import json as _json_steps
+            msg += "\nFORGE_STEPS " + _json_steps.dumps(forge_steps, sort_keys=True)
         res = _normalized(0, msg + "\n" + (loop_output or "")[-3000:], "",
                           time.time() - started)
+        if forge_usage:
+            res["llm_usage"] = forge_usage
+        if forge_steps:
+            res["steps"] = forge_steps
         res["cli_workspace"] = str(output_dir)
         res["output_dir"] = str(output_dir)
         return res

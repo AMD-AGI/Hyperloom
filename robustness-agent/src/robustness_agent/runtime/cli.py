@@ -258,15 +258,28 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     bundle = build_reactor_components(config, session_id=session_id)
     try:
         intents = await bundle.reactor.tick(reactor_ctx)
+        # Surface any RCA-LLM token spend this tick so the host can fold it
+        # into its trace ledger (None on the common no-LLM / Noop path).
+        llm_usage = None
+        rca = getattr(bundle.components, "rca", None)
+        drain = getattr(rca, "drain_usage", None)
+        if callable(drain):
+            try:
+                llm_usage = drain()
+            except Exception:  # noqa: BLE001 — telemetry must never fail a tick
+                llm_usage = None
     finally:
         await bundle.aclose()
 
-    return {
+    emit: dict[str, Any] = {
         "intent_envelope": build_envelope_dict(intents),
         "session_id": session_id,
         "tick_index": bundle.reactor.tick_index,
         "parse_warnings": list(reactor_ctx.parse_warnings),
     }
+    if llm_usage:
+        emit["llm_usage"] = llm_usage
+    return emit
 
 
 def _cmd_tick(args: argparse.Namespace) -> None:

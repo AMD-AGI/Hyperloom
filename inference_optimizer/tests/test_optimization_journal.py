@@ -418,3 +418,18 @@ def test_journal_entry_roundtrips_proposer_and_metrics():
             outcome="KEEP",
         ).to_dict()
     )
+
+
+def test_journal_entry_roundtrips_predicted_gain():
+    from inference_optimizer.orchestrator.optimization_journal import JournalEntry
+    e = JournalEntry(
+        phase="EXPLORE", iter=1, kind="backend", change="x", outcome="KEEP",
+        gain_pct=4.2, predicted_gain_pct=9.0,
+    )
+    d = e.to_dict()
+    assert d["predicted_gain_pct"] == 9.0
+    assert JournalEntry.from_dict(d).predicted_gain_pct == 9.0
+    # Unset prediction is stripped (distinguish "no prediction" from "0").
+    assert "predicted_gain_pct" not in JournalEntry(
+        phase="P", iter=0, kind="baseline", change="b", outcome="KEEP",
+    ).to_dict()
