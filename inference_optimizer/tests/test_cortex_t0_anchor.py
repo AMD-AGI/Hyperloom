@@ -12,6 +12,7 @@ import pytest
 
 from inference_optimizer.orchestrator.cortex_t0 import (
     T0Result,
+    _warm_recipe_source,
     run_t0_anchor,
 )
 from inference_optimizer.recipe_kb import (
@@ -19,6 +20,31 @@ from inference_optimizer.recipe_kb import (
     RecipeKB,
     recipe_canonical_id,
 )
+
+
+class GbrainRemoteRecipeClient:  # name matches the real client for the type check
+    enabled = True
+
+
+def test_warm_recipe_source_prefers_best_config_provenance() -> None:
+    row = {
+        "_sources": ["gbrain", "cortex"],
+        "_field_sources": {"best_config": "cortex", "best_throughput": "gbrain"},
+    }
+    assert _warm_recipe_source(row, kb=None) == "cortex"
+
+
+def test_warm_recipe_source_falls_back_to_first_source() -> None:
+    row = {"_sources": ["gbrain", "cortex"], "_field_sources": {}}
+    assert _warm_recipe_source(row, kb=None) == "gbrain"
+
+
+def test_warm_recipe_source_falls_back_to_remote_type() -> None:
+    class _Kb:
+        remote = GbrainRemoteRecipeClient()
+
+    assert _warm_recipe_source({}, kb=_Kb()) == "gbrain"
+    assert _warm_recipe_source(None, kb=object()) == "cortex-kb"
 
 
 # Fake SharedState — only the fields the anchor reads

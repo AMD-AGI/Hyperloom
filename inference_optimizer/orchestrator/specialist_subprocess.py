@@ -26,6 +26,8 @@ from typing import Any
 
 from .trace.parse_usage import (
     parse_claude_stream_json_response,
+    parse_claude_stream_json_tool_calls,
+    parse_claude_stream_json_turn_usages,
     parse_claude_stream_json_usage,
 )
 
@@ -139,6 +141,18 @@ class SpecialistSubprocessResult:
     the stream); pairing the parent-side prompt with this response lands the
     production specialist turn in ``conversations.jsonl``. ``None`` when no
     response text could be recovered (crash before any reply)."""
+
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    """Intel/tool calls (``{"tool", "query"}``) recovered from the same
+    stream-json log so the trace can surface what the specialist actually
+    read (WebSearch / WebFetch / pr_monitor / cortex_kb / ...). Empty when
+    none were made or the log was missing/truncated."""
+
+    turn_usages: list[dict[str, int | None]] = field(default_factory=list)
+    """Per-assistant-turn token usage recovered from the stream-json log so
+    the parent can trace the multi-turn subprocess as one ledger row per
+    model turn instead of a single cumulative ``turn=1`` lump. Empty when no
+    per-message usage was present (parent then falls back to ``usage``)."""
 
     error: str = ""
 
@@ -438,6 +452,13 @@ class SpecialistSubprocessDispatcher:
         # is paired in by the parent runner). Best-effort: returns None on a
         # missing / truncated log.
         response = parse_claude_stream_json_response(process_log)
+        # Intel/tool calls (WebSearch / WebFetch / pr_monitor / cortex_kb /
+        # Read / Grep / ...) the specialist made — recovered from the same log
+        # so the trace can show what it read, not just its token total.
+        tool_calls = parse_claude_stream_json_tool_calls(process_log)
+        # Per-turn usage for fine-grained tracing (one ledger row per model
+        # turn); falls back to the cumulative ``usage`` when absent.
+        turn_usages = parse_claude_stream_json_turn_usages(process_log)
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
@@ -449,6 +470,8 @@ class SpecialistSubprocessDispatcher:
             patches=patches,
             usage=usage,
             response=response,
+            tool_calls=tool_calls,
+            turn_usages=turn_usages,
             error=outcome["error"],
         )
 

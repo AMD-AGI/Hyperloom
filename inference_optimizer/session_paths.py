@@ -258,12 +258,19 @@ def report_file(session_dir: Path, ts: str, suffix: str = "md") -> Path:
 # Layout (see FULL_TRACE_DESIGN §3.3):
 #
 #   <sd>/reports/trace/
-#     llm_calls.jsonl              # in-process components append directly
-#     ext/<component>-<pid>.jsonl  # each out-of-process child writes its own
+#     llm_calls.jsonl              # every in-process LLM call's token row
+#     ext/<component>-<pid>.jsonl  # out-of-process child shards (compat path)
 #     decision_trace.jsonl         # collector join product (token+decision)
 #
 # All trace writers are best-effort and swallow OSError; these helpers only
-# compute paths (callers mkdir the parent before writing).
+# compute paths (callers mkdir the parent before writing). The parent process
+# is the sole writer of llm_calls.jsonl, so there is no concurrent-writer
+# fan-in to coordinate on that file. Out-of-process children (specialist /
+# geak / oob / robustness / critic-agent CLI) do NOT append to it; they write
+# their own ext/*.jsonl shard (see ``ext_trace_path``) which the collector
+# (``_load_llm_calls``) and the Langfuse emitter (``_flush_ext_shards``)
+# backfill at read time. The ext shards are a legacy/child-compatibility path:
+# new producers should run in-process and parent-append into llm_calls.jsonl.
 def trace_dir(session_dir: Path) -> Path:
     """``<sd>/reports/trace/`` — root of the unified token+decision trace.
 
@@ -337,6 +344,34 @@ def decision_trace_path(session_dir: Path) -> Path:
         ``<session_dir>/reports/trace/decision_trace.jsonl``.
     """
     return trace_dir(session_dir) / "decision_trace.jsonl"
+
+
+def proposal_task_map_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/proposal_task_map.jsonl`` — append-only map of
+    ``{proposal_msg_id -> task_id}`` stamped when an approved proposal is
+    materialized into a task. Lets the decision-trace collector attribute a
+    Critic review call (which only knows the proposal ``msg_id`` at review
+    time) to the decision the proposal eventually became."""
+    return trace_dir(session_dir) / "proposal_task_map.jsonl"
+
+
+def forge_steps_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/forge_steps.jsonl`` — append-only audit of the
+    Kernel-Forge autonomous loop's key steps (per-iteration rationale /
+    validation / bench / keep-revert + a run summary), recovered from the forge
+    kernel-backend stdout. Backfilled into the trace as ``forge:iter:<n>`` /
+    ``forge:summary`` spans so a trace shows forge's decision process, not just
+    its token total."""
+    return trace_dir(session_dir) / "forge_steps.jsonl"
+
+
+def specialist_intel_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/specialist_intel.jsonl`` — append-only audit of the
+    intel/tool calls each specialist made (WebSearch / WebFetch / pr_monitor /
+    cortex_kb / Read / Grep / ...), recovered from the subprocess stream-json
+    log. Backfilled into the trace as per-call ``intel:<tool>`` spans so a
+    trace shows what a specialist *read*, not just its token total."""
+    return trace_dir(session_dir) / "specialist_intel.jsonl"
 
 
 def conversations_path(session_dir: Path) -> Path:
@@ -801,7 +836,8 @@ __all__ = [
     "cortex_sid_file",
     "cortex_warm_json",
     "decision_trace_path",
-    "ext_trace_path",
+    "proposal_task_map_path",
+    "forge_steps_path",
     "kernel_agent_runs_dir",
     "kernel_workspace",
     "llm_calls_path",
@@ -822,5 +858,4 @@ __all__ = [
     "target_analysis_report_md",
     "target_baseline_json",
     "trace_dir",
-    "trace_ext_dir",
 ]
