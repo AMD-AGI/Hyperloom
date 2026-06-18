@@ -269,8 +269,20 @@ def build(
     exported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # Section collectors (each catches its own errors via warnings).
-    session_meta = _pick(
+    session_section = _pick(
         "session", _safe_collect("session", lambda: collectors.collect_session(sd, state, manifest, warnings), warnings)
+    )
+    # §1b: author-side ``session_meta`` enrichment. Emitted unconditionally from
+    # the manifest + resolved ``session`` block so the block no longer depends on
+    # the ci/optimize_submit backfill (which only ran on the GHA submit path).
+    session_meta = _pick(
+        "session_meta",
+        _safe_collect(
+            "session_meta",
+            lambda: collectors.collect_session_meta(manifest, session_section, warnings),
+            warnings,
+            default={},
+        ),
     )
     workload = _pick(
         "workload", _safe_collect("workload", lambda: collectors.collect_workload(state, manifest, warnings), warnings)
@@ -387,6 +399,12 @@ def build(
     optimization_stack = _pick(
         "optimization_stack",
         _safe_collect("optimization_stack", lambda: collectors.collect_optimization_stack(state), warnings, default=[]),
+    )
+    # Fixed FP8 GEMM-tuning stage, engine-tagged (geak today, forge later);
+    # empty {} on non-fp8/sglang or pre-section sessions.
+    gemm_tuning = _pick(
+        "gemm_tuning",
+        _safe_collect("gemm_tuning", lambda: collectors.collect_gemm_tuning(state), warnings, default={}),
     )
     # Hot-kernel roofline table (Dashboard §1) from ``<sd>/reports/kernel_roofline.json``.
     kernel_roofline = _pick(
@@ -520,7 +538,9 @@ def build(
         "schema_version": schema_version,
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
-        "session": session_meta,
+        "session": session_section,
+        # §1b enrichment; always present from the exporter (no longer CI-only).
+        "session_meta": session_meta,
         "workload": workload,
         "baseline": baseline,
         "final": final,
@@ -546,6 +566,10 @@ def build(
         "specialist_runs": specialist_runs,
         # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``.
         "optimization_stack": optimization_stack,
+        # Fixed FP8 GEMM-tuning stage (KERNEL entry), engine-tagged (geak
+        # today, forge later). Gain mirrored here; ``attribution`` stays
+        # authoritative. Empty {} on non-fp8/sglang or pre-section sessions.
+        "gemm_tuning": gemm_tuning,
         # Hot-kernel roofline table (spec §1); empty → dashboard hides it.
         "kernel_roofline": kernel_roofline,
         # Kernel-agent attempt outcome summary (spec §A1); empty → hides Block 1.
