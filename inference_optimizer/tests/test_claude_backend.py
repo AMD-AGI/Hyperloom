@@ -480,7 +480,7 @@ async def test_raw_completion_options_disable_tools_and_skip_suffix():
     assert kw["allowed_tools"] == []
     assert kw["disallowed_tools"]  # built-ins blocked
     assert "mcp_servers" not in kw
-    assert kw["max_turns"] >= 2
+    assert kw["max_turns"] >= 8
     assert "OUTPUT FORMAT" not in captured["prompt"]
     assert captured["prompt"] == "the prompt"
 

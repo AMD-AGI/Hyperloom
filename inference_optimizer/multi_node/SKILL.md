@@ -412,17 +412,14 @@ default `--robustness-agent` was selected via
   `${USER_DATA_PATH}/runs/<action>/<task>/<variant>/` carries
   `error_class` plus a truncated error tail.
 
-* **`baseline_accuracy=0.0` + `accuracy gate skipped`** is the expected
-  default, not a bug. `_workload_envs.py` sets `RUN_EVAL=false` because
-  Magpie's `--concurrent-requests N` is rejected by InferenceX's current
-  `run_lm_eval`; `_accuracy_gate.py` therefore returns True for
-  high-risk variants. To opt in, export `RUN_EVAL=true` in the
-  **sandbox** env before launch (`_workload_envs.py` reads it via
-  `os.environ.get`); the multi-node CLI's `--extra-env` flag feeds
-  RayJob env and is the **wrong scope**. Before opting in, confirm
-  InferenceX accepts the flag via
-  `grep -nR concurrent-requests "$INFERENCEX_PATH/benchmarks"` — if the
-  grep is empty, opting in will fail every variant including baseline.
+* **Accuracy eval defaults on.** `_workload_envs.py` now defaults
+  `RUN_EVAL=true`; setting `RUN_EVAL=false` is an explicit disable path and
+  emits a warning. If a session records `baseline_accuracy=0.0`, the accuracy
+  gate still skips because there is no baseline to compare against, so treat
+  that as a missing-evidence warning rather than a clean accuracy pass. Before
+  relying on multi-node accuracy eval, confirm InferenceX accepts the relevant
+  flags via `grep -nR concurrent-requests "$INFERENCEX_PATH/benchmarks"` — if
+  the grep is empty, eval may fail every variant including baseline.
 
 * **Image-level launcher-flag denylist (probe each boot,
   framework-aware, model-agnostic)**. Any `backends` grid variant

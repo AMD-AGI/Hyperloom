@@ -3721,6 +3721,29 @@ def _default_research_lane_capacity() -> int:
     return research_lane_ceiling()
 
 
+def _default_gpu_specialist_capacity() -> int:
+    """Default ``--gpu-specialist-capacity``: $INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY else the whole machine.
+
+    WS2 turns GPU specialists on by default at whole-machine capacity. When the
+    env var is set (including ``0`` as an explicit disable escape hatch) it
+    wins; otherwise the default is the visible GPU count probed on the launch
+    host (``detect_gpu_count()``), or ``0`` when nothing can be probed.
+
+    Returns:
+        int: The resolved GPU specialist capacity (env value when set and
+            parseable, otherwise the detected whole-machine GPU count).
+    """
+    env = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY")
+    if env is not None and env.strip() != "":
+        try:
+            return max(0, int(env))
+        except ValueError:
+            pass
+    from inference_optimizer.orchestrator.policy import detect_gpu_count
+
+    return detect_gpu_count()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser and subcommands.
 
@@ -4331,6 +4354,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "need to also pass --degraded-kb).",
     )
     opt.add_argument(
+        "--specialist-kb-mcp-url",
+        dest="specialist_kb_mcp_url",
+        type=str,
+        default=None,
+        help="Read-only KB-graph (cortex_kb) MCP endpoint advertised to "
+        "specialist subprocesses; also settable via "
+        "$HYPERLOOM_SPECIALIST_KB_MCP_URL (bearer token from "
+        "$HYPERLOOM_SPECIALIST_KB_MCP_TOKEN). When unset, falls back to "
+        "the gbrain MCP derived from $GBRAIN_BASE_URL (+ /mcp) with a "
+        "$GBRAIN_TOKEN bearer. Specialist KB writes always stay local.",
+    )
+    opt.add_argument(
         "--local-kb-root",
         dest="local_kb_root",
         type=str,
@@ -4466,9 +4501,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--gpu-specialist-capacity",
         dest="gpu_specialist_capacity",
         type=int,
-        default=int(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "0") or "0"),
+        default=_default_gpu_specialist_capacity(),
         help="Number of GPUs available to specialists that request "
-        "needs_gpu=true. 0 disables GPU specialists (default). "
+        "needs_gpu=true. Defaults to the whole machine (visible GPU "
+        "count on the launch host); set "
+        "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=0 (or pass 0) to "
+        "disable GPU specialists. GPU specialists serialize against the "
+        "serving lanes via gpu_research_lane. "
         "Set INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES to a "
         "comma-separated GPU id pool when the specialist pool should "
         "not use device ids 0..N-1. Locked at session start.",
@@ -4523,9 +4562,9 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="specialist_per_turn_max_seconds",
         type=float,
         default=float(os.environ.get("INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS", "600") or "600"),
-        help="Wall-clock cap per specialist turn (default 600s). Used "
-        "by the robustness stale-scan to detect stuck specialists "
-        ".",
+        help="Wall-clock fallback ceiling per specialist task when no "
+        "explicit wall_budget_sec is provided (legacy backstop, default "
+        "600s; production dispatches use the WS1 wall-clock budget).",
     )
     # specialist dispatch shape
     opt.add_argument(
@@ -4740,7 +4779,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio).
     # Default 1.10: kill a single-variant run once wall-clock exceeds baseline by +10% (outcome=KILLED_OVERTIME).
-    # 0 disables (legacy variant_timeout_sec hard cap still applies); gate skips the inlined stack rebench (Q4).
+    # 0 disables (legacy variant_timeout_sec hard cap still applies); overtime kills skip stack rebench.
     def _env_float_or(default: float, env_var: str) -> float:
         """Resolve a float CLI default from an environment variable.
 

@@ -170,13 +170,14 @@ async def test_message_bus_replay_for_returns_ascending(db):
 
 # resource_lock
 def test_known_lanes_v08_includes_research_lane():
-    """v0.8 M5 (KB_design §3.7) adds ``research_lane``; the four v0.6 serving lanes are unchanged."""
+    """v0.8 M5 (KB_design §3.7) adds ``research_lane``; the four v0.6 serving lanes are unchanged. WS2 adds ``gpu_research_lane`` (GPU specialists ⊥ serving)."""
     assert set(KNOWN_LANES) == {
         "server_lifecycle",
         "workspace_mutation",
         "benchmark_lane",
         "profile_lane",
         "research_lane",
+        "gpu_research_lane",
     }
 
 
