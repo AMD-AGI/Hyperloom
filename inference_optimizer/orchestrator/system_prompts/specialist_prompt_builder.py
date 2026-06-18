@@ -563,6 +563,13 @@ class SpecialistPromptInputs:
     # (timeout / crash / stale-heartbeat) attempt; empty on the first attempt.
     auto_retry_reason: str = ""
 
+    # WS1 wall-clock budget for this dispatch (seconds) and the dispatch start
+    # timestamp (ISO-8601 UTC), so the specialist can self-throttle instead of
+    # only learning the deadline when the reaper hard-kills it. 0 / "" => not
+    # supplied (legacy turn-bounded path); the budget section renders nothing.
+    wall_budget_sec: float = 0.0
+    started_at_iso: str = ""
+
 
 # Section 1 — Identity & autonomy
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
@@ -837,6 +844,48 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
     if inp.target_gap_notes:
         rows.append("")
         rows.append(inp.target_gap_notes)
+    return rows
+
+
+# Section 2a — Execution budget (wall-clock)
+def _section_execution_budget(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the wall-clock budget block so the specialist can self-throttle.
+
+    Renders the concrete WS1 budget (seconds + minutes) and the dispatch start
+    timestamp. Returns ``[]`` when no budget was supplied (legacy turn-bounded
+    path), so the section is omitted entirely rather than emitting a placeholder.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``wall_budget_sec`` /
+            ``started_at_iso``).
+
+    Returns:
+        The rendered execution-budget section lines, or ``[]`` when no budget
+        is set.
+    """
+    if inp.wall_budget_sec <= 0:
+        return []
+    mins = inp.wall_budget_sec / 60.0
+    rows = [
+        "## 2a. EXECUTION BUDGET (wall-clock)",
+        "",
+        f"- Hard wall-clock budget for this entire dispatch: "
+        f"**{inp.wall_budget_sec:.0f}s (~{mins:.0f} min)**.",
+    ]
+    if inp.started_at_iso:
+        rows.append(f"- Dispatch started at: {inp.started_at_iso} (UTC).")
+    rows.extend(
+        [
+            "- The Coordinator hard-kills your subprocess when this budget is "
+            "exhausted — turns are NOT the stop signal. Scope your work to "
+            "reach a deliverable conclusion inside the budget.",
+            "- Self-throttle: check elapsed wall-clock with Bash "
+            "(``date -u +%s`` vs the start above), keep your "
+            "``specialist_done.partial.json`` checkpoint current, and write "
+            "the final ``specialist_done.json`` before the budget runs out so "
+            "your best work is never lost to a kill.",
+        ]
+    )
     return rows
 
 
@@ -1567,6 +1616,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     ]
     user_sections = [
         _section_hardware(inp),  # 0: § 1
+        _section_execution_budget(inp),  # 0a: § 2a (omitted when no budget)
         _section_gap(inp),  # 1: § 2-3
         _section_kb_subgraph(inp),  # 2: § 4
         _section_roofline_evidence(inp),  # 3: § 4a
@@ -1599,6 +1649,8 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         """
         out: list[str] = []
         for sec in sections:
+            if not sec:  # skip omitted sections (e.g. no execution budget)
+                continue
             if out:
                 out.append("")
             out.extend(sec)

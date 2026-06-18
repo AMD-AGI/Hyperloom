@@ -566,6 +566,11 @@ class SpecialistRunner:
                 # Coordinator-injected note when this is a bounded auto-retry
                 # of a prior transient (timeout / crash / stale) attempt.
                 auto_retry_reason=str(params.get("_auto_retry_reason") or ""),
+                # WS1 wall-clock budget (Coordinator-computed, on ctx.extra) +
+                # dispatch start, so the specialist can self-throttle instead of
+                # only finding the deadline when the reaper kills it.
+                wall_budget_sec=float((ctx.extra or {}).get("wall_budget_sec") or 0.0),
+                started_at_iso=datetime.now(timezone.utc).isoformat(),
                 # proposal_set self-curation target (policy.py is the
                 # source of truth); shapes the prompt, not a hard cap.
                 max_proposals=max(1, int(params.get("max_proposals") or DEFAULT_SPECIALIST_MAX_PROPOSALS)),
