@@ -1515,6 +1515,11 @@ async def _run_forge_gemm_tuning(
     # guaranteeing the highest-value tuner (MoE fmoe_ck) always runs first.
     cmd.extend(["--global-timeout", str(timeout)])
 
+    # Thorough mode: exhaustive search when session budget allows (>= 12h).
+    session_max_min = float(getattr(state, "max_minutes", 0) or 0)
+    if session_max_min >= 720:
+        cmd.append("--thorough")
+
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
 
     result = _parse_forge_gemm_sentinel(stdout)
