@@ -654,6 +654,23 @@ def materialize_config_with_envs(
         "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
     ):
         envs.setdefault(_trust_key, "1")
+    # Server-side trust-remote-code for custom-code models (Qwen3.6 MoE): the
+    # checkpoint ships a custom text-generation implementation behind a config
+    # that advertises vision_config, so the SERVER must also load remote code
+    # or it refuses the arch at boot. Scoped to this exact daily-candidate
+    # family so other models' server args are untouched; the client side is
+    # already covered model-agnostically above. Merge (never overwrite) so an
+    # operator pin survives, and skip when --trust-remote-code is already set.
+    if "qwen3.6-35b-a3b" in _model_basename or "qwen3-6-35b-a3b" in _model_basename:
+        _trust_existing = str(envs.get(framework_env, "")).strip()
+        if "trust-remote-code" not in _trust_existing:
+            from ._grid_runner import merge_server_args
+
+            envs[framework_env] = (
+                merge_server_args(_trust_existing, "--trust-remote-code")
+                if _trust_existing
+                else "--trust-remote-code"
+            )
     # Accuracy eval (GSM8K) is ON by default; env / extra_envs may override.
     # Disabling it removes the per-variant accuracy gate, so accuracy-
     # destroying changes can pass on throughput alone — warn loudly, never
