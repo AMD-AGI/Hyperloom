@@ -34,6 +34,11 @@ def tla():
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    # Register before exec so self-referential dataclass annotations
+    # (OpResolution.fanout: list["OpResolution"]) resolve under py3.10.
+    import sys as _sys
+
+    _sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
