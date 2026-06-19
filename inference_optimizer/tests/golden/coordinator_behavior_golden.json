@@ -194,6 +194,7 @@
     "kernel_enabled": true,
     "kernel_integrate_attempts": {},
     "kernel_opt_attempts": {},
+    "kernel_optimizer": "native",
     "last_action_failures": [
       {
         "action": "baseline",
@@ -288,6 +289,7 @@
     "pending_integrate": {},
     "pending_stack_validation_apply_results": [],
     "pending_stack_validation_result": {},
+    "perfskills_result": {},
     "phase": "PRELUDE",
     "phase_budget_pct": {
       "CLOSE": 0.02,
