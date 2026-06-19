@@ -482,8 +482,8 @@
     "patchable": true,
     "vllm": {
       "_ZN5aiter50fmoe_bf16_blockscaleFp8_g1u1_vs_silutg_psx256E.kd": {
-        "kernel_source_path": null,
-        "kernel_source_line": null,
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/py_itfs_cu/asm_fmoe.cu",
+        "kernel_source_line": "812",
         "kernel_kind": "aiter_asm",
         "patchable": true
       }
@@ -800,21 +800,21 @@
     "vllm": {
       "_ZN7ck_tile6kentryILi1ENSRmsnorm2dFwdINSRmsnorm2dFwdPipelineOnePassINSRmsnorm2dFwdPipelineProblemIDF16bDF16bfDF16bDF16bD": {
         "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/py_itfs_ck/rmsnorm_ck_kernels.cu",
-        "kernel_source_line": null,
+        "kernel_source_line": "96",
         "kernel_kind": "aiter_ck",
         "patchable": true
       },
       "_ZN7ck_tile6kentryILi1ENSRmsnorm2dFwdINSRmsnorm2dFwdPipelineOnePassINSRmsnorm2dFwdPipelineProblemIDF16_DF16_fDF16_DF16_D": {
         "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/py_itfs_ck/rmsnorm_ck_kernels.cu",
-        "kernel_source_line": null,
+        "kernel_source_line": "96",
         "kernel_kind": "aiter_ck",
         "patchable": true
       }
     },
     "sglang": {
       "_ZN7ck_tile6kentryILi1ENSRmsnorm2dFwdINSRmsnorm2dFwdPipelineTwoPassINSRmsnorm2dFwdPipelineProblemIDF16bDF16bfDF16bDF16bD": {
-        "kernel_source_path": null,
-        "kernel_source_line": null,
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/rmsnorm_ck_kernels.cu",
+        "kernel_source_line": "96",
         "kernel_kind": "aiter_ck",
         "patchable": true
       }
@@ -859,6 +859,12 @@
         "note": "templated __global__ kernel kn_entry_2c_sbhd_cached_indirect_inplace defined in rope_common.h; profiler strips digits so it appears as kn_entryc_*; host op in general_2c_cached_positions_fwd_kernels.cu"
       },
       "void aiter::kn_entryc_sbhd_cached_indirect_inplace<aiter::OpCachedFwd, 0, true, false, true, true, 1, true, c10::BFloat1": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rope/rope_common.h",
+        "kernel_source_line": "3547",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void aiter::kn_entryc_sbhd_cached_indirect_inplace<aiter::OpCachedFwd, 0, true, false, true, true, 2, true, c10::BFloat1": {
         "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rope/rope_common.h",
         "kernel_source_line": "3547",
         "kernel_kind": "aiter_hip",
@@ -1873,6 +1879,24 @@
         "kernel_source_line": "688",
         "kernel_kind": "aiter_hip",
         "patchable": true
+      },
+      "void wvSplitK_hf_sml_<__hip_bfloat16, 64, 4, 16, 8, 1, 4>(int, int, int, int, int, int, __hip_bfloat16 const*, __hip_bfl": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/custom_kernels.cu",
+        "kernel_source_line": "688",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void wvSplitK_hf_sml_<__hip_bfloat16, 64, 1, 16, 8, 4, 4>(int, int, int, int, int, int, __hip_bfloat16 const*, __hip_bfl": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/custom_kernels.cu",
+        "kernel_source_line": "688",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void wvSplitK_hf_sml_<__hip_bfloat16, 64, 4, 16, 8, 2, 2>(int, int, int, int, int, int, __hip_bfloat16 const*, __hip_bfl": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/custom_kernels.cu",
+        "kernel_source_line": "688",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
       }
     },
     "sglang": {}
@@ -2162,6 +2186,12 @@
         "kernel_source_line": "301",
         "kernel_kind": "sgl_hip",
         "patchable": true
+      },
+      "(anonymous namespace)::topk_transform_decode_kernel((anonymous namespace)::FastTopKParams, int*, int const*, long)": {
+        "kernel_source_path": "/sgl-workspace/sglang/sgl-kernel/csrc/elementwise/topk.cu",
+        "kernel_source_line": "270",
+        "kernel_kind": "sgl_hip",
+        "patchable": true
       }
     }
   },
@@ -2236,9 +2266,9 @@
     "vllm": {},
     "sglang": {
       "_aiter_rmsnorm_tiled_kernel": {
-        "kernel_source_path": null,
-        "kernel_source_line": null,
-        "kernel_kind": "aiter_hip",
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/rmsnorm_ck_kernels.cu",
+        "kernel_source_line": "32",
+        "kernel_kind": "aiter_ck",
         "patchable": true
       }
     }
@@ -2258,20 +2288,6 @@
         "patchable": true
       }
     }
-  },
-  "triton_per_fused_1": {
-    "kind": "single",
-    "python_launcher_path": null,
-    "patchable": true,
-    "vllm": {
-      "triton_per_fused.kd": {
-        "kernel_source_path": null,
-        "kernel_source_line": null,
-        "kernel_kind": "triton",
-        "patchable": true
-      }
-    },
-    "sglang": {}
   },
   "vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant": {
     "kind": "single",
@@ -2305,48 +2321,6 @@
     },
     "sglang": {}
   },
-  "triton_per_fused__to_copy_mean_pow_view_0": {
-    "kind": "single",
-    "python_launcher_path": null,
-    "patchable": true,
-    "vllm": {
-      "triton_per_fused__to_copy_mean_pow_view.kd": {
-        "kernel_source_path": null,
-        "kernel_source_line": null,
-        "kernel_kind": "triton",
-        "patchable": true
-      }
-    },
-    "sglang": {}
-  },
-  "triton_per_fused_6": {
-    "kind": "single",
-    "python_launcher_path": null,
-    "patchable": true,
-    "vllm": {
-      "triton_per_fused.kd": {
-        "kernel_source_path": null,
-        "kernel_source_line": null,
-        "kernel_kind": "triton",
-        "patchable": true
-      }
-    },
-    "sglang": {}
-  },
-  "triton_per_fused_7": {
-    "kind": "single",
-    "python_launcher_path": null,
-    "patchable": true,
-    "vllm": {
-      "triton_per_fused.kd": {
-        "kernel_source_path": null,
-        "kernel_source_line": null,
-        "kernel_kind": "triton",
-        "patchable": true
-      }
-    },
-    "sglang": {}
-  },
   "_C::rms_norm": {
     "kind": "single",
     "python_launcher_path": null,
@@ -2372,20 +2346,6 @@
       "_static_quant_fp8": {
         "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/fp8_kernel.py",
         "kernel_source_line": "619",
-        "kernel_kind": "triton",
-        "patchable": true
-      }
-    }
-  },
-  "triton_tem_fused__scaled_mm_0": {
-    "kind": "single",
-    "python_launcher_path": null,
-    "patchable": true,
-    "vllm": {},
-    "sglang": {
-      "triton_tem_fused__scaled_mm": {
-        "kernel_source_path": null,
-        "kernel_source_line": null,
         "kernel_kind": "triton",
         "patchable": true
       }
@@ -2445,6 +2405,12 @@
         "kernel_source_line": "1783",
         "kernel_kind": "aiter_hip",
         "patchable": true
+      },
+      "void wvSplitKQ_hf_<__hip_bfloat16, c10::Float8_e4m3fnuz, 64, 2, 16, 16, 1, 4>(int, int, int, int, int, int, c10::Float8_": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/custom_kernels.cu",
+        "kernel_source_line": "2004",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
       }
     },
     "sglang": {}
@@ -2458,8 +2424,8 @@
     "vllm": {},
     "sglang": {
       "_ZN7ck_tile6kentryILi1ENSRmsnorm2dFwdINSRmsnorm2dFwdPipelineTwoPassINSRmsnorm2dFwdPipelineProblemIDF16bDF16bfDF16bDF16bD": {
-        "kernel_source_path": null,
-        "kernel_source_line": null,
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/rmsnorm_ck_kernels.cu",
+        "kernel_source_line": "32",
         "kernel_kind": "aiter_ck",
         "patchable": true
       }
@@ -2536,5 +2502,53 @@
       }
     },
     "sglang": {}
+  },
+  "aiter::layernorm2d_fwd": {
+    "kind": "single",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/layernorm.py(522): forward_hip"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN7ck_tile6kentryILi1ENSLayernorm2dFwdINSLayernorm2dFwdPipelineOnePassINSLayernorm2dFwdPipelineProblemIDF16bDF16bDF16bD": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/norm_kernels.cu",
+        "kernel_source_line": "33",
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      }
+    }
+  },
+  "aiter::indexer_k_quant_and_cache": {
+    "kind": "single",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/nsa/nsa_indexer.py(997): _store_index_k_cache"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN5aiter32indexer_k_quant_and_cache_kernelIDF16bDB8_LN4vllm18Fp8KVCacheDataTypeE1ELi8ELi8ELi16EEEvPKT_PT0_PKliiiiibb": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/cache_kernels.cu",
+        "kernel_source_line": "1151",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    }
+  },
+  "aiter::moe_fused_gate": {
+    "kind": "single",
+    "python_launcher_path": [
+      "aiter/ops/topk.py(75): biased_grouped_topk"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_Z21moe_fused_gate_kernelIDF16bLi32ELi256ELi8ELi1EEvPvS0_PfPilllldi": {
+        "kernel_source_path": "/sgl-workspace/sglang/sgl-kernel/csrc/moe/moe_fused_gate.cu",
+        "kernel_source_line": "280",
+        "kernel_kind": "sgl_hip",
+        "patchable": true
+      }
+    }
   }
 }
