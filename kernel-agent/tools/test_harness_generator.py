@@ -422,3 +422,48 @@ def _inject_fake_validate(monkeypatch, *, harness_ok, bench_ok, force_file=False
         monkeypatch.setitem(sys.modules, "validate_harness", mod)
     if force_file:
         monkeypatch.setattr(hg.Path, "is_file", lambda self: True)
+
+
+# --- traced-shape pinning (faithful harness shapes from the candidate) ---
+
+
+def test_parse_traced_operand_dims_list_of_dict():
+    """TraceLens list form: [{'shape': '(a,b) dt<br>(c,d,e) dt<br>...'}]."""
+    cand = {
+        "input_shapes": [
+            {"shape": "(64,2048) bf16<br>(128,1536,2048) bf16<br>(128,2048,768) bf16<br>(4600,) int"}
+        ]
+    }
+    dims = hg._parse_traced_operand_dims(cand)
+    assert dims[0] == (64, 2048)
+    assert dims[1] == (128, 1536, 2048)
+    assert dims[2] == (128, 2048, 768)
+    assert (4600,) in dims
+
+
+def test_parse_traced_operand_dims_plain_string():
+    cand = {"shapes": ["(32,5120) bf16<br>(5120,) bf16"]}
+    dims = hg._parse_traced_operand_dims(cand)
+    assert dims == [(32, 5120), (5120,)]
+
+
+def test_aiter_shape_from_candidate_moe_inter_dim_from_w2():
+    """ck_moe: inter_dim is w2's LAST axis (w2=(E, model_dim, inter_dim)), not topk."""
+    cand = {
+        "input_shapes": [
+            {"shape": "(64,2048) bf16<br>(128,1536,2048) bf16<br>(128,2048,768) bf16<br>(64,8,768) bf16"}
+        ]
+    }
+    s = hg._aiter_shape_from_candidate(cand)
+    assert s["M"] == 64  # token
+    assert s["N"] == 2048  # model_dim
+    assert s["K"] == 768  # inter_dim (w2 last axis), NOT 8 (topk) or 1536 (2*inter)
+
+
+def test_aiter_shape_from_candidate_dict_form_passthrough():
+    s = hg._aiter_shape_from_candidate({"input_shapes": {"M": 16, "N": 32, "K": 64}})
+    assert s == {"M": 16, "N": 32, "K": 64}
+
+
+def test_aiter_shape_from_candidate_empty():
+    assert hg._aiter_shape_from_candidate({}) == {}
