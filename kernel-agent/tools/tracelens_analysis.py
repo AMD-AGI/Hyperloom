@@ -4895,6 +4895,85 @@ def enrich_candidates_with_runtime_metadata(
                 flags.setdefault(key, value)
         flags.setdefault("is_multigpu", bool(item.get("is_multigpu")))
         flags.setdefault("num_gpus_recommended", item.get("num_gpus_recommended"))
+        # Kernel-class CONTRACT enrichment so GEAK's harness is faithful for
+        # non-MoE kernels too (collectives need a real distributed reference;
+        # attention needs causal/kv layout). Without these the harness can pass
+        # a tautological or wrong-regime correctness check and a "win" won't
+        # transfer to E2E. Derived from the kernel name + model config.
+        _enrich_kernel_contract(item, model_params)
+
+
+def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] | None) -> None:
+    """Populate per-kernel-class contract fields used to build a faithful harness.
+
+    - Collectives (all_reduce / all_gather / reduce_scatter / ...): record
+      ``collective_op`` + ``world_size``/``tp_size`` (from model_params) so the
+      harness can use ``torch.distributed.<op>`` as a real reference instead of
+      a self-compare, and so a reviewer knows the kernel is comm-bound.
+    - Attention (mha / flash / paged): record ``causal`` (decode/prefill attn
+      is causal), ``kv_layout``, ``head_dim``/``num_heads`` from model_params,
+      and the ``seqlen_regime`` so the harness benchmarks the served regime.
+    These are advisory metadata; absent fields are simply not set.
+    """
+    name = str(item.get("name") or "").lower()
+    mp = model_params or {}
+    contract = item.get("kernel_contract")
+    if not isinstance(contract, dict):
+        contract = {}
+    # --- collectives ---
+    _COLL = (("all_reduce", "allreduce"), ("all_gather", "allgather"),
+             ("reduce_scatter", "reducescatter"), ("all_to_all", "alltoall"),
+             ("broadcast",), ("reduce",))
+    _OPMAP = {"all_reduce": "all_reduce", "allreduce": "all_reduce",
+              "all_gather": "all_gather", "allgather": "all_gather",
+              "reduce_scatter": "reduce_scatter", "reducescatter": "reduce_scatter",
+              "all_to_all": "all_to_all", "alltoall": "all_to_all",
+              "broadcast": "broadcast", "reduce": "reduce"}
+    if bool(item.get("is_multigpu")) or any(tag in name for grp in _COLL for tag in grp):
+        op = next((_OPMAP[t] for grp in _COLL for t in grp if t in name), "all_reduce")
+        contract["kind"] = "collective"
+        contract["collective_op"] = op
+        ws = mp.get("WORLD_SIZE") or mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE") \
+            or item.get("num_gpus_recommended")
+        if ws:
+            contract["world_size"] = int(ws)
+        if mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE"):
+            contract["tp_size"] = int(mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE"))
+        contract.setdefault("reduce_op", "sum")
+        contract["reference"] = f"torch.distributed.{op}"
+        contract["e2e_note"] = ("comm-bound collective: a 1-GPU GEAK slot cannot "
+                                "reproduce inter-GPU traffic; needs KERNEL_AGENT_NUM_GPUS>=world_size")
+    # --- attention ---
+    elif any(t in name for t in ("mha", "flash", "attn", "attention", "paged")):
+        contract["kind"] = "attention"
+        contract["causal"] = True  # autoregressive serving attention is causal
+        for src, dst in (("HEAD_SIZE", "head_dim"), ("NUM_ATTENTION_HEADS", "num_heads"),
+                         ("NUM_KEY_VALUE_HEADS", "num_kv_heads")):
+            if mp.get(src) is not None:
+                contract[dst] = mp.get(src)
+        contract.setdefault("kv_layout", "unknown")  # to be confirmed from trace; flag for reviewer
+        contract["seqlen_regime"] = "prefill" if "prefill" in name else (
+            "decode" if "decode" in name else "mixed")
+        contract["reference"] = "torch.nn.functional.scaled_dot_product_attention"
+    # E2E-TRANSFER honesty flag: warn when a kernel-level win is unlikely to move
+    # serving E2E so neither the pipeline nor a reviewer over-trusts a micro-speedup.
+    #  - sealed-ASM launchers: asm_*.cu dispatches a prebuilt .co HSACO; only the
+    #    host-side launcher is editable, so wins are tiny (observed E2E #1: 1.09x
+    #    kernel -> 1.0008x E2E).
+    #  - collectives on a 1-GPU GEAK slot: cannot reproduce inter-GPU traffic.
+    src = str(item.get("source_file") or "").lower()
+    reasons = []
+    if "/py_itfs_cu/asm_" in src or (os.path.basename(src).startswith("asm_") and src.endswith(".cu")):
+        reasons.append("sealed-ASM launcher (.co binary not editable; only host launcher)")
+    if contract.get("kind") == "collective":
+        reasons.append("comm-bound collective (needs multi-GPU GEAK slot to reproduce E2E traffic)")
+    if reasons:
+        item["e2e_transferable"] = False
+        item["e2e_transfer_note"] = "; ".join(reasons)
+    else:
+        item.setdefault("e2e_transferable", True)
+    if contract:
+        item["kernel_contract"] = contract
 
 
 def build_task_groups(
