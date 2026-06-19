@@ -2909,6 +2909,49 @@ def resolve_shapes_from_csv_for_op(
     )
 
 
+def resolve_raw_arg_spec_from_csv(
+    perf_report_csv_dir: Path | str | None,
+    op_name: str,
+) -> dict[str, str] | None:
+    """Return the matched ``ops_unique_args.csv`` row's raw arg columns verbatim.
+
+    Unlike :func:`resolve_shapes_from_csv_for_op` (which drops scalar/empty
+    operands), this preserves the full ordered argument metadata exactly as the
+    trace recorded it — ``Input Dims`` / ``Input type`` / ``Concrete Inputs`` —
+    so the GEAK harness builder can reconstruct the real call signature
+    (tensors + scalar args in order) instead of inferring it from tensor shapes
+    alone. No parsing, no reshaping: the strings are forwarded as-is.
+
+    Args:
+        perf_report_csv_dir: Directory containing ``ops_unique_args.csv``.
+        op_name: Exact TraceLens op name to match (case-insensitive).
+
+    Returns:
+        ``{"input_dims", "input_type", "concrete_inputs"}`` from the first
+        matching row, or ``None`` when unavailable.
+    """
+    target = str(op_name or "").strip().lower()
+    if not target or not perf_report_csv_dir:
+        return None
+    csv_path = Path(perf_report_csv_dir) / "ops_unique_args.csv"
+    if not csv_path.is_file():
+        return None
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if str(row.get("name") or "").strip().lower() != target:
+                    continue
+                spec = {
+                    "input_dims": str(row.get("Input Dims") or "").strip(),
+                    "input_type": str(row.get("Input type") or "").strip(),
+                    "concrete_inputs": str(row.get("Concrete Inputs") or "").strip(),
+                }
+                return spec if any(spec.values()) else None
+    except (OSError, csv.Error):
+        return None
+    return None
+
+
 def _is_fused_moe_candidate(item: dict[str, Any]) -> bool:
     """Detect the Triton fused-MoE expert-kernel candidate.
 
@@ -3483,6 +3526,13 @@ def _finalize_candidates(
         # Mark trace-extracted shapes so the dispatch-time validator can tell their provenance.
         if item.get("shapes"):
             item.setdefault("shape_provenance", "torch_trace")
+        # Forward the full ordered arg metadata (tensors + scalars, verbatim) so
+        # GEAK's harness builder can reconstruct the exact call signature. Purely
+        # additive: shapes/input_shapes are unchanged.
+        if not item.get("raw_arg_spec"):
+            raw_spec = resolve_raw_arg_spec_from_csv(perf_report_csv_dir, str(item.get("name") or ""))
+            if raw_spec:
+                item["raw_arg_spec"] = raw_spec
         item["kernel_id"] = f"k{idx:03d}"
         if not item.get("gpu_pct"):
             item["gpu_pct"] = round(item["duration_us"] / sum_dur * 100.0, 3)
