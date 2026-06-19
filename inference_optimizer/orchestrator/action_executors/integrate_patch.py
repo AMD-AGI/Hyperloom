@@ -390,10 +390,74 @@ def _git_apply_reverse(
     return False, f"git apply -R: no matching -p level for {patch_path}"
 
 
+def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
+    """Stash uncommitted user changes so destructive resets don't lose them.
+
+    Only stashes when the working tree is dirty (``git status --porcelain``
+    is non-empty). The stash message is tagged for easy retrieval via
+    ``git stash list | grep hyperloom-auto-stash``.
+
+    Returns:
+        ``(state, note)`` where ``state`` is one of:
+
+        - ``"clean"`` — working tree was already clean, safe to proceed.
+        - ``"stashed"`` — dirty tree was successfully stashed, safe to proceed.
+        - ``"failed"`` — tree is dirty but stash command failed; callers
+          MUST NOT proceed with destructive operations.
+    """
+    status_cmd = ["git", "-C", str(framework_root), "status", "--porcelain"]
+    try:
+        cp = subprocess.run(
+            status_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return "failed", f"git status check failed: {exc!r}"
+    if cp.returncode != 0:
+        # Non-git directory (rc=128 "not a git repository") or other git
+        # status errors: treat as clean — no git-managed changes to protect.
+        log.debug(
+            "integrate_patch: git status rc=%d in %s (not a git repo?), "
+            "treating as clean",
+            cp.returncode,
+            framework_root,
+        )
+        return "clean", ""
+    if not cp.stdout.strip():
+        return "clean", ""
+    stash_cmd = [
+        "git", "-C", str(framework_root),
+        "stash", "push", "-u",
+        "-m", "hyperloom-auto-stash: preserving user changes before revert",
+    ]
+    try:
+        cp2 = subprocess.run(
+            stash_cmd,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return "failed", f"git stash push failed: {exc!r}"
+    if cp2.returncode == 0:
+        log.info(
+            "integrate_patch: stashed user changes in %s before revert",
+            framework_root,
+        )
+        return "stashed", ""
+    return "failed", f"git stash push rc={cp2.returncode}: {cp2.stderr.strip()}"
+
+
 def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
     """``git checkout -- .`` to discard every uncommitted change.
 
     Last-resort REVERT path when individual reverse-apply fails.
+    Refuses to proceed if there are uncommitted changes that cannot be
+    stashed (fail-closed: returns False rather than risking data loss).
 
     Args:
         framework_root (Path): Directory to run ``git checkout`` in.
@@ -402,6 +466,9 @@ def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
         tuple[bool, str]: ``(ok, stderr)`` where ``ok`` is ``True`` on
         return code 0.
     """
+    state, note = _git_stash_if_dirty(framework_root)
+    if state == "failed":
+        return False, f"refusing checkout: stash failed ({note})"
     cmd = ["git", "-C", str(framework_root), "checkout", "--", "."]
     try:
         cp = subprocess.run(
@@ -918,6 +985,28 @@ class IntegratePatchExecutor:
                 shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — sentinel is best-effort
                 log.exception("integrate_patch: failed to persist pending_integrate sentinel")
+
+        # Preserve user's uncommitted changes BEFORE applying patches.
+        # Stashing here ensures only user state enters the stash (not
+        # Hyperloom candidate artifacts), so `git stash pop` after the
+        # run cleanly restores only the user's original modifications.
+        stash_state, stash_note = _git_stash_if_dirty(framework_root)
+        if stash_state == "failed":
+            log.error(
+                "integrate_patch: cannot stash user changes in %s: %s; "
+                "aborting to avoid data loss",
+                framework_root,
+                stash_note,
+            )
+            return {
+                "status": "apply_failed",
+                "error_class": "stash_failed",
+                "error": f"refusing to proceed: user changes could not be stashed ({stash_note})",
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "config_changes_applied": {},
+            }
 
         # Stage 1: apply patches (best-effort with -3 fallback).
         applied: list[Path] = []
