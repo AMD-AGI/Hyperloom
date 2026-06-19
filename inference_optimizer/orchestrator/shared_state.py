@@ -587,6 +587,8 @@ class SharedState:
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
+    # Per-tuner envs pending independent E2E validation (forge multi-tuner split).
+    pending_gemm_tuning_envs: list[dict[str, Any]] = field(default_factory=list)
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     # explore audit log (capped per _DEFAULT_ATTEMPTS_HISTORY).
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)

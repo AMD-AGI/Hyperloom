@@ -2800,19 +2800,62 @@ class Coordinator:
         final_report = str(result.get("final_report_path") or "")
 
         if requires_e2e:
-            # Forge micro-only: do NOT promote tput or cumulative_gain
-            # (micro speedup != E2E speedup). Only record the extra_envs
-            # so downstream explore picks them up for E2E validation.
-            self.shared_state.current_best = {
-                "action": "gemm_tuning",
-                "tput": baseline,  # keep baseline as-is; E2E will update
-                "variant_name": variant_name,
-                "tuned_file": tuned_file,
-                "final_report_path": final_report,
-                "workspace": result.get("workspace"),
-                "extra_envs": extra_envs,
-                "requires_e2e_validation": True,
-            }
+            # Forge micro-only: do NOT promote tput or cumulative_gain.
+            # Split per-tuner envs into separate pending entries so
+            # downstream explore validates each tuner's env independently
+            # (avoids one bad tuner dragging down the whole set).
+            tuners_run = result.get("tuners_run") or []
+            pending_envs: list[dict[str, str]] = []
+            for t in tuners_run:
+                if not isinstance(t, dict):
+                    continue
+                env_var = str(t.get("env_var") or "").strip()
+                env_value = str(t.get("env_value") or "").strip()
+                if env_var and env_value and t.get("status") == "ok":
+                    improved = int(t.get("improved_shapes") or 0)
+                    if improved > 0:
+                        pending_envs.append({env_var: env_value})
+
+            if not pending_envs:
+                # No tuner produced improvement; use combined env as fallback.
+                pending_envs = [extra_envs] if extra_envs else []
+
+            if len(pending_envs) == 1:
+                # Single tuner — put directly into current_best.extra_envs.
+                self.shared_state.current_best = {
+                    "action": "gemm_tuning",
+                    "tput": baseline,
+                    "variant_name": variant_name,
+                    "tuned_file": tuned_file,
+                    "final_report_path": final_report,
+                    "workspace": result.get("workspace"),
+                    "extra_envs": pending_envs[0],
+                    "requires_e2e_validation": True,
+                }
+            elif len(pending_envs) > 1:
+                # Multiple tuners — use highest-priority (first) as
+                # current_best; queue the rest as pending explore variants.
+                self.shared_state.current_best = {
+                    "action": "gemm_tuning",
+                    "tput": baseline,
+                    "variant_name": variant_name,
+                    "tuned_file": tuned_file,
+                    "final_report_path": final_report,
+                    "workspace": result.get("workspace"),
+                    "extra_envs": pending_envs[0],
+                    "requires_e2e_validation": True,
+                }
+                # Store remaining tuner envs for separate E2E validation.
+                pending_gemm = list(
+                    getattr(self.shared_state, "pending_gemm_tuning_envs", None) or []
+                )
+                for env in pending_envs[1:]:
+                    pending_gemm.append({
+                        "extra_envs": env,
+                        "source": "forge_gemm_tuning",
+                        "ts": ts,
+                    })
+                self.shared_state.pending_gemm_tuning_envs = pending_gemm
             return
 
         # GEAK path: E2E already validated internally.
