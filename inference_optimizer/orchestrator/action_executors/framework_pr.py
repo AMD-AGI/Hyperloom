@@ -83,6 +83,7 @@ from .integrate_patch import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_VARIANT_TIMEOUT_SEC,
     _git_apply,
+    _git_stash_if_dirty,
     _resolve_framework_root,
 )
 from ..kb_writeback import (
@@ -132,6 +133,10 @@ def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
     """Revert ``framework_root`` to ``sha``: ``git reset --hard`` +
     ``git clean -fd`` (discards untracked files the candidate added) so a
     failed candidate can't leak state into the next candidate's baseline.
+
+    NOTE: User-change preservation (stash) should happen BEFORE candidate
+    apply, not here. This function is purely destructive; the caller
+    ``_run_single_candidate`` stashes at the correct time.
 
     Args:
         framework_root: The git checkout to reset.
@@ -728,6 +733,29 @@ class FrameworkPrExecutor:
                         "workspace": str(output_root),
                     }
                 patch_paths.append(dest.resolve())
+
+        # Preserve user's uncommitted changes BEFORE applying the candidate.
+        # This ensures the stash contains only user state (not candidate
+        # patches), so `git stash pop` after the run cleanly restores the
+        # user's original modifications without mixing in Hyperloom artifacts.
+        stash_state, stash_note = _git_stash_if_dirty(framework_root)
+        if stash_state == "failed":
+            log.error(
+                "framework_pr: cannot stash user changes in %s: %s; "
+                "aborting candidate to avoid data loss",
+                framework_root,
+                stash_note,
+            )
+            return {
+                "status": "apply_failed",
+                "error_class": "stash_failed",
+                "error": f"refusing to proceed: user changes could not be stashed ({stash_note})",
+                "candidate": candidate,
+                "batch_id": batch_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "workspace": str(output_root),
+            }
 
         # Capture HEAD before apply so REVERT/REJECT can reset cleanly;
         # prior KEEPs are committed past this sha and survive a reset.
