@@ -3479,7 +3479,14 @@ class Coordinator:
                 "error": repr(exc),
             }
         self.shared_state.record_gemm_tuning(result)
-        self._promote_gemm_tuning_keep(result)
+
+        # Forge path: sequential per-tuner E2E validation (like kernel_opt).
+        if result.get("requires_e2e_validation") and result.get("backend") == "forge":
+            await self._validate_forge_gemm_tuning_e2e(result)
+        else:
+            # GEAK path: already E2E validated internally.
+            self._promote_gemm_tuning_keep(result)
+
         self.shared_state.save(self.session_dir)
         status = str(result.get("status") or "unknown")
         await self.bus.append_and_seq(
@@ -3542,7 +3549,6 @@ class Coordinator:
             return
 
         backend = str(result.get("backend") or "geak").strip().lower()
-        requires_e2e = bool(result.get("requires_e2e_validation", False))
         ts = datetime.now(timezone.utc).isoformat()
 
         # Resolve extra_envs: forge provides recommended_env/extra_envs;
@@ -3565,66 +3571,8 @@ class Coordinator:
 
         final_report = str(result.get("final_report_path") or "")
 
-        if requires_e2e:
-            # Forge micro-only: do NOT promote tput or cumulative_gain.
-            # Split per-tuner envs into separate pending entries so
-            # downstream explore validates each tuner's env independently
-            # (avoids one bad tuner dragging down the whole set).
-            tuners_run = result.get("tuners_run") or []
-            pending_envs: list[dict[str, str]] = []
-            for t in tuners_run:
-                if not isinstance(t, dict):
-                    continue
-                env_var = str(t.get("env_var") or "").strip()
-                env_value = str(t.get("env_value") or "").strip()
-                if env_var and env_value and t.get("status") == "ok":
-                    improved = int(t.get("improved_shapes") or 0)
-                    if improved > 0:
-                        pending_envs.append({env_var: env_value})
-
-            if not pending_envs:
-                # No tuner produced improvement; use combined env as fallback.
-                pending_envs = [extra_envs] if extra_envs else []
-
-            if len(pending_envs) == 1:
-                # Single tuner — put directly into current_best.extra_envs.
-                self.shared_state.current_best = {
-                    "action": "gemm_tuning",
-                    "tput": baseline,
-                    "variant_name": variant_name,
-                    "tuned_file": tuned_file,
-                    "final_report_path": final_report,
-                    "workspace": result.get("workspace"),
-                    "extra_envs": pending_envs[0],
-                    "requires_e2e_validation": True,
-                }
-            elif len(pending_envs) > 1:
-                # Multiple tuners — use highest-priority (first) as
-                # current_best; queue the rest as pending explore variants.
-                self.shared_state.current_best = {
-                    "action": "gemm_tuning",
-                    "tput": baseline,
-                    "variant_name": variant_name,
-                    "tuned_file": tuned_file,
-                    "final_report_path": final_report,
-                    "workspace": result.get("workspace"),
-                    "extra_envs": pending_envs[0],
-                    "requires_e2e_validation": True,
-                }
-                # Store remaining tuner envs for separate E2E validation.
-                pending_gemm = list(
-                    getattr(self.shared_state, "pending_gemm_tuning_envs", None) or []
-                )
-                for env in pending_envs[1:]:
-                    pending_gemm.append({
-                        "extra_envs": env,
-                        "source": "forge_gemm_tuning",
-                        "ts": ts,
-                    })
-                self.shared_state.pending_gemm_tuning_envs = pending_gemm
-            return
-
         # GEAK path: E2E already validated internally.
+        # (Forge path is handled by _validate_forge_gemm_tuning_e2e before this.)
         tuned_tput = baseline * speedup
         existing = {
             str(item.get("tuned_file") or "")
@@ -3669,6 +3617,145 @@ class Coordinator:
         self.shared_state.cumulative_gain_validated_stack_len = len(
             self.shared_state.optimization_stack or []
         )
+
+    async def _validate_forge_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
+        """Sequentially E2E-validate each forge tuner's env independently.
+
+        Like kernel_opt's per-kernel integrate: try each tuner's env one by
+        one. KEEPs accumulate (stacked envs); REVERTs are discarded. This
+        prevents one bad tuner from dragging down the whole set.
+        """
+        from .kernel_request_handlers import integrate_handler
+
+        tuners_run = result.get("tuners_run") or []
+        # Sort by priority: fmoe_ck (MoE) first, dense tuners second.
+        # The original list is already priority-sorted by forge CLI.
+        candidates = []
+        for t in tuners_run:
+            if not isinstance(t, dict):
+                continue
+            if t.get("status") != "ok":
+                continue
+            if int(t.get("improved_shapes") or 0) <= 0:
+                continue
+            env_var = str(t.get("env_var") or "").strip()
+            env_value = str(t.get("env_value") or "").strip()
+            if env_var and env_value:
+                candidates.append({
+                    "tuner": t.get("tuner") or "unknown",
+                    "env_var": env_var,
+                    "env_value": env_value,
+                    "micro_speedup": float(t.get("best_micro_speedup") or 1.0),
+                })
+
+        if not candidates:
+            log.info("forge gemm tuning: no candidates to E2E validate")
+            return
+
+        baseline_tput = float(self.shared_state.baseline_tput or 0.0)
+        running_tput = float(
+            (self.shared_state.current_best or {}).get("tput") or baseline_tput
+        )
+        stacked_envs: dict[str, str] = {}
+        kept: list[dict[str, Any]] = []
+        reverted: list[dict[str, Any]] = []
+        ts = datetime.now(timezone.utc).isoformat()
+
+        for cand in candidates:
+            tuner_name = cand["tuner"]
+            env = {cand["env_var"]: cand["env_value"]}
+            # Merge with previously KEEP'd envs for stacked validation.
+            test_envs = dict(stacked_envs)
+            test_envs.update(env)
+
+            log.info(
+                "forge gemm E2E: validating tuner=%s env=%s (base_tput=%.1f)",
+                tuner_name, cand["env_var"], running_tput,
+            )
+
+            try:
+                integrate_result = await integrate_handler(
+                    {
+                        "task_id": f"gemm_tune_e2e_{tuner_name}",
+                        "source": "forge_gemm_tuning",
+                        "base_tput": running_tput,
+                        "extra_envs": test_envs,
+                        "keep_threshold_pct": 1.0,
+                        "budget_minutes": 10,
+                    },
+                    session_dir=self.session_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "forge gemm E2E: integrate failed for %s: %s",
+                    tuner_name, exc,
+                )
+                reverted.append({**cand, "reason": repr(exc)})
+                continue
+
+            decision = str(integrate_result.get("decision") or "").upper()
+            new_tput = float(integrate_result.get("new_tput") or 0.0)
+            gain_pct = float(integrate_result.get("gain_pct") or 0.0)
+
+            log.info(
+                "forge gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%",
+                tuner_name, decision, new_tput, gain_pct,
+            )
+
+            if decision == "KEEP" and new_tput > running_tput:
+                stacked_envs.update(env)
+                running_tput = new_tput
+                kept.append({**cand, "tput": new_tput, "gain_pct": gain_pct})
+
+                # Push to optimization_stack.
+                entry = {
+                    "action": "gemm_tuning",
+                    "variant_name": f"forge_{tuner_name}",
+                    "tuned_file": cand["env_value"],
+                    "gain_pct": gain_pct,
+                    "tput": new_tput,
+                    "workspace": result.get("workspace"),
+                    "extra_envs": dict(stacked_envs),
+                    "backend": "forge",
+                    "source": "kernel_entry_auto",
+                    "ts": ts,
+                }
+                self.shared_state.optimization_stack.append(entry)
+                self.shared_state.append_stack_gain_entry(
+                    action="gemm_tuning",
+                    variant_name=f"forge_{tuner_name}",
+                    new_tput=new_tput,
+                    ts=ts,
+                )
+            else:
+                reverted.append({**cand, "reason": f"decision={decision}, gain={gain_pct:.2f}%"})
+
+        # Update current_best and cumulative_gain with final stacked result.
+        if kept:
+            self.shared_state.current_best = {
+                "action": "gemm_tuning",
+                "engine": "forge",
+                "tput": running_tput,
+                "variant_name": "forge_gemm_tuned",
+                "extra_envs": stacked_envs,
+                "workspace": result.get("workspace"),
+            }
+            total_gain = (running_tput - baseline_tput) / baseline_tput * 100.0 if baseline_tput > 0 else 0.0
+            self.shared_state.cumulative_gain = total_gain
+            self.shared_state.cumulative_gain_validated = total_gain
+            self.shared_state.cumulative_gain_validated_ts = ts
+            self.shared_state.cumulative_gain_validated_stack_len = len(
+                self.shared_state.optimization_stack or []
+            )
+            log.info(
+                "forge gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
+                len(kept), total_gain, len(reverted),
+            )
+        else:
+            log.info(
+                "forge gemm E2E: all %d tuners REVERT, no E2E gain",
+                len(reverted),
+            )
 
     def _should_continue_kernel_after_gemm(self) -> bool:
         """Decide whether to run source-level kernel_opt right after GEMM tuning.
