@@ -7198,7 +7198,12 @@ class Coordinator:
         if backend == "forge":
             # forge-gemm-tune supports: any MoE model, FP8 dense,
             # bf16/fp8/fp4 precision, sglang/vllm frameworks.
-            is_moe = bool(getattr(ss, "is_moe", False) or getattr(ss, "model_is_moe", False))
+            is_moe = bool(
+                getattr(ss, "is_moe", False)
+                or getattr(ss, "model_is_moe", False)
+                or "moe" in str(getattr(ss, "model_type", "") or "").lower()
+                or "moe" in str(getattr(ss, "model_class", "") or "").lower()
+            )
             eligible = (
                 framework in ("sglang", "vllm", "vllm-aiter")
                 and (
