@@ -1259,7 +1259,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     Returns (precision, quant_type) tuple.
     """
-    from .roofline_ceiling import _parse_server_arg
+    from .roofline_ceiling import _parse_server_arg, resolve_runtime_workload
 
     # Explicit override from payload
     if payload.get("precision"):
@@ -1267,24 +1267,34 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
         quant_type = str(payload.get("quant_type") or "auto").strip()
         return precision, quant_type
 
-    # Resolve from actual server args (current_best reflects optimizer's decisions)
+    # Resolve from actual server args (baseline yaml + current_best overlay).
     current_best = getattr(state, "current_best", None) or {}
-    server_args = ""
-    if isinstance(current_best, dict):
-        server_args = str(current_best.get("extra_server_args") or "")
-    # Also check extra_envs for fp8 backend hints
+    try:
+        server_args = resolve_runtime_workload(state, arm="current_best").server_args
+    except Exception:  # noqa: BLE001 - best-effort fallback for partial state/test doubles
+        server_args = ""
+        if isinstance(current_best, dict):
+            server_args = str(current_best.get("extra_server_args") or "")
+    # Check all env sources for per-token signal: current_best.extra_envs,
+    # reference_envs, and baseline yaml envs.
     extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
+    ref_envs = dict(getattr(state, "reference_envs", None) or {})
+    per_token_signal = (
+        _truthy_env_value(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
+        or _truthy_env_value(ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
+    )
 
     quantization_arg = _parse_server_arg(server_args, "--quantization").lower()
-    fp8_backend = _parse_server_arg(server_args, "--fp8-gemm-backend").lower()
 
     if quantization_arg == "fp8":
         precision = "fp8"
-        # Determine quant_type from fp8 backend or envs
-        if fp8_backend == "aiter" or extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"):
+        # Only explicit per-token env should route to per_token.
+        # Otherwise keep auto so forge can inspect kernel_signature_log
+        # for QuantType.per_Token / blockscale detection.
+        if per_token_signal:
             quant_type = "per_token"
         else:
-            quant_type = "blockscale"
+            quant_type = "auto"
         return precision, quant_type
 
     if quantization_arg in ("fp4", "mxfp4"):
@@ -1298,12 +1308,27 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     return precision, quant_type
 
 
-def _resolve_forge_server_log(state, session_dir: Path) -> str:
-    """Find the most recent server log for kernel signature detection.
+def _truthy_env_value(value: Any) -> bool:
+    """Return True for common env truthy values."""
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
-    Checks baseline workspace and last explore workspace for server.log.
+
+def _resolve_forge_server_log(state, session_dir: Path) -> str:
+    """Find the server log matching the current runtime configuration.
+
+    Priority: current_best workspace (matches the resolved server args)
+    → baseline workspace → most recent server.log under runs/.
     """
-    # Try baseline workspace
+    # 1. current_best workspace — matches the runtime args we resolved precision from.
+    current_best = getattr(state, "current_best", None) or {}
+    if isinstance(current_best, dict):
+        cb_workspace = str(current_best.get("workspace") or "").strip()
+        if cb_workspace:
+            log_path = Path(cb_workspace) / "server.log"
+            if log_path.is_file():
+                return str(log_path)
+
+    # 2. Baseline workspace — the initial server run.
     last_baseline = getattr(state, "last_baseline", None) or {}
     if isinstance(last_baseline, dict):
         bl_workspace = last_baseline.get("workspace") or ""
@@ -1312,30 +1337,79 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
             if log_path.is_file():
                 return str(log_path)
 
-    # Try session runs directory for recent server logs
+    # 3. Fallback: most recent server.log anywhere under runs/.
     runs_dir = session_dir / "runs"
     if runs_dir.is_dir():
-        server_logs = sorted(runs_dir.glob("**/server.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        server_logs = sorted(
+            runs_dir.glob("**/server.log"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
         if server_logs:
             return str(server_logs[0])
 
     return ""
 
 
+def _is_forge_compatible_shapes_json(path: Path) -> bool:
+    """Validate that a shapes JSON file matches forge's expected format.
+
+    Forge expects: [{"M": int, "N": int, "K": int}, ...]
+    or {"shapes": [{"M": int, "N": int, "K": int}, ...]}
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            data = data.get("shapes", [])
+        if not isinstance(data, list) or not data:
+            return False
+        sample = data[0]
+        if not isinstance(sample, dict):
+            return False
+        # Must have M/N/K keys (case-insensitive check)
+        keys = {k.upper() for k in sample}
+        return {"M", "N", "K"}.issubset(keys)
+    except (json.JSONDecodeError, OSError, TypeError):
+        return False
+
+
 def _resolve_forge_shapes(state, session_dir: Path) -> str:
-    """Find TraceLens shapes JSON if available from last trace analysis."""
+    """Find TraceLens shapes JSON if available and in forge-compatible format.
+
+    Forge dense tuners expect: [{"M": int, "N": int, "K": int}, ...]
+    Only passes files that match this schema; incompatible formats are
+    silently skipped so forge falls back to config.json shape derivation.
+    """
     last_trace = getattr(state, "last_trace_analyze", None) or {}
     if not isinstance(last_trace, dict):
         return ""
-    # Check for kernel_roofline_path which contains shape data
-    candidates_path = last_trace.get("candidates_path") or ""
-    if candidates_path:
-        cand_file = Path(candidates_path)
+
+    candidates: list[str] = []
+
+    # Prefer explicit artifact fields when newer TraceLens versions expose them.
+    for key in ("shapes_json", "shapes_path"):
+        raw = str(last_trace.get(key) or "").strip()
+        if raw:
+            candidates.append(raw)
+    artifact_paths = last_trace.get("artifact_paths")
+    if isinstance(artifact_paths, dict):
+        for key in ("shapes_json", "shapes", "gemm_shapes_json"):
+            raw = str(artifact_paths.get(key) or "").strip()
+            if raw:
+                candidates.append(raw)
+    # Fallback: check beside candidates_path.
+    candidates_path_str = last_trace.get("candidates_path") or ""
+    if candidates_path_str:
+        cand_file = Path(candidates_path_str)
         if cand_file.is_file():
-            # Look for shapes.json in the same directory
             shapes_file = cand_file.parent / "shapes.json"
-            if shapes_file.is_file():
-                return str(shapes_file)
+            candidates.append(str(shapes_file))
+
+    for candidate in candidates:
+        p = Path(candidate)
+        if p.is_file() and _is_forge_compatible_shapes_json(p):
+            return str(p)
+
     return ""
 
 
@@ -1412,9 +1486,6 @@ async def _run_forge_gemm_tuning(
     ]
     if tokens:
         cmd.extend(["--tokens", tokens])
-    else:
-        # Pass conc-derived tokens explicitly so forge covers CUDAGraph BS
-        cmd.extend(["--conc", str(conc)])
     if payload.get("untuned_csv"):
         cmd.extend(["--untuned-csv", str(payload["untuned_csv"])])
     if shapes_json:

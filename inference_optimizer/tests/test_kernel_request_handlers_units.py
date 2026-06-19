@@ -459,6 +459,98 @@ class TestRunGemmTuningHandler:
 
         assert result["status"] == "ok"
 
+    def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.current_best = {
+            "extra_server_args": "--quantization fp8 --fp8-gemm-backend aiter",
+            "extra_envs": {},
+        }
+        state.save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            captured["cmd"] = cmd
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "ok",
+                        "micro_decision": "candidate",
+                        "recommended_env": {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"},
+                        "tuners_run": [{"best_micro_speedup": 1.1}],
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path)
+        )
+
+        cmd = captured["cmd"]  # type: ignore[assignment]
+        assert cmd[cmd.index("--precision") + 1] == "fp8"
+        # Do not force blockscale from Hyperloom. Forge should inspect
+        # kernel_signature_log when available; without a log it defaults to
+        # blockscale internally.
+        assert cmd[cmd.index("--quant-type") + 1] == "auto"
+        assert cmd.count("--conc") == 1
+        assert result["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
+
+    def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.current_best = {
+            "extra_server_args": "--quantization fp8 --fp8-gemm-backend aiter",
+            "extra_envs": {"SGLANG_USE_AITER_FP8_PER_TOKEN": "1"},
+        }
+        state.save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            captured["cmd"] = cmd
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "skipped",
+                        "micro_decision": "skipped",
+                        "recommended_env": {},
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        asyncio.run(krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path))
+
+        cmd = captured["cmd"]  # type: ignore[assignment]
+        assert cmd[cmd.index("--precision") + 1] == "fp8"
+        assert cmd[cmd.index("--quant-type") + 1] == "per_token"
+
 
 # _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror
 # of the kernel-agent default (PR #301); the legacy 90 forced quick-mode timing.
