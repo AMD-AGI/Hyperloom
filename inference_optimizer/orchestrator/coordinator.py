@@ -3478,16 +3478,7 @@ class Coordinator:
                 "error_class": exc.__class__.__name__,
                 "error": repr(exc),
             }
-        self.shared_state.record_gemm_tuning(result)
-
-        # Forge path: sequential per-tuner E2E validation (like kernel_opt).
-        if result.get("requires_e2e_validation") and result.get("backend") == "forge":
-            await self._validate_forge_gemm_tuning_e2e(result)
-        else:
-            # GEAK path: already E2E validated internally.
-            self._promote_gemm_tuning_keep(result)
-
-        self.shared_state.save(self.session_dir)
+        await self._handle_gemm_tuning_result(result)
         status = str(result.get("status") or "unknown")
         await self.bus.append_and_seq(
             Message.new(
@@ -3514,6 +3505,20 @@ class Coordinator:
         )
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
+
+    async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
+        """Record and post-process a run_gemm_tuning result from any entrypoint.
+
+        Both the KERNEL-entry auto hook and orchestration-issued
+        ``run_gemm_tuning`` requests must converge here; otherwise forge
+        results can bypass per-tuner E2E validation.
+        """
+        self.shared_state.record_gemm_tuning(result)
+        if result.get("requires_e2e_validation") and result.get("backend") == "forge":
+            await self._validate_forge_gemm_tuning_e2e(result)
+        else:
+            self._promote_gemm_tuning_keep(result)
+        self.shared_state.save(self.session_dir)
 
     def _promote_gemm_tuning_keep(self, result: dict[str, Any]) -> None:
         """Promote a successful GEMM tuning run into the main gain ledger.
