@@ -84,6 +84,7 @@ testpaths = [
     "kernel-agent/tools/test_gemm_tuning.py",
     "kernel-agent/tools/test_rocprof_roofline.py",
     "kernel-agent/tools/test_harness_generator.py",
+    "kernel-agent/tools/test_op_to_source_resolver.py",
     # ci/ inference-optimization pipeline: the genuine unit tests
     # (test_submit_body.py + the new test_ci_*.py suites) were never
     # collected before because ci/ was absent from testpaths. The two
