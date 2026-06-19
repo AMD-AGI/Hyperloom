@@ -252,7 +252,7 @@
     },
     "sglang": {
       "void ck::kernel_moe_gemmlds<ck::GridwiseMoeGemm<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::ColumnMajor,": {
-        "kernel_source_path": null,
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",
         "kernel_source_line": null,
         "kernel_kind": "aiter_ck",
         "patchable": true
@@ -281,7 +281,7 @@
     },
     "sglang": {
       "void ck::kernel_moe_gemmlds<ck::GridwiseMoeGemm<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::ColumnMajor,": {
-        "kernel_source_path": null,
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",
         "kernel_source_line": null,
         "kernel_kind": "aiter_ck",
         "patchable": true
