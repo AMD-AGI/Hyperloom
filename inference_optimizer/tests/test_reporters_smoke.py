@@ -31,8 +31,12 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "model_name": "deepseek-ai/DeepSeek-R1",
             "framework": "vllm",
             "gpu_type": "MI300X",
-            "tp": 8, "conc": 64, "isl": 1024, "osl": 1024,
-            "precision": "FP8", "max_model_len": 4096,
+            "tp": 8,
+            "conc": 64,
+            "isl": 1024,
+            "osl": 1024,
+            "precision": "FP8",
+            "max_model_len": 4096,
             "objective": {"kind": "gain_pct", "value": 30.0},
         },
         "baseline": {
@@ -55,23 +59,27 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
         },
         "phase_timeline": [],
         "capability_summary": {
-            "explore":        {"status": "kept",          "attempts": 1, "keeps": 1},
-            "backends":       {"status": "not_attempted", "attempts": 0, "keeps": 0},
-            "params":         {"status": "not_attempted", "attempts": 0, "keeps": 0},
-            "sweep":          {"status": "not_attempted", "attempts": 0, "keeps": 0, "grid_size": 9},
-            "geak":           {"status": "not_attempted", "attempts": 0, "keeps": 0},
-            "oob":            {"status": "not_attempted", "attempts": 0, "keeps": 0},
+            "explore": {"status": "kept", "attempts": 1, "keeps": 1},
+            "backends": {"status": "not_attempted", "attempts": 0, "keeps": 0},
+            "params": {"status": "not_attempted", "attempts": 0, "keeps": 0},
+            "sweep": {"status": "not_attempted", "attempts": 0, "keeps": 0, "grid_size": 9},
+            "geak": {"status": "not_attempted", "attempts": 0, "keeps": 0},
+            "oob": {"status": "not_attempted", "attempts": 0, "keeps": 0},
             "validate_stack": {"status": "not_attempted", "attempts": 0, "keeps": 0},
         },
         "kernel_lifecycle": {
             "detected": [{"kernel_id": f"k{i}"} for i in range(50)],
             "recommended": [{"kernel_id": f"k{i}"} for i in range(10)],
-            "optimized": [], "adopted": [], "partial": [], "reverted": [], "rejected": [],
+            "optimized": [],
+            "adopted": [],
+            "partial": [],
+            "reverted": [],
+            "rejected": [],
         },
         "param_search": {
             "explore": {"accepted": ["vllm_kv_fp8"], "tested": {"vllm_kv_fp8": True}},
             "backends": {"accepted": ["vllm_kv_fp8"], "tested": {"vllm_kv_fp8": True}},
-            "params":   {"accepted": [], "tested": {}},
+            "params": {"accepted": [], "tested": {}},
             "discovered_flags": {},
             "backend_winners_history": [],
             "synergy_attempted": [],
@@ -80,9 +88,14 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
         "critic_robustness": [],
         "telemetry": {
             "gpu_monitor_aggregate": {
-                "samples": 52, "max_power_w": 0, "avg_power_w": 0,
-                "max_temp_c": 0, "avg_temp_c": 0,
-                "max_util_pct": 0, "avg_util_pct": 0, "source_file_count": 1,
+                "samples": 52,
+                "max_power_w": 0,
+                "avg_power_w": 0,
+                "max_temp_c": 0,
+                "avg_temp_c": 0,
+                "max_util_pct": 0,
+                "avg_util_pct": 0,
+                "source_file_count": 1,
             },
             "benchmark_files_total": 4,
             "log_files_total": 3,
@@ -103,14 +116,24 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
 def test_all_renderers_register_in_stable_order() -> None:
     """compose.py module imports must keep this exact order."""
     expected = [
-        "session", "workload", "baseline", "final",
-        "capability_summary", "phase_timeline", "kernel_lifecycle",
-        "kernel_profiling", "kernel_decision_path",
+        "session",
+        "workload",
+        "baseline",
+        "final",
+        "capability_summary",
+        "phase_timeline",
+        "kernel_lifecycle",
+        "kernel_profiling",
+        "kernel_decision_path",
         "roofline",
-        "geak_invocations", "oob_invocations",
-        "param_search", "decision_journal",
-        "sweep", "critic_robustness",
-        "attribution", "source_files",
+        "geak_invocations",
+        "oob_invocations",
+        "param_search",
+        "decision_journal",
+        "sweep",
+        "critic_robustness",
+        "attribution",
+        "source_files",
         "data_provenance",
     ]
     assert [sid for sid, _ in REGISTRY] == expected
@@ -181,8 +204,7 @@ def test_geak_not_attempted_never_emits_kept_decision() -> None:
             continue
         for d in sec.decisions:
             assert d.kind == "not_attempted", (
-                f"GEAK section emitted non-not_attempted decision {d!r} "
-                f"despite no invocations on disk"
+                f"GEAK section emitted non-not_attempted decision {d!r} despite no invocations on disk"
             )
 
 
@@ -200,9 +222,7 @@ def test_legacy_backends_action_path_still_attributed() -> None:
 
     r = render_session_report(bd)
 
-    assert r.global_facts.gain_attribution_lines[0].startswith(
-        "100% via 1 backends KEEP"
-    )
+    assert r.global_facts.gain_attribution_lines[0].startswith("100% via 1 backends KEEP")
 
 
 def test_legacy_source_buckets_survive_alongside_explore() -> None:
@@ -223,21 +243,13 @@ def test_legacy_source_buckets_survive_alongside_explore() -> None:
 
     r = render_session_report(bd)
 
-    assert any(
-        line.startswith("explore: 10.00% of total")
-        for line in r.global_facts.gain_attribution_lines
-    )
-    assert any(
-        line.startswith("backends: 4.50% of total")
-        for line in r.global_facts.gain_attribution_lines
-    )
+    assert any(line.startswith("explore: 10.00% of total") for line in r.global_facts.gain_attribution_lines)
+    assert any(line.startswith("backends: 4.50% of total") for line in r.global_facts.gain_attribution_lines)
 
 
 def test_attribution_missing_when_no_gain() -> None:
     bd = _fixture_breakdown()
-    bd["final"] = {"throughput_tok_s_per_gpu": None,
-                   "cumulative_gain_pct_validated": None,
-                   "action_path": []}
+    bd["final"] = {"throughput_tok_s_per_gpu": None, "cumulative_gain_pct_validated": None, "action_path": []}
     r = render_session_report(bd)
     assert r.global_facts.attribution_method == "missing"
     assert r.global_facts.gain_attribution_lines == []
@@ -249,10 +261,12 @@ class _GoodLLM:
     def complete(self, *, system: str, user: str) -> str:
         payload = json.loads(user)
         sids = [s["section_id"] for s in payload["sections"] if not s["skipped"]]
-        return json.dumps({
-            "executive_summary": "Validated +10.99% via explore KEEP on DeepSeek-R1 MI300X.",
-            "section_narratives": {sid: f"narr-{sid}" for sid in sids},
-        })
+        return json.dumps(
+            {
+                "executive_summary": "Validated +10.99% via explore KEEP on DeepSeek-R1 MI300X.",
+                "section_narratives": {sid: f"narr-{sid}" for sid in sids},
+            }
+        )
 
 
 @dataclass
@@ -306,17 +320,23 @@ def test_kernel_lifecycle_funnel_propagates_to_global_facts() -> None:
     assert f["optimized"] == 0 and f["adopted"] == 0
 
 
-@pytest.mark.parametrize("cap_status,expected_kind", [
-    ("kept",     "kept"),
-    ("reverted", "reverted"),
-    ("rejected", "rejected"),
-])
+@pytest.mark.parametrize(
+    "cap_status,expected_kind",
+    [
+        ("kept", "kept"),
+        ("reverted", "reverted"),
+        ("rejected", "rejected"),
+    ],
+)
 def test_capability_decision_kind_round_trips(
-    cap_status: str, expected_kind: str,
+    cap_status: str,
+    expected_kind: str,
 ) -> None:
     bd = _fixture_breakdown()
     bd["capability_summary"]["sweep"] = {
-        "status": cap_status, "attempts": 1, "keeps": 1 if cap_status == "kept" else 0,
+        "status": cap_status,
+        "attempts": 1,
+        "keeps": 1 if cap_status == "kept" else 0,
     }
     r = render_session_report(bd)
     cap = next(s for s in r.sections if s.section_id == "capability_summary")
@@ -332,22 +352,19 @@ def test_attribution_method_renders_from_field() -> None:
         "method": "reconstructed",
         "source_breakdown": {
             "validated_total_pct": 14.5,
-            "explore_pct_of_total":  14.5,
+            "explore_pct_of_total": 14.5,
             "backends_pct_of_total": 0.0,
-            "params_pct_of_total":   0.0,
-            "geak_pct_of_total":     0.0,
-            "oob_pct_of_total":      0.0,
-            "sweep_pct_of_total":    0.0,
+            "params_pct_of_total": 0.0,
+            "geak_pct_of_total": 0.0,
+            "oob_pct_of_total": 0.0,
+            "sweep_pct_of_total": 0.0,
         },
         "notes": [],
     }
     r = render_session_report(bd)
     sec = next(s for s in r.sections if s.section_id == "attribution")
     assert any("reconstructed" in fact for fact in sec.key_facts), sec.key_facts
-    assert not any(
-        "single-source" in fact and "single_source" not in fact
-        for fact in sec.key_facts
-    ), sec.key_facts
+    assert not any("single-source" in fact and "single_source" not in fact for fact in sec.key_facts), sec.key_facts
 
 
 def test_invocation_section_renders_when_present() -> None:
@@ -356,9 +373,9 @@ def test_invocation_section_renders_when_present() -> None:
     bd["session"]["image"] = "registry.example/hyperloom:abc123"
     bd["baseline"]["invocation"] = {
         "framework_args": "python -m sglang.launch_server --model /weka/m --tp 8",
-        "extra_envs":     {"TP": "8", "VLLM_FLASH_ATTN": "1"},
-        "config_path":    "runs/baseline/h1/baseline_config.with_envs.yaml",
-        "server_log_path":"runs/baseline/h1/benchmark_001/server.log",
+        "extra_envs": {"TP": "8", "VLLM_FLASH_ATTN": "1"},
+        "config_path": "runs/baseline/h1/baseline_config.with_envs.yaml",
+        "server_log_path": "runs/baseline/h1/benchmark_001/server.log",
     }
     r = render_session_report(bd)
     base = next(s for s in r.sections if s.section_id == "baseline")
@@ -372,9 +389,7 @@ def test_invocation_section_renders_when_present() -> None:
     # The invocation must NOT reach the LLM user prompt (command lines carry transient values).
     prompt = json.loads(r.llm_user_prompt)
     user_text = json.dumps(prompt)
-    assert "sglang.launch_server" not in user_text, (
-        "framework_args leaked into LLM prompt"
-    )
+    assert "sglang.launch_server" not in user_text, "framework_args leaked into LLM prompt"
 
 
 def test_invocation_renders_framework_args_source() -> None:
@@ -382,11 +397,11 @@ def test_invocation_renders_framework_args_source() -> None:
     bd = _fixture_breakdown()
     bd["session"]["image"] = "registry.example/hyperloom:src"
     bd["baseline"]["invocation"] = {
-        "framework_args":        "python -m sglang.launch_server --tp 4",
+        "framework_args": "python -m sglang.launch_server --tp 4",
         "framework_args_source": "yaml_cmd",
-        "extra_envs":            {"TP": "4"},
-        "config_path":           "runs/baseline/h1/baseline_config.with_envs.yaml",
-        "server_log_path":       "runs/baseline/h1/benchmark_001/server.log",
+        "extra_envs": {"TP": "4"},
+        "config_path": "runs/baseline/h1/baseline_config.with_envs.yaml",
+        "server_log_path": "runs/baseline/h1/benchmark_001/server.log",
     }
     r = render_session_report(bd)
     base = next(s for s in r.sections if s.section_id == "baseline")

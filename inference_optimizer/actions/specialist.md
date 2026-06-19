@@ -62,6 +62,13 @@ short GPU experiments or microbenchmarks, set `needs_gpu=true` and
 specialist GPU pool and injects GPU visibility env vars into the subprocess.
 GPU specialists must not launch persistent serving servers or Magpie loops.
 
+GPU requests are governed identically for **every** scope: a `scope=freeform`
+dispatch that sets `needs_gpu` clears the same `gpu_specialist_ceiling`
+checks (`specialist_gpu_pool_disabled` / `specialist_gpu_request_exceeds_capacity`)
+as a domain-anchored one — freeform is not a GPU loophole. Pair
+`mode=patch + bench=true + needs_gpu` to give a freeform specialist an in-loop
+`run_bench` measure → edit → measure loop inside its worktree.
+
 ## Inputs (task.params)
 
 | Key                  | Type     | Required | Description |
@@ -72,8 +79,8 @@ GPU specialists must not launch persistent serving servers or Magpie loops.
 | `gap_symptom`        | string   | no       | Human summary of the symptom (e.g. `decode kernel at 30% HBM peak`). |
 | `gap_layer`          | string   | no       | Layer label (`kernel` / `framework` / `communication` / …). |
 | `gap_evidence`       | object   | no       | Profile path + numeric metrics forwarded into the prompt. |
-| `max_turns`          | int      | no       | Hard cap on LLM turns (default 12, hard ceiling 16). |
-| `needs_gpu`          | bool     | no       | Request the specialist GPU pool for a short GPU experiment / microbenchmark. Default false. |
+| `max_turns`          | int      | no       | Optional turn cap (default 1000, hard ceiling 1000; `0` means unbounded). Depth is primarily bounded by the wall-clock budget. |
+| `needs_gpu`          | bool     | no       | Request the specialist GPU pool for a wall-budgeted GPU experiment / microbenchmark. Default false. |
 | `gpu_count`          | int      | no       | Number of GPUs to allocate when `needs_gpu=true` (default 1). |
 
 ## EMIT format
@@ -89,7 +96,7 @@ delegate{
     gap_layer         = 'framework',
     gap_evidence      = { profile_trace = '<from SharedState.last_profile_trace>' },
     needs_gpu         = false,
-    max_turns         = 12,
+    # Omit max_turns for the default wall-budgeted run; set it only to cap a probe early.
   },
   idempotency_key = 'specialist-framework-<gap_id>-<round_idx>',
 }
@@ -110,8 +117,12 @@ Each specialist subprocess sees:
   - the worktree path
   - allocated GPU ids when `needs_gpu=true`
 * A tool whitelist including `Read / Grep / Glob / Bash / Edit / Write
-  / MultiEdit / WebSearch / WebFetch` and the relevant MCP servers,
-  scoped to the worktree directory (`--add-dir <worktree>`).
+  / MultiEdit / TodoWrite / WebSearch / WebFetch / Task` and the relevant
+  MCP servers, scoped to the worktree directory (`--add-dir <worktree>`).
+  `run_bench` is added only when the dispatch sets `mode=patch & bench=true`.
+  `Task` is limited to `subagent_type="hyperloom-leaf"`: leaves inherit the
+  parent specialist's visible devices and their tool set omits `Task`, so
+  fan-out is single-layer and stays within the parent's lane/GPU lease.
 * A 60s heartbeat protocol — the subprocess writes
   `runs/specialist/<task_id>/heartbeat.json`; SpecialistRunner reaps
   stale agents after 5 minutes (`HEARTBEAT_STALE_THRESHOLD_S`).

@@ -29,12 +29,14 @@ _spec.loader.exec_module(tab)
 def tla():
     """Import tracelens_analysis.py as a module without executing main()."""
     spec = importlib.util.spec_from_file_location(
-        "tracelens_analysis_under_test", _TOOLS_DIR / "tracelens_analysis.py",
+        "tracelens_analysis_under_test",
+        _TOOLS_DIR / "tracelens_analysis.py",
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(mod)
     return mod
+
 
 _VISIBLE_DEVICE_VARS = (
     "HIP_VISIBLE_DEVICES",
@@ -102,9 +104,7 @@ def test_select_idle_gpu_reuses_single_idle_gpu(
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
 
-    monkeypatch.setattr(
-        tab, "check_gpu_idle", lambda *_a, **_k: (True, "idle")
-    )
+    monkeypatch.setattr(tab, "check_gpu_idle", lambda *_a, **_k: (True, "idle"))
 
     selected = tab.select_idle_gpu()
     assert selected == 3
@@ -116,9 +116,7 @@ def test_select_idle_gpu_raises_when_all_busy(monkeypatch: pytest.MonkeyPatch) -
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
 
-    monkeypatch.setattr(
-        tab, "check_gpu_idle", lambda *_a, **_k: (False, "busy")
-    )
+    monkeypatch.setattr(tab, "check_gpu_idle", lambda *_a, **_k: (False, "busy"))
 
     with pytest.raises(RuntimeError, match="no unoccupied GPU"):
         tab.select_idle_gpu()
@@ -168,10 +166,13 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
         )
         return 0
 
-    with patch.object(tab, "resolve_arch_json_path", return_value=None), patch.object(
-        tab,
-        "select_idle_gpu",
-        return_value=2,
+    with (
+        patch.object(tab, "resolve_arch_json_path", return_value=None),
+        patch.object(
+            tab,
+            "select_idle_gpu",
+            return_value=2,
+        ),
     ):
         path = tab.populate_gpu_arch_json(
             tracelens_root=tmp_path,
@@ -192,9 +193,7 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
     assert "TraceLens.PerfModel.benchmarking.microbench" in calls[0]
     assert "--warmup" in calls[0] and "20" in calls[0]
     assert "--rep" in calls[0] and "50" in calls[0]
-    assert calls[0][calls[0].index("--output") + 1].endswith(
-        "TraceLens/Agent/Analysis/utils/arch/MI355X.json"
-    )
+    assert calls[0][calls[0].index("--output") + 1].endswith("TraceLens/Agent/Analysis/utils/arch/MI355X.json")
     assert captured_env is not None
     assert captured_env["CUDA_VISIBLE_DEVICES"] == "2"
 
@@ -210,9 +209,10 @@ def test_populate_skips_microbench_when_internal_extension_enabled(
         calls.append(cmd)
         return 0
 
-    with patch.object(tab, "resolve_arch_json_path", return_value=None), patch.object(
-        tab, "select_idle_gpu"
-    ) as select_idle:
+    with (
+        patch.object(tab, "resolve_arch_json_path", return_value=None),
+        patch.object(tab, "select_idle_gpu") as select_idle,
+    ):
         path = tab.populate_gpu_arch_json(
             tracelens_root=tmp_path,
             platform="MI355X",
@@ -256,8 +256,9 @@ def test_populate_external_raises_on_microbench_failure(
     tmp_path: Path,
 ) -> None:
     """Open-source path surfaces a non-zero microbenchmark exit code."""
-    with patch.object(tab, "resolve_arch_json_path", return_value=None), patch.object(
-        tab, "select_idle_gpu", return_value=0
+    with (
+        patch.object(tab, "resolve_arch_json_path", return_value=None),
+        patch.object(tab, "select_idle_gpu", return_value=0),
     ):
         with pytest.raises(RuntimeError, match="exit code 7"):
             tab.populate_gpu_arch_json(
@@ -269,9 +270,7 @@ def test_populate_external_raises_on_microbench_failure(
             )
 
 
-def _install_fake_tracelens(
-    monkeypatch: pytest.MonkeyPatch, leaf: str, attr: str, value
-) -> None:
+def _install_fake_tracelens(monkeypatch: pytest.MonkeyPatch, leaf: str, attr: str, value) -> None:
     """Inject a fake ``TraceLens.…`` package tree so a lazy ``from … import``
     succeeds without the real TraceLens being present."""
     import sys
@@ -320,22 +319,20 @@ def test_get_collect_arch_jsons_resolves_after_install(
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        (None, 600),       # unset -> floor
-        ("", 600),         # empty -> floor
-        ("   ", 600),      # whitespace -> floor
-        ("abc", 600),      # non-numeric -> floor (no ValueError)
-        ("12.5", 600),     # float string -> floor (int() would raise)
-        ("0", 600),        # below floor -> clamped up
-        ("-5", 600),       # negative -> clamped up to floor
-        ("300", 600),      # under floor -> floor
-        ("600", 600),      # exactly floor
-        ("1800", 1800),    # valid override
+        (None, 600),  # unset -> floor
+        ("", 600),  # empty -> floor
+        ("   ", 600),  # whitespace -> floor
+        ("abc", 600),  # non-numeric -> floor (no ValueError)
+        ("12.5", 600),  # float string -> floor (int() would raise)
+        ("0", 600),  # below floor -> clamped up
+        ("-5", 600),  # negative -> clamped up to floor
+        ("300", 600),  # under floor -> floor
+        ("600", 600),  # exactly floor
+        ("1800", 1800),  # valid override
         ("  900  ", 900),  # surrounding whitespace tolerated
     ],
 )
-def test_resolve_arch_benchmark_timeout_s(
-    tla, monkeypatch: pytest.MonkeyPatch, raw, expected
-) -> None:
+def test_resolve_arch_benchmark_timeout_s(tla, monkeypatch: pytest.MonkeyPatch, raw, expected) -> None:
     """Malformed TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC falls back to the 600s
     floor instead of raising ValueError before the microbenchmark (#390)."""
     if raw is None:
@@ -380,7 +377,9 @@ def test_sanitize_raises_when_all_maf_zero(tmp_path: Path) -> None:
     }
     with pytest.raises(RuntimeError, match="no positive max_achievable_tflops"):
         tab._sanitize_measured_arch_spec(
-            payload, platform="MI355X", out_path=tmp_path / "MI355X.json",
+            payload,
+            platform="MI355X",
+            out_path=tmp_path / "MI355X.json",
             log=lambda _m: None,
         )
 
@@ -389,7 +388,9 @@ def test_sanitize_raises_when_maf_missing(tmp_path: Path) -> None:
     payload = {"name": "MI355X", "mem_bw_gbps": 5000}
     with pytest.raises(RuntimeError, match="no max_achievable_tflops"):
         tab._sanitize_measured_arch_spec(
-            payload, platform="MI355X", out_path=tmp_path / "MI355X.json",
+            payload,
+            platform="MI355X",
+            out_path=tmp_path / "MI355X.json",
             log=lambda _m: None,
         )
 
@@ -403,6 +404,8 @@ def test_sanitize_raises_on_non_positive_bandwidth(tmp_path: Path, mem_bw) -> No
     }
     with pytest.raises(RuntimeError, match="non-positive mem_bw_gbps"):
         tab._sanitize_measured_arch_spec(
-            payload, platform="MI355X", out_path=tmp_path / "MI355X.json",
+            payload,
+            platform="MI355X",
+            out_path=tmp_path / "MI355X.json",
             log=lambda _m: None,
         )

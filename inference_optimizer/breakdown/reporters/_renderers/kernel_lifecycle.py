@@ -21,7 +21,15 @@ _MAX_NAME_LEN = 70
 
 
 def _short_name(name: str) -> str:
-    """Shorten a kernel name keeping head + tail (CK/ROCBLAS variants differ at the tail)."""
+    """Shorten a kernel name keeping head + tail (CK/ROCBLAS variants differ at the tail).
+
+    Args:
+        name: Full kernel name to shorten.
+
+    Returns:
+        The name unchanged when short enough, otherwise a head + tail
+        elision joined by ``"..."``.
+    """
     if not name:
         return ""
     if len(name) <= _MAX_NAME_LEN:
@@ -108,11 +116,13 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             title="Kernel Lifecycle",
             key_facts=["No kernels detected this session."],
             markdown_block="",
-            decisions=[Decision(
-                kind="not_attempted",
-                subject="kernel_lifecycle",
-                rationale="no detected kernels",
-            )],
+            decisions=[
+                Decision(
+                    kind="not_attempted",
+                    subject="kernel_lifecycle",
+                    rationale="no detected kernels",
+                )
+            ],
             warnings=[],
             skipped=True,
         )
@@ -139,37 +149,42 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "stalled before launch."
         )
     if adopted:
-        names = ", ".join(
-            f"`{d.get('kernel_id')}`→{d.get('adopted_by') or '?'}"
-            for d in adopted[:5]
-        )
+        names = ", ".join(f"`{d.get('kernel_id')}`→{d.get('adopted_by') or '?'}" for d in adopted[:5])
         facts.append(f"Adopted kernels: {names}.")
 
     decisions: list[Decision] = []
     if adopted:
-        decisions.append(Decision(
-            kind="kept", subject="kernel_lifecycle:adopted",
-            rationale=f"{len(adopted)} kernel patches adopted",
-        ))
+        decisions.append(
+            Decision(
+                kind="kept",
+                subject="kernel_lifecycle:adopted",
+                rationale=f"{len(adopted)} kernel patches adopted",
+            )
+        )
     if reverted:
-        decisions.append(Decision(
-            kind="reverted", subject="kernel_lifecycle:reverted",
-            rationale=f"{len(reverted)} kernel patches reverted after integrate",
-        ))
+        decisions.append(
+            Decision(
+                kind="reverted",
+                subject="kernel_lifecycle:reverted",
+                rationale=f"{len(reverted)} kernel patches reverted after integrate",
+            )
+        )
     if rejected:
-        decisions.append(Decision(
-            kind="rejected", subject="kernel_lifecycle:rejected",
-            rationale=f"{len(rejected)} kernel patches rejected outright",
-        ))
+        decisions.append(
+            Decision(
+                kind="rejected",
+                subject="kernel_lifecycle:rejected",
+                rationale=f"{len(rejected)} kernel patches rejected outright",
+            )
+        )
     if not adopted and not reverted and not rejected and not attempted:
-        decisions.append(Decision(
-            kind="not_attempted",
-            subject="kernel_lifecycle",
-            rationale=(
-                f"all {len(detected)} detected kernels left un-optimized "
-                "(neither GEAK nor OOB attempted)"
-            ),
-        ))
+        decisions.append(
+            Decision(
+                kind="not_attempted",
+                subject="kernel_lifecycle",
+                rationale=(f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor OOB attempted)"),
+            )
+        )
 
     # Drop bw% / compute% columns when every entry is None/0 (no roofline data).
     show_bw = any(d.get("bandwidth_util_pct") for d in detected)

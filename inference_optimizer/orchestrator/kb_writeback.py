@@ -16,6 +16,7 @@ import os
 import time
 from pathlib import Path
 
+
 #: Default KB root for framework-PR lessons; override via
 #: ``INFERENCE_OPTIMIZER_FA_KB_PATH``.
 def _default_kb_root() -> Path:
@@ -45,11 +46,13 @@ LESSONS_FILE: str = "lessons.jsonl"
 OUTCOME_INTEGRATED: str = "integrated"
 OUTCOME_REVERTED_SMOKE_FAIL: str = "reverted_smoke_fail"
 OUTCOME_REJECTED_APPLY_FAIL: str = "rejected_apply_fail"
-ALLOWED_OUTCOMES: frozenset[str] = frozenset({
-    OUTCOME_INTEGRATED,
-    OUTCOME_REVERTED_SMOKE_FAIL,
-    OUTCOME_REJECTED_APPLY_FAIL,
-})
+ALLOWED_OUTCOMES: frozenset[str] = frozenset(
+    {
+        OUTCOME_INTEGRATED,
+        OUTCOME_REVERTED_SMOKE_FAIL,
+        OUTCOME_REJECTED_APPLY_FAIL,
+    }
+)
 
 
 def _record(
@@ -128,10 +131,7 @@ async def write_framework_pr_record(
     * ``session_id`` — orchestrator session id.
     """
     if outcome not in ALLOWED_OUTCOMES:
-        raise ValueError(
-            f"write_framework_pr_record: outcome={outcome!r} must be one of "
-            f"{sorted(ALLOWED_OUTCOMES)!r}"
-        )
+        raise ValueError(f"write_framework_pr_record: outcome={outcome!r} must be one of {sorted(ALLOWED_OUTCOMES)!r}")
     record = _record(
         pr_url=pr_url,
         pr_sha=pr_sha,

@@ -25,9 +25,7 @@ from inference_optimizer.tests.test_critic_agent_backend import (
 
 
 # Resolve critic-agent's on-disk ``runtime`` package so its web_tools import succeeds at test time.
-REAL_CRITIC_AGENT_ROOT = (
-    Path(__file__).resolve().parents[2] / "critic-agent"
-)
+REAL_CRITIC_AGENT_ROOT = Path(__file__).resolve().parents[2] / "critic-agent"
 
 
 # Skip the module when critic-agent isn't checked out alongside the parent project.
@@ -38,6 +36,7 @@ pytestmark = pytest.mark.skipif(
 
 
 # OpenAI-shaped fakes that support tool_calls
+
 
 @dataclass
 class _FakeFunction:
@@ -113,6 +112,7 @@ class _ScriptedOpenAIClient:
 
 # Fake web tool clients
 
+
 @dataclass
 class _RecordingSearchClient:
     """In-process stand-in for :class:`WebSearchClient`."""
@@ -146,6 +146,7 @@ class _FakeWebClients:
 
 # Helpers
 
+
 def _bundle(session_id: str, *, proposals: list[dict] | None = None) -> dict[str, Any]:
     """Minimum judge-bundle shape that drives the LLM path (proposals!=[])."""
     return {
@@ -154,7 +155,8 @@ def _bundle(session_id: str, *, proposals: list[dict] | None = None) -> dict[str
         "merged_context": {"model": "Qwen3", "framework": "sglang"},
         "missing_context": {},
         "required_context": [],
-        "proposals": proposals or [
+        "proposals": proposals
+        or [
             {
                 "msg_id": "p1",
                 "action_name": "kernel_opt",
@@ -179,7 +181,9 @@ def _build_review_reply() -> str:
 
 
 def _tool_call(
-    call_id: str, name: str, arguments: dict[str, Any],
+    call_id: str,
+    name: str,
+    arguments: dict[str, Any],
 ) -> _FakeToolCall:
     return _FakeToolCall(
         id=call_id,
@@ -197,15 +201,14 @@ def _import_web_tools_config():
     cached_paths = []
     if runtime_mod is not None:
         try:
-            cached_paths = [
-                Path(p).resolve() for p in (getattr(runtime_mod, "__path__", []) or [])
-            ]
+            cached_paths = [Path(p).resolve() for p in (getattr(runtime_mod, "__path__", []) or [])]
         except (OSError, ValueError):
             cached_paths = []
     if runtime_mod is not None and expected not in cached_paths:
         for key in [k for k in sys.modules if k == "runtime" or k.startswith("runtime.")]:
             sys.modules.pop(key, None)
     from runtime.web_tools import WebToolsConfig
+
     return WebToolsConfig
 
 
@@ -232,7 +235,8 @@ def _make_backend(
     fake_client = _ScriptedOpenAIClient(scripted_replies)
     bundle = judge_bundle or _bundle(tmp_session.name)
     fake_caller = _make_fake_runtime(
-        judge_bundle=bundle, capture=runtime_calls,
+        judge_bundle=bundle,
+        capture=runtime_calls,
     )
     clients = _FakeWebClients(search=search_client, fetch=fetch_client)
     backend = CriticAgentBackend(
@@ -257,6 +261,7 @@ def tmp_session(tmp_path: Path) -> Path:
 
 # Tests: legacy single-call path (web tools off)
 
+
 @pytest.mark.asyncio
 async def test_disabled_web_tools_keeps_single_call_path(tmp_session: Path):
     backend, fake = _make_backend(
@@ -272,6 +277,7 @@ async def test_disabled_web_tools_keeps_single_call_path(tmp_session: Path):
 
 
 # Tests: enabled but no tool_calls on first turn
+
 
 @pytest.mark.asyncio
 async def test_enabled_with_immediate_text_makes_one_call(tmp_session: Path):
@@ -294,15 +300,18 @@ async def test_enabled_with_immediate_text_makes_one_call(tmp_session: Path):
 
 # Tests: model issues a search tool call
 
+
 @pytest.mark.asyncio
 async def test_search_tool_call_is_dispatched_and_result_appended(tmp_session: Path):
     search = _RecordingSearchClient(output="SEARCH_RESULT_OK")
     backend, fake = _make_backend(
         tmp_session=tmp_session,
         scripted_replies=[
-            _ScriptedReply(tool_calls=[
-                _tool_call("c1", "web_search", {"query": "sglang fp8"}),
-            ]),
+            _ScriptedReply(
+                tool_calls=[
+                    _tool_call("c1", "web_search", {"query": "sglang fp8"}),
+                ]
+            ),
             _ScriptedReply(text=_build_review_reply()),
         ],
         search_client=search,
@@ -322,15 +331,18 @@ async def test_search_tool_call_is_dispatched_and_result_appended(tmp_session: P
 
 # Tests: fetch tool call is dispatched too
 
+
 @pytest.mark.asyncio
 async def test_fetch_tool_call_dispatched(tmp_session: Path):
     fetch = _RecordingFetchClient(output="PAGE_OK")
     backend, fake = _make_backend(
         tmp_session=tmp_session,
         scripted_replies=[
-            _ScriptedReply(tool_calls=[
-                _tool_call("c1", "web_fetch", {"url": "https://x/y"}),
-            ]),
+            _ScriptedReply(
+                tool_calls=[
+                    _tool_call("c1", "web_fetch", {"url": "https://x/y"}),
+                ]
+            ),
             _ScriptedReply(text=_build_review_reply()),
         ],
         fetch_client=fetch,
@@ -345,6 +357,7 @@ async def test_fetch_tool_call_dispatched(tmp_session: Path):
 
 # Tests: multiple parallel tool_calls in one assistant turn
 
+
 @pytest.mark.asyncio
 async def test_parallel_tool_calls_all_dispatched(tmp_session: Path):
     search = _RecordingSearchClient(output="S")
@@ -352,10 +365,12 @@ async def test_parallel_tool_calls_all_dispatched(tmp_session: Path):
     backend, fake = _make_backend(
         tmp_session=tmp_session,
         scripted_replies=[
-            _ScriptedReply(tool_calls=[
-                _tool_call("c1", "web_search", {"query": "a"}),
-                _tool_call("c2", "web_fetch", {"url": "https://a/b"}),
-            ]),
+            _ScriptedReply(
+                tool_calls=[
+                    _tool_call("c1", "web_search", {"query": "a"}),
+                    _tool_call("c2", "web_fetch", {"url": "https://a/b"}),
+                ]
+            ),
             _ScriptedReply(text=_build_review_reply()),
         ],
         search_client=search,
@@ -372,60 +387,61 @@ async def test_parallel_tool_calls_all_dispatched(tmp_session: Path):
 
 # Tests: bad JSON arguments propagate as a tool error message
 
+
 @pytest.mark.asyncio
 async def test_invalid_tool_arguments_returns_error_message(tmp_session: Path):
     search = _RecordingSearchClient()
     backend, fake = _make_backend(
         tmp_session=tmp_session,
         scripted_replies=[
-            _ScriptedReply(tool_calls=[
-                _FakeToolCall(
-                    id="c1",
-                    function=_FakeFunction(name="web_search", arguments="not-json"),
-                ),
-            ]),
+            _ScriptedReply(
+                tool_calls=[
+                    _FakeToolCall(
+                        id="c1",
+                        function=_FakeFunction(name="web_search", arguments="not-json"),
+                    ),
+                ]
+            ),
             _ScriptedReply(text=_build_review_reply()),
         ],
         search_client=search,
     )
     await backend.run(prompt="inbox", system_prompt="You are critic.")
     assert search.calls == []
-    tool_msgs = [
-        m for m in fake.completions.calls[1]["messages"]
-        if m.get("role") == "tool"
-    ]
+    tool_msgs = [m for m in fake.completions.calls[1]["messages"] if m.get("role") == "tool"]
     assert "valid JSON" in tool_msgs[0]["content"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("arguments", ["[]", '"x"'])
 async def test_non_object_tool_arguments_returns_error_message(
-    tmp_session: Path, arguments: str,
+    tmp_session: Path,
+    arguments: str,
 ):
     search = _RecordingSearchClient()
     backend, fake = _make_backend(
         tmp_session=tmp_session,
         scripted_replies=[
-            _ScriptedReply(tool_calls=[
-                _FakeToolCall(
-                    id="c1",
-                    function=_FakeFunction(name="web_search", arguments=arguments),
-                ),
-            ]),
+            _ScriptedReply(
+                tool_calls=[
+                    _FakeToolCall(
+                        id="c1",
+                        function=_FakeFunction(name="web_search", arguments=arguments),
+                    ),
+                ]
+            ),
             _ScriptedReply(text=_build_review_reply()),
         ],
         search_client=search,
     )
     await backend.run(prompt="inbox", system_prompt="You are critic.")
     assert search.calls == []
-    tool_msgs = [
-        m for m in fake.completions.calls[1]["messages"]
-        if m.get("role") == "tool"
-    ]
+    tool_msgs = [m for m in fake.completions.calls[1]["messages"] if m.get("role") == "tool"]
     assert "JSON object" in tool_msgs[0]["content"]
 
 
 # Tests: unknown tool name yields an inline error
+
 
 @pytest.mark.asyncio
 async def test_unknown_tool_name_returns_error_message(tmp_session: Path):
@@ -433,22 +449,22 @@ async def test_unknown_tool_name_returns_error_message(tmp_session: Path):
     backend, fake = _make_backend(
         tmp_session=tmp_session,
         scripted_replies=[
-            _ScriptedReply(tool_calls=[
-                _tool_call("c1", "evil_eval", {"code": "1+1"}),
-            ]),
+            _ScriptedReply(
+                tool_calls=[
+                    _tool_call("c1", "evil_eval", {"code": "1+1"}),
+                ]
+            ),
             _ScriptedReply(text=_build_review_reply()),
         ],
         search_client=search,
     )
     await backend.run(prompt="inbox", system_prompt="You are critic.")
-    tool_msgs = [
-        m for m in fake.completions.calls[1]["messages"]
-        if m.get("role") == "tool"
-    ]
+    tool_msgs = [m for m in fake.completions.calls[1]["messages"] if m.get("role") == "tool"]
     assert "unknown" in tool_msgs[0]["content"]
 
 
 # Tests: max_tool_turns exhausted forces a final no-tool call
+
 
 @pytest.mark.asyncio
 async def test_max_tool_turns_forces_final_no_tool_call(tmp_session: Path):
@@ -457,9 +473,11 @@ async def test_max_tool_turns_forces_final_no_tool_call(tmp_session: Path):
     backend, fake = _make_backend(
         tmp_session=tmp_session,
         scripted_replies=[
-            _ScriptedReply(tool_calls=[
-                _tool_call("c1", "web_search", {"query": "x"}),
-            ]),
+            _ScriptedReply(
+                tool_calls=[
+                    _tool_call("c1", "web_search", {"query": "x"}),
+                ]
+            ),
             _ScriptedReply(text=_build_review_reply()),
         ],
         search_client=search,
@@ -474,6 +492,7 @@ async def test_max_tool_turns_forces_final_no_tool_call(tmp_session: Path):
 
 
 # Tests: web tools enabled by config but no clients usable
+
 
 @pytest.mark.asyncio
 async def test_enabled_config_but_empty_clients_falls_back_to_no_tools(
@@ -523,19 +542,18 @@ async def test_fetch_only_config_exposes_fetch_schema_not_search(tmp_session: Pa
         runtime_caller_factory=lambda: fake_caller,
         web_tools_config=cfg,
         web_tool_clients_factory=lambda _c: _FakeWebClients(
-            search=None, fetch=fetch,
+            search=None,
+            fetch=fetch,
         ),
         static_context={"model": "Qwen3", "framework": "sglang"},
     )
     await backend.run(prompt="inbox", system_prompt="You are critic.")
-    tool_names = [
-        t["function"]["name"]
-        for t in fake_client.completions.calls[0]["kwargs"]["tools"]
-    ]
+    tool_names = [t["function"]["name"] for t in fake_client.completions.calls[0]["kwargs"]["tools"]]
     assert tool_names == ["web_fetch"]
 
 
 # Tests: web tool client raising propagates as BackendError context
+
 
 @pytest.mark.asyncio
 async def test_search_client_exception_is_not_swallowed_as_text(
@@ -546,9 +564,11 @@ async def test_search_client_exception_is_not_swallowed_as_text(
     backend, _ = _make_backend(
         tmp_session=tmp_session,
         scripted_replies=[
-            _ScriptedReply(tool_calls=[
-                _tool_call("c1", "web_search", {"query": "x"}),
-            ]),
+            _ScriptedReply(
+                tool_calls=[
+                    _tool_call("c1", "web_search", {"query": "x"}),
+                ]
+            ),
             _ScriptedReply(text=_build_review_reply()),
         ],
         search_client=search,

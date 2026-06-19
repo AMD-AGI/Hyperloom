@@ -32,6 +32,7 @@ class _FakeResp:
 
 def _install_urlopen(monkeypatch, handler) -> None:
     """Replace urllib.request.urlopen used by github backend."""
+
     def fake(req, timeout):  # noqa: ARG001
         return handler(req)
 
@@ -64,12 +65,14 @@ def test_build_query_falls_back_to_perf_terms_when_empty() -> None:
 
 def test_search_perf_prs_parses_items(monkeypatch) -> None:
     """A normal GitHub-Search-shaped response is mapped to GitHubPr list."""
-    body = json.dumps({
-        "items": [
-            {"number": 11, "title": "fp8 fix", "html_url": "u11"},
-            {"number": 12, "title": "rocm tune", "html_url": "u12"},
-        ]
-    }).encode("utf-8")
+    body = json.dumps(
+        {
+            "items": [
+                {"number": 11, "title": "fp8 fix", "html_url": "u11"},
+                {"number": 12, "title": "rocm tune", "html_url": "u12"},
+            ]
+        }
+    ).encode("utf-8")
     _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
     out = gh.search_perf_prs("https://github.com/sgl-project/sglang.git", limit=5)
     assert out == [
@@ -80,6 +83,7 @@ def test_search_perf_prs_parses_items(monkeypatch) -> None:
 
 def test_search_perf_prs_best_effort_on_failure(monkeypatch) -> None:
     """Network / rate-limit errors must return [] (no exception)."""
+
     def boom(req):
         raise urllib.error.HTTPError(req.get_full_url(), 403, "rate", {}, io.BytesIO(b""))
 

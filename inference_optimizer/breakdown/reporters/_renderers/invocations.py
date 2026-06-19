@@ -19,12 +19,20 @@ def _render_pair(
     invocations_key: str,
     legacy_key: str,
 ) -> RenderedSection:
-    """Render either GEAK or OOB invocations (new ``invocations`` key, legacy fallback)."""
-    raw = (
-        (breakdown.get("invocations") or {}).get(invocations_key)
-        or breakdown.get(legacy_key)
-        or []
-    )
+    """Render either GEAK or OOB invocations (new ``invocations`` key, legacy fallback).
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+        section_id: Section identifier for the rendered block.
+        title: Human-readable section title.
+        invocations_key: Key under ``invocations`` to read records from.
+        legacy_key: Top-level fallback key for older breakdowns.
+
+    Returns:
+        The rendered section, or a skipped placeholder when no invocations
+        are present.
+    """
+    raw = (breakdown.get("invocations") or {}).get(invocations_key) or breakdown.get(legacy_key) or []
     # Normalize stray string entries (kernel ids) into dicts.
     invs: list[dict[str, Any]] = []
     for v in raw:
@@ -36,41 +44,45 @@ def _render_pair(
         return RenderedSection(
             section_id=section_id,
             title=title,
-            key_facts=[
-                f"`{section_id}` never invoked this session — no attempts on disk."
-            ],
+            key_facts=[f"`{section_id}` never invoked this session — no attempts on disk."],
             markdown_block="",
-            decisions=[Decision(
-                kind="not_attempted",
-                subject=section_id,
-                rationale="no attempts found in session_breakdown",
-            )],
+            decisions=[
+                Decision(
+                    kind="not_attempted",
+                    subject=section_id,
+                    rationale="no attempts found in session_breakdown",
+                )
+            ],
             warnings=[],
             skipped=True,
         )
 
     keeps = sum(1 for v in invs if v.get("decision") == "KEEP")
     failed = sum(1 for v in invs if v.get("decision") in ("FAILED", "ERROR"))
-    decisions = [Decision(
-        kind="kept" if keeps else ("attempted" if invs else "not_attempted"),
-        subject=section_id,
-        metric_pct=None,
-        rationale=f"{keeps} KEEP / {failed} FAILED across {len(invs)} attempts",
-    )]
+    decisions = [
+        Decision(
+            kind="kept" if keeps else ("attempted" if invs else "not_attempted"),
+            subject=section_id,
+            metric_pct=None,
+            rationale=f"{keeps} KEEP / {failed} FAILED across {len(invs)} attempts",
+        )
+    ]
     facts = [
         f"{section_id}: {len(invs)} invocation(s), {keeps} KEEP, {failed} FAILED.",
     ]
     head = invs[-_MAX_ATTEMPT_ROWS:] if len(invs) > _MAX_ATTEMPT_ROWS else invs
     rows = []
     for v in head:
-        rows.append([
-            v.get("ts") or "",
-            v.get("kernel_id") or v.get("kernel_name") or "",
-            v.get("decision") or "",
-            v.get("micro_speedup") or "",
-            v.get("workspace") or v.get("workspace_path") or "",
-            (v.get("error") or "")[:80],
-        ])
+        rows.append(
+            [
+                v.get("ts") or "",
+                v.get("kernel_id") or v.get("kernel_name") or "",
+                v.get("decision") or "",
+                v.get("micro_speedup") or "",
+                v.get("workspace") or v.get("workspace_path") or "",
+                (v.get("error") or "")[:80],
+            ]
+        )
     md = md_table(
         ["ts", "kernel_id", "decision", "micro_speedup", "workspace", "error"],
         rows,

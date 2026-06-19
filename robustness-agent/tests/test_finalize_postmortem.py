@@ -40,7 +40,8 @@ def _make_run_result(
     task_dir = session_dir / "runs" / action / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "result.json").write_text(
-        json.dumps(payload), encoding="utf-8",
+        json.dumps(payload),
+        encoding="utf-8",
     )
     return task_dir
 
@@ -57,10 +58,12 @@ def test_finalize_creates_postmortem_and_decision_trace(tmp_path: Path) -> None:
         summary="ROCm KFD leak repeated",
         evidence={"used_mb": 71000},
         rca_text="reboot mitigated last 3 times",
-        intents=[{
-            "intent_type": "alert",
-            "payload": {"severity": "high"},
-        }],
+        intents=[
+            {
+                "intent_type": "alert",
+                "payload": {"severity": "high"},
+            }
+        ],
     )
     _write_finding(
         findings_path,
@@ -70,7 +73,9 @@ def test_finalize_creates_postmortem_and_decision_trace(tmp_path: Path) -> None:
     )
 
     _make_run_result(
-        tmp_path, "integrate", "kernel_42",
+        tmp_path,
+        "integrate",
+        "kernel_42",
         {
             "decision": "KEEP",
             "gain_pct": 12.5,
@@ -78,7 +83,9 @@ def test_finalize_creates_postmortem_and_decision_trace(tmp_path: Path) -> None:
         },
     )
     _make_run_result(
-        tmp_path, "integrate", "kernel_99",
+        tmp_path,
+        "integrate",
+        "kernel_99",
         {
             "decision": "REVERT",
             "gain_pct": -3.0,
@@ -86,7 +93,9 @@ def test_finalize_creates_postmortem_and_decision_trace(tmp_path: Path) -> None:
         },
     )
     _make_run_result(
-        tmp_path, "baseline", "task_0",
+        tmp_path,
+        "baseline",
+        "task_0",
         {
             "decision": None,
             "output_throughput": 123.4,
@@ -95,7 +104,8 @@ def test_finalize_creates_postmortem_and_decision_trace(tmp_path: Path) -> None:
     )
 
     finalizer = PostmortemFinalizer(
-        session_dir=tmp_path, session_id="sess-1",
+        session_dir=tmp_path,
+        session_id="sess-1",
     )
     assert finalizer.finalize(stop_reason="budget_exhausted") is True
     assert finalizer.is_finalized() is True
@@ -125,7 +135,8 @@ def test_finalize_creates_postmortem_and_decision_trace(tmp_path: Path) -> None:
 
 def test_finalize_idempotent_via_marker(tmp_path: Path) -> None:
     finalizer = PostmortemFinalizer(
-        session_dir=tmp_path, session_id="sess-x",
+        session_dir=tmp_path,
+        session_id="sess-x",
     )
     assert finalizer.finalize(stop_reason="r1") is True
     # Second invocation must not overwrite.
@@ -138,19 +149,20 @@ def test_finalize_idempotent_via_marker(tmp_path: Path) -> None:
 
 
 def test_finalize_no_findings_no_runs(tmp_path: Path) -> None:
-    assert finalize_session(
-        tmp_path, session_id="empty", stop_reason="manual_close",
-    ) is True
+    assert (
+        finalize_session(
+            tmp_path,
+            session_id="empty",
+            stop_reason="manual_close",
+        )
+        is True
+    )
     md = (tmp_path / "reports" / "robustness_postmortem.md").read_text(
         encoding="utf-8",
     )
     assert "No HIGH-severity finding" in md
-    assert "No ``runs/" in md or "No \"runs/" in md or "result.json" in md
-    trace = json.loads(
-        (tmp_path / "reports" / "decision_trace.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    assert "No ``runs/" in md or 'No "runs/' in md or "result.json" in md
+    trace = json.loads((tmp_path / "reports" / "decision_trace.json").read_text(encoding="utf-8"))
     assert trace["total_tasks"] == 0
     assert trace["tasks_by_action"] == {}
 
@@ -161,17 +173,25 @@ def test_finalize_skips_malformed_jsonl_lines(tmp_path: Path) -> None:
     findings_path = findings_dir / "sess-1.jsonl"
     findings_path.write_text(
         "{not json}\n"
-        + json.dumps({
-            "tick_index": 1, "timestamp_unix": 1.0,
-            "symptom_name": "x", "severity": "high",
-            "summary": "s", "intents": [], "evidence": {},
-            "rca_text": "",
-        }) + "\n"
+        + json.dumps(
+            {
+                "tick_index": 1,
+                "timestamp_unix": 1.0,
+                "symptom_name": "x",
+                "severity": "high",
+                "summary": "s",
+                "intents": [],
+                "evidence": {},
+                "rca_text": "",
+            }
+        )
+        + "\n"
         + "\n",
         encoding="utf-8",
     )
     finalizer = PostmortemFinalizer(
-        session_dir=tmp_path, session_id="sess-1",
+        session_dir=tmp_path,
+        session_id="sess-1",
     )
     assert finalizer.finalize(stop_reason="r") is True
     md = (tmp_path / "reports" / "robustness_postmortem.md").read_text(
@@ -206,7 +226,8 @@ def test_finalize_picks_first_high_severity_as_flashpoint(
         severity="medium",
     )
     finalizer = PostmortemFinalizer(
-        session_dir=tmp_path, session_id="sess-1",
+        session_dir=tmp_path,
+        session_id="sess-1",
     )
     assert finalizer.finalize(stop_reason="r") is True
     md = (tmp_path / "reports" / "robustness_postmortem.md").read_text(
@@ -221,25 +242,25 @@ def test_finalize_picks_first_high_severity_as_flashpoint(
 
 def test_finalize_caps_tasks_per_action(tmp_path: Path) -> None:
     import os
+
     for i in range(8):
         task_dir = _make_run_result(
-            tmp_path, "sweep", f"task_{i:03d}",
-            {"decision": "KEEP" if i % 2 == 0 else "REVERT",
-             "gain_pct": float(i)},
+            tmp_path,
+            "sweep",
+            f"task_{i:03d}",
+            {"decision": "KEEP" if i % 2 == 0 else "REVERT", "gain_pct": float(i)},
         )
         # Deterministic mtime: i=7 newest, i=0 oldest.
         ts = 1_700_000_000 + i * 10
         os.utime(task_dir, (ts, ts))
     cfg = PostmortemFinalizerConfig(max_tasks_per_action=3)
     finalizer = PostmortemFinalizer(
-        session_dir=tmp_path, session_id="sess-1", config=cfg,
+        session_dir=tmp_path,
+        session_id="sess-1",
+        config=cfg,
     )
     assert finalizer.finalize(stop_reason="r") is True
-    trace = json.loads(
-        (tmp_path / "reports" / "decision_trace.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    trace = json.loads((tmp_path / "reports" / "decision_trace.json").read_text(encoding="utf-8"))
     sweep_tasks = trace["tasks_by_action"]["sweep"]
     assert len(sweep_tasks) == 3
     task_ids = [t["task_id"] for t in sweep_tasks]

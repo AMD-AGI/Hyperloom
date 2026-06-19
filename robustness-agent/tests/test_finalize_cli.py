@@ -18,21 +18,33 @@ def test_finalize_creates_postmortem(tmp_path: Path, capsys):
     findings_dir = sd / "agents" / "robustness" / "findings"
     findings_dir.mkdir(parents=True)
     (findings_dir / "sess-123.jsonl").write_text(
-        json.dumps({
-            "tick_index": 1, "timestamp_unix": 1.0,
-            "symptom_name": "x", "severity": "high",
-            "summary": "s", "intents": [], "evidence": {},
-            "rca_text": "",
-        }) + "\n",
+        json.dumps(
+            {
+                "tick_index": 1,
+                "timestamp_unix": 1.0,
+                "symptom_name": "x",
+                "severity": "high",
+                "summary": "s",
+                "intents": [],
+                "evidence": {},
+                "rca_text": "",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
 
-    rc = main([
-        "finalize",
-        "--session-dir", str(sd),
-        "--stop-reason", "manual_test",
-        "--out", "-",
-    ])
+    rc = main(
+        [
+            "finalize",
+            "--session-dir",
+            str(sd),
+            "--stop-reason",
+            "manual_test",
+            "--out",
+            "-",
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     payload = json.loads(out)
@@ -47,30 +59,42 @@ def test_finalize_creates_postmortem(tmp_path: Path, capsys):
 def test_finalize_is_idempotent(tmp_path: Path, capsys):
     sd = tmp_path / "sess-abc"
     sd.mkdir()
-    rc1 = main([
-        "finalize",
-        "--session-dir", str(sd),
-        "--out", "-",
-    ])
+    rc1 = main(
+        [
+            "finalize",
+            "--session-dir",
+            str(sd),
+            "--out",
+            "-",
+        ]
+    )
     assert rc1 == 0
     capsys.readouterr()  # drain
     # Second call must not overwrite; ``wrote_new_files=False``.
-    rc2 = main([
-        "finalize",
-        "--session-dir", str(sd),
-        "--out", "-",
-    ])
+    rc2 = main(
+        [
+            "finalize",
+            "--session-dir",
+            str(sd),
+            "--out",
+            "-",
+        ]
+    )
     assert rc2 == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["wrote_new_files"] is False
 
 
 def test_finalize_rejects_missing_session_dir(tmp_path: Path, capsys):
-    rc = main([
-        "finalize",
-        "--session-dir", str(tmp_path / "does_not_exist"),
-        "--out", "-",
-    ])
+    rc = main(
+        [
+            "finalize",
+            "--session-dir",
+            str(tmp_path / "does_not_exist"),
+            "--out",
+            "-",
+        ]
+    )
     assert rc == 2
     # Error message goes to stderr (RuntimeAdapterError); session_dir
     # check is reported as a clean exit-2.
@@ -81,11 +105,15 @@ def test_finalize_rejects_missing_session_dir(tmp_path: Path, capsys):
 def test_finalize_defaults_session_id_to_dirname(tmp_path: Path, capsys):
     sd = tmp_path / "auto-named"
     sd.mkdir()
-    rc = main([
-        "finalize",
-        "--session-dir", str(sd),
-        "--out", "-",
-    ])
+    rc = main(
+        [
+            "finalize",
+            "--session-dir",
+            str(sd),
+            "--out",
+            "-",
+        ]
+    )
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["session_id"] == "auto-named"

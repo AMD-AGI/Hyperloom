@@ -18,6 +18,8 @@ import yaml
 from inference_optimizer.orchestrator.action_executors import _grid_runner
 from inference_optimizer.orchestrator.action_executors import _grid_runner as gr
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
+    _MN_BACKENDS_PRIORITY,
+    _MN_PARAMS_PRIORITY,
     GridVariant,
     VariantResult,
     _build_variant_yaml,
@@ -27,6 +29,7 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
     apply_runtime_benchmark_overrides,
     apply_user_skip_list,
     coerce_extra_envs,
+    reorder_grid_for_multi_node,
     resolve_skip_spec,
     run_grid,
 )
@@ -49,8 +52,7 @@ def test_write_variant_abort_marker_creates_file_with_expected_fields(tmp_path):
         variant_name="max_num_seqs_128",
         error_class="mn_server_restart_failed",
         error_summary=(
-            "server /health did not return 200 within 1800s "
-            "(url=http://10.245.131.67:8888/health, last_err=...)"
+            "server /health did not return 200 within 1800s (url=http://10.245.131.67:8888/health, last_err=...)"
         ),
         extra_args="--max-num-seqs 128",
     )
@@ -102,10 +104,7 @@ def test_write_variant_abort_marker_swallows_oserror(monkeypatch, tmp_path, capl
             error_class="mn_server_restart_failed",
             error_summary="oops",
         )
-    assert any(
-        "failed to write abort_reason.json" in r.message
-        for r in caplog.records
-    )
+    assert any("failed to write abort_reason.json" in r.message for r in caplog.records)
 
 
 def test_write_variant_abort_marker_json_is_stable_sorted(tmp_path):
@@ -155,7 +154,10 @@ def test_variant_result_carries_error_class_field():
     assert d["status"] == "failed"
 
     vr_ok = _grid_runner.VariantResult(
-        name="ok", extra_server_args="", extra_envs={}, status="succeeded",
+        name="ok",
+        extra_server_args="",
+        extra_envs={},
+        status="succeeded",
     )
     assert vr_ok.to_dict()["error_class"] == ""
 
@@ -208,13 +210,60 @@ class TestMultiNodeCudaGraphMaxBsAdvisory:
         monkeypatch.setenv("CONC", "64")
         grid = [
             GridVariant(name="bad", extra_server_args="--cuda-graph-max-bs 8"),
-            GridVariant(name="ok",  extra_server_args="--max-num-seqs 128"),
+            GridVariant(name="ok", extra_server_args="--max-num-seqs 128"),
         ]
         notes = annotate_multi_node_cuda_graph_max_bs(grid)
         assert [n["name"] for n in notes] == ["bad"]
         assert "CONC=64" in notes[0]["reason"]
         # Grid itself is unchanged: nothing is dropped.
         assert [v.name for v in grid] == ["bad", "ok"]
+
+
+class TestReorderGridForMultiNode:
+    """reorder is wired into explore/sweep; single-node MUST be a no-op."""
+
+    def _grid(self):
+        # Deliberately ordered so a real reorder would change it: a
+        # low-priority backend variant first, a high-priority param variant
+        # last, and an untagged variant in the middle.
+        return [
+            GridVariant(name="tier5_comm_custom_ar", note="tier5_comm"),
+            GridVariant(name="untagged_misc"),
+            GridVariant(name="cuda_graph_max_bs_64", note="cuda_graph_max_bs"),
+        ]
+
+    def test_single_node_preserves_order_bit_for_bit(self, monkeypatch):
+        # Hard requirement: single-node grid order is never altered.
+        from inference_optimizer.orchestrator.action_executors import (
+            _multi_node_env as mne,
+        )
+
+        monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+        grid = self._grid()
+        out = reorder_grid_for_multi_node(
+            grid,
+            priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
+        )
+        assert [v.name for v in out] == [v.name for v in grid]
+
+    def test_multi_node_surfaces_likely_winners_first(self, monkeypatch):
+        from inference_optimizer.orchestrator.action_executors import (
+            _multi_node_env as mne,
+        )
+
+        monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+        grid = self._grid()
+        out = reorder_grid_for_multi_node(
+            grid,
+            priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
+        )
+        # cuda_graph_max_bs (params tier-1) sorts ahead of tier5_comm; the
+        # untagged variant sinks to the end. Stable sort keeps ties in order.
+        assert [v.name for v in out] == [
+            "cuda_graph_max_bs_64",
+            "tier5_comm_custom_ar",
+            "untagged_misc",
+        ]
 
 
 class TestApplyUserSkipList:
@@ -239,14 +288,17 @@ class TestApplyUserSkipList:
         kept, dropped = apply_user_skip_list(grid, skip_spec="cuda_graph_*")
         assert [k.name for k in kept] == ["schedule_lpm"]
         assert {d["name"] for d in dropped} == {
-            "cuda_graph_max_bs_8", "cuda_graph_max_bs_32",
+            "cuda_graph_max_bs_8",
+            "cuda_graph_max_bs_32",
         }
 
 
 class TestVariantResultToDict:
     def test_succeeded_default_shape(self):
         vr = VariantResult(
-            name="v", extra_server_args="--foo 1", extra_envs={"A": "1"},
+            name="v",
+            extra_server_args="--foo 1",
+            extra_envs={"A": "1"},
             status="succeeded",
         )
         out = vr.to_dict()
@@ -255,8 +307,12 @@ class TestVariantResultToDict:
 
     def test_failed_round_trip_carries_error_class(self):
         vr = VariantResult(
-            name="v", extra_server_args="", extra_envs={},
-            status="failed", error="boom", error_class="benchmark_report_missing",
+            name="v",
+            extra_server_args="",
+            extra_envs={},
+            status="failed",
+            error="boom",
+            error_class="benchmark_report_missing",
         )
         out = vr.to_dict()
         assert out["status"] == "failed"
@@ -310,47 +366,53 @@ class TestCoerceExtraEnvs:
 
     def test_dict_is_passthrough(self):
         assert coerce_extra_envs({"FOO": "1", "BAR": "two"}) == {
-            "FOO": "1", "BAR": "two",
+            "FOO": "1",
+            "BAR": "two",
         }
 
     def test_dict_coerces_values_to_str(self):
         assert coerce_extra_envs({"USE_AITER": 1, "DEBUG": True}) == {
-            "USE_AITER": "1", "DEBUG": "True",
+            "USE_AITER": "1",
+            "DEBUG": "True",
         }
 
     def test_space_delimited_string(self):
-        assert coerce_extra_envs(
-            "SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1"
-        ) == {"SGLANG_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "1"}
+        assert coerce_extra_envs("SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1") == {
+            "SGLANG_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "1",
+        }
 
     def test_newline_delimited_string(self):
-        assert coerce_extra_envs(
-            "FOO=1\nBAR=two\n\nBAZ=3"
-        ) == {"FOO": "1", "BAR": "two", "BAZ": "3"}
+        assert coerce_extra_envs("FOO=1\nBAR=two\n\nBAZ=3") == {"FOO": "1", "BAR": "two", "BAZ": "3"}
 
     def test_semicolon_delimited_string(self):
         assert coerce_extra_envs("A=1;B=2;C=3") == {
-            "A": "1", "B": "2", "C": "3",
+            "A": "1",
+            "B": "2",
+            "C": "3",
         }
 
     def test_string_preserves_url_in_value(self):
-        assert coerce_extra_envs(
-            "HF_ENDPOINT=https://hf.example.com/api"
-        ) == {"HF_ENDPOINT": "https://hf.example.com/api"}
+        assert coerce_extra_envs("HF_ENDPOINT=https://hf.example.com/api") == {
+            "HF_ENDPOINT": "https://hf.example.com/api"
+        }
 
     def test_string_drops_tokens_without_equals(self):
         assert coerce_extra_envs("FOO=1 garbage BAR=2") == {
-            "FOO": "1", "BAR": "2",
+            "FOO": "1",
+            "BAR": "2",
         }
 
     def test_list_of_kv_tokens(self):
         assert coerce_extra_envs(["FOO=1", "BAR=2"]) == {
-            "FOO": "1", "BAR": "2",
+            "FOO": "1",
+            "BAR": "2",
         }
 
     def test_list_of_dicts(self):
         assert coerce_extra_envs([{"FOO": "1"}, {"BAR": "2"}]) == {
-            "FOO": "1", "BAR": "2",
+            "FOO": "1",
+            "BAR": "2",
         }
 
     def test_list_later_entries_win(self):
@@ -368,13 +430,13 @@ class TestCoerceExtraEnvs:
     def test_used_by_backends_grid_override(self):
         llm_entry = {
             "name": "aiter_mla_off",
-            "extra_sglang_args": "--attention-backend aiter --disable-mla",
+            "extra_server_args": "--attention-backend aiter --disable-mla",
             "extra_envs": "SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0",
             "note": "aiter attn without MLA fast path",
         }
         v = GridVariant(
             name=llm_entry["name"],
-            extra_sglang_args=llm_entry["extra_sglang_args"],
+            extra_server_args=llm_entry["extra_server_args"],
             extra_envs=coerce_extra_envs(llm_entry["extra_envs"]),
             note=llm_entry["note"],
         )
@@ -425,27 +487,36 @@ def _write_baseline_yaml_mtime(path: Path) -> None:
 def _empty_workspace(slot: Path) -> Path:
     ws = slot / "benchmark_sglang_20260513_010101"
     ws.mkdir(parents=True)
-    (ws / "benchmark_report.json").write_text(json.dumps({
-        "success": False,
-        "framework": "sglang",
-        "model": "/wekafs/models/Qwen-Qwen3-8B",
-    }))
+    (ws / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": False,
+                "framework": "sglang",
+                "model": "/wekafs/models/Qwen-Qwen3-8B",
+            }
+        )
+    )
     return ws
 
 
 def _write_leak(path: Path, *, tput: float = 1761.6, completed: int = 640) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "output_throughput": tput,
-        "request_throughput": tput / 10,
-        "completed_requests": completed,
-        "duration_seconds": 120.0,
-    }))
+    path.write_text(
+        json.dumps(
+            {
+                "output_throughput": tput,
+                "request_throughput": tput / 10,
+                "completed_requests": completed,
+                "duration_seconds": 120.0,
+            }
+        )
+    )
 
 
 @pytest.mark.asyncio
 async def test_run_grid_rejects_stale_leak_from_previous_run(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_mtime(base)
@@ -465,13 +536,14 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base, base_extra_args="",
-            grid=[GridVariant("vA")], output_root=output_root,
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("vA")],
+            output_root=output_root,
             variant_timeout_sec=5,
         )
 
@@ -479,10 +551,7 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
     r = results[0]
     assert r.status == "failed"
     assert r.output_throughput is None
-    assert all(
-        "rescued_from_leaked_path" not in (w or "")
-        for w in r.nonfatal_warnings
-    )
+    assert all("rescued_from_leaked_path" not in (w or "") for w in r.nonfatal_warnings)
 
 
 @pytest.mark.asyncio
@@ -503,13 +572,14 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base, base_extra_args="",
-            grid=[GridVariant("vA")], output_root=output_root,
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("vA")],
+            output_root=output_root,
             variant_timeout_sec=5,
         )
 
@@ -517,10 +587,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
     r = results[0]
     assert r.status == "succeeded"
     assert r.output_throughput == pytest.approx(1234.0)
-    assert any(
-        (w or "").startswith("rescued_from_leaked_path:")
-        for w in r.nonfatal_warnings
-    )
+    assert any((w or "").startswith("rescued_from_leaked_path:") for w in r.nonfatal_warnings)
 
 
 # param overrides subsection helpers
@@ -551,22 +618,26 @@ def _write_baseline_yaml_overrides(path: Path) -> None:
 def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
     workspace = slot / "benchmark_sglang_20260513_001122"
     workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(json.dumps({
-        "success": True,
-        "framework": "sglang",
-        "model": "/wekafs/models/Qwen-Qwen3-8B",
-        "throughput": {
-            "request_throughput": tput / 256,
-            "output_throughput": tput,
-            "total_token_throughput": tput * 2,
-            "completed_requests": 80,
-            "duration_seconds": 25.0,
-        },
-        "latency": {
-            "ttft": {"mean_ms": 140.0, "p99_ms": 160.0},
-            "e2el": {"mean_ms": 2500.0, "p99_ms": 2800.0},
-        },
-    }))
+    (workspace / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "framework": "sglang",
+                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "throughput": {
+                    "request_throughput": tput / 256,
+                    "output_throughput": tput,
+                    "total_token_throughput": tput * 2,
+                    "completed_requests": 80,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {
+                    "ttft": {"mean_ms": 140.0, "p99_ms": 160.0},
+                    "e2el": {"mean_ms": 2500.0, "p99_ms": 2800.0},
+                },
+            }
+        )
+    )
     return workspace
 
 
@@ -577,7 +648,9 @@ def test_apply_runtime_overrides_pins_benchmark_script_after_gpu_pop():
         "envs": {},
     }
     apply_runtime_benchmark_overrides(
-        bench, gpu_type="mi300x", benchmark_script="sglang_mi300x.sh",
+        bench,
+        gpu_type="mi300x",
+        benchmark_script="sglang_mi300x.sh",
     )
     assert bench["benchmark_script"] == "sglang_mi300x.sh"
     assert bench["runner_type"] == "mi300x"
@@ -591,10 +664,7 @@ def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
         "envs": {"TP": 2, "CONC": 64, "ISL": 1024, "OSL": 1024},
     }
     apply_runtime_benchmark_overrides(bench, gpu_type="mi355x")
-    assert bench["envs"]["TP"] == 2, (
-        f"yaml-pinned TP=2 must win over os.environ['TP']=1; "
-        f"got TP={bench['envs']['TP']}"
-    )
+    assert bench["envs"]["TP"] == 2, f"yaml-pinned TP=2 must win over os.environ['TP']=1; got TP={bench['envs']['TP']}"
     # Other env keys still flow through normally (no yaml-wins for them).
     monkeypatch.setenv("CONC", "128")
     apply_runtime_benchmark_overrides(bench, gpu_type="mi355x")
@@ -635,8 +705,7 @@ def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -658,8 +727,7 @@ def test_run_magpie_explicit_result_dir_overrides_default(tmp_path, monkeypatch)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -687,13 +755,15 @@ async def test_run_grid_forwards_benchmark_script_per_variant(tmp_path):
 
     grid = [GridVariant("v0"), GridVariant("v1")]
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base, base_extra_args="",
-            grid=grid, output_root=output_root, variant_timeout_sec=5,
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=grid,
+            output_root=output_root,
+            variant_timeout_sec=5,
             gpu_type="mi300x",
             benchmark_script="sglang_mi300x.sh",
         )
@@ -721,13 +791,15 @@ async def test_run_grid_forwards_result_dir_to_subprocess_env(tmp_path):
 
     grid = [GridVariant("v0"), GridVariant("v1")]
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         await run_grid(
-            base_yaml_path=base, base_extra_args="",
-            grid=grid, output_root=output_root, variant_timeout_sec=5,
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=grid,
+            output_root=output_root,
+            variant_timeout_sec=5,
             result_dir="/tmp/redirect",
         )
 
@@ -753,13 +825,15 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
 
     grid = [GridVariant("vA"), GridVariant("vB")]
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
         await run_grid(
-            base_yaml_path=base, base_extra_args="",
-            grid=grid, output_root=output_root, variant_timeout_sec=5,
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=grid,
+            output_root=output_root,
+            variant_timeout_sec=5,
         )
 
     for slot_path, result_dir in captured_envs:
@@ -779,14 +853,12 @@ def _reset_help_cache():
 
 
 def test_probe_server_help_text_atom_returns_help_when_importable(
-    _reset_help_cache, monkeypatch,
+    _reset_help_cache,
+    monkeypatch,
 ):
     """The atom probe returns the mocked help verbatim and caches it for the second call."""
     call_count = {"n": 0}
-    synthetic_help = (
-        "usage: atom-engine [-h] [--tensor-parallel-size INT] "
-        "[--torch-profiler-dir DIR] ..."
-    )
+    synthetic_help = "usage: atom-engine [-h] [--tensor-parallel-size INT] [--torch-profiler-dir DIR] ..."
 
     def fake_run(cmd, *args, **kwargs):
         call_count["n"] += 1
@@ -800,13 +872,13 @@ def test_probe_server_help_text_atom_returns_help_when_importable(
     out2 = _grid_runner._probe_server_help_text("atom")
     assert out2 == out
     assert call_count["n"] == 1, (
-        "_probe_server_help_text must cache atom's result; subprocess "
-        f"called {call_count['n']} times"
+        f"_probe_server_help_text must cache atom's result; subprocess called {call_count['n']} times"
     )
 
 
 def test_probe_server_help_text_atom_returns_empty_on_failure(
-    _reset_help_cache, monkeypatch,
+    _reset_help_cache,
+    monkeypatch,
 ):
     """Subprocess failures surface as ``""`` and are NOT cached (transient failures must not poison the slot)."""
     raised = {"n": 0}
@@ -823,7 +895,8 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
 
 
 def test_probe_server_help_text_cache_keyed_by_framework(
-    _reset_help_cache, monkeypatch,
+    _reset_help_cache,
+    monkeypatch,
 ):
     """Cache slots must be per-framework so sglang's help text doesn't leak into the vllm/atom slot."""
     payload_map = {
@@ -853,22 +926,24 @@ def test_probe_server_help_text_cache_keyed_by_framework(
 
 
 def test_probe_server_help_text_supports_all_three_frameworks(
-    _reset_help_cache, monkeypatch,
+    _reset_help_cache,
+    monkeypatch,
 ):
     """Cross-cutting guard: every first-class framework has a registered probe command and returns a ``str``."""
     monkeypatch.setattr(
-        subprocess, "run",
+        subprocess,
+        "run",
         lambda cmd, *a, **kw: subprocess.CompletedProcess(
-            cmd, 0, f"help for {cmd[-1]!r}", "",
+            cmd,
+            0,
+            f"help for {cmd[-1]!r}",
+            "",
         ),
     )
     for fw in ("sglang", "vllm", "atom"):
         out = _grid_runner._probe_server_help_text(fw)
         assert isinstance(out, str)
-        assert out, (
-            f"_probe_server_help_text({fw!r}) returned an empty string; "
-            f"command registration likely missing"
-        )
+        assert out, f"_probe_server_help_text({fw!r}) returned an empty string; command registration likely missing"
 
 
 def test_probe_server_help_text_unknown_framework_returns_empty(
@@ -880,13 +955,18 @@ def test_probe_server_help_text_unknown_framework_returns_empty(
 
 
 def test_probe_sglang_help_text_back_compat_shim(
-    _reset_help_cache, monkeypatch,
+    _reset_help_cache,
+    monkeypatch,
 ):
     """The legacy ``_probe_sglang_help_text`` name is preserved as a thin wrapper so fixtures patching it keep working."""
     monkeypatch.setattr(
-        subprocess, "run",
+        subprocess,
+        "run",
         lambda cmd, *a, **kw: subprocess.CompletedProcess(
-            cmd, 0, "USAGE_SGLANG_LEGACY", "",
+            cmd,
+            0,
+            "USAGE_SGLANG_LEGACY",
+            "",
         ),
     )
     out = _grid_runner._probe_sglang_help_text()
@@ -896,7 +976,8 @@ def test_probe_sglang_help_text_back_compat_shim(
 
 
 def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
-    _reset_help_cache, monkeypatch,
+    _reset_help_cache,
+    monkeypatch,
 ):
     """When ``$FRAMEWORK=atom`` the compatibility filter validates variant flags against atom --help, dropping a sglang-only flag with a reason mentioning ``atom --help``."""
     monkeypatch.setenv("FRAMEWORK", "atom")
@@ -904,10 +985,7 @@ def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
     monkeypatch.setenv("MODEL_PATH", "/wekafs/models/DeepSeek-R1-0528")
 
     # Pre-populate the cache so the predicate reads from it without mocking subprocess.
-    _grid_runner._HELP_TEXT_CACHE["atom"] = (
-        "usage: atom-engine [--tensor-parallel-size INT] "
-        "[--enable-deepep-moe]"
-    )
+    _grid_runner._HELP_TEXT_CACHE["atom"] = "usage: atom-engine [--tensor-parallel-size INT] [--enable-deepep-moe]"
 
     # One variant's flag IS in the atom help (kept); one references a sglang-only flag (dropped).
     kept_variant = GridVariant(
@@ -928,3 +1006,170 @@ def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
         f"reason must mention `atom --help` so log readers can tell "
         f"which framework rejected the variant: {dropped[0]['reason']!r}"
     )
+
+
+# Section: dedup_vllm_server_args (#520) — vLLM/atom single-value flag collapse
+
+
+class TestDedupVllmServerArgs:
+    """``dedup_vllm_server_args`` collapses repeated vLLM single-value flags."""
+
+    def test_duplicate_attention_backend_keeps_last(self):
+        # The exact #520 repro: YAML base + variant both inject the flag.
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend ROCM_AITER_FA --attention-backend ROCM_FLASH",
+            "vllm",
+        )
+        assert out == "--attention-backend ROCM_FLASH"
+        assert out.count("--attention-backend") == 1
+
+    def test_identical_duplicate_collapses_to_single(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend ROCM_AITER_FA --attention-backend ROCM_AITER_FA",
+            "vllm",
+        )
+        assert out == "--attention-backend ROCM_AITER_FA"
+
+    def test_preserves_surrounding_and_unknown_flags_in_order(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--enforce-eager --attention-backend A --max-model-len 4096 --attention-backend B --trust-remote-code",
+            "vllm",
+        )
+        # Earlier --attention-backend span removed; everything else stays ordered.
+        assert out == ("--enforce-eager --max-model-len 4096 --attention-backend B --trust-remote-code")
+
+    def test_equals_form_is_deduped(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--gpu-memory-utilization=0.9 --gpu-memory-utilization=0.85",
+            "vllm",
+        )
+        assert out == "--gpu-memory-utilization=0.85"
+
+    def test_atom_framework_also_deduped(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend A --attention-backend B",
+            "atom",
+        )
+        assert out == "--attention-backend B"
+
+    def test_sglang_is_noop_repeats_preserved(self):
+        # sglang tolerates repeats (last-wins at the server); do not mangle.
+        raw = "--attention-backend aiter --attention-backend triton"
+        assert _grid_runner.dedup_vllm_server_args(raw, "sglang") == raw
+
+    def test_no_duplicates_returns_unchanged(self):
+        raw = "--attention-backend ROCM_AITER_FA --max-model-len 8192"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+    def test_empty_and_none_safe(self):
+        assert _grid_runner.dedup_vllm_server_args("", "vllm") == ""
+        assert _grid_runner.dedup_vllm_server_args(None, "vllm") == ""
+
+    def test_unparseable_string_returned_as_is(self):
+        # Unbalanced quote: leave it for vLLM to report rather than mangling.
+        raw = "--attention-backend 'unterminated"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw.strip()
+
+    def test_distinct_single_value_flags_untouched(self):
+        raw = "--max-num-seqs 256 --block-size 16 --kv-cache-dtype fp8"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+    def test_mixed_equals_and_space_forms_dedup_last_wins(self):
+        # `--flag value` (YAML base) then `--flag=value` (variant): last wins.
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend ROCM_AITER_FA --attention-backend=ROCM_FLASH",
+            "vllm",
+        )
+        assert out == "--attention-backend=ROCM_FLASH"
+
+    def test_mixed_equals_then_space_form_dedup_last_wins(self):
+        # Reverse order: `--flag=value` then `--flag value`.
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend=ROCM_AITER_FA --attention-backend ROCM_FLASH",
+            "vllm",
+        )
+        assert out == "--attention-backend ROCM_FLASH"
+
+    def test_three_occurrences_keep_only_last(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend A --attention-backend B --attention-backend C",
+            "vllm",
+        )
+        assert out == "--attention-backend C"
+
+    def test_json_space_value_flag_left_untouched(self):
+        # #520 review: a flag carrying a JSON/space value must NOT be tokenized
+        # and re-joined (would drop quotes -> {temperature: 0.7}). Leave the
+        # whole string verbatim, even with a duplicate single-value flag also
+        # present (the unquoted $EXTRA_*_ARGS expansion can't round-trip it).
+        raw = "--attention-backend A --attention-backend B --override-generation-config '{\"temperature\": 0.7}'"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+    def test_multi_value_flag_left_untouched(self):
+        # cuda-graph-bs takes a list; never collapse a string that carries one.
+        raw = "--attention-backend A --cuda-graph-bs 1 2 4 8 --attention-backend B"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+
+class TestCompactJsonServerArgs:
+    """JSON-valued flags must be space-free to survive Magpie's unquoted
+    ``$EXTRA_VLLM_ARGS`` splice (otherwise spec-decode / compilation-config
+    explore variants always crash the server at boot)."""
+
+    def test_compilation_config_separator_space_removed(self):
+        out = _grid_runner.compact_json_server_args(
+            '--compilation-config {"full_cuda_graph": true}', "vllm"
+        )
+        assert out == '--compilation-config {"full_cuda_graph":true}'
+        # the JSON value is now a single shell word under bash word-splitting
+        assert len(out.split()) == 2
+
+    def test_speculative_config_multikey(self):
+        out = _grid_runner.compact_json_server_args(
+            '--speculative-config {"method": "eagle", "num_speculative_tokens": 3}',
+            "vllm",
+        )
+        assert out == (
+            '--speculative-config {"method":"eagle","num_speculative_tokens":3}'
+        )
+        assert len(out.split()) == 2
+
+    def test_compact_json_server_args_internal_space_unsupported(self):
+        # json.dumps keeps spaces INSIDE string values; only separators shrink.
+        # Such a value is therefore NOT made a single shell word — under
+        # Magpie's unquoted $EXTRA_VLLM_ARGS expansion it still word-splits, so
+        # this flag shape is explicitly unsupported (documented limitation). We
+        # leave the value intact (do not corrupt it by stripping inner spaces),
+        # but assert the limitation so callers are not misled into thinking it
+        # is boot-safe.
+        out = _grid_runner.compact_json_server_args(
+            '--speculative-config {"model": "draft model name"}', "vllm"
+        )
+        # Value is preserved verbatim (separator space after ':' removed only).
+        assert out == '--speculative-config {"model":"draft model name"}'
+        # ...but it still splits into MORE than the ideal 2 words: the two
+        # internal spaces of "draft model name" survive, so the shell sees
+        # ['--speculative-config', '{"model":"draft', 'model', 'name"}'].
+        assert len(out.split()) == 4
+
+    def test_other_flags_around_json_untouched(self):
+        out = _grid_runner.compact_json_server_args(
+            '--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm"
+        )
+        assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
+
+    def test_sglang_is_noop(self):
+        raw = '--speculative-config {"method": "eagle"}'
+        assert _grid_runner.compact_json_server_args(raw, "sglang") == raw
+
+    def test_no_json_is_noop(self):
+        raw = "--block-size 128 --no-enable-prefix-caching"
+        assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
+
+    def test_malformed_json_left_verbatim(self):
+        raw = "--compilation-config {not json}"
+        assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
+
+    def test_empty_is_noop(self):
+        assert _grid_runner.compact_json_server_args("", "vllm") == ""
+        assert _grid_runner.compact_json_server_args(None, "vllm") == ""

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,9 +18,19 @@ from inference_optimizer.orchestrator.proposal_scorer import (
     _extract_scores_json,
 )
 from inference_optimizer.orchestrator.policy import SPECIALIST_FROM_AGENT_PREFIX
+from inference_optimizer.session_paths import (
+    conversations_path,
+    llm_calls_path,
+)
 
 
 # Fake OpenAI client (test seam)
+@dataclass
+class _FakeUsage:
+    prompt_tokens: int
+    completion_tokens: int
+
+
 @dataclass
 class _FakeMessage:
     content: str
@@ -33,6 +44,7 @@ class _FakeChoice:
 @dataclass
 class _FakeResp:
     choices: list[_FakeChoice]
+    usage: _FakeUsage | None = None
 
 
 class _FakeCompletions:
@@ -47,7 +59,10 @@ class _FakeCompletions:
         result = self._behaviour.get(model)
         if isinstance(result, BaseException):
             raise result
-        return _FakeResp(choices=[_FakeChoice(_FakeMessage(result or ""))])
+        return _FakeResp(
+            choices=[_FakeChoice(_FakeMessage(result or ""))],
+            usage=_FakeUsage(prompt_tokens=120, completion_tokens=30),
+        )
 
 
 class _FakeChat:
@@ -92,10 +107,7 @@ _PROPOSALS = [
 
 
 def _scores_json(*pairs: tuple[str, float, str]) -> str:
-    body = ", ".join(
-        f'"{name}": {{"score": {score}, "reason": "{reason}"}}'
-        for name, score, reason in pairs
-    )
+    body = ", ".join(f'"{name}": {{"score": {score}, "reason": "{reason}"}}' for name, score, reason in pairs)
     return f'```json\n{{"scores": {{{body}}}}}\n```'
 
 
@@ -120,6 +132,63 @@ async def test_score_two_models_happy_path():
     assert out["models"]["claude-opus-4-7"]["cuda_graph_bs_512"]["score"] == 8.0
     assert out["models"]["gpt-5.4"]["disable_radix"]["score"] == 5.0
     assert out["errors"] == {}
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+@pytest.mark.asyncio
+async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
+    """With ``session_dir`` set, each scoring call records both a token row
+    (component=proposal_scorer) and a full prompt/reply conversation row."""
+    session_dir = tmp_path / "SESSION"
+    session_dir.mkdir()
+    client = _FakeClient(
+        {
+            "claude-opus-4-7": _scores_json(("cuda_graph_bs_512", 8.0, "fit")),
+        }
+    )
+    scorer = ProposalScorer(
+        models=("claude-opus-4-7",),
+        client_factory=lambda: client,
+        session_dir=session_dir,
+    )
+    await scorer.score(gap=_GAP, proposals=_PROPOSALS, task_id="spec-7")
+
+    conv_rows = _read_jsonl(conversations_path(session_dir))
+    assert len(conv_rows) == 1
+    row = conv_rows[0]
+    assert row["component"] == "proposal_scorer"
+    assert row["role"] == "proposal_scorer"
+    assert row["model"] == "claude-opus-4-7"
+    # task_id threads onto the conversation row so its pair key matches the
+    # token row (and the collector can attribute the scoring spend).
+    assert row["task_id"] == "spec-7"
+    # The prompt carries the scoring instructions + proposals; the reply is
+    # the model's verbatim (fenced) scores JSON.
+    assert "cuda_graph_bs_512" in row["prompt"]
+    assert "cuda_graph_bs_512" in row["response"]
+
+    token_rows = _read_jsonl(llm_calls_path(session_dir))
+    scorer_rows = [r for r in token_rows if r["component"] == "proposal_scorer"]
+    assert scorer_rows
+    r = scorer_rows[0]
+    assert r["input_tokens"] == 120 and r["output_tokens"] == 30
+    # Attribution key + measured latency now land on the token row.
+    assert r["task_id"] == "spec-7"
+    assert r["latency_ms"] is not None and r["latency_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_scoring_without_session_dir_writes_no_trace(tmp_path: Path):
+    """The default (tests / no full-trace) path writes no conversation file."""
+    scorer = _make_scorer({"m1": _scores_json(("cuda_graph_bs_512", 7.0, "x"))})
+    await scorer.score(gap=_GAP, proposals=_PROPOSALS)
+    # session_dir is None → nothing on disk (and no crash).
+    assert scorer.session_dir is None
 
 
 @pytest.mark.asyncio
@@ -162,9 +231,9 @@ async def test_unparseable_reply_recorded_as_error():
 async def test_scores_clamped_and_unknown_names_dropped():
     behaviour = {
         "m1": _scores_json(
-            ("cuda_graph_bs_512", 99.0, "over"),       # clamp to 10
-            ("disable_radix", -3.0, "under"),          # clamp to 0
-            ("ghost_variant", 5.0, "not in set"),      # dropped
+            ("cuda_graph_bs_512", 99.0, "over"),  # clamp to 10
+            ("disable_radix", -3.0, "under"),  # clamp to 0
+            ("ghost_variant", 5.0, "not in set"),  # dropped
         ),
     }
     scorer = _make_scorer(behaviour)
@@ -227,10 +296,7 @@ class _StubSharedState:
 
     def bump_specialist_domain_empty_streak(self, domain, *, empty) -> int:
         d = domain or "unknown"
-        self.specialist_domain_empty_streak[d] = (
-            0 if not empty
-            else self.specialist_domain_empty_streak.get(d, 0) + 1
-        )
+        self.specialist_domain_empty_streak[d] = 0 if not empty else self.specialist_domain_empty_streak.get(d, 0) + 1
         return self.specialist_domain_empty_streak[d]
 
     def update_last_specialist(self, snapshot) -> None:
@@ -267,20 +333,21 @@ def _done():
 
 @pytest.mark.asyncio
 async def test_coordinator_attaches_ensemble_scores(tmp_path):
-    scorer = _make_scorer({
-        "claude-opus-4-7": _scores_json(("cuda_graph_bs_512", 8.0, "fit")),
-    })
+    scorer = _make_scorer(
+        {
+            "claude-opus-4-7": _scores_json(("cuda_graph_bs_512", 8.0, "fit")),
+        }
+    )
     c = _coord(tmp_path, scorer)
     task = _StubTask(task_id="t1", params={"gap_symptom": "cuda stalls"})
     await c._record_specialist_result(
-        task=task, done_payload=_done(),
+        task=task,
+        done_payload=_done(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
     )
     row = c.shared_state.specialist_rounds[0]
     assert "ensemble_scores" in row
-    assert row["ensemble_scores"]["models"]["claude-opus-4-7"][
-        "cuda_graph_bs_512"
-    ]["score"] == 8.0
+    assert row["ensemble_scores"]["models"]["claude-opus-4-7"]["cuda_graph_bs_512"]["score"] == 8.0
 
 
 @pytest.mark.asyncio
@@ -288,7 +355,8 @@ async def test_coordinator_no_scorer_no_key(tmp_path):
     c = _coord(tmp_path, None)
     task = _StubTask(task_id="t1", params={})
     await c._record_specialist_result(
-        task=task, done_payload=_done(),
+        task=task,
+        done_payload=_done(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
     )
     assert "ensemble_scores" not in c.shared_state.specialist_rounds[0]
@@ -303,7 +371,8 @@ async def test_coordinator_scorer_exception_still_records(tmp_path):
     c = _coord(tmp_path, _BoomScorer())
     task = _StubTask(task_id="t1", params={})
     await c._record_specialist_result(
-        task=task, done_payload=_done(),
+        task=task,
+        done_payload=_done(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
     )
     assert len(c.shared_state.specialist_rounds) == 1
@@ -319,7 +388,8 @@ async def test_coordinator_empty_proposals_not_scored(tmp_path):
     payload["empty"] = True
     task = _StubTask(task_id="t1", params={})
     await c._record_specialist_result(
-        task=task, done_payload=payload,
+        task=task,
+        done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
     )
     assert "ensemble_scores" not in c.shared_state.specialist_rounds[0]
@@ -329,38 +399,40 @@ async def test_coordinator_empty_proposals_not_scored(tmp_path):
 # 3. Renderer
 def _real_state():
     from inference_optimizer.orchestrator.shared_state import SharedState
+
     return SharedState()
 
 
 def test_render_omits_section_when_no_scores():
     st = _real_state()
     st.specialist_rounds = [
-        {"round_id": "r1", "domain": "serving_specialist",
-         "proposal_set": [{"name": "v1"}]},
+        {"round_id": "r1", "domain": "serving_specialist", "proposal_set": [{"name": "v1"}]},
     ]
     assert st.to_proposal_scores_summary() == ""
 
 
 def test_render_shows_per_model_side_by_side():
     st = _real_state()
-    st.specialist_rounds = [{
-        "round_id": "r1",
-        "domain": "serving_specialist",
-        "proposal_set": [{"name": "cuda_graph_bs_512"}, {"name": "disable_radix"}],
-        "ensemble_scores": {
-            "scale": "0-10",
-            "models": {
-                "claude-opus-4-7": {
-                    "cuda_graph_bs_512": {"score": 8.0, "reason": "fit"},
-                    "disable_radix": {"score": 4.0, "reason": "marginal"},
+    st.specialist_rounds = [
+        {
+            "round_id": "r1",
+            "domain": "serving_specialist",
+            "proposal_set": [{"name": "cuda_graph_bs_512"}, {"name": "disable_radix"}],
+            "ensemble_scores": {
+                "scale": "0-10",
+                "models": {
+                    "claude-opus-4-7": {
+                        "cuda_graph_bs_512": {"score": 8.0, "reason": "fit"},
+                        "disable_radix": {"score": 4.0, "reason": "marginal"},
+                    },
+                    "gpt-5.4": {
+                        "cuda_graph_bs_512": {"score": 6.5, "reason": "plausible"},
+                    },
                 },
-                "gpt-5.4": {
-                    "cuda_graph_bs_512": {"score": 6.5, "reason": "plausible"},
-                },
+                "errors": {},
             },
-            "errors": {},
-        },
-    }]
+        }
+    ]
     text = st.to_proposal_scores_summary()
     assert "Advisory only" in text
     assert "cuda_graph_bs_512" in text
@@ -374,16 +446,18 @@ def test_render_shows_per_model_side_by_side():
 
 def test_render_reports_unavailable_models():
     st = _real_state()
-    st.specialist_rounds = [{
-        "round_id": "r1",
-        "domain": "comm_specialist",
-        "proposal_set": [{"name": "v1"}],
-        "ensemble_scores": {
-            "scale": "0-10",
-            "models": {"good": {"v1": {"score": 7.0, "reason": "ok"}}},
-            "errors": {"bad": "timed out"},
-        },
-    }]
+    st.specialist_rounds = [
+        {
+            "round_id": "r1",
+            "domain": "comm_specialist",
+            "proposal_set": [{"name": "v1"}],
+            "ensemble_scores": {
+                "scale": "0-10",
+                "models": {"good": {"v1": {"score": 7.0, "reason": "ok"}}},
+                "errors": {"bad": "timed out"},
+            },
+        }
+    ]
     text = st.to_proposal_scores_summary()
     # Anonymized: failing slug "bad" -> rater_1, must not leak.
     assert "bad" not in text
@@ -435,14 +509,20 @@ def test_render_rater_labels_stable_across_rounds():
 # 4. Resume idempotency
 @pytest.mark.asyncio
 async def test_resume_idempotent_on_round_id(tmp_path):
-    scorer = _make_scorer({
-        "m1": _scores_json(("cuda_graph_bs_512", 8.0, "fit")),
-    })
+    scorer = _make_scorer(
+        {
+            "m1": _scores_json(("cuda_graph_bs_512", 8.0, "fit")),
+        }
+    )
     c = _coord(tmp_path, scorer)
-    task = _StubTask(task_id="t1", params={}, )
+    task = _StubTask(
+        task_id="t1",
+        params={},
+    )
     for _ in range(2):
         await c._record_specialist_result(
-            task=task, done_payload=_done(),
+            task=task,
+            done_payload=_done(),
             source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
         )
     assert len(c.shared_state.specialist_rounds) == 1
