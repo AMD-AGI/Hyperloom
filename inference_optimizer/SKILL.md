@@ -830,9 +830,14 @@ root** (parent of per-session dirs). The CLI creates
 `$USER_DATA_PATH/<model_basename>/<UTC_ts>/` via `make_session_dir`.
 Launcher stdout / PID files go under that session's `optimizer_runs/`.
 For sandboxes that don't persist `export`s across shell calls (Cursor agents),
-copy `inference_optimizer/scripts/setup_env.sh.example` to
-`$USER_DATA_PATH/optimizer_runs/setup_env.sh`, fill in the workload block,
-and `.` it each call.
+copy `inference_optimizer/scripts/setup_env.sh.example` to a
+**session-scoped** path:
+`$USER_DATA_PATH/optimizer_runs/setup_env_${CLAW_SESSION_ID:-$(date +%s)}.sh`,
+fill in the workload block, and `.` it each call.
+
+**IMPORTANT**: never use a shared filename like `setup_env.sh` — concurrent
+sessions on different pods share `$USER_DATA_PATH` via WekaFS; a single file
+causes MODEL_PATH race conditions where sessions launch the wrong model.
 After `setsid nohup ... &`, locate the optimizer via
 `pgrep -af 'inference_optimizer.*optimize'` — `$!` may be a wrapper PID.
 
