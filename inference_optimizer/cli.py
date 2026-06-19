@@ -3392,8 +3392,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_options=robustness_options,
         no_kernel=no_kernel,
     )
-    # Bug A: expose active session_dir to in-process executors (read in report.py::_resolve_session_dir).
-    os.environ["USER_DATA_PATH"] = str(session_dir)
+    # Expose active session_dir to in-process executors via the canonical
+    # pin env var (read by paths.session_dir() -> report.py, sweep.py, etc.).
+    # Note: make_session_dir() already sets this, but we reinforce it here
+    # for --resume paths where make_session_dir may not have been called.
+    # DO NOT overwrite USER_DATA_PATH — it must remain the workspace root
+    # so concurrent sessions, install.sh, and setup_env.sh resolution work
+    # correctly on shared filesystems (WekaFS).
+    os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
     # Production: enable strict PolicyGate path-containment (escaping intents land as policy_denied).
     os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
     # PolicyGate R1 phase_incompatible enforcement for production runs (env affects cli boot path only).
