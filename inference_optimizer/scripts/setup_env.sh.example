@@ -3,6 +3,12 @@
 
 # Source this at the start of every shell call when your shell does
 # not persist `export`s between invocations. Idempotent.
+#
+# NAMING: When deploying on shared filesystems (WekaFS), save this file with
+# a session-scoped name to avoid race conditions from concurrent sessions:
+#   $USER_DATA_PATH/optimizer_runs/setup_env_${CLAW_SESSION_ID:-$$}.sh
+# NEVER use a bare "setup_env.sh" — multiple pods writing to the same path
+# will overwrite each other's MODEL_PATH.
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 export REPO_ROOT
