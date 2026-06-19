@@ -45,8 +45,9 @@ on:
   # disjoint, so the whole pool keeps cycling (re-running finished models too).
   # The tail batch is short (not head-wrapped) so consecutive fires never
   # double-submit the head models. Manual workflow_dispatch is unaffected.
-  schedule:
-    - cron: '0 4,16 * * *'
+  # PAUSED 2026-06-19: scheduled auto-run disabled on request. Uncomment to resume.
+  # schedule:
+  #   - cron: '0 4,16 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > legacy hf_top) ──────
