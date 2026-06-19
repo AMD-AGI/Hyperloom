@@ -1198,6 +1198,9 @@ class SafeOptimizeClient:
         if prompt_suffix:
             body["promptSuffix"] = prompt_suffix
         attempts = 8
+        # Captured before the first POST so the dedup lookup only matches a task
+        # this call created (not an unrelated older one for the same model).
+        submit_started_at = time.time()
         for attempt in range(1, attempts + 1):
             try:
                 # The submit POST can be slow when the core42 apiserver is
@@ -1217,7 +1220,25 @@ class SafeOptimizeClient:
                     or "timeout" in low
                     or "connection" in low  # ConnectionError / HTTPSConnectionPool
                 )
-                if not transient or attempt >= attempts:
+                if not transient:
+                    raise
+                # The POST is NOT idempotent: a slow/dropped response can hide a
+                # task the backend actually created. Blindly retrying then spawns
+                # a SECOND Claw session for the same model (the duplicate /
+                # abandoned-PRELUDE dirs). Before retrying, look the task up by
+                # modelId+workspace; if it already exists, reuse it.
+                existing = self._find_recent_submitted_task(model_id, chosen_ws, submit_started_at)
+                if existing and existing.get("id"):
+                    log.warning(
+                        "[submit] transient submit failure but a task for modelId=%s "
+                        "already exists server-side (id=%s) — reusing it instead of "
+                        "re-POSTing to avoid a duplicate session: %s",
+                        model_id,
+                        existing.get("id"),
+                        msg,
+                    )
+                    return existing
+                if attempt >= attempts:
                     raise
                 delay = random.uniform(10, 60)
                 log.warning(
@@ -1230,6 +1251,53 @@ class SafeOptimizeClient:
                 )
                 time.sleep(delay)
         raise RuntimeError("unreachable submit retry loop exit")
+
+    def _find_recent_submitted_task(self, model_id: str, workspace: str, since_ts: float) -> dict | None:
+        """Find a task this submit call may have created before its POST failed.
+
+        A transient submit failure (slow/timeout/dropped response) can hide a
+        task the backend actually created. Look it up by ``modelId`` +
+        ``workspace`` so the retry path can reuse it instead of creating a
+        duplicate Claw session.
+
+        Args:
+            model_id (str): Registered SaFE model id used in the submit body.
+            workspace (str): Submit workspace used in the submit body.
+            since_ts (float): Unix time captured just before the first POST;
+                only tasks created at/after this (minus clock-skew slack) match.
+
+        Returns:
+            dict | None: The most recently-created matching task, or ``None``.
+        """
+        from urllib.parse import quote
+
+        try:
+            data = self._request(
+                "GET",
+                f"api/v1/optimization/tasks?modelId={quote(model_id)}"
+                f"&workspace={quote(workspace)}&limit=20",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.debug("[submit] dedup lookup failed (will fall back to retry): %s", e)
+            return None
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return None
+        floor = since_ts - 120.0  # 2-min slack for client/server clock skew
+        best = None
+        best_ct = floor
+        for it in items:
+            if not isinstance(it, dict) or (it.get("modelId") or "") != model_id:
+                continue
+            created = str(it.get("createdAt") or "")
+            try:
+                ct = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+            except Exception:  # noqa: BLE001
+                continue
+            if ct >= best_ct:
+                best_ct = ct
+                best = it
+        return best
 
     # ── Task lifecycle ──
 
