@@ -70,9 +70,7 @@ def slugify(topic: str) -> str:
             (i for i, ch in enumerate(normalised) if ord(ch) > 127),
             -1,
         )
-        raise SlugifyError(
-            f"non_ascii: topic contains non-ASCII characters (offset={offset})"
-        )
+        raise SlugifyError(f"non_ascii: topic contains non-ASCII characters (offset={offset})")
     lowered = normalised.lower()
     replaced = _NON_ALNUM_RE.sub("-", lowered)
     trimmed = _LEADING_TRAILING_DASH_RE.sub("", replaced)
@@ -83,9 +81,7 @@ def slugify(topic: str) -> str:
         digest = hashlib.sha256(topic.encode("utf-8")).hexdigest()[:7]
         return f"{folded[:_TRUNC_LEN]}-{digest}"
     if len(folded) < _MIN_LEN:
-        raise SlugifyError(
-            f"too_short: slug={folded!r} length={len(folded)} < {_MIN_LEN}"
-        )
+        raise SlugifyError(f"too_short: slug={folded!r} length={len(folded)} < {_MIN_LEN}")
     return folded
 
 

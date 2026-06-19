@@ -60,11 +60,13 @@ def test_classify_specialist_failure(status, error, expected_type, expected_retr
 
 
 def test_only_infra_failures_are_in_the_retryable_set():
-    assert RETRYABLE_SPECIALIST_FAILURES == frozenset({
-        SpecialistFailureType.TIMEOUT,
-        SpecialistFailureType.STALE_HEARTBEAT,
-        SpecialistFailureType.CRASH,
-    })
+    assert RETRYABLE_SPECIALIST_FAILURES == frozenset(
+        {
+            SpecialistFailureType.TIMEOUT,
+            SpecialistFailureType.STALE_HEARTBEAT,
+            SpecialistFailureType.CRASH,
+        }
+    )
 
 
 def test_classify_is_case_and_whitespace_insensitive():

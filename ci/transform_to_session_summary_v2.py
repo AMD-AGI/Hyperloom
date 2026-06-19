@@ -27,16 +27,16 @@ We auto-detect:
 Usage
 -----
     # Single file (writes <input>.v2.json next to it)
-    python scripts/transform_to_session_summary_v2.py session_breakdown.json
+    python ci/transform_to_session_summary_v2.py session_breakdown.json
 
     # Explicit output path
-    python scripts/transform_to_session_summary_v2.py session_breakdown.json -o out.json
+    python ci/transform_to_session_summary_v2.py session_breakdown.json -o out.json
 
     # Batch: every *.json under a directory, output into another directory
-    python scripts/transform_to_session_summary_v2.py --in-dir ./remote_sessions --out-dir ./v2_out
+    python ci/transform_to_session_summary_v2.py --in-dir ./remote_sessions --out-dir ./v2_out
 
     # Stdout (one file only)
-    python scripts/transform_to_session_summary_v2.py session_breakdown.json -o -
+    python ci/transform_to_session_summary_v2.py session_breakdown.json -o -
 
 The output file name in batch mode is `<session_id>.json` when we can read a
 session id, otherwise it mirrors the input file's relative path.
@@ -55,6 +55,7 @@ from typing import Any, Dict, List, Optional
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def safe_get(d: Any, *keys: str, default: Any = None) -> Any:
     """Safely traverse nested dicts by a sequence of keys.
@@ -81,10 +82,19 @@ def safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 # Gap 1: baseline.extra_server_args / extra_envs
 # ---------------------------------------------------------------------------
 
+
 def _patch_baseline(data: Dict) -> List[str]:
-    """Mirror `extra_server_args` / `extra_envs` onto `baseline` (which lacks
-    them) from baseline.invocation. Reads the legacy ``extra_sglang_args`` key
-    but always writes the canonical ``extra_server_args``.
+    """Mirror ``extra_server_args`` / ``extra_envs`` onto ``baseline``.
+
+    Fills the fields from ``baseline.invocation`` when ``baseline`` lacks
+    them. Reads the legacy ``extra_sglang_args`` key but always writes the
+    canonical ``extra_server_args``.
+
+    Args:
+        data: The session summary data dict (mutated in place).
+
+    Returns:
+        Human-readable notes describing each patch applied.
     """
     notes = []
     baseline = data.get("baseline")
@@ -111,6 +121,7 @@ def _patch_baseline(data: Dict) -> List[str]:
 # ---------------------------------------------------------------------------
 # Gap 2: capability_summary.<phase>.best_gain_pct
 # ---------------------------------------------------------------------------
+
 
 def _best_gain_for_phase(data: Dict, phase: str) -> Optional[float]:
     """
@@ -188,6 +199,7 @@ def _patch_capability_summary(data: Dict) -> List[str]:
 # Gap 3: phase_timeline[].extras key rename
 # ---------------------------------------------------------------------------
 
+
 def _patch_phase_timeline(data: Dict) -> List[str]:
     """
     Frontend reads one of: `extra_server_args`, `best_extra_server_args`, `sglang_args`.
@@ -211,11 +223,7 @@ def _patch_phase_timeline(data: Dict) -> List[str]:
         extras = entry.get("extras")
         if not isinstance(extras, dict):
             continue
-        if (
-            "best_extra_server_args" not in extras
-            and "extra_server_args" not in extras
-            and "sglang_args" not in extras
-        ):
+        if "best_extra_server_args" not in extras and "extra_server_args" not in extras and "sglang_args" not in extras:
             # Back-compat: canonical candidate_extra_server_args wins over the
             # legacy candidate_extra_sglang_args.
             cand = extras.get("candidate_extra_server_args")
@@ -230,6 +238,7 @@ def _patch_phase_timeline(data: Dict) -> List[str]:
 # ---------------------------------------------------------------------------
 # Gap 4: detected[].geak / .oob structured aggregates
 # ---------------------------------------------------------------------------
+
 
 def _aggregate_backend(data: Dict, kernel_id: str, backend: str) -> Dict[str, Any]:
     """
@@ -320,6 +329,7 @@ def _patch_detected_kernels(data: Dict) -> List[str]:
 # Master transform
 # ---------------------------------------------------------------------------
 
+
 def is_already_v2(data: Dict) -> bool:
     """Cheap heuristic: presence of all 4 V2 fields means it's already V2.
 
@@ -334,14 +344,12 @@ def is_already_v2(data: Dict) -> bool:
     # ``extra_sglang_args`` instead of ``extra_server_args``; treat
     # either as evidence the field is present.
     baseline_ok = isinstance(data.get("baseline"), dict) and (
-        "extra_server_args" in data["baseline"]
-        or "extra_sglang_args" in data["baseline"]
+        "extra_server_args" in data["baseline"] or "extra_sglang_args" in data["baseline"]
     )
 
     cs = data.get("capability_summary") or {}
     cs_ok = all(
-        isinstance(cs.get(p), dict) and "best_gain_pct" in cs[p]
-        for p in ("params", "backends", "sweep", "geak", "oob")
+        isinstance(cs.get(p), dict) and "best_gain_pct" in cs[p] for p in ("params", "backends", "sweep", "geak", "oob")
     )
 
     pt = data.get("phase_timeline") or []
@@ -349,22 +357,16 @@ def is_already_v2(data: Dict) -> bool:
     for entry in pt:
         extras = (entry or {}).get("extras") or {}
         # Back-compat: accept either canonical or legacy key.
-        has_candidate = (
-            "candidate_extra_server_args" in extras
-            or "candidate_extra_sglang_args" in extras
-        )
+        has_candidate = "candidate_extra_server_args" in extras or "candidate_extra_sglang_args" in extras
         if has_candidate and not (
-            "best_extra_server_args" in extras
-            or "extra_server_args" in extras
-            or "sglang_args" in extras
+            "best_extra_server_args" in extras or "extra_server_args" in extras or "sglang_args" in extras
         ):
             pt_ok = False
             break
 
     detected = safe_get(data, "kernel_lifecycle", "detected", default=[]) or []
     detected_ok = all(
-        isinstance(k, dict) and isinstance(k.get("geak"), dict) and isinstance(k.get("oob"), dict)
-        for k in detected
+        isinstance(k, dict) and isinstance(k.get("geak"), dict) and isinstance(k.get("oob"), dict) for k in detected
     )
 
     return baseline_ok and cs_ok and pt_ok and detected_ok
@@ -415,6 +417,7 @@ def transform(data: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def transform_file(in_path: Path, out_path: Optional[Path]) -> Path:
     """Read a session breakdown file, transform it, and write the V2 output.
@@ -496,8 +499,11 @@ def main():
     parser.add_argument("-o", "--out", help="Output path (single input only). Use '-' for stdout.")
     parser.add_argument("--in-dir", help="Directory containing *.json to transform recursively.")
     parser.add_argument("--out-dir", help="Directory to write transformed files into.")
-    parser.add_argument("--pattern", default="session_breakdown.json",
-                        help="When using --in-dir, file name glob (default: session_breakdown.json)")
+    parser.add_argument(
+        "--pattern",
+        default="session_breakdown.json",
+        help="When using --in-dir, file name glob (default: session_breakdown.json)",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 

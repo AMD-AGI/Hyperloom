@@ -35,10 +35,19 @@ def _hermetic_env(monkeypatch):
     """Clear the workload env knobs and disable the TP clamp so the rendered YAML is hermetic."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     for key in (
-        "SGLANG_CONTEXT_HEADROOM_TOKENS", "SGLANG_CONTEXT_FLOOR_TOKENS",
+        "SGLANG_CONTEXT_HEADROOM_TOKENS",
+        "SGLANG_CONTEXT_FLOOR_TOKENS",
         "SGLANG_WATCHDOG_TIMEOUT",
-        "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "RANDOM_RANGE_RATIO",
-        "ROCR_VISIBLE_DEVICES", "PRECISION", "RUN_EVAL", "FRAMEWORK",
+        "CONC",
+        "ISL",
+        "OSL",
+        "MAX_MODEL_LEN",
+        "TP",
+        "RANDOM_RANGE_RATIO",
+        "ROCR_VISIBLE_DEVICES",
+        "PRECISION",
+        "RUN_EVAL",
+        "FRAMEWORK",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -58,7 +67,11 @@ def _write_model(tmp_path: Path, max_pos: int | None, *, nested: bool = False) -
 
 
 def _write_yaml(
-    path: Path, *, framework: str, model: str, runner_type: str | None = None,
+    path: Path,
+    *,
+    framework: str,
+    model: str,
+    runner_type: str | None = None,
 ) -> None:
     cfg: dict = {
         "benchmark": {
@@ -97,7 +110,8 @@ def _materialize_envs(
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
-        base, out,
+        base,
+        out,
         extra_server_args=extra_server_args,
         extra_envs=extra_envs,
     )
@@ -177,11 +191,14 @@ def test_inject_uses_cap_below_native_window(tmp_path):
     assert _context_length_value(out) == 10240
 
 
-@pytest.mark.parametrize("existing", [
-    "--context-length 6144",
-    "--context-length=6144",
-    "--foo 1 --context-length 6144 --bar 2",
-])
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "--context-length 6144",
+        "--context-length=6144",
+        "--foo 1 --context-length 6144 --bar 2",
+    ],
+)
 def test_inject_does_not_override_existing(tmp_path, existing):
     """Required case 2: an operator-supplied ``--context-length`` wins."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
@@ -195,12 +212,13 @@ def test_inject_does_not_override_existing(tmp_path, existing):
 def test_inject_noop_for_non_sglang(tmp_path, framework):
     """Required case 3: vllm / atom get no ``--context-length`` injected."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
-    assert (
-        inject_sglang_context_length("--foo", framework, model, 256, 256)
-        == "--foo"
-    )
+    assert inject_sglang_context_length("--foo", framework, model, 256, 256) == "--foo"
     assert "--context-length" not in inject_sglang_context_length(
-        "--gpu-memory-utilization 0.9", framework, model, 256, 256,
+        "--gpu-memory-utilization 0.9",
+        framework,
+        model,
+        256,
+        256,
     )
 
 
@@ -220,12 +238,8 @@ def test_inject_noop_when_maxpos_unreadable(tmp_path):
 def test_inject_empty_or_unknown_framework_treated_as_sglang(tmp_path):
     """An empty/unknown framework routes to EXTRA_SGLANG_ARGS, so the cap applies there too."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
-    assert _context_length_value(
-        inject_sglang_context_length("", "", model, 256, 256)
-    ) == 8192
-    assert _context_length_value(
-        inject_sglang_context_length("", None, model, 256, 256)
-    ) == 8192
+    assert _context_length_value(inject_sglang_context_length("", "", model, 256, 256)) == 8192
+    assert _context_length_value(inject_sglang_context_length("", None, model, 256, 256)) == 8192
 
 
 # materialize_config_with_envs (the production choke point)
@@ -242,7 +256,9 @@ def test_materialize_sglang_injects_context_length_cap(tmp_path):
 def test_materialize_sglang_respects_user_context_length(tmp_path):
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     envs = _materialize_envs(
-        tmp_path, framework="sglang", model=model,
+        tmp_path,
+        framework="sglang",
+        model=model,
         extra_server_args="--context-length 6144",
     )
     sglang_args = envs["EXTRA_SGLANG_ARGS"]
@@ -277,15 +293,14 @@ def _default_non_amd_gpu(monkeypatch: pytest.MonkeyPatch):
     upstream ``dual_chunk_flash_attn`` assertions hold without real GPU
     hardware. MI30x-path tests override this with their own monkeypatch."""
     monkeypatch.setattr(
-        "inference_optimizer.cli._autodetect_gpu_type", lambda: None,
+        "inference_optimizer.cli._autodetect_gpu_type",
+        lambda: None,
     )
     monkeypatch.delenv("GPU_TYPE", raising=False)
     monkeypatch.delenv("HYPERLOOM_DUAL_CHUNK_BACKEND", raising=False)
 
 
-def _write_dual_chunk_model(
-    tmp_path: Path, *, dual_chunk: bool, nested: bool = False
-) -> str:
+def _write_dual_chunk_model(tmp_path: Path, *, dual_chunk: bool, nested: bool = False) -> str:
     model_dir = tmp_path / "dcmodel"
     model_dir.mkdir(parents=True, exist_ok=True)
     cfg: dict = {"model_type": "qwen2", "max_position_embeddings": 1_010_000}
@@ -317,7 +332,8 @@ def test_dual_chunk_on_amd_returns_canonical_backend(tmp_path, monkeypatch):
     """AMD dual-chunk models are blocked by preflight; if inject still runs
     it should return the canonical backend (not triton which sglang rejects)."""
     monkeypatch.setattr(
-        "inference_optimizer.cli._autodetect_gpu_type", lambda: "mi300x",
+        "inference_optimizer.cli._autodetect_gpu_type",
+        lambda: "mi300x",
     )
     model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
     out = inject_sglang_attention_backend("--foo bar", "sglang", model)
@@ -329,7 +345,10 @@ def test_dual_chunk_uses_explicit_gpu_type_before_autodetect(tmp_path):
     """The caller's runner gpu_type must win when runtime probing is unavailable."""
     model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
     out = inject_sglang_attention_backend(
-        "--foo bar", "sglang", model, gpu_type="mi300x",
+        "--foo bar",
+        "sglang",
+        model,
+        gpu_type="mi300x",
     )
     assert "--attention-backend dual_chunk_flash_attn" in out
 
@@ -337,7 +356,8 @@ def test_dual_chunk_uses_explicit_gpu_type_before_autodetect(tmp_path):
 def test_dual_chunk_backend_env_override(tmp_path, monkeypatch):
     """HYPERLOOM_DUAL_CHUNK_BACKEND wins over hardware detection."""
     monkeypatch.setattr(
-        "inference_optimizer.cli._autodetect_gpu_type", lambda: "mi300x",
+        "inference_optimizer.cli._autodetect_gpu_type",
+        lambda: "mi300x",
     )
     monkeypatch.setenv("HYPERLOOM_DUAL_CHUNK_BACKEND", "flashinfer")
     model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
@@ -361,9 +381,7 @@ def test_dual_chunk_does_not_override_operator_backend(tmp_path):
 @pytest.mark.parametrize("framework", ["vllm", "atom"])
 def test_dual_chunk_noop_for_non_sglang(tmp_path, framework):
     model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
-    assert (
-        inject_sglang_attention_backend("--foo", framework, model) == "--foo"
-    )
+    assert inject_sglang_attention_backend("--foo", framework, model) == "--foo"
 
 
 def test_dual_chunk_noop_when_config_unreadable(tmp_path):
@@ -382,7 +400,10 @@ def test_materialize_sglang_injects_dual_chunk_backend(tmp_path):
 def test_materialize_sglang_uses_runner_type_for_dual_chunk_backend(tmp_path):
     model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
     envs = _materialize_envs(
-        tmp_path, framework="sglang", model=model, runner_type="mi300x",
+        tmp_path,
+        framework="sglang",
+        model=model,
+        runner_type="mi300x",
     )
     sglang_args = envs["EXTRA_SGLANG_ARGS"]
     assert "--attention-backend dual_chunk_flash_attn" in sglang_args

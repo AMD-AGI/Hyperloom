@@ -32,9 +32,7 @@ def test_extract_whitelist_hits_are_lowercase_and_sorted() -> None:
 
 def test_extract_amd_cdna_codenames() -> None:
     """AMD CDNA accelerator codenames must survive extract_keywords()."""
-    out = extract_keywords(
-        "improve sglang bf16 throughput on mi300x; also gfx942 cdna3"
-    )
+    out = extract_keywords("improve sglang bf16 throughput on mi300x; also gfx942 cdna3")
     assert "mi300x" in out
     assert "gfx942" in out
     assert "cdna3" in out
@@ -45,9 +43,7 @@ def test_extract_amd_cdna_codenames() -> None:
 
 def test_extract_nvidia_codenames() -> None:
     """NVIDIA Ampere/Hopper/Blackwell codenames must survive extract_keywords()."""
-    out = extract_keywords(
-        "port mega moe to sm90 hopper h100 from sm80 ampere a100"
-    )
+    out = extract_keywords("port mega moe to sm90 hopper h100 from sm80 ampere a100")
     assert "sm90" in out
     assert "sm80" in out
     assert "hopper" in out
@@ -73,9 +69,7 @@ def test_extract_atom_framework_token() -> None:
 
 def test_extract_atom_specific_terms() -> None:
     """Pin atom-flavoured terms (MTP / DP attention / kv_cache_dtype / torch_profiler_dir) so search relevance stays on the atom axis."""
-    out = extract_keywords(
-        "atom mtp dp_attention kv_cache_dtype fp8 torch_profiler_dir on mi355x"
-    )
+    out = extract_keywords("atom mtp dp_attention kv_cache_dtype fp8 torch_profiler_dir on mi355x")
     assert "atom" in out
     assert "mtp" in out
     assert "dp_attention" in out
@@ -148,9 +142,7 @@ def test_score_title_handles_empty_inputs() -> None:
 
 def test_score_title_snake_case_token() -> None:
     """snake_case tokens count as a single token by the regex token split."""
-    assert score_title_against_keywords(
-        "tensor_parallel optimisation", ["tensor_parallel"]
-    ) == 1
+    assert score_title_against_keywords("tensor_parallel optimisation", ["tensor_parallel"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +160,7 @@ def test_score_anti_dense_vs_moe_pr_demoted() -> None:
     moe_score = score_title_with_anti_signal(moe_title, gap)
     dense_score = score_title_with_anti_signal(dense_title, gap)
     assert dense_score > moe_score, (
-        f"dense PR must rank above MoE PR under dense gap "
-        f"(got dense={dense_score} vs moe={moe_score})"
+        f"dense PR must rank above MoE PR under dense gap (got dense={dense_score} vs moe={moe_score})"
     )
 
 
@@ -200,8 +191,7 @@ def test_score_anti_inactive_when_trigger_absent() -> None:
     score = score_title_with_anti_signal(moe_title, gap)
     legacy = score_title_against_keywords(moe_title, gap)
     assert score == float(legacy), (
-        f"anti must not activate without a trigger keyword in the gap "
-        f"(got new={score} vs legacy={legacy})"
+        f"anti must not activate without a trigger keyword in the gap (got new={score} vs legacy={legacy})"
     )
 
 

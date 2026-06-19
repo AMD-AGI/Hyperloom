@@ -40,17 +40,16 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 
 def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE,
-                  payload={"topic": "heartbeat", "body_md": "ok"})
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel":        MockBackend(silent, name="k"),
-        "critic":        MockBackend(silent, name="c"),
-        "robustness":    MockBackend(silent, name="r"),
+        "kernel": MockBackend(silent, name="k"),
+        "critic": MockBackend(silent, name="c"),
+        "robustness": MockBackend(silent, name="r"),
     }
 
 
@@ -115,9 +114,13 @@ def test_target_tput_zero_rejected():
 def test_target_baseline_loads_ref_tput(tmp_path):
     workspace = tmp_path / "ref-baseline"
     workspace.mkdir()
-    (workspace / "benchmark_report.json").write_text(json.dumps({
-        "throughput": {"output_throughput": 1234.5},
-    }))
+    (workspace / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "throughput": {"output_throughput": 1234.5},
+            }
+        )
+    )
     obj = TargetBaselineObjective(baseline_dir=str(workspace))
     s = SharedState(baseline_tput=1000.0, current_best={"tput": 1000.0})
     assert obj.kind() == "baseline"
@@ -144,8 +147,7 @@ def test_target_baseline_missing_report_rejected(tmp_path):
 # TimeOnlyObjective
 def test_time_only_never_reached():
     obj = TimeOnlyObjective()
-    s = SharedState(baseline_tput=999.0, current_best={"tput": 9999.0},
-                    cumulative_gain=99.0)
+    s = SharedState(baseline_tput=999.0, current_best={"tput": 9999.0}, cumulative_gain=99.0)
     assert obj.kind() == "time_only"
     assert obj.progress(s) == 0.0
     assert obj.remaining_gap(s) == float("inf")
@@ -171,9 +173,13 @@ def test_build_objective_time_only_when_no_target():
 
 def test_build_objective_rejects_multiple_targets():
     with pytest.raises(ObjectiveError, match="at most one TARGET_"):
-        build_objective({
-            "MAX_HOURS": "1", "TARGET_GAIN_PCT": "5", "TARGET_TPUT_PER_GPU": "100",
-        })
+        build_objective(
+            {
+                "MAX_HOURS": "1",
+                "TARGET_GAIN_PCT": "5",
+                "TARGET_TPUT_PER_GPU": "100",
+            }
+        )
 
 
 def test_build_objective_rejects_missing_max_hours():
@@ -187,12 +193,14 @@ def test_build_objective_rejects_zero_max_hours():
 
 
 def test_build_objective_treats_empty_target_as_unset():
-    obj = build_objective({
-        "MAX_HOURS": "1",
-        "TARGET_GAIN_PCT": "",
-        "TARGET_TPUT_PER_GPU": None,
-        "TARGET_DIR": "",
-    })
+    obj = build_objective(
+        {
+            "MAX_HOURS": "1",
+            "TARGET_GAIN_PCT": "",
+            "TARGET_TPUT_PER_GPU": None,
+            "TARGET_DIR": "",
+        }
+    )
     assert isinstance(obj, TimeOnlyObjective)
 
 
@@ -245,11 +253,13 @@ def _write_marker_target_baseline(session_dir: Path) -> None:
     path = target_baseline_json(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({
-            "status": "no_target",
-            "reason": "no_target_gpu_configured",
-            "row_count": 0,
-        }),
+        json.dumps(
+            {
+                "status": "no_target",
+                "reason": "no_target_gpu_configured",
+                "row_count": 0,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -295,9 +305,9 @@ async def test_run_closing_phase_skips_reactor(session_dir):
     spy = _SpyBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="o")
     backends = {
         "orchestration": spy,
-        "kernel":        MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="k"),
-        "critic":        MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="c"),
-        "robustness":    MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="r"),
+        "kernel": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="k"),
+        "critic": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="c"),
+        "robustness": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="r"),
     }
     c = Coordinator(session_dir, backends=backends)
     c.sub.register_executor("report", report_executor)
@@ -340,7 +350,9 @@ async def test_run_stops_on_signal_via_stop_event(session_dir):
 async def test_run_stops_on_emergency_crash_count(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        c.shared_state.crash_count = 30
+        # Record crashes through the counter so the trailing-window rate sees them.
+        for _ in range(30):
+            c.shared_state.increment_crash_count()
         reason = await c.run(max_ticks=10)
         assert reason == "emergency"
     finally:
@@ -431,7 +443,8 @@ async def test_run_finally_labels_residual_escape_as_coordinator_exception(
 async def test_run_emergency_threshold_can_be_lowered_per_call(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        c.shared_state.crash_count = 4
+        for _ in range(4):
+            c.shared_state.increment_crash_count()
         reason = await c.run(max_ticks=10, crash_emergency_threshold=3)
         assert reason == "emergency"
     finally:
@@ -481,8 +494,10 @@ async def test_run_async_stop_when_callback(session_dir):
     """stop_when can be an async function too."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
+
         async def acb(_c):
             return True
+
         reason = await c.run(stop_when=acb, max_ticks=10)
         assert reason == "custom"
     finally:

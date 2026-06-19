@@ -63,6 +63,15 @@ class OpenAIHttpClient:
     timeout_sec: float = 60.0
 
     def complete(self, *, system: str, user: str) -> str:
+        """Issue a single chat-completion request and return the text.
+
+        Args:
+            system: System prompt content.
+            user: User prompt content.
+
+        Returns:
+            The content of the first choice's message.
+        """
         import httpx  # local import (see module docstring)
 
         url = self.base_url.rstrip("/") + "/chat/completions"
@@ -78,8 +87,7 @@ class OpenAIHttpClient:
         try:
             r = httpx.post(
                 url,
-                headers={"Authorization": f"Bearer {self.api_key}",
-                         "Content-Type": "application/json"},
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                 content=json.dumps(body),
                 timeout=self.timeout_sec,
             )
@@ -90,9 +98,7 @@ class OpenAIHttpClient:
         try:
             return data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as exc:
-            raise LLMClientError(
-                f"unexpected openai response shape: {data!r}"
-            ) from exc
+            raise LLMClientError(f"unexpected openai response shape: {data!r}") from exc
 
 
 @dataclass
@@ -149,9 +155,7 @@ class AnthropicHttpClient:
             text_parts = [b.get("text") or "" for b in blocks if b.get("type") == "text"]
             return "".join(text_parts)
         except Exception as exc:  # noqa: BLE001
-            raise LLMClientError(
-                f"unexpected anthropic response shape: {data!r}"
-            ) from exc
+            raise LLMClientError(f"unexpected anthropic response shape: {data!r}") from exc
 
 
 def build_client_from_env() -> Any | None:
@@ -161,6 +165,10 @@ def build_client_from_env() -> Any | None:
     ``HYPERLOOM_REPORT_MODEL``, ``HYPERLOOM_REPORT_MAX_TOKENS`` and the
     per-backend base-url/api-key vars; returns ``None``
     (deterministic-only) when required vars are missing.
+
+    Returns:
+        A configured backend client instance, or ``None`` when the backend
+        is disabled or required environment variables are missing.
     """
     backend = (os.environ.get("HYPERLOOM_REPORT_LLM_BACKEND") or "none").lower()
     if backend in ("", "none", "off", "disabled"):
@@ -182,14 +190,18 @@ def build_client_from_env() -> Any | None:
             )
             return None
         return OpenAIHttpClient(
-            base_url=base, api_key=key, model=model,
+            base_url=base,
+            api_key=key,
+            model=model,
             max_output_tokens=max_tokens,
         )
     if backend == "anthropic":
         base = os.environ.get("ANTHROPIC_BASE_URL")
-        key = (os.environ.get("ANTHROPIC_API_KEY")
-               or os.environ.get("CLAUDE_API_KEY")
-               or os.environ.get("PRIMUS_SAFE_API_KEY"))
+        key = (
+            os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("CLAUDE_API_KEY")
+            or os.environ.get("PRIMUS_SAFE_API_KEY")
+        )
         if not (base and key):
             log.warning(
                 "HYPERLOOM_REPORT_LLM_BACKEND=anthropic but ANTHROPIC_BASE_URL "
@@ -198,11 +210,13 @@ def build_client_from_env() -> Any | None:
             )
             return None
         return AnthropicHttpClient(
-            base_url=base, api_key=key, model=model,
+            base_url=base,
+            api_key=key,
+            model=model,
             max_output_tokens=max_tokens,
         )
     log.warning(
-        "Unknown HYPERLOOM_REPORT_LLM_BACKEND=%r; falling back to "
-        "deterministic-only report.", backend,
+        "Unknown HYPERLOOM_REPORT_LLM_BACKEND=%r; falling back to deterministic-only report.",
+        backend,
     )
     return None
