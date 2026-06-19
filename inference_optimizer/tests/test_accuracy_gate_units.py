@@ -77,9 +77,13 @@ class TestParseEvalResults:
     def test_handles_unrecognized_metric(self, tmp_path):
         eval_dir = tmp_path / "eval_003"
         eval_dir.mkdir()
-        (eval_dir / "results.json").write_text(json.dumps({
-            "results": {"task": {"unknown_metric": 0.5}},
-        }))
+        (eval_dir / "results.json").write_text(
+            json.dumps(
+                {
+                    "results": {"task": {"unknown_metric": 0.5}},
+                }
+            )
+        )
         out = ag.parse_eval_results(tmp_path)
         assert out["accuracy"] is None
         assert "no recognized metric" in out["error"]

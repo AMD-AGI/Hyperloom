@@ -17,42 +17,42 @@ from quantization_agent.driver.outcomes import (
 # IDs; the enum stores them by name only (the row number is implicit in the
 # §A documentation).
 _AUTO_RECOVER_NAMES = {
-    "intent_parse_failed",                        # #8
-    "analysis_artifact_invalid_or_missing",       # #10
-    "plan_artifact_invalid_or_missing",           # #11
-    "manifest_artifact_invalid_or_missing",       # #12
-    "must_have_config_missing_or_invalid",        # #14
-    "must_have_tokenizer_missing",                # #15
-    "must_validate_config_mismatch",              # #17
-    "should_have_aux_missing",                    # #19
-    "nice_to_have_skipped",                       # #20
-    "eval_env_unavailable",                       # #22
-    "validation_report_absent",                   # #25
-    "must_validate_skipped",                      # #27
-    "eval_oom",                                   # #29
+    "intent_parse_failed",  # #8
+    "analysis_artifact_invalid_or_missing",  # #10
+    "plan_artifact_invalid_or_missing",  # #11
+    "manifest_artifact_invalid_or_missing",  # #12
+    "must_have_config_missing_or_invalid",  # #14
+    "must_have_tokenizer_missing",  # #15
+    "must_validate_config_mismatch",  # #17
+    "should_have_aux_missing",  # #19
+    "nice_to_have_skipped",  # #20
+    "eval_env_unavailable",  # #22
+    "validation_report_absent",  # #25
+    "must_validate_skipped",  # #27
+    "eval_oom",  # #29
 }
 
 _AUTO_FAIL_NAMES = {
-    "quark_root_missing",                # #1
-    "exec_model_load_failed",            # #4
-    "exec_calibration_data_missing",     # #5
-    "quark_skill_unavailable",           # #7
-    "model_path_unreachable",            # #9
-    "validator_self_test_failed",        # #13
-    "must_validate_md5_mismatch",        # #18
-    "workspace_unwritable",              # #23
-    "sdk_runtime_error",                 # #24
-    "quantized_load_failed",             # #28
-    "upstream_change_required",          # derived from #30
+    "quark_root_missing",  # #1
+    "exec_model_load_failed",  # #4
+    "exec_calibration_data_missing",  # #5
+    "quark_skill_unavailable",  # #7
+    "model_path_unreachable",  # #9
+    "validator_self_test_failed",  # #13
+    "must_validate_md5_mismatch",  # #18
+    "workspace_unwritable",  # #23
+    "sdk_runtime_error",  # #24
+    "quantized_load_failed",  # #28
+    "upstream_change_required",  # derived from #30
 }
 
 _ASK_NAMES = {
-    "checkpoint_aborted",                # #2
-    "exec_oom",                          # #3
-    "export_crashed",                    # #6
-    "must_have_weights_missing",         # #16
-    "eval_gap_exceeded",                 # #21
-    "fuzzy_check_failed",                # #26
+    "checkpoint_aborted",  # #2
+    "exec_oom",  # #3
+    "export_crashed",  # #6
+    "must_have_weights_missing",  # #16
+    "eval_gap_exceeded",  # #21
+    "fuzzy_check_failed",  # #26
 }
 
 
@@ -93,7 +93,10 @@ def test_ask_retryable_subset_of_ask():
     assert ASK_RETRYABLE.issubset(ASK)
     # The four CI-auto-retry rows per design §A bottom of table.
     assert {o.value for o in ASK_RETRYABLE} == {
-        "exec_oom", "export_crashed", "must_have_weights_missing", "fuzzy_check_failed",
+        "exec_oom",
+        "export_crashed",
+        "must_have_weights_missing",
+        "fuzzy_check_failed",
     }
     # checkpoint_aborted and eval_gap_exceeded are Ask but NOT retryable —
     # retrying them won't synthesize missing info / shrink the gap.

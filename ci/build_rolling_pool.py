@@ -11,6 +11,7 @@ Outputs:
 
 Run:  python3 ci/build_rolling_pool.py
 """
+
 from __future__ import annotations
 
 import json
@@ -39,15 +40,40 @@ from generate_hf_matrix import slugify  # noqa: E402
 
 
 def _norm(repo: str | None) -> str:
+    """Normalize a repo id for case-insensitive comparison.
+
+    Args:
+        repo: Repo id, possibly ``None``.
+
+    Returns:
+        The trimmed, lower-cased repo id (empty string when ``repo`` is falsy).
+    """
     return (repo or "").strip().lower()
 
 
 def _candidate_keys(repo_id: str) -> set[str]:
+    """Build the set of slug keys a candidate may be matched by.
+
+    Args:
+        repo_id: Full Hugging Face repo id (``org/name``).
+
+    Returns:
+        Slugs for both the full repo id and its basename, since Pulse may store
+        either form as ``model_name``.
+    """
     repo_id = (repo_id or "").strip()
     return {slugify(repo_id), slugify(repo_id.split("/")[-1])}
 
 
 def _pulse_model_keys() -> set[str]:
+    """Fetch slug keys for every model already seen in Pulse breakdowns.
+
+    Pages through the Pulse session-breakdowns API (with retries) and collects
+    a slugified key per ``model_name``.
+
+    Returns:
+        The set of slugified model keys that have already been run.
+    """
     keys: set[str] = set()
     offset = 0
     limit = 200
@@ -79,6 +105,15 @@ def _pulse_model_keys() -> set[str]:
 
 
 def main() -> int:
+    """Merge the production and new-model pools and write the rolling outputs.
+
+    Reads the curated production corpus and the new-models list, applies the
+    production exclusion policy, de-duplicates by repo id, then writes the
+    merged pool, the reserved manual top-100, and the unrun subset.
+
+    Returns:
+        Process exit code (``0`` on success).
+    """
     prod = json.loads(PROD.read_text(encoding="utf-8"))
     newm = json.loads(NEWM.read_text(encoding="utf-8"))
 
@@ -90,6 +125,15 @@ def main() -> int:
     excl_kw = [k.lower() for k in policy.get("exclusion_keywords", [])]
 
     def excluded(repo: str) -> bool:
+        """Return whether a repo is filtered out by the exclusion policy.
+
+        Args:
+            repo: Candidate repo id.
+
+        Returns:
+            ``True`` when the repo is empty, exactly excluded, or matches an
+            exclusion keyword.
+        """
         k = _norm(repo)
         if not k:
             return True
@@ -104,13 +148,16 @@ def main() -> int:
         rid = c.get("repo_id")
         if not rid or excluded(rid):
             continue
-        merged.setdefault(_norm(rid), {
-            "repo_id": rid,
-            "params_b": c.get("params_b"),
-            "downloads": c.get("downloads") or 0,
-            "pipeline_tag": c.get("pipeline_tag") or "text-generation",
-            "source": "production_1000",
-        })
+        merged.setdefault(
+            _norm(rid),
+            {
+                "repo_id": rid,
+                "params_b": c.get("params_b"),
+                "downloads": c.get("downloads") or 0,
+                "pipeline_tag": c.get("pipeline_tag") or "text-generation",
+                "source": "production_1000",
+            },
+        )
 
     # new_models_to_run — convert num_parameters (raw count) -> params_b.
     for m in newm.get("models", []):
@@ -130,8 +177,7 @@ def main() -> int:
             "source": "new_models_to_run",
         }
 
-    allc = sorted(merged.values(),
-                  key=lambda x: x.get("downloads") or 0, reverse=True)
+    allc = sorted(merged.values(), key=lambda x: x.get("downloads") or 0, reverse=True)
     for i, c in enumerate(allc):
         c["pool_index"] = i
 
@@ -139,37 +185,61 @@ def main() -> int:
     manual_keys = {_norm(c.get("repo_id")) for c in manual}
     pulse_keys = _pulse_model_keys()
     unrun = [
-        c for c in allc
-        if _norm(c.get("repo_id")) not in manual_keys
-        and not (_candidate_keys(c.get("repo_id") or "") & pulse_keys)
+        c
+        for c in allc
+        if _norm(c.get("repo_id")) not in manual_keys and not (_candidate_keys(c.get("repo_id") or "") & pulse_keys)
     ]
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     def dump(path: Path, cands: list[dict], note: str) -> None:
-        path.write_text(json.dumps({
-            "schema_version": "hyperloom.production_corpus.v1",
-            "pool_id": path.stem,
-            "note": note,
-            "generated_at": generated_at,
-            "sort": "downloads desc",
-            "sources": [PROD.name, NEWM.name],
-            "count": len(cands),
-            "candidates": cands,
-        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        """Write a candidate pool to ``path`` as the standard corpus JSON.
 
-    dump(PROD, allc,
-         "Merged full pool: production_1000 ∪ new_models_to_run, de-duped by "
-         "repo_id and sorted by downloads desc. This replaces the previous "
-         "1000-ish production pool as the main corpus.")
-    dump(MANUAL_OUT, manual,
-         f"Top-{MANUAL_N} by downloads, RESERVED for manual workflow_dispatch "
-         "(operator triggers these by hand; NOT in the cron priority pool).")
-    dump(UNRUN_OUT, unrun,
-         "Current not-on-Pulse-session-breakdowns subset from the merged full "
-         "pool, with manual_100 removed. Matching uses either full repo slug or "
-         "repo basename slug because SaFE breakdown model_name often stores the "
-         "basename. optimize-submit cron prioritizes this file and also passes "
-         "exclude_leaderboard=true to avoid duplicate submits after models finish.")
+        Args:
+            path: Destination file; its stem is used as the ``pool_id``.
+            cands: Candidate records to serialize.
+            note: Human-readable description stored under the ``note`` key.
+        """
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "hyperloom.production_corpus.v1",
+                    "pool_id": path.stem,
+                    "note": note,
+                    "generated_at": generated_at,
+                    "sort": "downloads desc",
+                    "sources": [PROD.name, NEWM.name],
+                    "count": len(cands),
+                    "candidates": cands,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    dump(
+        PROD,
+        allc,
+        "Merged full pool: production_1000 ∪ new_models_to_run, de-duped by "
+        "repo_id and sorted by downloads desc. This replaces the previous "
+        "1000-ish production pool as the main corpus.",
+    )
+    dump(
+        MANUAL_OUT,
+        manual,
+        f"Top-{MANUAL_N} by downloads, RESERVED for manual workflow_dispatch "
+        "(operator triggers these by hand; NOT in the cron priority pool).",
+    )
+    dump(
+        UNRUN_OUT,
+        unrun,
+        "Current not-on-Pulse-session-breakdowns subset from the merged full "
+        "pool, with manual_100 removed. Matching uses either full repo slug or "
+        "repo basename slug because SaFE breakdown model_name often stores the "
+        "basename. optimize-submit cron prioritizes this file and also passes "
+        "exclude_leaderboard=true to avoid duplicate submits after models finish.",
+    )
 
     prod_n = len(prod.get("candidates", []))
     new_n = len(newm.get("models", []))

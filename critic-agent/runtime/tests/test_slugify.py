@@ -31,13 +31,10 @@ def test_golden_cases_all_pass():
         out = slugify(case["input"])
         if "output_pattern" in case:
             assert re.match(case["output_pattern"], out), (
-                f"input={case['input']!r} got={out!r} expected pattern "
-                f"{case['output_pattern']!r}"
+                f"input={case['input']!r} got={out!r} expected pattern {case['output_pattern']!r}"
             )
         else:
-            assert out == case["output"], (
-                f"input={case['input']!r} got={out!r} expected {case['output']!r}"
-            )
+            assert out == case["output"], f"input={case['input']!r} got={out!r} expected {case['output']!r}"
 
 
 def test_slugify_rejects_non_ascii():

@@ -20,6 +20,7 @@ from inference_optimizer.orchestrator.action_executors.benchmark_result import (
 
 # Unit helpers (formerly test_benchmark_result_units.py)
 
+
 # scalar coercion helpers
 class TestScalarHelpers:
     @pytest.mark.parametrize(
@@ -28,7 +29,7 @@ class TestScalarHelpers:
             ("3.14", 3.14),
             (42, 42.0),
             (None, None),
-            (True, None),     # booleans are skipped intentionally
+            (True, None),  # booleans are skipped intentionally
             ("nope", None),
             ([], None),
         ],
@@ -165,7 +166,8 @@ class TestRescueCandidatePaths:
         ws = tmp_path / "ws"
         ws.mkdir()
         out = br._rescue_candidate_paths(
-            ws, subprocess_started_unix=leak.stat().st_mtime + 60.0,
+            ws,
+            subprocess_started_unix=leak.stat().st_mtime + 60.0,
         )
         assert out == []
 
@@ -189,7 +191,8 @@ def _write_inferencex(path: Path, tput: float = 1761.6, completed: int = 640) ->
 
 
 def test_rescue_from_env_path_adopted_after_subprocess_start(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -208,18 +211,13 @@ def test_rescue_from_env_path_adopted_after_subprocess_start(
     assert measurement["valid_measurement"] is True
     assert measurement["output_throughput"] == pytest.approx(1761.6)
     assert measurement["completed_requests"] == 640
-    assert any(
-        w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"]
-    )
+    assert any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
     copied = workspace / leak_path.name
     assert copied.exists()
     assert measurement["raw_result_path"] == str(copied)
     assert json.loads(copied.read_text())["output_throughput"] == 1761.6
     assert leak_path.exists()
-    assert any(
-        w == f"rescued_from_leaked_path:{leak_path}"
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert any(w == f"rescued_from_leaked_path:{leak_path}" for w in measurement["nonfatal_warnings"])
 
 
 def test_rescue_rejects_stale_leak_with_older_mtime(tmp_path, monkeypatch):
@@ -238,10 +236,7 @@ def test_rescue_rejects_stale_leak_with_older_mtime(tmp_path, monkeypatch):
     )
     assert measurement["valid_measurement"] is False
     assert measurement.get("output_throughput") is None
-    assert not any(
-        w.startswith("rescued_from_leaked_path:")
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert not any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
 
 
 def test_rescue_skips_when_in_workspace_salvage_succeeded(tmp_path, monkeypatch):
@@ -260,10 +255,7 @@ def test_rescue_skips_when_in_workspace_salvage_succeeded(tmp_path, monkeypatch)
     # in-workspace value wins; rescue path should not have been used.
     assert measurement["valid_measurement"] is True
     assert measurement["output_throughput"] == pytest.approx(2000.0)
-    assert not any(
-        w.startswith("rescued_from_leaked_path:")
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert not any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
 
 
 def test_rescue_no_candidates_keeps_invalid_measurement(tmp_path, monkeypatch):
@@ -279,14 +271,12 @@ def test_rescue_no_candidates_keeps_invalid_measurement(tmp_path, monkeypatch):
         subprocess_started_unix=0.0,
     )
     assert measurement["valid_measurement"] is False
-    assert not any(
-        w.startswith("rescued_from_leaked_path:")
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert not any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
 
 
 def test_rescue_directory_scanned_for_inferencex_result_glob(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -306,14 +296,12 @@ def test_rescue_directory_scanned_for_inferencex_result_glob(
     )
     assert measurement["valid_measurement"] is True
     assert measurement["output_throughput"] in (100.0, 200.0)
-    assert any(
-        w.startswith("rescued_from_leaked_path:")
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
 
 
 def test_subprocess_started_unix_none_disables_mtime_gate(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -353,16 +341,14 @@ def test_rescue_copies_leaked_file_into_workspace(tmp_path, monkeypatch):
     assert body["output_throughput"] == 1234.5
     assert body["completed_requests"] == 500
     assert measurement["raw_result_path"] == str(copied)
-    assert any(
-        w == f"rescued_from_leaked_path:{leak_path}"
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert any(w == f"rescued_from_leaked_path:{leak_path}" for w in measurement["nonfatal_warnings"])
     # The leak file itself is not touched (we copy, never move/delete).
     assert leak_path.exists()
 
 
 def test_rescue_copy_failure_falls_back_to_leak_path(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """If the copy step fails, salvage must still advertise the leaked measurement."""
     workspace = tmp_path / "workspace"
@@ -373,7 +359,9 @@ def test_rescue_copy_failure_falls_back_to_leak_path(
 
     # Force the copy helper to fail so we exercise the fallback branch.
     monkeypatch.setattr(
-        br, "_materialize_rescue_into_workspace", lambda *_a, **_k: None,
+        br,
+        "_materialize_rescue_into_workspace",
+        lambda *_a, **_k: None,
     )
 
     measurement = extract_benchmark_measurement(
@@ -386,10 +374,7 @@ def test_rescue_copy_failure_falls_back_to_leak_path(
     assert measurement["raw_result_path"] == str(leak_path)
     warnings = measurement["nonfatal_warnings"]
     assert any(w.startswith("rescued_from_leaked_path:") for w in warnings)
-    assert any(
-        w.startswith("rescued_copy_into_workspace_failed:")
-        for w in warnings
-    )
+    assert any(w.startswith("rescued_copy_into_workspace_failed:") for w in warnings)
 
 
 # Harvest pass (formerly test_harvest_leaked_artifacts.py): copy diagnostics leaked under /workspace/ into the per-task workspace.
@@ -427,8 +412,7 @@ def test_harvest_copies_every_default_glob(tmp_path):
     )
 
     by_name = {src.name: dst for src, dst in harvested}
-    assert {"server.log", "gpu_metrics.csv", "profile_run.trace.json.gz",
-            "inferencex_result.json"} <= set(by_name)
+    assert {"server.log", "gpu_metrics.csv", "profile_run.trace.json.gz", "inferencex_result.json"} <= set(by_name)
     for dst in by_name.values():
         assert dst.parent == destination
         assert dst.exists()
@@ -569,7 +553,8 @@ def test_harvest_reads_env_leak_roots(tmp_path, monkeypatch):
     _touch(root_a / "server.log", "from-a")
     _touch(root_b / "gpu_metrics.csv", "from-b")
     monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LEAK_ROOTS", f"{root_a}:{root_b}",
+        "INFERENCE_OPTIMIZER_LEAK_ROOTS",
+        f"{root_a}:{root_b}",
     )
 
     harvested = harvest_leaked_artifacts(
@@ -616,3 +601,83 @@ def test_harvest_creates_destination_if_missing(tmp_path):
     assert destination.is_dir()
     assert (destination / "server.log").read_text() == "log body"
     assert harvested
+
+
+# ---------------------------------------------------------------------------
+# Approximate throughput for killed-overtime variants (server.log parsing)
+# ---------------------------------------------------------------------------
+_SGLANG_LOG = """\
+[2026-06-12 10:00:00] INFO: server started
+Decode batch. #running-req: 64, #token: 1000, token usage: 0.10, gen throughput (token/s): 100.0, #queue-req: 0
+Decode batch. #running-req: 64, #token: 2000, token usage: 0.20, gen throughput (token/s): 900.0, #queue-req: 0
+Decode batch. #running-req: 64, #token: 3000, token usage: 0.30, gen throughput (token/s): 1000.0, #queue-req: 0
+Decode batch. #running-req: 64, #token: 4000, token usage: 0.40, gen throughput (token/s): 1100.0, #queue-req: 0
+Decode batch. #running-req: 64, #token: 5000, token usage: 0.50, gen throughput (token/s): 1200.0, #queue-req: 0
+"""
+
+_VLLM_LOG = """\
+INFO: Started server process
+Avg prompt throughput: 5000.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 64 reqs
+Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 800.0 tokens/s, Running: 64 reqs
+Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1000.0 tokens/s, Running: 64 reqs
+Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1200.0 tokens/s, Running: 64 reqs
+"""
+
+
+def test_estimate_from_sglang_server_log(tmp_path):
+    """sglang ``gen throughput`` lines parse; warmup-trimmed steady mean returned."""
+    log_path = tmp_path / "server.log"
+    log_path.write_text(_SGLANG_LOG)
+    est = br.estimate_output_throughput_from_server_log(log_path)
+    assert est is not None
+    # 5 positive samples; warmup_skip=int(5*0.25)=1 drops the 100.0 ramp.
+    # mean(900,1000,1100,1200) = 1050.0
+    assert est["output_throughput"] == pytest.approx(1050.0)
+    assert est["num_samples"] == 5
+    assert est["source_path"] == str(log_path)
+
+
+def test_estimate_from_vllm_server_log_filters_zero(tmp_path):
+    """vllm ``Avg generation throughput`` parses; prefill-only zeros dropped."""
+    log_path = tmp_path / "server.log"
+    log_path.write_text(_VLLM_LOG)
+    est = br.estimate_output_throughput_from_server_log(log_path)
+    assert est is not None
+    # 3 positive samples (the 0.0 prefill window is filtered);
+    # warmup_skip=int(3*0.25)=0 keeps all -> mean(800,1000,1200)=1000.0
+    assert est["output_throughput"] == pytest.approx(1000.0)
+    assert est["num_samples"] == 3
+
+
+def test_estimate_returns_none_without_samples(tmp_path):
+    """A log with no throughput markers yields no estimate."""
+    log_path = tmp_path / "server.log"
+    log_path.write_text("INFO: nothing useful here\nWARN: still nothing\n")
+    assert br.estimate_output_throughput_from_server_log(log_path) is None
+
+
+def test_estimate_returns_none_for_missing_file(tmp_path):
+    """A non-existent log path is tolerated (returns None, never raises)."""
+    assert br.estimate_output_throughput_from_server_log(tmp_path / "absent.log") is None
+
+
+def test_estimate_killed_variant_prefers_richest_log(tmp_path):
+    """``estimate_killed_variant_throughput`` scans the slot recursively and
+    uses the largest server.log (the engine's full decode trace)."""
+    slot = tmp_path / "variant_00_vA"
+    (slot / "benchmark_sglang_x").mkdir(parents=True)
+    # A tiny harvested stub plus the full in-slot log; the larger one wins.
+    (slot / "server.log").write_text(_SGLANG_LOG)
+    (slot / "benchmark_sglang_x" / "server.log").write_text(
+        "Decode batch. gen throughput (token/s): 5.0, #queue-req: 0\n"
+    )
+    est = br.estimate_killed_variant_throughput(slot)
+    assert est is not None
+    assert est["output_throughput"] == pytest.approx(1050.0)
+
+
+def test_estimate_killed_variant_none_when_no_logs(tmp_path):
+    """No server.log anywhere under the slot -> no estimate."""
+    slot = tmp_path / "variant_00_vA"
+    slot.mkdir()
+    assert br.estimate_killed_variant_throughput(slot) is None

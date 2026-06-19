@@ -63,9 +63,7 @@ def _task_id(model: str) -> str:
         str: The resolved or generated task identifier.
     """
     explicit = (
-        os.environ.get("HYPERLOOM_TASK_ID")
-        or os.environ.get("SAFE_TASK_ID")
-        or os.environ.get("CLAW_SESSION_ID")
+        os.environ.get("HYPERLOOM_TASK_ID") or os.environ.get("SAFE_TASK_ID") or os.environ.get("CLAW_SESSION_ID")
     )
     if explicit:
         return explicit
@@ -99,7 +97,10 @@ def _build_parser() -> argparse.ArgumentParser:
         output, model, service URL, token, timeout, and ``--strict`` options.
     """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task-dir", default=os.environ.get("HYPERLOOM_RESULT_DIR") or os.environ.get("USER_DATA_PATH") or "/workspace/hyperloom")
+    parser.add_argument(
+        "--task-dir",
+        default=os.environ.get("HYPERLOOM_RESULT_DIR") or os.environ.get("USER_DATA_PATH") or "/workspace/hyperloom",
+    )
     parser.add_argument("--out-dir", default="")
     parser.add_argument("--model", default="")
     parser.add_argument("--display-name", default="")

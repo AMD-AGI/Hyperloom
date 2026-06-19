@@ -46,6 +46,23 @@ class TestCoerceRuntimeValue:
         assert krh._coerce_runtime_value(value) == expected
 
 
+# _backend_order
+class TestBackendOrder:
+    def test_documented_kernel_opt_backends_env_is_honored(self, monkeypatch):
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+        monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+        monkeypatch.setenv("KERNEL_OPT_BACKENDS", "geak")
+
+        assert krh._backend_order({}) == ["geak"]
+
+    def test_documented_kernel_opt_backends_env_is_case_normalized(self, monkeypatch):
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+        monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+        monkeypatch.setenv("KERNEL_OPT_BACKENDS", " GEAK , CoDeX ")
+
+        assert krh._backend_order({}) == ["geak", "codex"]
+
+
 # _candidate_env_allowed
 class TestCandidateEnvAllowed:
     @pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"])
@@ -74,10 +91,7 @@ class TestRuntimeGeneratedKernel:
         if not markers:
             pytest.skip("no runtime markers in build")
         marker = next(iter(markers))
-        assert (
-            krh._is_runtime_generated_kernel("kernel", f"/tmp/{marker}_x.py")
-            is True
-        )
+        assert krh._is_runtime_generated_kernel("kernel", f"/tmp/{marker}_x.py") is True
 
     def test_reusable_source_root_overrides_compile_marker(self):
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
@@ -87,10 +101,7 @@ class TestRuntimeGeneratedKernel:
         marker = next(iter(markers))
         reusable_root = next(iter(roots))
         # Name matches but source lives under a reusable root → False.
-        assert (
-            krh._is_runtime_generated_kernel(marker, f"{reusable_root}/foo.py")
-            is False
-        )
+        assert krh._is_runtime_generated_kernel(marker, f"{reusable_root}/foo.py") is False
 
 
 # _split_server_args
@@ -120,33 +131,49 @@ class TestLoadCandidateMetadata:
 
     def test_reads_kernel_from_disk(self, tmp_path):
         candidates = tmp_path / "hot.json"
-        candidates.write_text(json.dumps({
-            "hot_kernels": [
-                {"kernel_id": "k0", "name": "first"},
-                {"kernel_id": "k1", "name": "second"},
-            ],
-        }))
-        out = krh._load_candidate_metadata({
-            "candidates_path": str(candidates),
-            "kernel_id": "k1",
-        })
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {"kernel_id": "k0", "name": "first"},
+                        {"kernel_id": "k1", "name": "second"},
+                    ],
+                }
+            )
+        )
+        out = krh._load_candidate_metadata(
+            {
+                "candidates_path": str(candidates),
+                "kernel_id": "k1",
+            }
+        )
         assert out["name"] == "second"
 
     def test_returns_empty_on_missing_kernel(self, tmp_path):
         candidates = tmp_path / "hot.json"
         candidates.write_text(json.dumps({"hot_kernels": []}))
-        assert krh._load_candidate_metadata({
-            "candidates_path": str(candidates),
-            "kernel_id": "missing",
-        }) == {}
+        assert (
+            krh._load_candidate_metadata(
+                {
+                    "candidates_path": str(candidates),
+                    "kernel_id": "missing",
+                }
+            )
+            == {}
+        )
 
     def test_returns_empty_on_bad_json(self, tmp_path):
         candidates = tmp_path / "hot.json"
         candidates.write_text("{not json")
-        assert krh._load_candidate_metadata({
-            "candidates_path": str(candidates),
-            "kernel_id": "x",
-        }) == {}
+        assert (
+            krh._load_candidate_metadata(
+                {
+                    "candidates_path": str(candidates),
+                    "kernel_id": "x",
+                }
+            )
+            == {}
+        )
 
 
 # _load_materialized_workload_metadata
@@ -185,13 +212,16 @@ class TestLoadMaterializedWorkloadMetadata:
         "framework,env_name,expected_args",
         [
             ("sglang", "EXTRA_SGLANG_ARGS", "--mem-fraction-static=0.8"),
-            ("vllm",   "EXTRA_VLLM_ARGS",   "--gpu-memory-utilization 0.9"),
-            ("atom",   "EXTRA_ATOM_ARGS",
-             "--trust-remote-code --level 2 --enable-expert-parallel"),
+            ("vllm", "EXTRA_VLLM_ARGS", "--gpu-memory-utilization 0.9"),
+            ("atom", "EXTRA_ATOM_ARGS", "--trust-remote-code --level 2 --enable-expert-parallel"),
         ],
     )
     def test_server_args_read_from_per_framework_env_key(
-        self, tmp_path, framework, env_name, expected_args,
+        self,
+        tmp_path,
+        framework,
+        env_name,
+        expected_args,
     ):
         """The handler reads the per-framework ``EXTRA_<FRAMEWORK>_ARGS`` slot, not always ``EXTRA_SGLANG_ARGS``."""
         cfg = tmp_path / f"magpie_{framework}.yaml"
@@ -211,8 +241,7 @@ class TestLoadMaterializedWorkloadMetadata:
         runtime = out["runtime_args"]
         assert runtime["framework"] == framework
         assert runtime["server_args"] == expected_args, (
-            f"framework={framework!r} expected server_args="
-            f"{expected_args!r}; got {runtime['server_args']!r}."
+            f"framework={framework!r} expected server_args={expected_args!r}; got {runtime['server_args']!r}."
         )
 
     def test_atom_server_args_not_read_from_extra_sglang_args(self, tmp_path):
@@ -269,22 +298,13 @@ class TestReusableSourceRootsAtom:
     def test_includes_atom_editable_path(self):
         # The matcher lowercases its source-file input, so the stored prefix is
         # lowercase ``/app/atom/atom/`` even though the real path is ``/app/ATOM/atom/``.
-        assert any(
-            "/app/atom/atom/" in r.lower()
-            for r in krh._reusable_source_roots()
-        )
+        assert any("/app/atom/atom/" in r.lower() for r in krh._reusable_source_roots())
 
     def test_includes_atom_site_packages_python_3_10(self):
-        assert any(
-            "/opt/venv/lib/python3.10/site-packages/atom/" in r
-            for r in krh._reusable_source_roots()
-        )
+        assert any("/opt/venv/lib/python3.10/site-packages/atom/" in r for r in krh._reusable_source_roots())
 
     def test_includes_atom_site_packages_python_3_12(self):
-        assert any(
-            "/opt/venv/lib/python3.12/site-packages/atom/" in r
-            for r in krh._reusable_source_roots()
-        )
+        assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in krh._reusable_source_roots())
 
     def test_atom_path_classified_as_reusable(self):
         """An atom-owned kernel source under /app/ATOM/atom/ is NOT runtime-generated even if its name matches a compile marker."""
@@ -293,7 +313,8 @@ class TestReusableSourceRootsAtom:
             pytest.skip("compile markers empty in build")
         marker = next(iter(markers))
         result = krh._is_runtime_generated_kernel(
-            marker, "/app/ATOM/atom/model_engine/model_runner.py",
+            marker,
+            "/app/ATOM/atom/model_engine/model_runner.py",
         )
         assert result is False
 
@@ -305,7 +326,8 @@ class TestReusableSourceRootsAtom:
         marker = next(iter(markers))
         # Under /app/ but not /app/ATOM/atom/ → runtime-generated (not reusable).
         result = krh._is_runtime_generated_kernel(
-            marker, "/app/session_dir/runs/baseline/foo.py",
+            marker,
+            "/app/session_dir/runs/baseline/foo.py",
         )
         assert result is True
 
@@ -349,23 +371,31 @@ class TestRunGemmTuningHandler:
             data = json.loads(Path(input_path).read_text())
             assert data["framework"] == "sglang"
             assert data["precision"] == "fp8"
-            return 0, json.dumps({
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.2,
-                "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
-            }), ""
+            return (
+                0,
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "decision": "KEEP",
+                        "best_speedup": 1.2,
+                        "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
+                    }
+                ),
+                "",
+            )
 
         monkeypatch.setattr(krh, "_run_subprocess", fake_run)
 
-        result = asyncio.run(krh.run_gemm_tuning_handler(
-            {
-                "benchmark_script": "/workspace/run_sglang_test.sh",
-                "dry_run": True,
-                "task_id": "t1",
-            },
-            session_dir=tmp_path,
-        ))
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler(
+                {
+                    "benchmark_script": "/workspace/run_sglang_test.sh",
+                    "dry_run": True,
+                    "task_id": "t1",
+                },
+                session_dir=tmp_path,
+            )
+        )
 
         assert result["status"] == "ok"
         cmd_text = " ".join(captured["cmd"])  # type: ignore[arg-type]
@@ -399,22 +429,30 @@ class TestRunGemmTuningHandler:
             bench = Path(data["benchmark_script"])
             text = bench.read_text()
             assert bench.name == "geak_gemm_benchmark.sh"
-            assert "PORT=\"${PORT:-18888}\"" in text
+            assert 'PORT="${PORT:-18888}"' in text
             assert "pgrep" not in text
             assert data["benchmark_script"].endswith("geak_gemm_benchmark.sh")
-            return 0, json.dumps({
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.1,
-                "tuned_file": "/tmp/tuned.csv",
-            }), ""
+            return (
+                0,
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "decision": "KEEP",
+                        "best_speedup": 1.1,
+                        "tuned_file": "/tmp/tuned.csv",
+                    }
+                ),
+                "",
+            )
 
         monkeypatch.setattr(krh, "_run_subprocess", fake_run)
 
-        result = asyncio.run(krh.run_gemm_tuning_handler(
-            {"dry_run": True, "task_id": "auto"},
-            session_dir=tmp_path,
-        ))
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler(
+                {"dry_run": True, "task_id": "auto"},
+                session_dir=tmp_path,
+            )
+        )
 
         assert result["status"] == "ok"
 
@@ -425,11 +463,11 @@ class TestDefaultGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
         [
-            (None, 130.0),       # unset -> full default
-            ("", 130.0),         # empty -> full default
+            (None, 130.0),  # unset -> full default
+            ("", 130.0),  # empty -> full default
             ("full", 130.0),
-            ("FULL", 130.0),     # case-insensitive
-            ("  full  ", 130.0), # whitespace tolerated
+            ("FULL", 130.0),  # case-insensitive
+            ("  full  ", 130.0),  # whitespace tolerated
             ("garbage", 130.0),  # unknown values fall back to full
             ("quick", 70.0),
             ("QUICK", 70.0),
@@ -455,12 +493,18 @@ class TestGeakBudgetMinutes:
         monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "115")
         assert krh._geak_budget_minutes({}) == 115.0
 
-    @pytest.mark.parametrize("geak_run_mode, expected", [
-        ("full", 130.0),
-        ("quick", 70.0),
-    ])
+    @pytest.mark.parametrize(
+        "geak_run_mode, expected",
+        [
+            ("full", 130.0),
+            ("quick", 70.0),
+        ],
+    )
     def test_falls_through_to_helper_when_no_overrides(
-        self, monkeypatch, geak_run_mode, expected,
+        self,
+        monkeypatch,
+        geak_run_mode,
+        expected,
     ):
         monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
         monkeypatch.setenv("GEAK_RUN_MODE", geak_run_mode)
@@ -510,7 +554,11 @@ class TestDefaultKernelBatchParallel:
         ],
     )
     def test_scales_with_visible_gpus(
-        self, patch_torch, n_gpus, per_task, expected,
+        self,
+        patch_torch,
+        n_gpus,
+        per_task,
+        expected,
     ):
         patch_torch(n_gpus, per_task=per_task)
         assert krh._default_kernel_batch_parallel() == expected
@@ -525,10 +573,7 @@ class TestDefaultKernelBatchParallel:
 
     def test_zero_visible_gpus_returns_legacy_fallback(self, patch_torch):
         patch_torch(0)
-        assert (
-            krh._default_kernel_batch_parallel()
-            == krh._DEFAULT_KERNEL_BATCH_PARALLEL
-        )
+        assert krh._default_kernel_batch_parallel() == krh._DEFAULT_KERNEL_BATCH_PARALLEL
 
     def test_torch_failure_returns_legacy_fallback(self, monkeypatch):
         torch = _ensure_torch_module(monkeypatch)
@@ -538,10 +583,7 @@ class TestDefaultKernelBatchParallel:
 
         monkeypatch.setattr(torch.cuda, "device_count", _boom)
         monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
-        assert (
-            krh._default_kernel_batch_parallel()
-            == krh._DEFAULT_KERNEL_BATCH_PARALLEL
-        )
+        assert krh._default_kernel_batch_parallel() == krh._DEFAULT_KERNEL_BATCH_PARALLEL
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +597,7 @@ class TestDefaultKernelBatchParallel:
 # second ladder, so keep the sequential GEAK-first / OOB-fallback ladder.
 # Operators / tests can force the decision via payload or env.
 # ---------------------------------------------------------------------------
+
 
 class TestShouldParallelizeBackends:
     @pytest.fixture
@@ -578,20 +621,25 @@ class TestShouldParallelizeBackends:
         [
             # 1 GPU/task: need room for both ladders -> visible_gpus >= 2.
             # The kernel count is irrelevant (batch width is capped elsewhere).
-            (8, 1, 3, True),     # 8 >= 2
-            (8, 1, 7, True),     # 8 >= 2 (kernel count no longer gates)
-            (8, 1, 100, True),   # 8 >= 2 even when candidates >> gpus
-            (2, 1, 1, True),     # 2 >= 2 boundary
-            (1, 1, 1, False),    # 1 < 2 -> no room for a second ladder
+            (8, 1, 3, True),  # 8 >= 2
+            (8, 1, 7, True),  # 8 >= 2 (kernel count no longer gates)
+            (8, 1, 100, True),  # 8 >= 2 even when candidates >> gpus
+            (2, 1, 1, True),  # 2 >= 2 boundary
+            (1, 1, 1, False),  # 1 < 2 -> no room for a second ladder
             # Multi-GPU reservations: need room for TWO per_task backends.
-            (8, 4, 1, True),     # 8 >= 8 boundary
-            (8, 4, 5, True),     # 8 >= 8 (candidate count irrelevant)
-            (8, 8, 1, False),    # 8 < 16 -> can't fit a 2nd 8-GPU backend
-            (16, 8, 1, True),    # 16 >= 16
+            (8, 4, 1, True),  # 8 >= 8 boundary
+            (8, 4, 5, True),  # 8 >= 8 (candidate count irrelevant)
+            (8, 8, 1, False),  # 8 < 16 -> can't fit a 2nd 8-GPU backend
+            (16, 8, 1, True),  # 16 >= 16
         ],
     )
     def test_gpu_aware_threshold(
-        self, patch_torch, n_gpus, per_task, num_candidates, expected,
+        self,
+        patch_torch,
+        n_gpus,
+        per_task,
+        num_candidates,
+        expected,
     ):
         patch_torch(n_gpus, per_task=per_task)
         assert krh._should_parallelize_backends({}, num_candidates) is expected
@@ -617,21 +665,37 @@ class TestShouldParallelizeBackends:
 
     def test_payload_override_enables_below_threshold(self, patch_torch):
         patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
-        assert krh._should_parallelize_backends(
-            {"parallel_backends": True}, 5,
-        ) is True
-        assert krh._should_parallelize_backends(
-            {"parallel_backends": "on"}, 5,
-        ) is True
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": True},
+                5,
+            )
+            is True
+        )
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": "on"},
+                5,
+            )
+            is True
+        )
 
     def test_payload_override_disables_above_threshold(self, patch_torch):
         patch_torch(64, per_task=1)  # GPU-aware math would say True
-        assert krh._should_parallelize_backends(
-            {"parallel_backends": False}, 1,
-        ) is False
-        assert krh._should_parallelize_backends(
-            {"parallel_backends": "no"}, 1,
-        ) is False
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": False},
+                1,
+            )
+            is False
+        )
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": "no"},
+                1,
+            )
+            is False
+        )
 
     def test_env_override(self, patch_torch, monkeypatch):
         patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
@@ -651,6 +715,7 @@ class TestShouldParallelizeBackends:
 # budget even when ``max_parallel`` is set higher.
 # ---------------------------------------------------------------------------
 
+
 class TestBatchParallelConcurrencyCap:
     def test_caps_concurrency_to_gpu_budget(self, tmp_path, monkeypatch):
         # 8 visible GPUs, 1 GPU/task -> safe concurrency = 8 // (2*1) = 4.
@@ -661,7 +726,11 @@ class TestBatchParallelConcurrencyCap:
         state = {"in_flight": 0, "peak": 0}
 
         async def fake_sequence(
-            base_payload, candidate, *, session_dir, parallel_backends=False,
+            base_payload,
+            candidate,
+            *,
+            session_dir,
+            parallel_backends=False,
         ):
             assert parallel_backends is True
             state["in_flight"] += 1
@@ -680,15 +749,15 @@ class TestBatchParallelConcurrencyCap:
 
         monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
         candidates = [
-            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py",
-             "reusable_native_kernel": True}
-            for i in range(10)
+            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py", "reusable_native_kernel": True} for i in range(10)
         ]
-        out = asyncio.run(krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy", "max_parallel": 10},
-            candidates=candidates,
-            session_dir=tmp_path,
-        ))
+        out = asyncio.run(
+            krh._run_optimization_batch(
+                payload={"candidates_path": "/dummy", "backend_order": "geak,claude,codex", "max_parallel": 10},
+                candidates=candidates,
+                session_dir=tmp_path,
+            )
+        )
 
         assert out["parallel_backends"] is True
         # max_parallel echoes the capped value (10 -> 4).
@@ -703,7 +772,11 @@ class TestBatchParallelConcurrencyCap:
         monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")  # force parallel
 
         async def fake_sequence(
-            base_payload, candidate, *, session_dir, parallel_backends=False,
+            base_payload,
+            candidate,
+            *,
+            session_dir,
+            parallel_backends=False,
         ):
             return {
                 "status": "ok",
@@ -715,15 +788,15 @@ class TestBatchParallelConcurrencyCap:
 
         monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
         candidates = [
-            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py",
-             "reusable_native_kernel": True}
-            for i in range(3)
+            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py", "reusable_native_kernel": True} for i in range(3)
         ]
-        out = asyncio.run(krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy", "max_parallel": 7},
-            candidates=candidates,
-            session_dir=tmp_path,
-        ))
+        out = asyncio.run(
+            krh._run_optimization_batch(
+                payload={"candidates_path": "/dummy", "backend_order": "geak,claude,codex", "max_parallel": 7},
+                candidates=candidates,
+                session_dir=tmp_path,
+            )
+        )
 
         assert out["parallel_backends"] is True
         assert out["max_parallel"] == 7  # uncapped (visible GPU count unknown)
@@ -757,14 +830,9 @@ class TestReconcileKernelId:
         # Non-empty ids are never guessed. A pure hallucination should flow to
         # the reusable-native guard / CLI skip path rather than being mapped to
         # an unrelated candidate.
+        assert krh._reconcile_kernel_id("aiter.silu_and_mul", self.CANDS) == "aiter.silu_and_mul"
         assert (
-            krh._reconcile_kernel_id("aiter.silu_and_mul", self.CANDS)
-            == "aiter.silu_and_mul"
-        )
-        assert (
-            krh._reconcile_kernel_id(
-                "framework_sglang_silu_and_mul_m64", self.CANDS
-            )
+            krh._reconcile_kernel_id("framework_sglang_silu_and_mul_m64", self.CANDS)
             == "framework_sglang_silu_and_mul_m64"
         )
 
@@ -774,12 +842,9 @@ class TestReconcileKernelId:
 # rejects the real k00x rather than the raw hallucinated alias.
 class TestResolveCandidateId:
     SKIPPED = [
-        {"kernel_id": "k001", "name": "aten::mm",
-         "reusable_native_kernel": False, "source_file": ""},
-        {"kernel_id": "k003", "name": "aten::mm",
-         "reusable_native_kernel": False, "source_file": ""},
-        {"kernel_id": "k010", "name": "aiter::rmsnorm",
-         "reusable_native_kernel": False, "source_file": ""},
+        {"kernel_id": "k001", "name": "aten::mm", "reusable_native_kernel": False, "source_file": ""},
+        {"kernel_id": "k003", "name": "aten::mm", "reusable_native_kernel": False, "source_file": ""},
+        {"kernel_id": "k010", "name": "aiter::rmsnorm", "reusable_native_kernel": False, "source_file": ""},
     ]
 
     def test_exact_id(self):
@@ -805,10 +870,15 @@ class TestResolveCandidateId:
 class TestAllKernelCandidates:
     def test_union_of_hot_and_skipped(self, tmp_path):
         cp = tmp_path / "kc.json"
-        cp.write_text(json.dumps({
-            "hot_kernels": [{"kernel_id": "k005", "name": "moe"}],
-            "skipped_kernels": [{"kernel_id": "k001", "name": "aten::mm"}],
-        }), encoding="utf-8")
+        cp.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [{"kernel_id": "k005", "name": "moe"}],
+                    "skipped_kernels": [{"kernel_id": "k001", "name": "aten::mm"}],
+                }
+            ),
+            encoding="utf-8",
+        )
         out = krh._all_kernel_candidates({"candidates_path": str(cp)})
         assert {c["kernel_id"] for c in out} == {"k005", "k001"}
 

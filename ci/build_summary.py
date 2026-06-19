@@ -34,12 +34,13 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from artifact_normalizer import collect_normalized_results       # noqa: E402
+from artifact_normalizer import collect_normalized_results  # noqa: E402
 
 log = logging.getLogger("build-summary")
 
 
 # ── InferenceX reference lookup ─────────────────────────────────────────────────
+
 
 def load_hf_to_ifx_map(yaml_path: Path) -> dict[str, str]:
     """Read inferenceX_models.yaml → {hf_model: api_name}.
@@ -54,11 +55,7 @@ def load_hf_to_ifx_map(yaml_path: Path) -> dict[str, str]:
     if not yaml_path.exists():
         return {}
     cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-    return {
-        m["hf_model"]: m["api_name"]
-        for m in cfg.get("models", [])
-        if m.get("hf_model") and m.get("api_name")
-    }
+    return {m["hf_model"]: m["api_name"] for m in cfg.get("models", []) if m.get("hf_model") and m.get("api_name")}
 
 
 def fetch_inferenceX_ref(
@@ -68,10 +65,19 @@ def fetch_inferenceX_ref(
     isl: int,
     osl: int,
 ) -> float | None:
-    """Look up InferenceX output_tput_per_gpu for repo_id on target_gpu.
+    """Look up the InferenceX reference throughput for a model.
 
-    Returns None when no comparison is available (unmapped repo, no benchmarks,
-    or no (hardware, ISL, OSL) match) — the column stays blank.
+    Args:
+        repo_id: HF repo id to look up.
+        hf_to_ifx: Mapping of HF repo ids to InferenceX api names.
+        target_gpu: GPU type to match.
+        isl: Input sequence length to match.
+        osl: Output sequence length to match.
+
+    Returns:
+        The ``output_tput_per_gpu`` reference value, or ``None`` when no
+        comparison is available (unmapped repo, no benchmarks, or no
+        (hardware, ISL, OSL) match).
     """
     api_name = hf_to_ifx.get(repo_id)
     if not api_name:
@@ -79,20 +85,21 @@ def fetch_inferenceX_ref(
         return None
     try:
         from inferenceX_parser import fetch_benchmarks, find_benchmark
+
         benchmarks = fetch_benchmarks(api_name)
     except Exception as e:
         log.warning("[%s] InferenceX API failed: %s", api_name, e)
         return None
     bench = find_benchmark(benchmarks, target_gpu, isl, osl, precision=None)
     if not bench:
-        log.info("[%s] no InferenceX entry for hw=%s isl=%d osl=%d",
-                 api_name, target_gpu, isl, osl)
+        log.info("[%s] no InferenceX entry for hw=%s isl=%d osl=%d", api_name, target_gpu, isl, osl)
         return None
     m = bench.get("metrics") or {}
     return m.get("output_tput_per_gpu") or m.get("tput_per_gpu")
 
 
 # ── Row assembly ────────────────────────────────────────────────────────────────
+
 
 def collect_rows(
     artifacts_dir: Path,
@@ -121,8 +128,7 @@ def collect_rows(
             are the underlying normalized records.
     """
     rows: list[dict] = []
-    normalized_results = collect_normalized_results(
-        artifacts_dir, manifests_dir, build_run_metadata())
+    normalized_results = collect_normalized_results(artifacts_dir, manifests_dir, build_run_metadata())
 
     for item in normalized_results:
         task = item.get("task") or {}
@@ -143,14 +149,8 @@ def collect_rows(
             "tp": metrics.get("tp") or detected.get("tp"),
             "params_b": detected.get("params_b"),
             "gpu_type": metrics.get("gpu_type"),
-            "baseline_tok_per_gpu": (
-                metrics.get("tok_per_gpu_baseline")
-                or metrics.get("baseline_throughput")
-            ),
-            "optimized_tok_per_gpu": (
-                metrics.get("tok_per_gpu_optimized")
-                or metrics.get("optimized_throughput")
-            ),
+            "baseline_tok_per_gpu": (metrics.get("tok_per_gpu_baseline") or metrics.get("baseline_throughput")),
+            "optimized_tok_per_gpu": (metrics.get("tok_per_gpu_optimized") or metrics.get("optimized_throughput")),
             "gain_pct": metrics.get("gain_pct"),
             "peak_throughput": metrics.get("peak_throughput"),
             "peak_throughput_conc": metrics.get("peak_throughput_conc"),
@@ -171,9 +171,7 @@ def collect_rows(
                 or (item.get("source_files") or {}).get("session_breakdown") is not None
             )
             row["ci_success"] = bool(
-                row["final_status"] == "Succeeded"
-                or row["ci_status"] == "Delivered"
-                or has_delivered_metrics
+                row["final_status"] == "Succeeded" or row["ci_status"] == "Delivered" or has_delivered_metrics
             )
         if not row["ci_status"]:
             row["ci_status"] = "Delivered" if row["ci_success"] else "Missing artifacts"
@@ -208,6 +206,7 @@ def build_run_metadata() -> dict:
 
 
 # ── Markdown rendering ──────────────────────────────────────────────────────────
+
 
 def fmt_num(v, fmt: str = ".1f") -> str:
     """Format a numeric value for the table, with a dash placeholder.
@@ -392,10 +391,13 @@ def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> st
     n = len(rows)
     delivered = sum(1 for r in rows if r.get("ci_success"))
     safe_succeeded = sum(1 for r in rows if r.get("final_status") == "Succeeded")
-    with_gain = sum(1 for r in rows
-                    if (r.get("gain_pct") or 0) > 0
-                    and r.get("baseline_tok_per_gpu") is not None
-                    and r.get("optimized_tok_per_gpu") is not None)
+    with_gain = sum(
+        1
+        for r in rows
+        if (r.get("gain_pct") or 0) > 0
+        and r.get("baseline_tok_per_gpu") is not None
+        and r.get("optimized_tok_per_gpu") is not None
+    )
     beat_infx = sum(1 for r in rows if (r.get("vs_inferenceX_pct") or 0) > 0)
 
     lines = [
@@ -445,6 +447,7 @@ def render_markdown(rows: list[dict], target_gpu: str, isl: int, osl: int) -> st
 
 # ── Main ────────────────────────────────────────────────────────────────────────
 
+
 def main() -> int:
     """CLI entry point: build the summary table and write output artifacts.
 
@@ -454,18 +457,17 @@ def main() -> int:
     Returns:
         int: Process exit code (0 on success).
     """
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--artifacts-dir", required=True,
-                        help="Root dir of per-task artifacts (task-artifacts/<task_id>/...)")
-    parser.add_argument("--manifests-dir", required=True,
-                        help="Root dir containing submission_manifest.json file(s)")
-    parser.add_argument("--target-gpu", default="b200",
-                        help="Reference GPU for InferenceX comparison (default: b200)")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--artifacts-dir", required=True, help="Root dir of per-task artifacts (task-artifacts/<task_id>/...)"
+    )
+    parser.add_argument("--manifests-dir", required=True, help="Root dir containing submission_manifest.json file(s)")
+    parser.add_argument("--target-gpu", default="b200", help="Reference GPU for InferenceX comparison (default: b200)")
     parser.add_argument("--isl", type=int, default=1024)
     parser.add_argument("--osl", type=int, default=1024)
-    parser.add_argument("--ifx-models-yaml", default="",
-                        help="Path to inferenceX_models.yaml (default: ./inferenceX_models.yaml)")
+    parser.add_argument(
+        "--ifx-models-yaml", default="", help="Path to inferenceX_models.yaml (default: ./inferenceX_models.yaml)"
+    )
     parser.add_argument("--out-dir", default="summary-out")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
@@ -476,8 +478,7 @@ def main() -> int:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    yaml_path = Path(args.ifx_models_yaml or
-                     Path(__file__).resolve().parent / "inferenceX_models.yaml")
+    yaml_path = Path(args.ifx_models_yaml or Path(__file__).resolve().parent / "inferenceX_models.yaml")
     hf_to_ifx = load_hf_to_ifx_map(yaml_path)
     log.info("HF→InferenceX mappings loaded: %d", len(hf_to_ifx))
 
@@ -495,21 +496,27 @@ def main() -> int:
     md = render_markdown(rows, args.target_gpu, args.isl, args.osl)
     (out / "ci_summary.md").write_text(md, encoding="utf-8")
     (out / "ci_summary.json").write_text(
-        json.dumps({
-            "target_gpu": args.target_gpu,
-            "isl": args.isl,
-            "osl": args.osl,
-            "rows": rows,
-        }, indent=2),
+        json.dumps(
+            {
+                "target_gpu": args.target_gpu,
+                "isl": args.isl,
+                "osl": args.osl,
+                "rows": rows,
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
     (out / "normalized_results.json").write_text(
-        json.dumps({
-            "target_gpu": args.target_gpu,
-            "isl": args.isl,
-            "osl": args.osl,
-            "results": normalized_results,
-        }, indent=2),
+        json.dumps(
+            {
+                "target_gpu": args.target_gpu,
+                "isl": args.isl,
+                "osl": args.osl,
+                "results": normalized_results,
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
     (out / "normalized_results.ndjson").write_text(

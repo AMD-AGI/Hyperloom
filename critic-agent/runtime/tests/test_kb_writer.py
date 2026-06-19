@@ -139,16 +139,18 @@ def test_write_kb_drafts_batch_inserts_and_filters_unknown_categories(writer, pa
 
 def test_list_priors_uses_session_memory_cache(writer, packet_context):
     w, kb, sm, _ = writer
-    kb.upsert({
-        "scope": {
-            "org": "hyperloom",
-            **{k: packet_context[k] for k in ("framework", "model", "model_family", "workload", "precision")},
-        },
-        "kind": "pitfall",
-        "slug": "active-path-unproven-pitfall",
-        "importance": 0.5,
-        "metadata": {"topic": "active path"},
-    })
+    kb.upsert(
+        {
+            "scope": {
+                "org": "hyperloom",
+                **{k: packet_context[k] for k in ("framework", "model", "model_family", "workload", "precision")},
+            },
+            "kind": "pitfall",
+            "slug": "active-path-unproven-pitfall",
+            "importance": 0.5,
+            "metadata": {"topic": "active path"},
+        }
+    )
     scope = {
         "org": "hyperloom",
         **{k: packet_context[k] for k in ("framework", "model", "model_family", "workload", "precision")},
@@ -164,22 +166,32 @@ def test_list_priors_uses_session_memory_cache(writer, packet_context):
 
 def test_add_contradiction_writes_edge(writer, packet_context):
     w, kb, _, _ = writer
-    a = kb.upsert({
-        "scope": {
-            "org": "hyperloom",
-            **{k: packet_context[k] for k in ("framework", "model", "model_family", "workload", "precision")},
-        },
-        "kind": "pitfall", "slug": "abcdef-1", "importance": 0.5,
-    })["row"]["id"]
-    b = kb.upsert({
-        "scope": {
-            "org": "hyperloom",
-            **{k: packet_context[k] for k in ("framework", "model", "model_family", "workload", "precision")},
-        },
-        "kind": "pitfall", "slug": "abcdef-2", "importance": 0.5,
-    })["row"]["id"]
+    a = kb.upsert(
+        {
+            "scope": {
+                "org": "hyperloom",
+                **{k: packet_context[k] for k in ("framework", "model", "model_family", "workload", "precision")},
+            },
+            "kind": "pitfall",
+            "slug": "abcdef-1",
+            "importance": 0.5,
+        }
+    )["row"]["id"]
+    b = kb.upsert(
+        {
+            "scope": {
+                "org": "hyperloom",
+                **{k: packet_context[k] for k in ("framework", "model", "model_family", "workload", "precision")},
+            },
+            "kind": "pitfall",
+            "slug": "abcdef-2",
+            "importance": 0.5,
+        }
+    )["row"]["id"]
     res = w.add_contradiction(
-        new_id=a, old_ids=[b], ctx=WriteContext(session_id="s1"),
+        new_id=a,
+        old_ids=[b],
+        ctx=WriteContext(session_id="s1"),
     )
     assert res.status == "ok"
     rows = {r["id"]: r for r in kb.all_rows()}
@@ -321,8 +333,11 @@ def test_write_verdict_disabled_when_breaker_open(breaker_writer):
             "packet_evidence": ["benchmark.after.gain_pct"],
         },
         packet_context={
-            "framework": "sglang", "model": "deepseek-r1",
-            "model_family": "deepseek", "workload": "decode", "precision": "fp8",
+            "framework": "sglang",
+            "model": "deepseek-r1",
+            "model_family": "deepseek",
+            "workload": "decode",
+            "precision": "fp8",
         },
         ctx=WriteContext(session_id="s1", review_id="rev"),
     )
@@ -335,15 +350,20 @@ def test_write_kb_drafts_disabled_when_breaker_open(breaker_writer):
     w, _, _, _ = breaker_writer
     w.force_kb_unreachable()
     res = w.write_kb_drafts(
-        kb_drafts=[{
-            "category": "kernel_optimization",
-            "action": "patch the active dispatch path",
-            "lesson": "active dispatch path must stay in sync",
-            "tags": [],
-        }],
+        kb_drafts=[
+            {
+                "category": "kernel_optimization",
+                "action": "patch the active dispatch path",
+                "lesson": "active dispatch path must stay in sync",
+                "tags": [],
+            }
+        ],
         packet_context={
-            "framework": "sglang", "model": "deepseek-r1",
-            "model_family": "deepseek", "workload": "decode", "precision": "fp8",
+            "framework": "sglang",
+            "model": "deepseek-r1",
+            "model_family": "deepseek",
+            "workload": "decode",
+            "precision": "fp8",
         },
         ctx=WriteContext(session_id="s2"),
     )
@@ -361,8 +381,11 @@ def test_write_verdict_dead_letters_then_opens_breaker(breaker_writer):
             "packet_evidence": ["benchmark.after.gain_pct"],
         },
         packet_context={
-            "framework": "sglang", "model": "deepseek-r1",
-            "model_family": "deepseek", "workload": "decode", "precision": "fp8",
+            "framework": "sglang",
+            "model": "deepseek-r1",
+            "model_family": "deepseek",
+            "workload": "decode",
+            "precision": "fp8",
         },
         ctx=WriteContext(session_id="s_dlq", review_id="rev"),
     )
@@ -379,16 +402,18 @@ def test_decision_reviewer_marks_bundle_when_breaker_open(tmp_path):
     rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
     writer.force_kb_unreachable()
 
-    bundle = rev.prepare_review({
-        "kind": "coordinator_inbox",
-        "session_id": "sess_breaker",
-        "raw_prompt": (
-            "=== Shared session state ===\n"
-            "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
-            "=== Inbox for critic ===\n"
-            "  seq=1 msg_id=mmm from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
-        ),
-    })
+    bundle = rev.prepare_review(
+        {
+            "kind": "coordinator_inbox",
+            "session_id": "sess_breaker",
+            "raw_prompt": (
+                "=== Shared session state ===\n"
+                "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
+                "=== Inbox for critic ===\n"
+                "  seq=1 msg_id=mmm from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
+            ),
+        }
+    )
     assert bundle.kb_read_skipped_reason == "kb_unreachable"
     assert any("KB service unreachable" in n for n in bundle.notes)
     assert bundle.review_constraints["kb_breaker"]["open"] is True
@@ -399,16 +424,18 @@ def test_decision_reviewer_marks_bundle_when_kb_read_disabled(tmp_path, monkeypa
     sm = SessionMemory(root=tmp_path / "sm")
     writer = KBWriter(InMemoryKBClient(), session_memory=sm)
     rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
-    bundle = rev.prepare_review({
-        "kind": "coordinator_inbox",
-        "session_id": "sess_disabled",
-        "raw_prompt": (
-            "=== Shared session state ===\n"
-            "model=qwen3-14b framework=sglang\n"
-            "=== Inbox for critic ===\n"
-            "  seq=1 msg_id=mmm from=orchestration topic=proposal payload={}\n"
-        ),
-    })
+    bundle = rev.prepare_review(
+        {
+            "kind": "coordinator_inbox",
+            "session_id": "sess_disabled",
+            "raw_prompt": (
+                "=== Shared session state ===\n"
+                "model=qwen3-14b framework=sglang\n"
+                "=== Inbox for critic ===\n"
+                "  seq=1 msg_id=mmm from=orchestration topic=proposal payload={}\n"
+            ),
+        }
+    )
     assert bundle.kb_read_skipped_reason == "kb_read_disabled"
 
 
@@ -418,15 +445,17 @@ def test_breaker_reflects_per_request_failures_in_bundle(tmp_path):
     writer = KBWriter(kb, session_memory=sm)
     rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
     kb.fail_next("list", times=1)
-    bundle = rev.prepare_review({
-        "kind": "coordinator_inbox",
-        "session_id": "sess_per_request",
-        "raw_prompt": (
-            "=== Shared session state ===\n"
-            "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
-            "=== Inbox for critic ===\n"
-            "  seq=1 msg_id=mmm from=orchestration topic=proposal payload={'action_name': 'baseline'}\n"
-        ),
-    })
+    bundle = rev.prepare_review(
+        {
+            "kind": "coordinator_inbox",
+            "session_id": "sess_per_request",
+            "raw_prompt": (
+                "=== Shared session state ===\n"
+                "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
+                "=== Inbox for critic ===\n"
+                "  seq=1 msg_id=mmm from=orchestration topic=proposal payload={'action_name': 'baseline'}\n"
+            ),
+        }
+    )
     assert bundle.kb_read_skipped_reason == "kb_unreachable"
     assert bundle.kb_priors_by_proposal["mmm"] == []
