@@ -2740,25 +2740,54 @@ def _update_kernel_roofline_sidecar(
             append_log(log_path, f"[rocprof_roofline] updated {sidecar_path} [{phase}]")
 
 
+def _reference_entry_point_from_candidate(candidate: dict[str, Any] | None) -> str | None:
+    """Extract the launcher's Python callable string from a candidate.
+
+    TraceLens records the call site in ``tracelens_launcher_path.entry_point``
+    (e.g. ``aiter/ops/moe_op.py(522): ck_moe_stage1_fwd``). GEAK's deterministic
+    harness synthesizer turns this into an importable ``module:func`` reference so
+    it can build a faithful harness without compiling the kernel source from
+    scratch. Returns ``None`` when no launcher entry_point is present.
+    """
+    if not isinstance(candidate, dict):
+        return None
+    lp = candidate.get("tracelens_launcher_path")
+    if isinstance(lp, dict):
+        ep = lp.get("entry_point")
+        return ep if isinstance(ep, str) and ep.strip() else None
+    if isinstance(lp, str) and lp.strip():
+        return lp
+    return None
+
+
 def _apply_geak_env_overrides(
     args: argparse.Namespace,
     prompt_file: Path,
+    candidate: dict[str, Any] | None = None,
 ) -> dict[str, str | None]:
     """Temporarily tune GEAK env for this attempt; caller must restore.
 
-    Sets ``GEAK_CONFIG`` (and disables the knowledge base when requested)
-    for the duration of one attempt, returning the prior values so the
-    caller can restore them via :func:`_restore_env`.
+    Sets ``GEAK_CONFIG`` (and disables the knowledge base when requested) for the
+    duration of one attempt, returning the prior values so the caller can restore
+    them via :func:`_restore_env`. When ``candidate`` carries a launcher callable
+    + traced shapes, also exports ``GEAK_REFERENCE_ENTRY_POINT`` /
+    ``GEAK_INPUT_SHAPES_JSON`` so GEAK's deterministic harness synthesizer can
+    build a faithful harness directly (avoids the LLM generator compiling a CK/.cu
+    from scratch). Both are additive: unset when the candidate lacks them.
 
     Args:
         args (argparse.Namespace): Parsed CLI args (e.g. ``disable_xs_memory``).
         prompt_file (Path): Prompt file used to derive any per-run config.
+        candidate (dict | None): The hot-kernel candidate (launcher + shapes).
 
     Returns:
         dict[str, str | None]: The previous values of the mutated env vars
             (None for vars that were previously unset).
     """
-    keys = ("GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE")
+    keys = (
+        "GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE",
+        "GEAK_REFERENCE_ENTRY_POINT", "GEAK_INPUT_SHAPES_JSON",
+    )
     previous = {key: os.environ.get(key) for key in keys}
     config = _geak_config_for_run(args, prompt_file)
     if config:
@@ -2766,6 +2795,17 @@ def _apply_geak_env_overrides(
     if getattr(args, "disable_xs_memory", False):
         os.environ["GEAK_USE_KNOWLEDGE_BASE"] = "0"
         os.environ["GEAK_SAVE_TO_KNOWLEDGE_BASE"] = "0"
+    # Deterministic-harness inputs for GEAK (see preprocess_v3.reference_harness).
+    ref_ep = _reference_entry_point_from_candidate(candidate)
+    shapes = candidate.get("input_shapes") if isinstance(candidate, dict) else None
+    if not shapes and isinstance(candidate, dict):
+        shapes = candidate.get("shapes")
+    if ref_ep and shapes:
+        os.environ["GEAK_REFERENCE_ENTRY_POINT"] = ref_ep
+        try:
+            os.environ["GEAK_INPUT_SHAPES_JSON"] = json.dumps(shapes)
+        except (TypeError, ValueError):
+            os.environ.pop("GEAK_INPUT_SHAPES_JSON", None)
     return previous
 
 
@@ -2995,7 +3035,7 @@ def invoke_backend(
                             if _dst.exists() and _dst.resolve() == Path(_w).resolve():
                                 continue
                             _shutil.copy2(_w, _dst)
-            previous_env = _apply_geak_env_overrides(args, prompt_file)
+            previous_env = _apply_geak_env_overrides(args, prompt_file, candidate)
             try:
                 result = geak.submit(
                     prompt_file=prompt_file,
