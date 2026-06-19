@@ -2994,6 +2994,7 @@ class Coordinator:
         state.perfskills_result = result
 
         self._promote_perfskills_result(result)
+        self._record_perfskills_kernel_journey(result)
         self._record_phase_entry_evidence(perfskills={
             "status": result.get("status"),
             "throughput_speedup": result.get("throughput_speedup"),
@@ -3088,6 +3089,90 @@ class Coordinator:
             self.shared_state.cumulative_gain_validated_ts = (
                 datetime.now(timezone.utc).isoformat()
             )
+
+    def _record_perfskills_kernel_journey(self, result: dict[str, Any]) -> None:
+        """Replay GEAK-e2e's kernel_journey.json into the breakdown recorder.
+
+        GEAK-e2e is a whole-pipeline e2e optimizer, so its authored kernels
+        never went through the per-kernel SDK recorder path and were invisible
+        in ``kernel_journey`` (only the tracelens discovery substream showed).
+        It now emits a self-contained ``kernel_journey.json`` whose per-kernel
+        sub-objects are shaped EXACTLY as the recorder's
+        ``record_kernel_{dispatch,backend_result,e2e}`` inputs (see GEAK-e2e
+        ``interface/run_e2e.py`` ``build_kernel_journey``). We replay them
+        verbatim so the assembler folds the e2e optimizer's kernels into
+        ``kernel_journey`` next to tracelens discovery — no mapping logic here,
+        the contract file owns it. Best-effort: a missing/partial file never
+        breaks the phase.
+        """
+        if not isinstance(result, dict):
+            return
+        kj_path = str(result.get("kernel_journey_path") or "")
+        if not kj_path:
+            eval_dir = str(result.get("eval_dir") or "")
+            if eval_dir:
+                kj_path = str(Path(eval_dir) / "kernel_journey.json")
+        if not kj_path or not Path(kj_path).is_file():
+            return
+        try:
+            journey = json.loads(Path(kj_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(journey, dict):
+            return
+
+        from ..breakdown.recorder import instrument
+
+        sdir = self.session_dir
+        commit = str(getattr(self.shared_state, "code_revision", "") or "")
+        for k in (journey.get("kernels") or []):
+            if not isinstance(k, dict):
+                continue
+            kid = str(k.get("kernel_id") or "")
+            if not kid:
+                continue
+            disp = k.get("dispatch") if isinstance(k.get("dispatch"), dict) else {}
+            try:
+                instrument.record_kernel_dispatch(
+                    sdir,
+                    kernel_id=kid,
+                    dispatched=bool(disp.get("dispatched", True)),
+                    backends=list(disp.get("backends") or []),
+                    skip_reason=str(disp.get("skip_reason") or ""),
+                    orchestration_commit=commit,
+                    task_group=disp.get("task_group"),
+                )
+                br = k.get("backend_result")
+                if isinstance(br, dict):
+                    instrument.record_kernel_backend_result(sdir, br)
+                e2e = k.get("e2e")
+                if isinstance(e2e, dict):
+                    instrument.record_kernel_e2e(
+                        sdir,
+                        kernel_id=kid,
+                        integrated=bool(e2e.get("integrated", False)),
+                        e2e_gain_pct=e2e.get("e2e_gain_pct"),
+                        validated=e2e.get("validated"),
+                        decision=str(e2e.get("decision") or ""),
+                        patch_path=e2e.get("patch_path"),
+                        target_file=e2e.get("target_file"),
+                        extra_server_args=str(e2e.get("extra_server_args") or ""),
+                    )
+            except Exception:  # noqa: BLE001
+                log.debug("perfskills kernel_journey replay failed for %s", kid,
+                          exc_info=True)
+        for tool, meta in (journey.get("versions") or {}).items():
+            if not isinstance(meta, dict):
+                continue
+            try:
+                instrument.record_tool_version(
+                    sdir,
+                    tool=str(tool),
+                    root=str(meta.get("root_dir") or "") or None,
+                    version=str(meta.get("version") or meta.get("commit") or "") or None,
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     def _promote_gemm_tuning_keep(self, result: dict[str, Any]) -> None:
         """Promote a successful GEMM tuning run into the main gain ledger.
