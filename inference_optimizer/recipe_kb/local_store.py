@@ -80,10 +80,10 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Filenames + sub-paths within one recipe directory
 # ---------------------------------------------------------------------------
-RECIPE_FILENAME:        str = "recipe.json"
-HISTORY_DIRNAME:        str = "history"
-ATTEMPTS_FILENAME:      str = "attempts.ndjson"
-LOCK_FILENAME:          str = ".lock"
+RECIPE_FILENAME: str = "recipe.json"
+HISTORY_DIRNAME: str = "history"
+ATTEMPTS_FILENAME: str = "attempts.ndjson"
+LOCK_FILENAME: str = ".lock"
 HISTORY_VERSION_PREFIX: str = "v"
 HISTORY_VERSION_SUFFIX: str = ".json"
 
@@ -95,11 +95,11 @@ HISTORY_VERSION_SUFFIX: str = ".json"
 # ``order_by`` can't silently emit results in the wrong order.
 _ORDER_BY_KEYS: dict[str, tuple[str, bool]] = {
     "updated_at DESC": ("updated_at", True),
-    "updated_at ASC":  ("updated_at", False),
+    "updated_at ASC": ("updated_at", False),
     "created_at DESC": ("created_at", True),
-    "created_at ASC":  ("created_at", False),
-    "version DESC":    ("version",    True),
-    "version ASC":     ("version",    False),
+    "created_at ASC": ("created_at", False),
+    "version DESC": ("version", True),
+    "version ASC": ("version", False),
 }
 
 
@@ -240,7 +240,8 @@ def _list_jsonl(path: Path) -> list[dict[str, Any]]:
             except json.JSONDecodeError as exc:
                 log.warning(
                     "skipping malformed NDJSON row in %s: %s",
-                    path, exc,
+                    path,
+                    exc,
                 )
                 continue
             if isinstance(obj, dict):
@@ -354,13 +355,13 @@ class LocalRecipeStore:
     # Path helpers
     # ------------------------------------------------------------------
     def _recipe_dir(self, canonical_id: str) -> Path:
-        """Return the 5-level directory holding one cid's files.
+        """Return the 7-level directory holding one cid's files.
 
         Args:
             canonical_id (str): Canonical recipe identity.
 
         Returns:
-            Path: ``root`` joined with the cid's 5 path components.
+            Path: ``root`` joined with the cid's 7 path components.
         """
         components = cid_to_path_components(canonical_id)
         return self.root.joinpath(*components)
@@ -397,10 +398,7 @@ class LocalRecipeStore:
         Returns:
             Path: Path to ``history/v{version}.json`` for the cid.
         """
-        return (
-            self._history_dir(canonical_id)
-            / f"{HISTORY_VERSION_PREFIX}{int(version)}{HISTORY_VERSION_SUFFIX}"
-        )
+        return self._history_dir(canonical_id) / f"{HISTORY_VERSION_PREFIX}{int(version)}{HISTORY_VERSION_SUFFIX}"
 
     def _attempts_path(self, canonical_id: str) -> Path:
         """Return the path to a cid's append-only attempts log.
@@ -425,19 +423,14 @@ class LocalRecipeStore:
         return self._recipe_dir(canonical_id) / LOCK_FILENAME
 
     def _walk_recipe_dirs(self) -> Iterable[Path]:
-        """Yield every directory exactly five levels below ``root``
+        """Yield every directory at a valid depth below ``root``
         that contains a live ``recipe.json``.
 
         Used by :meth:`list_recent` / :meth:`search` — both of which
         only care about live recipe rows. Directories that hold
         attempts but no recipe are intentionally excluded.
 
-        Skips:
-        * any malformed depth (operator created an extra subdir or
-          put a recipe.json at the wrong level — we log and skip
-          rather than indexing it);
-        * the ``history`` subdir (six levels deep, the recipe.json
-          presence check naturally rules it out).
+        Only 7-level directories are accepted.
         """
         if not self.root.is_dir():
             return
@@ -449,16 +442,16 @@ class LocalRecipeStore:
                 rel_parts = recipe_dir.relative_to(self.root).parts
             except ValueError:
                 continue
-            if len(rel_parts) != 5:
+            if len(rel_parts) != 7:
                 log.debug(
-                    "skipping %s: not at the documented 5-level depth",
+                    "skipping %s: not at the required 7-level depth",
                     recipe_dir,
                 )
                 continue
             yield recipe_dir
 
     def _walk_cid_dirs(self) -> Iterable[Path]:
-        """Yield every directory exactly five levels below ``root``
+        """Yield every directory exactly seven levels below ``root``
         that contains EITHER a live ``recipe.json`` OR an
         ``attempts.ndjson``.
 
@@ -466,6 +459,10 @@ class LocalRecipeStore:
         against a cid that doesn't (yet) have a parent recipe row
         are still discoverable. Mirrors the central server contract
         that attempts have no FK to the parent recipe.
+
+        Yields:
+            Each canonical-id directory at the 5-level depth holding either a
+            ``recipe.json`` or an ``attempts.ndjson`` (deduplicated).
         """
         if not self.root.is_dir():
             return
@@ -479,7 +476,7 @@ class LocalRecipeStore:
                     rel_parts = cid_dir.relative_to(self.root).parts
                 except ValueError:
                     continue
-                if len(rel_parts) != 5:
+                if len(rel_parts) != 7:
                     continue
                 if cid_dir in seen:
                     continue
@@ -493,7 +490,7 @@ class LocalRecipeStore:
         self,
         *,
         canonical_id: str,
-        # 5-tuple identity (also encoded in canonical_id; stamped at
+        # 7-tuple identity (also encoded in canonical_id; stamped at
         # the top level for arbor-compat — arbor's recipe.json has
         # ``model`` / ``hardware`` as top-level fields).
         model: str = "",
@@ -598,9 +595,7 @@ class LocalRecipeStore:
             now = _utc_now_iso()
             live = _read_json(self._live_path(canonical_id))
             created = live is None
-            prior_version = (
-                int(live.get("version", 0)) if isinstance(live, dict) else 0
-            )
+            prior_version = int(live.get("version", 0)) if isinstance(live, dict) else 0
             new_version = prior_version + 1 if not created else 1
 
             if not created:
@@ -608,14 +603,15 @@ class LocalRecipeStore:
                 # carries the triggering write's provenance so an
                 # audit can trace who supplanted v{N-1}.
                 archive_path = self._history_version_path(
-                    canonical_id, prior_version,
+                    canonical_id,
+                    prior_version,
                 )
                 archive_payload: dict[str, Any] = {
                     "canonical_id": canonical_id,
-                    "version":      prior_version,
-                    "archived_at":  now,
-                    "replaced_by":  dict(provenance or {}),
-                    "snapshot":     dict(live) if isinstance(live, dict) else {},
+                    "version": prior_version,
+                    "archived_at": now,
+                    "replaced_by": dict(provenance or {}),
+                    "snapshot": dict(live) if isinstance(live, dict) else {},
                 }
                 _atomic_write_json(archive_path, archive_payload)
 
@@ -625,33 +621,30 @@ class LocalRecipeStore:
             # or ``{"description": ..., "measured_impact": ...}`` —
             # both end up in the same on-disk shape).
             payload_dict: dict[str, Any] = {
-                "canonical_id":      canonical_id,
-                "version":           new_version,
-                "created_at":        (
-                    str(live.get("created_at") or now)
-                    if isinstance(live, dict) else now
-                ),
-                "updated_at":        now,
-                "model":             model,
-                "hardware":          hardware,
-                "framework":         framework,
+                "canonical_id": canonical_id,
+                "version": new_version,
+                "created_at": (str(live.get("created_at") or now) if isinstance(live, dict) else now),
+                "updated_at": now,
+                "model": model,
+                "hardware": hardware,
+                "framework": framework,
                 "framework_version": framework_version,
-                "precision":         precision,
-                "best_config":       dict(best_config or {}),
-                "best_throughput":   float(best_throughput),
-                "what_worked":       _normalise_findings(what_worked),
-                "what_failed":       _normalise_failures(what_failed),
-                "remaining_gaps":    _normalise_gaps(remaining_gaps),
-                "prs_tested":        _normalise_prs(prs_tested),
-                "pitfalls":          _normalise_pitfalls(pitfalls),
-                "lessons":           _normalise_lessons(lessons),
-                "last_profiled":     last_profiled,
+                "precision": precision,
+                "best_config": dict(best_config or {}),
+                "best_throughput": float(best_throughput),
+                "what_worked": _normalise_findings(what_worked),
+                "what_failed": _normalise_failures(what_failed),
+                "remaining_gaps": _normalise_gaps(remaining_gaps),
+                "prs_tested": _normalise_prs(prs_tested),
+                "pitfalls": _normalise_pitfalls(pitfalls),
+                "lessons": _normalise_lessons(lessons),
+                "last_profiled": last_profiled,
                 "stack_fingerprint": dict(stack_fingerprint or {}),
-                "sessions":          _normalise_sessions(sessions),
-                "authority":         authority,
-                "confidence":        float(confidence),
-                "evidence_refs":     list(evidence_refs or []),
-                "provenance":        dict(provenance or {}),
+                "sessions": _normalise_sessions(sessions),
+                "authority": authority,
+                "confidence": float(confidence),
+                "evidence_refs": list(evidence_refs or []),
+                "provenance": dict(provenance or {}),
             }
             if extras:
                 # Splat extras at the top level so arbor consumers
@@ -662,13 +655,14 @@ class LocalRecipeStore:
 
             recipe = Recipe.from_dict(payload_dict)
             _atomic_write_json(
-                self._live_path(canonical_id), recipe.to_dict(),
+                self._live_path(canonical_id),
+                recipe.to_dict(),
             )
 
         return {
             "canonical_id": canonical_id,
-            "version":      new_version,
-            "created":      created,
+            "version": new_version,
+            "created": created,
         }
 
     # ------------------------------------------------------------------
@@ -758,10 +752,7 @@ class LocalRecipeStore:
         for entry in sorted(history_dir.iterdir()):
             if not entry.is_file():
                 continue
-            if not (
-                entry.name.startswith(HISTORY_VERSION_PREFIX)
-                and entry.name.endswith(HISTORY_VERSION_SUFFIX)
-            ):
+            if not (entry.name.startswith(HISTORY_VERSION_PREFIX) and entry.name.endswith(HISTORY_VERSION_SUFFIX)):
                 continue
             archive = _read_json(entry)
             if isinstance(archive, dict):
@@ -807,8 +798,31 @@ class LocalRecipeStore:
                 ) from exc
 
     # ------------------------------------------------------------------
-    # list_recent / search
+    # list_recent / search / list_all_live_recipes
     # ------------------------------------------------------------------
+    def list_all_live_recipes(self) -> list[dict[str, Any]]:
+        """Return ALL live recipes without the search() 1000-row clamp.
+
+        Used by the mirror ingest CronJob which must iterate the entire
+        corpus. Unlike search(), this bypasses the limit/filter/sort
+        machinery and simply walks every recipe dir.
+        """
+        rows: list[dict[str, Any]] = []
+        for recipe_dir in self._walk_recipe_dirs():
+            try:
+                cid = canonical_id_for_path(
+                    root=self.root,
+                    recipe_dir=recipe_dir,
+                )
+            except InvalidCanonicalIdError:
+                continue
+            payload = _read_json(recipe_dir / RECIPE_FILENAME)
+            if not isinstance(payload, dict):
+                continue
+            payload.setdefault("canonical_id", cid)
+            rows.append(payload)
+        return rows
+
     def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """Recent live recipes (``updated_at DESC``), no filter.
 
@@ -880,8 +894,7 @@ class LocalRecipeStore:
         del prefer  # client-side rerank lives in RecipeKB
         if order_by not in _ORDER_BY_KEYS:
             raise ValueError(
-                f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, "
-                f"got {order_by!r}",
+                f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, got {order_by!r}",
             )
         sort_key, descending = _ORDER_BY_KEYS[order_by]
         clamped_limit = max(1, min(1000, int(limit) if limit else 50))
@@ -890,11 +903,14 @@ class LocalRecipeStore:
         for recipe_dir in self._walk_recipe_dirs():
             try:
                 cid = canonical_id_for_path(
-                    root=self.root, recipe_dir=recipe_dir,
+                    root=self.root,
+                    recipe_dir=recipe_dir,
                 )
             except InvalidCanonicalIdError as exc:
                 log.warning(
-                    "skipping malformed recipe dir %s: %s", recipe_dir, exc,
+                    "skipping malformed recipe dir %s: %s",
+                    recipe_dir,
+                    exc,
                 )
                 continue
             payload = _read_json(recipe_dir / RECIPE_FILENAME)
@@ -1007,12 +1023,14 @@ class LocalRecipeStore:
                 except OSError as exc:
                     if exc.errno != errno.EINVAL:
                         log.debug(
-                            "fsync skipped on %s: %s", attempts_path, exc,
+                            "fsync skipped on %s: %s",
+                            attempts_path,
+                            exc,
                         )
         return {
-            "id":                  next_id,
+            "id": next_id,
             "recipe_canonical_id": canonical_id,
-            "attempt_at":          stamped_at,
+            "attempt_at": stamped_at,
         }
 
     def list_attempts(
@@ -1126,8 +1144,14 @@ def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> boo
     Recognised label keys map to top-level fields:
 
     * ``model`` / ``hardware`` / ``framework`` /
-      ``framework_version`` / ``precision`` → the 5-tuple identity
-      slots stamped at the top level.
+      ``framework_version`` / ``precision`` / ``model_type`` /
+      ``architectures`` → the 7-tuple identity slots.
+
+    For ``architectures`` the semantics are *contains*: the query's
+    architecture slug(s) must be a subset of the recipe's architectures
+    (matching gbrain_remote_client behaviour). Both slug strings
+    (``"llamaforcausallm"``) and lists (``["LlamaForCausalLM"]``) are
+    accepted and normalized before comparison.
 
     Any other key is matched against the recipe's free-form
     ``extras`` (preserved arbor session-level keys) so a caller
@@ -1143,20 +1167,75 @@ def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> boo
             match. Empty matches everything.
 
     Returns:
-        bool: ``True`` iff every requested label equals the row's
+        bool: ``True`` iff every requested label matches the row's
             corresponding value.
     """
     if not label_match:
         return True
     for key, expected in label_match.items():
-        actual = payload.get(key)
-        if actual != expected:
-            return False
+        if key == "architectures":
+            if not _arch_contains(payload.get("architectures"), expected):
+                return False
+        elif key == "model_type":
+            if not _model_type_matches(payload.get("model_type"), expected):
+                return False
+        else:
+            actual = payload.get(key)
+            if actual != expected:
+                return False
     return True
 
 
+def _arch_contains(recipe_arch: Any, query_arch: Any) -> bool:
+    """True when the recipe's architectures contain all queried architectures.
+
+    Handles slug strings ("llamaforcausallm"), "+" joined multi-arch slugs,
+    and raw lists (["LlamaForCausalLM"]). None / empty / default on either
+    side is a wildcard so legacy recipes without architecture tags match.
+    """
+    from ..recipe_snapshot_constants import DEFAULT_ARCHITECTURES_SLUG
+
+    query_slug = _normalize_arch_to_slug(query_arch)
+    if not query_slug or query_slug in (DEFAULT_ARCHITECTURES_SLUG, "none"):
+        return True
+    recipe_slug = _normalize_arch_to_slug(recipe_arch)
+    if not recipe_slug or recipe_slug in (DEFAULT_ARCHITECTURES_SLUG, "none"):
+        return True
+    query_parts = set(query_slug.split("+"))
+    recipe_parts = set(recipe_slug.split("+"))
+    return query_parts.issubset(recipe_parts)
+
+
+def _model_type_matches(recipe_mt: Any, query_mt: Any) -> bool:
+    """Compare model_type with slug normalization.
+
+    None / empty / default on either side is treated as a wildcard
+    so legacy recipes without model_type tags are still reachable.
+    """
+    from ..recipe_snapshot_constants import DEFAULT_MODEL_TYPE_SLUG
+
+    q = str(query_mt or "").strip().lower().replace("/", "_").replace(" ", "_")
+    if not q or q in (DEFAULT_MODEL_TYPE_SLUG, "none"):
+        return True
+    r = str(recipe_mt or "").strip().lower().replace("/", "_").replace(" ", "_")
+    if not r or r in (DEFAULT_MODEL_TYPE_SLUG, "none"):
+        return True
+    return r == q
+
+
+def _normalize_arch_to_slug(value: Any) -> str:
+    """Normalize architectures to a sorted '+'-joined lowercase slug."""
+    if isinstance(value, list):
+        parts = sorted(
+            str(v).strip().lower().replace("/", "_").replace(" ", "_") for v in value if str(v or "").strip()
+        )
+        return "+".join(parts) if parts else ""
+    return str(value or "").strip().lower().replace("/", "_").replace(" ", "_")
+
+
 def _matches_metrics(
-    payload: dict[str, Any], metric_filters: dict[str, Any],
+    payload: dict[str, Any],
+    metric_filters: dict[str, Any],
 ) -> bool:
     """Numeric range filter against arbor-shape metric fields.
 
@@ -1186,10 +1265,7 @@ def _matches_metrics(
         # ``best_throughput`` for arbor-compat (the v2 wire spec
         # uses ``throughput`` as the canonical metric key, so
         # callers might still use that name).
-        lookup_key = (
-            "best_throughput" if key in ("throughput", "best_throughput")
-            else key
-        )
+        lookup_key = "best_throughput" if key in ("throughput", "best_throughput") else key
         if lookup_key not in payload:
             return False
         try:
@@ -1218,7 +1294,8 @@ def _matches_metrics(
 
 
 def _matches_updated_since(
-    payload: dict[str, Any], updated_since: str | None,
+    payload: dict[str, Any],
+    updated_since: str | None,
 ) -> bool:
     """Test whether a row was updated at or after a bound.
 
@@ -1289,6 +1366,7 @@ def _coerce_dict(item: Any) -> dict[str, Any] | None:
             cannot be coerced.
     """
     from dataclasses import is_dataclass, asdict
+
     if item is None:
         return None
     if isinstance(item, dict):
@@ -1313,14 +1391,16 @@ def _normalise_findings(items: list[Any] | None) -> list[dict[str, Any]]:
             dict per coercible finding.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append({
-            "description":     str(d.get("description") or ""),
-            "measured_impact": str(d.get("measured_impact") or ""),
-        })
+        out.append(
+            {
+                "description": str(d.get("description") or ""),
+                "measured_impact": str(d.get("measured_impact") or ""),
+            }
+        )
     return out
 
 
@@ -1336,14 +1416,16 @@ def _normalise_failures(items: list[Any] | None) -> list[dict[str, Any]]:
             coercible failure.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append({
-            "description": str(d.get("description") or ""),
-            "reason":      str(d.get("reason") or ""),
-        })
+        out.append(
+            {
+                "description": str(d.get("description") or ""),
+                "reason": str(d.get("reason") or ""),
+            }
+        )
     return out
 
 
@@ -1359,14 +1441,16 @@ def _normalise_gaps(items: list[Any] | None) -> list[dict[str, Any]]:
             coercible gap.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append({
-            "description": str(d.get("description") or ""),
-            "metrics":     str(d.get("metrics") or ""),
-        })
+        out.append(
+            {
+                "description": str(d.get("description") or ""),
+                "metrics": str(d.get("metrics") or ""),
+            }
+        )
     return out
 
 
@@ -1385,7 +1469,7 @@ def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
             dict per coercible PR.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
@@ -1393,12 +1477,14 @@ def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
             number = int(d.get("number") or 0)
         except (TypeError, ValueError):
             number = 0
-        out.append({
-            "repo":    str(d.get("repo") or ""),
-            "number":  number,
-            "outcome": str(d.get("outcome") or ""),
-            "notes":   str(d.get("notes") or ""),
-        })
+        out.append(
+            {
+                "repo": str(d.get("repo") or ""),
+                "number": number,
+                "outcome": str(d.get("outcome") or ""),
+                "notes": str(d.get("notes") or ""),
+            }
+        )
     return out
 
 
@@ -1414,14 +1500,16 @@ def _normalise_pitfalls(items: list[Any] | None) -> list[dict[str, Any]]:
             coercible pitfall.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append({
-            "description": str(d.get("description") or ""),
-            "severity":    str(d.get("severity") or ""),
-        })
+        out.append(
+            {
+                "description": str(d.get("description") or ""),
+                "severity": str(d.get("severity") or ""),
+            }
+        )
     return out
 
 
@@ -1440,16 +1528,18 @@ def _normalise_lessons(items: list[Any] | None) -> list[dict[str, Any]]:
             dict per coercible lesson.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append({
-            "statement":       str(d.get("statement") or ""),
-            # Free-form (Coordinator writes a structured dict) — keep
-            # verbatim instead of str()-ing a dict into a lossy string.
-            "measured_impact": d.get("measured_impact") or "",
-        })
+        out.append(
+            {
+                "statement": str(d.get("statement") or ""),
+                # Free-form (Coordinator writes a structured dict) — keep
+                # verbatim instead of str()-ing a dict into a lossy string.
+                "measured_impact": d.get("measured_impact") or "",
+            }
+        )
     return out
 
 
@@ -1469,7 +1559,7 @@ def _normalise_sessions(items: list[Any] | None) -> list[dict[str, Any]]:
             coercible record.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
@@ -1489,15 +1579,17 @@ def _normalise_sessions(items: list[Any] | None) -> list[dict[str, Any]]:
             stack_len = int(d.get("stack_len") or 0)
         except (TypeError, ValueError):
             stack_len = 0
-        out.append({
-            "date":              str(d.get("date") or ""),
-            "throughput_before": tput_before,
-            "throughput_after":  tput_after,
-            "actions_taken":     list(d.get("actions_taken") or []),
-            "session_id":        str(d.get("session_id") or ""),
-            "gain_pct":          gain_pct,
-            "stack_len":         stack_len,
-        })
+        out.append(
+            {
+                "date": str(d.get("date") or ""),
+                "throughput_before": tput_before,
+                "throughput_after": tput_after,
+                "actions_taken": list(d.get("actions_taken") or []),
+                "session_id": str(d.get("session_id") or ""),
+                "gain_pct": gain_pct,
+                "stack_len": stack_len,
+            }
+        )
     return out
 
 

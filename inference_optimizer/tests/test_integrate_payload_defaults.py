@@ -49,7 +49,8 @@ class TestFillIntegrateDefaultsFromState:
         )
 
         out = krh._fill_integrate_defaults_from_state(
-            {"kernel_id": "k_abc"}, session_dir=session_dir,
+            {"kernel_id": "k_abc"},
+            session_dir=session_dir,
         )
 
         assert out["base_tput"] == 800.0
@@ -95,7 +96,8 @@ class TestFillIntegrateDefaultsFromState:
         _seed_state(session_dir)  # all defaults zero/empty
 
         out = krh._fill_integrate_defaults_from_state(
-            {"kernel_id": "k_abc"}, session_dir=session_dir,
+            {"kernel_id": "k_abc"},
+            session_dir=session_dir,
         )
 
         assert "base_tput" not in out or out["base_tput"] in (0.0, 0)
@@ -107,7 +109,8 @@ class TestFillIntegrateDefaultsFromState:
 
         payload = {"kernel_id": "k_abc"}
         out = krh._fill_integrate_defaults_from_state(
-            payload, session_dir=session_dir,
+            payload,
+            session_dir=session_dir,
         )
 
         assert "base_tput" not in payload
@@ -137,26 +140,29 @@ class TestFillIntegrateDefaultsFromState:
 class TestIntegrateHandlerHonoursStateDefault:
     @pytest.mark.asyncio
     async def test_missing_base_tput_in_payload_still_runs_when_state_has_one(
-        self, session_dir, monkeypatch,
+        self,
+        session_dir,
+        monkeypatch,
     ):
         """The ``base_tput <= 0`` hard-check must not fire when state has a baseline."""
         _seed_state(session_dir, baseline_tput=800.0)
 
         result = await krh.integrate_handler(
-            {"kernel_id": "k_no_artifact"}, session_dir=session_dir,
+            {"kernel_id": "k_no_artifact"},
+            session_dir=session_dir,
         )
 
         assert result["status"] == "failed"
-        assert result.get("error") != (
-            "integrate_handler requires base_tput > 0 to compute KEEP/REVERT"
-        )
+        assert result.get("error") != ("integrate_handler requires base_tput > 0 to compute KEEP/REVERT")
 
     @pytest.mark.asyncio
     async def test_no_base_tput_anywhere_still_fails_with_clear_error(
-        self, session_dir,
+        self,
+        session_dir,
     ):
         result = await krh.integrate_handler(
-            {"kernel_id": "k_orphan"}, session_dir=session_dir,
+            {"kernel_id": "k_orphan"},
+            session_dir=session_dir,
         )
 
         assert result["status"] == "failed"

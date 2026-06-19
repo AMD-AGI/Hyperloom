@@ -102,9 +102,7 @@ class CursorStore:
             CursorState: The stored cursor, or an empty cursor when the
             agent has no row.
         """
-        row = await self.db.fetchone(
-            "SELECT * FROM cursors WHERE agent=?", (agent,)
-        )
+        row = await self.db.fetchone("SELECT * FROM cursors WHERE agent=?", (agent,))
         if row is None:
             return CursorState.empty(agent)
         return CursorState.from_row(row)
@@ -139,8 +137,7 @@ class CursorStore:
         """
         async with self.db.transaction() as cur:
             cur.execute(
-                "SELECT last_processed_seq, last_processed_msg_id, processed_at "
-                "FROM cursors WHERE agent=?",
+                "SELECT last_processed_seq, last_processed_msg_id, processed_at FROM cursors WHERE agent=?",
                 (agent,),
             )
             row = cur.fetchone()

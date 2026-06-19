@@ -48,7 +48,8 @@ class _CoordinatorStub:
 def _call_gate(stub: _CoordinatorStub, candidate: dict[str, Any]) -> dict[str, str]:
     return asyncio.run(
         Coordinator._critic_review_framework_pr_candidate(  # type: ignore[arg-type]
-            stub, candidate,
+            stub,
+            candidate,
         ),
     )
 
@@ -58,14 +59,14 @@ def test_gate_returns_approve_for_mock_critic(tmp_path: Path) -> None:
     """MockCriticBackend auto-approves, so the gate maps to ``approve`` and caches the decision."""
     stub = _CoordinatorStub(tmp_path, MockCriticBackend())
     candidate = {
-        "candidate_id":     "https://github.com/sgl-project/sglang/pull/9999",
-        "pr_url":           "https://github.com/sgl-project/sglang/pull/9999",
-        "repo":             "sgl-project/sglang",
-        "ref":              "feature/x",
-        "title":            "perf: speed up moe",
-        "framework":        "sglang",
+        "candidate_id": "https://github.com/sgl-project/sglang/pull/9999",
+        "pr_url": "https://github.com/sgl-project/sglang/pull/9999",
+        "repo": "sgl-project/sglang",
+        "ref": "feature/x",
+        "title": "perf: speed up moe",
+        "framework": "sglang",
         "gap_canonical_id": "moe_gemm_latency",
-        "batch_id":         "batch-1",
+        "batch_id": "batch-1",
     }
     result = _call_gate(stub, candidate)
     assert result["verdict"] == "approve"
@@ -94,18 +95,22 @@ class _RejectBackend:
         self.calls.append(prompt)
         # Extract msg_id so the verdict targets the right proposal.
         import re
+
         m = re.search(r"msg_id=([a-f0-9]+)", prompt)
         msg_id = m.group(1) if m else "unknown"
         from types import SimpleNamespace
+
         return SimpleNamespace(
-            intents=[Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={
-                    "target_proposal_msg_id": msg_id,
-                    "verdict":                "reject",
-                    "reasoning":              "out of scope for this gap",
-                },
-            )],
+            intents=[
+                Intent(
+                    type=IntentType.REVIEW_VERDICT,
+                    payload={
+                        "target_proposal_msg_id": msg_id,
+                        "verdict": "reject",
+                        "reasoning": "out of scope for this gap",
+                    },
+                )
+            ],
             raw_text="(reject)",
         )
 
@@ -166,17 +171,20 @@ class _NeedsReviewBackend:
     ) -> Any:
         import re
         from types import SimpleNamespace
+
         m = re.search(r"msg_id=([a-f0-9]+)", prompt)
         msg_id = m.group(1) if m else "unknown"
         return SimpleNamespace(
-            intents=[Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={
-                    "target_proposal_msg_id": msg_id,
-                    "verdict":                "needs_review",
-                    "reasoning":              "insufficient context",
-                },
-            )],
+            intents=[
+                Intent(
+                    type=IntentType.REVIEW_VERDICT,
+                    payload={
+                        "target_proposal_msg_id": msg_id,
+                        "verdict": "needs_review",
+                        "reasoning": "insufficient context",
+                    },
+                )
+            ],
             raw_text="(needs_review)",
         )
 
@@ -207,17 +215,20 @@ class _CountingBackend:
         self.run_count += 1
         import re
         from types import SimpleNamespace
+
         m = re.search(r"msg_id=([a-f0-9]+)", prompt)
         msg_id = m.group(1) if m else "unknown"
         return SimpleNamespace(
-            intents=[Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={
-                    "target_proposal_msg_id": msg_id,
-                    "verdict":                "approve",
-                    "reasoning":              "ok",
-                },
-            )],
+            intents=[
+                Intent(
+                    type=IntentType.REVIEW_VERDICT,
+                    payload={
+                        "target_proposal_msg_id": msg_id,
+                        "verdict": "approve",
+                        "reasoning": "ok",
+                    },
+                )
+            ],
             raw_text="(approve)",
         )
 
@@ -253,17 +264,20 @@ class _PromptCapturingBackend:
         self.last_prompt = prompt
         import re
         from types import SimpleNamespace
+
         m = re.search(r"msg_id=([a-f0-9]+)", prompt)
         msg_id = m.group(1) if m else "x"
         return SimpleNamespace(
-            intents=[Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={
-                    "target_proposal_msg_id": msg_id,
-                    "verdict":                "approve",
-                    "reasoning":              "ok",
-                },
-            )],
+            intents=[
+                Intent(
+                    type=IntentType.REVIEW_VERDICT,
+                    payload={
+                        "target_proposal_msg_id": msg_id,
+                        "verdict": "approve",
+                        "reasoning": "ok",
+                    },
+                )
+            ],
             raw_text="(approve)",
         )
 
@@ -273,9 +287,9 @@ def test_prompt_includes_diff_url_when_present(tmp_path: Path) -> None:
     stub = _CoordinatorStub(tmp_path, backend)
     cand = {
         "candidate_id": "pr-1",
-        "batch_id":     "b-1",
-        "pr_url":       "https://github.com/sgl-project/sglang/pull/1",
-        "diff_url":     "https://github.com/sgl-project/sglang/pull/1.diff",
+        "batch_id": "b-1",
+        "pr_url": "https://github.com/sgl-project/sglang/pull/1",
+        "diff_url": "https://github.com/sgl-project/sglang/pull/1.diff",
     }
     _call_gate(stub, cand)
     assert "https://github.com/sgl-project/sglang/pull/1.diff" in backend.last_prompt
@@ -286,22 +300,24 @@ def test_prompt_includes_diff_url_when_present(tmp_path: Path) -> None:
     "framework, diff_url",
     [
         ("sglang", "https://github.com/sgl-project/sglang/pull/100.diff"),
-        ("vllm",   "https://github.com/ROCm/vllm/pull/200.diff"),
-        ("atom",   "https://github.com/ROCm/ATOM/pull/123/files"),
+        ("vllm", "https://github.com/ROCm/vllm/pull/200.diff"),
+        ("atom", "https://github.com/ROCm/ATOM/pull/123/files"),
     ],
 )
 def test_critic_prompt_renders_candidate_diff_url_across_frameworks(
-    tmp_path: Path, framework: str, diff_url: str,
+    tmp_path: Path,
+    framework: str,
+    diff_url: str,
 ) -> None:
     """The Critic prompt carries the candidate's ``diff_url`` verbatim regardless of framework (incl. atom's /files shape)."""
     backend = _PromptCapturingBackend()
     stub = _CoordinatorStub(tmp_path, backend)
     cand = {
         "candidate_id": f"pr-{framework}",
-        "batch_id":     f"b-{framework}",
-        "pr_url":       diff_url.rsplit("/", 1)[0],
-        "diff_url":     diff_url,
-        "framework":    framework,
+        "batch_id": f"b-{framework}",
+        "pr_url": diff_url.rsplit("/", 1)[0],
+        "diff_url": diff_url,
+        "framework": framework,
     }
     _call_gate(stub, cand)
     assert diff_url in backend.last_prompt
@@ -316,11 +332,11 @@ def test_critic_prompt_no_framework_specific_rule_text_for_atom(
     stub = _CoordinatorStub(tmp_path, backend)
     cand = {
         "candidate_id": "pr-atom-rules",
-        "batch_id":     "b-atom-rules",
-        "pr_url":       "https://github.com/ROCm/ATOM/pull/9",
-        "diff_url":     "https://github.com/ROCm/ATOM/pull/9.diff",
-        "framework":    "atom",
-        "title":        "perf: atom MTP scheduler",
+        "batch_id": "b-atom-rules",
+        "pr_url": "https://github.com/ROCm/ATOM/pull/9",
+        "diff_url": "https://github.com/ROCm/ATOM/pull/9.diff",
+        "framework": "atom",
+        "title": "perf: atom MTP scheduler",
     }
     _call_gate(stub, cand)
     assert "sglang-specific" not in backend.last_prompt, (
@@ -328,8 +344,7 @@ def test_critic_prompt_no_framework_specific_rule_text_for_atom(
         "rule text; rephrase the rule to be framework-neutral."
     )
     assert "vllm-specific" not in backend.last_prompt, (
-        "Critic prompt for atom candidate contains vllm-specific "
-        "rule text; rephrase the rule to be framework-neutral."
+        "Critic prompt for atom candidate contains vllm-specific rule text; rephrase the rule to be framework-neutral."
     )
 
 
@@ -337,34 +352,38 @@ def test_prompt_includes_session_local_priors(tmp_path: Path) -> None:
     """Recent Critic decisions + apply/bench outcomes fold into the prompt for pattern-spotting."""
     backend = _PromptCapturingBackend()
     stub = _CoordinatorStub(tmp_path, backend)
-    stub.shared_state.framework_pr_critic_decisions.extend([
-        {
-            "candidate_id": "pr-prev-1",
-            "verdict":      "reject",
-            "rationale":    "touches kernel build",
-            "ts":           "2026-05-27T00:00:00Z",
-        },
-        {
-            "candidate_id": "pr-prev-2",
-            "verdict":      "approve",
-            "rationale":    "",
-            "ts":           "2026-05-27T00:01:00Z",
-        },
-    ])
-    stub.shared_state.framework_pr_phase_progress.extend([
-        {
-            "candidate_id": "pr-prev-2",
-            "status":       "reverted",
-            "gain_pct":     -1.4,
-            "ts":           "2026-05-27T00:02:00Z",
-        },
-        {
-            "candidate_id": "pr-prev-3",
-            "status":       "kept",
-            "gain_pct":     3.2,
-            "ts":           "2026-05-27T00:03:00Z",
-        },
-    ])
+    stub.shared_state.framework_pr_critic_decisions.extend(
+        [
+            {
+                "candidate_id": "pr-prev-1",
+                "verdict": "reject",
+                "rationale": "touches kernel build",
+                "ts": "2026-05-27T00:00:00Z",
+            },
+            {
+                "candidate_id": "pr-prev-2",
+                "verdict": "approve",
+                "rationale": "",
+                "ts": "2026-05-27T00:01:00Z",
+            },
+        ]
+    )
+    stub.shared_state.framework_pr_phase_progress.extend(
+        [
+            {
+                "candidate_id": "pr-prev-2",
+                "status": "reverted",
+                "gain_pct": -1.4,
+                "ts": "2026-05-27T00:02:00Z",
+            },
+            {
+                "candidate_id": "pr-prev-3",
+                "status": "kept",
+                "gain_pct": 3.2,
+                "ts": "2026-05-27T00:03:00Z",
+            },
+        ]
+    )
     cand = {"candidate_id": "pr-new", "batch_id": "b-2"}
     _call_gate(stub, cand)
     assert "pr-prev-1" in backend.last_prompt
@@ -377,18 +396,23 @@ def test_prompt_includes_session_local_priors(tmp_path: Path) -> None:
 def test_priors_helper_trims_to_tail_length(tmp_path: Path) -> None:
     """The helper bounds both decisions and outcomes to the tail length so the prompt stays bounded."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
+
     stub = _CoordinatorStub(tmp_path, backend=None)
     for i in range(12):
-        stub.shared_state.framework_pr_critic_decisions.append({
-            "candidate_id": f"pr-{i}",
-            "verdict":      "approve",
-            "rationale":    "",
-        })
-        stub.shared_state.framework_pr_phase_progress.append({
-            "candidate_id": f"pr-{i}",
-            "status":       "kept",
-            "gain_pct":     1.0,
-        })
+        stub.shared_state.framework_pr_critic_decisions.append(
+            {
+                "candidate_id": f"pr-{i}",
+                "verdict": "approve",
+                "rationale": "",
+            }
+        )
+        stub.shared_state.framework_pr_phase_progress.append(
+            {
+                "candidate_id": f"pr-{i}",
+                "status": "kept",
+                "gain_pct": 1.0,
+            }
+        )
     priors = Coordinator._collect_framework_pr_priors(stub)  # type: ignore[arg-type]
     assert len(priors["recent_decisions"]) == 5
     assert len(priors["recent_outcomes"]) == 5
@@ -399,11 +423,14 @@ def test_priors_helper_trims_to_tail_length(tmp_path: Path) -> None:
 def test_priors_helper_skips_non_terminal_outcomes(tmp_path: Path) -> None:
     """Only terminal-status rows feed the outcomes prior; in-flight ``running`` rows don't show up."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
+
     stub = _CoordinatorStub(tmp_path, backend=None)
-    stub.shared_state.framework_pr_phase_progress.extend([
-        {"candidate_id": "pr-running", "status": "running"},
-        {"candidate_id": "pr-kept", "status": "kept", "gain_pct": 2.0},
-    ])
+    stub.shared_state.framework_pr_phase_progress.extend(
+        [
+            {"candidate_id": "pr-running", "status": "running"},
+            {"candidate_id": "pr-kept", "status": "kept", "gain_pct": 2.0},
+        ]
+    )
     priors = Coordinator._collect_framework_pr_priors(stub)  # type: ignore[arg-type]
     ids = [r["candidate_id"] for r in priors["recent_outcomes"]]
     assert "pr-kept" in ids

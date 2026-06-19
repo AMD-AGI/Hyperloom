@@ -34,6 +34,7 @@ from robustness_agent.state_store import DetectorStateStore
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _fresh_classifier(
     session_dir: Path,
     *,
@@ -113,6 +114,7 @@ def _ray_pending_data(pending: int = 7) -> SourceData:
 # GpuLeakDetector — consecutive-tick rule (the original motivating bug)
 # ---------------------------------------------------------------------------
 
+
 def test_gpu_leak_fires_only_after_2_subprocesses_see_leak(
     tmp_path: Path,
 ):
@@ -167,6 +169,7 @@ def test_gpu_leak_resets_when_owner_reappears(tmp_path: Path):
 # RayPendingDetector — ≥3 consecutive ticks
 # ---------------------------------------------------------------------------
 
+
 def test_ray_pending_starvation_needs_three_subprocesses(tmp_path: Path):
     for tick in (1, 2):
         c, store = _fresh_classifier(tmp_path)
@@ -183,6 +186,7 @@ def test_ray_pending_starvation_needs_three_subprocesses(tmp_path: Path):
 # ProgressDetector — rolling-window plateau
 # ---------------------------------------------------------------------------
 
+
 def test_gain_plateau_history_survives_subprocess_restarts(
     tmp_path: Path,
 ):
@@ -190,7 +194,8 @@ def test_gain_plateau_history_survives_subprocess_restarts(
     for tick in (1, 2, 3):
         c, store = _fresh_classifier(tmp_path)
         ctx = _ctx_with_tick(
-            tick, cumulative_gain_validated=0.0,
+            tick,
+            cumulative_gain_validated=0.0,
             optimization_stack_size=1,
         )
         c.classify(SourceData(sources_used=["local"]), ctx)
@@ -201,7 +206,8 @@ def test_gain_plateau_history_survives_subprocess_restarts(
     syms = c4.classify(
         SourceData(sources_used=["local"]),
         _ctx_with_tick(
-            4, cumulative_gain_validated=0.0,
+            4,
+            cumulative_gain_validated=0.0,
             optimization_stack_size=1,
         ),
     )
@@ -211,6 +217,7 @@ def test_gain_plateau_history_survives_subprocess_restarts(
 # ---------------------------------------------------------------------------
 # ActionLadder cooldown — persists across subprocesses
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_action_ladder_cooldown_persists(tmp_path: Path):
@@ -226,24 +233,28 @@ async def test_action_ladder_cooldown_persists(tmp_path: Path):
 
     store1 = DetectorStateStore(session_dir=tmp_path)
     ladder1 = ActionLadder(
-        config=cfg, state_view=store1.view("action_ladder"),
+        config=cfg,
+        state_view=store1.view("action_ladder"),
     )
     result1 = await ladder1.decide(
-        [sym], tick_index=10, now_unix=1.0,
+        [sym],
+        tick_index=10,
+        now_unix=1.0,
     )
-    assert any(
-        i.type.value == "alert" for i in result1.intents
-    )
+    assert any(i.type.value == "alert" for i in result1.intents)
     store1.flush_atomic()
 
     # A fresh ladder instance against the same state file. Tick 11 is
     # within the 5-tick cooldown of tick 10 → no alert this time.
     store2 = DetectorStateStore(session_dir=tmp_path)
     ladder2 = ActionLadder(
-        config=cfg, state_view=store2.view("action_ladder"),
+        config=cfg,
+        state_view=store2.view("action_ladder"),
     )
     result2 = await ladder2.decide(
-        [sym], tick_index=11, now_unix=2.0,
+        [sym],
+        tick_index=11,
+        now_unix=2.0,
     )
     intent_types = [i.type.value for i in result2.intents]
     assert "alert" not in intent_types
@@ -253,6 +264,7 @@ async def test_action_ladder_cooldown_persists(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # RcaThrottle cooldown — persists across subprocesses
 # ---------------------------------------------------------------------------
+
 
 def test_rca_throttle_cooldown_persists(tmp_path: Path):
     cfg = RcaThrottleConfig(
@@ -289,6 +301,7 @@ def test_rca_throttle_cooldown_persists(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # state_store_enabled=False → behaviour reverts to in-memory only
 # ---------------------------------------------------------------------------
+
 
 def test_classifier_without_state_store_is_in_memory(tmp_path: Path):
     classifier = Classifier(

@@ -6,7 +6,7 @@ expected_gain_pct: [3.0, 10.0]
 accuracy_risk: 0.0
 crash_risk: 0.05
 prerequisites:
-  - params
+  - explore
 requires_lanes:
   - server_lifecycle
   - benchmark_lane
@@ -26,7 +26,7 @@ pipeline_phase: explore
 typical_runtime_min: 15.0
 applicable_when:
   - "baseline_tput > 0"
-# Descriptive — see backends.yaml.
+# Descriptive — params_schema documents the optional sweep overrides.
 params_schema:
   benchmark_script:
     type: string

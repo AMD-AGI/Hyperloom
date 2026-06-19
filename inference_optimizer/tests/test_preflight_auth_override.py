@@ -36,13 +36,9 @@ def stub_install_steps(monkeypatch, tmp_path):
     # circuits, and stub the clone as a belt-and-braces fallback.
     inferencex_dir = tmp_path / "InferenceX"
     (inferencex_dir / "benchmarks").mkdir(parents=True)
-    (inferencex_dir / "benchmarks" / "benchmark_lib.sh").write_text(
-        "# stub", encoding="utf-8"
-    )
+    (inferencex_dir / "benchmarks" / "benchmark_lib.sh").write_text("# stub", encoding="utf-8")
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
-    monkeypatch.setattr(
-        cli, "_clone_inferencex", lambda dest: str(inferencex_dir)
-    )
+    monkeypatch.setattr(cli, "_clone_inferencex", lambda dest: str(inferencex_dir))
 
     def _fake_which(name: str):
         return f"/usr/bin/{name}"
@@ -87,9 +83,7 @@ def clean_url_env(monkeypatch):
 
 def test_derive_anthropic_base_url_strips_openai_v1_suffix():
     assert (
-        cli._derive_anthropic_base_url(
-            "https://gateway.example/api/v1/llm-proxy/v1/"
-        )
+        cli._derive_anthropic_base_url("https://gateway.example/api/v1/llm-proxy/v1/")
         == "https://gateway.example/api/v1/llm-proxy"
     )
 
@@ -157,6 +151,148 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
     assert '"customApiUrl": "https://gateway.example/api/v1/llm-proxy"' in config_text
 
 
+def test_preflight_preserves_operator_geak_tunnel_url(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """#521: an operator-pinned GEAK/OOB tunnel URL survives preflight.
+
+    GEAK runs in a separate network namespace that cannot reach the gateway
+    directly; the operator points GEAK_BASE_URL at the host-local reverse
+    tunnel. Preflight must NOT clobber it back to the direct gateway URL, while
+    still defaulting the unset LLM_API_BASE to the gateway.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SAFE_API_KEY", "safe-key")
+    monkeypatch.setenv(
+        "OPENAI_BASE_URL",
+        "https://gateway.example/api/v1/llm-proxy/v1",
+    )
+    tunnel = "https://127.0.0.1:18444/api/v1/llm-proxy/v1"
+    monkeypatch.setenv("GEAK_BASE_URL", tunnel)
+    monkeypatch.setenv("OOB_BASE_URL", tunnel)
+    # LLM_API_BASE left unset → should default to the gateway.
+
+    resolved = cli._preflight()
+
+    gateway = resolved[1]
+    # Operator tunnel preserved.
+    assert cli.os.environ["GEAK_BASE_URL"] == tunnel
+    assert cli.os.environ["OOB_BASE_URL"] == tunnel
+    # Unset alias still defaults to the gateway.
+    assert cli.os.environ["LLM_API_BASE"] == gateway
+
+
+def test_preflight_rewrites_stale_proxy_even_when_operator_set(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """A leftover 127.0.0.1:4002 value is force-rewritten, not preserved."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SAFE_API_KEY", "safe-key")
+    monkeypatch.setenv(
+        "OPENAI_BASE_URL",
+        "https://gateway.example/api/v1/llm-proxy/v1",
+    )
+    monkeypatch.setenv(
+        "GEAK_BASE_URL",
+        "http://127.0.0.1:4002/api/v1/llm-proxy/v1",
+    )
+
+    resolved = cli._preflight()
+
+    assert cli.os.environ["GEAK_BASE_URL"] == resolved[1]
+    assert "127.0.0.1:4002" not in cli.os.environ["GEAK_BASE_URL"]
+
+
+def test_is_stale_proxy_url_matches_legacy_only():
+    assert cli._is_stale_proxy_url("http://127.0.0.1:4002/api/v1/llm-proxy/v1")
+    assert not cli._is_stale_proxy_url("https://127.0.0.1:18444/api/v1/llm-proxy/v1")
+    assert not cli._is_stale_proxy_url("https://gateway.example/v1")
+    assert not cli._is_stale_proxy_url("")
+    assert not cli._is_stale_proxy_url(None)
+
+
+# _sync_geak_config_base_url (#521): GEAK reads $GEAK_CONFIG yaml, not env.
+_GEAK_CFG_TEMPLATE = """model:
+  model_class: litellm
+  model_name: openai/claude-opus-4-7
+  api_key: sk-test
+  base_url: {url}
+  model_kwargs:
+    max_tokens: 16384
+run:
+  mode: full
+"""
+
+
+def test_sync_geak_config_rewrites_stale_base_url(tmp_path):
+    """An install-time gateway URL is rewritten to the operator tunnel."""
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text(
+        _GEAK_CFG_TEMPLATE.format(
+            url="https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1",
+        ),
+        encoding="utf-8",
+    )
+    tunnel = "https://127.0.0.1:18444/api/v1/llm-proxy/v1"
+
+    changed = cli._sync_geak_config_base_url(str(cfg), tunnel)
+
+    assert changed is True
+    text = cfg.read_text(encoding="utf-8")
+    assert f"base_url: {tunnel}" in text
+    assert "core42.example-internal-host.invalid" not in text
+    # Other keys untouched.
+    assert "model_class: litellm" in text
+    assert "api_key: sk-test" in text
+
+
+def test_sync_geak_config_noop_when_already_in_sync(tmp_path):
+    cfg = tmp_path / "geak.yaml"
+    url = "https://127.0.0.1:18444/api/v1/llm-proxy/v1"
+    cfg.write_text(_GEAK_CFG_TEMPLATE.format(url=url), encoding="utf-8")
+    before = cfg.read_text(encoding="utf-8")
+
+    assert cli._sync_geak_config_base_url(str(cfg), url) is False
+    assert cfg.read_text(encoding="utf-8") == before
+
+
+def test_sync_geak_config_missing_file_is_safe(tmp_path):
+    missing = tmp_path / "nope.yaml"
+    assert cli._sync_geak_config_base_url(str(missing), "https://x/v1") is False
+
+
+def test_sync_geak_config_no_base_url_line_is_safe(tmp_path):
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text("model:\n  model_class: litellm\n", encoding="utf-8")
+    assert cli._sync_geak_config_base_url(str(cfg), "https://x/v1") is False
+
+
+def test_sync_geak_config_empty_args_are_safe(tmp_path):
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text(_GEAK_CFG_TEMPLATE.format(url="https://x/v1"), encoding="utf-8")
+    assert cli._sync_geak_config_base_url("", "https://y/v1") is False
+    assert cli._sync_geak_config_base_url(str(cfg), "") is False
+
+
+def test_sync_geak_config_preserves_url_with_special_chars(tmp_path):
+    """A replacement URL with regex-special chars must land verbatim."""
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text(
+        _GEAK_CFG_TEMPLATE.format(url="https://old/v1"),
+        encoding="utf-8",
+    )
+    weird = r"https://host/api\g<0>/v1"
+
+    assert cli._sync_geak_config_base_url(str(cfg), weird) is True
+    assert f"base_url: {weird}" in cfg.read_text(encoding="utf-8")
+
+
 # _ensure_python_sdks
 class _RecordingRun:
     """Test double for subprocess.run that records calls and replays a script."""
@@ -184,11 +320,13 @@ class _Completed:
 
 def test_ensure_python_sdks_skips_when_all_present(monkeypatch, capsys):
     """All three import-checks return rc=0 → no pip install fires."""
-    runner = _RecordingRun([
-        _Completed(returncode=0),
-        _Completed(returncode=0),
-        _Completed(returncode=0),
-    ])
+    runner = _RecordingRun(
+        [
+            _Completed(returncode=0),
+            _Completed(returncode=0),
+            _Completed(returncode=0),
+        ]
+    )
     monkeypatch.setattr(cli.subprocess, "run", runner)
 
     cli._ensure_python_sdks("/opt/venv/bin/python", [])
@@ -206,12 +344,14 @@ def test_ensure_python_sdks_skips_when_all_present(monkeypatch, capsys):
 
 def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsys):
     """When `import claude_agent_sdk` fails, pip install runs with the SAME interpreter."""
-    runner = _RecordingRun([
-        _Completed(returncode=1),
-        _Completed(returncode=0),
-        _Completed(returncode=0),
-        _Completed(returncode=0),
-    ])
+    runner = _RecordingRun(
+        [
+            _Completed(returncode=1),
+            _Completed(returncode=0),
+            _Completed(returncode=0),
+            _Completed(returncode=0),
+        ]
+    )
     monkeypatch.setattr(cli.subprocess, "run", runner)
 
     cli._ensure_python_sdks("/opt/venv/bin/python", ["--break-system-packages"])
@@ -235,6 +375,7 @@ def test_unset_hip_visible_devices_pops_when_rocr_present(monkeypatch, capsys):
     cli._unset_hip_visible_devices()
 
     import os as _os
+
     assert "HIP_VISIBLE_DEVICES" not in _os.environ
     assert _os.environ["ROCR_VISIBLE_DEVICES"] == "0,1,2,3"
     assert "WARNING" in capsys.readouterr().out
@@ -247,6 +388,7 @@ def test_unset_hip_visible_devices_keeps_hip_when_rocr_unset(monkeypatch):
     cli._unset_hip_visible_devices()
 
     import os as _os
+
     assert _os.environ["HIP_VISIBLE_DEVICES"] == "0,1,2,3"
 
 
@@ -316,9 +458,76 @@ def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
     assert "claude-opus-4-6" in err
 
 
+def test_validate_claude_model_custom_allowed_when_optout_set(monkeypatch, capsys):
+    """#340: opt-out lets a non-AMD orchestration model pass when in catalog."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    monkeypatch.setattr(
+        cli,
+        "_probe_llm_catalog",
+        lambda **kw: {"my-org/custom-claude", "gpt-5.4"},
+    )
+    args = _make_args(claude_model="my-org/custom-claude")
+    catalog = cli._validate_and_resolve_claude_model(args, None)
+
+    assert args.claude_model == "my-org/custom-claude"
+    assert "my-org/custom-claude" in catalog
+    out = capsys.readouterr().out
+    assert "confirmed in gateway catalog" in out
+
+
+def test_validate_claude_model_custom_optout_no_amd_fallback(monkeypatch, capsys):
+    """#340: under opt-out a catalog miss errors (no silent opus-4-6 fallback)."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    monkeypatch.setattr(
+        cli,
+        "_probe_llm_catalog",
+        # 4-6 present, but custom id absent → must NOT fall back to 4-6.
+        lambda **kw: {"claude-opus-4-6", "gpt-5.4"},
+    )
+    args = _make_args(claude_model="my-org/custom-claude")
+    with pytest.raises(SystemExit) as exc_info:
+        cli._validate_and_resolve_claude_model(args, None)
+    assert exc_info.value.code == 2
+    assert args.claude_model == "my-org/custom-claude"
+    err = capsys.readouterr().err
+    assert "not present in gateway catalog" in err
+
+
+def test_validate_claude_model_custom_optout_rejects_empty(monkeypatch, capsys):
+    """#340: opt-out with an empty model id aborts before the probe."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+
+    def _no_probe(**kwargs):
+        raise AssertionError("probe should not run on empty-model abort")
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    args = _make_args(claude_model="")
+    with pytest.raises(SystemExit) as exc_info:
+        cli._validate_and_resolve_claude_model(args, None)
+    assert exc_info.value.code == 2
+    assert "is empty" in capsys.readouterr().err
+
+
+def test_validate_claude_model_optout_off_still_hard_gates(monkeypatch, capsys):
+    """Default (opt-out unset): custom model still rejected by static gate."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
+
+    def _no_probe(**kwargs):
+        raise AssertionError("probe should not run on static-gate fail")
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    args = _make_args(claude_model="my-org/custom-claude")
+    with pytest.raises(SystemExit) as exc_info:
+        cli._validate_and_resolve_claude_model(args, None)
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL" in err
+
+
 def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
     monkeypatch.setattr(
-        cli, "_probe_llm_catalog",
+        cli,
+        "_probe_llm_catalog",
         lambda **kw: {"claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-4-7")
@@ -332,7 +541,8 @@ def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
 def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys):
     """Catalog has 4-6 only → arg rewritten with a WARN."""
     monkeypatch.setattr(
-        cli, "_probe_llm_catalog",
+        cli,
+        "_probe_llm_catalog",
         lambda **kw: {"claude-opus-4-6", "claude-opus-4-5", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-4-7")
@@ -348,7 +558,8 @@ def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys
 def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
     """Catalog missing both 4-7 and 4-6 → sys.exit(2)."""
     monkeypatch.setattr(
-        cli, "_probe_llm_catalog",
+        cli,
+        "_probe_llm_catalog",
         lambda **kw: {"claude-opus-4-5", "claude-haiku-4-5-20251001", "gpt-5.4"},
     )
     args = _make_args(claude_model="claude-opus-4-7")
@@ -404,7 +615,8 @@ def test_probe_llm_catalog_retries_on_transient_error_then_succeeds(monkeypatch)
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
     ids = cli._probe_llm_catalog(
-        base_url="https://gateway/v1", api_key="sk-test",
+        base_url="https://gateway/v1",
+        api_key="sk-test",
     )
     assert ids == {"claude-opus-4-7"}
     assert attempt[0] == 3
@@ -422,7 +634,8 @@ def test_probe_llm_catalog_returns_none_when_all_attempts_fail(monkeypatch, caps
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
     ids = cli._probe_llm_catalog(
-        base_url="https://gateway/v1", api_key="sk-test",
+        base_url="https://gateway/v1",
+        api_key="sk-test",
     )
     assert ids is None
     out = capsys.readouterr().out
@@ -517,9 +730,12 @@ def _ns(**overrides) -> argparse.Namespace:
 
 
 def _write_marker(
-    marker_path: Path, *,
-    kb_reachable: bool, pr_reachable: bool,
-    kb_skipped: bool = False, pr_skipped: bool = False,
+    marker_path: Path,
+    *,
+    kb_reachable: bool,
+    pr_reachable: bool,
+    kb_skipped: bool = False,
+    pr_skipped: bool = False,
     kb_failure_reason: str | None = None,
     pr_failure_reason: str | None = None,
 ) -> None:
@@ -527,8 +743,8 @@ def _write_marker(
     payload: dict = {
         "kb_reachable": kb_reachable,
         "pr_reachable": pr_reachable,
-        "kb_skipped":   kb_skipped,
-        "pr_skipped":   pr_skipped,
+        "kb_skipped": kb_skipped,
+        "pr_skipped": pr_skipped,
     }
     if kb_failure_reason is not None:
         payload["kb_failure_reason"] = kb_failure_reason
@@ -539,6 +755,7 @@ def _write_marker(
 
 def _fake_run_writes_marker(marker_path: Path, **marker_kwargs):
     """Return a ``subprocess.run`` stub that writes ``marker_path`` and returns an appropriate rc."""
+
     def _runner(cmd, env=None, check=False, timeout=None):
         _write_marker(marker_path, **marker_kwargs)
         kb_skipped = marker_kwargs.get("kb_skipped", False)
@@ -551,6 +768,7 @@ def _fake_run_writes_marker(marker_path: Path, **marker_kwargs):
         if not pr_skipped and not pr_ok:
             rc = 1
         return subprocess.CompletedProcess(cmd, rc)
+
     return _runner
 
 
@@ -565,7 +783,8 @@ def marker_path(tmp_path, monkeypatch) -> Path:
 def test_ir3_kb_ok_pr_ok(marker_path):
     args = _ns()
     with patch.object(
-        cli_module.subprocess, "run",
+        cli_module.subprocess,
+        "run",
         side_effect=_fake_run_writes_marker(marker_path, kb_reachable=True, pr_reachable=True),
     ):
         cli_module._run_ir3_preflight(args)
@@ -579,9 +798,12 @@ def test_ir3_kb_ok_pr_ok(marker_path):
 def test_ir3_kb_5xx_auto_degrade(marker_path):
     args = _ns()
     with patch.object(
-        cli_module.subprocess, "run",
+        cli_module.subprocess,
+        "run",
         side_effect=_fake_run_writes_marker(
-            marker_path, kb_reachable=False, pr_reachable=True,
+            marker_path,
+            kb_reachable=False,
+            pr_reachable=True,
             kb_failure_reason="500",
         ),
     ):
@@ -617,7 +839,8 @@ def test_ir3_kb_401_with_token(marker_path, monkeypatch):
     monkeypatch.setenv("KB_SERVICE_TOKEN", "tok-abc")
     args = _ns()
     with patch.object(
-        cli_module.subprocess, "run",
+        cli_module.subprocess,
+        "run",
         side_effect=_fake_run_writes_marker(marker_path, kb_reachable=True, pr_reachable=True),
     ):
         cli_module._run_ir3_preflight(args)
@@ -630,9 +853,12 @@ def test_ir3_kb_401_missing_token(marker_path, monkeypatch):
     monkeypatch.delenv("KB_SERVICE_TOKEN", raising=False)
     args = _ns()
     with patch.object(
-        cli_module.subprocess, "run",
+        cli_module.subprocess,
+        "run",
         side_effect=_fake_run_writes_marker(
-            marker_path, kb_reachable=False, pr_reachable=True,
+            marker_path,
+            kb_reachable=False,
+            pr_reachable=True,
             kb_failure_reason="missing_token",
         ),
     ):
@@ -684,7 +910,10 @@ def test_ir3_no_kb_url_skips_probe_local_only(marker_path, monkeypatch):
     def _runner(cmd, env=None, check=False, timeout=None):
         seen_env.update(env or {})
         _write_marker(
-            marker_path, kb_reachable=False, pr_reachable=True, kb_skipped=True,
+            marker_path,
+            kb_reachable=False,
+            pr_reachable=True,
+            kb_skipped=True,
         )
         return subprocess.CompletedProcess(cmd, 0)
 

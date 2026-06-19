@@ -58,9 +58,7 @@ def _build_prompt(
 # Registry side: both yaml files must load cleanly
 def test_specialist_yaml_loads_into_registry(registry: ActionRegistry) -> None:
     meta = registry.get("specialist")
-    assert meta is not None, (
-        "actions/_meta/specialist.yaml missing — PR-A1 contract broken"
-    )
+    assert meta is not None, "actions/_meta/specialist.yaml missing — PR-A1 contract broken"
     assert meta.family == "creative"
     assert "research_lane" in meta.requires_lanes
     assert "emit_intent" in meta.allowed_tools
@@ -74,9 +72,7 @@ def test_specialist_yaml_loads_into_registry(registry: ActionRegistry) -> None:
 
 def test_integrate_patch_yaml_loads_into_registry(registry: ActionRegistry) -> None:
     meta = registry.get("integrate_patch")
-    assert meta is not None, (
-        "actions/_meta/integrate_patch.yaml missing — PR-A1 contract broken"
-    )
+    assert meta is not None, "actions/_meta/integrate_patch.yaml missing — PR-A1 contract broken"
     assert "server_lifecycle" in meta.requires_lanes
     assert "benchmark_lane" in meta.requires_lanes
     assert "workspace_mutation" in meta.requires_lanes
@@ -103,15 +99,17 @@ def test_integrate_patch_allowed_in_explore_phase() -> None:
 
 # Rendered prompt: EMIT hints must be present in both kernel + no_kernel modes
 def test_specialist_emit_hint_in_full_prompt(
-    registry: ActionRegistry, rules_path: Path,
+    registry: ActionRegistry,
+    rules_path: Path,
 ) -> None:
     prompt = _build_prompt(
-        registry, rules_path,
-        enabled=FULL_ENABLED_ACTIONS, kernel_enabled=True,
+        registry,
+        rules_path,
+        enabled=FULL_ENABLED_ACTIONS,
+        kernel_enabled=True,
     )
     assert "EMIT: delegate{action_name='specialist'" in prompt, (
-        "Orchestration prompt missing the specialist EMIT hint — the LLM "
-        "will not learn how to fan out specialists."
+        "Orchestration prompt missing the specialist EMIT hint — the LLM will not learn how to fan out specialists."
     )
     # Required payload fields must be advertised so the LLM doesn't trip ``specialist_dispatch_source``.
     assert "domain=" in prompt
@@ -119,22 +117,28 @@ def test_specialist_emit_hint_in_full_prompt(
 
 
 def test_integrate_patch_emit_hint_in_full_prompt(
-    registry: ActionRegistry, rules_path: Path,
+    registry: ActionRegistry,
+    rules_path: Path,
 ) -> None:
     prompt = _build_prompt(
-        registry, rules_path,
-        enabled=FULL_ENABLED_ACTIONS, kernel_enabled=True,
+        registry,
+        rules_path,
+        enabled=FULL_ENABLED_ACTIONS,
+        kernel_enabled=True,
     )
     assert "EMIT: delegate{action_name='integrate_patch'" in prompt
     assert "specialist_task_id=" in prompt
 
 
 def test_specialist_emit_hint_in_no_kernel_prompt(
-    registry: ActionRegistry, rules_path: Path,
+    registry: ActionRegistry,
+    rules_path: Path,
 ) -> None:
     prompt = _build_prompt(
-        registry, rules_path,
-        enabled=NO_KERNEL_ENABLED_ACTIONS, kernel_enabled=False,
+        registry,
+        rules_path,
+        enabled=NO_KERNEL_ENABLED_ACTIONS,
+        kernel_enabled=False,
     )
     assert "EMIT: delegate{action_name='specialist'" in prompt
     assert "EMIT: delegate{action_name='integrate_patch'" in prompt

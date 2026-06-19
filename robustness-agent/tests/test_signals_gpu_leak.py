@@ -70,6 +70,7 @@ def _data(local_gpu: dict, processes: list | None = None) -> SourceData:
 # Two-tick gate
 # ---------------------------------------------------------------------------
 
+
 def test_first_tick_with_all_full_no_owner_is_silent():
     """min_consecutive_ticks=2 means a single tick is not enough."""
     det = GpuLeakDetector(GpuLeakConfig(min_consecutive_ticks=2))
@@ -103,6 +104,7 @@ def test_min_consecutive_ticks_one_emits_immediately():
 # Live owner silence
 # ---------------------------------------------------------------------------
 
+
 def test_full_but_live_engine_core_owner_is_silent():
     det = GpuLeakDetector(GpuLeakConfig(min_consecutive_ticks=2))
     procs = [
@@ -135,6 +137,7 @@ def test_full_with_unrelated_process_still_fires():
 # Partial-fill silence
 # ---------------------------------------------------------------------------
 
+
 def test_partial_full_is_silent():
     """Only some GPUs full -> not a leak."""
     det = GpuLeakDetector(GpuLeakConfig(min_consecutive_ticks=2))
@@ -153,6 +156,7 @@ def test_partial_full_is_silent():
 # ---------------------------------------------------------------------------
 # Reset behaviour
 # ---------------------------------------------------------------------------
+
 
 def test_reset_after_one_clean_tick():
     """full -> clean -> full -> full: detector emits only on the 4th tick."""
@@ -184,14 +188,17 @@ def test_no_gpu_data_is_silent_and_resets_counter():
 # Free-MB threshold path
 # ---------------------------------------------------------------------------
 
+
 def test_free_mb_threshold_fires_when_util_mem_pct_missing():
     """rocm-smi older builds may omit ``GPU memory use (%)`` — fall back
     on absolute free MiB."""
-    det = GpuLeakDetector(GpuLeakConfig(
-        util_mem_pct_threshold=200.0,  # effectively unreachable
-        free_mb_threshold=500.0,
-        min_consecutive_ticks=1,
-    ))
+    det = GpuLeakDetector(
+        GpuLeakConfig(
+            util_mem_pct_threshold=200.0,  # effectively unreachable
+            free_mb_threshold=500.0,
+            min_consecutive_ticks=1,
+        )
+    )
     snap = {
         "gpus": [
             {"gpu_id": 0, "vram_used_mb": 196500.0, "vram_total_mb": 196608.0},
@@ -207,6 +214,7 @@ def test_free_mb_threshold_fires_when_util_mem_pct_missing():
 # ---------------------------------------------------------------------------
 # Classifier integration
 # ---------------------------------------------------------------------------
+
 
 def test_classifier_includes_gpu_leak_rule():
     classifier = Classifier(

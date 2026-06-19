@@ -72,6 +72,7 @@ class PostmortemFinalizerConfig:
 # Public entry points
 # ---------------------------------------------------------------------------
 
+
 class PostmortemFinalizer:
     """Once-per-session aggregator for L1 (flashpoint) + L2 (decision trace).
 
@@ -172,9 +173,7 @@ class PostmortemFinalizer:
             )
         except Exception:  # noqa: BLE001
             log.exception("postmortem: failed to render markdown")
-            postmortem_md = self._fallback_postmortem_md(
-                stop_reason=stop_reason
-            )
+            postmortem_md = self._fallback_postmortem_md(stop_reason=stop_reason)
         # Best-effort writes; failing to write the trace shouldn't stop
         # us from writing the marker (idempotency wins).
         try:
@@ -184,9 +183,7 @@ class PostmortemFinalizer:
             return False
         wrote_any = False
         wrote_any |= self._write_text(_POSTMORTEM_FILENAME, postmortem_md)
-        wrote_any |= self._write_json(
-            _DECISION_TRACE_FILENAME, decision_trace
-        )
+        wrote_any |= self._write_json(_DECISION_TRACE_FILENAME, decision_trace)
         self._write_marker(stop_reason=stop_reason)
         return wrote_any
 
@@ -199,11 +196,7 @@ class PostmortemFinalizer:
         Returns:
             Path: ``<session_dir>/<findings_subdir>/<session_id>.jsonl``.
         """
-        return (
-            self.session_dir
-            / self._config.findings_subdir
-            / f"{self.session_id}.jsonl"
-        )
+        return self.session_dir / self._config.findings_subdir / f"{self.session_id}.jsonl"
 
     def _load_findings(self) -> list[dict[str, Any]]:
         """Load the session findings from the FindingSink JSONL file.
@@ -271,7 +264,9 @@ class PostmortemFinalizer:
         return out
 
     def _collect_action_tasks(
-        self, action_dir: Path, cfg: PostmortemFinalizerConfig,
+        self,
+        action_dir: Path,
+        cfg: PostmortemFinalizerConfig,
     ) -> list[dict[str, Any]]:
         """Collect normalised task entries for one action directory.
 
@@ -301,31 +296,37 @@ class PostmortemFinalizer:
         for task_dir in task_dirs:
             result_path = task_dir / "result.json"
             if not result_path.is_file():
-                out.append({
-                    "task_id": task_dir.name,
-                    "workspace": str(task_dir),
-                    "result_path": None,
-                    "error": "result.json_missing",
-                })
+                out.append(
+                    {
+                        "task_id": task_dir.name,
+                        "workspace": str(task_dir),
+                        "result_path": None,
+                        "error": "result.json_missing",
+                    }
+                )
                 continue
             try:
                 raw = result_path.read_text(encoding="utf-8")
                 payload = json.loads(raw)
             except (OSError, json.JSONDecodeError) as exc:
-                out.append({
-                    "task_id": task_dir.name,
-                    "workspace": str(task_dir),
-                    "result_path": str(result_path),
-                    "error": f"result.json_parse_failed: {exc}",
-                })
+                out.append(
+                    {
+                        "task_id": task_dir.name,
+                        "workspace": str(task_dir),
+                        "result_path": str(result_path),
+                        "error": f"result.json_parse_failed: {exc}",
+                    }
+                )
                 continue
             if not isinstance(payload, dict):
-                out.append({
-                    "task_id": task_dir.name,
-                    "workspace": str(task_dir),
-                    "result_path": str(result_path),
-                    "error": "result.json_not_dict",
-                })
+                out.append(
+                    {
+                        "task_id": task_dir.name,
+                        "workspace": str(task_dir),
+                        "result_path": str(result_path),
+                        "error": "result.json_not_dict",
+                    }
+                )
                 continue
             out.append(_normalise_task_entry(task_dir, result_path, payload))
         return out
@@ -362,9 +363,7 @@ class PostmortemFinalizer:
         lines.append(f"- **stop_reason**: `{stop_reason or '(unspecified)'}`")
         lines.append(f"- **finalized_at_utc**: `{now_iso}`")
         lines.append(f"- **findings_count**: {len(findings)}")
-        lines.append(
-            f"- **tasks_count**: {decision_trace.get('total_tasks', 0)}"
-        )
+        lines.append(f"- **tasks_count**: {decision_trace.get('total_tasks', 0)}")
         lines.append("")
 
         # ----- Flashpoint -----
@@ -372,17 +371,10 @@ class PostmortemFinalizer:
         lines.append("## Flashpoint")
         lines.append("")
         if flashpoint is None:
-            lines.append(
-                "_No HIGH-severity finding recorded this session._ The "
-                "stop_reason above is the only signal."
-            )
+            lines.append("_No HIGH-severity finding recorded this session._ The stop_reason above is the only signal.")
         else:
-            lines.append(
-                f"- **symptom**: `{flashpoint.get('symptom_name', '(unknown)')}`"
-            )
-            lines.append(
-                f"- **severity**: `{flashpoint.get('severity', '?')}`"
-            )
+            lines.append(f"- **symptom**: `{flashpoint.get('symptom_name', '(unknown)')}`")
+            lines.append(f"- **severity**: `{flashpoint.get('severity', '?')}`")
             lines.append(
                 f"- **tick_index**: `{flashpoint.get('tick_index', '?')}`  "
                 f"**timestamp_unix**: `{flashpoint.get('timestamp_unix', '?')}`"
@@ -413,10 +405,7 @@ class PostmortemFinalizer:
                 for intent in intents:
                     if not isinstance(intent, dict):
                         continue
-                    lines.append(
-                        f"- `{intent.get('intent_type', '?')}` "
-                        f"→ `{intent.get('payload', {})}`"
-                    )
+                    lines.append(f"- `{intent.get('intent_type', '?')}` → `{intent.get('payload', {})}`")
         lines.append("")
 
         # ----- Findings catalogue -----
@@ -428,23 +417,23 @@ class PostmortemFinalizer:
             high = [f for f in findings if str(f.get("severity")) == "high"]
             medium = [f for f in findings if str(f.get("severity")) == "medium"]
             low = [f for f in findings if str(f.get("severity")) == "low"]
-            lines.append(
-                f"Totals: HIGH={len(high)} / MEDIUM={len(medium)} / LOW={len(low)}"
-            )
+            lines.append(f"Totals: HIGH={len(high)} / MEDIUM={len(medium)} / LOW={len(low)}")
             lines.append("")
             # Render the most recent N HIGH-severity for the operator;
             # MEDIUM/LOW go to decision_trace.json (full corpus).
             ordered = sorted(
-                high, key=lambda f: f.get("tick_index") or 0, reverse=True,
+                high,
+                key=lambda f: f.get("tick_index") or 0,
+                reverse=True,
             )[: cfg.max_findings_in_report]
             if ordered:
                 lines.append("**HIGH findings (most recent first):**")
                 lines.append("")
                 for f in ordered:
                     lines.append(
-                        f"- `tick={f.get('tick_index','?')}` "
-                        f"`{f.get('symptom_name','?')}` — "
-                        f"{str(f.get('summary',''))[:200]}"
+                        f"- `tick={f.get('tick_index', '?')}` "
+                        f"`{f.get('symptom_name', '?')}` — "
+                        f"{str(f.get('summary', ''))[:200]}"
                     )
         lines.append("")
 
@@ -461,22 +450,12 @@ class PostmortemFinalizer:
             lines.append("| action | tasks | KEEP | REVERT | other |")
             lines.append("|---|---:|---:|---:|---:|")
             for action, tasks in sorted(tasks_by_action.items()):
-                keep = sum(
-                    1 for t in tasks
-                    if isinstance(t, dict) and str(t.get("decision") or "") == "KEEP"
-                )
-                revert = sum(
-                    1 for t in tasks
-                    if isinstance(t, dict) and str(t.get("decision") or "") == "REVERT"
-                )
+                keep = sum(1 for t in tasks if isinstance(t, dict) and str(t.get("decision") or "") == "KEEP")
+                revert = sum(1 for t in tasks if isinstance(t, dict) and str(t.get("decision") or "") == "REVERT")
                 other = len(tasks) - keep - revert
-                lines.append(
-                    f"| `{action}` | {len(tasks)} | {keep} | {revert} | {other} |"
-                )
+                lines.append(f"| `{action}` | {len(tasks)} | {keep} | {revert} | {other} |")
         lines.append("")
-        lines.append(
-            "_See `decision_trace.json` for the full per-task ledger._"
-        )
+        lines.append("_See `decision_trace.json` for the full per-task ledger._")
         lines.append("")
         return "\n".join(lines).rstrip() + "\n"
 
@@ -515,7 +494,9 @@ class PostmortemFinalizer:
             return True
         except OSError as exc:
             log.warning(
-                "postmortem: cannot write %s: %s", target, exc,
+                "postmortem: cannot write %s: %s",
+                target,
+                exc,
             )
             return False
 
@@ -539,7 +520,9 @@ class PostmortemFinalizer:
             return True
         except (OSError, TypeError, ValueError) as exc:
             log.warning(
-                "postmortem: cannot write %s: %s", target, exc,
+                "postmortem: cannot write %s: %s",
+                target,
+                exc,
             )
             return False
 
@@ -559,13 +542,12 @@ class PostmortemFinalizer:
                     {
                         "stop_reason": stop_reason,
                         "session_id": self.session_id,
-                        "finalized_at_utc": datetime.now(
-                            timezone.utc
-                        ).isoformat(timespec="seconds"),
+                        "finalized_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     },
                     indent=2,
                     sort_keys=True,
-                ) + "\n",
+                )
+                + "\n",
                 encoding="utf-8",
             )
         except OSError as exc:
@@ -576,6 +558,7 @@ class PostmortemFinalizer:
 # Standalone entry point for the operator CLI / post-hoc runs
 # ---------------------------------------------------------------------------
 
+
 def finalize_session(
     session_dir: Path,
     *,
@@ -585,7 +568,14 @@ def finalize_session(
 ) -> bool:
     """Convenience wrapper for non-reactor callers (e.g. post-hoc re-runs).
 
-    Returns the :meth:`PostmortemFinalizer.finalize` boolean.
+    Args:
+        session_dir: Session directory to finalize.
+        session_id: Identifier of the session.
+        stop_reason: Reason recorded for finalization.
+        config: Optional finalizer configuration.
+
+    Returns:
+        The :meth:`PostmortemFinalizer.finalize` boolean.
     """
     finalizer = PostmortemFinalizer(
         session_dir=session_dir,
@@ -599,15 +589,21 @@ def finalize_session(
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _pick_flashpoint(
     findings: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """First HIGH-severity finding, ordered by ``tick_index`` then
-    ``timestamp_unix`` (tie-break). ``None`` if nothing crossed HIGH."""
-    high = [
-        f for f in findings
-        if isinstance(f, dict) and str(f.get("severity")) == "high"
-    ]
+    """Pick the earliest HIGH-severity finding as the flashpoint.
+
+    Ordered by ``tick_index`` then ``timestamp_unix`` (tie-break).
+
+    Args:
+        findings: Candidate finding dicts.
+
+    Returns:
+        The first HIGH-severity finding, or ``None`` if none crossed HIGH.
+    """
+    high = [f for f in findings if isinstance(f, dict) and str(f.get("severity")) == "high"]
     if not high:
         return None
     high.sort(
@@ -624,9 +620,19 @@ def _normalise_task_entry(
     result_path: Path,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Project an executor ``result.json`` into the trace shape, capturing
-    the union of action-specific fields (e.g. ``output_throughput`` vs
-    ``gain_pct``) so dashboards need not re-read each file."""
+    """Project an executor ``result.json`` into the trace entry shape.
+
+    Captures the union of action-specific fields (e.g. ``output_throughput``
+    vs ``gain_pct``) so dashboards need not re-read each file.
+
+    Args:
+        task_dir: The task's workspace directory.
+        result_path: Path to the task's ``result.json``.
+        payload: Parsed result payload.
+
+    Returns:
+        A normalized trace entry dict.
+    """
     entry: dict[str, Any] = {
         "task_id": task_dir.name,
         "workspace": str(task_dir),
@@ -639,9 +645,15 @@ def _normalise_task_entry(
     # Common executor outputs — only include when non-None to keep
     # the JSON narrow.
     for key in (
-        "gain_pct", "validated_gain_pct", "output_throughput",
-        "base_tput", "new_tput", "kernel_id", "patch_path",
-        "report_path", "variant_name",
+        "gain_pct",
+        "validated_gain_pct",
+        "output_throughput",
+        "base_tput",
+        "new_tput",
+        "kernel_id",
+        "patch_path",
+        "report_path",
+        "variant_name",
     ):
         if key in payload and payload[key] is not None:
             entry[key] = payload[key]

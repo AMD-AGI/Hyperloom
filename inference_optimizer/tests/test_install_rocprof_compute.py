@@ -48,8 +48,12 @@ def _make_exec(path: Path, body: str) -> None:
 
 
 def _run(
-    tmp_path: Path, *, rocprof_present: bool, apt_present: bool,
-    check_only: int = 0, dry_run: int = 0,
+    tmp_path: Path,
+    *,
+    rocprof_present: bool,
+    apt_present: bool,
+    check_only: int = 0,
+    dry_run: int = 0,
 ) -> tuple[str, bool]:
     """Run the extracted body return (stdout, apt_called).
 
@@ -137,14 +141,20 @@ def test_no_apt_available_degrades(tmp_path: Path) -> None:
 
 def test_check_only_does_not_install(tmp_path: Path) -> None:
     out, apt_called = _run(
-        tmp_path, rocprof_present=False, apt_present=True, check_only=1,
+        tmp_path,
+        rocprof_present=False,
+        apt_present=True,
+        check_only=1,
     )
     assert not apt_called, f"--check-only must not install:\n{out}"
 
 
 def test_dry_run_does_not_install(tmp_path: Path) -> None:
     out, apt_called = _run(
-        tmp_path, rocprof_present=False, apt_present=True, dry_run=1,
+        tmp_path,
+        rocprof_present=False,
+        apt_present=True,
+        dry_run=1,
     )
     assert not apt_called, f"--dry-run must not install:\n{out}"
     assert "would install" in out
@@ -182,11 +192,13 @@ echo "RESOLVED=${{HYPERLOOM_ROCPROF_COMPUTE_PATH:-<unset>}}"
     script = tmp_path / "harness.sh"
     script.write_text(harness, encoding="utf-8")
     proc = subprocess.run(
-        ["bash", str(script)], cwd=REPO_ROOT, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+        ["bash", str(script)],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
     )
     assert proc.returncode == 0, f"harness failed:\n{proc.stdout}"
-    assert f"RESOLVED={rocprof_stub}" in proc.stdout, (
-        f"resolved path must be persisted for Ray workers:\n{proc.stdout}"
-    )
+    assert f"RESOLVED={rocprof_stub}" in proc.stdout, f"resolved path must be persisted for Ray workers:\n{proc.stdout}"
     assert "rocprof-compute present at" in proc.stdout

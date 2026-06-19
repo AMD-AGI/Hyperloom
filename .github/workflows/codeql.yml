@@ -2,13 +2,36 @@
 
 name: CodeQL
 
+# PR/push on all branches: skip when all changes match paths-ignore (same as Tests
+# with Coverage). Weekly schedule still runs on default branch for full analysis.
 on:
+  # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
+  # PR does not double-trigger. Weekly ``schedule`` still does a full analysis.
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE*"
+      - "COPYRIGHT"
+      - "CODEOWNERS"
+      - ".gitattributes"
   pull_request:
-    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE*"
+      - "COPYRIGHT"
+      - "CODEOWNERS"
+      - ".gitattributes"
   schedule:
     - cron: '0 6 * * 1'
+
+# Cancel superseded runs for the same ref (does not affect scheduled runs,
+# which use a distinct ref group).
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
