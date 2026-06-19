@@ -169,9 +169,7 @@ async def _arm(
         "extra_server_args": extra_sglang.strip(),
         "returncode": rc,
         "workspace": str(workspace) if workspace else None,
-        "report_path": str(workspace / "benchmark_report.json")
-        if workspace
-        else None,
+        "report_path": str(workspace / "benchmark_report.json") if workspace else None,
         "success": bool(report and report.get("success")),
         "output_throughput": tput,
         "stderr_tail": (stderr or stdout)[-4000:],
@@ -193,8 +191,7 @@ async def main_async() -> int:
     ap.add_argument(
         "--config",
         type=Path,
-        default=Path(__file__).resolve().parent / "configs"
-        / "baseline_sglang.yaml",
+        default=Path(__file__).resolve().parent / "configs" / "baseline_sglang.yaml",
     )
     ap.add_argument(
         "--base-extra-args",
@@ -217,9 +214,7 @@ async def main_async() -> int:
         print(f"config not found: {args.config}", file=sys.stderr)
         return 2
 
-    root = args.output_root or Path(
-        f"/tmp/ab_torch_compile_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-    )
+    root = args.output_root or Path(f"/tmp/ab_torch_compile_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}")
     root.mkdir(parents=True, exist_ok=True)
 
     base = (args.base_extra_args or "").strip()
@@ -248,12 +243,12 @@ async def main_async() -> int:
 
     ta = a_res.get("output_throughput")
     tb = b_res.get("output_throughput")
-    ratio = (float(tb) / float(ta)) if (isinstance(ta, (int, float)) and ta
-                                        and isinstance(tb, (int, float))) else None
-    diff_pct = ((float(tb) - float(ta)) / float(ta) * 100.0) if (
-        isinstance(ta, (int, float)) and ta
-        and isinstance(tb, (int, float))
-    ) else None
+    ratio = (float(tb) / float(ta)) if (isinstance(ta, (int, float)) and ta and isinstance(tb, (int, float))) else None
+    diff_pct = (
+        ((float(tb) - float(ta)) / float(ta) * 100.0)
+        if (isinstance(ta, (int, float)) and ta and isinstance(tb, (int, float)))
+        else None
+    )
 
     out = {
         "ts": datetime.now(tz=timezone.utc).isoformat(),

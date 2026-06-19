@@ -20,6 +20,7 @@ import pytest
 import yaml
 
 from inference_optimizer import cli
+from inference_optimizer import cli_model_gate
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
     DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND,
     HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV,
@@ -40,10 +41,19 @@ def _hermetic_env(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     # Without an explicit/env GPU type, _resolve_amd_gpu_type falls back to
     # autodetect; pin it OFF so non-AMD test cases never see real hardware.
-    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: None)
+    # Lives in cli_model_gate after the phase-6D fold; patch the real call site.
+    monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
     for key in (
-        "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "RANDOM_RANGE_RATIO",
-        "ROCR_VISIBLE_DEVICES", "PRECISION", "RUN_EVAL", "FRAMEWORK",
+        "CONC",
+        "ISL",
+        "OSL",
+        "MAX_MODEL_LEN",
+        "TP",
+        "RANDOM_RANGE_RATIO",
+        "ROCR_VISIBLE_DEVICES",
+        "PRECISION",
+        "RUN_EVAL",
+        "FRAMEWORK",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -77,26 +87,32 @@ def dense_model(tmp_path) -> str:
 
 
 # _model_is_moe detection
-@pytest.mark.parametrize("config", [
-    {"num_experts": 128},
-    {"num_local_experts": 8},
-    {"n_routed_experts": 64},
-    {"moe_intermediate_size": 768},
-    {"model_type": "qwen3_moe"},
-    {"architectures": ["Qwen3MoeForCausalLM"]},
-    {"text_config": {"num_experts": 16}},
-])
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"num_experts": 128},
+        {"num_local_experts": 8},
+        {"n_routed_experts": 64},
+        {"moe_intermediate_size": 768},
+        {"model_type": "qwen3_moe"},
+        {"architectures": ["Qwen3MoeForCausalLM"]},
+        {"text_config": {"num_experts": 16}},
+    ],
+)
 def test_model_is_moe_true(tmp_path, config):
     path = _write_model_config(tmp_path / "m", config)
     assert cli._model_is_moe(path) is True
 
 
-@pytest.mark.parametrize("config", [
-    {"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3"},
-    {"num_experts": 1},        # single "expert" is not MoE
-    {"num_experts": True},     # bool must not count as an int expert count
-    {},
-])
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3"},
+        {"num_experts": 1},  # single "expert" is not MoE
+        {"num_experts": True},  # bool must not count as an int expert count
+        {},
+    ],
+)
 def test_model_is_moe_false(tmp_path, config):
     path = _write_model_config(tmp_path / "m", config)
     assert cli._model_is_moe(path) is False
@@ -114,29 +130,23 @@ def test_inject_appends_triton_for_moe_on_amd(moe_model):
 
 
 def test_inject_appends_when_args_empty(moe_model):
-    assert (
-        inject_sglang_moe_runner_backend("", "sglang", moe_model, _AMD)
-        == "--moe-runner-backend triton"
-    )
-    assert (
-        inject_sglang_moe_runner_backend(None, "sglang", moe_model, _AMD)
-        == "--moe-runner-backend triton"
-    )
+    assert inject_sglang_moe_runner_backend("", "sglang", moe_model, _AMD) == "--moe-runner-backend triton"
+    assert inject_sglang_moe_runner_backend(None, "sglang", moe_model, _AMD) == "--moe-runner-backend triton"
 
 
 def test_inject_honors_env_override(moe_model, monkeypatch):
     monkeypatch.setenv(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "ck")
-    assert (
-        inject_sglang_moe_runner_backend("", "sglang", moe_model, _AMD)
-        == "--moe-runner-backend ck"
-    )
+    assert inject_sglang_moe_runner_backend("", "sglang", moe_model, _AMD) == "--moe-runner-backend ck"
 
 
-@pytest.mark.parametrize("existing", [
-    "--moe-runner-backend ck",
-    "--moe-runner-backend=ck",
-    "--foo 1 --moe-runner-backend ck --bar 2",
-])
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "--moe-runner-backend ck",
+        "--moe-runner-backend=ck",
+        "--foo 1 --moe-runner-backend ck --bar 2",
+    ],
+)
 def test_inject_does_not_double_user_value(moe_model, existing):
     out = inject_sglang_moe_runner_backend(existing, "sglang", moe_model, _AMD)
     assert out == existing
@@ -147,7 +157,10 @@ def test_inject_does_not_double_user_value(moe_model, existing):
 def test_inject_noop_for_dense_model(dense_model):
     assert inject_sglang_moe_runner_backend("--foo", "sglang", dense_model, _AMD) == "--foo"
     assert "--moe-runner-backend" not in inject_sglang_moe_runner_backend(
-        "", "sglang", dense_model, _AMD,
+        "",
+        "sglang",
+        dense_model,
+        _AMD,
     )
 
 
@@ -185,7 +198,10 @@ def _write_yaml(path: Path, *, model: str, framework: str = "sglang") -> None:
 
 
 def _materialize_envs(
-    tmp_path: Path, *, model: str, framework: str = "sglang",
+    tmp_path: Path,
+    *,
+    model: str,
+    framework: str = "sglang",
     extra_server_args: str = "",
 ) -> dict:
     base = tmp_path / "base.yaml"
@@ -193,7 +209,9 @@ def _materialize_envs(
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
-        base, out, extra_server_args=extra_server_args,
+        base,
+        out,
+        extra_server_args=extra_server_args,
     )
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -213,7 +231,9 @@ def test_materialize_noop_for_dense_model_on_amd(tmp_path, dense_model, monkeypa
 def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypatch):
     monkeypatch.setenv("GPU_TYPE", _AMD)
     envs = _materialize_envs(
-        tmp_path, model=moe_model, extra_server_args="--moe-runner-backend ck",
+        tmp_path,
+        model=moe_model,
+        extra_server_args="--moe-runner-backend ck",
     )
     sglang_args = envs["EXTRA_SGLANG_ARGS"]
     assert sglang_args.count("--moe-runner-backend") == 1

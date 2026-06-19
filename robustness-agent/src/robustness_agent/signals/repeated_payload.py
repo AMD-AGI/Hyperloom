@@ -31,7 +31,6 @@ from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 
 
-
 # Per-family payload projection: dotted keys (stable order) that define
 # the fingerprint; missing keys map to ``None`` so empties hash identically.
 _FAMILY_PROJECTIONS: dict[str, tuple[str, ...]] = {
@@ -75,24 +74,24 @@ _FAMILY_PROJECTIONS: dict[str, tuple[str, ...]] = {
 }
 
 # Generic fallback for unknown families with a ``params`` dict.
-_GENERIC_PROJECTION: tuple[str, ...] = (
-    "params",
-)
+_GENERIC_PROJECTION: tuple[str, ...] = ("params",)
 
 # Per-attempt fields stripped before hashing; including them would make
 # the fingerprint always-unique and the signal a no-op.
-_HASH_BLACKLIST: frozenset[str] = frozenset({
-    "idempotency_key",
-    "task_id",
-    "ts",
-    "timestamp",
-    "started_at",
-    "finished_at",
-    "submitted_at",
-    "msg_id",
-    "in_reply_to",
-    "target_proposal_msg_id",
-})
+_HASH_BLACKLIST: frozenset[str] = frozenset(
+    {
+        "idempotency_key",
+        "task_id",
+        "ts",
+        "timestamp",
+        "started_at",
+        "finished_at",
+        "submitted_at",
+        "msg_id",
+        "in_reply_to",
+        "target_proposal_msg_id",
+    }
+)
 
 
 @dataclass
@@ -148,10 +147,20 @@ def evaluate_repeated_payload_signals(
 # Streak detection
 # ---------------------------------------------------------------------------
 
+
 def _walk_streaks(
     events: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group consecutive same-hash failures per family; a ``succeeded`` entry resets the streak."""
+    """Group consecutive same-hash failures per family.
+
+    A ``succeeded`` entry resets the streak for its family.
+
+    Args:
+        events: Time-ordered ``delegated_result`` rows.
+
+    Returns:
+        Mapping of family to its current run of same-hash failure events.
+    """
     by_family: dict[str, list[dict[str, Any]]] = {}
     current_hash: dict[str, str | None] = {}
     for ev in events:
@@ -178,12 +187,25 @@ def _walk_streaks(
 # Event normalisation
 # ---------------------------------------------------------------------------
 
+
 def _gather_events(
     inbox: list[InboxItem],
     coord_events: list[dict[str, Any]],
     cfg: RepeatedPayloadConfig,
 ) -> list[dict[str, Any]]:
-    """Build a single time-ordered list of ``delegated_result`` rows, trimmed to ``lookback_events``."""
+    """Build a time-ordered list of ``delegated_result`` rows.
+
+    Unions inbox items and coordinator events, trimmed to
+    ``lookback_events``.
+
+    Args:
+        inbox: Reactor inbox items.
+        coord_events: Coordinator event dicts.
+        cfg: Repeated-payload configuration (lookback window).
+
+    Returns:
+        The merged, trimmed list of ``delegated_result`` rows.
+    """
     inbox_rows = [
         {
             "topic": item.topic,
@@ -191,8 +213,7 @@ def _gather_events(
             "payload": item.payload,
         }
         for item in inbox
-        if item.topic == "delegated_result"
-        and isinstance(item.payload, dict)
+        if item.topic == "delegated_result" and isinstance(item.payload, dict)
     ]
     coord_rows: list[dict[str, Any]] = []
     for ev in coord_events:
@@ -201,28 +222,32 @@ def _gather_events(
         payload = ev.get("payload") or {}
         if not isinstance(payload, dict):
             continue
-        coord_rows.append({
-            "topic": "delegated_result",
-            "agent": ev.get("agent", ""),
-            "payload": payload,
-        })
+        coord_rows.append(
+            {
+                "topic": "delegated_result",
+                "agent": ev.get("agent", ""),
+                "payload": payload,
+            }
+        )
 
     combined: list[dict[str, Any]] = []
     for row in coord_rows + inbox_rows:
         payload = row.get("payload") or {}
         if not isinstance(payload, dict):
             continue
-        combined.append({
-            "kind": payload.get("kind") or payload.get("action_name") or "",
-            "family": payload.get("family") or "",
-            "state": payload.get("state") or "",
-            "task_id": payload.get("task_id"),
-            "error": payload.get("error"),
-            "error_class": payload.get("error_class"),
-            "payload": payload,
-        })
+        combined.append(
+            {
+                "kind": payload.get("kind") or payload.get("action_name") or "",
+                "family": payload.get("family") or "",
+                "state": payload.get("state") or "",
+                "task_id": payload.get("task_id"),
+                "error": payload.get("error"),
+                "error_class": payload.get("error_class"),
+                "payload": payload,
+            }
+        )
     if cfg.lookback_events > 0:
-        combined = combined[-cfg.lookback_events:]
+        combined = combined[-cfg.lookback_events :]
     return combined
 
 
@@ -246,6 +271,7 @@ def _family_of(event: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Hashing
 # ---------------------------------------------------------------------------
+
 
 def _hash_for(family: str, event: dict[str, Any]) -> str | None:
     """Compute the action-defining fingerprint for an event payload.
@@ -277,9 +303,17 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
 
 
 def _normalise_extra_server_args_key(payload: dict[str, Any]) -> dict[str, Any]:
-    """Shallow copy with ``params.extra_server_args`` set from the compat
-    helper (originals not mutated). No-op when no extra-args key or canonical
-    already present; the shim's DeprecationWarning stays as the legacy audit channel.
+    """Normalise the legacy SGLang extra-args key to the canonical one.
+
+    Returns a shallow copy with ``params.extra_server_args`` populated from
+    the compat helper (originals not mutated). No-op when no extra-args key
+    exists or the canonical key is already present.
+
+    Args:
+        payload: The event payload to normalise.
+
+    Returns:
+        The (possibly copied) payload with a canonical extra-args key.
     """
     params = payload.get("params")
     if not isinstance(params, dict):
@@ -296,7 +330,16 @@ def _normalise_extra_server_args_key(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _walk_path(payload: dict[str, Any], path: str) -> Any:
-    """Walk dotted ``a.b.c`` paths against nested dicts (non-dicts short-circuit to ``None``)."""
+    """Walk a dotted ``a.b.c`` path against nested dicts.
+
+    Args:
+        payload: The mapping to traverse.
+        path: Dot-separated key path.
+
+    Returns:
+        The value at the path, or ``None`` if any segment is missing or a
+        non-dict is encountered.
+    """
     cur: Any = payload
     for token in path.split("."):
         if not isinstance(cur, dict):
@@ -315,11 +358,7 @@ def _strip_blacklisted(value: Any) -> Any:
         Any: The value with all blacklisted keys removed from nested dicts.
     """
     if isinstance(value, dict):
-        return {
-            k: _strip_blacklisted(v)
-            for k, v in value.items()
-            if k not in _HASH_BLACKLIST
-        }
+        return {k: _strip_blacklisted(v) for k, v in value.items() if k not in _HASH_BLACKLIST}
     if isinstance(value, list):
         return [_strip_blacklisted(item) for item in value]
     return value
@@ -328,6 +367,7 @@ def _strip_blacklisted(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Symptom builder
 # ---------------------------------------------------------------------------
+
 
 def _build_symptom(
     family: str,
@@ -349,11 +389,7 @@ def _build_symptom(
         return None
     count = len(streak_events)
     last = streak_events[-1]
-    error_classes = Counter(
-        str(ev.get("error_class") or "").strip()
-        for ev in streak_events
-        if ev.get("error_class")
-    )
+    error_classes = Counter(str(ev.get("error_class") or "").strip() for ev in streak_events if ev.get("error_class"))
     top_error = error_classes.most_common(1)[0][0] if error_classes else ""
     return Symptom(
         name="same_payload_loop",

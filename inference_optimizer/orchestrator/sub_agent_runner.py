@@ -59,7 +59,7 @@ class SubAgentResult:
     """
 
     task_id: str
-    state: str   # "succeeded" / "failed" / "needs_manual_review"
+    state: str  # "succeeded" / "failed" / "needs_manual_review"
     result: dict
     error: str | None = None
 
@@ -116,6 +116,13 @@ class SubAgentRunner:
 
         Returns the path (stashed on ``RunnerContext.extra``) or None when
         the task kind is not a known runs/ action.
+
+        Args:
+            task: The task whose workspace directory should be pre-created.
+
+        Returns:
+            The created workspace path, or ``None`` when there is no session
+            dir or the task kind is not a known runs/ action.
         """
         if self.session_dir is None:
             return None
@@ -139,6 +146,16 @@ class SubAgentRunner:
         Bug-fix N34: a long-running task's row can vanish before its terminal
         transition; swallowing TaskNotFound keeps the pipeline running.
         Returns True on success, False on the swallowed-TaskNotFound branch.
+
+        Args:
+            task_id: The task to transition.
+            new_state: The target state.
+            evidence: Optional evidence dict recorded with the transition.
+            context: Short label describing the transition call site.
+
+        Returns:
+            ``True`` on success, ``False`` on the swallowed-``TaskNotFound``
+            branch.
         """
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
@@ -149,7 +166,9 @@ class SubAgentRunner:
                 "transition→%s (context=%s); continuing so the executor "
                 "result is not lost. See sub_agent_runner._transition_"
                 "resilient docstring for the disappearing-row hypothesis.",
-                task_id, new_state, context,
+                task_id,
+                new_state,
+                context,
             )
             return False
 
@@ -165,24 +184,39 @@ class SubAgentRunner:
         Always transitions to ``running`` first (state machine constraint).
         With ``prebound_lease`` the runner skips its own acquire but still
         owns the release in its finally block.
+
+        Args:
+            task: The task to execute.
+            prebound_lease: Optional already-acquired lease; when given, the
+                runner skips its own acquire but still releases it.
+            extra_context: Optional extra values merged into the
+                :class:`RunnerContext`.
+
+        Returns:
+            The :class:`SubAgentResult` capturing terminal state and payload.
         """
         # queued → running first (state machine constraint).
         await self._transition_resilient(
-            task.task_id, "running", context="enter_running",
+            task.task_id,
+            "running",
+            context="enter_running",
         )
 
         runner = self.executor_registry.get(task.kind)
         if runner is None:
             await self._transition_resilient(
-                task.task_id, "failed",
+                task.task_id,
+                "failed",
                 evidence={"reason": "no_executor", "kind": task.kind},
                 context="no_executor",
             )
             if prebound_lease is not None:
                 await self.locks.release(prebound_lease)
             return SubAgentResult(
-                task_id=task.task_id, state="failed",
-                result={}, error=f"no runner registered for kind={task.kind!r}",
+                task_id=task.task_id,
+                state="failed",
+                result={},
+                error=f"no runner registered for kind={task.kind!r}",
             )
 
         lease: Lease | None = prebound_lease
@@ -211,21 +245,27 @@ class SubAgentRunner:
                 result_payload = await runner(ctx)
             except Exception as exc:  # noqa: BLE001 — surface to task.history
                 await self._transition_resilient(
-                    task.task_id, "failed",
+                    task.task_id,
+                    "failed",
                     evidence={"error": repr(exc)},
                     context="executor_exception",
                 )
                 return SubAgentResult(
-                    task_id=task.task_id, state="failed",
-                    result={}, error=repr(exc),
+                    task_id=task.task_id,
+                    state="failed",
+                    result={},
+                    error=repr(exc),
                 )
             await self._transition_resilient(
-                task.task_id, "succeeded",
+                task.task_id,
+                "succeeded",
                 evidence={"result_keys": sorted(result_payload.keys())},
                 context="executor_success",
             )
             return SubAgentResult(
-                task_id=task.task_id, state="succeeded", result=result_payload,
+                task_id=task.task_id,
+                state="succeeded",
+                result=result_payload,
             )
         finally:
             # Always release whoever acquired the lease — pre-bound or owned

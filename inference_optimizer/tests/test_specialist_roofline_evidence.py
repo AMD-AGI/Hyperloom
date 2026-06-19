@@ -110,10 +110,7 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
     assert ev["executive_summary"]["compute_pct"] == pytest.approx(32.1, rel=0.01)
     assert ev["executive_summary"]["idle_pct"] == pytest.approx(17.5, rel=0.01)
     assert ev["executive_summary"]["comm_pct"] == pytest.approx(41.8, rel=0.01)
-    assert (
-        ev["executive_summary"]["top_bottleneck"]
-        == "rccl_AllReduce"
-    )
+    assert ev["executive_summary"]["top_bottleneck"] == "rccl_AllReduce"
 
 
 @pytest.mark.asyncio
