@@ -98,6 +98,16 @@ _CUDA_GRAPH_STRONG_MARKERS = (
 # both of which disabling cuda-graph cannot recover.
 _CUDA_GRAPH_WEAK_MARKER = "capture cuda graph failed"
 
+# Profile-cuda-graph shape discovery feeds a device seq_lens into sglang's
+# get_num_new_pages (which asserts CPU) -> AssertionError -> SIGQUIT. Disabling
+# cuda-graph skips that path, so this specific assert IS recoverable and must
+# win over the generic assertionerror non-recoverable gate below. Both markers
+# are required so a generic AssertionError never matches.
+_CUDA_GRAPH_PROFILE_ASSERT_MARKERS = (
+    "get_num_new_pages",
+    "seq_lens.device == cpu_device",
+)
+
 # OOM-rooted capture failures are NOT recoverable by disabling cuda-graph
 # (eager peaks can be higher); compile/lowering errors are not either.
 _OOM_MARKERS = (
@@ -137,6 +147,9 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     lines = "\n".join(t for t in texts if t).splitlines()
     lowered = [ln.lower() for ln in lines]
     blob = "\n".join(lowered)
+    # Specific profile-cuda-graph assert wins over the assertionerror gate.
+    if all(m in blob for m in _CUDA_GRAPH_PROFILE_ASSERT_MARKERS):
+        return True
     blob_has_oom = any(m in blob for m in _OOM_MARKERS)
     blob_has_non_recoverable = any(m in blob for m in _NON_RECOVERABLE_MARKERS)
     saw_pure_weak = False
