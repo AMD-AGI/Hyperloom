@@ -86,7 +86,7 @@ DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
 DEFAULT_MAX_HOURS = 12.0
-DEFAULT_TARGET_GAIN = 100.0
+DEFAULT_TARGET_GAIN = 500.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16
 # Models whose config.json ``max_position_embeddings`` is at or below this are
@@ -4040,7 +4040,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target-gain",
         type=float,
         default=float(os.environ.get("SAFE_OPTIMIZE_TARGET_GAIN", DEFAULT_TARGET_GAIN)),
-        help="Target gain %% passed to the Hyperloom optimizer prompt (default: 30).",
+        help="Target gain %% passed to the Hyperloom optimizer prompt (default: 500).",
     )
     parser.add_argument(
         "--results-path",
