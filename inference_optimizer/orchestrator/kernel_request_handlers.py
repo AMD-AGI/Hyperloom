@@ -1468,8 +1468,11 @@ async def _run_forge_gemm_tuning(
         payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x"
     ).strip().lower()
     tokens = str(payload.get("tokens") or "").strip()
-    # Default mp = TP (server is stopped during tuning, all TP GPUs are free)
-    mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or tp)
+    # Default mp = all visible GPUs (server is stopped during tuning).
+    from .policy import detect_gpu_count
+
+    detected_gpus = detect_gpu_count() or tp
+    mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)
 
     # Resolve server log for 1-stage ASM detection
     kernel_sig_log = str(payload.get("kernel_signature_log") or "").strip()
