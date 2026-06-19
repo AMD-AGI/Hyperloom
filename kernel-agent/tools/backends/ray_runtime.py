@@ -331,6 +331,12 @@ SAFE_ENV_KEYS = (
     "GEAK_USE_KNOWLEDGE_BASE",
     "GEAK_MEMORY_DISABLE",
     "GEAK_MEMORY_NO_CROSS_SESSION",
+    # Deterministic reference-callable harness synthesizer inputs (preprocess_v3):
+    # forwarded so GEAK's Ray worker can build a faithful harness from the
+    # launcher callable + traced shapes instead of compiling source from scratch.
+    "GEAK_REFERENCE_ENTRY_POINT",
+    "GEAK_INPUT_SHAPES_JSON",
+    "GEAK_NO_SYNTH_HARNESS",
     "MSWEA_MODEL_NAME",
 )
 
