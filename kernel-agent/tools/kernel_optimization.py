@@ -1035,7 +1035,62 @@ def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
         f"- args: {rendered}\n"
         "Correctness golden: the ORIGINAL kernel's output on these shapes "
         "(baseline / `fn=` injection); do not hand-derive a reference from scratch.\n"
+        + _build_kernel_contract_block(candidate)
     )
+
+
+def _build_kernel_contract_block(candidate: dict[str, Any]) -> str:
+    """Render the kernel-class CONTRACT (collective / attention) into the prompt.
+
+    TraceLens enrichment (``_enrich_kernel_contract``) attaches a
+    ``kernel_contract`` dict for non-MoE kernel classes that need extra info to
+    build a FAITHFUL harness (a real reference + correct execution model).
+    Surfacing it here makes the harness-generator's rule-1 USER TASK CONTEXT
+    authoritative for these kernels too, not just MoE. Returns "" when absent so
+    the prompt stays byte-identical for kernels without a contract.
+    """
+    c = candidate.get("kernel_contract")
+    if not isinstance(c, dict) or not c:
+        return ""
+    kind = c.get("kind", "")
+    # Lead with the literal ``USER TASK CONTEXT`` marker: the GEAK harness-generator
+    # subagent's shape-source priority rule-1 keys on exactly this header to use the
+    # supplied shapes/reference VERBATIM and write ``user_task:production``. Without
+    # it, when a benchmark file was discovered the subagent hits rule-2 and inherits
+    # that file's synthetic sweep + self-ref (observed for qr_all_reduce). This makes
+    # the contract authoritative over the discovered file for non-MoE kernels too.
+    rendered = _format_shapes_for_case(candidate.get("shapes") or candidate.get("kernel_shapes"))
+    lines = [
+        "\n## USER TASK CONTEXT (authoritative — overrides any discovered benchmark/test file)\n",
+        "Build the harness to EXACTLY this contract. Use these shapes verbatim (do NOT\n",
+        "sweep/scale them, do NOT read shapes from a discovered benchmark file), build the\n",
+        "stated reference, and write `user_task:production` to harness_shapes_source.txt.\n",
+    ]
+    if rendered:
+        lines.append(f"- Exact serving shapes: {rendered}\n")
+    if kind == "collective":
+        lines.append(
+            f"- This is a COLLECTIVE ({c.get('collective_op')}). The shapes above are the\n"
+            f"  per-rank tensor. Correctness reference MUST be `{c.get('reference')}` "
+            f"(reduce_op={c.get('reduce_op','sum')}, world_size={c.get('world_size','?')})\n"
+            "  computed independently -- NEVER `return run_kernel(inputs)` (a self-compare is\n"
+            "  a tautology). Initialize the process group and shard inputs per rank.\n"
+            f"- NOTE: {c.get('e2e_note','')}\n"
+        )
+    elif kind == "attention":
+        extra = ", ".join(
+            f"{k}={c[k]}" for k in ("head_dim", "num_heads", "num_kv_heads", "kv_layout", "seqlen_regime")
+            if c.get(k) is not None
+        )
+        lines.append(
+            f"- This is ATTENTION (causal={c.get('causal', True)}). Correctness reference MUST be\n"
+            f"  `{c.get('reference')}` with is_causal={c.get('causal', True)} -- NEVER a self-compare.\n"
+            f"- Serving contract: {extra}. Benchmark the '{c.get('seqlen_regime','mixed')}' regime\n"
+            "  (decode=seqlen 1 per step vs prefill=full); do not mix regimes in one config.\n"
+        )
+    else:
+        return ""
+    return "".join(lines)
 
 
 def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
@@ -1132,7 +1187,11 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
             f"flops_per_byte={flops_per_byte if flops_per_byte is not None else '-'}; "
             f"efficiency={efficiency}; bound={bound}"
         )
-    return "\n".join(lines)
+    # Also surface the kernel-class contract on the task_group path (the
+    # captured-shapes fallback above isn't reached when a task_group exists), so
+    # collectives/attention get their authoritative reference + execution-model
+    # contract regardless of which branch rendered the cases.
+    return "\n".join(lines) + _build_kernel_contract_block(candidate)
 
 
 # PR-B §3: ordered optimization directions keyed by bound type so the first lever
@@ -2863,7 +2922,20 @@ def invoke_backend(
     # OOB backends don't accept --test-command but we still want the rocprof
     # snapshot, so we compute it here unconditionally.
     common_test_command = getattr(args, "test_command", "").strip()
-    if not common_test_command:
+    # When TraceLens attached an authoritative kernel_contract (collective /
+    # attention) AND we have the exact traced shapes, do NOT hand GEAK a
+    # discovered benchmark file: the harness-generator subagent would prefer that
+    # file (shape-source rule-2) and inherit its synthetic sweep + self-ref,
+    # overriding our USER TASK CONTEXT. Letting GEAK build from the prompt is the
+    # path that produced a faithful harness (verified: mha with no bench file got
+    # a single traced-shape config + user_task:production; qr WITH a bench file
+    # stayed an 11-config sweep + self-ref). MoE/other kernels are unaffected.
+    _contract = candidate.get("kernel_contract")
+    _has_contract = (
+        isinstance(_contract, dict) and _contract.get("kind") in ("collective", "attention")
+        and bool(candidate.get("shapes") or candidate.get("kernel_shapes"))
+    )
+    if not common_test_command and not _has_contract:
         common_test_command = _render_geak_test_command(
             kernel_name=cand_name,
             bench_files=bench_files,
