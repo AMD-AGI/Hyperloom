@@ -3612,12 +3612,20 @@ async def integrate_handler(
             "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
         }
 
-    payload, missing_inputs = _resolve_integrate_payload(
-        payload,
-        session_dir=session_dir,
+    # Route through the compat helper so a legacy ``extra_sglang_args`` envelope still resolves.
+    from ..compat.payload_aliases import read_extra_server_args
+
+    env_only_validation = (
+        str(payload.get("source") or "").strip() in {"forge_gemm_tuning", "gemm_tuning"}
+        and (bool(payload.get("extra_envs")) or bool(read_extra_server_args(payload).strip()))
     )
-    if missing_inputs is not None:
-        return missing_inputs
+    if not env_only_validation:
+        payload, missing_inputs = _resolve_integrate_payload(
+            payload,
+            session_dir=session_dir,
+        )
+        if missing_inputs is not None:
+            return missing_inputs
 
     patch_path = payload.get("patch_path")
     kernel_id = payload.get("kernel_id")
@@ -3626,6 +3634,12 @@ async def integrate_handler(
         session_dir=session_dir,
         kernel_id=kernel_id,
     )
+    if apply_result.get("status") == "skipped" and env_only_validation:
+        apply_result = {
+            "status": "ok",
+            "reason": "env_only_validation",
+            "kernel_id": kernel_id,
+        }
     log.info("integrate_handler: apply_result=%s", apply_result)
     if apply_result.get("status") == "failed":
         # Apply crash: the patch was never measured. Stamp a fault error_class
@@ -3653,9 +3667,6 @@ async def integrate_handler(
         }
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
-    # Route through the compat helper so a legacy ``extra_sglang_args`` envelope still resolves.
-    from ..compat.payload_aliases import read_extra_server_args
-
     extra_args = read_extra_server_args(payload).strip()
 
     # Wrap BaselineExecutor in a Task/RunnerContext; extra_server_args goes via task params (forward compat).
