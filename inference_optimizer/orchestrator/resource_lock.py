@@ -35,17 +35,40 @@ KNOWN_LANES = (
     # research_lane carries LLM specialist sub-agents; no LANE_CONFLICTS
     # with the serving lanes and capacity may exceed 1.
     "research_lane",
+    # gpu_research_lane carries GPU-holding specialists; unlike research_lane it
+    # IS mutually exclusive with the serving lanes (a GPU specialist and a
+    # benchmark/profile/serving step must never share the physical cards).
+    # Capacity-1 / strictly serial: the co-acquisition model can't express a
+    # multi-holder lane that also mutexes the cap-1 serving lanes, so one GPU
+    # specialist holds the machine at a time (the GPU pool partitions cards
+    # within that single lease).
+    "gpu_research_lane",
 )
 
 # Lane → lanes that must *also* be free or co-acquired (DESIGN §3.5.3).
+# NOTE: conflicts must be declared symmetrically — ``_expand_lanes`` only
+# expands the *requested* lane's own conflict set, so for serving and
+# gpu_research_lane to block each other, each side must list the other.
 LANE_CONFLICTS: dict[str, frozenset[str]] = {
-    "benchmark_lane": frozenset({"profile_lane", "server_lifecycle"}),
-    "profile_lane": frozenset({"benchmark_lane", "server_lifecycle"}),
-    "server_lifecycle": frozenset({"benchmark_lane", "profile_lane"}),
+    "benchmark_lane": frozenset(
+        {"profile_lane", "server_lifecycle", "gpu_research_lane"}
+    ),
+    "profile_lane": frozenset(
+        {"benchmark_lane", "server_lifecycle", "gpu_research_lane"}
+    ),
+    "server_lifecycle": frozenset(
+        {"benchmark_lane", "profile_lane", "gpu_research_lane"}
+    ),
     "workspace_mutation": frozenset(),
     # research_lane does not conflict with any serving-side lane.
     # (Capacity caps come from a separate table.)
     "research_lane": frozenset(),
+    # gpu_research_lane ⊥ serving lanes. Capacity-1 (see KNOWN_LANES), so GPU
+    # specialists also serialize against each other under the co-acquisition
+    # model.
+    "gpu_research_lane": frozenset(
+        {"benchmark_lane", "profile_lane", "server_lifecycle"}
+    ),
 }
 
 

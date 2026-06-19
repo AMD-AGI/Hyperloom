@@ -18,12 +18,14 @@ lives in `orchestrator/system_prompts/orchestration.md`. In brief:
   bounded by the `research_lane` / GPU pool leases (the `research_lane` scales
   with the `2 × visible GPU count` ceiling). Specialists author patches into an
   isolated worktree; `integrate_patch` does the actual `git apply` +
-  throughput/accuracy gate after Critic review. Optional GPU specialists are off
-  by default: launch with `--gpu-specialist-capacity N` (or
-  `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) before Orchestration may
-  dispatch `delegate{action_name='specialist', params={needs_gpu: true,
-  gpu_count: ...}}`. They are limited to short GPU experiments / microbenchmarks
-  and must not start serving servers or Magpie loops.
+  throughput/accuracy gate after Critic review. GPU specialists are on by
+  default at whole-machine capacity (WS2); launch with
+  `--gpu-specialist-capacity 0` (or
+  `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=0`) to disable them. When
+  enabled, Orchestration may dispatch
+  `delegate{action_name='specialist', params={needs_gpu: true, gpu_count: ...}}`.
+  GPU specialists serialize against serving through `gpu_research_lane` and
+  must not start persistent serving servers or Magpie benchmark loops.
 - **IR-6 HARD force-exit**: EXPLORE exits the moment wall-clock remaining <
   `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase budget <
   `--explore-force-exit-budget-pct` (default 20%). Non-negotiable — leaves

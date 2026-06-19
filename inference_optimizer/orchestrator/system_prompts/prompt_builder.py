@@ -250,8 +250,8 @@ def _section_phase_semantics(
         lines.extend(
             [
                 "",
-                "**Phase interleave mode is ON** (on by default; set env "
-                + "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable):",
+                "**Phase interleave mode is ON** (off by default; enabled via "
+                + "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=1`):",
                 "- EXPLORE may also REQUEST kernel-owned kinds "
                 + "(kernel_opt / integrate / deep_kernel_analysis / "
                 + "operator_tuning / vendor_kernel_config / gemm_tuning) when "
@@ -424,7 +424,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "gap_canonical_id=<stable gap id>, "
             "gap_symptom?=<str>, gap_layer?=<str>, "
             "gap_evidence?={profile_trace:..., ...}, "
-            "max_turns?=<int<=16>}}"
+            "max_turns?=<int<=1000 or 0=unbounded>}}"
         )
     if meta.name == "integrate_patch":
         return (
@@ -433,7 +433,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "patches?=[<patch paths from specialist_done>], "
             "config_changes?={ENV_VAR: value}, "
             "keep_threshold_pct?=1.0, "
-            "accuracy_baseline?={task: {metric: score}}}}"
+            "accuracy_baseline?=<float>}}"
         )
     return f"propose_action{{action_name='{meta.name}', predicted_gain_pct=<your estimate>}}"
 

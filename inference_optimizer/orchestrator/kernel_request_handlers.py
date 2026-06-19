@@ -1188,7 +1188,7 @@ export OSL={int(osl)}
 export RANDOM_RANGE_RATIO="${{RANDOM_RANGE_RATIO:-1}}"
 export NUM_PROMPTS="${{NUM_PROMPTS:-320}}"
 export NUM_WARMUPS="${{NUM_WARMUPS:-8}}"
-export RUN_EVAL="${{RUN_EVAL:-false}}"
+export RUN_EVAL="${{RUN_EVAL:-true}}"
 export RESULT_DIR="${{RESULT_DIR:-$PWD/gemm_benchmark_result}}"
 export RESULT_FILENAME="${{RESULT_FILENAME:-bench_serving.json}}"
 export PORT="${{PORT:-18888}}"
@@ -1651,6 +1651,7 @@ async def _run_geak_gemm_tuning(
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_tuning_timeout_sec(payload))
     result = _shape_tool_result(rc, stdout, stderr)
     result.setdefault("backend", "geak")
+    result.setdefault("engine", "geak")
     result.setdefault("workspace", str(workspace))
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)

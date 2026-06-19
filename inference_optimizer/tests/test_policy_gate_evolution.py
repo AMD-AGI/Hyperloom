@@ -249,13 +249,15 @@ def test_specialist_runner_constants_derive_from_policy():
 
     assert set(sr.PR_MONITOR_MCP_TOOLS) == PR_MONITOR_TOOL_NAMES
     assert set(sr.CORTEX_KB_READONLY_MCP_TOOLS) == CORTEX_KB_READ_TOOL_NAMES
-    # Default whitelist includes emit_intent + web + PR Monitor MCP, and excludes
-    # KB write surfaces and the orphan Cortex KB read MCP names.
+    # Default whitelist includes emit_intent + web + PR Monitor MCP + the
+    # read-only Cortex KB-graph MCP tools, and excludes KB write surfaces.
+    # (The cortex_kb read tools are stripped at resolve time when the KB-graph
+    # MCP server is not wired; see KnowledgePlane.cortex_enabled.)
     default_set = set(sr.DEFAULT_SPECIALIST_TOOLS)
     assert "emit_intent" in default_set
     assert WEB_TOOL_NAMES <= default_set
     assert PR_MONITOR_TOOL_NAMES <= default_set
-    assert not (default_set & CORTEX_KB_READ_TOOL_NAMES)
+    assert CORTEX_KB_READ_TOOL_NAMES <= default_set
     assert not (default_set & KB_WRITE_TOOL_NAMES)
     assert KB_WRITE_TOOL_NAMES <= sr.SPECIALIST_TOOL_DENYLIST
 

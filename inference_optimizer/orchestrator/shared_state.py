@@ -497,6 +497,14 @@ class SharedState:
     cumulative_gain_validated_ts: str = ""
     # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
+    # Long-run #4 resume sentinels. ``pending_integrate`` is written before a
+    # non-transactional integrate_patch window and normally cleared after
+    # stack/current best are persisted. After a crash, resume recovery replays
+    # or rolls back that window before clearing the sentinel.
+    # ``resume_pending_revalidation`` tells reports/ops that accepted stack
+    # entries need a fresh post-resume stack rebench.
+    pending_integrate: dict[str, Any] = field(default_factory=dict)
+    resume_pending_revalidation: bool = False
     # Tput watermark for gain-driven roofline refresh; Coordinator re-enqueues at a compound 10% step.
     last_roofline_tput: float = 0.0
     stop_reason: str = ""
@@ -645,7 +653,9 @@ class SharedState:
     explore_specialist_dispatched_count: int = 0
     # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
     research_lane_capacity: int = 1
-    # GPU pool capacity for needs_gpu specialists (0 disables); locked at session start.
+    # GPU pool capacity for needs_gpu specialists (0 disables); locked at
+    # session start. The dataclass default is a placeholder for tests/direct
+    # construction; the CLI/manifest default is whole-machine GPU detection.
     gpu_specialist_capacity: int = 0
     # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it once acted on.
     pending_escalate_hint: str = ""
@@ -716,6 +726,14 @@ class SharedState:
     # Cleared once the live top bottleneck actually drifts off the plateaued one.
     pending_bottleneck_switch: bool = False
     last_cycle_bottleneck: str = ""
+    # Long-run #10: latest roofline saturation per specialist-domain family and
+    # prev-cycle -> current-cycle bottleneck movement. Coordinator/record_trace
+    # are the only writers; orchestration only sees advisory prompt text.
+    saturated_directions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    bottleneck_shift: dict[str, Any] = field(default_factory=dict)
+    # Long-run #9: deterministic per-cycle advisory focus log. Each entry is a
+    # compact, persisted fact row so cycle strategy survives compaction/resume.
+    cycle_strategy_log: list[dict[str, Any]] = field(default_factory=list)
 
     # Cortex KB integration fields — Coordinator-only writers (CORE_STATE_FIELDS; LLM update_state denied).
     # ``cortex_session_id`` — hyperloom-local id carried into KB fact-write attrs (source_session_id); defaults to session_dir.name.
@@ -745,6 +763,11 @@ class SharedState:
 
     # Orchestration working memory — durable compacted reasoning snapshot for compaction + crash-recovery rebuild; Coordinator-only writer, not in session_breakdown.
     orchestration_memory: dict[str, Any] = field(default_factory=dict)
+
+    # Bounded rollback ring of prior good ``orchestration_memory`` records (#1);
+    # capped at 10 by the Coordinator. Lets a later degenerate compaction be
+    # recovered from a prior snapshot via INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK.
+    orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
 
     # Non-field instance attr (set in load_or_init / save): session dir used by
     # breakdown instrumentation. Plain class attr => not a dataclass field, so
@@ -1567,7 +1590,11 @@ class SharedState:
 
     @property
     def has_keep_pending_integrate(self) -> bool:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """True when kernel KEEP results still await kernel ``integrate``.
+
+        This is separate from ``pending_integrate``, the integrate_patch
+        crash-recovery sentinel.
+        """
         from . import kernel_request_handlers as _m
         return _m.has_keep_pending_integrate(self)
 
@@ -2217,12 +2244,76 @@ class SharedState:
             except Exception:  # noqa: BLE001 — PerfModel serialization is best-effort
                 pass
             history_entry["trace_input"] = str(trace_input)
+            history_entry["macro_cycle"] = int(getattr(self, "macro_cycle", 0) or 0)
             history_entry["analysis_md_path"] = str(analysis_md_path)
             # 9fe4609 sidecar artifact pointer for per-kernel roofline data.
             history_entry["kernel_roofline_path"] = str(kernel_roofline_path)
             if not isinstance(self.roofline_snapshots, list):
                 self.roofline_snapshots = []
             self.roofline_snapshots.append(history_entry)
+            try:
+                from .roofline_snapshot import direction_saturation
+
+                sat = direction_saturation(history_entry)
+                direction = str(sat.get("direction") or "")
+                hint = sat.get("domain_hint") if isinstance(sat.get("domain_hint"), dict) else {}
+                domain_key = str(hint.get("domain") or direction or "unknown")
+                latest_cycle = int(history_entry.get("macro_cycle") or 0)
+                prev_cycle_snapshot: dict[str, Any] = {}
+                for prev in reversed(self.roofline_snapshots[:-1]):
+                    if not isinstance(prev, dict):
+                        continue
+                    try:
+                        prev_cycle = int(prev.get("macro_cycle", 0) or 0)
+                    except (TypeError, ValueError):
+                        prev_cycle = 0
+                    if prev_cycle < latest_cycle:
+                        prev_cycle_snapshot = prev
+                        break
+                if not prev_cycle_snapshot and len(self.roofline_snapshots) >= 2:
+                    prev = self.roofline_snapshots[-2]
+                    prev_cycle_snapshot = prev if isinstance(prev, dict) else {}
+                prev_sat = direction_saturation(prev_cycle_snapshot) if prev_cycle_snapshot else {}
+                if not isinstance(self.saturated_directions, dict):
+                    self.saturated_directions = {}
+                self.saturated_directions[domain_key] = {
+                    **sat,
+                    "domain": domain_key,
+                    "tag": str(hint.get("tag") or ""),
+                    "macro_cycle": latest_cycle,
+                    "snapshot_id": snapshot_id,
+                    "top_bottleneck": history_entry.get("top_bottleneck"),
+                }
+                self.bottleneck_shift = {
+                    "from": prev_sat.get("direction", "") if prev_sat else "",
+                    "to": sat.get("direction", ""),
+                    "from_domain": (prev_sat.get("domain_hint") or {}).get("domain", "") if prev_sat else "",
+                    "to_domain": domain_key,
+                    "prev_cycle": prev_cycle_snapshot.get("macro_cycle") if prev_cycle_snapshot else None,
+                    "cycle": latest_cycle,
+                    "within_delta": (
+                        round(float(sat["within_pct"]) - float(prev_sat["within_pct"]), 2)
+                        if prev_sat
+                        and isinstance(sat.get("within_pct"), (int, float))
+                        and isinstance(prev_sat.get("within_pct"), (int, float))
+                        else None
+                    ),
+                    "gap_delta": (
+                        round(float(sat["gap_pct"]) - float(prev_sat["gap_pct"]), 2)
+                        if prev_sat
+                        and isinstance(sat.get("gap_pct"), (int, float))
+                        and isinstance(prev_sat.get("gap_pct"), (int, float))
+                        else None
+                    ),
+                    "bound_kind_changed": (
+                        bool(prev_sat)
+                        and str(prev_sat.get("bound_kind") or "") != str(sat.get("bound_kind") or "")
+                    ),
+                    "current": sat,
+                    "previous": prev_sat,
+                }
+            except Exception:  # noqa: BLE001 — saturation telemetry is advisory only
+                pass
             # R3: a fresh roofline whose top bottleneck has drifted off the
             # plateaued one means the cycle redirect succeeded — retire the
             # pending switch so the orchestration prompt stops nagging.
@@ -3178,6 +3269,11 @@ class SharedState:
             if unvalidated
             else ""
         )
+        resume_revalidation_tag = (
+            " ⚠ resume_pending_revalidation=true — recheck current stack before trusting validated gain"
+            if bool(getattr(self, "resume_pending_revalidation", False))
+            else ""
+        )
         lines = [
             f"baseline  : {self.baseline_tput} tok/s/GPU",
             f"current   : {self._format_current_best_for_mission()}",
@@ -3185,7 +3281,7 @@ class SharedState:
             f"validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
-            f"{unvalidated_tag}",
+            f"{unvalidated_tag}{resume_revalidation_tag}",
         ]
         # Surface reusable hot kernels still owing a kernel_opt attempt (visible without a checklist).
         untried_hot = self.untried_hot_reusable_kernels()

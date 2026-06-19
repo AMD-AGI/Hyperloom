@@ -1963,6 +1963,8 @@ def _is_pybind_shim(source_file: str) -> bool:
 _AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # ck_moe_stage1/2 — the .cu is the @compile_ops codegen entry (jit/build invalidated by PR-K before rebuild).
     ("ck_moe_stage", ("csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",)),
+    # fmoe_fp8_blockscale_g1u1 — fused MoE ASM entrypoint used by W4A8/MXFP4 expert GEMM.
+    ("fmoe_fp8_blockscale", ("csrc/py_itfs_cu/asm_fmoe.cu",)),
     # topk_softmax decode kernels.
     ("topk_softmax_group", ("csrc/kernels/topk_softmax_kernels_group.cu",)),
     ("topk_softmax", ("csrc/kernels/topk_softmax_kernels.cu",)),
@@ -1991,6 +1993,26 @@ _PACKAGE_INNER_ROOTS = (
     "/sgl-workspace/sglang/python/sglang",
 )
 
+_AITER_COMPILE_OPS_LAUNCHERS = (
+    "aiter/ops/",
+    "aiter/fused_moe.py",
+    "aiter/fused_moe_bf16_asm.py",
+    "aiter/fused_moe_dp_shared_expert.py",
+)
+
+
+def _normalize_tracelens_launcher_source(source_file: str) -> str:
+    """Strip TraceLens line/symbol suffixes from launcher paths."""
+    return re.sub(r"\(\d+\):.*$", "", source_file.replace(os.sep, "/")).strip()
+
+
+def _is_aiter_compile_ops_launcher(source_file: str) -> bool:
+    """Match known aiter launchers without accepting path-prefix lookalikes."""
+    return any(
+        source_file.startswith(marker) or f"/{marker}" in source_file
+        for marker in _AITER_COMPILE_OPS_LAUNCHERS
+    )
+
 
 def upgrade_aiter_compile_ops_launcher(
     source_file: str,
@@ -1999,9 +2021,10 @@ def upgrade_aiter_compile_ops_launcher(
 ) -> str:
     """Promote an aiter ``@compile_ops`` Python wrapper to the device ``.cu``.
 
-    Promotes when source_file is a ``.py`` under ``aiter/ops/``, kernel_name
-    matches a :data:`_AITER_COMPILE_OPS_PROMOTIONS` pattern, and the ``.cu``
-    exists under kernel_repo (or :data:`_AITER_FALLBACK_REPO`).
+    Promotes when source_file is a known aiter ``@compile_ops`` Python
+    launcher, kernel_name matches a
+    :data:`_AITER_COMPILE_OPS_PROMOTIONS` pattern, and the ``.cu`` exists
+    under kernel_repo (or :data:`_AITER_FALLBACK_REPO`).
 
     Args:
         source_file: The candidate's resolved source path.
@@ -2014,8 +2037,8 @@ def upgrade_aiter_compile_ops_launcher(
     """
     if not source_file or not kernel_name:
         return source_file
-    s = source_file.replace(os.sep, "/")
-    if "/aiter/ops/" not in s or not s.endswith(".py"):
+    s = _normalize_tracelens_launcher_source(source_file)
+    if not s.endswith(".py") or not _is_aiter_compile_ops_launcher(s):
         return source_file
 
     name_lower = kernel_name.lower()
@@ -2448,12 +2471,9 @@ def load_op_category_map(
 # whole geak→claude→codex ladder before any harness is built.
 #
 # TraceLens DOES still capture the operands for this kernel: the per-shape rows in
-# ``perf_report_csvs/ops_unique_args.csv`` carry the wrapped invocation's
-# ``Input Dims`` / ``Input type`` (the gate/up and down grouped-GEMM operands).
-# This recovers those operand shapes from that deterministic sidecar so the
-# emitted candidate carries non-empty, trace-anchored ``shapes`` with
-# ``shape_provenance="torch_trace"``. Scoped to the fused-MoE invoke kernel so
-# other ops are untouched.
+# ``perf_report_csvs/ops_unique_args.csv`` carries trace-recorded ``Input Dims``
+# / ``Input type``. Use it to recover missing candidate shapes deterministically
+# by exact op-name match (or fused-MoE marker match for the historical wrapper).
 _FUSED_MOE_KERNEL_MARKER = "invoke_fused_moe_kernel"
 
 # torch ``Input type`` token → compact dtype suffix used by TraceLens shape
@@ -2502,23 +2522,22 @@ def _format_trace_shape(dims: Any, dtype: Any) -> str | None:
     return f"{shape} {suffix}" if suffix else shape
 
 
-def resolve_fused_moe_shapes_from_csv(
+def _resolve_shapes_from_ops_unique_args_csv(
     perf_report_csv_dir: Path | str | None,
+    row_matches: Callable[[str], bool],
 ) -> list[str]:
-    """Recover the fused-MoE expert kernel operand shapes from ``ops_unique_args.csv``.
+    """Recover operand shapes from matching ``ops_unique_args.csv`` rows.
 
-    Reads each per-shape row whose op name embeds ``invoke_fused_moe_kernel`` and
-    parses its ``Input Dims`` / ``Input type`` tuple-of-tuples into TraceLens-style
-    shape strings (e.g. ``(15360,2048) bf16``), deduped across rows in first-seen
-    order.
+    Parses ``Input Dims`` / ``Input type`` tuple-of-tuples into TraceLens-style
+    shape strings (e.g. ``(15360,2048) bf16``), deduped in first-seen order.
 
     Args:
         perf_report_csv_dir: Directory containing ``ops_unique_args.csv``.
+        row_matches: Predicate called with the normalized row name.
 
     Returns:
-        The recovered operand shape strings, or ``[]`` when the sidecar is
-        absent or carries no fused-MoE rows (callers then leave the
-        candidate's empty ``shapes`` untouched).
+        The recovered operand shape strings, or ``[]`` when no trusted rows
+        are available.
     """
     if not perf_report_csv_dir:
         return []
@@ -2531,7 +2550,7 @@ def resolve_fused_moe_shapes_from_csv(
         with csv_path.open(newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 name = str(row.get("name") or "").strip().lower()
-                if _FUSED_MOE_KERNEL_MARKER not in name:
+                if not row_matches(name):
                     continue
                 try:
                     dims = ast.literal_eval(str(row.get("Input Dims") or "").strip() or "()")
@@ -2551,6 +2570,30 @@ def resolve_fused_moe_shapes_from_csv(
     except (OSError, csv.Error):
         return []
     return shapes
+
+
+def resolve_fused_moe_shapes_from_csv(
+    perf_report_csv_dir: Path | str | None,
+) -> list[str]:
+    """Recover the fused-MoE expert-kernel operand shapes from ``ops_unique_args.csv``."""
+    return _resolve_shapes_from_ops_unique_args_csv(
+        perf_report_csv_dir,
+        lambda name: _FUSED_MOE_KERNEL_MARKER in name,
+    )
+
+
+def resolve_shapes_from_csv_for_op(
+    perf_report_csv_dir: Path | str | None,
+    op_name: str,
+) -> list[str]:
+    """Recover operand shapes for a candidate by exact TraceLens op name."""
+    target = str(op_name or "").strip().lower()
+    if not target:
+        return []
+    return _resolve_shapes_from_ops_unique_args_csv(
+        perf_report_csv_dir,
+        lambda name: name == target,
+    )
 
 
 def _is_fused_moe_candidate(item: dict[str, Any]) -> bool:
@@ -3116,6 +3159,11 @@ def _finalize_candidates(
             if _fused_moe_shapes:
                 item["shapes"] = list(_fused_moe_shapes)
                 item["shape_provenance"] = "torch_trace"
+        if not item.get("shapes"):
+            csv_shapes = resolve_shapes_from_csv_for_op(perf_report_csv_dir, str(item.get("name") or ""))
+            if csv_shapes:
+                item["shapes"] = csv_shapes
+                item["shape_provenance"] = "torch_trace"
         # Mark trace-extracted shapes so the dispatch-time validator can tell their provenance.
         if item.get("shapes"):
             item.setdefault("shape_provenance", "torch_trace")
@@ -3193,7 +3241,8 @@ def _finalize_candidates(
 def recommend_backends(candidate: dict[str, Any]) -> list[str]:
     """Recommend a backend ladder for a reusable native kernel.
 
-    Orders GEAK first, then claude/codex.
+    Orders forge first, then GEAK, then the claude/codex LLM backends
+    (cursor appended only when CURSOR_API_KEY is set).
 
     Args:
         candidate: The hot-kernel candidate dict.
@@ -3211,7 +3260,7 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    # GEAK first; append cursor only when CURSOR_API_KEY is provisioned.
+    # forge then GEAK; append cursor only when CURSOR_API_KEY is provisioned.
     cursor_tail = ["cursor"] if os.environ.get("CURSOR_API_KEY", "").strip() else []
     return ["forge", "geak", "claude", "codex"] + cursor_tail
 
@@ -3675,14 +3724,19 @@ def deterministic_extract_hot_kernels(
 
         cat_ops = ops_by_category.get(category, [])
 
-        sorted_members = sorted(
-            members,
-            key=lambda m: m.get("efficiency_pct", 100),
-        )
+        def _eff_sort_key(m: dict[str, Any]) -> float:
+            # ``efficiency_pct`` may be present-but-null in priority_data; a
+            # bare ``.get(key, 100)`` returns None then (default only applies
+            # to a missing key), which breaks both ``sorted`` comparisons and
+            # the downstream ``round``. Treat null as the missing-key default.
+            v = m.get("efficiency_pct")
+            return float(v) if isinstance(v, (int, float)) else 100.0
+
+        sorted_members = sorted(members, key=_eff_sort_key)
 
         for member in sorted_members:
             op_name = member.get("operation", "")
-            member_time_ms = member.get("time_ms", 0)
+            member_time_ms = member.get("time_ms") or 0
 
             # Match by (name, time_ms) to avoid collisions when multiple
             # ops share the same name (e.g. many aten::mm instances).
@@ -3700,7 +3754,9 @@ def deterministic_extract_hot_kernels(
                 continue
 
             duration_us = member_time_ms * 1000
-            eff_pct = member.get("efficiency_pct", 0)
+            eff_pct = member.get("efficiency_pct")
+            if not isinstance(eff_pct, (int, float)):
+                eff_pct = 0
 
             launcher_path = full_op.get("launcher_path", "")
             if launcher_path in ("\u2014", "-", ""):
@@ -3728,7 +3784,11 @@ def deterministic_extract_hot_kernels(
                 "duration_us": round(duration_us, 3),
                 "call_count": op_count,
                 "efficiency_percent": round(eff_pct, 2),
-                "impact_score": member.get("impact_score", impact_score),
+                "impact_score": (
+                    member.get("impact_score")
+                    if member.get("impact_score") is not None
+                    else impact_score
+                ),
                 "bound_type": member.get("bound_type", ""),
                 "tracelens_category": category,
                 "tracelens_pitem_rank": global_rank,
@@ -3747,7 +3807,8 @@ def deterministic_extract_hot_kernels(
     # categorizes them as "other" with no efficiency model.
     other_ops = ops_by_category.get("other", [])
     for op in other_ops:
-        time_ms = op.get("time_ms", 0)
+        # Guard null (not just missing) before the numeric compare below.
+        time_ms = op.get("time_ms") or 0
         if time_ms < 1.0:
             continue
 
@@ -3851,6 +3912,23 @@ def generate_minimal_analysis_md(
     report_path = output_dir / "analysis.md"
     lines: list[str] = []
 
+    def _fnum(v: Any, default: float = 0.0) -> float:
+        """Coerce a possibly-null/str metric to float for ``:.Nf`` formatting.
+
+        Deterministic "other"-bucket candidates (e.g. synthetic GDN/MoE ops)
+        can carry present-but-null metric fields; a bare ``.get(k, 0)`` returns
+        None then and ``f"{None:.2f}"`` raises ``unsupported format string
+        passed to NoneType.__format__``. Treat null/non-numeric as the default.
+        """
+        if isinstance(v, bool):
+            return default
+        if isinstance(v, (int, float)):
+            return float(v)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
     gpu_timeline_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
     gpu_rows: list[dict[str, str]] = []
     if gpu_timeline_path.exists():
@@ -3942,10 +4020,10 @@ def generate_minimal_analysis_md(
         for i, c in enumerate(candidates, 1):
             lines.append(
                 f"| {i} | {c.get('name', '')} "
-                f"| {c.get('duration_us', 0):.1f} "
-                f"| {c.get('gpu_pct', 0):.2f}% "
-                f"| {c.get('efficiency_percent', 0):.1f}% "
-                f"| {c.get('impact_score', 0):.2f} "
+                f"| {_fnum(c.get('duration_us')):.1f} "
+                f"| {_fnum(c.get('gpu_pct')):.2f}% "
+                f"| {_fnum(c.get('efficiency_percent')):.1f}% "
+                f"| {_fnum(c.get('impact_score')):.2f} "
                 f"| {c.get('tracelens_category', '')} "
                 f"| {c.get('bound_type', '')} "
                 f"| {c.get('source_file', '') or '-'} |"
@@ -3981,12 +4059,12 @@ def generate_minimal_analysis_md(
         for rc in rank_cands:
             lines.append(
                 f"| {rc.get('name', '')} "
-                f"| {rc.get('duration_us', 0):.1f} "
-                f"| {rc.get('gpu_pct', 0):.2f}% "
-                f"| {rc.get('impact_score', 0):.2f} "
+                f"| {_fnum(rc.get('duration_us')):.1f} "
+                f"| {_fnum(rc.get('gpu_pct')):.2f}% "
+                f"| {_fnum(rc.get('impact_score')):.2f} "
                 f"| {rc.get('call_count', 1)} "
                 f"| - "
-                f"| {rc.get('efficiency_percent', 0):.1f}% "
+                f"| {_fnum(rc.get('efficiency_percent')):.1f}% "
                 f"| {rc.get('bound_type', '')} "
                 f"| {' '.join(rc.get('shapes', []))} "
                 f"| {rc.get('source_file', '') or '-'} "

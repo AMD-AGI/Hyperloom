@@ -344,10 +344,10 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
     assert tla.is_reusable_native_kernel(candidate) is True
     # Without CURSOR_API_KEY: recommendation excludes cursor (auto-skip).
     monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex"]
     # With CURSOR_API_KEY: cursor is appended to the recommendation tail.
     monkeypatch.setenv("CURSOR_API_KEY", "crsr_test_dummy")
-    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex", "cursor"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex", "cursor"]
 
 
 def test_recommend_backends_includes_geak_for_python_source():
@@ -358,7 +358,7 @@ def test_recommend_backends_includes_geak_for_python_source():
         "source_type": "python",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex"]
 
 
 def test_recommend_backends_includes_geak_for_unknown_source():
@@ -369,11 +369,11 @@ def test_recommend_backends_includes_geak_for_unknown_source():
         "source_type": "unknown",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["geak", "claude", "codex"]
+    assert tla.recommend_backends(candidate) == ["forge", "geak", "claude", "codex"]
 
 
-def test_recommend_backends_geak_is_first_in_ladder():
-    """Invariant: when GEAK is in the ladder, it is FIRST."""
+def test_recommend_backends_geak_precedes_llm_backends():
+    """Invariant: forge leads, GEAK precedes the claude/codex LLM backends."""
     candidate = {
         "name": "some_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/x.py",
@@ -381,7 +381,8 @@ def test_recommend_backends_geak_is_first_in_ladder():
         "reusable_native_kernel": True,
     }
     ladder = tla.recommend_backends(candidate)
-    assert ladder and ladder[0] == "geak", f"GEAK must be first in the ladder, got {ladder}"
+    assert ladder[:2] == ["forge", "geak"], f"forge then GEAK must lead the ladder, got {ladder}"
+    assert ladder.index("geak") < ladder.index("claude"), ladder
 
 
 def test_unknown_source_root_is_not_reusable_native():
@@ -594,8 +595,49 @@ def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
     assert out[0]["shape_provenance"] == "torch_trace"
 
 
+def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_path):
+    """#599: other_bucket fallback candidates use exact op-name CSV shapes."""
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "ops_unique_args.csv").write_text(
+        (
+            "name,op category,Input Dims,Input type\n"
+            "sglang_profiler::attention_paged_attention_ragged_100,other,"
+            '"((64, 32, 128), (2181038080,), (64, 32, 128), '
+            '(1177709, 1, 8, 128), (), (1,), ())",'
+            "\"('c10::BFloat16', 'unsigned char', 'c10::BFloat16', "
+            "'c10::BFloat16', '', 'float', '')\"\n"
+        ),
+        encoding="utf-8",
+    )
+    candidates = [
+        {
+            "name": "sglang_profiler::attention_paged_attention_ragged_100",
+            "duration_us": 170086.617,
+            "call_count": 0,
+            "candidate_source": "other_bucket_fallback",
+            "source_file": "/sgl-workspace/aiter/csrc/cpp_itfs/pa/pa_ragged.py",
+            "source_type": "python",
+            "shapes": [],
+            "tracelens_category": "other",
+        }
+    ]
+
+    out = tla._finalize_candidates(
+        candidates,
+        total_dur=170086.617,
+        perf_report_csv_dir=csv_dir,
+    )
+
+    assert out[0]["shapes"]
+    assert "(64,32,128) bf16" in out[0]["shapes"]
+    assert "(1177709,1,8,128) bf16" in out[0]["shapes"]
+    assert "(1,) f32" in out[0]["shapes"]
+    assert out[0]["shape_provenance"] == "torch_trace"
+
+
 def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
-    """Resolver is scoped: non-MoE ops and MoE candidates that already have shapes are left as-is."""
+    """Unmatched non-MoE ops and already-shaped MoE candidates are left as-is."""
     csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
     candidates = [
         {  # non-MoE op: must NOT be back-filled from the fused-MoE sidecar
@@ -4011,3 +4053,48 @@ def test_deterministic_other_bucket_keeps_resolvable_graph_op(
     assert len(result) == 1
     assert result[0]["source_file"] == "/sgl-workspace/aiter/my_triton_kernel.py"
     assert result[0]["duration_us"] == 50000.0
+
+
+def test_deterministic_extract_tolerates_null_efficiency_and_impact(tmp_path):
+    """TraceLens emits null efficiency_pct/impact_score for synthetic ops;
+    extraction must not crash on round(None) and should coerce them to 0."""
+    op_name = "hipLaunchKernel->paged_attention_mfma16_kernel (Synthetic Op)"
+    _write_priority_json(
+        tmp_path,
+        [
+            {
+                "category": "inferenceattention",
+                "global_rank": 1,
+                "impact_score": 12.5,
+                "members": [
+                    {
+                        "operation": op_name,
+                        "time_ms": 520.223,
+                        "efficiency_pct": None,
+                        "impact_score": None,
+                    },
+                ],
+            },
+        ],
+    )
+    _write_metrics_json(
+        tmp_path,
+        "inferenceattention",
+        [
+            {
+                "name": op_name,
+                "time_ms": 520.223,
+                "count": 1,
+                "args": "(1,256,256) bf16",
+                "launcher_path": "",
+            },
+        ],
+    )
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+
+    assert len(result) == 1
+    assert result[0]["efficiency_percent"] == 0
+    # member impact_score is null -> falls back to the finding-level score.
+    assert result[0]["impact_score"] == 12.5
+    assert result[0]["duration_us"] == 520223.0

@@ -46,6 +46,7 @@ def _seed_shared_state(
     """
     # research_lane capacity is locked for the session; clamp to [0, ceiling] (2×GPU) to protect quota/PR-Monitor.
     from inference_optimizer.orchestrator.policy import (
+        detect_gpu_count,
         research_lane_ceiling,
     )
     research_lane_capacity = int(
@@ -61,10 +62,10 @@ def _seed_shared_state(
         gpu_specialist_capacity = max(
             0,
             int(gpu_specialist_capacity_raw)
-            if gpu_specialist_capacity_raw is not None else 0,
+            if gpu_specialist_capacity_raw is not None else detect_gpu_count(),
         )
     except (TypeError, ValueError):
-        gpu_specialist_capacity = 0
+        gpu_specialist_capacity = detect_gpu_count()
     # Collect plateau threshold overrides; absent keys fall through to DEFAULT_PLATEAU_* at compute time.
     plateau_overrides: dict[str, Any] = {}
     if getattr(args, "plateau_explore_keep_gain", None) is not None:
