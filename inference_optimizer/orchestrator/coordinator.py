@@ -3671,7 +3671,6 @@ class Coordinator:
             per_tuner_timeout_sec = _compute_explore_variant_timeout(
                 baseline_runtime_sec=float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0),
                 kill_ratio=float(getattr(self.shared_state, "explore_overtime_kill_ratio", 1.5) or 1.5),
-                floor_sec=0,
             )
         except Exception:  # noqa: BLE001 - conservative fallback
             per_tuner_timeout_sec = 15 * 60
