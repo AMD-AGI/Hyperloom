@@ -38,21 +38,25 @@ class TestResolveSessionDir:
         assert sb.SessionBreakdownExecutor._resolve_session_dir(ctx) == tmp_path
 
     def test_fallback_path_returned_when_manifest_present(
-        self, session_dir, monkeypatch,
+        self,
+        session_dir,
+        monkeypatch,
     ):
         monkeypatch.setattr(
-            "inference_optimizer.paths.session_dir", lambda: session_dir,
+            "inference_optimizer.paths.session_dir",
+            lambda: session_dir,
         )
         ctx = _ctx()
-        assert (
-            sb.SessionBreakdownExecutor._resolve_session_dir(ctx) == session_dir
-        )
+        assert sb.SessionBreakdownExecutor._resolve_session_dir(ctx) == session_dir
 
     def test_fallback_returns_none_without_manifest(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         monkeypatch.setattr(
-            "inference_optimizer.paths.session_dir", lambda: tmp_path,
+            "inference_optimizer.paths.session_dir",
+            lambda: tmp_path,
         )
         ctx = _ctx()
         assert sb.SessionBreakdownExecutor._resolve_session_dir(ctx) is None
@@ -63,7 +67,8 @@ class TestExecutor:
     @pytest.mark.asyncio
     async def test_failed_when_no_session_dir(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            "inference_optimizer.paths.session_dir", lambda: tmp_path,
+            "inference_optimizer.paths.session_dir",
+            lambda: tmp_path,
         )
         result = await sb.SessionBreakdownExecutor()(_ctx())
         assert result["status"] == "failed"
@@ -75,10 +80,12 @@ class TestExecutor:
             raise RuntimeError("kaboom")
 
         monkeypatch.setattr(
-            "inference_optimizer.breakdown.write_breakdown_json", boom,
+            "inference_optimizer.breakdown.write_breakdown_json",
+            boom,
         )
         monkeypatch.setattr(
-            "inference_optimizer.breakdown.build", lambda *a, **k: {"warnings": []},
+            "inference_optimizer.breakdown.build",
+            lambda *a, **k: {"warnings": []},
         )
         result = await sb.SessionBreakdownExecutor()(
             _ctx(extra={"session_dir": str(session_dir)}),
@@ -88,7 +95,9 @@ class TestExecutor:
 
     @pytest.mark.asyncio
     async def test_succeeded_returns_breakdown_metadata(
-        self, monkeypatch, session_dir,
+        self,
+        monkeypatch,
+        session_dir,
     ):
         target = session_dir / "session_breakdown.json"
         target.write_text(json.dumps({"warnings": ["w1"]}))
@@ -97,7 +106,8 @@ class TestExecutor:
             return target
 
         monkeypatch.setattr(
-            "inference_optimizer.breakdown.write_breakdown_json", fake_writer,
+            "inference_optimizer.breakdown.write_breakdown_json",
+            fake_writer,
         )
         monkeypatch.setattr(
             "inference_optimizer.breakdown.build",
@@ -112,7 +122,9 @@ class TestExecutor:
 
     @pytest.mark.asyncio
     async def test_build_exception_yields_empty_warnings(
-        self, monkeypatch, session_dir,
+        self,
+        monkeypatch,
+        session_dir,
     ):
         target = session_dir / "session_breakdown.json"
         target.write_text("{}")
@@ -126,7 +138,8 @@ class TestExecutor:
             raise RuntimeError("build failure")
 
         monkeypatch.setattr(
-            "inference_optimizer.breakdown.build", raise_build,
+            "inference_optimizer.breakdown.build",
+            raise_build,
         )
         ctx = _ctx(extra={"session_dir": str(session_dir)})
         result = await sb.SessionBreakdownExecutor()(ctx)

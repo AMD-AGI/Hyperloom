@@ -70,7 +70,14 @@ class Objective(ABC):
 
     @abstractmethod
     def pressure_input(self, state: "SharedState") -> float:
-        """Feed to scheduler.pressure() (§12): 0.0 = relaxed, 1.0 = max urgency."""
+        """Feed to scheduler.pressure() (§12): 0.0 = relaxed, 1.0 = max urgency.
+
+        Args:
+            state: Current shared optimization state to evaluate.
+
+        Returns:
+            Urgency in the range 0.0 (relaxed) → 1.0 (maximum urgency).
+        """
 
     @abstractmethod
     def describe(self) -> str:
@@ -95,10 +102,7 @@ class TargetGainObjective(Objective):
             ObjectiveError: If ``target_gain_pct`` is not strictly positive.
         """
         if self.target_gain_pct <= 0:
-            raise ObjectiveError(
-                f"TargetGainObjective: target_gain_pct must be > 0, "
-                f"got {self.target_gain_pct}"
-            )
+            raise ObjectiveError(f"TargetGainObjective: target_gain_pct must be > 0, got {self.target_gain_pct}")
 
     def kind(self) -> str:
         """Return the objective kind tag.
@@ -142,6 +146,15 @@ class TargetGainObjective(Objective):
         return state.cumulative_gain >= self.target_gain_pct
 
     def pressure_input(self, state: "SharedState") -> float:
+        """Compute normalized progress toward the gain target.
+
+        Args:
+            state: Current shared state.
+
+        Returns:
+            Progress in ``[0.0, 1.0]``; stays ``0.0`` until the baseline
+            throughput has been measured.
+        """
         # Stays 0 until baseline finishes.
         if state.baseline_tput <= 0:
             return 0.0
@@ -170,8 +183,7 @@ class TargetTputObjective(Objective):
         """
         if self.target_tput_per_gpu <= 0:
             raise ObjectiveError(
-                f"TargetTputObjective: target_tput_per_gpu must be > 0, "
-                f"got {self.target_tput_per_gpu}"
+                f"TargetTputObjective: target_tput_per_gpu must be > 0, got {self.target_tput_per_gpu}"
             )
 
     def kind(self) -> str:
@@ -276,21 +288,15 @@ class TargetBaselineObjective(Objective):
         """
         path = Path(self.baseline_dir)
         if not path.exists():
-            raise ObjectiveError(
-                f"TargetBaselineObjective: baseline_dir not found: {path}"
-            )
+            raise ObjectiveError(f"TargetBaselineObjective: baseline_dir not found: {path}")
         candidates = sorted(path.rglob("benchmark_report.json"))
         if not candidates:
-            raise ObjectiveError(
-                f"TargetBaselineObjective: no benchmark_report.json under {path}"
-            )
+            raise ObjectiveError(f"TargetBaselineObjective: no benchmark_report.json under {path}")
         with candidates[-1].open(encoding="utf-8") as f:
             ref = json.load(f)
         tput = (ref.get("throughput") or {}).get("output_throughput")
         if not isinstance(tput, (int, float)) or tput <= 0:
-            raise ObjectiveError(
-                f"TargetBaselineObjective: invalid output_throughput in {candidates[-1]}"
-            )
+            raise ObjectiveError(f"TargetBaselineObjective: invalid output_throughput in {candidates[-1]}")
         self._ref_tput = float(tput)
 
     def kind(self) -> str:
@@ -446,7 +452,21 @@ class TimeOnlyObjective(Objective):
 
 # ---------------------------------------------------------------------------
 def build_objective(env: dict[str, Any]) -> Objective:
-    """Factory (DESIGN §11.3): requires MAX_HOURS; at most one of TARGET_GAIN_PCT / TARGET_TPUT_PER_GPU / TARGET_DIR (none → TimeOnly)."""
+    """Factory (DESIGN §11.3): requires MAX_HOURS; at most one of TARGET_GAIN_PCT / TARGET_TPUT_PER_GPU / TARGET_DIR (none → TimeOnly).
+
+    Args:
+        env: Environment mapping; must contain ``MAX_HOURS`` and may contain at
+            most one of ``TARGET_GAIN_PCT``, ``TARGET_TPUT_PER_GPU``, or
+            ``TARGET_DIR``.
+
+    Returns:
+        The objective matching the supplied target, or a ``TimeOnlyObjective``
+        when no target is given.
+
+    Raises:
+        ObjectiveError: If ``MAX_HOURS`` is missing, non-numeric, or
+            non-positive, or if more than one ``TARGET_*`` key is supplied.
+    """
     if "MAX_HOURS" not in env:
         raise ObjectiveError("build_objective: MAX_HOURS is required")
     try:
@@ -456,12 +476,9 @@ def build_objective(env: dict[str, Any]) -> Objective:
     if max_hours <= 0:
         raise ObjectiveError(f"build_objective: MAX_HOURS must be > 0, got {max_hours}")
 
-    targets = [k for k in ("TARGET_GAIN_PCT", "TARGET_TPUT_PER_GPU", "TARGET_DIR")
-               if env.get(k) not in (None, "")]
+    targets = [k for k in ("TARGET_GAIN_PCT", "TARGET_TPUT_PER_GPU", "TARGET_DIR") if env.get(k) not in (None, "")]
     if len(targets) > 1:
-        raise ObjectiveError(
-            f"build_objective: at most one TARGET_* allowed, got {targets}"
-        )
+        raise ObjectiveError(f"build_objective: at most one TARGET_* allowed, got {targets}")
 
     if "TARGET_GAIN_PCT" in env and env["TARGET_GAIN_PCT"] not in (None, ""):
         return TargetGainObjective(float(env["TARGET_GAIN_PCT"]))

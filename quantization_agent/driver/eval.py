@@ -65,7 +65,18 @@ def resolve_threshold(
     *,
     acceptable_eval_gap: float | None,
 ) -> tuple[float, str]:
-    """Return ``(threshold, source)`` per §3.1 priority chain."""
+    """Resolve the eval-gap threshold per the §3.1 priority chain.
+
+    Args:
+        workspace: Workspace directory that may hold a threshold override
+            file.
+        acceptable_eval_gap: Explicit threshold argument; takes precedence
+            when provided.
+
+    Returns:
+        A ``(threshold, source)`` tuple where ``source`` is ``"arg"``,
+        ``"file"``, or ``"default"``.
+    """
 
     if acceptable_eval_gap is not None:
         return float(acceptable_eval_gap), "arg"
@@ -88,9 +99,19 @@ def decide(
     workspace: Path,
     acceptable_eval_gap: float | None,
 ) -> EvalDecision:
-    threshold, source = resolve_threshold(
-        workspace, acceptable_eval_gap=acceptable_eval_gap
-    )
+    """Decide whether an evaluation report passes the quality gap threshold.
+
+    Args:
+        eval_report: Parsed evaluation report, or ``None`` when absent.
+        workspace: Run workspace, used to resolve a per-run gap threshold file.
+        acceptable_eval_gap: Explicit maximum relative gap; falls back to the
+            workspace threshold or the default when ``None``.
+
+    Returns:
+        An :class:`EvalDecision` describing the status (``missing``,
+        ``within``, or ``exceeded``), the relative gap, and the threshold used.
+    """
+    threshold, source = resolve_threshold(workspace, acceptable_eval_gap=acceptable_eval_gap)
 
     if not isinstance(eval_report, dict):
         return EvalDecision(

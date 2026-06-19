@@ -147,18 +147,11 @@ class CodexBackend:
         try:
             from openai import AsyncOpenAI  # type: ignore[import-not-found]
         except ImportError as exc:  # pragma: no cover
-            raise BackendError(
-                "openai SDK not installed; run `pip install openai>=1.50`"
-            ) from exc
+            raise BackendError("openai SDK not installed; run `pip install openai>=1.50`") from exc
 
-        api_key = (
-            os.environ.get(self.api_key_env)
-            or os.environ.get("OPENAI_API_KEY")
-        )
+        api_key = os.environ.get(self.api_key_env) or os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            raise BackendError(
-                f"{self.api_key_env} not set in env (CodexBackend cannot auth)"
-            )
+            raise BackendError(f"{self.api_key_env} not set in env (CodexBackend cannot auth)")
         base_url = (
             os.environ.get(self.base_url_env)
             or os.environ.get("OPENAI_BASE_URL")
@@ -218,14 +211,13 @@ class CodexBackend:
             )
         except asyncio.TimeoutError as exc:
             raise BackendError(
-                f"Codex API call timed out after {self.call_timeout_s:.0f}s "
-                "(likely upstream proxy stall)"
+                f"Codex API call timed out after {self.call_timeout_s:.0f}s (likely upstream proxy stall)"
             ) from exc
         except Exception as exc:  # noqa: BLE001
             raise BackendError(f"Codex API call failed: {exc!r}") from exc
 
         choice = resp.choices[0]
-        text = (choice.message.content or "")
+        text = choice.message.content or ""
         finish = getattr(choice, "finish_reason", None)
         # Token usage: the OpenAI chat-completions response carries a
         # ``usage`` object (prompt_tokens / completion_tokens). Map it
@@ -235,29 +227,28 @@ class CodexBackend:
         usage = getattr(resp, "usage", None)
         input_tokens = self._safe_int(getattr(usage, "prompt_tokens", None))
         output_tokens = self._safe_int(getattr(usage, "completion_tokens", None))
-        self.calls.append({
-            "prompt_chars": len(full_prompt),
-            "reply_chars": len(text),
-            "finish_reason": finish,
-            "model": self.model,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-        })
+        self.calls.append(
+            {
+                "prompt_chars": len(full_prompt),
+                "reply_chars": len(text),
+                "finish_reason": finish,
+                "model": self.model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            }
+        )
 
         envelope = _extract_envelope(text)
         if envelope is None:
             raise NoIntentEmitted(
-                f"codex reply contained no parseable JSON envelope "
-                f"(reply_chars={len(text)}, finish={finish})"
+                f"codex reply contained no parseable JSON envelope (reply_chars={len(text)}, finish={finish})"
             )
         try:
             intents = validate_envelope(envelope)
         except IntentValidationError as exc:
-            raise NoIntentEmitted(
-                f"codex envelope invalid: {exc}"
-            ) from exc
+            raise NoIntentEmitted(f"codex envelope invalid: {exc}") from exc
         return BackendTurnResult(
             intents=intents,
             raw_text=text,
@@ -284,6 +275,13 @@ class CodexBackend:
 
         Mirrors ``ClaudeBackend._safe_int`` so both backends report
         identically-shaped token counts on metadata.
+
+        Args:
+            value: A raw usage counter of any type to coerce to an integer.
+
+        Returns:
+            The integer value, or ``0`` when ``value`` is ``None`` or not
+            coercible.
         """
         try:
             return int(value or 0)

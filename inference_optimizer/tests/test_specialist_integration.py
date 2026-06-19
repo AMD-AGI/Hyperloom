@@ -18,7 +18,8 @@ from inference_optimizer.orchestrator.backends.mock_backend import (
     ScriptedPlan,
 )
 from inference_optimizer.protocol.intent import (
-    Intent, IntentType,
+    Intent,
+    IntentType,
 )
 from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 
@@ -27,6 +28,7 @@ from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 @dataclass
 class _StubTask:
     """Minimal Task-shaped stub (only ``task_id`` and ``params`` are inspected)."""
+
     task_id: str
     kind: str = "specialist"
     params: dict[str, Any] | None = None
@@ -49,17 +51,21 @@ class _FakeKnowledgePlane:
     cortex_enabled = True
 
     def __init__(self, prs: list | None = None):
-        self._prs = prs if prs is not None else [
-            _StubPRSummary(
-                repo="sgl-project/sglang",
-                number=1234,
-                title="Add MoE expert parallel scheduling",
-                url="https://example.test/pr/1234",
-                state="open",
-                labels=("moe", "perf"),
-                author="alice",
-            ),
-        ]
+        self._prs = (
+            prs
+            if prs is not None
+            else [
+                _StubPRSummary(
+                    repo="sgl-project/sglang",
+                    number=1234,
+                    title="Add MoE expert parallel scheduling",
+                    url="https://example.test/pr/1234",
+                    state="open",
+                    labels=("moe", "perf"),
+                    author="alice",
+                ),
+            ]
+        )
 
     def pr_feed_warm(self, domain: str, **_kwargs):
         # Mirrors KnowledgePlane.pr_feed_warm return shape (list[PRSummary], list[str]).
@@ -89,7 +95,9 @@ def test_build_specialist_executor_returns_callable(tmp_path: Path):
     plane = _FakeKnowledgePlane()
     args = _build_args()
     executor = _build_specialist_executor(
-        args, session_dir=tmp_path, knowledge_plane=plane,
+        args,
+        session_dir=tmp_path,
+        knowledge_plane=plane,
     )
     assert callable(executor), "specialist executor must be a callable"
 
@@ -119,16 +127,18 @@ async def test_register_executors_registers_specialist_kind(tmp_path: Path):
     args = _build_args(research_lane_capacity=1)
     plane = _FakeKnowledgePlane()
     spec_exec = _build_specialist_executor(
-        args, session_dir=tmp_path, knowledge_plane=plane,
+        args,
+        session_dir=tmp_path,
+        knowledge_plane=plane,
     )
     _register_executors(
-        coord, no_kernel=True,  # skip kernel-only kinds (independent path)
+        coord,
+        no_kernel=True,  # skip kernel-only kinds (independent path)
         session_dir=tmp_path,
         specialist_executor=spec_exec,
     )
     assert "specialist" in coord.sub.registry, (
-        "specialist executor must be wired into SubAgentRunner — "
-        "KB_gaps/Gap-01 root cause"
+        "specialist executor must be wired into SubAgentRunner — KB_gaps/Gap-01 root cause"
     )
 
 
@@ -153,7 +163,9 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
     coord = _StubCoord()
     # specialist_executor=None mirrors cli's gating when capacity == 0.
     _register_executors(
-        coord, no_kernel=True, session_dir=tmp_path,
+        coord,
+        no_kernel=True,
+        session_dir=tmp_path,
         specialist_executor=None,
     )
     assert "specialist" not in coord.sub.registry
@@ -174,6 +186,7 @@ async def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
         warm_start_pitfalls: list = None
         warm_start_lessons: list = None
         gpu_type: str = "MI300X"
+
     state = _State(
         warm_start_recipe={"backend": "sglang", "tp": 8},
         warm_start_pitfalls=["avoid --max-num-seqs 1024 on MoE"],
@@ -210,6 +223,7 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
         warm_start_pitfalls: list = None
         warm_start_lessons: list = None
         gpu_type: str = ""
+
     coord.shared_state = _State()
 
     params: dict = {"domain": "serving_specialist"}
@@ -232,6 +246,7 @@ async def test_warm_specialist_params_respects_explicit_pr_feed(tmp_path: Path):
         warm_start_pitfalls: list = None
         warm_start_lessons: list = None
         gpu_type: str = ""
+
     coord.shared_state = _State()
 
     explicit_pr_feed = [{"repo": "x/y", "title": "preset PR", "labels": []}]
@@ -265,23 +280,29 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
             },
         ],
         "empty": False,
-        "summary": (
-            "Surveyed sglang main; expert-parallel scheduling looks safe"
-        ),
+        "summary": ("Surveyed sglang main; expert-parallel scheduling looks safe"),
         "reason": "kb_evidence",
         "confidence": 0.7,
         "new_findings": [],
         "residual_questions": [],
     }
-    plan = ScriptedPlan(turns=[MockTurn(intents=[
-        Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
-    ])])
+    plan = ScriptedPlan(
+        turns=[
+            MockTurn(
+                intents=[
+                    Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
+                ]
+            )
+        ]
+    )
 
     # Monkey-patch ClaudeBackend so the cli factory doesn't reach the real SDK.
     import inference_optimizer.cli_executors as cli_mod
+
     real_claude_cls = cli_mod.ClaudeBackend
     cli_mod.ClaudeBackend = lambda **_kw: MockBackend(
-        plan, name="specialist-mock",
+        plan,
+        name="specialist-mock",
     )
     try:
         args = _build_args()
@@ -323,8 +344,13 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
     assert (workspace / "transcript.jsonl").exists()
     on_disk = json.loads((workspace / "specialist_done.json").read_text())
     for key in (
-        "gap_canonical_id", "domain", "proposal_set", "empty",
-        "summary", "reason", "confidence",
+        "gap_canonical_id",
+        "domain",
+        "proposal_set",
+        "empty",
+        "summary",
+        "reason",
+        "confidence",
     ):
         assert on_disk[key] == sd[key], f"on-disk vs return diff at {key!r}"
 
@@ -347,12 +373,15 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
     )
 
     import inference_optimizer.cli_executors as cli_mod
+
     real_claude_cls = cli_mod.ClaudeBackend
     cli_mod.ClaudeBackend = lambda **_kw: MockBackend(plan, name="spec-stale")
     try:
         args = _build_args(specialist_max_turns=2)
         executor = _build_specialist_executor(
-            args, session_dir=tmp_path, knowledge_plane=_FakeKnowledgePlane(),
+            args,
+            session_dir=tmp_path,
+            knowledge_plane=_FakeKnowledgePlane(),
         )
         task = _StubTask(
             task_id="task-stale-1",
@@ -382,14 +411,21 @@ def test_cli_specialist_flags_present():
     import inference_optimizer.cli as cli_mod
 
     parser = cli_mod._build_parser()
-    args = parser.parse_args([
-        "optimize",
-        "--model", "/tmp/dummy-model",
-        "--research-lane-capacity", "2",
-        "--specialist-max-turns", "5",
-        "--specialist-per-turn-max-seconds", "120",
-        "--specialist-model", "claude-3-haiku-20240307",
-    ])
+    args = parser.parse_args(
+        [
+            "optimize",
+            "--model",
+            "/tmp/dummy-model",
+            "--research-lane-capacity",
+            "2",
+            "--specialist-max-turns",
+            "5",
+            "--specialist-per-turn-max-seconds",
+            "120",
+            "--specialist-model",
+            "claude-3-haiku-20240307",
+        ]
+    )
     assert args.research_lane_capacity == 2
     assert args.specialist_max_turns == 5
     assert args.specialist_per_turn_max_seconds == 120.0
@@ -402,20 +438,28 @@ def test_cli_specialist_flags_have_safe_defaults(monkeypatch):
 
     # research-lane-capacity default is GPU-derived; pin the GPU count for determinism.
     monkeypatch.delenv(
-        "INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", raising=False,
+        "INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY",
+        raising=False,
     )
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     parser = cli_mod._build_parser()
-    args = parser.parse_args([
-        "optimize", "--model", "/tmp/dummy-model",
-    ])
+    args = parser.parse_args(
+        [
+            "optimize",
+            "--model",
+            "/tmp/dummy-model",
+        ]
+    )
     # Default capacity is the research-lane ceiling (2 × visible GPU).
     assert args.research_lane_capacity == policy_mod.research_lane_ceiling()
     from inference_optimizer.orchestrator.specialist_domains import (
         DEFAULT_SPECIALIST_MAX_TURNS,
     )
+
     assert args.specialist_max_turns == DEFAULT_SPECIALIST_MAX_TURNS
-    assert args.specialist_max_turns == 12
+    # WS1: turn cap lifted to "effectively unbounded"; the real stop is the
+    # explicit wall-clock budget, not the turn count.
+    assert args.specialist_max_turns == 1000
     assert args.specialist_per_turn_max_seconds == 600.0
     # Specialist model defaults to None → cli falls back to --claude-model.
     assert args.specialist_model is None

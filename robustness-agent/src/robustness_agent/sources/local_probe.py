@@ -46,7 +46,7 @@ _DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = (
     "vllm serve",
     "vllm.v1.engine.core",
     "vllm.engine.async_llm_engine",
-    "EngineCore",            # generic substring; covers ``EngineCore-`` child PIDs
+    "EngineCore",  # generic substring; covers ``EngineCore-`` child PIDs
     # Magpie / InferenceX benchmark harness
     "Magpie",
     "inferencex",
@@ -178,16 +178,16 @@ class LocalProbeConfig:
     external_gateway_probe_url: str = ""
 
     @property
-    def conductor_db_path(self) -> Path | None:
+    def coordinator_db_path(self) -> Path | None:
         """Path to the Coordinator session DB under ``session_dir``.
 
         Returns:
-            Path | None: ``<session_dir>/storage/conductor.db`` when a
+            Path | None: ``<session_dir>/storage/coordinator.db`` when a
             session directory is configured, else ``None``.
         """
         if self.session_dir is None:
             return None
-        return self.session_dir / "storage" / "conductor.db"
+        return self.session_dir / "storage" / "coordinator.db"
 
 
 @dataclass
@@ -245,7 +245,7 @@ class LocalProbeSource:
         cfg = self._config
         coordinator_events = await asyncio.to_thread(
             _read_coordinator_events,
-            cfg.conductor_db_path,
+            cfg.coordinator_db_path,
             cfg.coordinator_event_limit,
         )
         local_disk = await asyncio.to_thread(_sample_disk, cfg.disk_mountpoints)
@@ -268,18 +268,11 @@ class LocalProbeSource:
             cfg.health_probe_targets,
             cfg.health_probe_timeout_s,
         )
-        local_ray = (
-            await asyncio.to_thread(_probe_ray_head, cfg.ray_probe_timeout_s)
-            if cfg.ray_probe_enabled
-            else {}
-        )
-        local_fd = (
-            await asyncio.to_thread(_sample_fd_usage, cfg.fd_probe_pid)
-            if cfg.fd_probe_enabled
-            else {}
-        )
+        local_ray = await asyncio.to_thread(_probe_ray_head, cfg.ray_probe_timeout_s) if cfg.ray_probe_enabled else {}
+        local_fd = await asyncio.to_thread(_sample_fd_usage, cfg.fd_probe_pid) if cfg.fd_probe_enabled else {}
         local_aiter_jit = await asyncio.to_thread(
-            _sample_aiter_jit, cfg.aiter_jit_dir,
+            _sample_aiter_jit,
+            cfg.aiter_jit_dir,
         )
         local_decision_audit = (
             await asyncio.to_thread(
@@ -292,14 +285,10 @@ class LocalProbeSource:
             else {}
         )
         local_manifest = (
-            await asyncio.to_thread(_load_manifest_extras, cfg.session_dir)
-            if cfg.preflight_enabled
-            else {}
+            await asyncio.to_thread(_load_manifest_extras, cfg.session_dir) if cfg.preflight_enabled else {}
         )
         local_kernel_breakdown = (
-            await asyncio.to_thread(_load_kernel_breakdown, cfg.session_dir)
-            if cfg.preflight_enabled
-            else {}
+            await asyncio.to_thread(_load_kernel_breakdown, cfg.session_dir) if cfg.preflight_enabled else {}
         )
         local_critic_health = (
             await asyncio.to_thread(
@@ -347,9 +336,7 @@ class LocalProbeSource:
             or local_external_deps
         )
         if not any_signal:
-            raise SourceUnavailable(
-                "local probe produced no data (all sub-probes empty)"
-            )
+            raise SourceUnavailable("local probe produced no data (all sub-probes empty)")
 
         return SourceData(
             local_gpu=local_gpu,
@@ -376,6 +363,7 @@ class LocalProbeSource:
 # Sub-probes (all sync; called via asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
+
 def _read_coordinator_events(
     db_path: Path | None,
     limit: int,
@@ -387,7 +375,7 @@ def _read_coordinator_events(
     (missing file, open failure, bad query) yields an empty list.
 
     Args:
-        db_path (Path | None): Path to ``conductor.db``; ``None`` or a
+        db_path (Path | None): Path to ``coordinator.db``; ``None`` or a
             missing file short-circuits to ``[]``.
         limit (int): Maximum number of most-recent events to return.
 
@@ -412,10 +400,8 @@ def _read_coordinator_events(
         rows = _try_select(
             conn,
             [
-                "SELECT seq AS id, from_agent AS agent, topic, payload, ts "
-                + "FROM events ORDER BY seq DESC LIMIT ?",
-                "SELECT id, agent, topic, payload, timestamp AS ts "
-                + "FROM events ORDER BY id DESC LIMIT ?",
+                "SELECT seq AS id, from_agent AS agent, topic, payload, ts " + "FROM events ORDER BY seq DESC LIMIT ?",
+                "SELECT id, agent, topic, payload, timestamp AS ts " + "FROM events ORDER BY id DESC LIMIT ?",
             ],
             (limit,),
         )
@@ -572,9 +558,7 @@ def _sample_processes(patterns: tuple[str, ...]) -> list[dict[str, Any]]:
             rss_kb = int(rss_str)
         except ValueError:
             continue
-        out.append(
-            {"pid": pid, "rss_mb": round(rss_kb / 1024.0, 1), "cmd": cmd}
-        )
+        out.append({"pid": pid, "rss_mb": round(rss_kb / 1024.0, 1), "cmd": cmd})
     return out
 
 
@@ -653,10 +637,12 @@ _ROCM_HEADER_MAP: dict[str, str] = {
 }
 
 # Byte-valued rocm-smi fields; parser divides by 1024**2 to match nvidia-smi units.
-_ROCM_BYTE_TO_MB_FIELDS: frozenset[str] = frozenset({
-    "vram_used_mb",
-    "vram_total_mb",
-})
+_ROCM_BYTE_TO_MB_FIELDS: frozenset[str] = frozenset(
+    {
+        "vram_used_mb",
+        "vram_total_mb",
+    }
+)
 
 
 def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
@@ -721,11 +707,7 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
             if "util_mem_pct" not in snap:
                 used = snap.get("vram_used_mb")
                 total = snap.get("vram_total_mb")
-                if (
-                    isinstance(used, (int, float))
-                    and isinstance(total, (int, float))
-                    and total > 0
-                ):
+                if isinstance(used, (int, float)) and isinstance(total, (int, float)) and total > 0:
                     snap["util_mem_pct"] = used / total * 100.0
             out.append(snap)
     return out
@@ -890,7 +872,9 @@ def _tail_logs(
                 except (FileNotFoundError, PermissionError, OSError):
                     continue
             sorted_paths = sorted(
-                unique.items(), key=lambda kv: kv[1], reverse=True,
+                unique.items(),
+                key=lambda kv: kv[1],
+                reverse=True,
             )[:max_extra_logs]
             for path, _ in sorted_paths:
                 if primary_path is not None and path == primary_path:
@@ -946,9 +930,7 @@ def _extract_log_errors(
     for line in candidate:
         for pattern, regex in compiled:
             if regex.search(line):
-                out.append(
-                    {"pattern": pattern, "line": line[:240]}
-                )
+                out.append({"pattern": pattern, "line": line[:240]})
                 break
     return out
 
@@ -1231,6 +1213,7 @@ def _resolve_aiter_jit_dir(explicit: Path | None) -> Path | None:
             return candidate
     try:
         import importlib.util
+
         spec = importlib.util.find_spec("aiter")
     except (ImportError, ValueError):
         return None
@@ -1245,6 +1228,7 @@ def _resolve_aiter_jit_dir(explicit: Path | None) -> Path | None:
 # ---------------------------------------------------------------------------
 # G — decision-audit probe (reads persisted decision artefacts)
 # ---------------------------------------------------------------------------
+
 
 def _sample_decision_audit(
     session_dir: Path | None,
@@ -1339,7 +1323,9 @@ def _scan_integrate_results(
 
 
 def _normalise_integrate_entry(
-    data: dict[str, Any], *, result_path: Path,
+    data: dict[str, Any],
+    *,
+    result_path: Path,
 ) -> dict[str, Any] | None:
     """Project a raw integrate ``result.json`` dict into the audit shape.
 
@@ -1436,16 +1422,16 @@ def _scan_oob_attempts(
             row = _json_loads_or_none(line)
             if not isinstance(row, dict):
                 continue
-            out.append({
-                "kernel_id": str(row.get("kernel_id") or ""),
-                "backend": str(row.get("backend") or ""),
-                "report_text": str(row.get("report_text") or "")[:500],
-                "microbench_speedup": _coerce_optional_float(
-                    row.get("microbench_speedup")
-                ),
-                "ts": row.get("ts"),
-                "source_file": str(path),
-            })
+            out.append(
+                {
+                    "kernel_id": str(row.get("kernel_id") or ""),
+                    "backend": str(row.get("backend") or ""),
+                    "report_text": str(row.get("report_text") or "")[:500],
+                    "microbench_speedup": _coerce_optional_float(row.get("microbench_speedup")),
+                    "ts": row.get("ts"),
+                    "source_file": str(path),
+                }
+            )
         if out:
             break
     return out[-max_entries:]
@@ -1537,6 +1523,7 @@ def _coerce_optional_float(value: Any) -> float | None:
 # C — preflight probe (manifest + kernel_breakdown)
 # ---------------------------------------------------------------------------
 
+
 def _load_manifest_extras(session_dir: Path | None) -> dict[str, Any]:
     """Read ``manifest.json`` for the C-section preflight signals.
 
@@ -1571,11 +1558,11 @@ def _load_manifest_extras(session_dir: Path | None) -> dict[str, Any]:
 # Private tier mapping so the signal layer computes the Amdahl ceiling
 # without importing the inference_optimizer package.
 _AMDAHL_TIER_FAMILIES: dict[str, str] = {
-    "T1_TRITON":      "triton",
-    "T2_AITER_CK":    "vendor",
-    "T3_FRAMEWORK":   "framework",
-    "T4_COMM":        "comm",
-    "T5_COMPILED":    "compiled",
+    "T1_TRITON": "triton",
+    "T2_AITER_CK": "vendor",
+    "T3_FRAMEWORK": "framework",
+    "T4_COMM": "comm",
+    "T5_COMPILED": "compiled",
 }
 
 
@@ -1605,9 +1592,7 @@ def _load_kernel_breakdown(session_dir: Path | None) -> dict[str, Any]:
         text = candidate.read_text(encoding="utf-8")
         mtime = candidate.stat().st_mtime
     except (OSError, ValueError) as exc:
-        log.debug(
-            "local_probe: kernel_breakdown read %s failed: %s", candidate, exc
-        )
+        log.debug("local_probe: kernel_breakdown read %s failed: %s", candidate, exc)
         return {}
     rows = _json_loads_or_none(text)
     if not isinstance(rows, list):
@@ -1638,6 +1623,7 @@ def _load_kernel_breakdown(session_dir: Path | None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # E — critic-health probe (judge_bundle.json + workdir count)
 # ---------------------------------------------------------------------------
+
 
 def _sample_critic_workdir(
     session_dir: Path | None,
@@ -1679,9 +1665,7 @@ def _sample_critic_workdir(
         try:
             text = judge_path.read_text(encoding="utf-8")
         except (OSError, ValueError) as exc:
-            log.debug(
-                "local_probe: judge_bundle read %s failed: %s", judge_path, exc
-            )
+            log.debug("local_probe: judge_bundle read %s failed: %s", judge_path, exc)
             continue
         data = _json_loads_or_none(text)
         if not isinstance(data, dict):
@@ -1698,13 +1682,15 @@ def _sample_critic_workdir(
             proposal_count = len(data["kb_priors_by_proposal"])
         else:
             proposal_count = 0
-        recent_judges.append({
-            "turn_dir": turn_dir.name,
-            "kb_read_skipped_reason": data.get("kb_read_skipped_reason"),
-            "required_context": list(data.get("required_context") or []),
-            "proposal_count": proposal_count,
-            "mtime": mtime,
-        })
+        recent_judges.append(
+            {
+                "turn_dir": turn_dir.name,
+                "kb_read_skipped_reason": data.get("kb_read_skipped_reason"),
+                "required_context": list(data.get("required_context") or []),
+                "proposal_count": proposal_count,
+                "mtime": mtime,
+            }
+        )
     return {
         "recent_judges": recent_judges,
         "workdir_count": workdir_count,
@@ -1715,6 +1701,7 @@ def _sample_critic_workdir(
 # ---------------------------------------------------------------------------
 # I — state-integrity probe (state.json / WAL / leases / agent JSONLs / PID)
 # ---------------------------------------------------------------------------
+
 
 def _sample_state_integrity(
     session_dir: Path | None,
@@ -1744,7 +1731,8 @@ def _sample_state_integrity(
         "leases": _probe_leases(session_dir),
         "agents": _probe_agent_files(session_dir),
         "coordinator": _probe_coordinator_pid(
-            session_dir, optimizer_runs_dirname,
+            session_dir,
+            optimizer_runs_dirname,
         ),
     }
 
@@ -1768,7 +1756,9 @@ def _probe_state_json(session_dir: Path) -> dict[str, Any]:
         text = path.read_text(encoding="utf-8")
     except (OSError, ValueError) as exc:
         return {
-            "valid": False, "error": f"read_failed: {exc}", "path": str(path),
+            "valid": False,
+            "error": f"read_failed: {exc}",
+            "path": str(path),
         }
     decoded = _json_loads_or_none(text)
     if decoded is None or not isinstance(decoded, dict):
@@ -1847,7 +1837,9 @@ def _probe_leases(session_dir: Path) -> list[dict[str, Any]]:
         return []
     try:
         conn = sqlite3.connect(
-            f"file:{db_path}?mode=ro", uri=True, timeout=2.0,
+            f"file:{db_path}?mode=ro",
+            uri=True,
+            timeout=2.0,
         )
     except sqlite3.Error as exc:
         log.debug("local_probe: cannot open leases db: %s", exc)
@@ -1855,9 +1847,7 @@ def _probe_leases(session_dir: Path) -> list[dict[str, Any]]:
     try:
         conn.row_factory = sqlite3.Row
         try:
-            rows = list(conn.execute(
-                "SELECT task_id, holder_pid, lane, acquired_at FROM leases"
-            ).fetchall())
+            rows = list(conn.execute("SELECT task_id, holder_pid, lane, acquired_at FROM leases").fetchall())
         except sqlite3.Error as exc:
             log.debug("local_probe: leases select failed: %s", exc)
             return []
@@ -1872,15 +1862,15 @@ def _probe_leases(session_dir: Path) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             holder_int = None
         alive = _is_pid_alive(holder_int) if holder_int is not None else False
-        out.append({
-            "task_id": row["task_id"] if "task_id" in keys else None,
-            "holder_pid": holder_int,
-            "lane": row["lane"] if "lane" in keys else None,
-            "acquired_at": (
-                row["acquired_at"] if "acquired_at" in keys else None
-            ),
-            "alive": alive,
-        })
+        out.append(
+            {
+                "task_id": row["task_id"] if "task_id" in keys else None,
+                "holder_pid": holder_int,
+                "lane": row["lane"] if "lane" in keys else None,
+                "acquired_at": (row["acquired_at"] if "acquired_at" in keys else None),
+                "alive": alive,
+            }
+        )
     return out
 
 
@@ -1949,7 +1939,8 @@ def _probe_agent_files(session_dir: Path) -> dict[str, Any]:
 
 
 def _probe_coordinator_pid(
-    session_dir: Path, optimizer_runs_dirname: str,
+    session_dir: Path,
+    optimizer_runs_dirname: str,
 ) -> dict[str, Any]:
     """Cross-reference ``optimizer_runs/run_*.pid`` against ``os.kill(pid, 0)``.
 
@@ -1968,7 +1959,9 @@ def _probe_coordinator_pid(
     """
     runs_dir = session_dir / optimizer_runs_dirname
     out: dict[str, Any] = {
-        "recorded_pid": None, "alive": None, "pid_file": "",
+        "recorded_pid": None,
+        "alive": None,
+        "pid_file": "",
     }
     if not runs_dir.is_dir():
         return out
@@ -2003,6 +1996,7 @@ def _probe_coordinator_pid(
 # J — external-deps probe (gateway / mounts / TraceLens CLI)
 # ---------------------------------------------------------------------------
 
+
 async def _probe_external_deps(
     gateway_probe_url_override: str,
     mount_timeout_s: float,
@@ -2027,13 +2021,10 @@ async def _probe_external_deps(
         base = os.environ.get("OPENAI_BASE_URL", "").strip()
         if base:
             gateway_url = base.rstrip("/") + "/models"
-    gateway = (
-        await _probe_gateway_health(gateway_url, http_timeout_s)
-        if gateway_url
-        else {}
-    )
+    gateway = await _probe_gateway_health(gateway_url, http_timeout_s) if gateway_url else {}
     mounts = await asyncio.to_thread(
-        _probe_external_mounts, mount_timeout_s,
+        _probe_external_mounts,
+        mount_timeout_s,
     )
     tracelens_cli = await asyncio.to_thread(_probe_tracelens_cli)
     if not gateway and not mounts and not tracelens_cli:
@@ -2046,7 +2037,8 @@ async def _probe_external_deps(
 
 
 async def _probe_gateway_health(
-    url: str, timeout_s: float,
+    url: str,
+    timeout_s: float,
 ) -> dict[str, Any]:
     """GET ``$OPENAI_BASE_URL/models`` with Bearer; classify the response.
 
@@ -2065,7 +2057,9 @@ async def _probe_gateway_health(
         ``error`` marker on transport failure.
     """
     out: dict[str, Any] = {
-        "url": url, "reachable": False, "status": "error",
+        "url": url,
+        "reachable": False,
+        "status": "error",
     }
     headers: dict[str, str] = {}
     api_key = os.environ.get("SAFE_API_KEY", "").strip()
@@ -2146,14 +2140,16 @@ def _probe_external_mounts(
         except OSError as exc:
             error = f"oserror: {exc.__class__.__name__}: {exc}"
         latency_ms = (time.monotonic() - start) * 1000.0
-        out.append({
-            "env_name": env_name,
-            "path": path,
-            "ok": ok,
-            "error": error,
-            "latency_ms": round(latency_ms, 2),
-            "timeout_ms": timeout_s * 1000.0,
-        })
+        out.append(
+            {
+                "env_name": env_name,
+                "path": path,
+                "ok": ok,
+                "error": error,
+                "latency_ms": round(latency_ms, 2),
+                "timeout_ms": timeout_s * 1000.0,
+            }
+        )
     return out
 
 

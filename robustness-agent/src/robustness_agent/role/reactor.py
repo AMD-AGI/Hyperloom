@@ -167,9 +167,17 @@ class Reactor:
         return validated_intents
 
     def _resolve_authoritative_tick(self, ctx: ReactorContext) -> int:
-        """Pick the most reliable tick index: prefer the Coordinator's
-        session-wide ``ctx.shared_state.tick``, else the in-memory counter
-        (tests / first tick before the prompt is written).
+        """Pick the most reliable tick index for this reactor pass.
+
+        Prefers the Coordinator's session-wide ``ctx.shared_state.tick``,
+        else the in-memory counter (tests / first tick before the prompt is
+        written).
+
+        Args:
+            ctx: Reactor context for the current tick.
+
+        Returns:
+            The resolved authoritative tick index.
         """
         shared_tick = getattr(ctx.shared_state, "tick", 0) or 0
         if shared_tick > 0:
@@ -188,7 +196,8 @@ class Reactor:
             await asyncio.to_thread(self._state_store.flush_atomic)
         except Exception:  # noqa: BLE001 — best-effort, never crash tick
             log.exception(
-                "reactor tick=%d state_store flush failed", self._tick_index,
+                "reactor tick=%d state_store flush failed",
+                self._tick_index,
             )
 
     async def _maybe_finalize(self, ctx: ReactorContext) -> None:
@@ -211,11 +220,13 @@ class Reactor:
         self._finalize_fired = True
         try:
             await asyncio.to_thread(
-                self._finalizer.finalize, stop_reason=stop_reason,
+                self._finalizer.finalize,
+                stop_reason=stop_reason,
             )
         except Exception:  # noqa: BLE001 — finalize is best-effort
             log.exception(
-                "reactor tick=%d postmortem finalizer raised", self._tick_index,
+                "reactor tick=%d postmortem finalizer raised",
+                self._tick_index,
             )
 
 
