@@ -3686,8 +3686,8 @@ class Coordinator:
                         "source": "forge_gemm_tuning",
                         "base_tput": running_tput,
                         "extra_envs": test_envs,
-                        "keep_threshold_pct": 1.0,
-                        "budget_minutes": 10,
+                        "keep_threshold_pct": 3.0,
+                        "budget_minutes": 15,
                     },
                     session_dir=self.session_dir,
                 )
