@@ -176,6 +176,29 @@ def _profile_err_text(profile_result: Any) -> str:
     return "\n".join(parts)
 
 
+def _profile_server_log_tail(profile_result: Any, max_bytes: int = 16384) -> str:
+    """Return the tail of the newest engine ``server.log`` for a profile run.
+
+    The seq_lens/get_num_new_pages assert and SIGQUIT surface only in the engine
+    ``server.log`` (not the profile result fields), so feed it to the cuda-graph
+    capture-failure detector. Best-effort: returns "" on any miss.
+    """
+    if not isinstance(profile_result, dict):
+        return ""
+    base = profile_result.get("trace_dir") or profile_result.get("workspace")
+    if not base:
+        return ""
+    try:
+        from .benchmark_result import _find_server_logs
+
+        logs = _find_server_logs(Path(str(base)))
+        if not logs:
+            return ""
+        return logs[0].read_bytes()[-max_bytes:].decode("utf-8", "replace")
+    except (OSError, ImportError):
+        return ""
+
+
 class RooflineExecutor:
     """Production composite ActionRunner.
 
@@ -335,7 +358,9 @@ class RooflineExecutor:
                     last_error,
                 )
                 if not disable_cuda_graph and _is_cuda_graph_capture_failure(
-                    last_error, _profile_err_text(profile_result)
+                    last_error,
+                    _profile_err_text(profile_result),
+                    _profile_server_log_tail(profile_result),
                 ):
                     disable_cuda_graph = True
                     log.warning(
