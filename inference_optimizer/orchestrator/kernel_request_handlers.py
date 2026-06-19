@@ -1248,6 +1248,97 @@ def _forge_gemm_tune_available() -> bool:
         return False
 
 
+def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
+    """Resolve the actual runtime precision and quant_type for forge tuning.
+
+    Priority:
+    1. Explicit payload override
+    2. --quantization from current_best server args (actual runtime)
+    3. state.precision (session-level, may be stale)
+    4. Default: bf16
+
+    Returns (precision, quant_type) tuple.
+    """
+    from .roofline_ceiling import _parse_server_arg
+
+    # Explicit override from payload
+    if payload.get("precision"):
+        precision = _normalize_precision(payload["precision"])
+        quant_type = str(payload.get("quant_type") or "auto").strip()
+        return precision, quant_type
+
+    # Resolve from actual server args (current_best reflects optimizer's decisions)
+    current_best = getattr(state, "current_best", None) or {}
+    server_args = ""
+    if isinstance(current_best, dict):
+        server_args = str(current_best.get("extra_server_args") or "")
+    # Also check extra_envs for fp8 backend hints
+    extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
+
+    quantization_arg = _parse_server_arg(server_args, "--quantization").lower()
+    fp8_backend = _parse_server_arg(server_args, "--fp8-gemm-backend").lower()
+
+    if quantization_arg == "fp8":
+        precision = "fp8"
+        # Determine quant_type from fp8 backend or envs
+        if fp8_backend == "aiter" or extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"):
+            quant_type = "per_token"
+        else:
+            quant_type = "blockscale"
+        return precision, quant_type
+
+    if quantization_arg in ("fp4", "mxfp4"):
+        return quantization_arg, "fp4"
+
+    # Fall back to session precision
+    precision = _normalize_precision(state.precision)
+    if not precision:
+        precision = "bf16"
+    quant_type = str(payload.get("quant_type") or "auto").strip()
+    return precision, quant_type
+
+
+def _resolve_forge_server_log(state, session_dir: Path) -> str:
+    """Find the most recent server log for kernel signature detection.
+
+    Checks baseline workspace and last explore workspace for server.log.
+    """
+    # Try baseline workspace
+    last_baseline = getattr(state, "last_baseline", None) or {}
+    if isinstance(last_baseline, dict):
+        bl_workspace = last_baseline.get("workspace") or ""
+        if bl_workspace:
+            log_path = Path(bl_workspace) / "server.log"
+            if log_path.is_file():
+                return str(log_path)
+
+    # Try session runs directory for recent server logs
+    runs_dir = session_dir / "runs"
+    if runs_dir.is_dir():
+        server_logs = sorted(runs_dir.glob("**/server.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if server_logs:
+            return str(server_logs[0])
+
+    return ""
+
+
+def _resolve_forge_shapes(state, session_dir: Path) -> str:
+    """Find TraceLens shapes JSON if available from last trace analysis."""
+    last_trace = getattr(state, "last_trace_analyze", None) or {}
+    if not isinstance(last_trace, dict):
+        return ""
+    # Check for kernel_roofline_path which contains shape data
+    candidates_path = last_trace.get("candidates_path") or ""
+    if candidates_path:
+        cand_file = Path(candidates_path)
+        if cand_file.is_file():
+            # Look for shapes.json in the same directory
+            shapes_file = cand_file.parent / "shapes.json"
+            if shapes_file.is_file():
+                return str(shapes_file)
+    return ""
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -1275,7 +1366,8 @@ async def _run_forge_gemm_tuning(
             "backend": "forge",
         }
 
-    precision = _normalize_precision(payload.get("precision") or state.precision)
+    # Resolve precision from actual runtime (not just session-level state)
+    precision, quant_type = _resolve_forge_precision_and_quant(state, payload)
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
 
     workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
@@ -1292,15 +1384,24 @@ async def _run_forge_gemm_tuning(
     gpu_type = str(
         payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x"
     ).strip().lower()
-    quant_type = str(payload.get("quant_type") or "auto").strip()
     tokens = str(payload.get("tokens") or "").strip()
     mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or 1)
+
+    # Resolve server log for 1-stage ASM detection
+    kernel_sig_log = str(payload.get("kernel_signature_log") or "").strip()
+    if not kernel_sig_log:
+        kernel_sig_log = _resolve_forge_server_log(state, session_dir)
+
+    # Resolve TraceLens shapes if available
+    shapes_json = str(payload.get("shapes_json") or "").strip()
+    if not shapes_json:
+        shapes_json = _resolve_forge_shapes(state, session_dir)
 
     cmd = [
         "python3", "-m", "forge_gemm_tune.cli", "run",
         "--model-path", model_path,
         "--framework", framework,
-        "--precision", precision or "bf16",
+        "--precision", precision,
         "--quant-type", quant_type,
         "--gpu-type", gpu_type,
         "--tp", str(tp),
@@ -1311,14 +1412,17 @@ async def _run_forge_gemm_tuning(
     ]
     if tokens:
         cmd.extend(["--tokens", tokens])
+    else:
+        # Pass conc-derived tokens explicitly so forge covers CUDAGraph BS
+        cmd.extend(["--conc", str(conc)])
     if payload.get("untuned_csv"):
         cmd.extend(["--untuned-csv", str(payload["untuned_csv"])])
-    if payload.get("shapes_json"):
-        cmd.extend(["--shapes-json", str(payload["shapes_json"])])
+    if shapes_json:
+        cmd.extend(["--shapes-json", shapes_json])
     if payload.get("tunableop_input"):
         cmd.extend(["--tunableop-input", str(payload["tunableop_input"])])
-    if payload.get("kernel_signature_log"):
-        cmd.extend(["--kernel-signature-log", str(payload["kernel_signature_log"])])
+    if kernel_sig_log:
+        cmd.extend(["--kernel-signature-log", kernel_sig_log])
 
     timeout = _gemm_tuning_timeout_sec(payload)
     cmd.extend(["--timeout", str(timeout)])
