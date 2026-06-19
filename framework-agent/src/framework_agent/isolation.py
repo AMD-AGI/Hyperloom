@@ -53,9 +53,7 @@ class WorkspacePaths:
 # ---------------------------------------------------------------------------
 # Subprocess helpers
 # ---------------------------------------------------------------------------
-def _run_subprocess(
-    args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800
-) -> None:
+def _run_subprocess(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800) -> None:
     """Run a subprocess with a timeout; raise CalledProcessError on non-zero.
 
     Args:
@@ -108,7 +106,9 @@ def _resolve_min_free_gb(explicit: float | None) -> float:
         except ValueError:
             log.warning(
                 "%s=%r is not a number; falling back to default %.1f GB",
-                _DISK_MIN_GB_ENV, raw, _DEFAULT_DISK_MIN_GB,
+                _DISK_MIN_GB_ENV,
+                raw,
+                _DEFAULT_DISK_MIN_GB,
             )
     return _DEFAULT_DISK_MIN_GB
 
@@ -124,17 +124,31 @@ def disk_preflight(
 
     Required = ``max(min_free_gb, n_candidates * per_candidate_gb)``. The
     work_dir is created when missing so :func:`shutil.disk_usage` doesn't
-    fail. Raises :class:`DiskPreflightError` on failure.
+    fail.
+
+    Args:
+        work_dir: Working directory whose mount is checked.
+        n_candidates: Number of candidates used to size the requirement.
+        min_free_gb: Floor on required free space; resolved from env when
+            ``None``.
+        per_candidate_gb: Estimated disk per candidate in GB.
+
+    Raises:
+        DiskPreflightError: If free space is below the computed requirement.
     """
     floor_gb = _resolve_min_free_gb(min_free_gb)
     required_gb = max(floor_gb, float(n_candidates) * per_candidate_gb)
     work_dir.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(str(work_dir))
-    free_gb = usage.free / (1024 ** 3)
+    free_gb = usage.free / (1024**3)
     log.info(
-        "disk_preflight: work_dir=%s free=%.1fGB required=%.1fGB (n=%d, "
-        "floor=%.1fGB, per_cand=%.1fGB)",
-        work_dir, free_gb, required_gb, n_candidates, floor_gb, per_candidate_gb,
+        "disk_preflight: work_dir=%s free=%.1fGB required=%.1fGB (n=%d, floor=%.1fGB, per_cand=%.1fGB)",
+        work_dir,
+        free_gb,
+        required_gb,
+        n_candidates,
+        floor_gb,
+        per_candidate_gb,
     )
     if free_gb < required_gb:
         raise DiskPreflightError(
@@ -247,9 +261,17 @@ def prepare_candidate_workspace(
 ) -> WorkspacePaths:
     """Materialise ``candidate_dir`` + (when execute) worktree + venv.
 
-    Returns :class:`WorkspacePaths`. ``execute=False`` /
-    ``prepare_candidate_env=False`` short-circuits before the git worktree
-    and venv steps so plan mode stays cheap.
+    ``execute=False`` / ``prepare_candidate_env=False`` short-circuits
+    before the git worktree and venv steps so plan mode stays cheap.
+
+    Args:
+        req: The explore request (work dir + env policy).
+        candidate: The candidate to prepare a workspace for.
+        index: Candidate index used in the directory name.
+        execute: Whether to materialize the worktree and venv.
+
+    Returns:
+        The :class:`WorkspacePaths` for the candidate.
     """
     candidate_dir = req.work_dir / "candidates" / f"{index:02d}_{candidate.slug}"
     worktree_dir = candidate_dir / "worktree"
@@ -259,7 +281,8 @@ def prepare_candidate_workspace(
     if not execute or not req.prepare_candidate_env:
         log.debug(
             "prepare_candidate_workspace[%02d] %s: plan mode (no worktree/venv)",
-            index, candidate.ref,
+            index,
+            candidate.ref,
         )
         return WorkspacePaths(candidate_dir, worktree_dir, venv_dir)
 
@@ -269,7 +292,9 @@ def prepare_candidate_workspace(
         shutil.rmtree(worktree_dir)
     log.info(
         "prepare_candidate_workspace[%02d] %s: worktree -> %s",
-        index, candidate.ref, worktree_dir,
+        index,
+        candidate.ref,
+        worktree_dir,
     )
     _run_git(
         [
@@ -287,7 +312,9 @@ def prepare_candidate_workspace(
         shutil.rmtree(venv_dir)
     log.info(
         "prepare_candidate_workspace[%02d] %s: venv -> %s",
-        index, candidate.ref, venv_dir,
+        index,
+        candidate.ref,
+        venv_dir,
     )
     _run_subprocess(
         [sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],
@@ -310,6 +337,12 @@ def cleanup_workspace(
     but ``candidate_dir`` (and its ``pr.patches`` / ``pr_files.json`` audit
     artefacts) is kept so reviewers can still diff. Best-effort: cleanup
     errors are logged, never re-raised.
+
+    Args:
+        workspace: Paths for the candidate workspace to clean up.
+        is_winner: Whether this candidate is a winner (winners are kept).
+        keep_winner_only: When False, nothing is removed.
+        repo_dir: Mirror repo dir used to detach the worktree cleanly.
     """
     if not keep_winner_only or is_winner:
         return

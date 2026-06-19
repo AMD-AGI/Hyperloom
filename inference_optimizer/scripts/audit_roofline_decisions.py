@@ -39,10 +39,18 @@ from typing import Any
 
 
 _ANALYSIS_MD_KEYWORDS = (
-    "analysis.md", "saturated", "comm-bound", "memory-bound",
-    "compute-bound", "efficiency", "Top Operations",
-    "Executive Summary", "Recommendations", "snapshot",
-    "rcclAllreduce", "bottleneck",
+    "analysis.md",
+    "saturated",
+    "comm-bound",
+    "memory-bound",
+    "compute-bound",
+    "efficiency",
+    "Top Operations",
+    "Executive Summary",
+    "Recommendations",
+    "snapshot",
+    "rcclAllreduce",
+    "bottleneck",
 )
 
 _FLAG_PATTERN = re.compile(r"--[a-z][a-z0-9_-]+")
@@ -225,9 +233,7 @@ def extract(session_dir: Path) -> AuditReport:
         return r
     r.has_state_json = True
     try:
-        r.cumulative_gain_validated_pct = float(
-            state.get("cumulative_gain_validated", 0.0)
-        )
+        r.cumulative_gain_validated_pct = float(state.get("cumulative_gain_validated", 0.0))
     except (TypeError, ValueError):
         # Missing/non-numeric gain field: leave the default and keep auditing.
         pass
@@ -248,21 +254,15 @@ def extract(session_dir: Path) -> AuditReport:
     r.discovered_flag_names = _flatten_discovered_flag_names(state)
     r.proposed_flag_names = _extract_proposed_flag_names(state)
     if r.discovered_flag_names:
-        r.hallucinated_flag_names = {
-            f for f in r.proposed_flag_names if f not in r.discovered_flag_names
-        }
+        r.hallucinated_flag_names = {f for f in r.proposed_flag_names if f not in r.discovered_flag_names}
         proposed_set = set(r.proposed_flag_names)
         r.untested_flag_names = r.discovered_flag_names - proposed_set
     r.analysis_md_referenced_count = _count_analysis_md_references(state)
 
     cache_metrics = state.get("tick_cache_metrics") or {}
     if isinstance(cache_metrics, dict):
-        r.cache_creation_input_tokens = int(
-            cache_metrics.get("cache_creation_input_tokens") or 0
-        )
-        r.cache_read_input_tokens = int(
-            cache_metrics.get("cache_read_input_tokens") or 0
-        )
+        r.cache_creation_input_tokens = int(cache_metrics.get("cache_creation_input_tokens") or 0)
+        r.cache_read_input_tokens = int(cache_metrics.get("cache_read_input_tokens") or 0)
     return r
 
 
@@ -298,9 +298,7 @@ def _format_roofline_timeline(attempts: list[dict[str, Any]]) -> str:
     if not attempts:
         return "    (no roofline action attempts recorded)"
     lines: list[str] = []
-    lines.append(
-        f"    {'#':>2s} {'ts':<28s} {'status':>10s} {'task_id':>14s}"
-    )
+    lines.append(f"    {'#':>2s} {'ts':<28s} {'status':>10s} {'task_id':>14s}")
     lines.append("    " + "-" * 64)
     for i, entry in enumerate(attempts, start=1):
         ts = str(entry.get("ts") or "?")[:27]
@@ -323,23 +321,17 @@ def _format_pruned_families(pruned: list[dict[str, Any]]) -> str:
     if not pruned:
         return "    (no pruned_families)"
     lines: list[str] = []
-    lines.append(
-        f"    {'family':<28s} {'source':<14s} {'analysis-md-grounded':<22s} {'reason'}"
-    )
+    lines.append(f"    {'family':<28s} {'source':<14s} {'analysis-md-grounded':<22s} {'reason'}")
     lines.append("    " + "-" * 90)
     for entry in pruned:
         fam = str(entry.get("family") or "?")
         source = str(entry.get("source") or "?")
         reason = str(entry.get("reason") or "")
-        grounded = any(
-            kw.lower() in reason.lower() for kw in _ANALYSIS_MD_KEYWORDS
-        )
+        grounded = any(kw.lower() in reason.lower() for kw in _ANALYSIS_MD_KEYWORDS)
         tag = "yes" if grounded else "no"
         # Truncate reason to 100 chars for readability
         reason_short = reason if len(reason) <= 100 else reason[:97] + "..."
-        lines.append(
-            f"    {fam:<28s} {source:<14s} {tag:<22s} {reason_short}"
-        )
+        lines.append(f"    {fam:<28s} {source:<14s} {tag:<22s} {reason_short}")
     return "\n".join(lines)
 
 
@@ -354,21 +346,13 @@ def _format_flag_audit(r: AuditReport, *, max_show: int = 10) -> str:
         str: Multi-line summary of flag namespace coverage.
     """
     lines: list[str] = []
-    lines.append(
-        f"    discovered_flags namespace : {len(r.discovered_flag_names)} flags"
-    )
-    lines.append(
-        f"    flags proposed             : {len(set(r.proposed_flag_names))} unique"
-    )
-    lines.append(
-        f"    hallucinated (not in namespace): {len(r.hallucinated_flag_names)}"
-    )
+    lines.append(f"    discovered_flags namespace : {len(r.discovered_flag_names)} flags")
+    lines.append(f"    flags proposed             : {len(set(r.proposed_flag_names))} unique")
+    lines.append(f"    hallucinated (not in namespace): {len(r.hallucinated_flag_names)}")
     if r.hallucinated_flag_names:
         sample = sorted(r.hallucinated_flag_names)[:max_show]
         lines.append(f"      sample: {sample}")
-    lines.append(
-        f"    untested (in namespace, never proposed): {len(r.untested_flag_names)}"
-    )
+    lines.append(f"    untested (in namespace, never proposed): {len(r.untested_flag_names)}")
     return "\n".join(lines)
 
 
@@ -393,9 +377,7 @@ def render(r: AuditReport) -> str:
     if r.error:
         out.append(f"  ERROR: {r.error}")
         return "\n".join(out)
-    out.append(
-        f"  cumulative_gain_validated_pct : {r.cumulative_gain_validated_pct:.3f}%"
-    )
+    out.append(f"  cumulative_gain_validated_pct : {r.cumulative_gain_validated_pct:.3f}%")
     out.append(f"  last snapshot_id              : {r.snapshot_id}")
     out.append(f"  roofline_attempts             : {len(r.roofline_attempts)}")
     out.append(f"  pruned_families               : {len(r.pruned_families_raw)}")
@@ -415,7 +397,7 @@ def render(r: AuditReport) -> str:
         (
             "cache_hit_rate ≥ 50%",
             cache >= 0.50,
-            f"{cache*100:.1f}%",
+            f"{cache * 100:.1f}%",
         ),
         (
             "analysis_md_referenced_count ≥ 3",
@@ -454,13 +436,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         argparse.Namespace: Parsed arguments with ``session`` and ``json``
         attributes.
     """
-    p = argparse.ArgumentParser(
-        description="Audit Roofline-v2 decisions in a single session_dir."
-    )
-    p.add_argument("--session", required=True, type=Path,
-                   help="Session directory containing state.json")
-    p.add_argument("--json", action="store_true",
-                   help="Emit machine-readable JSON instead of pretty text")
+    p = argparse.ArgumentParser(description="Audit Roofline-v2 decisions in a single session_dir.")
+    p.add_argument("--session", required=True, type=Path, help="Session directory containing state.json")
+    p.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of pretty text")
     return p.parse_args(argv)
 
 

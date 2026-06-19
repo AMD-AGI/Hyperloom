@@ -55,21 +55,20 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         facts.append(f"Delta vs baseline: {delta:+.2f} tok/s/gpu.")
     if gain_v is not None:
         facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
-        decisions.append(Decision(
-            kind="kept" if (gain_v or 0) > 0 else "attempted",
-            subject="final",
-            metric_pct=float(gain_v),
-            rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
-        ))
+        decisions.append(
+            Decision(
+                kind="kept" if (gain_v or 0) > 0 else "attempted",
+                subject="final",
+                metric_pct=float(gain_v),
+                rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
+            )
+        )
     if gain_round is not None:
         facts.append(
-            f"Per-round summed gain: {fmt_pct(gain_round)} "
-            "(non-additive, do not present as the user-visible number)."
+            f"Per-round summed gain: {fmt_pct(gain_round)} (non-additive, do not present as the user-visible number)."
         )
     if action_path:
-        facts.append(
-            "Final stack: " + " → ".join(f"`{p}`" for p in action_path)
-        )
+        facts.append("Final stack: " + " → ".join(f"`{p}`" for p in action_path))
     if extra_args:
         facts.append(f"Final extra_server_args: `{extra_args}`.")
     if stack_changed:
@@ -86,20 +85,22 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "predates V2."
         )
 
-    md_kv = md_kv_list([
-        ("final_throughput_tok_s_per_gpu", final_tput),
-        ("cumulative_gain_pct_validated",  gain_v),
-        ("cumulative_gain_pct_per_round_sum", gain_round),
-        ("validated_at_stack_len",         val_stack_len),
-        ("validated_ts",                   val_ts),
-        ("stack_changed_after_validation", stack_changed),
-        ("extra_server_args",              extra_args or None),
-        ("action_path",                    action_path or None),
-        ("ttft_mean_ms",                   f.get("ttft_mean_ms")),
-        ("e2el_mean_ms",                   f.get("e2el_mean_ms")),
-        ("ttft_e2el_source",               f.get("ttft_e2el_source") or None),
-        ("extra_envs",                     f.get("extra_envs") or None),
-    ])
+    md_kv = md_kv_list(
+        [
+            ("final_throughput_tok_s_per_gpu", final_tput),
+            ("cumulative_gain_pct_validated", gain_v),
+            ("cumulative_gain_pct_per_round_sum", gain_round),
+            ("validated_at_stack_len", val_stack_len),
+            ("validated_ts", val_ts),
+            ("stack_changed_after_validation", stack_changed),
+            ("extra_server_args", extra_args or None),
+            ("action_path", action_path or None),
+            ("ttft_mean_ms", f.get("ttft_mean_ms")),
+            ("e2el_mean_ms", f.get("e2el_mean_ms")),
+            ("ttft_e2el_source", f.get("ttft_e2el_source") or None),
+            ("extra_envs", f.get("extra_envs") or None),
+        ]
+    )
 
     md_parts = [md_kv]
     inv_md = render_invocation_block(f.get("invocation"), session.get("image"))

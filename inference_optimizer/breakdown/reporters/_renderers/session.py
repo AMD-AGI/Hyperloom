@@ -42,10 +42,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if claw:
         facts.append(f"Joined to Primus-Claw session `{claw}`")
     else:
-        facts.append(
-            "No claw_session_id recorded — this is a standalone "
-            "Hyperloom run or a pre-V2 session."
-        )
+        facts.append("No claw_session_id recorded — this is a standalone Hyperloom run or a pre-V2 session.")
     if sandbox:
         facts.append(f"Sandbox user `{sandbox}`")
     if stop_reason:
@@ -66,28 +63,36 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if code:
         facts.append(f"Hyperloom code revision `{code}`.")
 
-    md = md_kv_list([
-        ("session_id",       sid),
-        ("claw_session_id",  claw),
-        ("sandbox_user_id",  sandbox),
-        ("stop_reason",      stop_reason or None),
-        ("elapsed_minutes",  elapsed),
-        ("tick_count",       tick),
-        ("host",             host or None),
-        # Always emit the image row so a missing image is visible.
-        ("image",            image if (isinstance(image, str) and image.strip()) else "(not configured)"),
-        ("code_revision",    code or None),
-        ("created_at_utc",   s.get("created_at_utc")),
-        ("ended_at_utc",     s.get("ended_at_utc")),
-        ("max_minutes",      s.get("max_minutes")),
-        ("session_dir",      s.get("session_dir")),
-    ])
+    md = md_kv_list(
+        [
+            ("session_id", sid),
+            ("claw_session_id", claw),
+            ("sandbox_user_id", sandbox),
+            ("stop_reason", stop_reason or None),
+            ("elapsed_minutes", elapsed),
+            ("tick_count", tick),
+            ("host", host or None),
+            # Always emit the image row so a missing image is visible.
+            ("image", image if (isinstance(image, str) and image.strip()) else "(not configured)"),
+            ("code_revision", code or None),
+            ("created_at_utc", s.get("created_at_utc")),
+            ("ended_at_utc", s.get("ended_at_utc")),
+            ("max_minutes", s.get("max_minutes")),
+            ("session_dir", s.get("session_dir")),
+        ]
+    )
 
-    decisions = [Decision(
-        kind="attempted" if stop_reason else "not_attempted",
-        subject=f"session:{sid or 'unknown'}",
-        rationale=f"stop_reason={stop_reason or 'unset'}",
-    )] if sid else []
+    decisions = (
+        [
+            Decision(
+                kind="attempted" if stop_reason else "not_attempted",
+                subject=f"session:{sid or 'unknown'}",
+                rationale=f"stop_reason={stop_reason or 'unset'}",
+            )
+        ]
+        if sid
+        else []
+    )
 
     return RenderedSection(
         section_id="session",

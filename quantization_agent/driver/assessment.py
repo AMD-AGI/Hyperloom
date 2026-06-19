@@ -49,9 +49,7 @@ from .outcomes import (
 from .result_collector import CollectedArtifacts, collect_artifacts
 
 
-_BLOCKED_OUTCOME_RE = re.compile(
-    r"(?:^|\n)\s*outcome_id\s*:\s*([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE
-)
+_BLOCKED_OUTCOME_RE = re.compile(r"(?:^|\n)\s*outcome_id\s*:\s*([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
 
 _GAP_NARRATIVE_EPSILON = 1e-4  # gaps smaller than this are "clean success"
 
@@ -80,6 +78,12 @@ class Assessment:
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict:
+        """Serialize the assessment to a JSON-friendly dictionary.
+
+        Returns:
+            A dict with the final outcome, per-attempt outcomes, recovery flag,
+            evaluation gap, and notes, using enum *values* for outcome ids.
+        """
         return {
             "final": self.final.value if self.final is not None else None,
             "attempts": [a.value if a is not None else None for a in self.attempts],
@@ -94,32 +98,62 @@ class Assessment:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SDK_RUNTIME_PATTERNS = (
-    "rate limit", "rate_limit", "ratelimit",
-    "authentication", "auth_error", "unauthorized", "api key",
-    "context length", "context_length", "context window",
-    "connectionerror", "timeouterror", "anyio.endofstream",
-    "anthropic.", "claude_agent_sdk",
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "authentication",
+    "auth_error",
+    "unauthorized",
+    "api key",
+    "context length",
+    "context_length",
+    "context window",
+    "connectionerror",
+    "timeouterror",
+    "anyio.endofstream",
+    "anthropic.",
+    "claude_agent_sdk",
 )
 
 _OOM_PATTERNS = ("out of memory", "cuda out of memory", "oom", "torch.outofmemoryerror")
 
 _MODEL_LOAD_PATTERNS = (
-    "safetensorerror", "missing keys", "no such file",
-    "from_pretrained", "transformers.utils.import_utils",
-    "weight shape", "dtype mismatch",
+    "safetensorerror",
+    "missing keys",
+    "no such file",
+    "from_pretrained",
+    "transformers.utils.import_utils",
+    "weight shape",
+    "dtype mismatch",
 )
 
 _EXPORT_PATTERNS = (
-    "save_pretrained", "safetensors.write", "ioerror", "no space left",
-    "stale file handle", "nfs",
+    "save_pretrained",
+    "safetensors.write",
+    "ioerror",
+    "no space left",
+    "stale file handle",
+    "nfs",
 )
 
 _QUANTIZED_LOAD_PATTERNS = (
-    "vllm", "sglang", "engine.start", "engine startup",
+    "vllm",
+    "sglang",
+    "engine.start",
+    "engine startup",
 )
 
 
 def _contains_any(haystack: str, needles: tuple[str, ...]) -> bool:
+    """Return whether any needle substring appears in ``haystack``.
+
+    Args:
+        haystack: String to search within.
+        needles: Candidate substrings to look for.
+
+    Returns:
+        ``True`` if at least one needle is found, otherwise ``False``.
+    """
     for n in needles:
         if n in haystack:
             return True
@@ -127,6 +161,15 @@ def _contains_any(haystack: str, needles: tuple[str, ...]) -> bool:
 
 
 def _parse_blocked_outcome(text: str | None) -> OutcomeId | None:
+    """Extract an explicit ``BLOCKED`` outcome id from agent output text.
+
+    Args:
+        text: Free-form text that may contain a ``BLOCKED`` outcome marker.
+
+    Returns:
+        The matching :class:`OutcomeId`, or ``None`` when no valid marker is
+        present.
+    """
     if not text:
         return None
     m = _BLOCKED_OUTCOME_RE.search(text)
@@ -144,7 +187,17 @@ def _classify_eval_outcome(
     *,
     acceptable_eval_gap: float | None,
 ) -> OutcomeId | None:
-    """Map eval-phase artifacts → outcome. ``None`` means 'eval not exercised'."""
+    """Map eval-phase artifacts to an outcome.
+
+    Args:
+        art: Collected artifacts for the attempt.
+        acceptable_eval_gap: Maximum tolerated relative accuracy gap, if
+            configured.
+
+    Returns:
+        The matching eval :class:`OutcomeId`, or ``None`` when eval was
+        not exercised this attempt.
+    """
 
     if art.eval_skipped_reason:
         reason = art.eval_skipped_reason.lower()
@@ -178,10 +231,16 @@ def _classify_sdk_phase_error(
     sdk_error: str,
     phase: str | None,
 ) -> OutcomeId | None:
-    """Map ``sdk_error`` text under a known phase to a phase-specific outcome.
+    """Map an SDK error under a known phase to a phase-specific outcome.
 
-    Returns ``None`` if the message doesn't look phase-specific; the caller
-    then falls through to bootstrap-level patterns.
+    Args:
+        sdk_error: Raw SDK error text.
+        phase: The phase that was executing when the error occurred.
+
+    Returns:
+        The matching :class:`OutcomeId`, or ``None`` if the message is not
+        phase-specific (the caller then falls through to bootstrap-level
+        patterns).
     """
 
     msg = sdk_error.lower()
@@ -214,10 +273,16 @@ def _classify_phase_artifact_gap(
     art: CollectedArtifacts,
     phase: str | None,
 ) -> OutcomeId | None:
-    """Disk-evidence gaps that depend on which phase last wrote ``last_phase.txt``.
+    """Detect disk-evidence gaps relative to the last-written phase.
 
-    Returns ``None`` if nothing is amiss at this phase boundary — the caller
-    then continues to MUST-have / validator / eval checks.
+    Args:
+        art: Collected artifacts for the attempt.
+        phase: The phase that last wrote ``last_phase.txt``.
+
+    Returns:
+        The matching :class:`OutcomeId`, or ``None`` if nothing is amiss
+        at this phase boundary (the caller then continues to MUST-have /
+        validator / eval checks).
     """
 
     if phase == "intake" and not art.model_analysis_present:
@@ -234,6 +299,15 @@ def _classify_phase_artifact_gap(
 
 
 def _classify_bootstrap_sdk_error(sdk_error: str) -> OutcomeId | None:
+    """Classify a bootstrap-phase SDK error message into an outcome.
+
+    Args:
+        sdk_error: Raw error text raised before the skill chain started.
+
+    Returns:
+        The matching bootstrap :class:`OutcomeId` (e.g. missing Quark root,
+        unwritable workspace, runtime error), or ``None`` if unrecognized.
+    """
     msg = sdk_error.lower()
     if "quark_root" in msg or ("quark root" in msg and ("missing" in msg or "not found" in msg)):
         return OutcomeId.quark_root_missing
@@ -250,6 +324,7 @@ def _classify_bootstrap_sdk_error(sdk_error: str) -> OutcomeId | None:
 # main entry
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def classify_attempt(
     workspace: Path,
     *,
@@ -260,11 +335,20 @@ def classify_attempt(
 ) -> OutcomeId | None:
     """Classify a single attempt's workspace state.
 
-    Returns ``None`` for clean success, an ``OutcomeId`` otherwise. The retry
-    loop assembles attempts and derives the final ``Assessment``.
+    The retry loop assembles per-attempt outcomes and derives the final
+    ``Assessment``.
 
-    ``artifacts`` may be supplied if the caller already scanned the workspace
-    (saves a duplicate disk pass).
+    Args:
+        workspace: Attempt workspace directory to inspect.
+        sdk_error: Raw SDK error text, if the attempt raised one.
+        last_phase: Phase that last executed (overrides the on-disk marker).
+        acceptable_eval_gap: Maximum tolerated relative accuracy gap.
+        artifacts: Pre-scanned artifacts; supply to avoid a duplicate disk
+            pass.
+
+    Returns:
+        ``None`` for a clean success, otherwise the classified
+        :class:`OutcomeId`.
     """
 
     art = artifacts if artifacts is not None else collect_artifacts(Path(workspace))
@@ -340,6 +424,7 @@ def classify_attempt(
 # Assessment assembly
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def build_assessment(
     attempts: list[OutcomeId | None],
     *,
@@ -352,6 +437,15 @@ def build_assessment(
     * ``final`` = last attempt's outcome.
     * ``recovered`` = True iff len(attempts) > 1 AND final ∈ SUCCESS_TAGS.
     * ``eval_gap`` = ``relative_gap`` from the latest ``eval_report.json``.
+
+    Args:
+        attempts: Per-attempt outcomes in chronological order.
+        workspace: Workspace directory used to collect artifacts.
+        artifacts: Pre-scanned artifacts; supply to avoid a disk pass.
+        notes: Extra human-readable notes to attach to the assessment.
+
+    Returns:
+        The assembled :class:`Assessment`.
     """
 
     if not attempts:
@@ -381,8 +475,15 @@ def build_assessment(
 def derive_status(assessment: Assessment, artifacts: CollectedArtifacts) -> str:
     """Map an ``Assessment`` to a public status string per design §5.4.
 
-    Returns ``"success"`` / ``"partial"`` / ``"failed"``. Consumed by
+    Consumed by
     :class:`quantization_agent.driver.retry.QuantSkillRunResult`.
+
+    Args:
+        assessment: The assembled assessment to map.
+        artifacts: Collected artifacts used for status demotion checks.
+
+    Returns:
+        One of ``"success"``, ``"partial"``, or ``"failed"``.
     """
 
     final = assessment.final

@@ -18,48 +18,47 @@ class TestParamSearchRenderer:
         out = _render({})
         assert isinstance(out, RenderedSection)
         assert out.skipped is True
-        assert any("backends DFS" in f for f in out.key_facts)
-        assert any("params DFS" in f for f in out.key_facts)
+        assert any("backends search" in f for f in out.key_facts)
+        assert any("params search" in f for f in out.key_facts)
 
     def test_populated_explore_unskips_section(self):
-        out = _render({
-            "explore": {"accepted": ["a"], "tested": {"a": {}}, "cursor": 1,
-                        "last_round": 2},
-        })
+        out = _render(
+            {
+                "explore": {"accepted": ["a"], "tested": {"a": {}}, "cursor": 1, "last_round": 2},
+            }
+        )
         assert out.skipped is False
         assert "Explore Search" in out.markdown_block
 
     def test_populated_backends_unskips_section(self):
-        out = _render({
-            "backends": {"accepted": ["a"], "tested": {"a": {}}, "cursor": 1,
-                         "last_round": 2},
-            "params":   {"accepted": [], "tested": {}, "cursor": 0,
-                         "last_round": 0},
-        })
+        out = _render(
+            {
+                "backends": {"accepted": ["a"], "tested": {"a": {}}, "cursor": 1, "last_round": 2},
+                "params": {"accepted": [], "tested": {}, "cursor": 0, "last_round": 0},
+            }
+        )
         assert out.skipped is False
-        assert "Backends DFS" in out.markdown_block
+        assert "Backends search" in out.markdown_block
 
     def test_discovered_flags_rendered_per_framework(self):
-        out = _render({
-            "discovered_flags": {
-                "sglang": {
-                    "backend_flags": ["a", "b"],
-                    "param_flags": ["x"],
-                    "source_path": "/tmp/sglang/server_args.py",
+        out = _render(
+            {
+                "discovered_flags": {
+                    "sglang": {
+                        "backend_flags": ["a", "b"],
+                        "param_flags": ["x"],
+                        "source_path": "/tmp/sglang/server_args.py",
+                    },
                 },
-            },
-        })
-        # Non-empty flags inventory keeps the section unskipped.
-        assert any(
-            "discovered_flags[sglang]" in f and "param=1" in f
-            for f in out.key_facts
+            }
         )
+        # Non-empty flags inventory keeps the section unskipped.
+        assert any("discovered_flags[sglang]" in f and "param=1" in f for f in out.key_facts)
         assert out.skipped is False
 
     def test_winners_history_truncated_to_last_five(self):
         winners = [
-            {"round_id": i, "action": "backends", "base_tput": 100.0 + i,
-             "best": {"name": f"v{i}", "gain_pct": 2.5}}
+            {"round_id": i, "action": "backends", "base_tput": 100.0 + i, "best": {"name": f"v{i}", "gain_pct": 2.5}}
             for i in range(8)
         ]
         out = _render({"backend_winners_history": winners})

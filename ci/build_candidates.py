@@ -51,13 +51,13 @@ HF_BASE = "https://huggingface.co"
 # Drop repos matching these non-standard quant formats our toolchain
 # (vllm/sglang on ROCm) does not support, even if HF reports text-generation.
 QUANT_FORMAT_BLOCKLIST = re.compile(
-    r"(?i)(NVFP4|"             # NVIDIA modelopt FP4 — ROCm has no kernels
-    r"GGUF|"                   # llama.cpp format
-    r"MLX|"                    # Apple Silicon
+    r"(?i)(NVFP4|"  # NVIDIA modelopt FP4 — ROCm has no kernels
+    r"GGUF|"  # llama.cpp format
+    r"MLX|"  # Apple Silicon
     r"-MLX-|"
-    r"-Q[0-9]_K|"              # GGUF Q4_K_M / Q8_0 etc.
+    r"-Q[0-9]_K|"  # GGUF Q4_K_M / Q8_0 etc.
     r"-Q[0-9]_[0-9]|"
-    r"\.w[0-9]a[0-9]|"         # RedHatAI quantized.w8a8 / w4a16
+    r"\.w[0-9]a[0-9]|"  # RedHatAI quantized.w8a8 / w4a16
     r"quantized\.w"
     r")"
 )
@@ -66,13 +66,13 @@ QUANT_FORMAT_BLOCKLIST = re.compile(
 # can show pipeline_tag=text-generation via tag pollution but aren't causal LMs.
 NON_LM_BLOCKLIST = re.compile(
     r"(?i)(embedding|reranker|rerank|"
-    r"-VL-|"                   # Qwen3-VL, vision-language
+    r"-VL-|"  # Qwen3-VL, vision-language
     r"-Vision-|"
     r"vision-instruct|"
     r"-TTS-|tts-|"
     r"-Speech-|"
     r"paraphraser|"
-    r"-Guard-|"                # Qwen3Guard moderation
+    r"-Guard-|"  # Qwen3Guard moderation
     r"-Reward-|"
     r"diffusion"
     r")"
@@ -83,9 +83,9 @@ NON_LM_BLOCKLIST = re.compile(
 # don't support yet on ROCm). Matches inside repo_id, case-insensitive.
 FAMILY_BLOCKLIST = re.compile(
     r"(?i)("
-    r"DeepSeek-V4|"     # all V4 variants (Pro/Flash/Base/FP8-test)
-    r"GLM-5|"           # 1+ TB MoE
-    r"DeepSeek-V3$"     # DSV3 base only (V3.2 / V3.0324 stay eligible)
+    r"DeepSeek-V4|"  # all V4 variants (Pro/Flash/Base/FP8-test)
+    r"GLM-5|"  # 1+ TB MoE
+    r"DeepSeek-V3$"  # DSV3 base only (V3.2 / V3.0324 stay eligible)
     r")"
 )
 
@@ -130,12 +130,18 @@ def detect_precision_from_config(config: dict) -> str:
         or quant.get("method")
         or ""
     ).lower()
-    if "fp8" in raw:   return "FP8"
-    if "mxfp4" in raw: return "FP4"
-    if "nvfp4" in raw: return "FP4"
-    if "int4" in raw:  return "INT4"
-    if "gptq" in raw:  return "INT4"
-    if "awq" in raw:   return "INT4"
+    if "fp8" in raw:
+        return "FP8"
+    if "mxfp4" in raw:
+        return "FP4"
+    if "nvfp4" in raw:
+        return "FP4"
+    if "int4" in raw:
+        return "INT4"
+    if "gptq" in raw:
+        return "INT4"
+    if "awq" in raw:
+        return "INT4"
     return "BF16"  # most full-precision HF repos default here
 
 
@@ -202,15 +208,20 @@ class HFClient:
         return r.json()
 
     def listing(self, limit: int) -> list[dict]:
-        """Top-N text-generation by downloads (raw HF API records).
+        """Return the top-N text-generation models by downloads.
 
-        HF caps one page at 1000 entries; follow the ``Link`` header cursor
-        until ``limit`` entries are fetched.
+        HF caps one page at 1000 entries; this follows the ``Link`` header
+        cursor until ``limit`` entries are fetched.
+
+        Args:
+            limit: Maximum number of model records to return.
+
+        Returns:
+            Raw HF API model records, up to ``limit``.
         """
         out: list[dict] = []
         page_limit = min(max(limit, 1), 1000)
-        path = (f"/api/models?sort=downloads&direction=-1"
-                f"&limit={page_limit}&filter=text-generation")
+        path = f"/api/models?sort=downloads&direction=-1&limit={page_limit}&filter=text-generation"
         seen_urls: set[str] = set()
         while path and len(out) < limit:
             url = f"{HF_BASE}{path}" if path.startswith("/") else path
@@ -318,9 +329,6 @@ def classify_candidate(
         return None
 
     pipeline_tag = (info.get("pipeline_tag") or "").strip()
-    if pipeline_tag and pipeline_tag != "text-generation":
-        log.info("skip %s: pipeline_tag=%s", repo_id, pipeline_tag)
-        return None
 
     try:
         config = hf.model_config(repo_id)
@@ -347,8 +355,7 @@ def classify_candidate(
     precision = detect_precision_from_config(config)
     weight_gb = params_b * precision_bytes_per_param(precision)
     if weight_gb > max_weight_gb:
-        log.info("skip %s: weight_gb=%.0f > %.0f (DSV4/GLM-5 class)",
-                 repo_id, weight_gb, max_weight_gb)
+        log.info("skip %s: weight_gb=%.0f > %.0f (DSV4/GLM-5 class)", repo_id, weight_gb, max_weight_gb)
         return None
 
     return {
@@ -372,21 +379,26 @@ def main() -> int:
         int: Process exit code (0 on success).
     """
     p = argparse.ArgumentParser()
-    p.add_argument("--top", type=int, default=200,
-                   help="HF top-N to fetch (post-verify count will be lower)")
-    p.add_argument("--min-params", type=float, default=7.0,
-                   help="Minimum params in B (default 7, matches Qwen2.5-7B baseline)")
-    p.add_argument("--max-weight-gb", type=float, default=600.0,
-                   help="Skip if weight > this GB (default 600, drops DSV4/GLM-5)")
-    p.add_argument("--already-done", type=Path,
-                   default=Path(__file__).parent / "candidates" / "already_done.json",
-                   help="JSON of repos to exclude (default ci/candidates/already_done.json)")
-    p.add_argument("--output", type=Path, required=True,
-                   help="Output JSON path (e.g. ci/candidates/top200_2026-05-12.json)")
-    p.add_argument("--hf-token", default="",
-                   help="HF token for gated metadata (rarely needed)")
-    p.add_argument("--target-count", type=int, default=None,
-                   help="Stop after this many candidates pass (None = no cap, use all)")
+    p.add_argument("--top", type=int, default=200, help="HF top-N to fetch (post-verify count will be lower)")
+    p.add_argument(
+        "--min-params", type=float, default=7.0, help="Minimum params in B (default 7, matches Qwen2.5-7B baseline)"
+    )
+    p.add_argument(
+        "--max-weight-gb", type=float, default=600.0, help="Skip if weight > this GB (default 600, drops DSV4/GLM-5)"
+    )
+    p.add_argument(
+        "--already-done",
+        type=Path,
+        default=Path(__file__).parent / "candidates" / "already_done.json",
+        help="JSON of repos to exclude (default ci/candidates/already_done.json)",
+    )
+    p.add_argument(
+        "--output", type=Path, required=True, help="Output JSON path (e.g. ci/candidates/top200_2026-05-12.json)"
+    )
+    p.add_argument("--hf-token", default="", help="HF token for gated metadata (rarely needed)")
+    p.add_argument(
+        "--target-count", type=int, default=None, help="Stop after this many candidates pass (None = no cap, use all)"
+    )
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args()
 
@@ -432,7 +444,8 @@ def main() -> int:
             continue
 
         record = classify_candidate(
-            hf, repo,
+            hf,
+            repo,
             min_params_b=args.min_params,
             max_weight_gb=args.max_weight_gb,
         )
@@ -440,9 +453,7 @@ def main() -> int:
             n_classify += 1
             continue
         accepted.append(record)
-        log.info("[%d/%d] keep %s (%.1fB %s)",
-                 len(accepted), args.top, repo,
-                 record["params_b"], record["precision"])
+        log.info("[%d/%d] keep %s (%.1fB %s)", len(accepted), args.top, repo, record["params_b"], record["precision"])
         if args.target_count and len(accepted) >= args.target_count:
             log.info("hit target_count=%d, stopping early", args.target_count)
             break
@@ -469,10 +480,15 @@ def main() -> int:
     }
     args.output.write_text(json.dumps(out, indent=2), encoding="utf-8")
     log.info(
-        "wrote %d candidates to %s "
-        "(rejected: dup=%d done=%d fmt=%d task=%d family=%d classify=%d)",
-        len(accepted), args.output, n_dup, n_done, n_format, n_task,
-        n_family, n_classify,
+        "wrote %d candidates to %s (rejected: dup=%d done=%d fmt=%d task=%d family=%d classify=%d)",
+        len(accepted),
+        args.output,
+        n_dup,
+        n_done,
+        n_format,
+        n_task,
+        n_family,
+        n_classify,
     )
     return 0
 

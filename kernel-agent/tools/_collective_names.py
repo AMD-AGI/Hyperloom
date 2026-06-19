@@ -27,7 +27,14 @@ _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
 def _normalise_kernel_name(name: str) -> str:
-    """Lowercase + underscore-delimit *name* so substring tests are stable."""
+    """Lowercase and underscore-delimit a name so substring tests are stable.
+
+    Args:
+        name: The raw kernel name.
+
+    Returns:
+        The normalized name, or an empty string if ``name`` is falsy.
+    """
     if not name:
         return ""
     s = _CAMEL_BOUNDARY.sub("_", str(name))
@@ -37,7 +44,16 @@ def _normalise_kernel_name(name: str) -> str:
 
 
 def kernel_name_implies_multigpu(name: str) -> bool:
-    """Return True iff *name* matches a known collective-op pattern (leaf-name only)."""
+    """Report whether a kernel name implies a multi-GPU collective op.
+
+    Matching uses the leaf name only against known collective-op patterns.
+
+    Args:
+        name: The kernel name to test.
+
+    Returns:
+        ``True`` if the name matches a known collective-op pattern.
+    """
     norm = _normalise_kernel_name(name)
     if not norm:
         return False

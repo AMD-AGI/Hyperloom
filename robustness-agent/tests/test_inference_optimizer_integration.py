@@ -113,7 +113,7 @@ async def test_backend_high_severity_path_passes_gate(tmp_path):
         gate = _gate()
         assert intents
         types_emitted = {i.type.value for i in intents}
-        # Strategic HIGH symptoms emit alert(high) only; escalate/prune/delegate auto-emits dropped in loosen P3_19.
+        # Strategic HIGH symptoms emit alert(high) only; escalate/prune/delegate auto-emits dropped.
         assert "alert" in types_emitted
         assert "escalate_strategy_change" not in types_emitted
         for intent in intents:
@@ -166,7 +166,7 @@ async def test_heartbeat_passes_gate(tmp_path):
 
 @pytest.mark.asyncio
 async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_path):
-    """Full Change A/B round-trip: 2 ticks of leak -> gpu_memory_leaked HIGH -> alert + delegate(recover), each surviving upstream PolicyGate (escalate dropped, loosen P3_19). Feeds SourceData directly since the GpuLeakDetector counter is stateful."""
+    """Full Change A/B round-trip: 2 ticks of leak -> gpu_memory_leaked HIGH -> alert + delegate(recover), each surviving upstream PolicyGate (escalate dropped). Feeds SourceData directly since the GpuLeakDetector counter is stateful."""
     from robustness_agent.config import Config
     from robustness_agent.factory import build_reactor_components
     from robustness_agent.role.prompt_inputs import (
@@ -216,7 +216,9 @@ async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_pa
         assert any(s.name == "gpu_memory_leaked" for s in second)
 
         decision = await ladder.decide(
-            second, tick_index=1, now_unix=2.0,
+            second,
+            tick_index=1,
+            now_unix=2.0,
         )
         types_emitted = {i.type.value for i in decision.intents}
         assert {"alert", "delegate"} <= types_emitted
@@ -226,9 +228,7 @@ async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_pa
         for intent in decision.intents:
             gate.validate_intent("robustness", _to_upstream(intent))
 
-        delegate = next(
-            i for i in decision.intents if i.type.value == "delegate"
-        )
+        delegate = next(i for i in decision.intents if i.type.value == "delegate")
         assert delegate.payload["action_name"] == "recover"
         assert delegate.payload["params"]["force_gpu_cleanup"] is True
         assert delegate.payload["params"]["reason"] == "gpu_memory_leaked"
@@ -263,11 +263,13 @@ async def test_gpu_memory_leaked_silent_when_live_owner_present(tmp_path):
                     for i in range(2)
                 ],
             },
-            local_processes=[{
-                "pid": 4242,
-                "rss_mb": 8_000.0,
-                "cmd": "python -m vllm.entrypoints.openai.api_server",
-            }],
+            local_processes=[
+                {
+                    "pid": 4242,
+                    "rss_mb": 8_000.0,
+                    "cmd": "python -m vllm.entrypoints.openai.api_server",
+                }
+            ],
         )
         for tick in range(4):
             ctx = ReactorContext(
@@ -288,13 +290,13 @@ async def test_gpu_memory_leaked_silent_when_live_owner_present(tmp_path):
 async def test_repeated_failure_emits_prune_branch_passing_gate(tmp_path):
     from robustness_agent.config import Config
 
-    # Inbox can't carry delegated_result, so inject a fake conductor.db with state=failed twice on the same family.
+    # Inbox can't carry delegated_result, so inject a fake coordinator.db with state=failed twice on the same family.
     import json
     import sqlite3
 
     storage = tmp_path / "storage"
     storage.mkdir()
-    db = storage / "conductor.db"
+    db = storage / "coordinator.db"
     conn = sqlite3.connect(db)
     conn.execute(
         "CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, msg_id TEXT,"
@@ -302,8 +304,7 @@ async def test_repeated_failure_emits_prune_branch_passing_gate(tmp_path):
     )
     for tid in ("t1", "t2"):
         conn.execute(
-            "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 tid,
                 "coordinator",

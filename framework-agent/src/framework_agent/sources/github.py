@@ -20,7 +20,13 @@ from ._shared import GitHubPr, _repo_slug
 
 
 PERF_TERMS = (
-    "perf", "performance", "throughput", "rocm", "aiter", "flash", "decode",
+    "perf",
+    "performance",
+    "throughput",
+    "rocm",
+    "aiter",
+    "flash",
+    "decode",
 )
 
 

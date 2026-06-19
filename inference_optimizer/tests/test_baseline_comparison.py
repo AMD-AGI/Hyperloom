@@ -20,21 +20,25 @@ import pytest
 # name_mapping
 def test_name_mapping_known_display_name_passthrough():
     from inference_optimizer.baseline_comparison.name_mapping import to_inferencex_name
+
     assert to_inferencex_name("MiniMax-M2.5") == "MiniMax-M2.5"
 
 
 def test_name_mapping_strips_vendor_prefix_from_path():
     from inference_optimizer.baseline_comparison.name_mapping import to_inferencex_name
+
     assert to_inferencex_name("/wekafs/models/MiniMaxAI-MiniMax-M2.5") == "MiniMax-M2.5"
 
 
 def test_name_mapping_case_insensitive():
     from inference_optimizer.baseline_comparison.name_mapping import to_inferencex_name
+
     assert to_inferencex_name("/wekafs/x/minimaxai-minimax-m2.5") == "MiniMax-M2.5"
 
 
 def test_name_mapping_unknown_returns_none():
     from inference_optimizer.baseline_comparison.name_mapping import to_inferencex_name
+
     assert to_inferencex_name("/wekafs/models/MyCorp-Custom-FT-7B") is None
     assert to_inferencex_name("") is None
     assert to_inferencex_name(None) is None  # type: ignore[arg-type]
@@ -42,38 +46,39 @@ def test_name_mapping_unknown_returns_none():
 
 def test_known_models_list_is_nonempty():
     from inference_optimizer.baseline_comparison.name_mapping import KNOWN_INFERENCEX_MODELS
+
     assert "MiniMax-M2.5" in KNOWN_INFERENCEX_MODELS
     assert len(KNOWN_INFERENCEX_MODELS) >= 5
 
 
 # inferencex_client — happy path against a local HTTP server
 _SAMPLE_ROW = {
-    "hardware":      "b300",
-    "framework":     "vllm",
-    "model":         "minimaxm2.5",
-    "precision":     "fp8",
-    "spec_method":   "none",
-    "disagg":        False,
-    "is_multinode":  False,
-    "prefill_tp":    2,
-    "prefill_ep":    1,
-    "decode_tp":     2,
-    "decode_ep":     1,
+    "hardware": "b300",
+    "framework": "vllm",
+    "model": "minimaxm2.5",
+    "precision": "fp8",
+    "spec_method": "none",
+    "disagg": False,
+    "is_multinode": False,
+    "prefill_tp": 2,
+    "prefill_ep": 1,
+    "decode_tp": 2,
+    "decode_ep": 1,
     "num_prefill_gpu": 2,
-    "num_decode_gpu":  2,
-    "isl":           1024,
-    "osl":           1024,
-    "conc":          64,
-    "image":         "vllm-rocm:test",
+    "num_decode_gpu": 2,
+    "isl": 1024,
+    "osl": 1024,
+    "conc": 64,
+    "image": "vllm-rocm:test",
     "metrics": {
-        "tput_per_gpu":        2781.5,
+        "tput_per_gpu": 2781.5,
         "output_tput_per_gpu": 1390.7,
-        "input_tput_per_gpu":  1390.8,
-        "mean_ttft":           0.094,   # seconds
-        "mean_tpot":           0.022,   # seconds
-        "mean_e2el":           20.6,    # seconds
+        "input_tput_per_gpu": 1390.8,
+        "mean_ttft": 0.094,  # seconds
+        "mean_tpot": 0.022,  # seconds
+        "mean_e2el": 20.6,  # seconds
     },
-    "date":   "2026-04-17",
+    "date": "2026-04-17",
     "run_url": "https://example/runs/x",
 }
 
@@ -125,10 +130,10 @@ def mock_inferencex(monkeypatch):
     """Yield ``(set_payload, set_delay)`` for tests to drive the server."""
     state: dict[str, Any] = {
         "shutdown": None,
-        "payload":  [],
-        "delay":    0.0,
-        "gzip":     False,
-        "status":   200,
+        "payload": [],
+        "delay": 0.0,
+        "gzip": False,
+        "status": 200,
     }
 
     def _start():
@@ -157,6 +162,7 @@ def test_fetch_rows_happy_path(mock_inferencex):
     start()
 
     from inference_optimizer.baseline_comparison import fetch_rows
+
     rows, warning = fetch_rows("MiniMax-M2.5")
     assert warning == ""
     assert rows is not None
@@ -171,6 +177,7 @@ def test_fetch_rows_gzip_decode(mock_inferencex):
     start()
 
     from inference_optimizer.baseline_comparison import fetch_rows
+
     rows, warning = fetch_rows("MiniMax-M2.5")
     assert warning == ""
     assert rows is not None and len(rows) == 1
@@ -183,6 +190,7 @@ def test_fetch_rows_http_error_returns_none(mock_inferencex):
     start()
 
     from inference_optimizer.baseline_comparison import fetch_rows
+
     rows, warning = fetch_rows("MiniMax-M2.5")
     assert rows is None
     assert "500" in warning
@@ -193,6 +201,7 @@ def test_fetch_rows_empty_model_returns_none(mock_inferencex):
     state["payload"] = [_SAMPLE_ROW]
     start()
     from inference_optimizer.baseline_comparison import fetch_rows
+
     rows, warning = fetch_rows("")
     assert rows is None
     assert "empty" in warning.lower()
@@ -222,6 +231,7 @@ def _make_rows() -> list[dict[str, Any]]:
 
 def _write_competitor_target(session_dir: Path, per_conc: list[dict[str, Any]]) -> None:
     from inference_optimizer.orchestrator import research_hints
+
     research_hints.write_competitor_target(
         session_dir,
         {
@@ -236,14 +246,16 @@ def _write_competitor_target(session_dir: Path, per_conc: list[dict[str, Any]]) 
 
 
 def test_analyze_happy_path_writes_files(tmp_path: Path):
-    _write_competitor_target(tmp_path, [
-        {"conc": 4, "tput_per_gpu": 412.5, "tpot_ms": 18.0,
-         "source": "https://pr/1"},
-        {"conc": 256, "tput_per_gpu": 6624.1, "tpot_ms": 30.0,
-         "source": "https://blog/x"},
-    ])
+    _write_competitor_target(
+        tmp_path,
+        [
+            {"conc": 4, "tput_per_gpu": 412.5, "tpot_ms": 18.0, "source": "https://pr/1"},
+            {"conc": 256, "tput_per_gpu": 6624.1, "tpot_ms": 30.0, "source": "https://blog/x"},
+        ],
+    )
 
     from inference_optimizer.baseline_comparison import analyze
+
     summary = analyze(
         session_dir=tmp_path,
         model_path="/wekafs/models/MiniMaxAI-MiniMax-M2.5",
@@ -281,11 +293,15 @@ def test_analyze_happy_path_writes_files(tmp_path: Path):
 
 
 def test_analyze_mapping_miss_writes_skipped_summary(tmp_path):
-    _write_competitor_target(tmp_path, [
-        {"conc": 64, "tput_per_gpu": 2781.5, "source": "https://pr/1"},
-    ])
+    _write_competitor_target(
+        tmp_path,
+        [
+            {"conc": 64, "tput_per_gpu": 2781.5, "source": "https://pr/1"},
+        ],
+    )
 
     from inference_optimizer.baseline_comparison import analyze
+
     summary = analyze(
         session_dir=tmp_path,
         model_path="/wekafs/models/MyCorp-Custom-FT-7B",
@@ -300,9 +316,7 @@ def test_analyze_mapping_miss_writes_skipped_summary(tmp_path):
     assert summary.best is None
     assert "mapping miss" in summary.warning.lower()
 
-    on_disk = json.loads(
-        (tmp_path / "target_analysis" / "target_baseline.json").read_text()
-    )
+    on_disk = json.loads((tmp_path / "target_analysis" / "target_baseline.json").read_text())
     assert on_disk["status"] == "skipped"
     assert on_disk["reason"] == "model_mapping_miss"
 
@@ -310,6 +324,7 @@ def test_analyze_mapping_miss_writes_skipped_summary(tmp_path):
 def test_analyze_no_target_gpu_writes_marker(tmp_path):
     """``compare_against_gpu=""`` short-circuits and persists a marker JSON."""
     from inference_optimizer.baseline_comparison import analyze
+
     summary = analyze(
         session_dir=tmp_path,
         model_path="/wekafs/models/MiniMaxAI-MiniMax-M2.5",
@@ -320,9 +335,7 @@ def test_analyze_no_target_gpu_writes_marker(tmp_path):
     assert summary.best is None
     assert summary.query.gpu == ""
 
-    on_disk = json.loads(
-        (tmp_path / "target_analysis" / "target_baseline.json").read_text()
-    )
+    on_disk = json.loads((tmp_path / "target_analysis" / "target_baseline.json").read_text())
     assert on_disk["status"] == "skipped"
     assert on_disk["reason"] == "no_target_gpu_configured"
 
@@ -330,6 +343,7 @@ def test_analyze_no_target_gpu_writes_marker(tmp_path):
 def test_analyze_no_competitor_target(tmp_path):
     """No ``competitor_target.json`` on disk → ``no_match`` (fail-soft)."""
     from inference_optimizer.baseline_comparison import analyze
+
     summary = analyze(
         session_dir=tmp_path,
         model_path="MiniMax-M2.5",
@@ -348,17 +362,26 @@ def test_analyze_no_competitor_target(tmp_path):
 def test_analyze_sourceless_target_dropped(tmp_path):
     """Per-conc rows without a source are discarded; all-sourceless degrades to no_match."""
     from inference_optimizer.orchestrator import research_hints
+
     # Emulate a hand-edited file with a sourceless row to exercise load-time filter.
     from inference_optimizer import session_paths
+
     path = session_paths.competitor_target_json(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "gpu": "b300", "model": "MiniMax-M2.5",
-        "per_conc": [{"conc": 64, "tput_per_gpu": 2781.5}],
-    }), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {
+                "gpu": "b300",
+                "model": "MiniMax-M2.5",
+                "per_conc": [{"conc": 64, "tput_per_gpu": 2781.5}],
+            }
+        ),
+        encoding="utf-8",
+    )
     assert research_hints.load_competitor_target(tmp_path) is None
 
     from inference_optimizer.baseline_comparison import analyze
+
     summary = analyze(
         session_dir=tmp_path,
         model_path="MiniMax-M2.5",
@@ -372,16 +395,23 @@ def test_analyze_sourceless_target_dropped(tmp_path):
 def _ext_payload(**overrides) -> dict[str, Any]:
     base: dict[str, Any] = {
         "query": {
-            "model": "MiniMax-M2.5", "gpu": "b300",
-            "framework": "vllm", "precision": "fp8",
-            "isl": 1024, "osl": 1024,
+            "model": "MiniMax-M2.5",
+            "gpu": "b300",
+            "framework": "vllm",
+            "precision": "fp8",
+            "isl": 1024,
+            "osl": 1024,
         },
         "fetched_at": "2026-05-12T07:00:34Z",
         "row_count": 1,
         "best": {
-            "tput_per_gpu": 2781.5, "output_tput_per_gpu": 1390.7,
-            "conc": 64, "decode_tp": 2,
-            "mean_ttft_ms": 94.0, "mean_tpot_ms": 22.0, "mean_e2el_ms": 20600.0,
+            "tput_per_gpu": 2781.5,
+            "output_tput_per_gpu": 1390.7,
+            "conc": 64,
+            "decode_tp": 2,
+            "mean_ttft_ms": 94.0,
+            "mean_tpot_ms": 22.0,
+            "mean_e2el_ms": 20600.0,
             "date": "2026-04-17",
         },
         "all_concurrencies": [],
@@ -398,9 +428,13 @@ def test_report_section_renders_no_target_gpu_marker():
     from inference_optimizer.orchestrator.action_executors.report import (
         _format_external_baseline_section,
     )
+
     ext = _ext_payload(
-        status="skipped", reason="no_target_gpu_configured",
-        warning="compare_against_gpu is empty", best=None, row_count=0,
+        status="skipped",
+        reason="no_target_gpu_configured",
+        warning="compare_against_gpu is empty",
+        best=None,
+        row_count=0,
     )
     ext["query"]["gpu"] = ""
     md = "\n".join(_format_external_baseline_section(ext))
@@ -415,6 +449,7 @@ def test_report_section_renders_ok_with_reference_best():
     from inference_optimizer.orchestrator.action_executors.report import (
         _format_external_baseline_section,
     )
+
     md = "\n".join(_format_external_baseline_section(_ext_payload()))
     assert "## External baseline (competitor target, advisory)" in md
     assert "Reference best per-GPU throughput" in md
@@ -425,9 +460,13 @@ def test_report_section_renders_fetch_error_with_warning():
     from inference_optimizer.orchestrator.action_executors.report import (
         _format_external_baseline_section,
     )
+
     ext = _ext_payload(
-        status="fetch_error", reason="fetch_error",
-        warning="upstream timed out", best=None, row_count=0,
+        status="fetch_error",
+        reason="fetch_error",
+        warning="upstream timed out",
+        best=None,
+        row_count=0,
     )
     md = "\n".join(_format_external_baseline_section(ext))
     assert "## External baseline (competitor target, advisory)" in md
@@ -442,9 +481,8 @@ def test_session_paths_helpers_under_target_analysis(tmp_path):
         target_analysis_report_md,
         target_baseline_json,
     )
+
     sd = tmp_path / "sess"
     assert target_analysis_dir(sd) == sd / "target_analysis"
     assert target_baseline_json(sd) == sd / "target_analysis" / "target_baseline.json"
-    assert target_analysis_report_md(sd) == (
-        sd / "target_analysis" / "target_analysis_report.md"
-    )
+    assert target_analysis_report_md(sd) == (sd / "target_analysis" / "target_analysis_report.md")

@@ -22,7 +22,12 @@ def test_resume_safe_flag_explicit_disable_wins_over_manifest():
     args = _ns(no_foo=True)
     manifest = {"foo_enabled": True}
     result = _resume_safe_flag(
-        args, "no_foo", manifest, "foo_enabled", default=True, invert=True,
+        args,
+        "no_foo",
+        manifest,
+        "foo_enabled",
+        default=True,
+        invert=True,
     )
     # invert=True means args.no_foo=True → disabled.
     assert result is False
@@ -33,7 +38,12 @@ def test_resume_safe_flag_falls_back_to_manifest_when_arg_default():
     args = _ns(no_foo=False)  # argparse default for store_true
     manifest = {"foo_enabled": False}
     result = _resume_safe_flag(
-        args, "no_foo", manifest, "foo_enabled", default=True, invert=True,
+        args,
+        "no_foo",
+        manifest,
+        "foo_enabled",
+        default=True,
+        invert=True,
     )
     assert result is False
 
@@ -43,7 +53,12 @@ def test_resume_safe_flag_uses_default_when_manifest_missing_key():
     args = _ns(no_foo=False)
     manifest = {}
     result = _resume_safe_flag(
-        args, "no_foo", manifest, "foo_enabled", default=True, invert=True,
+        args,
+        "no_foo",
+        manifest,
+        "foo_enabled",
+        default=True,
+        invert=True,
     )
     assert result is True
 
@@ -52,7 +67,12 @@ def test_resume_safe_flag_handles_none_manifest():
     """``manifest=None`` → fall through to default (very-early-boot path)."""
     args = _ns(no_foo=False)
     result = _resume_safe_flag(
-        args, "no_foo", None, "foo_enabled", default=True, invert=True,
+        args,
+        "no_foo",
+        None,
+        "foo_enabled",
+        default=True,
+        invert=True,
     )
     assert result is True
 
@@ -63,7 +83,11 @@ def test_resume_safe_numeric_explicit_override_wins():
     args = _ns(threshold=0.5)
     manifest = {"threshold": 0.7}
     result = _resume_safe_numeric(
-        args, "threshold", manifest, "threshold", default=0.8,
+        args,
+        "threshold",
+        manifest,
+        "threshold",
+        default=0.8,
     )
     assert result == 0.5
 
@@ -73,7 +97,11 @@ def test_resume_safe_numeric_falls_back_to_manifest():
     args = _ns(threshold=0.8)  # argparse default
     manifest = {"threshold": 0.7}
     result = _resume_safe_numeric(
-        args, "threshold", manifest, "threshold", default=0.8,
+        args,
+        "threshold",
+        manifest,
+        "threshold",
+        default=0.8,
     )
     assert result == 0.7
 
@@ -82,7 +110,11 @@ def test_resume_safe_numeric_falls_back_to_default():
     """No manifest entry → use the supplied default."""
     args = _ns(threshold=0.8)
     result = _resume_safe_numeric(
-        args, "threshold", {}, "threshold", default=0.8,
+        args,
+        "threshold",
+        {},
+        "threshold",
+        default=0.8,
     )
     assert result == 0.8
 
@@ -92,6 +124,10 @@ def test_resume_safe_numeric_handles_malformed_manifest_value():
     args = _ns(threshold=0.8)
     manifest = {"threshold": "garbage"}
     result = _resume_safe_numeric(
-        args, "threshold", manifest, "threshold", default=0.8,
+        args,
+        "threshold",
+        manifest,
+        "threshold",
+        default=0.8,
     )
     assert result == 0.8

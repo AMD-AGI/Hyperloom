@@ -44,6 +44,18 @@ For each proposal in `proposals`:
    [references/verdict_schema.md](../references/verdict_schema.md) for
    per-verdict required fields, and any
    `kb_priors_by_proposal[<msg_id>]` returned in Step 1.
+4. If present, factor in
+   `kb_assess_by_proposal[<msg_id>]` — the substrate KB's calibrated
+   reasonableness verdict for that proposal's optimisation levers:
+   - `reasonable = "supported"` → measured KB evidence backs the levers;
+     a point in favour, but not on its own a reason to approve.
+   - `reasonable = "contested"` → at least one lever **contradicts** measured
+     evidence (`verdicts[].status` is `deviated` / `conflicts`); treat as a
+     risk signal and cite the offending lever in `kb_evidence`.
+   - `reasonable = "insufficient_basis"` (or field absent) → the KB has no
+     opinion; ignore it, do **not** penalise the proposal.
+   This field is advisory enrichment and is only present when the operator
+   configured `CORTEX_KB_URL`; never block solely on its absence.
 
 Default behavior summary:
 
