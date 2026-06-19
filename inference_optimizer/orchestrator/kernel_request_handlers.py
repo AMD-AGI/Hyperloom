@@ -1337,16 +1337,25 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
             if log_path.is_file():
                 return str(log_path)
 
-    # 3. Fallback: most recent server.log anywhere under runs/.
+    # 3. Fallback: check known run subdirs (bounded, not recursive glob).
     runs_dir = session_dir / "runs"
     if runs_dir.is_dir():
-        server_logs = sorted(
-            runs_dir.glob("**/server.log"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if server_logs:
-            return str(server_logs[0])
+        best: Path | None = None
+        best_mtime: float = 0.0
+        for sub in ("baseline", "explore", "gemm_tuning"):
+            sub_dir = runs_dir / sub
+            if not sub_dir.is_dir():
+                continue
+            for log in sub_dir.glob("*/server.log"):
+                try:
+                    mt = log.stat().st_mtime
+                except OSError:
+                    continue
+                if mt > best_mtime:
+                    best_mtime = mt
+                    best = log
+        if best is not None:
+            return str(best)
 
     return ""
 

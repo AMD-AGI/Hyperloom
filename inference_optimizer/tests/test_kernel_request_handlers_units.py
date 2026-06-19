@@ -551,6 +551,34 @@ class TestRunGemmTuningHandler:
         assert cmd[cmd.index("--precision") + 1] == "fp8"
         assert cmd[cmd.index("--quant-type") + 1] == "per_token"
 
+    def test_forge_fallback_to_session_precision_when_no_quantization(self, tmp_path, monkeypatch):
+        """When current_best has no --quantization, fall back to state.precision."""
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/moe",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.current_best = {"extra_server_args": "", "extra_envs": {}}
+        state.save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            captured["cmd"] = cmd
+            return (0, json.dumps({"status": "ok", "micro_decision": "skipped"}), "")
+
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        asyncio.run(krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path))
+
+        cmd = captured["cmd"]  # type: ignore[assignment]
+        assert cmd[cmd.index("--precision") + 1] == "bf16"
+        assert cmd[cmd.index("--quant-type") + 1] == "auto"
+
 
 # _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror
 # of the kernel-agent default (PR #301); the legacy 90 forced quick-mode timing.
