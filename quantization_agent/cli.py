@@ -35,6 +35,18 @@ from .driver.runner import DEFAULT_MODEL
 
 
 def _interactive_value(raw: str) -> bool | None:
+    """Parse the ``--interactive`` flag into a tri-state value.
+
+    Args:
+        raw: Raw flag value supplied on the command line.
+
+    Returns:
+        ``None`` for ``auto`` (tty auto-detection), ``True`` for the on-style
+        values, and ``False`` for the off-style values.
+
+    Raises:
+        argparse.ArgumentTypeError: If ``raw`` is not a recognized value.
+    """
     raw = raw.strip().lower()
     if raw in ("auto", "", "default"):
         return None
@@ -42,12 +54,18 @@ def _interactive_value(raw: str) -> bool | None:
         return True
     if raw in ("off", "false", "no", "0"):
         return False
-    raise argparse.ArgumentTypeError(
-        f"--interactive expects auto / on / off (got {raw!r})"
-    )
+    raise argparse.ArgumentTypeError(f"--interactive expects auto / on / off (got {raw!r})")
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Build the argument parser and parse the CLI arguments.
+
+    Args:
+        argv: Argument list to parse; defaults to ``sys.argv`` when ``None``.
+
+    Returns:
+        The populated :class:`argparse.Namespace`.
+    """
     p = argparse.ArgumentParser(
         prog="quantization_agent",
         description="Drive the AMD Quark PTQ skill chain from a natural-language prompt.",
@@ -87,8 +105,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=1,
         metavar="N",
-        help="Upper bound on Python-driven retries for Ask-class outcomes "
-        "(#3/#6/#16/#26) and #30. Default 1.",
+        help="Upper bound on Python-driven retries for Ask-class outcomes (#3/#6/#16/#26) and #30. Default 1.",
     )
     p.add_argument(
         "--model-id",
@@ -104,7 +121,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> int:
+    """Run one quantization request and print a JSON summary.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Process exit code: ``0`` on success or partial success, ``1`` when the
+        resulting model is unusable.
+    """
+
     def log(line: str) -> None:
+        """Write a line to stderr when verbose output is enabled.
+
+        Args:
+            line: Text to emit.
+        """
         if args.verbose:
             print(line, file=sys.stderr, flush=True)
 
@@ -121,9 +153,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     summary: dict[str, Any] = {
         "status": result.status,
-        "quantized_model_dir": (
-            str(result.quantized_model_dir) if result.quantized_model_dir else None
-        ),
+        "quantized_model_dir": (str(result.quantized_model_dir) if result.quantized_model_dir else None),
         "assessment": result.assessment.to_dict(),
     }
     print(json.dumps(summary, indent=2, sort_keys=True))
@@ -134,6 +164,14 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the quantization agent.
+
+    Args:
+        argv: Argument list to parse; defaults to ``sys.argv`` when ``None``.
+
+    Returns:
+        The process exit code produced by :func:`_run`.
+    """
     args = _parse_args(argv)
     return asyncio.run(_run(args))
 

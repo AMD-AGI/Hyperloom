@@ -70,13 +70,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         default=None,
-        help=(
-            f"Override output file path. Defaults to "
-            f"<session_dir>/{BREAKDOWN_FILENAME}."
-        ),
+        help=(f"Override output file path. Defaults to <session_dir>/{BREAKDOWN_FILENAME}."),
     )
     parser.add_argument(
         "--dry-run",
@@ -99,7 +97,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--verbose", "-v", action="count", default=0,
+        "--verbose",
+        "-v",
+        action="count",
+        default=0,
         help="-v INFO, -vv DEBUG.",
     )
     return parser
@@ -135,7 +136,6 @@ def _summary_line(breakdown: dict) -> str:
     """
     sess = breakdown.get("session") or {}
     final = breakdown.get("final") or {}
-    cap = breakdown.get("capability_summary") or {}
     geak_n = len(breakdown.get("geak_invocations") or [])
     oob_n = len(breakdown.get("oob_invocations") or [])
     lifecycle = breakdown.get("kernel_lifecycle") or {}

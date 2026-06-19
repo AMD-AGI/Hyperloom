@@ -68,20 +68,24 @@ class MockCriticBackend:
             if msg_id in self._approved_msg_ids:
                 continue
             self._approved_msg_ids.add(msg_id)
-            intents.append(Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={
-                    "target_proposal_msg_id": msg_id,
-                    "verdict": "approve",
-                    "reasoning": "(mock critic — auto-approve)",
-                    "source": "mock",
-                },
-            ))
+            intents.append(
+                Intent(
+                    type=IntentType.REVIEW_VERDICT,
+                    payload={
+                        "target_proposal_msg_id": msg_id,
+                        "verdict": "approve",
+                        "reasoning": "(mock critic — auto-approve)",
+                        "source": "mock",
+                    },
+                )
+            )
         if not intents:
-            intents.append(Intent(
-                type=IntentType.SEND_MESSAGE,
-                payload={"topic": "heartbeat", "body_md": "ok (mock critic)"},
-            ))
+            intents.append(
+                Intent(
+                    type=IntentType.SEND_MESSAGE,
+                    payload={"topic": "heartbeat", "body_md": "ok (mock critic)"},
+                )
+            )
         return BackendTurnResult(intents=intents, raw_text="(mock critic)")
 
 

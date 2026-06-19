@@ -102,9 +102,7 @@ class ActionLadder:
         # Cooldown bookkeeping persisted across subprocess restarts; without
         # it the in-memory dict resets each tick and re-emits every intent.
         loaded = state_view.load() if state_view is not None else {}
-        self._last_emitted_tick: dict[tuple[str, ...], int] = (
-            _decode_last_emitted(loaded.get("last_emitted"))
-        )
+        self._last_emitted_tick: dict[tuple[str, ...], int] = _decode_last_emitted(loaded.get("last_emitted"))
         # Stamped at the top of decide() so branches (e.g. gpu_memory_leaked)
         # can build a stable tick-indexed idempotency_key without threading
         # the tick through every helper.
@@ -114,9 +112,11 @@ class ActionLadder:
         """Write the per-key cooldown ticks to the state view, if any."""
         if self._state_view is None:
             return
-        self._state_view.save({
-            "last_emitted": _encode_last_emitted(self._last_emitted_tick),
-        })
+        self._state_view.save(
+            {
+                "last_emitted": _encode_last_emitted(self._last_emitted_tick),
+            }
+        )
 
     async def decide(
         self,
@@ -258,21 +258,15 @@ class ActionLadder:
         # Resource-safety: stale lease holds a lane on a dead PID. Robustness
         # owns ``kill_task(scope='task')`` exclusively here; else stays advisory.
         if sym.name == "stale_lease":
-            evidence = (
-                dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
-            )
+            evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
             task_id = str(evidence.get("task_id") or "").strip()
             if task_id and task_id != "unknown":
-                intents.append(
-                    build_kill_task(task_id=task_id, reason="stale_lease")
-                )
+                intents.append(build_kill_task(task_id=task_id, reason="stale_lease"))
             return intents
         # Resource-safety: GPU leak -> ``delegate(recover, force_gpu_cleanup=True)``,
         # the in-loop recovery action Robustness is explicitly allowlisted for.
         if sym.name == "gpu_memory_leaked":
-            evidence = (
-                dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
-            )
+            evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
             intents.append(
                 build_delegate(
                     action_name="recover",
@@ -281,9 +275,7 @@ class ActionLadder:
                         "force_gpu_cleanup": True,
                         "evidence": evidence,
                     },
-                    idempotency_key=(
-                        f"recover-gpu-leak-tick-{self._last_tick_index}"
-                    ),
+                    idempotency_key=(f"recover-gpu-leak-tick-{self._last_tick_index}"),
                 )
             )
             return intents
@@ -297,17 +289,13 @@ class ActionLadder:
             "deadline_hard_cutoff",
             "recover_unsuccessful",
         }:
-            evidence = (
-                dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
-            )
+            evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
             slug = sym.name.replace("_", "-")
             intents.append(
                 build_delegate(
                     action_name="report",
                     params={"reason": sym.name, "evidence": evidence},
-                    idempotency_key=(
-                        f"report-{slug}-tick-{self._last_tick_index}"
-                    ),
+                    idempotency_key=(f"report-{slug}-tick-{self._last_tick_index}"),
                 )
             )
             return intents
@@ -406,8 +394,17 @@ _LADDER_KEY_SEP: str = "\x1f"  # ASCII unit separator — safe inside JSON strin
 def _encode_last_emitted(
     last_emitted: dict[tuple[str, ...], int],
 ) -> dict[str, int]:
-    """Serialise a tuple-keyed cooldown dict to a JSON-safe dict (tuple
-    components joined with ``_LADDER_KEY_SEP`` so decode recovers them)."""
+    """Serialise a tuple-keyed cooldown dict to a JSON-safe dict.
+
+    Tuple components are joined with ``_LADDER_KEY_SEP`` so the decoder can
+    recover them.
+
+    Args:
+        last_emitted: Cooldown map keyed by tuple of string components.
+
+    Returns:
+        A string-keyed dict safe for JSON serialization.
+    """
     out: dict[str, int] = {}
     for key, tick in last_emitted.items():
         try:

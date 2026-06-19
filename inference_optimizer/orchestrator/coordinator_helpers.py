@@ -18,8 +18,18 @@ log = logging.getLogger(__name__)
 
 
 def _infer_model_class_from_config(model_path: str) -> str:
-    """Infer a deterministic model_class from local model metadata."""
+    """Infer a deterministic model_class from local model metadata.
+
+    Args:
+        model_path: Local model directory path; its ``config.json`` is read
+            when present.
+
+    Returns:
+        A model-class label: ``moe_mla_nsa``, ``moe_mla``, ``moe_swa`` or
+        ``dense``.
+    """
     import json
+
     raw_path = (model_path or "").strip()
     payload: dict[str, Any] = {}
     if raw_path:
@@ -44,6 +54,16 @@ def _infer_model_class_from_config(model_path: str) -> str:
     text = " ".join(text_parts)
 
     def _positive_int(*keys: str) -> bool:
+        """Whether any of the given payload keys holds a positive integer.
+
+        Booleans are explicitly ignored (they are not treated as ints).
+
+        Args:
+            *keys: Payload keys to check.
+
+        Returns:
+            ``True`` if at least one key parses to an integer > 0.
+        """
         for key in keys:
             val = payload.get(key)
             if isinstance(val, bool):
@@ -55,24 +75,44 @@ def _infer_model_class_from_config(model_path: str) -> str:
                 continue
         return False
 
-    is_moe = (
-        _positive_int(
-            "num_experts",
-            "n_routed_experts",
-            "num_local_experts",
-            "moe_num_experts",
+    is_moe = _positive_int(
+        "num_experts",
+        "n_routed_experts",
+        "num_local_experts",
+        "moe_num_experts",
+    ) or any(
+        k in text
+        for k in (
+            "moe",
+            "mixtral",
+            "deepseek-v2",
+            "deepseek-v3",
+            "deepseek-r1",
+            "kimi",
+            "glm-5",
+            "glm5",
         )
-        or any(k in text for k in (
-            "moe", "mixtral", "deepseek-v2", "deepseek-v3", "deepseek-r1",
-            "kimi", "glm-5", "glm5",
-        ))
     )
-    is_mla = any(k in text for k in (
-        "mla", "multi-head latent", "deepseek", "kimi", "glm-5", "glm5",
-    ))
-    is_nsa = any(k in text for k in (
-        "nsa", "native sparse attention", "glm-5", "glm5",
-    ))
+    is_mla = any(
+        k in text
+        for k in (
+            "mla",
+            "multi-head latent",
+            "deepseek",
+            "kimi",
+            "glm-5",
+            "glm5",
+        )
+    )
+    is_nsa = any(
+        k in text
+        for k in (
+            "nsa",
+            "native sparse attention",
+            "glm-5",
+            "glm5",
+        )
+    )
     if is_moe and is_mla and is_nsa:
         return "moe_mla_nsa"
     if is_moe and is_mla:
@@ -97,10 +137,12 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
 _BASELINE_SELF_LOOP_THRESHOLD: int = 2
 
 # Flags whose argparse consumes multiple bare tokens before the next ``--``.
-_MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset({
-    "--cuda-graph-bs",
-    "--cuda-graph-max-bs",
-})
+_MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset(
+    {
+        "--cuda-graph-bs",
+        "--cuda-graph-max-bs",
+    }
+)
 
 _DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 _ROOFLINE_WATERMARK_RATIO_ENV: str = "HYPERLOOM_ROOFLINE_WATERMARK_RATIO"
@@ -114,6 +156,14 @@ def effective_closing_grace_sec(
 
     Explicit ``closing_grace_sec`` (including ``0`` to disable) wins;
     otherwise default to ``min(120, max_minutes * 60 * 0.02)``.
+
+    Args:
+        max_minutes: The wall-clock budget in minutes (used for the default).
+        closing_grace_sec: Explicit grace window in seconds; when not
+            ``None`` it is used verbatim.
+
+    Returns:
+        The closing-phase grace window in seconds.
     """
     if closing_grace_sec is not None:
         return float(closing_grace_sec)
@@ -124,6 +174,12 @@ def _parse_iso_unix(ts: str) -> float:
     """Parse an ISO 8601 UTC timestamp into unix seconds; ``0.0`` on failure.
 
     Naive timestamps are treated as UTC. Never raises.
+
+    Args:
+        ts: ISO 8601 timestamp string (``Z`` suffix accepted).
+
+    Returns:
+        The timestamp in unix seconds, or ``0.0`` when empty/unparseable.
     """
     s = (ts or "").strip()
     if not s:
@@ -138,12 +194,21 @@ def _parse_iso_unix(ts: str) -> float:
 
 
 def _summarize_failed_variants(
-    all_results: Any, *, max_entries: int = 10,
+    all_results: Any,
+    *,
+    max_entries: int = 10,
 ) -> list[dict[str, Any]]:
     """Project ``status=='failed'`` grid_runner rows into a compact list.
 
     Returns ``[{name, error_class, error_excerpt, extra_server_args}, ...]``
     (excerpt capped at 400 chars, at most ``max_entries`` rows).
+
+    Args:
+        all_results: Grid-runner result rows; non-list inputs yield ``[]``.
+        max_entries: Maximum number of failed rows to include.
+
+    Returns:
+        A compact list of failed-variant projections.
     """
     if not isinstance(all_results, list):
         return []
@@ -154,12 +219,14 @@ def _summarize_failed_variants(
         if str(row.get("status") or "") != "failed":
             continue
         err = str(row.get("error") or "")
-        failed.append({
-            "name": str(row.get("name") or ""),
-            "error_class": str(row.get("error_class") or "") or None,
-            "error_excerpt": err[:400] if err else None,
-            "extra_server_args": str(row.get("extra_server_args") or ""),
-        })
+        failed.append(
+            {
+                "name": str(row.get("name") or ""),
+                "error_class": str(row.get("error_class") or "") or None,
+                "error_excerpt": err[:400] if err else None,
+                "extra_server_args": str(row.get("extra_server_args") or ""),
+            }
+        )
         if len(failed) >= max_entries:
             break
     return failed
@@ -171,8 +238,15 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
     Reads workload-shape fields outside ``_collect_workload_tags`` from
     ``benchmark.envs`` extra-args blobs and top-level ``benchmark`` fields.
     Defensive — parse errors return ``{}``.
+
+    Args:
+        yaml_path: Path to the baseline-materialized Magpie YAML.
+
+    Returns:
+        The extracted workload-tag fields, or ``{}`` on parse error.
     """
     import yaml as _yaml
+
     try:
         with open(yaml_path, "r", encoding="utf-8") as f:
             cfg = _yaml.safe_load(f) or {}
@@ -184,7 +258,7 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
         return out
     for src, dst in (
         ("workload_mode", "workload_mode"),
-        ("quant_scheme",  "quant_scheme"),
+        ("quant_scheme", "quant_scheme"),
     ):
         v = bm.get(src)
         if v not in (None, "", 0):
@@ -219,7 +293,10 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
         tc_env = envs.get("ENABLE_TORCH_COMPILE")
         if isinstance(tc_env, str):
             out["enable_torch_compile"] = tc_env.strip().lower() in (
-                "1", "true", "yes", "on",
+                "1",
+                "true",
+                "yes",
+                "on",
             )
     return out
 
@@ -230,6 +307,12 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
     Missing keys recorded as ``None``; ``extra_envs`` normalized to a sorted
     list of stringified ``[key, value]`` pairs so ordering doesn't affect
     equality.
+
+    Args:
+        params: Task params to project (``None`` treated as empty).
+
+    Returns:
+        A fingerprint dict over the baseline-determining keys.
     """
     params = params or {}
     out: dict[str, Any] = {}
@@ -237,9 +320,7 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
         if key == "extra_envs":
             envs = params.get(key) or {}
             if isinstance(envs, dict):
-                out[key] = sorted(
-                    [str(k), str(v)] for k, v in envs.items()
-                )
+                out[key] = sorted([str(k), str(v)] for k, v in envs.items())
             else:
                 out[key] = None
             continue
@@ -249,7 +330,12 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
 
 
 def _resolve_roofline_watermark_ratio() -> float:
-    """Resolve the roofline watermark ratio from ``$HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` (fallback 1.10)."""
+    """Resolve the roofline watermark ratio from ``$HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` (fallback 1.10).
+
+    Returns:
+        The watermark ratio (> 1.0), falling back to ``1.10`` when unset,
+        unparseable, or not greater than 1.0.
+    """
     raw = (os.environ.get(_ROOFLINE_WATERMARK_RATIO_ENV) or "").strip()
     if not raw:
         return _DEFAULT_ROOFLINE_WATERMARK_RATIO
@@ -271,6 +357,14 @@ def _merge_cumulative_extra_sglang_args(
 
     Prefer the full stack and dedupe, since joining ``base + candidate``
     when both are full stacks duplicates flags.
+
+    Args:
+        base_args: The baseline extra-args string.
+        candidate_args: The candidate extra-args string for the KEEP.
+        full_args: The full cumulative stack, preferred when present.
+
+    Returns:
+        The deduped cumulative launch-args string.
     """
     base = str(base_args or "").strip()
     candidate = str(candidate_args or "").strip()
@@ -287,15 +381,33 @@ def _merge_cumulative_extra_sglang_args(
     return _dedupe_extra_server_args(merged)
 
 
+_SPACE_VALUE_FLAGS = (
+    "--json-model-override-args",
+    "--override-generation-config",
+    "--tool-call-parser",
+)
+
+
 def _dedupe_extra_server_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string.
 
     Keep each flag once with its last value (first-seen order preserved),
     since argparse ``action="store"`` only honors the last value. Flags in
-    ``_MULTI_VALUE_SGLANG_FLAGS`` keep their multi-value runs.
+    ``_MULTI_VALUE_SGLANG_FLAGS`` keep their multi-value runs. Args with
+    JSON/space-valued flags are left untouched because downstream launch
+    scripts expand them unquoted.
+
+    Args:
+        args_str: The extra server-args string to dedupe.
+
+    Returns:
+        The deduped args string, or the input unchanged when it contains a
+        JSON/space-valued flag; ``""`` for empty input.
     """
     if not args_str:
         return ""
+    if any(flag in args_str for flag in _SPACE_VALUE_FLAGS):
+        return args_str
     tokens = args_str.split()
     pair_by_flag: dict[str, list[str]] = {}
     order: list[str] = []
@@ -303,16 +415,21 @@ def _dedupe_extra_server_args(args_str: str) -> str:
     while i < len(tokens):
         t = tokens[i]
         if t.startswith("--"):
-            flag = t
-            i += 1
-            values: list[str] = []
-            if flag in _MULTI_VALUE_SGLANG_FLAGS:
-                while i < len(tokens) and not tokens[i].startswith("--"):
-                    values.append(tokens[i])
-                    i += 1
-            elif i < len(tokens) and not tokens[i].startswith("--"):
-                values = [tokens[i]]
+            if "=" in t:
+                flag, _, value = t.partition("=")
+                values = [value] if value else []
                 i += 1
+            else:
+                flag = t
+                i += 1
+                values = []
+                if flag in _MULTI_VALUE_SGLANG_FLAGS:
+                    while i < len(tokens) and not tokens[i].startswith("--"):
+                        values.append(tokens[i])
+                        i += 1
+                elif i < len(tokens) and not tokens[i].startswith("--"):
+                    values = [tokens[i]]
+                    i += 1
             pair = [flag, *values] if values else [flag]
             if flag not in pair_by_flag:
                 order.append(flag)
