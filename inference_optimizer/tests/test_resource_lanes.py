@@ -707,3 +707,97 @@ async def test_concurrent_acquires_respect_capacity(conn, locks):
     assert len(succeeded) == 2
     for lease in succeeded:
         await locks.release(lease)
+
+
+# 7. WS2 — gpu_research_lane: serving mutex + multi-holder
+def test_gpu_research_lane_known_and_conflicts_are_symmetric():
+    """WS2: gpu_research_lane is a known lane, mutually exclusive with serving.
+
+    Conflicts must be declared symmetrically — ``_expand_lanes`` only expands the
+    requested lane's own conflict set, so each serving lane must list
+    gpu_research_lane and vice versa.
+    """
+    assert "gpu_research_lane" in KNOWN_LANES
+    assert LANE_CONFLICTS["gpu_research_lane"] == frozenset(
+        {"benchmark_lane", "profile_lane", "server_lifecycle"}
+    )
+    for serving in ("benchmark_lane", "profile_lane", "server_lifecycle"):
+        assert "gpu_research_lane" in LANE_CONFLICTS[serving]
+    # Not self-conflicting → multiple holders may coexist up to capacity.
+    assert "gpu_research_lane" not in LANE_CONFLICTS["gpu_research_lane"]
+
+
+@pytest.mark.asyncio
+async def test_gpu_research_lane_blocks_serving(locks):
+    """Holding gpu_research_lane blocks every serving lane (GPU spec ⊥ serving)."""
+    gpu = await locks.acquire_many(
+        ["gpu_research_lane"],
+        holder_id="g0",
+        task_id="tg0",
+        action="specialist",
+        ttl_sec=60,
+    )
+    for serving in ("server_lifecycle", "benchmark_lane", "profile_lane"):
+        with pytest.raises(LaneBusy) as exc:
+            await locks.acquire_many(
+                [serving],
+                holder_id=f"h-{serving}",
+                task_id=f"t-{serving}",
+                action="serve",
+                ttl_sec=60,
+            )
+        assert "gpu_research_lane" in exc.value.busy_lanes
+    await locks.release(gpu)
+
+
+@pytest.mark.asyncio
+async def test_serving_blocks_gpu_research_lane(locks):
+    """Symmetry: a live benchmark blocks a GPU specialist's gpu_research_lane."""
+    bench = await locks.acquire_many(
+        ["benchmark_lane"],
+        holder_id="b0",
+        task_id="tb0",
+        action="bench",
+        ttl_sec=60,
+    )
+    with pytest.raises(LaneBusy) as exc:
+        await locks.acquire_many(
+            ["gpu_research_lane"],
+            holder_id="g0",
+            task_id="tg0",
+            action="specialist",
+            ttl_sec=60,
+        )
+    assert "benchmark_lane" in exc.value.busy_lanes
+    await locks.release(bench)
+
+
+@pytest.mark.asyncio
+async def test_gpu_research_lane_is_strictly_serial(locks):
+    """WS2: a second GPU specialist is blocked while the first holds the lane.
+
+    The co-acquisition model can't express a multi-holder lane that also mutexes
+    the cap-1 serving lanes, so gpu_research_lane is capacity-1 / strictly serial
+    (one GPU specialist holds the whole machine at a time).
+    """
+    first = await locks.acquire_many(
+        ["gpu_research_lane"],
+        holder_id="g0",
+        task_id="tg0",
+        action="specialist",
+        ttl_sec=60,
+    )
+    with pytest.raises(LaneBusy):
+        await locks.acquire_many(
+            ["gpu_research_lane"],
+            holder_id="g1",
+            task_id="tg1",
+            action="specialist",
+            ttl_sec=60,
+        )
+    await locks.release(first)
+
+
+def test_gpu_research_lane_seeded_capacity_one():
+    """A fresh DB seeds gpu_research_lane at capacity 1 (strictly serial)."""
+    assert DEFAULT_LANE_CAPACITIES.get("gpu_research_lane") == 1

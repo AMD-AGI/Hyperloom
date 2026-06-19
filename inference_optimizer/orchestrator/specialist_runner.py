@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..session_paths import runs_dir
+from ..session_paths import runs_dir, specialist_intel_path
 from .backends.base import BackendError
 from ..protocol.intent import Intent, IntentType
 from .specialist_bench import BENCH_TOOL_ENABLED, TOOL_RUN_BENCH
@@ -33,7 +33,7 @@ from .specialist_domains import (
     FREEFORM_DOMAIN,
     SPECIALIST_DOMAINS_M5,
     SpecialistDomain,
-    get_domain,
+    domain_for_tag,
     normalize_dispatch_tags,
 )
 from .specialist_subprocess import (
@@ -108,18 +108,21 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
         # Scratch planning surface (no side effects); aligns the specialist tool
         # face with the broader CLI agent toolset.
         "TodoWrite",
+        # Single-layer fan-out of leaf sub-agents. Leaves inherit the parent's
+        # VISIBLE_DEVICES, so they share the parent's GPU lease and cannot
+        # oversubscribe; the leaf agent type itself omits Task (no recursion).
+        "Task",
     )
     + tuple(sorted(_WEB))
     + PR_MONITOR_MCP_TOOLS
+    # Read-only KB-graph query tools (mcp__cortex_kb__*). Stripped at resolve
+    # time when the cortex_kb MCP server is not wired (KnowledgePlane.cortex_enabled).
+    + CORTEX_KB_READONLY_MCP_TOOLS
 )
 
 
 # Tools explicitly denied even if the operator extends the whitelist.
-# ``Task`` is denied so a specialist can never recursively spawn its own
-# sub-agents: child agents would bypass the dispatcher's research_lane /
-# gpu_specialist_pool accounting and oversubscribe GPUs. Recursive fan-out is
-# the Coordinator's responsibility, not the specialist's.
-SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE) | {"Task"}
+SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 
 
 def _now_iso() -> str:
@@ -317,7 +320,6 @@ class SpecialistRunner:
         session_dir: Path | None = None,
         default_tools: tuple[str, ...] = DEFAULT_SPECIALIST_TOOLS,
         default_max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS,
-        per_turn_max_seconds: float = 90.0,
         knowledge_plane: Any = None,
     ):
         """Create a runner.
@@ -332,7 +334,6 @@ class SpecialistRunner:
             session_dir: Session output directory.
             default_tools: Default tool whitelist for specialists.
             default_max_turns: Default per-task max turn budget.
-            per_turn_max_seconds: Per-turn wall-clock soft limit.
             knowledge_plane: KnowledgePlane gating ``mcp__pr_monitor__*`` tools.
 
         Raises:
@@ -353,7 +354,6 @@ class SpecialistRunner:
         self.session_dir = Path(session_dir) if session_dir else None
         self.default_tools = tuple(default_tools)
         self.default_max_turns = int(default_max_turns)
-        self.per_turn_max_seconds = float(per_turn_max_seconds)
         self.knowledge_plane = knowledge_plane
 
     def _resolve_tools(
@@ -457,7 +457,11 @@ class SpecialistRunner:
         domain_key = str(params.get("domain") or "").strip()
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         max_turns = int(params.get("max_turns") or self.default_max_turns)
-        domain = get_domain(domain_key)
+        # B7: resolve by anchor first then key (``domain_for_tag``) so a dispatch
+        # whose ``domain`` carries the KB anchor (e.g. ``communication``) matches
+        # its catalogue entry (``comm_specialist``) instead of silently failing
+        # the key-only ``get_domain`` lookup and dying as ``unknown_domain``.
+        domain = domain_for_tag(domain_key)
         sub_kind = str(params.get("sub_kind") or "").strip()
         profile = resolve_specialist_profile(params)
         task_description = str(params.get("task_description") or "").strip()
@@ -562,6 +566,11 @@ class SpecialistRunner:
                 # Coordinator-injected note when this is a bounded auto-retry
                 # of a prior transient (timeout / crash / stale) attempt.
                 auto_retry_reason=str(params.get("_auto_retry_reason") or ""),
+                # WS1 wall-clock budget (Coordinator-computed, on ctx.extra) +
+                # dispatch start, so the specialist can self-throttle instead of
+                # only finding the deadline when the reaper kills it.
+                wall_budget_sec=float((ctx.extra or {}).get("wall_budget_sec") or 0.0),
+                started_at_iso=datetime.now(timezone.utc).isoformat(),
                 # proposal_set self-curation target (policy.py is the
                 # source of truth); shapes the prompt, not a hard cap.
                 max_proposals=max(1, int(params.get("max_proposals") or DEFAULT_SPECIALIST_MAX_PROPOSALS)),
@@ -594,23 +603,54 @@ class SpecialistRunner:
             ),
         )
 
+    @staticmethod
+    def _ctx_tick_phase(ctx: "RunnerContext | None") -> tuple[int | None, str | None]:
+        """Best-effort (tick, phase) from the live SharedState on ``ctx.extra``.
+
+        SubAgentRunner threads the live ``shared_state`` into every executor's
+        ``ctx.extra``; reading ``tick`` / ``phase`` here lets the specialist
+        trace rows carry the real phase/tick instead of leaving the collector
+        to ts-window backfill. Returns ``(None, None)`` when unavailable.
+        """
+        try:
+            extra = getattr(ctx, "extra", None) or {}
+            ss = extra.get("shared_state")
+            if ss is None:
+                return None, None
+            tick = ss.tick
+            phase = ss.phase
+            return (
+                int(tick) if tick is not None else None,
+                (str(phase) or None) if phase else None,
+            )
+        except Exception:  # noqa: BLE001 — telemetry must never break the run
+            return None, None
+
     def _trace_specialist_llm_call(
         self,
         *,
         task_id: str,
         turn: int,
         metadata: dict[str, Any] | None,
+        latency_ms: int | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for an in-process specialist turn.
 
         No-op when ``self.session_dir`` is unset (some test harnesses run
         the runner without a session dir) or the backend reported no token
-        counters. Wrapped broadly so a trace failure never aborts the run.
+        counters. ``latency_ms`` is the measured wall-clock of the turn (the
+        in-process backend call) or the whole subprocess session. Wrapped
+        broadly so a trace failure never aborts the run.
 
         Args:
             task_id: The specialist task id.
             turn: The turn index being traced.
             metadata: Backend turn metadata carrying token counters.
+            latency_ms: Measured wall-clock of the turn, when available.
+            tick: Timeline tick for this turn, when known.
+            phase: Optimization phase for this turn, when known.
         """
         if self.session_dir is None:
             return
@@ -633,6 +673,9 @@ class SpecialistRunner:
                 task_id=task_id,
                 turn=turn,
                 metadata=md,
+                latency_ms=latency_ms,
+                tick=tick,
+                phase=phase,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break the run
@@ -643,12 +686,55 @@ class SpecialistRunner:
                 exc_info=True,
             )
 
+    def _record_specialist_intel(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        tool_calls: list[dict[str, Any]] | None,
+    ) -> None:
+        """Append the specialist's intel/tool calls to ``specialist_intel.jsonl``.
+
+        One row per recovered ``tool_use`` (``{"tool", "query"}``), stamped with
+        ``task_id`` / ``turn`` / ``ts`` so the emitter can backfill each as an
+        ``intel:<tool>`` span under the ``specialist`` agent. No-op without a
+        session dir or when no tool calls were recovered. Best-effort: a trace
+        write must never break the run.
+        """
+        if self.session_dir is None or not tool_calls:
+            return
+        try:
+            path = specialist_intel_path(self.session_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            ts = _now_iso()
+            with path.open("a", encoding="utf-8") as f:
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    row = {
+                        "session_id": self.session_dir.name,
+                        "component": "specialist",
+                        "task_id": task_id,
+                        "turn": turn,
+                        "ts": ts,
+                        "tool": str(call.get("tool") or "tool"),
+                        "query": call.get("query"),
+                    }
+                    f.write(json.dumps(row, sort_keys=True) + "\n")
+        except Exception:  # noqa: BLE001 — trace must never break the run
+            log.debug(
+                "full-trace: specialist intel append failed for "
+                "task_id=%s turn=%s", task_id, turn, exc_info=True,
+            )
+
     def _record_specialist_conversation(
         self,
         *,
         task_id: str,
         turn: int,
         metadata: dict[str, Any] | None,
+        tick: int | None = None,
+        phase: str | None = None,
     ) -> None:
         """Append one ``conversations.jsonl`` row for an in-process specialist
         turn. Persists the full (redacted) prompt + completion the backend put
@@ -672,6 +758,8 @@ class SpecialistRunner:
                 component="specialist",
                 task_id=task_id,
                 turn=turn,
+                tick=tick,
+                phase=phase,
                 model=md.get("model"),
                 prompt=prompt or "",
                 response=response or "",
@@ -748,12 +836,14 @@ class SpecialistRunner:
                     max_turns=max_turns,
                     status="running",
                 )
+                _t0 = time.perf_counter()
                 turn_result = await backend.run(
                     prompt=prep.user_prompt if turn_idx == 1 else combined_prompt,
                     system_prompt=prep.system_prompt,
                     tools=list(prep.resolved_tools),
                     max_turns=1,
                 )
+                _turn_latency_ms = int((time.perf_counter() - _t0) * 1000)
             except BackendError as exc:
                 backend_error = f"backend_error:{exc!r}"
                 self._append_transcript(
@@ -792,15 +882,21 @@ class SpecialistRunner:
             # onto the unified ledger keyed by task_id + turn so the
             # collector can join it to the EXPLORE decision. The production
             # default (subprocess) path is covered separately by B1.
+            _tick, _phase = self._ctx_tick_phase(ctx)
             self._trace_specialist_llm_call(
                 task_id=ctx.task.task_id,
                 turn=turn_idx,
                 metadata=turn_result.metadata,
+                latency_ms=_turn_latency_ms,
+                tick=_tick,
+                phase=_phase,
             )
             self._record_specialist_conversation(
                 task_id=ctx.task.task_id,
                 turn=turn_idx,
                 metadata=turn_result.metadata,
+                tick=_tick,
+                phase=_phase,
             )
 
             # Tool-violation check (defense in depth).
@@ -814,6 +910,28 @@ class SpecialistRunner:
                     continue
                 else:
                     tool_violations.append(intent.type.value)
+
+            # WS1 incremental checkpoint: rewrite the partial after every turn
+            # so a budget kill (or any abnormal exit) leaves the best-so-far
+            # result on disk. When the agent has emitted its specialist_done
+            # this round, snapshot that payload; otherwise record progress.
+            if specialist_done_intent is not None:
+                self._write_specialist_done_partial(
+                    workspace,
+                    dict(specialist_done_intent.payload or {}),
+                )
+            else:
+                self._write_specialist_done_partial(
+                    workspace,
+                    {
+                        **build_empty_specialist_done(
+                            gap_canonical_id=gap,
+                            domain=domain.key,
+                            reason="in_progress",
+                        ),
+                        "turns_used": turns_used,
+                    },
+                )
 
             if specialist_done_intent is not None:
                 break
@@ -885,6 +1003,11 @@ class SpecialistRunner:
             max_turns=prep.max_turns,
             status="subprocess_starting",
         )
+        # WS1: explicit wall-clock budget injected by the Coordinator at
+        # dispatch (lane-tiered × macro_cycle, capped 4h). When present it
+        # overrides the legacy ``max_turns × per_turn`` ceiling in the reaper.
+        wall_budget_raw = (ctx.extra or {}).get("wall_budget_sec")
+        wall_budget_sec = float(wall_budget_raw) if wall_budget_raw else None
         sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
             task_id=ctx.task.task_id,
             workspace=workspace,
@@ -895,6 +1018,7 @@ class SpecialistRunner:
             allowed_tools=prep.resolved_tools,
             max_turns=prep.max_turns,
             gpu_ids=tuple((ctx.extra or {}).get("gpu_ids") or ()),
+            wall_budget_sec=wall_budget_sec,
         )
         self._append_transcript(
             workspace,
@@ -917,10 +1041,47 @@ class SpecialistRunner:
         # session, so we record turn=1. ``usage`` already uses the four
         # canonical counter names, so the metadata-shaped helper consumes
         # it directly.
-        self._trace_specialist_llm_call(
+        _sub_latency_ms = None
+        if sub_result.elapsed_seconds is not None:
+            try:
+                _sub_latency_ms = int(float(sub_result.elapsed_seconds) * 1000)
+            except (TypeError, ValueError):
+                _sub_latency_ms = None
+        _tick, _phase = self._ctx_tick_phase(ctx)
+        # Prefer per-turn token rows (one ledger row per model turn) when the
+        # stream-json log carried per-message usage; the whole-session latency
+        # lands on the final turn so the per-turn sums still reconcile without
+        # over-counting wall-clock. Fall back to a single cumulative turn=1 row.
+        turn_usages = list(sub_result.turn_usages or [])
+        if len(turn_usages) > 1:
+            last_idx = len(turn_usages) - 1
+            for i, tu in enumerate(turn_usages):
+                md = dict(tu)
+                if sub_result.usage and sub_result.usage.get("model"):
+                    md.setdefault("model", sub_result.usage.get("model"))
+                self._trace_specialist_llm_call(
+                    task_id=ctx.task.task_id,
+                    turn=i + 1,
+                    metadata=md,
+                    latency_ms=_sub_latency_ms if i == last_idx else None,
+                    tick=_tick,
+                    phase=_phase,
+                )
+        else:
+            self._trace_specialist_llm_call(
+                task_id=ctx.task.task_id,
+                turn=1,
+                metadata=sub_result.usage,
+                latency_ms=_sub_latency_ms,
+                tick=_tick,
+                phase=_phase,
+            )
+        # Full-trace intel: persist the tool/intel calls the specialist made so
+        # the trace shows what it read (web/PR/KB/grep), backfilled as spans.
+        self._record_specialist_intel(
             task_id=ctx.task.task_id,
             turn=1,
-            metadata=sub_result.usage,
+            tool_calls=sub_result.tool_calls,
         )
         # Full-trace B1 conversation: pair the parent-held prompt (the CLI
         # never echoes it into the stream-json log) with the assistant reply
@@ -935,6 +1096,8 @@ class SpecialistRunner:
                     "prompt": (prep.system_prompt + "\n---\n" + prep.user_prompt),
                     "response": sub_result.response,
                 },
+                tick=_tick,
+                phase=_phase,
             )
         self._write_heartbeat(
             workspace,
@@ -1282,6 +1445,22 @@ class SpecialistRunner:
         """
         return (workspace / "specialist_done.json") if workspace else None
 
+    def _partial_done_path(self, workspace: Path | None) -> Path | None:
+        """Return the ``specialist_done.partial.json`` path in the workspace.
+
+        WS1 incremental checkpoint target: rewritten atomically as findings
+        accumulate. Distinct from the final ``specialist_done.json`` so the
+        subprocess reaper (which treats the final file's appearance as the exit
+        signal) is never tripped early.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+
+        Returns:
+            Path | None: The partial path, or ``None`` when no workspace.
+        """
+        return (workspace / "specialist_done.partial.json") if workspace else None
+
     def _write_prompt(
         self,
         workspace: Path | None,
@@ -1366,6 +1545,26 @@ class SpecialistRunner:
         tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         os.replace(tmp, path)
 
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+        """Atomically write ``payload`` as pretty JSON to ``path``.
+
+        Writes to a sibling ``.tmp`` then ``os.replace``-s it into place so a
+        concurrent reader (or a high-frequency incremental rewrite under WS1)
+        never observes a half-written file — same pattern as
+        :meth:`_write_heartbeat`.
+
+        Args:
+            path (Path): Destination file path.
+            payload (dict[str, Any]): JSON-serialisable payload to persist.
+        """
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(payload, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+
     def _write_specialist_done(
         self,
         workspace: Path | None,
@@ -1373,7 +1572,8 @@ class SpecialistRunner:
     ) -> None:
         """Write the ``specialist_done.json`` artifact with a timestamp.
 
-        No-ops when no workspace is configured.
+        WS1 (B6): writes atomically (temp + ``os.replace``) so partial files
+        are never read. No-ops when no workspace is configured.
 
         Args:
             workspace (Path | None): The per-task workspace directory.
@@ -1382,13 +1582,29 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        payload_with_ts = {
-            "ts": _now_iso(),
-            **payload,
-        }
-        path.write_text(
-            json.dumps(payload_with_ts, sort_keys=True, indent=2),
-            encoding="utf-8",
+        self._atomic_write_json(path, {"ts": _now_iso(), **payload})
+
+    def _write_specialist_done_partial(
+        self,
+        workspace: Path | None,
+        payload: dict[str, Any],
+    ) -> None:
+        """Atomically (re)write the WS1 incremental checkpoint partial.
+
+        Mirrors :meth:`_write_specialist_done` but targets
+        ``specialist_done.partial.json`` so the final-file reaper exit signal is
+        not tripped. No-ops when no workspace is configured.
+
+        Args:
+            workspace (Path | None): The per-task workspace directory.
+            payload (dict[str, Any]): The best-so-far ``specialist_done`` payload.
+        """
+        path = self._partial_done_path(workspace)
+        if path is None:
+            return
+        self._atomic_write_json(
+            path,
+            {"ts": _now_iso(), "_recovered_from_partial": True, **payload},
         )
 
 

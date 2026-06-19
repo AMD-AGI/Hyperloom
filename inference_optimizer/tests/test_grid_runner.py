@@ -430,13 +430,13 @@ class TestCoerceExtraEnvs:
     def test_used_by_backends_grid_override(self):
         llm_entry = {
             "name": "aiter_mla_off",
-            "extra_sglang_args": "--attention-backend aiter --disable-mla",
+            "extra_server_args": "--attention-backend aiter --disable-mla",
             "extra_envs": "SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0",
             "note": "aiter attn without MLA fast path",
         }
         v = GridVariant(
             name=llm_entry["name"],
-            extra_sglang_args=llm_entry["extra_sglang_args"],
+            extra_server_args=llm_entry["extra_server_args"],
             extra_envs=coerce_extra_envs(llm_entry["extra_envs"]),
             note=llm_entry["note"],
         )
@@ -1109,3 +1109,67 @@ class TestDedupVllmServerArgs:
         # cuda-graph-bs takes a list; never collapse a string that carries one.
         raw = "--attention-backend A --cuda-graph-bs 1 2 4 8 --attention-backend B"
         assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+
+class TestCompactJsonServerArgs:
+    """JSON-valued flags must be space-free to survive Magpie's unquoted
+    ``$EXTRA_VLLM_ARGS`` splice (otherwise spec-decode / compilation-config
+    explore variants always crash the server at boot)."""
+
+    def test_compilation_config_separator_space_removed(self):
+        out = _grid_runner.compact_json_server_args(
+            '--compilation-config {"full_cuda_graph": true}', "vllm"
+        )
+        assert out == '--compilation-config {"full_cuda_graph":true}'
+        # the JSON value is now a single shell word under bash word-splitting
+        assert len(out.split()) == 2
+
+    def test_speculative_config_multikey(self):
+        out = _grid_runner.compact_json_server_args(
+            '--speculative-config {"method": "eagle", "num_speculative_tokens": 3}',
+            "vllm",
+        )
+        assert out == (
+            '--speculative-config {"method":"eagle","num_speculative_tokens":3}'
+        )
+        assert len(out.split()) == 2
+
+    def test_compact_json_server_args_internal_space_unsupported(self):
+        # json.dumps keeps spaces INSIDE string values; only separators shrink.
+        # Such a value is therefore NOT made a single shell word — under
+        # Magpie's unquoted $EXTRA_VLLM_ARGS expansion it still word-splits, so
+        # this flag shape is explicitly unsupported (documented limitation). We
+        # leave the value intact (do not corrupt it by stripping inner spaces),
+        # but assert the limitation so callers are not misled into thinking it
+        # is boot-safe.
+        out = _grid_runner.compact_json_server_args(
+            '--speculative-config {"model": "draft model name"}', "vllm"
+        )
+        # Value is preserved verbatim (separator space after ':' removed only).
+        assert out == '--speculative-config {"model":"draft model name"}'
+        # ...but it still splits into MORE than the ideal 2 words: the two
+        # internal spaces of "draft model name" survive, so the shell sees
+        # ['--speculative-config', '{"model":"draft', 'model', 'name"}'].
+        assert len(out.split()) == 4
+
+    def test_other_flags_around_json_untouched(self):
+        out = _grid_runner.compact_json_server_args(
+            '--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm"
+        )
+        assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
+
+    def test_sglang_is_noop(self):
+        raw = '--speculative-config {"method": "eagle"}'
+        assert _grid_runner.compact_json_server_args(raw, "sglang") == raw
+
+    def test_no_json_is_noop(self):
+        raw = "--block-size 128 --no-enable-prefix-caching"
+        assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
+
+    def test_malformed_json_left_verbatim(self):
+        raw = "--compilation-config {not json}"
+        assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
+
+    def test_empty_is_noop(self):
+        assert _grid_runner.compact_json_server_args("", "vllm") == ""
+        assert _grid_runner.compact_json_server_args(None, "vllm") == ""

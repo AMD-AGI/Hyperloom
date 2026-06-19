@@ -109,10 +109,14 @@ def _build_specialist_executor(
         DEFAULT_SPECIALIST_TOOLS,
         SpecialistRunner,
     )
+    from .orchestrator.specialist_domains import DEFAULT_SPECIALIST_MAX_TURNS
     from .orchestrator.specialist_subprocess import SpecialistSubprocessConfig
 
     claude_model = (getattr(args, "specialist_model", None) or args.claude_model).strip()
-    max_turns = int(getattr(args, "specialist_max_turns", 8) or 8)
+    max_turns = int(
+        getattr(args, "specialist_max_turns", DEFAULT_SPECIALIST_MAX_TURNS)
+        or DEFAULT_SPECIALIST_MAX_TURNS
+    )
     per_turn_max_seconds = float(getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0)
     dispatch_mode = str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess").strip().lower()
 
@@ -137,9 +141,17 @@ def _build_specialist_executor(
                 pr_mcp_url = knowledge_plane.specialist_mcp_url()
             except AttributeError:
                 pr_mcp_url = ""
+            try:
+                kb_mcp_url = knowledge_plane.cortex_specialist_mcp_url()
+                kb_mcp_headers = knowledge_plane.cortex_specialist_mcp_headers()
+            except AttributeError:
+                kb_mcp_url = ""
+                kb_mcp_headers = {}
             generated = write_specialist_mcp_config(
                 session_dir=session_dir,
                 pr_monitor_mcp_url=pr_mcp_url,
+                cortex_kb_mcp_url=kb_mcp_url,
+                cortex_kb_mcp_headers=kb_mcp_headers,
             )
             if generated is not None:
                 mcp_config_path = str(generated)
@@ -155,7 +167,6 @@ def _build_specialist_executor(
             session_dir=session_dir,
             default_tools=DEFAULT_SPECIALIST_TOOLS,
             default_max_turns=max_turns,
-            per_turn_max_seconds=per_turn_max_seconds,
             knowledge_plane=knowledge_plane,
         )
     else:
@@ -180,7 +191,6 @@ def _build_specialist_executor(
             session_dir=session_dir,
             default_tools=DEFAULT_SPECIALIST_TOOLS,
             default_max_turns=max_turns,
-            per_turn_max_seconds=per_turn_max_seconds,
             knowledge_plane=knowledge_plane,
         )
 

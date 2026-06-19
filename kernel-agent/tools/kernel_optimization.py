@@ -550,7 +550,16 @@ def parse_backends(backends: str) -> list[str]:
         ValueError: When any backend is outside the allowed set
             (``geak``, ``claude``, ``codex``, ``cursor``).
     """
-    parsed = [b.strip().lower() for b in backends.split(",") if b.strip()]
+    raw = str(backends or "").strip()
+    # Defense-in-depth (Hyperloom#601): an upstream dispatch slip can hand us
+    # the repr() of a Python list (e.g. "['geak']" or "['geak', 'claude']")
+    # instead of a bare comma-joined string. Recover the inner tokens so a
+    # serialization mistake at the call site does not reject an otherwise-valid
+    # backend with the self-contradictory "unsupported backend(s): ['geak']".
+    # Genuinely-invalid names inside the list are still rejected below.
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1].replace("'", "").replace('"', "")
+    parsed = [b.strip().lower() for b in raw.split(",") if b.strip()]
     # `forge` is the Kernel-Forge autonomous-loop backend; it is first in the
     # default ladder (choose_backends) and falls through to geak/claude/codex
     # when it skips a non-triton candidate or misses a KEEP. See
@@ -626,6 +635,16 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     }
 
     if user_backends:
+        # Geak fallback (RCA root cause A): a forge-only order (e.g.
+        # KERNEL_OPT_BACKEND_ORDER=forge) used to return ["forge"] with no
+        # fallback, so when forge skips a non-triton candidate (or misses a
+        # KEEP) the run produced ZERO optimization. Append geak as a safety net
+        # when forge is requested but geak isn't already in the ladder. Opt out
+        # with FORGE_DISABLE_GEAK_FALLBACK=1 for strict forge-only experiments.
+        disable_fallback = os.environ.get("FORGE_DISABLE_GEAK_FALLBACK", "").strip().lower() in ("1", "true", "yes")
+        if "forge" in user_backends and "geak" not in user_backends and not disable_fallback:
+            user_backends = user_backends + ["geak"]
+            notes["geak_fallback_appended"] = True
         if "geak" in user_backends and not benchmark_available:
             notes["geak_without_benchmark"] = True
         return user_backends, notes

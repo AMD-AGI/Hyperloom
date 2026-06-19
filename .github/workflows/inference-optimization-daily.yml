@@ -5,7 +5,7 @@ name: Inference Optimization Daily (fixed models)
 # Daily inference-optimization run over a SMALL FIXED model corpus
 # (ci/candidates/inferencex_daily_fixed.json — the InferenceX-comparison set
 # plus MiMo). One run per day; each model gets its own parallel job and an
-# optimizer budget of --max-hours=24.
+# optimizer budget of --max-hours=48.
 #
 # This workflow deliberately combines two existing pipelines:
 #   * inference-optimization-ci.yml  → the "fixed curated corpus" idea
@@ -25,11 +25,13 @@ name: Inference Optimization Daily (fixed models)
 # --concurrency so nothing is auto-detected at run time.
 
 on:
-  # Once per day at 00:00 Beijing time (Asia/Shanghai, UTC+8). GitHub Actions
-  # cron runs in UTC, so 16:00 UTC == 00:00 next-day Beijing. Every run pins the
-  # sandbox to that moment's latest main commit.
+  # Every other day at 00:00 Beijing time (Asia/Shanghai, UTC+8). GitHub Actions
+  # cron runs in UTC, so 16:00 UTC == 00:00 next-day Beijing. `*/2` on the
+  # day-of-month field fires on odd days (1,3,5,...,31); note month boundaries
+  # reset the cycle, so the gap across a month end can be 1 day instead of 2.
+  # Every run pins the sandbox to that moment's latest main commit.
   schedule:
-    - cron: '0 16 * * *'
+    - cron: '0 16 */2 * *'
   workflow_dispatch:
     inputs:
       models:
@@ -51,11 +53,11 @@ on:
       max_hours:
         description: 'Per-model optimizer budget in hours.'
         required: false
-        default: '24'
+        default: '48'
       task_timeout_min:
         description: 'Per-task wait timeout in minutes (must exceed max_hours*60).'
         required: false
-        default: '1560'
+        default: '2920'
       gpu_type:
         description: 'GPU type tag (empty = script default MI300X).'
         required: false
@@ -91,6 +93,7 @@ jobs:
       count:  ${{ steps.matrix.outputs.count }}
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
+      HF_TOKEN_2:            ${{ secrets.HF_TOKEN_2 }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
       # Always read the fixed candidates JSON (both schedule and dispatch) so
       # the daily corpus is reproducible and editable in one place.
@@ -122,9 +125,15 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.count != '0'
     runs-on: hyperloom-4hhzn
-    # 24h optimizer budget + cold-start + (potentially multi-hour) model
-    # download + register/wait/collect buffer.
-    timeout-minutes: 1680
+    # GitHub counts this from JOB START, while the optimize_submit.py wait loop
+    # (up to task_timeout_min=2920) only begins AFTER prewarm + submit-jitter +
+    # register, and artifact collection runs after it. Budget a generous buffer
+    # ON TOP of 2920 for those phases — a cold large-model prewarm/download
+    # (e.g. Mixtral ~93G, gemma-4 ~52G; registered:false rows are not pre-staged)
+    # can take well over an hour — so the runner never kills the job mid-wait
+    # while the optimizer is still inside its 48h budget.
+    # 2920 wait + ~6h (prewarm/jitter/register/collect) = 3280.
+    timeout-minutes: 3280
     strategy:
       fail-fast: false
       # The fixed corpus is small (~10 models); dispatch them all at once.
@@ -139,6 +148,7 @@ jobs:
       SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
       HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
       HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
+      HF_TOKEN_2:                       ${{ secrets.HF_TOKEN_2 }}
       SAFE_OPTIMIZE_REGISTER_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_REGISTER_WORKSPACE }}
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
@@ -158,6 +168,7 @@ jobs:
         continue-on-error: true
         env:
           HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          HF_TOKEN_2: ${{ secrets.HF_TOKEN_2 }}
           MODEL_REPO: ${{ matrix.model }}
         run: |
           set -euo pipefail
@@ -193,8 +204,8 @@ jobs:
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends || 'geak,claude,codex' }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
           SAFE_OPTIMIZE_SUBMIT_WORKSPACES: 'core42-top8'
-          INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min || '1560' }}
-          INPUT_MAX_HOURS:        ${{ github.event.inputs.max_hours || '24' }}
+          INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min || '2920' }}
+          INPUT_MAX_HOURS:        ${{ github.event.inputs.max_hours || '48' }}
           INPUT_DRY_RUN:          ${{ github.event.inputs.dry_run }}
           MATRIX_POOL_ID:         ${{ matrix.pool_id }}
           MATRIX_POOL_INDEX:      ${{ matrix.pool_index }}
@@ -250,7 +261,7 @@ jobs:
           if [ -n "${INPUT_KERNEL_OPT_BACKENDS:-}" ]; then
             ARGS+=(--kernel-opt-backends "${INPUT_KERNEL_OPT_BACKENDS}")
           fi
-          ARGS+=(--max-hours "${INPUT_MAX_HOURS:-24}")
+          ARGS+=(--max-hours "${INPUT_MAX_HOURS:-48}")
 
           # ── Pull latest code every run (mirror optimize-submit.yml) ───────
           # The hard contract: SaFE promptPrefix MUST be non-empty. The base

@@ -89,16 +89,21 @@ DEFAULT_MAX_HOURS = 12.0
 DEFAULT_TARGET_GAIN = 100.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16
+# Models whose config.json ``max_position_embeddings`` is at or below this are
+# skipped outright: their context window is too small to be worth a sandbox slot
+# (independent of the per-workload ``context_too_short`` check).
+MIN_MAX_POSITION_EMBEDDINGS = 2048
 
 # Hardware facts from AMD Instinct datasheets. tp_thresholds_b is CI policy:
-# MI300X baseline (32/128/256B) scaled by per-GPU HBM capacity.
+# MI300X baseline (80/128/256B): <=80B->TP1, <=128B->TP2, <=256B->TP4,
+# >256B->TP8. mi325x/mi355x stay scaled by per-GPU HBM capacity.
 GPU_PROFILES = {
     "mi300x": {
         "gpu_type": "MI300X",
         "llvm_target": "gfx942",
         "hbm_gb": 192,
         "hbm_bandwidth_tb_s": 5.3,
-        "tp_thresholds_b": (32, 128, 256),
+        "tp_thresholds_b": (80, 128, 256),
     },
     "mi325x": {
         "gpu_type": "MI325X",
@@ -289,6 +294,19 @@ SGLANG_ARCHS: set[str] = {
     "GPTBigCodeForCausalLM",
     "FalconForCausalLM",
     "ChatGLMModel",
+    # New architectures natively supported by sglang v0.5.11 (transformers 5.x)
+    # in the current sandbox image. Without these, detect_framework falls back
+    # to vLLM and the old proxy/vllm/vllm-openai-rocm:v0.19.0 image (transformers
+    # <5) crashes at baseline ("does not recognize this architecture" /
+    # "TokenizersBackend does not exist"). Verified against the failing models'
+    # config.architectures.
+    "Gemma4ForConditionalGeneration",            # gemma-4 (dense + A4B MoE)
+    "Qwen3_5ForConditionalGeneration",           # Qwen3.5 / Qwen3.6 dense
+    "Qwen3_5MoeForConditionalGeneration",        # Qwen3.5 / Qwen3.6 A3B MoE
+    "Mistral3ForConditionalGeneration",          # Mistral3 / Ministral3
+    "NemotronHForCausalLM",                      # Nemotron-H (nemotron_h)
+    "Glm4ForCausalLM",                           # GLM-4 (glm4) dense
+    "Glm4MoeForCausalLM",                        # GLM-4.5 / 4.6 (glm4_moe)
 }
 
 # Architectures that require vLLM (Lightning Attention, sparse, or special quant).
@@ -368,21 +386,49 @@ class HuggingFaceClient:
 
     BASE = "https://huggingface.co"
 
-    def __init__(self, token: str = "", timeout: int = 15):
+    def __init__(self, token: str = "", timeout: int = 15, tokens: list[str] | None = None, seed: str = ""):
         """Initialise the HF client session.
 
+        Supports a *pool* of HuggingFace tokens. Requests start on a token chosen
+        by hashing ``seed`` (so parallel CI jobs spread their first hit across the
+        pool) and, on HTTP 429 (Too Many Requests), transparently rotate to the
+        next token with exponential backoff before retrying. This mitigates the
+        bursty rate-limiting that hits the resolve/config.json endpoint when many
+        optimize jobs fan out at once.
+
         Args:
-            token (str): Optional HuggingFace token for gated-model access.
+            token (str): Primary HuggingFace token for gated-model access.
             timeout (int): Per-request timeout in seconds.
+            tokens (list[str] | None): Additional tokens to alternate with.
+            seed (str): Per-job string used to pick the starting token.
         """
         self.timeout = timeout
+        pool: list[str] = []
+        for t in [token, *(tokens or [])]:
+            if t and t not in pool:
+                pool.append(t)
+        self._tokens = pool
+        if pool:
+            self._idx = (hash(seed) % len(pool)) if seed else 0
+        else:
+            self._idx = 0
         self._sess = requests.Session()
         self._sess.headers["User-Agent"] = "hyperloom-optimize-submit/1.0"
-        if token:
-            self._sess.headers["Authorization"] = f"Bearer {token}"
+        self._apply_token()
+
+    def _apply_token(self) -> None:
+        """Set the Authorization header to the currently-selected token."""
+        if self._tokens:
+            tok = self._tokens[self._idx % len(self._tokens)]
+            self._sess.headers["Authorization"] = f"Bearer {tok}"
+        else:
+            self._sess.headers.pop("Authorization", None)
 
     def _get(self, path: str) -> dict | list:
         """GET a HuggingFace API path and return the parsed JSON body.
+
+        On HTTP 429 the client rotates to the next token in the pool and retries
+        with exponential backoff (capped at 30s); other errors raise immediately.
 
         Args:
             path (str): Path appended to the HF base URL.
@@ -393,9 +439,24 @@ class HuggingFaceClient:
         Raises:
             requests.HTTPError: If the response status indicates an error.
         """
-        resp = self._sess.get(f"{self.BASE}{path}", timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.json()
+        attempts = max(4, len(self._tokens) * 2)
+        last_exc: Exception | None = None
+        for i in range(attempts):
+            resp = self._sess.get(f"{self.BASE}{path}", timeout=self.timeout)
+            if resp.status_code == 429:
+                last_exc = requests.HTTPError(
+                    f"429 Client Error: Too Many Requests for url: {self.BASE}{path}", response=resp
+                )
+                if len(self._tokens) > 1:
+                    self._idx += 1
+                    self._apply_token()
+                time.sleep(min(2 ** i, 30))
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        if last_exc is not None:
+            raise last_exc
+        raise requests.HTTPError(f"exhausted retries for url: {self.BASE}{path}")
 
     def model_info(self, repo_id: str) -> dict:
         """Fetch a repo's model metadata from the HF API.
@@ -500,6 +561,9 @@ class DetectedConfig:
     image: str
     params_b: float
     max_context_tokens: int
+    # Raw ``config.json`` ``max_position_embeddings`` (0 when absent); used for
+    # the absolute small-context skip floor (``MIN_MAX_POSITION_EMBEDDINGS``).
+    max_position_embeddings: int = 0
 
 
 def _quant_type(config: dict) -> str:
@@ -673,16 +737,19 @@ def detect_tp(params_b: float, precision: str = "BF16", gpu_type: str | None = N
 def detect_concurrency(tp: int, framework: str) -> int:
     """Pick a benchmark concurrency from tensor-parallel size and framework.
 
+    CI policy is now a single fixed concurrency of 64 across every framework
+    and TP size, so benchmark load stays directly comparable between models
+    regardless of how they are sharded or served. ``tp`` / ``framework`` are
+    kept for API compatibility.
+
     Args:
         tp (int): Tensor-parallel size.
         framework (str): Serving framework (``vllm`` / ``sglang``).
 
     Returns:
-        int: The chosen concurrency level.
+        int: The chosen concurrency level (always ``64``).
     """
-    if framework == "vllm":
-        return 64 if tp <= 4 else 16
-    return 64 if tp == 1 else 32 if tp <= 4 else 64
+    return 64
 
 
 def _sglang_image_for(repo_id: str = "") -> str:
@@ -770,6 +837,8 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str, gpu_type: str | None = None
     precision = detect_precision(config)
     params_b = detect_param_count(info, config)
     max_context_tokens = detect_max_context_tokens(config)
+    mpe_raw = config.get("max_position_embeddings")
+    max_position_embeddings = int(mpe_raw) if isinstance(mpe_raw, (int, float)) and mpe_raw > 0 else 0
     tp = detect_tp(params_b, precision, gpu_type)
     conc = detect_concurrency(tp, framework)
     image = detect_image(framework, repo_id)
@@ -783,6 +852,7 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str, gpu_type: str | None = None
         image=image,
         params_b=params_b,
         max_context_tokens=max_context_tokens,
+        max_position_embeddings=max_position_embeddings,
     )
     log.info(
         "[%s] arch=%s params=%.1fB context=%d framework=%s precision=%s gpu=%s tp=%d conc=%d",
@@ -1109,12 +1179,28 @@ class SafeOptimizeClient:
             body["oobPath"] = oob_path
         if tracelens_root:
             body["tracelensRoot"] = tracelens_root
+        # Long-run tuning: when the optimizer budget exceeds 24h, ask the agent
+        # to enable phase interleaving + cyclic phases so the extra wall-clock is
+        # spent re-tuning in cycles instead of stalling after the first pass.
+        # Injected as shell exports (same prelude mechanism as HYPERLOOM_SOURCE_*).
+        if max_hours and max_hours > 24:
+            longrun_hint = (
+                "LONG-RUN TUNING (optimizer budget > 24h) — also run these exports "
+                "in the shell prelude before launching the optimizer:\n"
+                "  export INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=1\n"
+                "  export INFERENCE_OPTIMIZER_CYCLIC_PHASES=1\n"
+                "  export INFERENCE_OPTIMIZER_CYCLE_HOURS=16\n\n"
+            )
+            prompt_prefix = longrun_hint + (prompt_prefix or "")
         # Optional prefix/suffix forwarded to BuildHyperloomPrompt on the SaFE side.
         if prompt_prefix:
             body["promptPrefix"] = prompt_prefix
         if prompt_suffix:
             body["promptSuffix"] = prompt_suffix
         attempts = 8
+        # Captured before the first POST so the dedup lookup only matches a task
+        # this call created (not an unrelated older one for the same model).
+        submit_started_at = time.time()
         for attempt in range(1, attempts + 1):
             try:
                 # The submit POST can be slow when the core42 apiserver is
@@ -1134,7 +1220,25 @@ class SafeOptimizeClient:
                     or "timeout" in low
                     or "connection" in low  # ConnectionError / HTTPSConnectionPool
                 )
-                if not transient or attempt >= attempts:
+                if not transient:
+                    raise
+                # The POST is NOT idempotent: a slow/dropped response can hide a
+                # task the backend actually created. Blindly retrying then spawns
+                # a SECOND Claw session for the same model (the duplicate /
+                # abandoned-PRELUDE dirs). Before retrying, look the task up by
+                # modelId+workspace; if it already exists, reuse it.
+                existing = self._find_recent_submitted_task(model_id, chosen_ws, submit_started_at)
+                if existing and existing.get("id"):
+                    log.warning(
+                        "[submit] transient submit failure but a task for modelId=%s "
+                        "already exists server-side (id=%s) — reusing it instead of "
+                        "re-POSTing to avoid a duplicate session: %s",
+                        model_id,
+                        existing.get("id"),
+                        msg,
+                    )
+                    return existing
+                if attempt >= attempts:
                     raise
                 delay = random.uniform(10, 60)
                 log.warning(
@@ -1147,6 +1251,53 @@ class SafeOptimizeClient:
                 )
                 time.sleep(delay)
         raise RuntimeError("unreachable submit retry loop exit")
+
+    def _find_recent_submitted_task(self, model_id: str, workspace: str, since_ts: float) -> dict | None:
+        """Find a task this submit call may have created before its POST failed.
+
+        A transient submit failure (slow/timeout/dropped response) can hide a
+        task the backend actually created. Look it up by ``modelId`` +
+        ``workspace`` so the retry path can reuse it instead of creating a
+        duplicate Claw session.
+
+        Args:
+            model_id (str): Registered SaFE model id used in the submit body.
+            workspace (str): Submit workspace used in the submit body.
+            since_ts (float): Unix time captured just before the first POST;
+                only tasks created at/after this (minus clock-skew slack) match.
+
+        Returns:
+            dict | None: The most recently-created matching task, or ``None``.
+        """
+        from urllib.parse import quote
+
+        try:
+            data = self._request(
+                "GET",
+                f"api/v1/optimization/tasks?modelId={quote(model_id)}"
+                f"&workspace={quote(workspace)}&limit=20",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.debug("[submit] dedup lookup failed (will fall back to retry): %s", e)
+            return None
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return None
+        floor = since_ts - 120.0  # 2-min slack for client/server clock skew
+        best = None
+        best_ct = floor
+        for it in items:
+            if not isinstance(it, dict) or (it.get("modelId") or "") != model_id:
+                continue
+            created = str(it.get("createdAt") or "")
+            try:
+                ct = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+            except Exception:  # noqa: BLE001
+                continue
+            if ct >= best_ct:
+                best_ct = ct
+                best = it
+        return best
 
     # ── Task lifecycle ──
 
@@ -1198,7 +1349,18 @@ class SafeOptimizeClient:
             time.sleep(5)
 
         sse_used = False
-        if sid:
+        sf_status = ""
+        # On idle_timeout/stream_error the Claw SSE merely went quiet (a long tool
+        # call, or the agent paused between phases). SaFE often *prematurely* marks
+        # such a task Failed/Interrupted ("optimization report not found") even
+        # though it is still well within budget and may resume to finalize (and
+        # write session_breakdown.json). Do NOT accept an idle-induced terminal as
+        # final: resubscribe and keep waiting, up to a bounded number of
+        # consecutive idle re-entries, before concluding. Only a real Stopped
+        # (sandbox exit), a Succeeded, the deadline, or exhausted retries end it.
+        idle_retries = 0
+        max_idle_retries = int(_env_float("SAFE_OPTIMIZE_SSE_IDLE_RETRIES", 3.0))
+        while sid and time.time() < deadline:
             sse_used = True
             log.info("[task %s] using SSE on clawSessionId=%s", task_id, sid[:8])
             sse_reason = self._sse_wait_until_done(sid, deadline)
@@ -1208,7 +1370,8 @@ class SafeOptimizeClient:
             except Exception:
                 last_task = {}
             sf_status = last_task.get("status", "") if last_task else ""
-            if sf_status in self.TERMINAL_TASK_STATUSES:
+            # A real success is always final.
+            if sf_status == "Succeeded":
                 return sf_status, last_task
             # Stopped = sandbox pod exited (real end-of-task). SaFE's controller
             # lags shutdown by 10-180s, so short-poll up to 5min for its verdict.
@@ -1237,8 +1400,25 @@ class SafeOptimizeClient:
                 return "Succeeded", last_task
             if sse_reason == "deadline":
                 return "Timeout", last_task
-            # idle_timeout / stream_error are inconclusive (the SSE stream goes
-            # quiet during long tool calls), so fall through to SaFE polling.
+            # idle_timeout / stream_error: inconclusive. Resubscribe and keep
+            # waiting (bounded) instead of accepting an idle-induced terminal.
+            if sse_reason in ("idle_timeout", "stream_error") and idle_retries < max_idle_retries and time.time() < deadline:
+                idle_retries += 1
+                log.info(
+                    "[task %s] SSE %s within budget (sf_status=%s) — resubscribing "
+                    "(idle retry %d/%d) instead of concluding on a non-Stopped status",
+                    task_id,
+                    sse_reason,
+                    sf_status or "?",
+                    idle_retries,
+                    max_idle_retries,
+                )
+                time.sleep(min(poll_s, 60))
+                continue
+            # Retries exhausted (or another reason): accept a terminal SaFE
+            # verdict if one exists, else fall through to SaFE polling.
+            if sf_status in self.TERMINAL_TASK_STATUSES:
+                return sf_status, last_task
             log.info(
                 "[task %s] SSE inconclusive (reason=%s, sf_status=%s) — "
                 "falling back to SaFE polling for terminal status",
@@ -1246,6 +1426,7 @@ class SafeOptimizeClient:
                 sse_reason,
                 sf_status or "?",
             )
+            break
 
         # Fallback / continuation: SaFE optimization-API polling.
         if not sse_used:
@@ -1591,6 +1772,19 @@ def process_model(
     if detected:
         rec.detected = asdict(detected)
         rec.category = _category_from_arch(rec.detected.get("arch", ""))
+        # Absolute small-context floor: skip models whose config.json
+        # max_position_embeddings is present and <= MIN_MAX_POSITION_EMBEDDINGS,
+        # regardless of the requested isl/osl. (A missing config.json already
+        # fails auto_detect above and is skipped there.)
+        mpe = int(rec.detected.get("max_position_embeddings") or 0)
+        if mpe and mpe <= MIN_MAX_POSITION_EMBEDDINGS:
+            rec.status = "skipped"
+            rec.error = (
+                "context_too_short: "
+                f"max_position_embeddings={mpe} <= {MIN_MAX_POSITION_EMBEDDINGS}"
+            )
+            log.warning("[%s] skipping: %s", repo_id, rec.error)
+            return rec
         max_context = int(rec.detected.get("max_context_tokens") or 0)
         if context_too_short(max_context, isl, osl):
             required = isl + osl + DEFAULT_CONTEXT_RESERVE_TOKENS
@@ -3858,6 +4052,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hf-token", default=os.environ.get("HF_TOKEN", ""), help="HuggingFace token (or set $HF_TOKEN)"
     )
+    parser.add_argument(
+        "--hf-token-2",
+        default=os.environ.get("HF_TOKEN_2", ""),
+        help="Secondary HuggingFace token to alternate with on 429 (or set $HF_TOKEN_2)",
+    )
 
     # Production-pool audit metadata: copied into submission_manifest.json (does
     # not affect submission) to trace which pool entry a task reran.
@@ -4020,7 +4219,10 @@ def main() -> int:
             "fallback to be deployed; will 400 on submit_task otherwise"
         )
 
-    hf = HuggingFaceClient(args.hf_token)
+    hf_seed = ",".join(getattr(args, "model", None) or []) or os.environ.get("GITHUB_RUN_ID", "")
+    hf = HuggingFaceClient(args.hf_token, tokens=[args.hf_token_2], seed=hf_seed)
+    if args.hf_token_2:
+        log.info("HF token pool: 2 tokens (alternate on 429)")
     # Dry-run never hits SaFE, so a placeholder token is fine.
     safe = SafeOptimizeClient(
         base_url,

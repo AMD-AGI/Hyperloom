@@ -72,6 +72,38 @@ ANALYSIS_ROUTE_AGENT = "agent"
 _VALID_ANALYSIS_ROUTES = {ANALYSIS_ROUTE_DETERMINISTIC, ANALYSIS_ROUTE_AGENT}
 
 
+def _is_safe_litellm_gateway() -> bool:
+    """True when the Claude SDK targets the AMD SAFE/LiteLLM gateway (#574).
+
+    Detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` host or
+    the codebase-wide ``SAFE_API_KEY`` signal; other backends are left alone.
+    """
+    base_url = (
+        os.environ.get("ANTHROPIC_BASE_URL", "")
+        or os.environ.get("OPENAI_BASE_URL", "")
+    ).lower()
+    markers = ("primus-safe", "core42", "litellm", "llm-proxy")
+    return bool(os.environ.get("SAFE_API_KEY")) or any(m in base_url for m in markers)
+
+
+def _resolve_tracelens_model() -> str:
+    """Resolve ``ANTHROPIC_MODEL`` to the gateway's dash-form id (#574).
+
+    Only the strict SAFE/LiteLLM gateway rejects the image's dot form
+    (``Claude-Opus-4.7``); for it, map to dash (``claude-opus-4-7``). Other
+    backends keep the raw id; empty env yields ``""`` (SDK default).
+
+    Returns:
+        The model id to pass to the SDK, normalized only for SAFE/LiteLLM.
+    """
+    raw = os.environ.get("ANTHROPIC_MODEL", "").strip()
+    if not raw:
+        return ""
+    if not _is_safe_litellm_gateway():
+        return raw
+    return raw.lower().replace(".", "-")
+
+
 def _resolve_idle_pct_threshold() -> float:
     """Return the idle-percent gate threshold (default 80.0%).
 
@@ -1134,8 +1166,30 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
         return False, (f"runtime-generated (torch.compile / Inductor cache): {source_file}")
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _reusable_roots()):
-        return False, (f"source not under a reusable framework root: {source_file}")
+        return False, (
+            f"source not under a reusable framework root: {source_file}"
+        )
+    # cpp_itfs host-launcher guard (RCA root cause 2): files under aiter's
+    # csrc/cpp_itfs/ that are .py are host drivers — the real GPU code lives in
+    # sibling .cuh / .cpp.jinja. If the deterministic resolver didn't promote it
+    # to the device source, editing the .py always fails the smoke test ->
+    # REVERT. Skip it so the candidate doesn't burn a forge/geak attempt.
+    if "/csrc/cpp_itfs/" in lower_file and lower_file.endswith(".py"):
+        return False, (
+            f"cpp_itfs host launcher (device code is in sibling .cuh/.cpp.jinja, "
+            f"not this .py): {source_file}"
+        )
     source_type = candidate.get("source_type")
+    # aiter device-source promotion: aiter ships editable and JIT-compiles each
+    # op, so a real .cu/.cuh/.hip kernel under /aiter/ is patchable even when the
+    # upstream classifier left source_type unknown (e.g. aiter::mha_batch_prefill
+    # -> csrc/py_itfs_ck/*.cu). forge edits it in place + AITER_REBUILD recompiles
+    # it. Excludes tuned_gemm.py-style Python dispatchers (real GEMM is a
+    # compiled CK/hipBLASLt lib, editing the .py does nothing).
+    if (source_type not in {"hip_cpp", "triton", "python", "flydsl"}
+            and "/aiter/" in lower_file
+            and lower_file.endswith((".cu", ".cuh", ".hip"))):
+        return True, ""
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}")
     return True, ""
@@ -1727,6 +1781,22 @@ def _known_harness_files(name: str, source_file: str) -> list[Path]:
     return out
 
 
+_LIBRARY_TOKENS = ("aiter", "sglang", "vllm", "flashinfer", "sgl-kernel", "sgl_kernel")
+
+
+def _library_token(path: str) -> str:
+    """Return the library a path belongs to (aiter/sglang/...), else "".
+
+    Used to keep kernel↔benchmark pairing within one library. sgl-kernel and
+    sgl_kernel normalize to "sglang" since they are the sglang kernel package.
+    """
+    low = (path or "").lower()
+    for tok in _LIBRARY_TOKENS:
+        if f"/{tok}/" in low or f"/{tok}." in low:
+            return "sglang" if tok in ("sgl-kernel", "sgl_kernel") else tok
+    return ""
+
+
 def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> list[str]:
     """Find test/benchmark files matching a kernel under a repo's subdirs.
 
@@ -1818,7 +1888,16 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
         """
         low = path_str.lower()
         return any(tag in low for tag in ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_"))
-
+    # Same-library guard (RCA root cause 2): never pair a kernel from one library
+    # with a benchmark from another (e.g. a sglang sgl-kernel .cuh with an aiter
+    # op_test). Editing the kernel then "validating" against an unrelated lib's
+    # op always fails the smoke test -> REVERT. Drop cross-library candidates
+    # when the kernel's library is recognizable.
+    src_lib = _library_token(source_file)
+    if src_lib:
+        same_lib = [s for s in unique if _library_token(s) in (src_lib, "")]
+        if same_lib:
+            unique = same_lib
     unique.sort(key=_is_multigpu)
     return unique[:10]
 
@@ -1884,6 +1963,8 @@ def _is_pybind_shim(source_file: str) -> bool:
 _AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # ck_moe_stage1/2 — the .cu is the @compile_ops codegen entry (jit/build invalidated by PR-K before rebuild).
     ("ck_moe_stage", ("csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",)),
+    # fmoe_fp8_blockscale_g1u1 — fused MoE ASM entrypoint used by W4A8/MXFP4 expert GEMM.
+    ("fmoe_fp8_blockscale", ("csrc/py_itfs_cu/asm_fmoe.cu",)),
     # topk_softmax decode kernels.
     ("topk_softmax_group", ("csrc/kernels/topk_softmax_kernels_group.cu",)),
     ("topk_softmax", ("csrc/kernels/topk_softmax_kernels.cu",)),
@@ -1912,6 +1993,26 @@ _PACKAGE_INNER_ROOTS = (
     "/sgl-workspace/sglang/python/sglang",
 )
 
+_AITER_COMPILE_OPS_LAUNCHERS = (
+    "aiter/ops/",
+    "aiter/fused_moe.py",
+    "aiter/fused_moe_bf16_asm.py",
+    "aiter/fused_moe_dp_shared_expert.py",
+)
+
+
+def _normalize_tracelens_launcher_source(source_file: str) -> str:
+    """Strip TraceLens line/symbol suffixes from launcher paths."""
+    return re.sub(r"\(\d+\):.*$", "", source_file.replace(os.sep, "/")).strip()
+
+
+def _is_aiter_compile_ops_launcher(source_file: str) -> bool:
+    """Match known aiter launchers without accepting path-prefix lookalikes."""
+    return any(
+        source_file.startswith(marker) or f"/{marker}" in source_file
+        for marker in _AITER_COMPILE_OPS_LAUNCHERS
+    )
+
 
 def upgrade_aiter_compile_ops_launcher(
     source_file: str,
@@ -1920,9 +2021,10 @@ def upgrade_aiter_compile_ops_launcher(
 ) -> str:
     """Promote an aiter ``@compile_ops`` Python wrapper to the device ``.cu``.
 
-    Promotes when source_file is a ``.py`` under ``aiter/ops/``, kernel_name
-    matches a :data:`_AITER_COMPILE_OPS_PROMOTIONS` pattern, and the ``.cu``
-    exists under kernel_repo (or :data:`_AITER_FALLBACK_REPO`).
+    Promotes when source_file is a known aiter ``@compile_ops`` Python
+    launcher, kernel_name matches a
+    :data:`_AITER_COMPILE_OPS_PROMOTIONS` pattern, and the ``.cu`` exists
+    under kernel_repo (or :data:`_AITER_FALLBACK_REPO`).
 
     Args:
         source_file: The candidate's resolved source path.
@@ -1935,8 +2037,8 @@ def upgrade_aiter_compile_ops_launcher(
     """
     if not source_file or not kernel_name:
         return source_file
-    s = source_file.replace(os.sep, "/")
-    if "/aiter/ops/" not in s or not s.endswith(".py"):
+    s = _normalize_tracelens_launcher_source(source_file)
+    if not s.endswith(".py") or not _is_aiter_compile_ops_launcher(s):
         return source_file
 
     name_lower = kernel_name.lower()
@@ -2125,6 +2227,56 @@ def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any
             continue
         _merge_shape_call(entries, value, shape_count)
     return entries
+
+
+# Recognized dtype tokens that appear as the suffix on a TraceLens ``Args`` /
+# metrics shape entry (e.g. ``(64,5120) bf16``). Permissive: anything after the
+# shape paren is treated as the dtype; this list is only used to recognise a
+# trailing dtype on a paren-less entry.
+_KNOWN_DTYPE_TOKENS = frozenset({
+    "bf16", "fp16", "fp32", "f32", "fp8", "f8", "fp8_e4m3", "fp8_e5m2",
+    "e4m3", "e5m2", "int8", "int4", "int32", "int64", "int", "uint8",
+    "bool", "float", "double", "half",
+})
+
+
+def _split_shape_dtype(entry: Any) -> tuple[str, str]:
+    """Split a TraceLens shape entry ``"(64,5120) bf16"`` into ``("(64,5120)", "bf16")``.
+
+    TraceLens records each kernel arg as ``<shape> [dtype]`` in the analysis.md
+    ``Args`` column (and category metrics ``args``); the dtype is inline. This
+    separates them so the per-arg dtype can be surfaced as a clean, positionally
+    aligned ``input_dtypes`` list (the field that was always defaulted to ``[]``).
+    Non-string / dict entries return ``(str(value), "")``. Empty scalar ``()`` is
+    preserved with an empty dtype so arity stays aligned with the call signature.
+    """
+    if isinstance(entry, dict):
+        entry = entry.get("shape", "")
+    s = str(entry).strip()
+    if not s:
+        return "", ""
+    if s.startswith("("):
+        close = s.find(")")
+        if close != -1:
+            return s[: close + 1].strip(), s[close + 1 :].strip()
+        return s, ""
+    parts = s.rsplit(" ", 1)
+    if len(parts) == 2 and parts[1].lower() in _KNOWN_DTYPE_TOKENS:
+        return parts[0].strip(), parts[1].strip()
+    return s, ""
+
+
+def _dtypes_from_shapes(shapes: Any) -> list[str]:
+    """Ordered per-arg dtype list parsed from a candidate's ``shapes`` strings.
+
+    Positionally aligned with the shapes (one entry per arg, ``""`` when no dtype
+    was captured). Returns ``[]`` when no dtype is present on any entry, so callers
+    keep the existing empty-default behaviour when TraceLens captured none.
+    """
+    if not isinstance(shapes, list):
+        return []
+    dtypes = [_split_shape_dtype(s)[1] for s in shapes]
+    return dtypes if any(dtypes) else []
 
 
 def derive_kernel_category(candidate: dict[str, Any]) -> str:
@@ -2319,12 +2471,9 @@ def load_op_category_map(
 # whole geak→claude→codex ladder before any harness is built.
 #
 # TraceLens DOES still capture the operands for this kernel: the per-shape rows in
-# ``perf_report_csvs/ops_unique_args.csv`` carry the wrapped invocation's
-# ``Input Dims`` / ``Input type`` (the gate/up and down grouped-GEMM operands).
-# This recovers those operand shapes from that deterministic sidecar so the
-# emitted candidate carries non-empty, trace-anchored ``shapes`` with
-# ``shape_provenance="torch_trace"``. Scoped to the fused-MoE invoke kernel so
-# other ops are untouched.
+# ``perf_report_csvs/ops_unique_args.csv`` carries trace-recorded ``Input Dims``
+# / ``Input type``. Use it to recover missing candidate shapes deterministically
+# by exact op-name match (or fused-MoE marker match for the historical wrapper).
 _FUSED_MOE_KERNEL_MARKER = "invoke_fused_moe_kernel"
 
 # torch ``Input type`` token → compact dtype suffix used by TraceLens shape
@@ -2373,23 +2522,22 @@ def _format_trace_shape(dims: Any, dtype: Any) -> str | None:
     return f"{shape} {suffix}" if suffix else shape
 
 
-def resolve_fused_moe_shapes_from_csv(
+def _resolve_shapes_from_ops_unique_args_csv(
     perf_report_csv_dir: Path | str | None,
+    row_matches: Callable[[str], bool],
 ) -> list[str]:
-    """Recover the fused-MoE expert kernel operand shapes from ``ops_unique_args.csv``.
+    """Recover operand shapes from matching ``ops_unique_args.csv`` rows.
 
-    Reads each per-shape row whose op name embeds ``invoke_fused_moe_kernel`` and
-    parses its ``Input Dims`` / ``Input type`` tuple-of-tuples into TraceLens-style
-    shape strings (e.g. ``(15360,2048) bf16``), deduped across rows in first-seen
-    order.
+    Parses ``Input Dims`` / ``Input type`` tuple-of-tuples into TraceLens-style
+    shape strings (e.g. ``(15360,2048) bf16``), deduped in first-seen order.
 
     Args:
         perf_report_csv_dir: Directory containing ``ops_unique_args.csv``.
+        row_matches: Predicate called with the normalized row name.
 
     Returns:
-        The recovered operand shape strings, or ``[]`` when the sidecar is
-        absent or carries no fused-MoE rows (callers then leave the
-        candidate's empty ``shapes`` untouched).
+        The recovered operand shape strings, or ``[]`` when no trusted rows
+        are available.
     """
     if not perf_report_csv_dir:
         return []
@@ -2402,7 +2550,7 @@ def resolve_fused_moe_shapes_from_csv(
         with csv_path.open(newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 name = str(row.get("name") or "").strip().lower()
-                if _FUSED_MOE_KERNEL_MARKER not in name:
+                if not row_matches(name):
                     continue
                 try:
                     dims = ast.literal_eval(str(row.get("Input Dims") or "").strip() or "()")
@@ -2422,6 +2570,30 @@ def resolve_fused_moe_shapes_from_csv(
     except (OSError, csv.Error):
         return []
     return shapes
+
+
+def resolve_fused_moe_shapes_from_csv(
+    perf_report_csv_dir: Path | str | None,
+) -> list[str]:
+    """Recover the fused-MoE expert-kernel operand shapes from ``ops_unique_args.csv``."""
+    return _resolve_shapes_from_ops_unique_args_csv(
+        perf_report_csv_dir,
+        lambda name: _FUSED_MOE_KERNEL_MARKER in name,
+    )
+
+
+def resolve_shapes_from_csv_for_op(
+    perf_report_csv_dir: Path | str | None,
+    op_name: str,
+) -> list[str]:
+    """Recover operand shapes for a candidate by exact TraceLens op name."""
+    target = str(op_name or "").strip().lower()
+    if not target:
+        return []
+    return _resolve_shapes_from_ops_unique_args_csv(
+        perf_report_csv_dir,
+        lambda name: name == target,
+    )
 
 
 def _is_fused_moe_candidate(item: dict[str, Any]) -> bool:
@@ -2987,6 +3159,11 @@ def _finalize_candidates(
             if _fused_moe_shapes:
                 item["shapes"] = list(_fused_moe_shapes)
                 item["shape_provenance"] = "torch_trace"
+        if not item.get("shapes"):
+            csv_shapes = resolve_shapes_from_csv_for_op(perf_report_csv_dir, str(item.get("name") or ""))
+            if csv_shapes:
+                item["shapes"] = csv_shapes
+                item["shape_provenance"] = "torch_trace"
         # Mark trace-extracted shapes so the dispatch-time validator can tell their provenance.
         if item.get("shapes"):
             item.setdefault("shape_provenance", "torch_trace")
@@ -3064,7 +3241,8 @@ def _finalize_candidates(
 def recommend_backends(candidate: dict[str, Any]) -> list[str]:
     """Recommend a backend ladder for a reusable native kernel.
 
-    Orders GEAK first, then claude/codex.
+    Orders forge first, then GEAK, then the claude/codex LLM backends
+    (cursor appended only when CURSOR_API_KEY is set).
 
     Args:
         candidate: The hot-kernel candidate dict.
@@ -3082,7 +3260,7 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    # GEAK first; append cursor only when CURSOR_API_KEY is provisioned.
+    # forge then GEAK; append cursor only when CURSOR_API_KEY is provisioned.
     cursor_tail = ["cursor"] if os.environ.get("CURSOR_API_KEY", "").strip() else []
     return ["forge", "geak", "claude", "codex"] + cursor_tail
 
@@ -3546,14 +3724,19 @@ def deterministic_extract_hot_kernels(
 
         cat_ops = ops_by_category.get(category, [])
 
-        sorted_members = sorted(
-            members,
-            key=lambda m: m.get("efficiency_pct", 100),
-        )
+        def _eff_sort_key(m: dict[str, Any]) -> float:
+            # ``efficiency_pct`` may be present-but-null in priority_data; a
+            # bare ``.get(key, 100)`` returns None then (default only applies
+            # to a missing key), which breaks both ``sorted`` comparisons and
+            # the downstream ``round``. Treat null as the missing-key default.
+            v = m.get("efficiency_pct")
+            return float(v) if isinstance(v, (int, float)) else 100.0
+
+        sorted_members = sorted(members, key=_eff_sort_key)
 
         for member in sorted_members:
             op_name = member.get("operation", "")
-            member_time_ms = member.get("time_ms", 0)
+            member_time_ms = member.get("time_ms") or 0
 
             # Match by (name, time_ms) to avoid collisions when multiple
             # ops share the same name (e.g. many aten::mm instances).
@@ -3571,7 +3754,9 @@ def deterministic_extract_hot_kernels(
                 continue
 
             duration_us = member_time_ms * 1000
-            eff_pct = member.get("efficiency_pct", 0)
+            eff_pct = member.get("efficiency_pct")
+            if not isinstance(eff_pct, (int, float)):
+                eff_pct = 0
 
             launcher_path = full_op.get("launcher_path", "")
             if launcher_path in ("\u2014", "-", ""):
@@ -3599,7 +3784,11 @@ def deterministic_extract_hot_kernels(
                 "duration_us": round(duration_us, 3),
                 "call_count": op_count,
                 "efficiency_percent": round(eff_pct, 2),
-                "impact_score": member.get("impact_score", impact_score),
+                "impact_score": (
+                    member.get("impact_score")
+                    if member.get("impact_score") is not None
+                    else impact_score
+                ),
                 "bound_type": member.get("bound_type", ""),
                 "tracelens_category": category,
                 "tracelens_pitem_rank": global_rank,
@@ -3618,7 +3807,8 @@ def deterministic_extract_hot_kernels(
     # categorizes them as "other" with no efficiency model.
     other_ops = ops_by_category.get("other", [])
     for op in other_ops:
-        time_ms = op.get("time_ms", 0)
+        # Guard null (not just missing) before the numeric compare below.
+        time_ms = op.get("time_ms") or 0
         if time_ms < 1.0:
             continue
 
@@ -3722,6 +3912,23 @@ def generate_minimal_analysis_md(
     report_path = output_dir / "analysis.md"
     lines: list[str] = []
 
+    def _fnum(v: Any, default: float = 0.0) -> float:
+        """Coerce a possibly-null/str metric to float for ``:.Nf`` formatting.
+
+        Deterministic "other"-bucket candidates (e.g. synthetic GDN/MoE ops)
+        can carry present-but-null metric fields; a bare ``.get(k, 0)`` returns
+        None then and ``f"{None:.2f}"`` raises ``unsupported format string
+        passed to NoneType.__format__``. Treat null/non-numeric as the default.
+        """
+        if isinstance(v, bool):
+            return default
+        if isinstance(v, (int, float)):
+            return float(v)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
     gpu_timeline_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
     gpu_rows: list[dict[str, str]] = []
     if gpu_timeline_path.exists():
@@ -3813,10 +4020,10 @@ def generate_minimal_analysis_md(
         for i, c in enumerate(candidates, 1):
             lines.append(
                 f"| {i} | {c.get('name', '')} "
-                f"| {c.get('duration_us', 0):.1f} "
-                f"| {c.get('gpu_pct', 0):.2f}% "
-                f"| {c.get('efficiency_percent', 0):.1f}% "
-                f"| {c.get('impact_score', 0):.2f} "
+                f"| {_fnum(c.get('duration_us')):.1f} "
+                f"| {_fnum(c.get('gpu_pct')):.2f}% "
+                f"| {_fnum(c.get('efficiency_percent')):.1f}% "
+                f"| {_fnum(c.get('impact_score')):.2f} "
                 f"| {c.get('tracelens_category', '')} "
                 f"| {c.get('bound_type', '')} "
                 f"| {c.get('source_file', '') or '-'} |"
@@ -3852,12 +4059,12 @@ def generate_minimal_analysis_md(
         for rc in rank_cands:
             lines.append(
                 f"| {rc.get('name', '')} "
-                f"| {rc.get('duration_us', 0):.1f} "
-                f"| {rc.get('gpu_pct', 0):.2f}% "
-                f"| {rc.get('impact_score', 0):.2f} "
+                f"| {_fnum(rc.get('duration_us')):.1f} "
+                f"| {_fnum(rc.get('gpu_pct')):.2f}% "
+                f"| {_fnum(rc.get('impact_score')):.2f} "
                 f"| {rc.get('call_count', 1)} "
                 f"| - "
-                f"| {rc.get('efficiency_percent', 0):.1f}% "
+                f"| {_fnum(rc.get('efficiency_percent')):.1f}% "
                 f"| {rc.get('bound_type', '')} "
                 f"| {' '.join(rc.get('shapes', []))} "
                 f"| {rc.get('source_file', '') or '-'} "
@@ -4328,7 +4535,14 @@ def enrich_candidates_with_runtime_metadata(
             )
             item["_input_shapes_synthetic"] = True
         item.setdefault("output_shapes", [])
-        item.setdefault("input_dtypes", item.get("dtypes", []) or [])
+        # Per-arg dtypes: TraceLens records them INLINE in each ``shapes`` string
+        # ("(64,5120) bf16"); surface them as a clean, positionally-aligned list so
+        # the GEAK harness allocates the correct-dtype tensors (fp8 weight vs bf16
+        # activation). Falls back to any explicit ``dtypes`` field, then ``[]``.
+        existing_dtypes = item.get("input_dtypes") or item.get("dtypes") or []
+        if not existing_dtypes:
+            existing_dtypes = _dtypes_from_shapes(item.get("shapes", []) or [])
+        item["input_dtypes"] = existing_dtypes
         item.setdefault("output_dtypes", [])
         item.setdefault("runtime_args", {})
         item.setdefault("env_vars", {})
@@ -5351,7 +5565,7 @@ def main() -> int:
                             analysis_mode=args.analysis_mode,
                             capture_folder=capture_folder,
                             budget_minutes=args.budget_minutes,
-                            model=os.environ.get("ANTHROPIC_MODEL", ""),
+                            model=_resolve_tracelens_model(),
                             log=lambda msg: append_log(log_path, msg),
                         )
                     )

@@ -528,12 +528,21 @@ def record_kernel_invocations(
         if not failed:
             return
         backend = str(result.get("backend") or "").lower()
-        section = _invocation_section(backend) or "geak_invocations"
+        section = _invocation_section(backend)
+        if section is None:
+            # The optimizer that ran could not be determined (a genuine
+            # pre-dispatch / gating failure where no backend subprocess
+            # launched, or an ambiguous multi-backend value). Do NOT fabricate a
+            # GEAK invocation — that contaminates GEAK's success/failure tally
+            # with failures it never owned. The failure stays visible via the
+            # kernel_dispatch / kernel_backend_result journey lanes. See
+            # Hyperloom#602.
+            return
         payload = {
             "kernel_id": kid,
             "attempt_id": "",
             "run_id": run_id,
-            "backend": backend or "geak",
+            "backend": backend,
             "decision": "FAILED",
             "status": status or "failed",
             "error": result.get("error") or err_class or None,
@@ -1079,7 +1088,11 @@ def record_kernel_backend_result(
         failed = status in _FAILED_STATUSES or (decision == "REVERT" and bool(err_class))
         if not failed:
             return
-        backend = str(result.get("backend") or "").lower() or "geak"
+        # Never default an unattributable failure to GEAK; a genuine pre-dispatch
+        # gating failure (no backend launched) is recorded honestly as
+        # "unknown" so the kernel_journey timeline does not inflate GEAK's
+        # failure count with attempts it never owned. See Hyperloom#602.
+        backend = str(result.get("backend") or "").lower() or "unknown"
         payload = {
             "kernel_id": kid,
             "attempt_id": "",
@@ -1105,13 +1118,14 @@ def record_kernel_backend_result(
             payload,
             key=f"{kid}-predispatch",
         )
-        record_tool_version(
-            session_dir,
-            tool=backend,
-            root=str(result_meta.get("root_dir") or "") or None,
-            version=str(result_meta.get("version") or "") or None,
-            producer=producer,
-        )
+        if backend != "unknown":
+            record_tool_version(
+                session_dir,
+                tool=backend,
+                root=str(result_meta.get("root_dir") or "") or None,
+                version=str(result_meta.get("version") or "") or None,
+                producer=producer,
+            )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_backend_result failed", exc_info=True)
 

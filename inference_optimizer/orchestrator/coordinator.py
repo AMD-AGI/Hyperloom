@@ -49,16 +49,15 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop: the threshold counts only
 # crashes within this many seconds so old crashes age out on long runs/resume.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
+# Combined baseline-failure backstop: fast-fail after this many TOTAL baseline
+# failures (any error_class), so mixed classes can't dodge the per-class streaks.
+_BASELINE_MAX_TOTAL_FAILURES: int = 3
 from . import phase_state as _phase_state
 from .optimization_journal import (
     Journal,
     JournalEntry,
-    OUTCOME_KEEP,
-    OUTCOME_NO_PROMOTE,
-    OUTCOME_REVERT,
     classify_change_kind,
     operation_kind_for,
-    summarize_change,
 )
 from ..paths import db_path_for
 from ..storage.connection import SqliteConnection
@@ -76,6 +75,7 @@ from .policy import (
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from .gpu_pool import (
+    GPU_LEASE_TTL_GRACE,
     SpecialistGpuPool,
     resolve_gpu_specialist_devices,
 )
@@ -86,6 +86,8 @@ from .resource_lock import (
     _expand_lanes,
 )
 from .shared_state import SharedState
+from .intent_router import IntentRouter
+from .result_recorder import ResultRecorder
 from .sub_agent_runner import SubAgentResult, SubAgentRunner
 from .task_registry import Task, TaskRegistry
 from .trace.conversation_trace import ConversationRecord, append_conversation
@@ -471,6 +473,13 @@ class Coordinator:
                 _set_lane_capacity(self.db.raw, "research_lane", cap)
         except Exception:  # noqa: BLE001 — non-fatal; default seed wins
             log.exception("failed to sync research_lane_capacity to leases DB")
+        # WS2: gpu_research_lane stays capacity-1 (strictly serial GPU
+        # specialists). The co-acquisition lock model can't express a
+        # multi-holder lane that is also mutually exclusive with the cap-1
+        # serving lanes, so a single GPU specialist holds the whole machine at a
+        # time (gpu_count up to the whole machine); the GPU pool partitions the
+        # physical cards within that one lease. The seed default (1) is correct;
+        # no runtime sync needed.
         # `strict_paths` defers to the env flag (on in production, off in tests).
         self.policy = PolicyGate(
             role_registry=self.role_registry,
@@ -494,19 +503,73 @@ class Coordinator:
         # Orchestration working-memory checkpoint policy + tracker (plan Step 4).
         from . import orchestration_memory as _orch_mem
 
-        self._checkpoint_policy = _orch_mem.CheckpointPolicy()
+        # Context-token guardrail (#3): derive soft/hard budgets from the
+        # orchestration model's window × fraction (env-overridable). Falls back to
+        # a conservative 200k window for unknown models; 0 budgets => token
+        # triggers disabled (char/tick/time cadence still applies).
+        def _ckpt_fraction(env_key: str, default: float) -> float:
+            try:
+                v = float(os.environ.get(env_key, "").strip() or default)
+            except (TypeError, ValueError):
+                v = default
+            return v if 0.0 < v <= 1.0 else default
+
+        _orch_model = str(getattr(self.backends.get("orchestration"), "model", "") or "")
+        _ctx_window = _orch_mem.context_window_for_model(_orch_model)
+        _soft_frac = _ckpt_fraction(
+            "INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION",
+            _orch_mem.DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION,
+        )
+        _hard_frac = _ckpt_fraction(
+            "INFERENCE_OPTIMIZER_CTX_HARD_FRACTION",
+            _orch_mem.DEFAULT_CONTEXT_TOKEN_HARD_FRACTION,
+        )
+        self._checkpoint_policy = _orch_mem.CheckpointPolicy(
+            context_token_soft=int(_ctx_window * _soft_frac),
+            context_token_hard=int(_ctx_window * _hard_frac),
+        )
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
+        # Consecutive degenerate checkpoint replies (#1); resets on a good one.
+        self._consec_degenerate_ckpt: int = 0
         # Disable checkpointing entirely via env.
         self._checkpoint_enabled: bool = os.environ.get(
             "INFERENCE_OPTIMIZER_DISABLE_ORCH_CHECKPOINT",
             "",
         ).strip().lower() not in {"1", "true", "yes", "on"}
         # Seed memory rendered into the next full SEED push (resume recovery source).
-        self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(
-            dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
-        )
+        # Operator rollback (#1): INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK=<n>
+        # re-seeds from the n-th-from-newest history snapshot instead of the live
+        # memory, to recover when the most recent compaction(s) lost a key thread.
+        _seed_memory = dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
+        _rollback_raw = os.environ.get("INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK", "").strip()
+        if _rollback_raw:
+            try:
+                _n = int(_rollback_raw)
+                _hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
+                if _n >= 1 and len(_hist) >= _n:
+                    _seed_memory = dict(_hist[-_n])
+                    self.shared_state.orchestration_memory = _seed_memory
+                    log.warning(
+                        "Coordinator: orchestration memory rolled back to history[-%d] "
+                        "(of %d snapshots)",
+                        _n,
+                        len(_hist),
+                    )
+                else:
+                    log.warning(
+                        "Coordinator: ORCH_MEMORY_ROLLBACK=%s out of range (history has %d); "
+                        "using live memory",
+                        _rollback_raw,
+                        len(_hist),
+                    )
+            except (TypeError, ValueError):
+                log.warning(
+                    "Coordinator: invalid ORCH_MEMORY_ROLLBACK=%r; using live memory",
+                    _rollback_raw,
+                )
+        self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(_seed_memory)
         # No-progress circuit-breaker telemetry (plan Step 6); threshold = high-severity cutoff.
         self._progress_marker: dict[str, Any] = {}
         try:
@@ -626,6 +689,38 @@ class Coordinator:
         self._ensure_phase_initialised()
         # Cortex T0 defensive fallback for direct SDK/test callers; best-effort.
         self._ensure_cortex_t0_anchored()
+
+    @property
+    def router(self) -> IntentRouter:
+        """Intent routing collaborator (extracted from this class).
+
+        The ``_handle_*`` intent handlers were moved verbatim into
+        :class:`IntentRouter`; the ``_handle_*`` methods remaining on this class
+        are thin forwarding shims that delegate here. Built lazily and cached so
+        that test doubles constructed via ``Coordinator.__new__`` (bypassing
+        ``__init__``) still resolve a router on first access.
+        """
+        r = self.__dict__.get("_router")
+        if r is None:
+            r = IntentRouter(self)
+            self.__dict__["_router"] = r
+        return r
+
+    @property
+    def recorder(self) -> ResultRecorder:
+        """Result-recording / fact-synthesis collaborator (extracted from this class).
+
+        The ``_record_*`` / ``_build_*`` / ``cortex_finalize_recipe_and_journal``
+        / research-evidence methods were moved verbatim into
+        :class:`ResultRecorder`; the methods remaining here are thin forwarding
+        shims. Built lazily and cached, same as :attr:`router`, so test doubles
+        constructed via ``Coordinator.__new__`` resolve a recorder on first use.
+        """
+        r = self.__dict__.get("_recorder")
+        if r is None:
+            r = ResultRecorder(self)
+            self.__dict__["_recorder"] = r
+        return r
 
     # Context-pull tools (plan Step 2)
     def _orchestration_conversational(self) -> bool:
@@ -814,6 +909,8 @@ class Coordinator:
                     self._STATE_JSON_WARN_BYTES / (1024.0**2),
                 )
         except OSError:
+            # Best-effort disk/size warning only; never block on a stat() that
+            # races a concurrent prune or a transient filesystem error.
             pass
 
         if free_gb >= self._DISK_FREE_MIN_GB and used_frac <= self._DISK_USED_MAX_FRAC:
@@ -889,12 +986,21 @@ class Coordinator:
         tracker = self._checkpoint_tracker
         ticks_since = max(0, tick - tracker.last_tick)
         minutes_since = max(0.0, now_min - tracker.last_minute_mark)
-        # Approximate conversation growth from recorded prompt char counts since last reset.
-        if not force and not self._checkpoint_policy.should_checkpoint(
-            ticks_since_last=ticks_since,
-            minutes_since_last=minutes_since,
-            chars_since_last=tracker.chars_since_last,
-            phase_changed=phase_changed,
+        # Hard context-token guardrail: near the window we MUST compact even when
+        # the LLM summary is degenerate (deterministic fallback) to avoid overflow.
+        hard = self._checkpoint_policy.is_hard_compaction(tracker.context_tokens_now)
+        # Authoritative growth signal is the context-token water level; the char
+        # count is a fallback for backends that don't report token usage.
+        if (
+            not force
+            and not hard
+            and not self._checkpoint_policy.should_checkpoint(
+                ticks_since_last=ticks_since,
+                minutes_since_last=minutes_since,
+                chars_since_last=tracker.chars_since_last,
+                phase_changed=phase_changed,
+                context_tokens_now=tracker.context_tokens_now,
+            )
         ):
             return False
 
@@ -910,6 +1016,48 @@ class Coordinator:
             )
             raw_text = getattr(result, "raw_text", "") or ""
             parsed = _orch_mem.parse_checkpoint_reply(raw_text)
+            degenerate = _orch_mem.is_degenerate_checkpoint(parsed)
+            cur_phase = str(getattr(self.shared_state, "phase", "") or "")
+            # Path 1 — degenerate reply, NOT near the window: skip compaction.
+            # Preserve the live conversation + prior memory (a forgetful summary
+            # must never blank the plan or drop the history). Still reset the
+            # tracker so we don't immediately retry next tick (checkpoint storm).
+            if degenerate and not hard:
+                self._consec_degenerate_ckpt += 1
+                tracker.reset(tick=tick, minute_mark=now_min, phase=cur_phase)
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "orchestration_checkpoint_degraded",
+                        "tick": tick,
+                        "consecutive": self._consec_degenerate_ckpt,
+                        "parse_error": str(parsed.get("parse_error", "") or ""),
+                    },
+                )
+                # Repeated degeneracy: raise the observation's severity so the
+                # operator/robustness sees it (advisory, P3_19 style — never
+                # auto-changes strategy, and does not hijack the alert intent).
+                if self._consec_degenerate_ckpt >= 3:
+                    await self._record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": "orchestration_checkpoint_degraded",
+                            "severity": "medium",
+                            "tick": tick,
+                            "consecutive": self._consec_degenerate_ckpt,
+                            "detail": "orchestration checkpoint summaries repeatedly degenerate",
+                        },
+                    )
+                return False
+            # Path 2 — degenerate but near the window: compact anyway using a
+            # deterministic fallback synthesised from authoritative state, so the
+            # conversation is reset and never overflows.
+            if degenerate and hard:
+                parsed = _orch_mem.deterministic_memory_fallback(self.shared_state)
+            # Path 3 (and post-fallback): a usable summary — compact for real.
+            self._consec_degenerate_ckpt = 0
             seq = 0
             try:
                 row = self.bus.db.fetchone_sync("SELECT COALESCE(MAX(seq), 0) AS s FROM events")
@@ -923,6 +1071,14 @@ class Coordinator:
                 previous=dict(getattr(self.shared_state, "orchestration_memory", {}) or {}),
             )
             self.shared_state.orchestration_memory = record
+            # Append to the rollback ring (bounded) so a later bad compaction can
+            # be recovered from a prior good snapshot (long-run #1).
+            try:
+                hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
+                hist.append(record)
+                self.shared_state.orchestration_memory_history = hist[-10:]
+            except Exception:  # noqa: BLE001 — history is best-effort
+                log.exception("Coordinator: failed to append orchestration_memory_history")
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001
@@ -933,7 +1089,7 @@ class Coordinator:
             tracker.reset(
                 tick=tick,
                 minute_mark=now_min,
-                phase=str(getattr(self.shared_state, "phase", "") or ""),
+                phase=cur_phase,
             )
             await self._record_observation(
                 "coordinator",
@@ -944,11 +1100,23 @@ class Coordinator:
                     "seq": seq,
                     "checkpoint_count": record.get("checkpoint_count", 0),
                     "phase_changed": bool(phase_changed),
+                    "hard_compaction": bool(hard),
+                    "context_tokens": int(tracker.context_tokens_now),
                 },
             )
             return True
         except Exception:  # noqa: BLE001 — never let a checkpoint kill the loop
             log.exception("Coordinator: orchestration checkpoint failed")
+            # Reset the tracker even on failure so a transient backend error
+            # (e.g. gateway 401) can't trigger a checkpoint storm next tick.
+            try:
+                tracker.reset(
+                    tick=tick,
+                    minute_mark=now_min,
+                    phase=str(getattr(self.shared_state, "phase", "") or ""),
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return False
 
     def _attach_orchestration_context_tools(self) -> None:
@@ -1315,6 +1483,467 @@ class Coordinator:
             "verdicts_seen": len(verdicts),
         }
 
+    def _materialize_stack_config_for_resume(self) -> dict[str, Any]:
+        """Rebuild cumulative launch args/envs from ``optimization_stack``."""
+        stack = [e for e in (getattr(self.shared_state, "optimization_stack", []) or []) if isinstance(e, dict)]
+        args = ""
+        envs: dict[str, str] = {}
+        tput: float | None = None
+        variant_name = ""
+        action = "resume_reconstructed"
+        workspace = None
+        for entry in stack:
+            candidate = str(entry.get("candidate_extra_server_args") or "").strip()
+            full = str(entry.get("extra_server_args") or entry.get("extra_sglang_args") or "").strip()
+            args = _merge_cumulative_extra_sglang_args(args, candidate, full)
+            raw_envs = entry.get("extra_envs") or {}
+            if isinstance(raw_envs, Mapping):
+                envs.update({str(k): str(v) for k, v in raw_envs.items()})
+            if isinstance(entry.get("tput"), (int, float)) and float(entry["tput"]) > 0:
+                tput = float(entry["tput"])
+            variant_name = str(entry.get("variant_name") or variant_name or "")
+            action = str(entry.get("action") or action)
+            workspace = entry.get("workspace") or workspace
+        return {
+            "action": action,
+            "variant_name": variant_name,
+            "extra_server_args": args,
+            "extra_envs": envs,
+            "tput": tput,
+            "workspace": workspace,
+            "optimization_stack": stack,
+        }
+
+    async def _resume_consistency_pass(self) -> dict[str, Any]:
+        """One-shot resume audit + recovery for stack/current_best consistency.
+
+        Order matters: recover half-applied / orphaned KEEPs FIRST (they mutate
+        the stack), then reconcile ``current_best`` against the resulting stack,
+        then compensate the validation watermark by enqueuing a single
+        full-stack end-to-end rebench. Idempotent — only runs on a resumed
+        session and every recovery step dedupes, so a second pass is a no-op.
+        """
+        if not self._resumed_from.get("is_resume"):
+            return {"skipped": True, "reason": "not_resume"}
+        state = self.shared_state
+        report: dict[str, Any] = {
+            "skipped": False,
+            "fixes": [],
+            "warnings": [],
+        }
+        # (1) Half-applied integrate window (long-run #4 Gap C): replay the
+        # missing stack append or roll back the partial patch BEFORE anything
+        # reads the stack, so the rest of the pass sees the recovered truth.
+        await self._resume_recover_pending_integrate(report)
+        # (2) Orphaned KEEPs (long-run #4 Gap B): replay integrate_patch KEEPs
+        # that crashed before the append landed; surface ambiguous ones loudly.
+        await self._resume_recover_orphaned_keeps(report)
+
+        # (3) current_best <-> stack reconcile (after 1/2 may have grown stack).
+        stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
+        cb = state.current_best if isinstance(state.current_best, dict) else {}
+        if stack:
+            rebuilt = self._materialize_stack_config_for_resume()
+            cb_args = str(cb.get("extra_server_args") or "")
+            cb_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()} if isinstance(cb.get("extra_envs"), Mapping) else {}
+            if cb_args != rebuilt["extra_server_args"] or cb_envs != rebuilt["extra_envs"]:
+                # The append-only stack is authoritative; a disagreeing
+                # current_best is the inconsistency, recorded distinctly from the
+                # rebuild fix so operators can see a stale best was detected.
+                report["warnings"].append(
+                    {
+                        "kind": "resume_inconsistent_current_best",
+                        "current_best_args": cb_args,
+                        "stack_args": rebuilt["extra_server_args"],
+                    }
+                )
+                new_cb = dict(cb)
+                new_cb.update(
+                    {
+                        "action": rebuilt["action"],
+                        "variant_name": rebuilt["variant_name"],
+                        "extra_server_args": rebuilt["extra_server_args"],
+                        "extra_envs": rebuilt["extra_envs"],
+                        "optimization_stack": list(stack),
+                        "source": "resume_consistency_rebuild_from_stack",
+                    }
+                )
+                if rebuilt["tput"] is not None and not isinstance(new_cb.get("tput"), (int, float)):
+                    new_cb["tput"] = rebuilt["tput"]
+                if rebuilt["workspace"] and not new_cb.get("workspace"):
+                    new_cb["workspace"] = rebuilt["workspace"]
+                state.current_best = new_cb
+                report["fixes"].append("rebuilt_current_best_config_from_stack")
+        elif cb:
+            # Legacy sessions before the append-only stack existed are still
+            # recoverable; seed once instead of dropping a possibly valid best.
+            before = len(getattr(state, "optimization_stack", []) or [])
+            state.seed_stack_from_current_best()
+            after = len(getattr(state, "optimization_stack", []) or [])
+            if after > before:
+                report["fixes"].append("seeded_stack_from_legacy_current_best")
+            else:
+                report["warnings"].append({"kind": "current_best_without_stack"})
+
+        # (4) Validation-watermark compensation (long-run #4 Gap A): unvalidated
+        # KEEPs (claimed gain not yet end-to-end confirmed) → flag + enqueue ONE
+        # full-stack rebench. The flag + watermark are reconciled from the
+        # measured tput when that rebench promotes (see _promote_to_shared_state).
+        stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
+        vlen = int(getattr(state, "cumulative_gain_validated_stack_len", 0) or 0)
+        if vlen < len(stack):
+            state.resume_pending_revalidation = True
+            report["warnings"].append(
+                {
+                    "kind": "resume_unvalidated_keeps",
+                    "validated_stack_len": vlen,
+                    "stack_len": len(stack),
+                }
+            )
+            try:
+                fix = await self._enqueue_internal_stack_rebench(reason="resume_unvalidated_keeps")
+                report["fixes"].append({"kind": "queued_resume_stack_rebench", **fix})
+            except Exception:  # noqa: BLE001
+                log.exception("Coordinator: failed to enqueue resume stack rebench")
+                report["warnings"].append({"kind": "resume_stack_rebench_enqueue_failed"})
+
+        if os.environ.get("INFERENCE_OPTIMIZER_RESUME_REVERIFY_BEST", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            cb_now = state.current_best if isinstance(state.current_best, dict) else {}
+            cb_args = str(cb_now.get("extra_server_args") or "").strip()
+            cb_envs = cb_now.get("extra_envs") if isinstance(cb_now.get("extra_envs"), Mapping) else {}
+            if cb_args or cb_envs:
+                try:
+                    tput = cb_now.get("tput")
+                    params: dict[str, Any] = {
+                        "source": "resume_reverify_best",
+                        "reason": "resume_reverify_best",
+                        "grid": [
+                            {
+                                "name": "resume_current_best",
+                                "extra_args": cb_args,
+                                "extra_envs": dict(cb_envs),
+                                "provenance": "resume_reverify_best",
+                                "note": "env-requested post-resume current_best recheck",
+                            }
+                        ],
+                        "base_tput": float(tput) if isinstance(tput, (int, float)) and tput > 0 else 0.0,
+                        "enable_stack_rebench": False,
+                    }
+                    if state.baseline_config_path:
+                        params["config_path"] = state.baseline_config_path
+                    task, existing = await self.tasks.create_or_return_existing(
+                        kind="explore",
+                        params=params,
+                        idempotency_key="resume-reverify-current-best",
+                    )
+                    report["fixes"].append(
+                        {
+                            "kind": "queued_resume_reverify_best",
+                            "task_id": task.task_id,
+                            "existing": bool(existing),
+                        }
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("Coordinator: failed to queue resume current_best reverify")
+                    report["warnings"].append({"kind": "resume_reverify_best_enqueue_failed"})
+            else:
+                report["warnings"].append({"kind": "resume_reverify_best_no_config"})
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception("Coordinator: resume consistency save failed")
+        await self._record_observation("coordinator", "observation", {"kind": "resume_consistency", **report})
+        return report
+
+    def _replay_keep_from_result(self, kind: str, result: dict[str, Any]) -> bool:
+        """Replay a recorded KEEP delegated-result into current_best/stack.
+
+        Reconstructs the winning-variant dict from a persisted ``delegated_result``
+        and routes it through :meth:`_lift_to_current_best`, which dedupes by
+        ``(action, variant_name)`` — so replay is idempotent. Used by both the
+        pending-integrate (Gap C) and orphaned-KEEP (Gap B) resume recovery
+        paths. Returns ``True`` only when a new stack entry was appended.
+
+        Args:
+            kind: The originating action kind (``integrate_patch`` / ``explore``
+                / ``framework_pr``).
+            result: The recorded delegated result payload for that KEEP.
+
+        Returns:
+            ``True`` when the replay appended a new stack entry, else ``False``.
+        """
+        if not isinstance(result, dict):
+            return False
+        tput = result.get("output_throughput")
+        if not (isinstance(tput, (int, float)) and float(tput) > 0):
+            return False
+        if kind == "explore":
+            bv_src = result.get("best_variant")
+            if not isinstance(bv_src, dict) or not bv_src.get("name"):
+                return False
+            bv = dict(bv_src)
+        elif kind == "integrate_patch":
+            sid = str(result.get("specialist_task_id") or "")
+            if not sid:
+                return False
+            bv = {
+                "name": sid,
+                "candidate_extra_server_args": "",
+                "extra_envs": dict(result.get("config_changes_applied") or {}),
+                "tput": float(tput),
+                "workspace": result.get("workspace"),
+                "provenance": "integrate_patch",
+                "scope": "source_patch",
+            }
+        else:
+            return False
+        before = len(self.shared_state.optimization_stack or [])
+        self._lift_to_current_best(kind, float(tput), bv)
+        return len(self.shared_state.optimization_stack or []) > before
+
+    def _resume_rollback_pending_integrate(self, pending: dict[str, Any]) -> dict[str, Any]:
+        """Reverse-apply a half-applied integrate patch set (Gap C rollback).
+
+        Best-effort ``git apply -R`` of every patch recorded on the
+        ``pending_integrate`` sentinel into the framework source tree, so a
+        crash AFTER ``git apply`` but BEFORE the bench/KEEP cannot leak a partial
+        change into later launches. A patch that is not currently applied simply
+        fails the reverse ``--check`` and is reported, not retried.
+
+        Args:
+            pending: The ``pending_integrate`` sentinel dict.
+
+        Returns:
+            A summary ``{"reversed": [...], "failed": [...]}``.
+        """
+        from .action_executors.integrate_patch import _git_apply_reverse
+
+        summary: dict[str, Any] = {"reversed": [], "failed": []}
+        root = str(pending.get("framework_source_root") or "").strip()
+        patches = [str(p) for p in (pending.get("patches") or []) if str(p).strip()]
+        if not root or not patches:
+            return summary
+        root_path = Path(root)
+        for patch in patches:
+            try:
+                ok, err = _git_apply_reverse(root_path, Path(patch))
+            except Exception as exc:  # noqa: BLE001 — rollback is best-effort
+                summary["failed"].append({"patch": patch, "error": repr(exc)})
+                continue
+            if ok:
+                summary["reversed"].append(patch)
+            else:
+                summary["failed"].append({"patch": patch, "error": err})
+        return summary
+
+    async def _resume_recover_pending_integrate(self, report: dict[str, Any]) -> None:
+        """Recover a crashed integrate_patch window from the sentinel (Gap C).
+
+        Three-way decision keyed on whether a ``kept`` delegated-result exists
+        for the sentinel's task: replay the missing append (crashed after KEEP),
+        roll back the half-applied patch (crashed after apply, before KEEP), or
+        clear a stale sentinel. The sentinel is always cleared afterwards.
+
+        Args:
+            report: The resume report dict to append fixes/warnings to.
+        """
+        state = self.shared_state
+        pending = getattr(state, "pending_integrate", {}) or {}
+        if not (isinstance(pending, dict) and pending):
+            return
+        task_id = str(pending.get("task_id") or "")
+        kept_res: dict[str, Any] | None = None
+        try:
+            for msg in await self.bus.tail(topic="delegated_result", n=10_000):
+                payload = msg.payload or {}
+                if task_id and str(payload.get("task_id") or "") != task_id:
+                    continue
+                res = payload.get("result") or {}
+                # Require an explicit integrate_patch kind: an empty-kind wildcard
+                # could misclassify a non-integrate event that happens to share
+                # this task_id as a kept integrate result, skipping rollback of a
+                # half-applied patch. (Matches _resume_recover_orphaned_keeps.)
+                if (
+                    isinstance(res, dict)
+                    and str(res.get("kind") or payload.get("kind") or "") == "integrate_patch"
+                    and str(res.get("status") or "").lower() == "kept"
+                ):
+                    kept_res = res
+                    break
+        except Exception:  # noqa: BLE001
+            log.exception("Coordinator: pending_integrate kept-result scan failed")
+        if kept_res is not None:
+            appended = self._replay_keep_from_result("integrate_patch", kept_res)
+            report["fixes"].append(
+                {"kind": "replayed_pending_integrate", "task_id": task_id, "appended": bool(appended)}
+            )
+        else:
+            summary = self._resume_rollback_pending_integrate(pending)
+            if summary.get("reversed"):
+                report["fixes"].append(
+                    {"kind": "rolled_back_pending_integrate", "task_id": task_id, **summary}
+                )
+            elif summary.get("failed"):
+                report["warnings"].append(
+                    {"kind": "pending_integrate_rollback_failed", "task_id": task_id, **summary}
+                )
+            else:
+                report["fixes"].append({"kind": "cleared_stale_pending_integrate", "task_id": task_id})
+        state.pending_integrate = {}
+
+    async def _resume_recover_orphaned_keeps(self, report: dict[str, Any]) -> None:
+        """Recover / surface KEEPs present in the event log but absent from the stack (Gap B).
+
+        ``integrate_patch`` KEEPs are well-defined (a ``kept`` status means the
+        single-variant bench + accuracy gate passed and the patch was committed),
+        so a kept-but-absent one is a crash before the append landed → replay it
+        (idempotent), unless its run workspace is gone → discard + alert. ``explore``
+        / ``framework_pr`` KEEPs are ambiguous (KEEP_UNSTABLE eviction can drop a
+        kept explore variant from the stack), so they are surfaced as a
+        ``medium`` alert rather than resurrected. Whatever the stack ends up as
+        is re-validated by the Gap A full-stack rebench.
+
+        Args:
+            report: The resume report dict to append fixes/warnings to.
+        """
+        state = self.shared_state
+        try:
+            stack_keys = {
+                (str(e.get("action") or ""), str(e.get("variant_name") or ""))
+                for e in (state.optimization_stack or [])
+                if isinstance(e, dict)
+            }
+            seen: set[tuple[str, str]] = set()
+            for msg in await self.bus.tail(topic="delegated_result", n=10_000):
+                payload = msg.payload or {}
+                kind = str(payload.get("kind") or "")
+                res = payload.get("result") or {}
+                if not isinstance(res, dict) or str(res.get("status") or "").lower() != "kept":
+                    continue
+                if kind == "integrate_patch":
+                    variant = str(res.get("specialist_task_id") or "")
+                elif kind == "framework_pr":
+                    cand = res.get("candidate") or {}
+                    variant = str(
+                        (cand.get("candidate_id") if isinstance(cand, dict) else "")
+                        or (cand.get("pr_url") if isinstance(cand, dict) else "")
+                        or ""
+                    )
+                elif kind == "explore":
+                    bv = res.get("best_variant") or {}
+                    variant = str((bv.get("name") if isinstance(bv, dict) else "") or "")
+                else:
+                    continue
+                key = (kind, variant)
+                if not variant or key in stack_keys or key in seen:
+                    continue
+                seen.add(key)
+                if kind == "integrate_patch":
+                    workspace = str(res.get("workspace") or "").strip()
+                    if workspace and not Path(workspace).exists():
+                        report["warnings"].append(
+                            {
+                                "kind": "orphaned_keep_discarded",
+                                "orphan_kind": kind,
+                                "variant": variant,
+                                "task_id": payload.get("task_id"),
+                                "reason": "workspace_missing",
+                            }
+                        )
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "orphaned_keep_discarded",
+                                "severity": "medium",
+                                "orphan_kind": kind,
+                                "variant": variant,
+                            },
+                        )
+                    elif self._replay_keep_from_result(kind, res):
+                        stack_keys.add(key)
+                        report["fixes"].append(
+                            {"kind": "replayed_orphaned_keep", "orphan_kind": kind, "variant": variant}
+                        )
+                    else:
+                        report["warnings"].append(
+                            {"kind": "orphaned_keep_replay_noop", "orphan_kind": kind, "variant": variant}
+                        )
+                else:
+                    # explore / framework_pr: ambiguous vs eviction — never
+                    # resurrect; surface for the operator.
+                    report["warnings"].append(
+                        {
+                            "kind": "orphaned_keep",
+                            "orphan_kind": kind,
+                            "variant": variant,
+                            "task_id": payload.get("task_id"),
+                        }
+                    )
+                    await self._record_observation(
+                        "coordinator",
+                        "observation",
+                        {
+                            "kind": "orphaned_keep",
+                            "severity": "medium",
+                            "orphan_kind": kind,
+                            "variant": variant,
+                        },
+                    )
+        except Exception:  # noqa: BLE001
+            log.exception("Coordinator: orphaned KEEP resume recovery failed")
+
+    async def _enqueue_internal_stack_rebench(self, *, reason: str) -> dict[str, Any]:
+        """Enqueue one full-stack end-to-end rebench of the cumulative config (Gap A).
+
+        Builds a single-variant ``explore`` task from the stack-materialized
+        launch args/envs, benched against ``baseline_tput`` so the measured
+        delta becomes the validated cumulative gain. Tagged
+        ``source=resume_stack_revalidate`` so ``_promote_to_shared_state``
+        reconciles ``cumulative_gain_validated_stack_len`` + clears
+        ``resume_pending_revalidation`` from the measured throughput. Idempotent
+        via a fixed idempotency key.
+
+        Args:
+            reason: Human-readable reason stamped on the task params.
+
+        Returns:
+            A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
+        """
+        rebuilt = self._materialize_stack_config_for_resume()
+        args = str(rebuilt.get("extra_server_args") or "").strip()
+        envs = rebuilt.get("extra_envs") or {}
+        if not (args or envs):
+            return {"skipped": True, "reason": "empty_stack"}
+        params: dict[str, Any] = {
+            "source": "resume_stack_revalidate",
+            "reason": reason,
+            "grid": [
+                {
+                    "name": "resume_stack_revalidate",
+                    "extra_args": args,
+                    "extra_envs": dict(envs),
+                    "provenance": "resume_stack_revalidate",
+                    "note": "post-resume full-stack end-to-end revalidation",
+                }
+            ],
+            "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+            "enable_stack_rebench": False,
+        }
+        if self.shared_state.baseline_config_path:
+            params["config_path"] = self.shared_state.baseline_config_path
+        task, existing = await self.tasks.create_or_return_existing(
+            kind="explore",
+            params=params,
+            idempotency_key="resume-stack-revalidate",
+        )
+        return {"task_id": task.task_id, "existing": bool(existing)}
+
     @property
     def resumed_from(self) -> dict[str, Any]:
         """Read-only snapshot of resume detection (set by ``__init__``).
@@ -1342,6 +1971,8 @@ class Coordinator:
             try:
                 await t
             except asyncio.CancelledError:
+                # Expected: we just cancelled these tasks; swallow the
+                # cancellation so shutdown drains every task cleanly.
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
@@ -1586,6 +2217,163 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: _on_phase_entered hook failed")
 
+    def _negative_ledger_domain_counts(self, *, recent_cycles: int = 3) -> dict[str, int]:
+        """Summarise recent negative explore-ledger pressure by specialist domain."""
+        state = self.shared_state
+        cur_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        search = getattr(state, "explore_search", {}) or {}
+        rows: list[Any] = []
+        if isinstance(search, dict):
+            tested = search.get("tested") or {}
+            if isinstance(tested, dict):
+                rows.extend(tested.values())
+            rejected = search.get("rejected") or []
+            if isinstance(rejected, list):
+                rows.extend(rejected)
+        counts: dict[str, int] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                cycle = int(row.get("cycle", cur_cycle) or 0)
+            except (TypeError, ValueError):
+                cycle = cur_cycle
+            if cycle < max(0, cur_cycle - recent_cycles + 1):
+                continue
+            domain = str(
+                row.get("domain")
+                or row.get("specialist_domain")
+                or row.get("source_domain")
+                or row.get("provenance")
+                or ""
+            ).strip()
+            if not domain:
+                continue
+            counts[domain] = counts.get(domain, 0) + 1
+        return counts
+
+    def _plan_cycle_focus(self) -> dict[str, Any]:
+        """Pick an advisory specialist-domain focus for the current macro-cycle."""
+        from .roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+
+        state = self.shared_state
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        domains = sorted({v[0] for v in BOTTLENECK_DOMAIN_HINTS.values()} | {"freeform_specialist"})
+        scores: dict[str, float] = {d: 0.0 for d in domains}
+        reasons: dict[str, list[str]] = {d: [] for d in domains}
+        shift = getattr(state, "bottleneck_shift", {}) or {}
+        to_domain = str(shift.get("to_domain") or "").strip()
+        if to_domain:
+            scores.setdefault(to_domain, 0.0)
+            reasons.setdefault(to_domain, [])
+            scores[to_domain] += 5.0
+            reasons[to_domain].append(f"matches current bottleneck shift to {shift.get('to') or to_domain}")
+        sat = getattr(state, "saturated_directions", {}) or {}
+        if isinstance(sat, dict):
+            for domain, row in sat.items():
+                if not isinstance(row, dict):
+                    continue
+                d = str(domain or row.get("domain") or "").strip()
+                if not d:
+                    continue
+                scores.setdefault(d, 0.0)
+                reasons.setdefault(d, [])
+                if bool(row.get("saturated")):
+                    scores[d] -= 100.0
+                    reasons[d].append(
+                        f"saturated at {row.get('within_pct')}% within roofline; deprioritized"
+                    )
+                else:
+                    scores[d] += 1.0
+                    reasons[d].append("not saturated in latest roofline snapshot")
+        log_rows = list(getattr(state, "cycle_strategy_log", []) or [])
+        tried = {str(r.get("focus") or "") for r in log_rows if isinstance(r, dict)}
+        for row in log_rows:
+            if not isinstance(row, dict):
+                continue
+            domain = str(row.get("focus") or "").strip()
+            if not domain:
+                continue
+            scores.setdefault(domain, 0.0)
+            reasons.setdefault(domain, [])
+            gd = row.get("gain_delta")
+            if isinstance(gd, (int, float)):
+                scores[domain] += max(-2.0, min(3.0, float(gd)))
+                reasons[domain].append(f"historical cycle gain_delta={float(gd):+.2f}%")
+        for domain in domains:
+            if domain not in tried:
+                scores[domain] += 1.5
+                reasons[domain].append("exploration bonus: not yet used as cycle focus")
+        negative_counts = self._negative_ledger_domain_counts()
+        for domain, count in negative_counts.items():
+            scores.setdefault(domain, 0.0)
+            reasons.setdefault(domain, [])
+            penalty = min(4.0, 0.5 * float(count))
+            scores[domain] -= penalty
+            reasons[domain].append(f"recent negative ledger count={count} penalty={penalty:.1f}")
+        focus = max(scores.items(), key=lambda kv: (kv[1], kv[0]))[0] if scores else "freeform_specialist"
+        rationale_bits = reasons.get(focus) or ["fallback focus; no stronger cycle-level evidence"]
+        return {
+            "cycle": cycle,
+            "focus": focus,
+            "score": round(float(scores.get(focus, 0.0)), 3),
+            "rationale": "; ".join(rationale_bits[:4]),
+            "bottleneck_at_start": str(shift.get("to") or self.shared_state.current_top_bottleneck() or ""),
+            "saturated_at_start": sorted(
+                str(k)
+                for k, v in (sat.items() if isinstance(sat, dict) else [])
+                if isinstance(v, dict) and bool(v.get("saturated"))
+            ),
+            "gain_at_start": float(getattr(state, "gain_at_cycle_start", 0.0) or 0.0),
+            "gain_delta": None,
+        }
+
+    def _record_cycle_strategy_for_current_cycle(self) -> None:
+        """Append/update the advisory cycle-strategy row for the current cycle."""
+        state = self.shared_state
+        planned = self._plan_cycle_focus()
+        log_rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
+        cycle = int(planned.get("cycle", 0) or 0)
+        replaced = False
+        for idx, row in enumerate(log_rows):
+            if int(row.get("cycle", -1) or -1) == cycle:
+                merged = dict(row)
+                merged.update(planned)
+                log_rows[idx] = merged
+                replaced = True
+                break
+        if not replaced:
+            log_rows.append(planned)
+        state.cycle_strategy_log = log_rows[-50:]
+
+    def _cycle_strategy_seed_block(self) -> str:
+        """Render persisted cycle focus facts for orchestration SEED prompts."""
+        rows = [r for r in (getattr(self.shared_state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
+        if not rows:
+            return ""
+        cur_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        current = next((r for r in reversed(rows) if int(r.get("cycle", -1) or -1) == cur_cycle), rows[-1])
+        lines = [
+            f"=== Cycle {cur_cycle} strategy ===",
+            f"focus={current.get('focus') or '(none)'} score={current.get('score', 0)}",
+        ]
+        rationale = str(current.get("rationale") or "").strip()
+        if rationale:
+            lines.append(f"rationale: {rationale}")
+        saturated = current.get("saturated_at_start") or []
+        if saturated:
+            lines.append(f"saturated_at_start={saturated}")
+        prior = [r for r in rows if int(r.get("cycle", -1) or -1) != cur_cycle][-5:]
+        if prior:
+            lines.append("previous cycles:")
+            for row in prior:
+                lines.append(
+                    f"  - cycle={row.get('cycle')} focus={row.get('focus')} "
+                    f"gain_delta={row.get('gain_delta')} saturated={row.get('saturated_at_start') or []}"
+                )
+        lines.append("Advisory only: use this as a prior, not a dispatch gate.")
+        return "\n".join(lines)
+
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
         """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK_PR or EXPLORE).
 
@@ -1602,6 +2390,17 @@ class Coordinator:
         """
         state = self.shared_state
         prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        try:
+            prev_delta = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0) - float(
+                getattr(state, "gain_at_cycle_start", 0.0) or 0.0
+            )
+            rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
+            for row in rows:
+                if int(row.get("cycle", -1) or -1) == prior_cycle and row.get("gain_delta") is None:
+                    row["gain_delta"] = round(prev_delta, 6)
+            state.cycle_strategy_log = rows[-50:]
+        except Exception:  # noqa: BLE001 — advisory bookkeeping only
+            log.exception("Coordinator: cycle_strategy gain_delta backfill failed")
         state.macro_cycle = prior_cycle + 1
         # R7: carry the effective no-gain streak computed by should_reloop.
         if isinstance(evidence, dict) and "no_gain_cycle_streak_effective" in evidence:
@@ -1632,6 +2431,10 @@ class Coordinator:
         # and intentionally preserved.)
         state.last_sweep = {}
         state.last_conc_sweep = {}
+        try:
+            self._record_cycle_strategy_for_current_cycle()
+        except Exception:  # noqa: BLE001 — focus is advisory only
+            log.exception("Coordinator: cycle strategy planning failed on reloop")
         log.info(
             "Coordinator: macro-cycle reloop %d → %d (no_gain_streak=%d, gain_anchor=%.4f)",
             prior_cycle,
@@ -3211,8 +4014,10 @@ class Coordinator:
             if isinstance(item, dict) and item.get("action") == "gemm_tuning"
         }
         ts = datetime.now(timezone.utc).isoformat()
+        engine = str(result.get("engine") or "geak")
         entry = {
             "action": "gemm_tuning",
+            "engine": engine,
             "variant_name": "a8w8_blockscale_tuned_gemm",
             "tuned_file": tuned_file,
             "final_report_path": final_report,
@@ -3233,6 +4038,7 @@ class Coordinator:
             )
         self.shared_state.current_best = {
             "action": "gemm_tuning",
+            "engine": engine,
             "tput": tuned_tput,
             "variant_name": "a8w8_blockscale_tuned_gemm",
             "tuned_file": tuned_file,
@@ -5122,7 +5928,8 @@ class Coordinator:
                 "sources; do not benchmark or patch."
             ),
             "gap_layer": "research",
-            "max_turns": 10,
+            # WS1: depth is bounded by the wall-clock budget, not by turns —
+            # omit max_turns so the scout runs to a deliverable conclusion.
             "source": "coordinator_internal",
             "reason": str(reason),
             "seen_pr_ids": seen,
@@ -5204,6 +6011,10 @@ class Coordinator:
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: EXPLORE re-dispatch failed")
+
+    def _aggregate_research_evidence(self, done_payload: dict[str, Any]) -> None:
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        return self.recorder._aggregate_research_evidence(done_payload)
 
     async def _maybe_force_stalled_domain_specialist(self) -> None:
         """Hard-trigger (point 2): force-dispatch a domain specialist for a
@@ -5351,7 +6162,7 @@ class Coordinator:
                 "exhausted ones).\n" + (digest or "(no digest)")
             ),
             "gap_layer": "research",
-            "max_turns": 8,
+            # WS1: bounded by the wall-clock budget, not by turns.
             "source": "coordinator_internal",
             "reason": "plateau_trajectory_review",
             "readonly": True,
@@ -5381,58 +6192,8 @@ class Coordinator:
             )
 
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
-        """Persist scout output (hints, competitor target, gap seeds, dedup); all steps fail-soft.
-
-        Args:
-            done_payload: The completed research-scout task payload; its
-                ``research`` block carries hints, competitor target and PR ids.
-        """
-        from . import research_hints as _research_hints
-
-        block = done_payload.get("research")
-        if not isinstance(block, dict):
-            block = {}
-        hints = block.get("hints") or []
-        try:
-            added, dropped = _research_hints.append_hints(
-                self.session_dir,
-                hints,
-            )
-            if dropped:
-                log.info(
-                    "research-scout: dropped %d sourceless hint(s)",
-                    dropped,
-                )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("research-scout: append_hints failed")
-            added = 0
-        try:
-            _research_hints.write_competitor_target(
-                self.session_dir,
-                block.get("competitor_target"),
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("research-scout: competitor_target write failed")
-        # Share inspected PR ids with the FRAMEWORK_PR dedup set.
-        pr_ids: list[Any] = []
-        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
-            vals = block.get(key)
-            if isinstance(vals, list):
-                pr_ids.extend(vals)
-        try:
-            self.shared_state.register_seen_pr_ids(pr_ids)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("research-scout: register_seen_pr_ids failed")
-        # Seed high-priority hints as gaps[] so EXPLORE tries them early.
-        try:
-            self._seed_gaps_from_research_hints()
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("research-scout: gap seeding failed")
-        log.info(
-            "research-scout harvested: hints_added=%d seen_pr_ids=%d",
-            added,
-            len(self.shared_state.research_scout_seen_pr_ids or []),
-        )
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        return self.recorder._harvest_research_scout(done_payload)
 
     def _seed_gaps_from_research_hints(self) -> None:
         """Inject research hints as advisory gaps[] seeds (idempotent)."""
@@ -5596,6 +6357,7 @@ class Coordinator:
         if not (self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]):
             return
         await self.replay_for_resume()
+        await self._resume_consistency_pass()
 
     async def _pump_framework_pr_phase_safely(self, *, caller: str) -> None:
         """Best-effort FRAMEWORK_PR pump wrapper shared by tick and run.
@@ -5841,6 +6603,8 @@ class Coordinator:
                         stop_reason = "signal"
                         break
                     except asyncio.TimeoutError:
+                        # Normal path: no stop signal within the tick interval —
+                        # fall through and run the next tick.
                         pass
         finally:
             if self.shared_state.closing_phase:
@@ -5867,6 +6631,8 @@ class Coordinator:
                     for sig in previous_handlers:
                         loop.remove_signal_handler(sig)
                 except (NotImplementedError, RuntimeError):
+                    # Signal handlers are unsupported off the main thread / on
+                    # some platforms; teardown is best-effort, so ignore.
                     pass
         return self.shared_state.stop_reason
 
@@ -5974,15 +6740,26 @@ class Coordinator:
         """
         backend = self.backends[agent_name]
         prompt = await self._compose_prompt(agent_name)
-        # Accumulate orchestration prompt size as a proxy for conversation growth (plan Step 4).
-        if agent_name == "orchestration" and self._orchestration_conversational():
-            try:
-                self._checkpoint_tracker.chars_add(len(prompt))
-            except Exception:  # noqa: BLE001
-                pass
+        # Conversation-growth accounting happens AFTER the turn returns, from the
+        # backend's reported token usage (see below) — a delta-prompt char count
+        # before the call badly undercounts the cached history in a persistent
+        # conversation (#3).
         sys_prompt = await self._load_system_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
+        # Stamp the timeline keys onto backends that self-write their trace row
+        # (critic writes its own llm_calls row from inside run()). No-op for
+        # backends without the hook. Best-effort: never block the turn.
+        _set_trace_ctx = getattr(backend, "set_trace_context", None)
+        if callable(_set_trace_ctx):
+            try:
+                _set_trace_ctx(
+                    tick=int(self.shared_state.tick or 0),
+                    phase=(self.shared_state.phase or "") or None,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         # max_turns=0 → backend default; ClaudeBackend needs ≥2 for tool_use→tool_result→final-text.
+        _t0 = time.perf_counter()
         try:
             result: BackendTurnResult = await backend.run(
                 prompt=prompt,
@@ -6029,11 +6806,32 @@ class Coordinator:
         # role (orchestration / kernel) whose backend reports usage on
         # metadata (ClaudeBackend + CodexBackend). Best-effort: a trace
         # failure must never affect intent routing.
-        self._trace_reactor_llm_call(agent_name, result)
+        latency_ms = int((time.perf_counter() - _t0) * 1000)
+        self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace (conversations): persist the full, redacted
         # prompt+response for this reactor turn. Separate file from the
         # token ledger; same best-effort posture.
         self._record_reactor_conversation(agent_name, result)
+        # Context-token water level (#3): the persistent conversation's true size
+        # is the backend's reported input usage (input + cache_read +
+        # cache_creation). Fall back to a full-turn char accumulation only when
+        # the backend reports no usage (e.g. codex), never the old delta-only.
+        if agent_name == "orchestration" and self._orchestration_conversational():
+            try:
+                md = getattr(result, "metadata", None) or {}
+                it = md.get("input_tokens")
+                cr = md.get("cache_read_input_tokens")
+                cc = md.get("cache_creation_input_tokens")
+                if it is not None or cr is not None or cc is not None:
+                    self._checkpoint_tracker.set_context_tokens(
+                        int(it or 0) + int(cr or 0) + int(cc or 0)
+                    )
+                else:
+                    self._checkpoint_tracker.chars_add(
+                        len(prompt) + len(getattr(result, "raw_text", "") or "")
+                    )
+            except Exception:  # noqa: BLE001 — accounting must never break routing
+                pass
         # Completed orchestration turn means SEED delivered; flip flag so later turns send DELTA (plan Step 3).
         if agent_name == "orchestration":
             self._orchestration_seeded = True
@@ -6044,6 +6842,8 @@ class Coordinator:
         self,
         agent_name: str,
         result: BackendTurnResult,
+        *,
+        latency_ms: int | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a reactor turn.
 
@@ -6083,6 +6883,7 @@ class Coordinator:
                 metadata=metadata,
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
+                latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break the loop
@@ -6258,6 +7059,14 @@ class Coordinator:
         if agent_name == "orchestration":
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
+            if push_full:
+                try:
+                    cycle_strategy_block = self._cycle_strategy_seed_block()
+                except Exception:  # noqa: BLE001 — advisory only
+                    log.exception("Coordinator: cycle strategy seed render failed")
+                    cycle_strategy_block = ""
+                if cycle_strategy_block:
+                    sections.append(cycle_strategy_block)
             if self._run_deadline is not None and self._run_started_monotonic is not None:
                 remaining_min = max(
                     0.0,
@@ -6669,140 +7478,13 @@ class Coordinator:
 
     # Intent handling
     async def _handle_intent(self, source: str, intent: Intent) -> None:
-        """Validate an emitted intent through PolicyGate, then route it.
-
-        Runs the intent through :meth:`PolicyGate.validate_intent`; a
-        :class:`PolicyDenied` is recorded and the intent dropped. Valid intents
-        are dispatched to the matching ``_handle_*`` method by type, and the
-        agent's message cursor is advanced to the latest sequence afterward.
-
-        Args:
-            source (str): The agent that emitted the intent.
-            intent (Intent): The parsed intent to validate and route.
-        """
-        try:
-            self.policy.validate_intent(source, intent)
-        except PolicyDenied as denied:
-            await self._record_policy_denied(source, intent, denied)
-            return
-
-        try:
-            it = intent.type
-            if it == IntentType.PROPOSE_ACTION:
-                await self._handle_propose_action(source, intent)
-            elif it == IntentType.REVIEW_VERDICT:
-                await self._handle_review_verdict(source, intent)
-            elif it == IntentType.DELEGATE:
-                await self._handle_delegate(source, intent)
-            elif it == IntentType.REQUEST:
-                await self._handle_request(source, intent)
-            elif it == IntentType.RESPONSE:
-                await self._handle_response(source, intent)
-            elif it == IntentType.KILL_TASK:
-                await self._handle_kill_task(source, intent)
-            elif it == IntentType.PRUNE_BRANCH:
-                await self._handle_prune_branch(source, intent)
-            elif it == IntentType.FORCE_DISPATCH:
-                await self._handle_force_dispatch(source, intent)
-            elif it == IntentType.ESCALATE_STRATEGY_CHANGE:
-                await self._handle_escalate_strategy_change(source, intent)
-            elif it == IntentType.SEND_MESSAGE:
-                await self._handle_send_message(source, intent)
-            elif it == IntentType.ALERT:
-                await self._handle_alert(source, intent)
-            elif it == IntentType.UPDATE_STATE:
-                await self._handle_update_state(source, intent)
-            elif it == IntentType.SPECIALIST_DONE:
-                # Terminal specialist intent (R3 already validated); handler only bookkeeps. Defense-in-depth.
-                await self._handle_specialist_done(source, intent)
-            else:
-                # ASK_QUESTION / ANSWER / UPDATE_PERSONA — record for replay
-                await self._record_observation(
-                    source,
-                    "observation",
-                    {"intent": it.value, "payload": intent.payload},
-                )
-            await self._cursor_advance_to_latest(source)
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            raise
-        except Exception as exc:  # noqa: BLE001
-            log.exception("intent handler for %s raised", source)
-            self._record_coordinator_exception(
-                stage="handle_intent",
-                agent=source,
-                exc=exc,
-            )
-            try:
-                await self._record_observation(
-                    "coordinator",
-                    "observation",
-                    {
-                        "kind": "handle_intent_exception",
-                        "agent": source,
-                        "intent_type": intent.type.value,
-                        "error": f"{type(exc).__name__}: {str(exc)[:500]}",
-                    },
-                )
-            except Exception:  # noqa: BLE001
-                log.exception("failed to record handle_intent_exception observation")
-            return
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_intent(source, intent)
 
     # PROPOSE_ACTION + REVIEW_VERDICT
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
-        """Gate a proposed action and enqueue it for Critic Review.
-
-        Drops proposals for pruned families, applies the pending-roofline and
-        execution-order denials, then publishes a ``proposal`` message and
-        registers a :class:`PendingProposal` so the Critic gate (§18) can later
-        return a verdict.
-
-        Args:
-            source (str): The agent proposing the action.
-            intent (Intent): The PROPOSE_ACTION intent; ``payload`` carries
-                ``action_name`` and optional ``params`` / ``predicted_gain_pct``.
-        """
-        action_name = intent.payload["action_name"]
-        # Pruned families are advisory: proposal still queues, but the inbox carries an advisory note.
-        if self.shared_state.is_pruned(action_name):
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "proposal_pruned_advisory",
-                    "from": source,
-                    "action": action_name,
-                    "hint": (
-                        f"{action_name!r} is in pruned_families; if the "
-                        "prune was speculative the LLM may pick this "
-                        "action again, otherwise prefer another "
-                        "phase-allowed action."
-                    ),
-                },
-            )
-        denied = self._sequence_denial_for_action(
-            action_name,
-            proposed_params=intent.payload.get("params"),
-        )
-        if denied is not None:
-            await self._record_policy_denied(source, intent, denied)
-            return
-        msg = Message.new(
-            source,
-            "*",
-            "proposal",
-            {**intent.payload, "needs_review": True},
-            priority=1,
-        )
-        await self.bus.append_and_seq(msg)
-        pending = PendingProposal(
-            proposal_msg_id=msg.msg_id,
-            from_agent=source,
-            action_name=action_name,
-            predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
-            payload=dict(intent.payload),
-        )
-        # KB hypothesize/verify retired; proposals enter the queue directly, facts written after task lands.
-        self.state.pending_proposals[msg.msg_id] = pending
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_propose_action(source, intent)
 
     def _resolve_issue_canonical(self, pending: PendingProposal) -> str:
         """Find the issue_node canonical_id this proposal addresses. Priority: payload gap_canonical_id → params gap_canonical_id → _gap_anchor_canonical_id (Gap-09).
@@ -7104,41 +7786,8 @@ class Coordinator:
             )
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
-        """Apply a Critic ``review_verdict`` to its target proposal; legacy verdict_map collapsed (approve > reject > needs_review).
-
-        Args:
-            source: The agent (Critic) emitting the verdict.
-            intent: The REVIEW_VERDICT intent; payload carries
-                ``target_proposal_msg_id`` and ``verdict``/``verdict_map``.
-        """
-        target = intent.payload["target_proposal_msg_id"]
-        pending = self.state.pending_proposals.get(target)
-        verdict_map = intent.payload.get("verdict_map")
-        single_verdict = intent.payload.get("verdict")
-        if pending is None:
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "verdict_for_unknown_proposal",
-                    "target": target,
-                    "verdict": single_verdict or "",
-                    "verdict_map": bool(verdict_map),
-                },
-            )
-            return
-        verdict = str(single_verdict or "")
-        if not verdict and isinstance(verdict_map, dict) and verdict_map:
-            sub_verdicts = [str((entry or {}).get("verdict") or "").strip() for entry in verdict_map.values()]
-            verdict = (
-                "approve" if "approve" in sub_verdicts else "reject" if "reject" in sub_verdicts else "needs_review"
-            )
-        await self._handle_single_verdict(
-            source=source,
-            pending=pending,
-            verdict=verdict,
-            reasoning=str(intent.payload.get("reasoning") or ""),
-        )
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_review_verdict(source, intent)
 
     async def _handle_single_verdict(
         self,
@@ -7148,59 +7797,11 @@ class Coordinator:
         verdict: str,
         reasoning: str,
     ) -> None:
-        """Legacy v0.6 single-verdict handler (approve materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate.
-
-        Args:
-            source: The agent emitting the verdict.
-            pending: The pending proposal the verdict targets.
-            verdict: The collapsed verdict (approve / reject / needs_review).
-            reasoning: Free-text reasoning recorded with the verdict.
-        """
-        pending.decided = True
-        pending.verdict = verdict
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                pending.from_agent,
-                "review_verdict",
-                {
-                    "target_proposal_msg_id": pending.proposal_msg_id,
-                    "verdict": verdict,
-                    "reasoning": reasoning,
-                },
-                priority=0 if verdict == "reject" else 1,
-                in_reply_to=pending.proposal_msg_id,
-            )
-        )
-        # Mirror specialist / integrate_patch verdicts onto SharedState so
-        # PolicyGate's integrate_patch gate can consult them on the next tick.
-        try:
-            pa_params = pending.payload.get("params") or {}
-        except AttributeError:
-            pa_params = {}
-        sid_candidate = ""
-        if pending.action_name == "integrate_patch":
-            sid_candidate = str(pa_params.get("specialist_task_id") or "").strip()
-        elif pending.action_name == "specialist":
-            # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
-            sid_candidate = str(pending.task_id or "").strip()
-        if sid_candidate and verdict:
-            try:
-                self.shared_state.record_specialist_patch_verdict(
-                    sid_candidate,
-                    verdict,
-                )
-                self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — best-effort mirror
-                log.exception(
-                    "failed to mirror critic verdict for specialist task=%s",
-                    sid_candidate,
-                )
-        if verdict == "approve":
-            await self._materialize_approved_proposal(pending)
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_single_verdict(source=source, pending=pending, verdict=verdict, reasoning=reasoning)
 
     def _inject_explore_runtime_params(self, params: dict) -> None:
-        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides. Knobs: baseline_runtime_sec + explore_overtime_kill_ratio (Fix E soft_deadline), variant_timeout_sec, variant_timeout_safety_margin, roofline_saturation_snapshot (advisory).
+        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides. Knobs: baseline_runtime_sec + explore_overtime_kill_ratio (Fix E soft_deadline), variant_timeout_sec, variant_timeout_safety_margin.
 
         Args:
             params: The explore-task params dict mutated in place; existing keys
@@ -7240,19 +7841,6 @@ class Coordinator:
             params.setdefault(
                 "variant_timeout_safety_margin",
                 safety_margin_override,
-            )
-        history = list(
-            getattr(
-                self.shared_state,
-                "roofline_saturation_history",
-                [],
-            )
-            or []
-        )
-        if history and isinstance(history[-1], dict):
-            params.setdefault(
-                "roofline_saturation_snapshot",
-                dict(history[-1]),
             )
         # Thread the persisted explore_search ledger so ExploreExecutor's canonical_fingerprint dedup has cross-turn memory; setdefault keeps an explicit override.
         es = getattr(self.shared_state, "explore_search", None)
@@ -7299,6 +7887,13 @@ class Coordinator:
                 Critic-approved variant names; ``None`` keeps the full grid.
         """
         params = dict(pending.payload.get("params") or {})
+        # Carry the proposer's predicted gain onto the task so the post-run
+        # journal write can persist predicted-vs-realized for calibration.
+        # setdefault keeps an explicit per-variant prediction intact.
+        if pending.predicted_gain_pct:
+            params.setdefault(
+                "predicted_gain_pct", float(pending.predicted_gain_pct),
+            )
         # Filter the grid to the Critic-approved subset.
         if pending.action_name == "explore" and isinstance(params.get("grid"), list):
             stamped_grid: list[dict[str, Any]] = []
@@ -7347,6 +7942,21 @@ class Coordinator:
             keep = self._decaying_keep_threshold_pct()
             if keep is not None:
                 params.setdefault("keep_threshold_pct", keep)
+            # Seed the patched-eval server with the same base args/config every
+            # other eval server uses (current-best stack ∪ reference recipe).
+            # Without this the patched server launches on bare framework defaults
+            # (e.g. vLLM block_size=16) and crashes at startup regardless of the
+            # patch — so every integrate_patch falsely REVERTs with "no
+            # measurable throughput". Mirrors the sweep/explore branches above.
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+                else self.shared_state.baseline_tput
+            params.setdefault("base_tput", float(base or 0.0))
+            params.setdefault("base_extra_args", cb_args)
+            if self.shared_state.baseline_config_path:
+                params.setdefault(
+                    "config_path", self.shared_state.baseline_config_path
+                )
         lanes, ttl = self._registry_lanes_ttl(pending.action_name)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
@@ -7387,166 +7997,41 @@ class Coordinator:
                 },
             )
         )
+        # Trace attribution (item 2): record proposal_msg_id -> task_id so the
+        # decision-trace collector can attribute the Critic review call (which
+        # only knows the msg_id) to this decision. Best-effort; never blocks.
+        self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
+
+    def _record_proposal_task_map(self, proposal_msg_id: str, task_id: str) -> None:
+        """Append one ``{proposal_msg_id -> task_id}`` row to the trace map.
+
+        Lets the collector recover which decision a Critic review served. No-op
+        on empty ids; OSError swallowed so a trace write never breaks the loop.
+        """
+        if not proposal_msg_id or not task_id:
+            return
+        try:
+            from .trace.llm_trace import _now_iso
+            from ..session_paths import proposal_task_map_path
+            path = proposal_task_map_path(self.session_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            row = {
+                "ts": _now_iso(),
+                "proposal_msg_id": str(proposal_msg_id),
+                "task_id": str(task_id),
+            }
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug(
+                "full-trace: proposal_task_map append failed for "
+                "msg_id=%s task_id=%s", proposal_msg_id, task_id, exc_info=True,
+            )
 
     # DELEGATE
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
-        """Validate and enqueue a delegated action as a TaskRegistry task.
-
-        Drops pruned families and execution-order violations, re-routes
-        ``explore`` grids through the Critic-review path, and otherwise
-        materialises the delegated action (specialist, dynamic action, etc.)
-        into a task with the appropriate lanes, tools and warmed params.
-
-        Args:
-            source (str): The agent issuing the delegation.
-            intent (Intent): The DELEGATE intent; ``payload`` carries
-                ``action_name`` and optional ``params``.
-        """
-        action_name = intent.payload["action_name"]
-        if self.shared_state.is_pruned(action_name):
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "delegate_pruned_advisory",
-                    "from": source,
-                    "action": action_name,
-                    "hint": (
-                        f"{action_name!r} is in pruned_families; if the "
-                        "prune was speculative the LLM may pick this "
-                        "action again, otherwise prefer another "
-                        "phase-allowed action."
-                    ),
-                },
-            )
-        denied = self._sequence_denial_for_action(
-            action_name,
-            proposed_params=intent.payload.get("params"),
-        )
-        if denied is not None:
-            await self._record_policy_denied(
-                source,
-                intent,
-                denied,
-                action_name=action_name,
-            )
-            return
-        # delegate explore runs variants directly (config/env grids are not source patches → no Critic pre-review).
-        params = dict(intent.payload.get("params") or {})
-        # idempotency_key is top-level per schema; treat a nested params value as a compat alias and strip it.
-        nested_idempotency_key = params.pop("idempotency_key", None)
-        # Plumb baseline's materialized YAML into grid-style tasks for the workload contract; setdefault lets delegator override.
-        if action_name in ("sweep", "explore") and self.shared_state.baseline_config_path:
-            params.setdefault("config_path", self.shared_state.baseline_config_path)
-        # Parity with _materialize_approved_proposal: direct delegates need the same operational knobs.
-        if action_name == "explore":
-            self._inject_explore_runtime_params(params)
-            # Inject base_tput tied to current_best (or baseline_tput); else every variant lands FAILED.
-            # Defensive getattr: lightweight state doubles in tests may omit current_best.
-            cb = getattr(self.shared_state, "current_best", None) or {}
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = (
-                cb_tput
-                if isinstance(cb_tput, (int, float)) and cb_tput > 0
-                else getattr(self.shared_state, "baseline_tput", 0.0)
-            )
-            params.setdefault("base_tput", float(base or 0.0))
-        # Wave sugar: a specialist delegate carrying params.tasks=[...] fans
-        # out into N standard freeform specialist tasks (scope=freeform,
-        # lane=cpu, mode=research defaults), each dispatched through the
-        # normal SpecialistRunner + TaskRegistry + lease + reap path. This
-        # preserves the low-cost wide-net recon that the retired
-        # dynamic_specialist channel provided.
-        if (
-            action_name == "specialist"
-            and isinstance(
-                params.get("tasks"),
-                list,
-            )
-            and params["tasks"]
-        ):
-            await self._fan_out_specialist_wave(source, intent, params)
-            return
-        # Specialist pre-dispatch warmup: warm external-knowledge sections via KnowledgePlane (setdefault fills gaps).
-        if action_name == "specialist":
-            await self._warm_specialist_params(params)
-        # Idempotency-key chain: top-level → nested compat alias → content-fingerprint auto-key.
-        # Terminal collisions retry with -retry<N> (up to 5); non-terminal collisions → policy_denied.
-        raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
-        if not raw_key:
-            content_fp = hashlib.sha1(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()[:10]
-            raw_key = f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
-        idempotency_key = str(raw_key)
-        terminal_states = {
-            "succeeded",
-            "failed",
-            "cancelled",
-            "needs_manual_review",
-        }
-        task = None
-        was_existing = False
-        for attempt in range(6):
-            idempotency_key = str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
-            lanes, ttl = self._registry_lanes_ttl(action_name)
-            # Bench-enabled specialists serialize against the other GPU
-            # benchmark/profile/server work via benchmark_lane (research_lane
-            # alone conflicts with nothing).
-            if action_name == "specialist":
-                from .specialist_profile import resolve_specialist_profile
-
-                if resolve_specialist_profile(params).grants_bench_tool:
-                    lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
-            task, was_existing = await self.tasks.create_or_return_existing(
-                kind=action_name,
-                params=params,
-                idempotency_key=idempotency_key,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-            )
-            if not was_existing:
-                break
-            if task.state not in terminal_states:
-                hint = (
-                    f"task {task.task_id} is still {task.state!r}; wait for the "
-                    f"delegated_result event instead of re-emitting the same key."
-                )
-                await self._record_policy_denied(
-                    source,
-                    intent,
-                    PolicyDenied(
-                        f"delegate{{action_name={action_name!r}}} duplicate idempotency_key={idempotency_key!r}",
-                        rule="duplicate_idempotency_key_running",
-                        hint=hint,
-                    ),
-                    action_name=action_name,
-                )
-                return
-        else:
-            hint = (
-                f"task {task.task_id if task else '?'} terminated and could not "
-                f"allocate a fresh idempotency_key after 5 retries"
-            )
-            await self._record_policy_denied(
-                source,
-                intent,
-                PolicyDenied(
-                    f"delegate{{action_name={action_name!r}}} duplicate "
-                    f"idempotency_key exhausted retries for {raw_key!r}",
-                    rule="duplicate_idempotency_key",
-                    hint=hint,
-                ),
-                action_name=action_name,
-            )
-            return
-        self.shared_state.reset_policy_denial_streak(action_name)
-        await self.bus.append_and_seq(
-            Message.new(
-                "coordinator",
-                "*",
-                "event",
-                {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
-            )
-        )
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_delegate(source, intent)
 
     def _record_framework_pr_authored_outcome(
         self,
@@ -8233,35 +8718,8 @@ class Coordinator:
         source: str,
         intent: Intent,
     ) -> None:
-        """Handle a ``specialist_done`` intent (source ``specialist:<task_id>`` per Inv-5.3 / R3); bookkeeping in _record_specialist_result.
-
-        Args:
-            source: The emitting agent, expected as ``specialist:<task_id>``.
-            intent: The SPECIALIST_DONE intent carrying the done payload.
-        """
-        payload = dict(intent.payload or {})
-        task_id = self._task_id_from_specialist_source(source)
-        task: Task | None = None
-        if task_id:
-            try:
-                task = await self.tasks.get(task_id)
-            except Exception:  # noqa: BLE001 — TaskNotFound and friends
-                task = None
-        if task is None:
-            # PolicyGate R3 should have caught this; log defensively but don't crash.
-            log.warning(
-                "specialist_done from source=%r references unknown "
-                "task_id=%r; skipping bookkeeping (R3 should have "
-                "denied; defense in depth)",
-                source,
-                task_id,
-            )
-            return
-        await self._record_specialist_result(
-            task=task,
-            done_payload=payload,
-            source=source,
-        )
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_specialist_done(source, intent)
 
     @staticmethod
     def _task_id_from_specialist_source(source: str) -> str:
@@ -8401,201 +8859,8 @@ class Coordinator:
         done_payload: dict[str, Any],
         source: str,
     ) -> None:
-        """Common bookkeeping for any specialist task termination (dispatcher loop + intent routing); idempotent on round_id, failures logged not raised.
-
-        Args:
-            task: The terminated specialist task.
-            done_payload: The specialist's done payload (proposal_set, domain,
-                summary, etc.).
-            source: The emitting agent string (``specialist:<task_id>``).
-        """
-        domain = str(done_payload.get("domain") or "").strip()
-        proposals = done_payload.get("proposal_set") or []
-        if not isinstance(proposals, list):
-            proposals = []
-        is_empty = bool(done_payload.get("empty")) or len(proposals) == 0
-
-        round_entry = self._build_specialist_round_entry(
-            task=task,
-            done_payload=done_payload,
-            source=source,
-        )
-        # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
-        _scorer = getattr(self, "_proposal_scorer", None)
-        if _scorer is not None and proposals:
-            try:
-                scores = await _scorer.score(
-                    gap={
-                        "domain": domain,
-                        "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
-                        "gap_symptom": (task.params or {}).get("gap_symptom"),
-                        "gap_evidence": (task.params or {}).get("gap_evidence"),
-                        "summary": done_payload.get("summary", ""),
-                    },
-                    proposals=proposals,
-                )
-                if scores and scores.get("models"):
-                    round_entry["ensemble_scores"] = scores
-            except Exception:  # noqa: BLE001 — advisory; never block
-                log.exception(
-                    "specialist bookkeeping: proposal scoring failed for task=%s (continuing without scores)",
-                    task.task_id,
-                )
-        try:
-            self.shared_state.record_specialist_round(round_entry)
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "specialist bookkeeping: record_specialist_round failed for task=%s",
-                task.task_id,
-            )
-
-        try:
-            self.shared_state.bump_specialist_domain_empty_streak(
-                domain,
-                empty=is_empty,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "specialist bookkeeping: bump_specialist_domain_empty_streak failed for task=%s",
-                task.task_id,
-            )
-
-        # Per-anchor coverage ledger (point 1): every specialist completion is
-        # one "round" — tick all anchors, then zero the one that just ran so a
-        # long-idle domain's counter climbs until the hard-trigger forces it.
-        try:
-            self.shared_state.bump_domain_round_counters()
-            self.shared_state.note_specialist_dispatched(domain)
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "specialist bookkeeping: domain round-counter update failed for task=%s",
-                task.task_id,
-            )
-
-        try:
-            self.shared_state.update_last_specialist(
-                {
-                    "task_id": task.task_id,
-                    "domain": domain,
-                    "gap_canonical_id": str(done_payload.get("gap_canonical_id") or ""),
-                    "empty": is_empty,
-                    "proposals_total": len(proposals),
-                    "confidence": done_payload.get("confidence"),
-                    "summary": str(done_payload.get("summary") or "")[:480],
-                    "reason": str(done_payload.get("reason") or "")[:480],
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "specialist bookkeeping: update_last_specialist failed for task=%s",
-                task.task_id,
-            )
-
-        # Persist so a resume picks up the bookkeeping without re-running the specialist.
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "specialist bookkeeping: SharedState.save failed for task=%s",
-                task.task_id,
-            )
-
-        await self._record_observation(
-            source or "coordinator",
-            "observation",
-            {
-                "kind": "specialist_done_recorded",
-                "task_id": task.task_id,
-                "domain": domain,
-                "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
-                "proposals_total": len(proposals),
-                "empty": is_empty,
-            },
-        )
-
-        # Multi-node only: auto-materialise the proposal_set into a
-        # benchmarked explore task. No-op single-node (LLM drives explore
-        # directly there) and no-op when the proposal_set is empty / has
-        # no applicable variants. See :meth:`_maybe_materialize_mn_explore`.
-        try:
-            await self._maybe_materialize_mn_explore(
-                task=task,
-                domain=domain,
-                proposals=proposals,
-            )
-        except Exception:  # noqa: BLE001 — defensive; never block bookkeeping
-            log.exception(
-                "mn_auto_materialize: bridge raised for task=%s (continuing)",
-                task.task_id,
-            )
-
-        # route session_steward_specialist verdicts. Done payload
-        # carries extra fields beyond the standard schema; see
-        # ``actions/assess_remaining_gaps.md`` and the prompt builder
-        # focus template. Coerce out-of-vocab recommendations to
-        # ``stop_session`` (defense in depth — the LLM is allowed to
-        # write any string but we only honour the closed enum).
-        if domain == "session_steward_specialist":
-            try:
-                await self._route_steward_verdict(
-                    task=task,
-                    done_payload=done_payload,
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception(
-                    "steward routing failed for task=%s; assessment "
-                    "left in last_remaining_gaps_assessment but no "
-                    "phase-routing change applied",
-                    task.task_id,
-                )
-
-        # Harvest research-scout output (hints, competitor target, gap seeds, PR dedup). Fail-soft.
-        if domain == "research_scout_specialist":
-            try:
-                self._harvest_research_scout(done_payload)
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception(
-                    "research-scout harvest failed for task=%s",
-                    task.task_id,
-                )
-
-        # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
-        gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
-        if gap_cid:
-            try:
-                self.shared_state.append_gap_attempt(
-                    gap_cid,
-                    {
-                        "action": "specialist",
-                        "variant_name": domain,
-                        "outcome": "EMPTY" if is_empty else "PROPOSALS",
-                        "proposals_total": len(proposals),
-                    },
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception(
-                    "specialist bookkeeping: append_gap_attempt failed for gap=%s",
-                    gap_cid,
-                )
-        try:
-            await self._refresh_gaps(reason="specialist_done")
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "specialist bookkeeping: _refresh_gaps failed for task=%s",
-                task.task_id,
-            )
-        # B3: push specialist-authored patches to the Critic so integrate_patch can pass.
-        try:
-            await self._maybe_autosubmit_specialist_patches(
-                task=task,
-                done_payload=done_payload,
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "B3: specialist patch autosubmit failed for task=%s",
-                task.task_id,
-            )
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        return await self.recorder._record_specialist_result(task=task, done_payload=done_payload, source=source)
 
     def _plateau_advisory_block(self) -> str:
         """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK_PR). Returns "" when no plateau signal is active.
@@ -8751,21 +9016,51 @@ class Coordinator:
         state = self.shared_state
         if not _phase_state.is_cyclic_phases_enabled():
             return ""
-        if not bool(getattr(state, "pending_bottleneck_switch", False)):
-            return ""
         if (getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_EXPLORE:
+            return ""
+        sat = getattr(state, "saturated_directions", {}) or {}
+        saturated = {
+            str(k): v
+            for k, v in (sat.items() if isinstance(sat, dict) else [])
+            if isinstance(v, dict) and bool(v.get("saturated"))
+        }
+        rows = [r for r in (getattr(state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        focus_row = next((r for r in reversed(rows) if int(r.get("cycle", -1) or -1) == cycle), {})
+        has_switch = bool(getattr(state, "pending_bottleneck_switch", False))
+        if not has_switch and not saturated and not focus_row:
             return ""
         prev = str(getattr(state, "last_cycle_bottleneck", "") or "")
         cur_top = state.current_top_bottleneck()
         direction, pct = self._dominant_roofline_direction()
-        lines: list[str] = [
-            "The previous macro-cycle plateaued; redirect this cycle to a "
-            "different bottleneck instead of re-mining the exhausted one.",
-        ]
+        lines: list[str] = []
+        if has_switch:
+            lines.append(
+                "The previous macro-cycle plateaued; redirect this cycle to a "
+                "different bottleneck instead of re-mining the exhausted one."
+            )
+        if saturated:
+            lines.append("Roofline ceiling signal: one or more lever families are saturated; deprioritize them.")
+            for domain, row in sorted(saturated.items()):
+                lines.append(
+                    f"  saturated_domain={domain} direction={row.get('direction')} "
+                    f"within={row.get('within_pct')}% threshold={row.get('threshold_pct')}%"
+                )
+        if focus_row:
+            lines.append(
+                f"  suggested_cycle_focus={focus_row.get('focus')} "
+                f"score={focus_row.get('score')} rationale={focus_row.get('rationale')}"
+            )
         if prev:
             lines.append(f"  plateaued_bottleneck={prev} (avoid re-targeting)")
         if cur_top:
             lines.append(f"  current_top_bottleneck={cur_top}")
+        shift = getattr(state, "bottleneck_shift", {}) or {}
+        if isinstance(shift, dict) and (shift.get("from") or shift.get("to")):
+            lines.append(
+                f"  bottleneck_shift: {shift.get('from') or 'unknown'} → {shift.get('to') or 'unknown'} "
+                f"(within_delta={shift.get('within_delta')} gap_delta={shift.get('gap_delta')})"
+            )
         if direction:
             from .roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
@@ -8777,7 +9072,6 @@ class Coordinator:
                 )
             else:
                 lines.append(f"  dominant_direction={direction} ({pct:.1f}%)")
-        cycle = int(getattr(state, "macro_cycle", 0) or 0)
         lines.append(
             f"  macro_cycle={cycle}; KEEP'd variants stay de-duped permanently, "
             "but prior sub-threshold variants whose measured gain now meets the "
@@ -9185,233 +9479,8 @@ class Coordinator:
             )
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
-        """Route a REQUEST intent to its target agent (Plan A: → kernel).
-
-        Applies the kernel-request execution-order gate, records the request on
-        the bus for the target reactor / replay, and auto-rejects requests whose
-        target agent is not in the role registry (e.g. ``--no-kernel``) so the
-        requester never hangs.
-
-        Args:
-            source (str): The agent issuing the request.
-            intent (Intent): The REQUEST intent; ``payload`` carries
-                ``target_agent`` and ``kind``.
-        """
-        target_agent = intent.payload["target_agent"]
-        kind = intent.payload["kind"]
-        denied = self._sequence_denial_for_request(target_agent, kind)
-        if denied is not None:
-            await self._record_policy_denied(source, intent, denied)
-            return
-        # Always record the request on the bus so the kernel reactor (and tests/replay) can see it.
-        request_msg = Message.new(
-            source,
-            target_agent,
-            "request",
-            dict(intent.payload),
-            priority=1,
-        )
-        await self.bus.append_and_seq(request_msg)
-
-        # Safety net: auto-reject when the target agent was removed (e.g. --no-kernel) so Orch doesn't hang.
-        if target_agent not in self.role_registry:
-            await self.bus.append_and_seq(
-                Message.new(
-                    target_agent,
-                    source,
-                    "response",
-                    {
-                        "in_reply_to": request_msg.msg_id,
-                        "kind": f"{kind}_done",
-                        "status": "failed",
-                        "result": {
-                            "status": "failed",
-                            "error_class": "agent_disabled",
-                            "error": f"{target_agent} agent is disabled for this session",
-                        },
-                        "source": "coordinator_auto_reject",
-                    },
-                    in_reply_to=request_msg.msg_id,
-                    priority=1,
-                )
-            )
-            return
-
-        # Programmatic shortcut: run a registered kernel handler inline + emit RESPONSE so a deterministic shell-tool invocation doesn't burn an LLM turn (see kernel_request_handlers.py).
-        if target_agent == "kernel":
-            handler = get_handler(kind)
-            if handler is not None:
-                params = intent.payload.get("params") or {}
-                merged_payload = {**intent.payload, **params}
-                # Force batch dispatch for run_optimization: inject candidates_path from last_trace_analyze (else collapses to single-kernel run). LLM value wins.
-                if (
-                    kind == "run_optimization"
-                    and self.shared_state.last_trace_analyze
-                    and not merged_payload.get("candidates_path")
-                ):
-                    cached_candidates_path = self.shared_state.last_trace_analyze.get("candidates_path")
-                    if cached_candidates_path:
-                        merged_payload["candidates_path"] = cached_candidates_path
-                # Commit 1cd9f7d's roofline_json auto-inject is omitted here: Roofline-v2 caches under last_trace_analyze instead.
-                cache_hit_source = None
-                cached_result = self._cached_kernel_request(kind, merged_payload)
-                if cached_result is not None:
-                    result = cached_result
-                    cache_hit_source = "shared_state_cache"
-                    # #266: a cache hit produces a response but never runs the
-                    # handler, so emit a single END (no paired START). Without
-                    # this the lifecycle log would show no record at all for a
-                    # cache-served step, leaving an operator unsure whether it
-                    # ran. detail=cache_hit marks it as served-from-cache.
-                    self._emit_lifecycle(
-                        step=kind,
-                        status="END",
-                        artifacts=_lifecycle_paths(result),
-                        detail="cache_hit",
-                    )
-                else:
-                    rejected = (
-                        self.shared_state.find_rejected_kernel_patch(merged_payload) if kind == "integrate" else None
-                    )
-                    if rejected is not None:
-                        result = {
-                            "status": "skipped",
-                            "decision": "REVERT",
-                            "error_class": "kernel_patch_rejected",
-                            "error": "same kernel patch already exhausted E2E attempts",
-                            "kernel_id": rejected.get("kernel_id"),
-                            "patch_path": rejected.get("patch_path"),
-                            "target_file": rejected.get("target_file"),
-                            "extra_server_args": rejected.get("extra_server_args", ""),
-                            "attempt_count": rejected.get("attempt_count"),
-                            "best_gain_pct": rejected.get("best_gain_pct"),
-                            "reason": rejected.get("reason"),
-                        }
-                        cache_hit_source = "shared_state_kernel_rejection"
-                        # #266: a short-circuited integrate (patch already
-                        # exhausted) also never runs the handler; emit a lone
-                        # END so the log records the step was resolved as a
-                        # rejection rather than silently missing.
-                        self._emit_lifecycle(
-                            step=kind,
-                            status="END",
-                            artifacts=_lifecycle_paths(result),
-                            detail="rejected",
-                        )
-                    else:
-                        # Inject base_tput from current_best.tput when an integrate request omits it (else 2nd/3rd multi-KEEP integrate fails base_tput > 0); operator value wins.
-                        if kind == "integrate" and not merged_payload.get("base_tput"):
-                            cb_tput = (self.shared_state.current_best or {}).get("tput")
-                            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                                merged_payload["base_tput"] = float(cb_tput)
-
-                        # Streaming-record callback for run_optimization batch: each sub-attempt writes immediately (else a slow sibling starves a fast KEEP's integrate).
-                        handler_kwargs: dict[str, Any] = {
-                            "session_dir": self.session_dir,
-                        }
-                        if kind == "run_optimization":
-                            handler_kwargs["record_partial"] = self._record_kernel_opt_partial
-                        # #266: bracket the programmatic kernel step with
-                        # START / END lifecycle events so operators see the
-                        # step ran, how long it took, and where its outputs
-                        # landed. ``kind`` is the machine step name
-                        # (trace_analyze / run_optimization / integrate /
-                        # run_gemm_tuning); the human label is resolved by
-                        # SharedState from LIFECYCLE_STEP_LABELS.
-                        _lc_t0 = time.monotonic()
-                        self._emit_lifecycle(
-                            step=kind,
-                            status="START",
-                            artifacts=_lifecycle_paths(merged_payload),
-                        )
-                        try:
-                            result = await handler(
-                                merged_payload,
-                                **handler_kwargs,
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            log.exception(
-                                "kernel_request_handler[%s] crashed for source=%s",
-                                kind,
-                                source,
-                            )
-                            result = {
-                                "status": "failed",
-                                "error_class": "handler_exception",
-                                "error": repr(exc),
-                            }
-                        _lc_status = "ERROR" if str(result.get("status", "")).lower() in ("failed", "error") else "END"
-                        _lc_detail = " ".join(
-                            str(p)
-                            for p in (
-                                result.get("decision"),
-                                result.get("status"),
-                                f"kernel={result.get('kernel_id')}" if result.get("kernel_id") else "",
-                            )
-                            if p
-                        )
-                        self._emit_lifecycle(
-                            step=kind,
-                            status=_lc_status,
-                            artifacts=_lifecycle_paths(result),
-                            detail=_lc_detail,
-                            duration_s=time.monotonic() - _lc_t0,
-                        )
-                await self.bus.append_and_seq(
-                    Message.new(
-                        "kernel",
-                        source,
-                        "response",
-                        {
-                            "in_reply_to": request_msg.msg_id,
-                            "kind": f"{kind}_done",
-                            "status": result.get("status", "ok"),
-                            "result": result,
-                            "source": cache_hit_source or "programmatic_handler",
-                        },
-                        in_reply_to=request_msg.msg_id,
-                        priority=1,
-                    )
-                )
-                # Cache trace_analyze output (successful runs only) to short-circuit identical next-tick requests.
-                if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
-                    self.shared_state.record_trace_analyze(merged_payload, result)
-                    self.shared_state.save(self.session_dir)
-                # Mirror kernel-opt outcomes into SharedState so Orch sees decision/speedup next tick.
-                if kind == "run_optimization":
-                    # Batch mode already streamed each sub-result; re-recording would double-count. Cache hits lack batch_mode.
-                    if not bool(isinstance(result, dict) and result.get("batch_mode")):
-                        self.shared_state.record_kernel_opt(result)
-                    self.shared_state.save(self.session_dir)
-                    # Auto-enqueue integrate for KEEP'd kernels that haven't
-                    # been integrated yet (IR-3: integration is mandatory).
-                    await self._auto_enqueue_pending_integrations()
-                if kind == "run_gemm_tuning":
-                    self.shared_state.record_gemm_tuning(result)
-                    self.shared_state.save(self.session_dir)
-                if kind == "integrate":
-                    if result.get("status") != "skipped":
-                        self.shared_state.record_kernel_integrate_result(result)
-                    decision = str(result.get("decision", "")).upper()
-                    if decision == "KEEP":
-                        if isinstance(result, dict) and not result.get("gap_canonical_id"):
-                            payload_gap = str(merged_payload.get("gap_canonical_id") or "").strip()
-                            if payload_gap:
-                                result["gap_canonical_id"] = payload_gap
-                        await self._record_integrate_keep(result)
-                    self.shared_state.save(self.session_dir)
-                    # Re-evaluate pending integrations now that this one is
-                    # recorded: a retryable integration fault is re-dispatched
-                    # in-phase (KERNEL) rather than deferred to the SWEEP drain,
-                    # and any still-pending KEEP is chained forward. Idempotent —
-                    # KEEP/REVERT kernels have already left pending_keep_kernel_ids.
-                    await self._auto_enqueue_pending_integrations()
-                # Bug B: advance the kernel cursor past this request seq so the LLM kernel agent doesn't re-answer it next tick.
-                await self.cursors.advance(
-                    target_agent,
-                    seq=request_msg.seq,
-                    msg_id=request_msg.msg_id,
-                )
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_request(source, intent)
 
     def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Return a cached programmatic_handler result if applicable (cache key last_trace_analyze).
@@ -9445,274 +9514,38 @@ class Coordinator:
         }
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
-        """Route a RESPONSE intent back to the original requester.
-
-        Looks up the request message referenced by ``in_reply_to`` to address
-        the response, then publishes it on the bus.
-
-        Args:
-            source (str): The agent emitting the response.
-            intent (Intent): The RESPONSE intent; ``payload`` carries
-                ``in_reply_to``.
-        """
-        in_reply_to = intent.payload["in_reply_to"]
-        # Locate the original requester so we can address the response.
-        original = await self.bus.lookup_by_id(in_reply_to)
-        target = original.from_agent if original else "*"
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                target,
-                "response",
-                dict(intent.payload),
-                in_reply_to=in_reply_to,
-                priority=1,
-            )
-        )
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_response(source, intent)
 
     # Robustness scheduling-police
     async def _handle_kill_task(self, source: str, intent: Intent) -> None:
-        """Cancel a queued/running task in response to a kill_task intent.
-
-        Records an observation for unknown task ids, transitions a
-        queued/running task to ``cancelled``, and broadcasts a ``kill`` event.
-
-        Args:
-            source (str): The agent (typically robustness) issuing the kill.
-            intent (Intent): The KILL_TASK intent; ``payload`` carries
-                ``task_id`` and optional ``reason``.
-        """
-        task_id = intent.payload["task_id"]
-        try:
-            task = await self.tasks.get(task_id)
-        except Exception:  # noqa: BLE001 — TaskNotFound
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "kill_task_unknown", "task_id": task_id, "source": source},
-            )
-            return
-        if task.state in ("queued", "running"):
-            await self.tasks.transition(
-                task_id,
-                "cancelled",
-                evidence={"reason": intent.payload.get("reason"), "by": source},
-            )
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                "*",
-                "kill",
-                {"task_id": task_id, "reason": intent.payload.get("reason")},
-            )
-        )
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_kill_task(source, intent)
 
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
-        """Prune an action family and cancel its in-flight tasks.
-
-        Adds the family to the persistent pruned set, cancels any tasks in that
-        family, and broadcasts a ``prune_branch`` event.
-
-        Args:
-            source (str): The agent issuing the prune.
-            intent (Intent): The PRUNE_BRANCH intent; ``payload`` carries
-                ``family`` and optional ``reason``.
-        """
-        family = intent.payload["family"]
-        if self.shared_state.add_pruned_family(family):
-            self.shared_state.save(self.session_dir)
-        cancelled = await self.tasks.cancel_family([family])
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                "*",
-                "event",
-                {
-                    "kind": "prune_branch",
-                    "family": family,
-                    "cancelled_task_ids": cancelled,
-                    "reason": intent.payload.get("reason"),
-                },
-            )
-        )
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_prune_branch(source, intent)
 
     async def _handle_force_dispatch(self, source: str, intent: Intent) -> None:
-        """Handle a ``force_dispatch`` intent by emitting an event.
-
-        Currently a P0-3 stub: it broadcasts a ``force_dispatch`` event;
-        real dispatcher reordering arrives in P0-5 with the priority queue.
-
-        Args:
-            source: Identifier of the intent's originating agent.
-            intent: The ``force_dispatch`` intent carrying ``task_id``.
-        """
-        # P0-3 stub: emit an event; real dispatcher reordering lands in P0-5 with the priority queue.
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                "*",
-                "event",
-                {
-                    "kind": "force_dispatch",
-                    "task_id": intent.payload["task_id"],
-                    "reason": intent.payload.get("reason"),
-                },
-            )
-        )
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_force_dispatch(source, intent)
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        """Process ``escalate_strategy_change`` (KB_design §3.8 §7.3 + §3.13 M7 §5.3); broadcasts strategy_change, acts on closed-vocab hints, drops unknown (Inv-8.2).
-
-        Args:
-            source: The agent issuing the escalation.
-            intent: The ESCALATE_STRATEGY_CHANGE intent; ``payload`` may carry a
-                closed-vocab ``next_action_hint``.
-        """
-        payload = dict(intent.payload or {})
-        # Always emit the broadcast first (back-compat with legacy contract tests).
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                "*",
-                "strategy_change",
-                payload,
-                priority=0,
-            )
-        )
-        from .phase_state import (
-            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-            ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
-            ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
-            PHASE_EXPLORE,
-            PHASE_KERNEL,
-            apply_escalate_budget_bump,
-            is_pause_specialist_hint,
-            is_valid_escalate_hint,
-        )
-
-        hint = str(payload.get("next_action_hint") or "").strip()
-        if not hint or not is_valid_escalate_hint(hint):
-            return
-        # extend_*_budget mutates phase_budget_pct directly (consulted every tick).
-        now_ts = datetime.now(timezone.utc).isoformat()
-        if hint == ESCALATE_HINT_EXTEND_EXPLORE_BUDGET:
-            self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
-                self.shared_state.phase_budget_pct,
-                phase=PHASE_EXPLORE,
-            )
-            self.shared_state.last_consumed_escalate_hint = hint
-            self.shared_state.last_consumed_escalate_hint_ts = now_ts
-            self.shared_state.save(self.session_dir)
-            return
-        if hint == ESCALATE_HINT_EXTEND_KERNEL_BUDGET:
-            self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
-                self.shared_state.phase_budget_pct,
-                phase=PHASE_KERNEL,
-            )
-            self.shared_state.last_consumed_escalate_hint = hint
-            self.shared_state.last_consumed_escalate_hint_ts = now_ts
-            self.shared_state.save(self.session_dir)
-            return
-        # pause_specialist_<domain>: bump the per-domain empty-streak so the next EXPLORE round skips it.
-        if is_pause_specialist_hint(hint):
-            domain = hint[len(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX) :]
-            self.shared_state.bump_specialist_domain_empty_streak(
-                domain,
-                empty=True,
-            )
-            self.shared_state.last_consumed_escalate_hint = hint
-            self.shared_state.last_consumed_escalate_hint_ts = now_ts
-            self.shared_state.save(self.session_dir)
-            return
-        # skip_to_kernel / skip_to_close are deferred; next compute_next_phase picks them up.
-        self.shared_state.set_pending_escalate_hint(hint)
-        self.shared_state.save(self.session_dir)
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_escalate_strategy_change(source, intent)
 
     # SEND_MESSAGE / ALERT / UPDATE_STATE — minimal persistence
     async def _handle_send_message(self, source: str, intent: Intent) -> None:
-        """Publish a free-form message onto the bus.
-
-        Soft-degrades an unknown topic to ``observation`` per DESIGN §13.2 and
-        routes to the requested recipient (defaulting to broadcast).
-
-        Args:
-            source (str): The sending agent.
-            intent (Intent): The SEND_MESSAGE intent; ``payload`` may carry
-                ``topic`` / ``to`` plus arbitrary message fields.
-        """
-        topic = intent.payload.get("topic", "observation")
-        if (
-            topic
-            not in __import__(
-                "inference_optimizer.orchestrator.message_bus", fromlist=["TOPIC_ALLOWLIST"]
-            ).TOPIC_ALLOWLIST
-        ):
-            # Soft-degrade unknown topic per DESIGN §13.2.
-            topic = "observation"
-        to_agent = intent.payload.get("to") or "*"
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                to_agent,
-                topic,
-                {k: v for k, v in intent.payload.items() if k != "to"},
-            )
-        )
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_send_message(source, intent)
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:
-        """Broadcast an alert message, prioritized by severity.
-
-        High-severity alerts are published at priority 0; everything else at
-        priority 1.
-
-        Args:
-            source (str): The alerting agent.
-            intent (Intent): The ALERT intent; ``payload`` may carry
-                ``severity`` plus alert detail.
-        """
-        prio = 0 if intent.payload.get("severity") == "high" else 1
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                "*",
-                "alert",
-                dict(intent.payload),
-                priority=prio,
-            )
-        )
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_alert(source, intent)
 
     async def _handle_update_state(self, source: str, intent: Intent) -> None:
-        """Apply agent-requested SharedState changes and report the result.
-
-        Applies the requested changes (core fields disallowed), persists when
-        anything changed, and broadcasts an observation listing the applied vs
-        rejected keys.
-
-        Args:
-            source (str): The agent requesting the state update.
-            intent (Intent): The UPDATE_STATE intent; ``payload`` carries a
-                ``changes`` dict.
-        """
-        # Apply to persistent SharedState (PolicyGate already enforced that
-        # the source role can't write CORE_STATE_FIELDS unless allowed).
-        applied = self.shared_state.apply_changes(
-            intent.payload["changes"],
-            allow_core=False,
-        )
-        if applied:
-            self.shared_state.save(self.session_dir)
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                "*",
-                "observation",
-                {
-                    "kind": "update_state",
-                    "changes": applied,
-                    "rejected": sorted(set(intent.payload["changes"]) - set(applied)),
-                },
-            )
-        )
+        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
+        return await self.router._handle_update_state(source, intent)
 
     # Bookkeeping
     async def _record_policy_denied(
@@ -9981,56 +9814,8 @@ class Coordinator:
         task: "Task",
         result: Any,
     ) -> None:
-        """PR-A8: log a completed task's change_type into SharedState.intervention_mix (explore → config; integrate_patch → code_patch_attempt or code_patch when kept). Best-effort.
-
-        Args:
-            task: The completed task whose kind selects the intervention class.
-            result: The task result dict; non-dict results are ignored.
-        """
-        if not isinstance(result, dict):
-            return
-        kind = (task.kind or "").strip()
-        if kind == "explore":
-            # Winner surrogate: result.winners present OR best_variant set.
-            winners = result.get("winners") or []
-            best = result.get("best_variant")
-            if not winners and not best:
-                # B2: an explore round that KEPT nothing still counts as a config-only attempt.
-                self.shared_state.record_intervention(
-                    change_type="config_attempt",
-                    action="explore",
-                    task_id=task.task_id,
-                    delta_pct=None,
-                )
-                return
-            delta_pct = None
-            if isinstance(best, dict):
-                delta_pct = best.get("gain_pct")
-            self.shared_state.record_intervention(
-                change_type="config",
-                action="explore",
-                task_id=task.task_id,
-                delta_pct=delta_pct if isinstance(delta_pct, (int, float)) else None,
-            )
-            return
-        if kind == "integrate_patch":
-            status = str(result.get("status") or "").strip().lower()
-            if not status:
-                return
-            if status != "kept":
-                self.shared_state.record_intervention(
-                    change_type="code_patch_attempt",
-                    action="integrate_patch",
-                    task_id=task.task_id,
-                    delta_pct=result.get("delta_pct"),
-                )
-                return
-            self.shared_state.record_intervention(
-                change_type="code_patch",
-                action="integrate_patch",
-                task_id=task.task_id,
-                delta_pct=result.get("delta_pct"),
-            )
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        return self.recorder._record_intervention_for_task(task, result)
 
     async def _handle_unpromotable_result(
         self,
@@ -10087,6 +9872,17 @@ class Coordinator:
                 self.shared_state.baseline_arg_error_streak = 0
                 if self.shared_state.baseline_failure_streak >= 3:
                     self.shared_state.set_stop_reason("baseline_failed")
+            # Combined backstop (P5): mixed error_classes split the per-class
+            # streaks above so neither reaches its threshold and the session
+            # burns the whole budget -> time_exhausted. Count ALL baseline
+            # failures and fast-fail at the same 3-failure intent.
+            self.shared_state.baseline_total_failures += 1
+            if (
+                self.shared_state.baseline_total_failures
+                >= _BASELINE_MAX_TOTAL_FAILURES
+                and not self.shared_state.stop_reason
+            ):
+                self.shared_state.set_stop_reason("baseline_failed")
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
             # often recoverable by disabling cuda-graph capture. Arm it once.
             if err_class == "cuda_graph_capture_failed" and not self.shared_state.baseline_eager_fallback:
@@ -10177,7 +9973,7 @@ class Coordinator:
                 if atask in done:
                     try:
                         maybe_result: Any = atask.result()
-                    except BaseException as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True)
+                    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True); capture task error + cancellation, never KeyboardInterrupt/SystemExit
                         maybe_result = exc
                     completed.append((task, maybe_result, gpu_lease))
                 else:
@@ -10256,30 +10052,29 @@ class Coordinator:
                     if isinstance(needs_gpu_raw, str)
                     else bool(needs_gpu_raw)
                 )
+                # WS1: explicit wall-clock budget replaces the old
+                # ``max_seconds = max_turns × per_turn`` ceiling (which became
+                # ~1000×600 once the turn cap was lifted). Lane-tiered base ×
+                # ``macro_cycle`` amplification, hard-capped at 4h. macro_cycle
+                # is 0 for ≤24h bounded runs (``is_long_run`` gate), so those
+                # always get the base value and never degrade.
+                extra_context["wall_budget_sec"] = self._specialist_wall_budget_sec(
+                    needs_gpu=needs_gpu,
+                )
                 if needs_gpu:
                     try:
                         gpu_count = int(params.get("gpu_count", 1) or 1)
                     except (TypeError, ValueError):
                         gpu_count = 1
-                    try:
-                        max_turns = int(params.get("max_turns", 8) or 8)
-                    except (TypeError, ValueError):
-                        max_turns = 8
-                    try:
-                        per_turn_s = float(
-                            params.get("specialist_per_turn_max_seconds")
-                            or os.environ.get(
-                                "INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS",
-                                "600",
-                            )
-                            or 600.0
-                        )
-                    except (TypeError, ValueError):
-                        per_turn_s = 600.0
-                    gpu_ttl_sec = max(
-                        int(task.lease_ttl_sec or 0),
-                        int(max(1, max_turns) * max(1.0, per_turn_s)),
-                    )
+                    # WS2: TTL re-sourced to the WS1 wall budget (the old
+                    # ``max_turns × per_turn`` ceiling became ~1000×600 once the
+                    # turn cap was lifted). Iron law: the agent's wall-budget
+                    # kill (= the budget) must fire at or before the GPU lease
+                    # TTL, which in turn must not outlive the gpu_research_lane
+                    # lease TTL. Both are computed by ``_gpu_lease_ttl_sec`` (here
+                    # and in intent_router) so they cannot drift apart — the cards
+                    # are never reclaimed while the agent is still computing.
+                    gpu_ttl_sec = self._gpu_lease_ttl_sec(int(task.lease_ttl_sec or 0))
                     gpu_lease = await self.gpu_specialist_pool.try_acquire(
                         count=gpu_count,
                         holder_id=task.task_id,
@@ -10300,16 +10095,112 @@ class Coordinator:
                 (
                     task,
                     asyncio.create_task(
-                        self.sub.run_task(
+                        self._run_dispatched_with_gpu_release(
                             task,
                             prebound_lease=lease,
                             extra_context=extra_context,
+                            gpu_lease=gpu_lease,
                         ),
                     ),
                     gpu_lease,
                 )
             )
         return spawned
+
+    async def _run_dispatched_with_gpu_release(
+        self,
+        task: Task,
+        *,
+        prebound_lease: Any,
+        extra_context: dict[str, Any],
+        gpu_lease: Any,
+    ) -> "SubAgentResult":
+        """Run a dispatched task, releasing its GPU lease in a structured finally.
+
+        C1 liveness: binding the GPU-lease release to the asyncio task's own
+        lifecycle (rather than relying solely on the pump loop walking to
+        :meth:`_reap_dispatched_task`) guarantees the cards are freed when the
+        run completes — normally, on error, or on cancellation — even if the
+        pump coroutine is cancelled or the reap never runs. Combined with the
+        TTL reaper (``gpu_specialist_pool.reap_expired``) this is the
+        ``finally + TTL`` double insurance that keeps a crashed/cancelled GPU
+        specialist from pinning the serving cards forever. The lock-lane lease
+        already has its own ``finally`` in ``sub_agent_runner.run_task``.
+
+        ``release`` is idempotent (a no-op DELETE), so the belt-and-suspenders
+        release in :meth:`_reap_dispatched_task` remains harmless.
+
+        Args:
+            task: The dispatched task.
+            prebound_lease: The already-acquired resource-lane lease (or None).
+            extra_context: Per-task context (wall budget, gpu ids, …).
+            gpu_lease: The GPU specialist lease to release, or None.
+
+        Returns:
+            SubAgentResult: The result from ``sub.run_task``.
+        """
+        try:
+            return await self.sub.run_task(
+                task,
+                prebound_lease=prebound_lease,
+                extra_context=extra_context,
+            )
+        finally:
+            if gpu_lease is not None:
+                try:
+                    await self.gpu_specialist_pool.release(gpu_lease)
+                except Exception:  # noqa: BLE001 — defensive cleanup; TTL backstops
+                    log.exception(
+                        "dispatcher: finally GPU-lease release failed for task=%s",
+                        task.task_id,
+                    )
+
+    def _specialist_wall_budget_sec(self, *, needs_gpu: bool) -> float:
+        """Compute the WS1 explicit wall-clock budget for a specialist task.
+
+        Replaces the legacy ``max_seconds = max_turns × per_turn`` ceiling that
+        was implicitly disabled once the turn cap was lifted to ~1000. The
+        budget is a lane-tiered base (cpu 10min / gpu 60min) amplified by the
+        macro-cycle count and hard-capped at 4h::
+
+            budget_min = min(base × (macro_cycle + 1), 240)
+
+        ``macro_cycle`` only grows on long/unbounded runs (``is_long_run`` >24h
+        gate), so ≤24h bounded runs always get the base value (cpu 10 / gpu 60)
+        and never degrade.
+
+        Args:
+            needs_gpu: Whether the specialist holds a GPU lease (selects the
+                60min GPU lane base vs the 10min cpu base).
+
+        Returns:
+            float: The wall-clock budget in seconds.
+        """
+        base_min = 60.0 if needs_gpu else 10.0
+        macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        budget_min = min(base_min * (macro_cycle + 1), 240.0)
+        return budget_min * 60.0
+
+    def _gpu_lease_ttl_sec(self, floor_ttl_sec: int = 0) -> int:
+        """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.
+
+        The iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — both the
+        GPU-pool lease (dispatch) and the lane lease (intent_router) must outlive
+        the agent's WS1 wall-budget kill, so both are sourced from the same
+        ``wall_budget × (1 + GPU_LEASE_TTL_GRACE)`` here to keep them from
+        drifting apart.
+
+        Args:
+            floor_ttl_sec: A lower bound (e.g. the registry / existing
+                ``lease_ttl_sec``) the computed TTL is raised to.
+
+        Returns:
+            int: ``max(floor_ttl_sec, wall_budget × (1 + grace))``.
+        """
+        return max(
+            int(floor_ttl_sec or 0),
+            int(self._specialist_wall_budget_sec(needs_gpu=True) * (1.0 + GPU_LEASE_TTL_GRACE)),
+        )
 
     async def _reap_dispatched_task(
         self,
@@ -10657,127 +10548,8 @@ class Coordinator:
         result_dict: dict[str, Any],
         kept: bool,
     ) -> None:
-        """Per-task fact write — one journal row + maybe one KB fact (source_session_id is hyperloom-local).
-
-        Args:
-            task: The completed task being recorded.
-            source_session_id: The hyperloom-local session id stamped on the
-                fact provenance.
-            result_dict: The task result dict.
-            kept: Whether the result was KEEP-promoted (KEEP → lesson, else
-                pitfall/REVERT).
-        """
-        journal = self._ensure_journal()
-        gain_raw = result_dict.get("gain_pct")
-        try:
-            gain_pct = float(gain_raw) if gain_raw is not None else None
-        except (TypeError, ValueError):
-            gain_pct = None
-        tput_raw = result_dict.get("output_throughput")
-        try:
-            throughput_after = float(tput_raw) if tput_raw is not None else None
-        except (TypeError, ValueError):
-            throughput_after = None
-        kind = classify_change_kind(task.kind, None)
-        change = summarize_change(task.kind, None, result_dict)
-        if kept:
-            outcome = OUTCOME_KEEP
-            error_class = None
-            reason = None
-        else:
-            outcome = OUTCOME_REVERT
-            error_class = str(result_dict.get("error_class") or "") or None
-            reason = str(result_dict.get("reason") or "") or None
-        journal.append_entry(
-            JournalEntry(
-                phase=self._journal_entry_phase(),
-                iter=int(self.shared_state.tick or 0),
-                kind=kind,
-                change=change,
-                outcome=outcome,
-                gain_pct=gain_pct,
-                throughput_after=throughput_after,
-                error_class=error_class,
-                reason=reason,
-                task_id=task.task_id,
-                tick=int(self.shared_state.tick or 0),
-            )
-        )
-
-        if self.cortex_kb is None:
-            return
-
-        models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
-        hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        # evidence_refs (log:task-...) gives traceability since source_session_id lands in attrs.
-        evidence_refs = [f"log:task-{task.task_id}"]
-        # Workload-shape tags for lesson/pitfall attrs so the warm-start reader filters cross-framework noise.
-        workload_tags = self._collect_workload_tags()
-        extra = workload_tags if workload_tags else None
-        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if kept and gain_pct is not None and gain_pct > 0:
-            statement = self._build_statement(
-                change=change,
-                gain_pct=gain_pct,
-                kind="lesson",
-            )
-            impact = self._build_measured_impact(
-                gain_pct=gain_pct,
-                throughput_after=throughput_after,
-                stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
-                measured_at=now_iso,
-            )
-            live = self._read_local_recipe_row()
-            best_config_candidate = self._extract_kept_best_config(
-                task=task,
-                result_dict=result_dict,
-            )
-            recipe_overrides = self._kb_best_config_overrides_for_keep(
-                live=live,
-                best_config_candidate=best_config_candidate,
-                throughput_after=throughput_after,
-            )
-            # v2: append onto the recipe's lessons[] (no cross-recipe dedup).
-            self._kb_amend_recipe(
-                append_lesson={
-                    "statement": statement,
-                    "measured_impact": impact,
-                },
-                recipe_overrides=recipe_overrides or None,
-                provenance_details={
-                    "source_session_id": source_session_id,
-                    "source_task_id": task.task_id,
-                    "evidence": list(evidence_refs or []),
-                    "applicable_models": list(models or []),
-                    "applicable_hardware": list(hardware or []),
-                    "extra": dict(extra or {}),
-                    "now": now_iso,
-                },
-            )
-            return
-
-        severity = self._pitfall_severity_for(result_dict)
-        if severity is not None:
-            description = self._build_statement(
-                change=change,
-                severity=severity,
-                kind="pitfall",
-            )
-            self._kb_amend_recipe(
-                append_pitfall={
-                    "description": description,
-                    "severity": severity,
-                },
-                provenance_details={
-                    "source_session_id": source_session_id,
-                    "source_task_id": task.task_id,
-                    "evidence": list(evidence_refs or []),
-                    "applicable_models": list(models or []),
-                    "applicable_hardware": list(hardware or []),
-                    "extra": dict(extra or {}),
-                    "now": now_iso,
-                },
-            )
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        return self.recorder._record_fact_per_task(task=task, source_session_id=source_session_id, result_dict=result_dict, kept=kept)
 
     def _build_statement(
         self,
@@ -10787,28 +10559,8 @@ class Coordinator:
         gain_pct: float | None = None,  # kept for backward call-signature compat
         severity: str | None = None,
     ) -> str:
-        """Build the lesson statement / pitfall description hashed into the KB canonical_id; MUST exclude volatile fields (e.g. gain_pct) so N sessions merge instead of producing N rows. Identity = framework + change + model/hw.
-
-        Args:
-            change: The summarized change description.
-            kind: ``"lesson"`` or ``"pitfall"`` — selects the rendered form.
-            gain_pct: Kept for backward call-signature compat; intentionally not
-                included in the statement.
-            severity: The pitfall severity, rendered only when ``kind`` is
-                ``"pitfall"``.
-
-        Returns:
-            The identity-stable statement / description string.
-        """
-        framework = str(getattr(self.shared_state, "framework", "") or "").strip()
-        fw_tag = f"[{framework or '?'}] "
-        model = self.shared_state.model_name or "?"
-        hw = self.shared_state.gpu_type or "?"
-        if kind == "lesson":
-            # gain_pct intentionally NOT included — see docstring.
-            return f"{fw_tag}{change} on {model}/{hw}"
-        # kind == "pitfall"
-        return f"{fw_tag}{change} → {severity or '?'} on {model}/{hw}"
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        return self.recorder._build_statement(change=change, kind=kind, gain_pct=gain_pct, severity=severity)
 
     @staticmethod
     def _build_measured_impact(
@@ -10819,29 +10571,34 @@ class Coordinator:
         measured_at: str,
         throughput_before: float | None = None,
     ) -> dict[str, Any]:
-        """GAP 3 — structured ``measured_impact`` payload (dict not legacy string so consumers parse without regex); stack_depth = stack length before this lesson lands.
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        from .result_recorder import ResultRecorder as _RR
+        return _RR._build_measured_impact(gain_pct=gain_pct, throughput_after=throughput_after, stack_depth=stack_depth, measured_at=measured_at, throughput_before=throughput_before)
 
-        Args:
-            gain_pct: The measured gain percent, or ``None``.
-            throughput_after: Throughput after the change, or ``None``.
-            stack_depth: Optimization-stack length before this lesson lands.
-            measured_at: ISO timestamp of the measurement.
-            throughput_before: Throughput before the change, or ``None``.
+    @staticmethod
+    def _predicted_gain(
+        *sources: dict[str, Any] | None,
+    ) -> float | None:
+        """First parseable ``predicted_gain_pct`` across ordered sources.
 
-        Returns:
-            A compact ``measured_impact`` dict with ``None`` fields stripped.
+        Sources are checked in order (e.g. variant_outcome → variant attrs →
+        task params); a non-zero prediction wins. Returns ``None`` when none
+        carry a usable value so the journal row stays ``predicted``-free for
+        unpredicted (default-grid) changes rather than recording a fake 0.
         """
-        out: dict[str, Any] = {
-            "gain_pct": float(gain_pct) if gain_pct is not None else None,
-            "stack_depth_at_apply": int(stack_depth),
-            "measured_at": measured_at,
-        }
-        if throughput_after is not None:
-            out["throughput_after"] = float(throughput_after)
-        if throughput_before is not None:
-            out["throughput_before"] = float(throughput_before)
-        # Strip None for compactness (prompt section uses .get).
-        return {k: v for k, v in out.items() if v is not None}
+        for src in sources:
+            if not isinstance(src, dict):
+                continue
+            raw = src.get("predicted_gain_pct")
+            if raw is None:
+                continue
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if val != 0.0:
+                return val
+        return None
 
     def _record_fact_per_variant(
         self,
@@ -10850,329 +10607,16 @@ class Coordinator:
         source_session_id: str,
         variant_outcome: dict[str, Any],
     ) -> None:
-        """Per-variant fact write — mirror of _record_fact_per_task for explore per-variant decisions.
-
-        Args:
-            task: The completed explore task.
-            source_session_id: The hyperloom-local session id stamped on the
-                fact provenance.
-            variant_outcome: One per-variant outcome row (name, outcome,
-                metrics).
-        """
-        journal = self._ensure_journal()
-        outcome_raw = str(variant_outcome.get("outcome") or "")
-        if outcome_raw == "KEEP":
-            outcome = OUTCOME_KEEP
-        elif outcome_raw in ("REVERT", "FAILED", "KEEP_UNSTABLE"):
-            outcome = OUTCOME_REVERT
-        elif outcome_raw == "SKIPPED_DEDUP":
-            return  # nothing to journal
-        else:
-            outcome = OUTCOME_NO_PROMOTE
-        variant_name = str(variant_outcome.get("variant_name") or "")
-        metrics = variant_outcome.get("metrics") or {}
-        gain_raw = metrics.get("gain_pct") if isinstance(metrics, dict) else None
-        try:
-            gain_pct = float(gain_raw) if gain_raw is not None else None
-        except (TypeError, ValueError):
-            gain_pct = None
-        tput_raw = metrics.get("output_throughput") if isinstance(metrics, dict) else None
-        try:
-            throughput_after = float(tput_raw) if tput_raw is not None else None
-        except (TypeError, ValueError):
-            throughput_after = None
-        variant_attrs = variant_outcome.get("variant") or {}
-        kind = classify_change_kind(
-            task.kind,
-            variant_attrs if isinstance(variant_attrs, dict) else None,
-        )
-        # Ensure the change summary is variant-specific (else every explore variant writes an identical row).
-        change_attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
-        if (
-            not (change_attrs.get("extra_sglang_args") or change_attrs.get("extra_envs") or change_attrs.get("name"))
-            and variant_name
-        ):
-            change_attrs["name"] = variant_name
-        change = summarize_change(task.kind, change_attrs, None)
-        error_class = None
-        reason = None
-        if outcome == OUTCOME_REVERT:
-            error_class = str(variant_outcome.get("error_class") or "") or None
-            reason = str(variant_outcome.get("reason") or "") or None
-        # Proposer attribution + per-variant measurement detail, carried from the
-        # explore executor's per_variant_outcomes so the decision row records who
-        # proposed the change and how it measured (beyond headline gain/tput).
-        detail_metrics = {
-            k: metrics[k]
-            for k in (
-                "runtime_sec",
-                "wall_clock_ratio_vs_baseline",
-                "stack_rebench_tput",
-                "estimated_output_throughput",
-            )
-            if isinstance(metrics, dict) and metrics.get(k) is not None
-        }
-        journal.append_entry(
-            JournalEntry(
-                phase=self._journal_entry_phase(),
-                iter=int(self.shared_state.tick or 0),
-                kind=kind,
-                change=change,
-                outcome=outcome,
-                gain_pct=gain_pct,
-                throughput_after=throughput_after,
-                error_class=error_class,
-                reason=reason,
-                task_id=task.task_id,
-                variant_name=variant_name,
-                provenance=str(variant_outcome.get("provenance") or ""),
-                scope=str(variant_outcome.get("scope") or ""),
-                fingerprint=str(variant_outcome.get("fingerprint") or ""),
-                metrics=detail_metrics,
-                tick=int(self.shared_state.tick or 0),
-            )
-        )
-
-        if self.cortex_kb is None:
-            return
-
-        models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
-        hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        evidence_refs = [
-            f"log:task-{task.task_id}",
-            f"variant:{variant_name}",
-        ]
-        # Workload-shape tags — see _record_fact_per_task.
-        workload_tags = self._collect_workload_tags()
-        extra = workload_tags if workload_tags else None
-
-        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if outcome == OUTCOME_KEEP and gain_pct is not None and gain_pct > 0:
-            statement = self._build_statement(
-                change=change,
-                gain_pct=gain_pct,
-                kind="lesson",
-            )
-            impact = self._build_measured_impact(
-                gain_pct=gain_pct,
-                throughput_after=throughput_after,
-                stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
-                measured_at=now_iso,
-            )
-            live = self._read_local_recipe_row()
-            best_config_candidate = self._extract_kept_best_config(
-                task=task,
-                variant_attrs=change_attrs,
-            )
-            recipe_overrides = self._kb_best_config_overrides_for_keep(
-                live=live,
-                best_config_candidate=best_config_candidate,
-                throughput_after=throughput_after,
-            )
-            # v2: per-variant lesson append onto recipe.lessons[]
-            # (no cross-recipe dedup, see _record_fact_per_task).
-            self._kb_amend_recipe(
-                append_lesson={
-                    "statement": statement,
-                    "measured_impact": impact,
-                },
-                recipe_overrides=recipe_overrides or None,
-                provenance_details={
-                    "source_session_id": source_session_id,
-                    "source_task_id": task.task_id,
-                    "source_variant_name": variant_name,
-                    "evidence": list(evidence_refs or []),
-                    "applicable_models": list(models or []),
-                    "applicable_hardware": list(hardware or []),
-                    "extra": dict(extra or {}),
-                    "now": now_iso,
-                },
-            )
-            return
-
-        severity = self._pitfall_severity_for(
-            {
-                **(metrics if isinstance(metrics, dict) else {}),
-                "error_class": variant_outcome.get("error_class"),
-                "status": variant_outcome.get("outcome"),
-            }
-        )
-        if severity is not None:
-            description = self._build_statement(
-                change=change,
-                severity=severity,
-                kind="pitfall",
-            )
-            self._kb_amend_recipe(
-                append_pitfall={
-                    "description": description,
-                    "severity": severity,
-                },
-                provenance_details={
-                    "source_session_id": source_session_id,
-                    "source_task_id": task.task_id,
-                    "source_variant_name": variant_name,
-                    "evidence": list(evidence_refs or []),
-                    "applicable_models": list(models or []),
-                    "applicable_hardware": list(hardware or []),
-                    "extra": dict(extra or {}),
-                    "now": now_iso,
-                },
-            )
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        return self.recorder._record_fact_per_variant(task=task, source_session_id=source_session_id, variant_outcome=variant_outcome)
 
     def _collect_workload_tags(self) -> dict[str, Any]:
-        """Return the workload-shape KB tag dict for the current session (GAP 5); shared by recipe attrs + lesson/pitfall writes so the warm-start reader filters symmetrically.
-
-        Returns:
-            A dict of workload-shape KB tags (framework, model, parallelism,
-            runtime versions, baseline workload extras) with empty values
-            omitted.
-        """
-        ss = self.shared_state
-        out: dict[str, Any] = {}
-        framework = str(getattr(ss, "framework", "") or "").strip()
-        if framework:
-            out["framework"] = framework
-        model_class = str(getattr(ss, "model_class", "") or "").strip()
-        if model_class:
-            out["model_class"] = model_class
-        # model_family (v1 fallback) no longer stamped: v2 uses the exact 5-tuple canonical_id.
-        model_name = str(getattr(ss, "model_name", "") or "").strip()
-        if model_name:
-            out["model_name"] = model_name
-        for src_attr, dst_key in (
-            ("precision", "precision"),
-            ("tp", "tp"),
-            ("ep", "ep"),
-            ("conc", "conc"),
-            ("isl", "isl"),
-            ("osl", "osl"),
-            ("max_model_len", "max_model_len"),
-        ):
-            v = getattr(ss, src_attr, None)
-            if v not in (None, "", 0):
-                out[dst_key] = v
-        # EP env fallback when SharedState.ep is unset (legacy SDK callers).
-        if "ep" not in out:
-            raw_ep = (os.environ.get("EP") or "").strip()
-            try:
-                n = int(raw_ep) if raw_ep else 0
-            except ValueError:
-                n = 0
-            if n > 0:
-                out["ep"] = n
-        # PP — no SharedState field (no CLI surface); env-only.
-        raw_pp = (os.environ.get("PP") or "").strip()
-        try:
-            pp_n = int(raw_pp) if raw_pp else 0
-        except ValueError:
-            pp_n = 0
-        if pp_n > 0:
-            out["pp"] = pp_n
-        # runtime version tags from stack_fingerprint_meta (cli writes at boot, resume reads verbatim).
-        fp_meta = getattr(ss, "stack_fingerprint_meta", None) or {}
-        if isinstance(fp_meta, dict):
-            # framework_version is whichever of sglang/vllm is active.
-            fw_lc = framework.lower()
-            if fw_lc in ("sglang", "vllm"):
-                v = str(fp_meta.get(fw_lc) or "").strip()
-                if v and v != "unknown":
-                    out["framework_version"] = v
-            for src_key, dst_key in (
-                ("rocm", "rocm_version"),
-                ("aiter", "aiter_version"),
-                ("image_digest", "image_digest"),
-            ):
-                v = str(fp_meta.get(src_key) or "").strip()
-                if v and v != "unknown":
-                    out[dst_key] = v
-        # per-baseline workload extras from materialized YAML; keep bool False (don't drop an "explicitly disabled" signal).
-        wl_extra = getattr(ss, "baseline_workload_extra", None) or {}
-        if isinstance(wl_extra, dict):
-            for k in ("max_running_requests", "max_num_seqs"):
-                v = wl_extra.get(k)
-                if isinstance(v, int) and v > 0:
-                    out[k] = v
-            for k in ("chunked_prefill_enabled", "enable_torch_compile"):
-                v = wl_extra.get(k)
-                if isinstance(v, bool):
-                    out[k] = v
-            for k in ("quant_scheme", "workload_mode"):
-                v = wl_extra.get(k)
-                if isinstance(v, str) and v.strip():
-                    out[k] = v.strip()
-        return out
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        return self.recorder._collect_workload_tags()
 
     def _build_kernel_optimizations_from_state(self) -> list[dict[str, Any]]:
-        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False. Returns KernelOptimization-shaped dicts.
-
-        Returns:
-            A list of KernelOptimization-shaped dicts for each KEEP'd kernel,
-            joined with its E2E integrate verdict where available.
-        """
-        ss = self.shared_state
-        opt_attempts = getattr(ss, "kernel_opt_attempts", {}) or {}
-        integ_attempts = getattr(ss, "kernel_integrate_attempts", {}) or {}
-        if not isinstance(opt_attempts, dict):
-            return []
-
-        # Index integrate results by kernel_id (last write wins; entry carries rolled-up best_gain_pct).
-        integ_by_kid: dict[str, dict[str, Any]] = {}
-        if isinstance(integ_attempts, dict):
-            for entry in integ_attempts.values():
-                if not isinstance(entry, dict):
-                    continue
-                kid = str(entry.get("kernel_id") or "")
-                if kid:
-                    integ_by_kid[kid] = entry
-
-        out: list[dict[str, Any]] = []
-        for kid, e in opt_attempts.items():
-            if not isinstance(e, dict):
-                continue
-            if str(e.get("last_decision", "")).upper() != "KEEP":
-                continue
-            try:
-                micro = float(e.get("last_micro_speedup") or 0.0)
-            except (TypeError, ValueError):
-                micro = 0.0
-            integ = integ_by_kid.get(str(kid))
-            e2e_gain = 0.0
-            e2e_tput = 0.0
-            e2e_decision = ""
-            integrated = False
-            if isinstance(integ, dict):
-                integrated = True
-                # Integrate-layer verdict (E2E); lets warm-start skip a micro-win/E2E-loss kernel.
-                e2e_decision = str(integ.get("last_decision") or "").upper()
-                try:
-                    e2e_gain = float(integ.get("best_gain_pct") or 0.0)
-                except (TypeError, ValueError):
-                    e2e_gain = 0.0
-                # Last attempt's E2E re-bench throughput.
-                for att in reversed(list(integ.get("attempts") or [])):
-                    if isinstance(att, dict) and att.get("new_tput") is not None:
-                        try:
-                            e2e_tput = float(att.get("new_tput") or 0.0)
-                        except (TypeError, ValueError):
-                            e2e_tput = 0.0
-                        break
-            out.append(
-                {
-                    "kernel_id": str(kid),
-                    # source persisted under last_source_file; source_file is a legacy fallback.
-                    "source_file": str(e.get("last_source_file") or e.get("source_file") or ""),
-                    "artifact_path": str(e.get("last_artifact_path") or ""),
-                    "micro_speedup": micro,
-                    "decision": "KEEP",
-                    "e2e_gain_pct": e2e_gain,
-                    "e2e_tput": e2e_tput,
-                    "e2e_decision": e2e_decision,
-                    "integrated": integrated,
-                    "ts": str(e.get("last_ts") or e.get("ts") or ""),
-                }
-            )
-        return out
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        return self.recorder._build_kernel_optimizations_from_state()
 
     def _collect_attempt_provenance(
         self,
@@ -11218,239 +10662,12 @@ class Coordinator:
         return kept_sources, kept_by_gap, reverted_rows
 
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
-        """Materialise the recipe-shaped view of :class:`SharedState` (kg-usage-guide §7.4; defensive getattr).
-
-        Returns:
-            A recipe-shaped attrs dict (best_config, what_worked, what_failed,
-            kernel_optimizations, workload tags, session row) for KB recipe
-            writes.
-        """
-        ss = self.shared_state
-        current_best = getattr(ss, "current_best", {}) or {}
-        opt_stack = getattr(ss, "optimization_stack", []) or []
-        gain_per_stack = getattr(ss, "gain_per_stack_entry", []) or []
-        last_failures = getattr(ss, "last_action_failures", []) or []
-        # Read canonical extra_server_args first, but WRITE the legacy extra_sglang_args key (RecipeKB schema +
-        # warm-replay reader still key on it; reading the stale name would break warm-replay reproduction).
-        best_config: dict[str, Any] = {}
-        if isinstance(current_best, dict):
-            cb_args = current_best.get("extra_server_args") or current_best.get("extra_sglang_args")
-            if cb_args:
-                best_config["extra_sglang_args"] = str(cb_args)
-            for key in ("extra_envs", "args", "envs", "name", "tput", "accuracy"):
-                if key in current_best:
-                    best_config[key] = current_best[key]
-        # Prefer the last validated stack layer for launch args (current_best may carry a corrupted string).
-        if opt_stack:
-            last_entry = opt_stack[-1]
-            if isinstance(last_entry, dict):
-                # Read canonical keys first, legacy *_sglang_args as fallback (#332 best_config fix).
-                stack_args = str(
-                    last_entry.get("candidate_extra_server_args")
-                    or last_entry.get("extra_server_args")
-                    or last_entry.get("candidate_extra_sglang_args")
-                    or last_entry.get("extra_sglang_args")
-                    or "",
-                ).strip()
-                if stack_args:
-                    best_config["extra_sglang_args"] = stack_args
-        sediment_on = bool(getattr(ss, "recipe_sediment_enabled", True))
-        kept_sources, kept_by_gap, reverted_rows = self._collect_attempt_provenance() if sediment_on else ({}, {}, [])
-        what_worked: list[dict[str, Any]] = []
-        for idx, entry in enumerate(opt_stack):
-            if not isinstance(entry, dict):
-                continue
-            gain_per: float | None = None
-            if idx < len(gain_per_stack):
-                gain_per = gain_per_stack[idx]
-            name = str(entry.get("variant_name") or entry.get("name") or entry.get("kernel_id") or "")
-            row: dict[str, Any] = {
-                "name": name,
-                "extra_sglang_args": str(entry.get("extra_server_args") or entry.get("extra_sglang_args") or ""),
-                "extra_envs": dict(entry.get("extra_envs") or {}),
-                "gain_pct": gain_per,
-            }
-            # Prefer the entry's gap-id provenance (naming-independent); fall back to name/kernel_id match.
-            entry_gap = str(entry.get("gap_canonical_id") or "").strip()
-            src = (
-                (kept_by_gap.get(entry_gap) if entry_gap else None)
-                or kept_sources.get(name)
-                or kept_sources.get(str(entry.get("kernel_id") or ""))
-            )
-            if src:
-                row["source"] = src
-            what_worked.append(row)
-        what_failed: list[dict[str, Any]] = []
-        for failure in last_failures[-10:]:
-            if isinstance(failure, dict):
-                what_failed.append(
-                    {
-                        "name": str(failure.get("name") or failure.get("action") or ""),
-                        "reason": str(failure.get("reason") or failure.get("error_class") or ""),
-                    }
-                )
-        for rev in reverted_rows:
-            what_failed.append(rev)
-        kernel_optimizations = self._build_kernel_optimizations_from_state()
-        cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
-        cumulative_total = float(getattr(ss, "cumulative_gain", 0.0) or 0.0)
-        validated_stack_len = int(getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0)
-        stack_fingerprint = getattr(ss, "stack_fingerprint", "") or ""
-        # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
-        workload_tags = self._collect_workload_tags()
-        # framework_version left unset here (manifest-derived); the T0 backfill writes it.
-        return {
-            "best_config": best_config,
-            "best_throughput": float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0,
-            "what_worked": what_worked,
-            "what_failed": what_failed,
-            "kernel_optimizations": kernel_optimizations,
-            "stack_fingerprint": {"sha": str(stack_fingerprint)} if stack_fingerprint else {},
-            "last_profiled": str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
-            "workload": workload_tags,
-            "sessions": [
-                {
-                    "session_id": str(getattr(ss, "cortex_session_id", "") or self.session_dir.name),
-                    "gain_pct": cumulative_validated or cumulative_total,
-                    "stack_len": validated_stack_len or len(opt_stack),
-                    # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
-                    "throughput_before": float(getattr(ss, "baseline_tput", 0.0) or 0.0),
-                    "throughput_after": (
-                        float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0
-                    ),
-                    "date": datetime.now(timezone.utc).isoformat(),
-                    "actions_taken": [
-                        nm
-                        for nm in (
-                            str(e.get("variant_name") or e.get("name") or e.get("action") or "").strip()
-                            for e in opt_stack
-                            if isinstance(e, dict)
-                        )
-                        if nm
-                    ],
-                }
-            ],
-        }
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        return self.recorder._build_recipe_attrs_from_state()
 
     def cortex_finalize_recipe_and_journal(self) -> None:
-        """CLOSE-time fact finalize: final update_recipe + journal finalize (total_gain_pct + final_throughput); idempotent (CLOSE sequencer + _cortex_t4_hook safety net)."""
-        try:
-            journal = self._ensure_journal()
-            ss = self.shared_state
-            cb = getattr(ss, "current_best", {}) or {}
-            final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
-            total_gain = float(
-                getattr(ss, "cumulative_gain_validated", 0.0) or getattr(ss, "cumulative_gain", 0.0) or 0.0,
-            )
-            journal.finalize(
-                final_throughput=final_tput if final_tput > 0 else None,
-                total_gain_pct=total_gain,
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("optimization_journal.finalize failed")
-
-        if self.cortex_kb is None:
-            return
-        ss = self.shared_state
-        model_name = getattr(ss, "model_name", "") or ""
-        gpu_type = getattr(ss, "gpu_type", "") or ""
-        if not model_name or not gpu_type:
-            log.info(
-                "cortex finalize_recipe: missing model/hardware (model=%r hardware=%r); skipping update_recipe",
-                model_name,
-                gpu_type,
-            )
-            return
-        try:
-            attrs = self._build_recipe_attrs_from_state()
-            # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
-            workload_tags = attrs.get("workload") or {}
-
-            # sessions[] read-modify-write: read anchor, drop prior entry with our session_id (resume safety), append ours, write back.
-            my_sessions = list(attrs["sessions"] or [])
-            my_session_ids = {str((s or {}).get("session_id") or "") for s in my_sessions if isinstance(s, dict)}
-            # v2: read-modify-write the recipe row; sessions[] merged in-process under the cid flock so concurrent finalises don't tear.
-            merged_sessions: list[dict[str, Any]] = list(my_sessions)
-            existing_row: dict[str, Any] = {}
-            if self.cortex_kb is not None:
-                try:
-                    cid = self._workload_canonical_id()
-                    # Read the LOCAL row (authoritative for writes) so the merge + guard compare against it.
-                    existing_row = self.cortex_kb.local.get_recipe(canonical_id=cid) or {}
-                    existing_sessions: list[dict[str, Any]] = []
-                    for row in existing_row.get("sessions") or []:
-                        if not isinstance(row, dict):
-                            continue
-                        if str(row.get("session_id") or "") in my_session_ids:
-                            # Resume/retry of the same session — our new entry supersedes the prior one.
-                            continue
-                        existing_sessions.append(dict(row))
-                    merged_sessions = existing_sessions + my_sessions
-                except Exception as exc:  # noqa: BLE001 — defensive
-                    log.info(
-                        "recipe read failed (%s); finalize will append "
-                        "the current session only; the next finalize "
-                        "will catch up.",
-                        exc,
-                    )
-
-            # KEEP'd kernel optimizations ride the extras channel; merge with prior rows, dedup by kernel_id.
-            kopts_new = list(attrs.get("kernel_optimizations") or [])
-            new_kids = {str((k or {}).get("kernel_id") or "") for k in kopts_new if isinstance(k, dict)}
-            merged_kopts: list[dict[str, Any]] = list(kopts_new)
-            for prior in existing_row.get("kernel_optimizations") or []:
-                if not isinstance(prior, dict):
-                    continue
-                if str(prior.get("kernel_id") or "") in new_kids:
-                    continue
-                merged_kopts.append(dict(prior))
-
-            extras_payload = dict(workload_tags or {})
-            if merged_kopts:
-                extras_payload["kernel_optimizations"] = merged_kopts
-
-            overrides: dict[str, Any] = {
-                "what_worked": attrs["what_worked"],
-                "what_failed": attrs["what_failed"],
-                "last_profiled": attrs["last_profiled"],
-                "sessions": merged_sessions,
-                "extras": extras_payload,
-            }
-            # Overwrite best_config/best_throughput only on a real improvement (repro 20260531T144553Z: bare baseline clobbered a validated config): requires has_validated_win AND my_tput > live_tput.
-            my_tput = float(attrs.get("best_throughput") or 0.0)
-            cb_now = getattr(ss, "current_best", {}) or {}
-            cb_args_now = str(cb_now.get("extra_sglang_args") or "").strip() if isinstance(cb_now, dict) else ""
-            validated_gain = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
-            has_validated_win = bool(
-                (getattr(ss, "optimization_stack", []) or []) or validated_gain > 0.0 or cb_args_now
-            )
-            try:
-                live_tput = float(existing_row.get("best_throughput") or 0.0)
-            except (TypeError, ValueError):
-                live_tput = 0.0
-            if has_validated_win and my_tput > live_tput:
-                overrides["best_config"] = attrs["best_config"]
-                overrides["best_throughput"] = my_tput
-            # Merge stack_fingerprint rather than replace (CLOSE only has the sha; T0 stamps version keys).
-            merged_fp = dict(existing_row.get("stack_fingerprint") or {})
-            for fp_key, fp_val in (attrs.get("stack_fingerprint") or {}).items():
-                if fp_val not in (None, "", {}):
-                    merged_fp[fp_key] = fp_val
-            if merged_fp:
-                overrides["stack_fingerprint"] = merged_fp
-
-            self._kb_amend_recipe(
-                recipe_overrides=overrides,
-                provenance_details={
-                    "phase": "close_finalize",
-                    "evidence": [
-                        f"log:session-{getattr(ss, 'cortex_session_id', '') or self.session_dir.name}",
-                    ],
-                },
-            )
-        # Catch-all keeps CLOSE step 2.5 defensive against programmer bugs.
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("update_recipe raised unexpectedly")
+        """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
+        return self.recorder.cortex_finalize_recipe_and_journal()
 
     def _lift_to_current_best(
         self,
@@ -11686,6 +10903,16 @@ class Coordinator:
             }
             # seed the gaps[] ledger from baseline (best-effort).
             await self._refresh_gaps(reason="baseline_done")
+            # Standalone baseline-arm roofline ceiling (pure CPU, no GPU/trace):
+            # backs up the snapshot ceiling so the frontend still has data when
+            # the roofline (profile + trace_analyze) step later fails.
+            if isinstance(tput, (int, float)) and tput > 0:
+                try:
+                    self.shared_state.record_baseline_roofline_ceiling()
+                except Exception as exc:  # noqa: BLE001 — best-effort backup
+                    log.warning(
+                        "baseline roofline-ceiling backup failed: %r", exc,
+                    )
             # PRELUDE bootstrap (post-baseline), ordering mandatory: (1) inject warm-recipe history, (2) warm-replay, (3) auto-analysis (deferred while replay in_flight, same GPU/port), (4) research scout.
             if (
                 isinstance(tput, (int, float))
@@ -11898,6 +11125,56 @@ class Coordinator:
             best_winner = result.get("best_variant")
             best_tput = result.get("output_throughput")
             promoted = False
+            # Long-run #4 (Gap A): a post-resume full-stack revalidation confirms
+            # the EXISTING cumulative stack rather than adding a variant, so it
+            # never "promotes" (the lift dedupes). Reconcile the validation
+            # watermark + clear the resume_pending_revalidation flag directly
+            # from the measured tput, and flag drift when the cumulative result
+            # no longer reproduces the recorded current_best.
+            # A post-resume revalidation task (full-stack ``resume_stack_revalidate``
+            # or env-gated current_best ``resume_reverify_best``) confirms the
+            # EXISTING cumulative stack rather than adding a variant, so it never
+            # "promotes". Reconcile the validation watermark + clear the
+            # ``resume_pending_revalidation`` flag from the measured tput — but
+            # ONLY when the rebench actually produced a valid measurement, so a
+            # failed/empty rebench leaves the flag set and reports keep warning.
+            _revalidate_sources = {"resume_stack_revalidate", "resume_reverify_best"}
+            if task is not None and str((task.params or {}).get("source") or "") in _revalidate_sources:
+                measured = result.get("output_throughput")
+                measured_ok = isinstance(measured, (int, float)) and measured > 0
+                if measured_ok and self.shared_state.baseline_tput > 0:
+                    self.shared_state.cumulative_gain_validated = (
+                        (float(measured) - self.shared_state.baseline_tput)
+                        / self.shared_state.baseline_tput
+                        * 100.0
+                    )
+                    self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                    self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                    cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                    recorded = cb_rec.get("tput")
+                    try:
+                        floor = float(os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip() or 95.0)
+                    except (TypeError, ValueError):
+                        floor = 95.0
+                    if (
+                        isinstance(recorded, (int, float))
+                        and recorded > 0
+                        and float(measured) < float(recorded) * floor / 100.0
+                    ):
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "current_best_drift",
+                                "severity": "high",
+                                "measured_tput": float(measured),
+                                "recorded_tput": float(recorded),
+                                "floor_pct": floor,
+                            },
+                        )
+                if measured_ok:
+                    self.shared_state.resume_pending_revalidation = False
+                changed = True
             if isinstance(winners, list) and winners:
                 for winner in winners:
                     if not isinstance(winner, dict):
@@ -11937,7 +11214,7 @@ class Coordinator:
                 log.exception("depth: note_explore_outcome failed")
             if promoted:
                 # explore inlines the per-KEEP rebench, so promote it into cumulative_gain_validated +
-                # advance validated_stack_len so the TODO 4 stack-rebench guard clears immediately.
+                # advance validated_stack_len so the long-run #4 unvalidated-stack guard clears immediately.
                 if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
                     validated_gain = (
                         (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
@@ -11962,6 +11239,54 @@ class Coordinator:
                 "output_throughput": best_tput,
                 "keep_unstable_count": len(result.get("keep_unstable_in_stack") or []),
                 "explore_grid_exhausted": bool(result.get("explore_grid_exhausted")),
+            }
+        elif task_kind == "integrate_patch":
+            status = str(result.get("status") or "")
+            new_tput = result.get("output_throughput")
+            kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
+            if kept_flag:
+                specialist_task_id = str(result.get("specialist_task_id") or "")
+                lift = {
+                    "name": specialist_task_id or "integrate_patch_keep",
+                    "candidate_extra_server_args": "",
+                    "extra_envs": dict(result.get("config_changes_applied") or {}),
+                    "tput": float(new_tput),
+                    "workspace": result.get("workspace"),
+                    "provenance": "integrate_patch",
+                    "scope": "source_patch",
+                }
+                self._lift_to_current_best("integrate_patch", float(new_tput), lift)
+                if self.shared_state.baseline_tput > 0:
+                    validated_gain = (
+                        (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
+                    )
+                    self.shared_state.cumulative_gain_validated = float(validated_gain)
+                    self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                    self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                    self.shared_state.resume_pending_revalidation = False
+                    await self._maybe_enqueue_watermark_roofline(
+                        reason="integrate_keep_watermark",
+                    )
+                changed = True
+            # Clear long-run #4 sentinel after the task outcome has been
+            # observed. On a crash before this point, resume sees it and audits.
+            if isinstance(getattr(self.shared_state, "pending_integrate", None), dict):
+                pending = self.shared_state.pending_integrate
+                if not pending or str(pending.get("task_id") or "") in {
+                    "",
+                    str(getattr(task, "task_id", "") or ""),
+                }:
+                    self.shared_state.pending_integrate = {}
+                    changed = True
+            audit_decision = "promoted" if kept_flag else "discarded"
+            audit_extras = {
+                "status": status,
+                "specialist_task_id": result.get("specialist_task_id"),
+                "output_throughput": new_tput,
+                "delta_pct": result.get("delta_pct"),
+                "accuracy_pass": result.get("accuracy_pass"),
+                "patches_applied": result.get("patches_applied") or [],
+                "patches_reverted": result.get("patches_reverted") or [],
             }
         elif task_kind == "framework_pr":
             # FRAMEWORK_PR per-candidate result: append a progress row, update the batch max-gain stat, and on
@@ -12091,4 +11416,23 @@ class Coordinator:
             self.shared_state.save(self.session_dir)
 
 
-__all__ = ["Coordinator", "CoordinatorState", "PendingProposal", "SharedState"]
+__all__ = [
+    "Coordinator",
+    "CoordinatorState",
+    "PendingProposal",
+    "SharedState",
+    # Re-exported from coordinator_helpers for callers/tests that reference
+    # them via ``coordinator.<name>`` (e.g. test_coordinator_runtime uses
+    # coordinator._summarize_failed_variants). Declared so the re-export is
+    # intentional rather than a flagged unused import.
+    "_BASELINE_FINGERPRINT_KEYS",
+    "_baseline_params_fingerprint",
+    "_dedupe_extra_server_args",
+    "_infer_model_class_from_config",
+    "_merge_cumulative_extra_sglang_args",
+    "_parse_baseline_workload_extra",
+    "_parse_iso_unix",
+    "_resolve_roofline_watermark_ratio",
+    "_summarize_failed_variants",
+    "effective_closing_grace_sec",
+]

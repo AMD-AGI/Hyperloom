@@ -3,7 +3,8 @@
 name: SaFE Optimize Tiny (count-filler)
 
 # Scheduled/manual entrypoint for the count-filler pool, hosted off-repo at
-#   $WEKAFS_CHENYI_DIR/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json
+#   $WEKAFS_CHENYI_DIR/ci-candidates/sub100_lt12b_pulse_notrun.json
+#   (a date-less symlink that always points at the latest filtered pool)
 #   = HF text-generation models with <12B params AND <100 downloads that pulse
 #     has NOT run yet. The goal is breadth -- sweep the long tail.
 #
@@ -13,7 +14,7 @@ name: SaFE Optimize Tiny (count-filler)
 # INDEPENDENTLY of the large-B production cron (optimize-submit.yml's own
 # schedule, which sweeps the gt100 rotate pool twice a day).
 #
-# Cadence: 200 models per batch, 6h optimizer budget each, 4 runs/day (every
+# Cadence: 240 models per batch, 6h optimizer budget each, 4 runs/day (every
 # 6h), all submitted to the sandbox workspace.
 #
 # The candidates JSON lives on /wekafs (RO-mounted on the hyperloom runners)
@@ -52,9 +53,9 @@ jobs:
       # Off-repo pool on /wekafs (the /wekafs root lives in the WEKAFS_CHENYI_DIR
       # secret; generate_hf_matrix reads the absolute path as-is, and the
       # hyperloom runners RO-mount /wekafs).
-      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json', secrets.WEKAFS_CHENYI_DIR) }}
-      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json', secrets.WEKAFS_CHENYI_DIR) }}
-      BATCH_SIZE: '200'
+      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
+      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
+      BATCH_SIZE: '240'
       # Count-filler runs go to the sandbox workspace only.
       SUBMIT_WORKSPACES: core42-sandbox
     steps:
@@ -110,7 +111,7 @@ jobs:
 
           echo "Dispatching optimize-submit.yml on ref=${ref}"
           echo "Count-filler pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
-          echo "Batch size: ${BATCH_SIZE}; max_parallel=200; submit_workspaces=${SUBMIT_WORKSPACES}"
+          echo "Batch size: ${BATCH_SIZE}; max_parallel=${BATCH_SIZE}; submit_workspaces=${SUBMIT_WORKSPACES}"
 
           payload=$(python3 - <<'PY'
           import json

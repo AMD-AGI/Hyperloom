@@ -24,6 +24,7 @@ from __future__ import annotations
 import fcntl
 import logging
 import os
+import re
 import shutil
 import subprocess
 from contextlib import contextmanager
@@ -315,6 +316,69 @@ def _patch_tree(tracelens_root: Path, leaf: str) -> Path:
     return tracelens_root.joinpath(*_PATCH_TREE_REL, leaf)
 
 
+_VLLM_PATCH_RE = re.compile(r"^config_vllm_v(\d+(?:\.\d+)*)\.patch$")
+
+
+def _version_tuple(v: str) -> tuple[int, ...] | None:
+    """Parse the leading dotted-numeric run of a version into a tuple.
+    ``0.22.0-rocm`` -> (0, 22, 0); returns None when there is no numeric head."""
+    head = (v or "").strip().split("-", 1)[0].split("+", 1)[0]
+    nums: list[int] = []
+    for part in (head.split(".") if head else []):
+        if part.isdigit():
+            nums.append(int(part))
+        else:
+            break
+    return tuple(nums) if nums else None
+
+
+def _resolve_vllm_patch_file(patches_dir: Path, version: str) -> Path | None:
+    """Pick the TraceLens vLLM patch for ``version`` with graceful fallback.
+
+    Order: exact ``config_vllm_v{version}.patch`` > env
+    ``HYPERLOOM_VLLM_PATCH_EXACT_VERSIONS`` pin > highest same-minor patch
+    whose version is <= running > nearest patch whose version is <= running
+    (never a newer one). Patches are backward-compatible and ``_apply_atomic``'s
+    ``git apply --check`` still guards a genuinely incompatible pick. Returns
+    None when nothing qualifies.
+    """
+    exact = patches_dir / f"config_vllm_v{version}.patch"
+    if exact.is_file():
+        return exact
+    if not patches_dir.is_dir():
+        return None
+    available: dict[tuple[int, ...], Path] = {}
+    for p in patches_dir.glob("config_vllm_v*.patch"):
+        m = _VLLM_PATCH_RE.match(p.name)
+        if not m:
+            continue
+        vt = _version_tuple(m.group(1))
+        if vt:
+            available[vt] = p
+    if not available:
+        return None
+    env_pin = os.environ.get("HYPERLOOM_VLLM_PATCH_EXACT_VERSIONS", "").strip()
+    if env_pin:
+        for token in (t.strip() for t in env_pin.split(",")):
+            vt = _version_tuple(token)
+            if vt and vt in available:
+                return available[vt]
+    running = _version_tuple(version)
+    if running is None:
+        return None
+    if len(running) >= 2:
+        same_minor = [
+            vt for vt in available
+            if vt[:2] == running[:2] and vt <= running
+        ]
+        if same_minor:
+            return available[max(same_minor)]
+    not_higher = [vt for vt in available if vt <= running]
+    if not_higher:
+        return available[max(not_higher)]
+    return None
+
+
 def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
     """Build the vLLM patch plan for the installed vLLM version.
 
@@ -347,14 +411,21 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
         log.info("_server_patcher: vllm has no __version__; skip patch")
         return None
 
-    patch_file = _patch_tree(tracelens_root, "vllm_patches") / (f"config_vllm_v{version}.patch")
-    if not patch_file.is_file():
+    patches_dir = _patch_tree(tracelens_root, "vllm_patches")
+    patch_file = _resolve_vllm_patch_file(patches_dir, version)
+    if patch_file is None:
         log.info(
-            "_server_patcher: no TraceLens patch for vLLM %s (looked for %s); skip",
-            version,
-            patch_file,
+            "_server_patcher: no TraceLens patch for vLLM %s "
+            "(searched %s incl. minor/nearest-lower fallback); skip",
+            version, patches_dir,
         )
         return None
+    if patch_file.name != f"config_vllm_v{version}.patch":
+        log.info(
+            "_server_patcher: no exact vLLM patch for %s; using nearest %s "
+            "(backward-compatible; git apply --check still guards)",
+            version, patch_file.name,
+        )
 
     # Apply root for the ``a/vllm/...`` prefix is site-packages (parent of the
     # ``vllm/`` package dir).

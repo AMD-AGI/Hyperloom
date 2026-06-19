@@ -164,6 +164,43 @@ def test_redirect_advisory_renders_with_suggested_domain(cyclic_coordinator):
     assert "macro_cycle=2" in block
 
 
+def test_redirect_advisory_renders_for_saturation_without_plateau(cyclic_coordinator):
+    c = cyclic_coordinator
+    st = c.shared_state
+    st.phase = ps.PHASE_EXPLORE
+    st.macro_cycle = 3
+    st.saturated_directions = {
+        "kernel_switch_specialist": {
+            "saturated": True,
+            "direction": "compute",
+            "within_pct": 97.0,
+            "threshold_pct": 95.0,
+        }
+    }
+    block = c._bottleneck_redirect_advisory_block()
+    assert "saturated_domain=kernel_switch_specialist" in block
+    assert "Advisory only" in block
+
+
+def test_cycle_strategy_planner_avoids_saturated_focus(cyclic_coordinator):
+    c = cyclic_coordinator
+    st = c.shared_state
+    st.macro_cycle = 2
+    st.gain_at_cycle_start = 10.0
+    st.bottleneck_shift = {"to": "compute", "to_domain": "kernel_switch_specialist"}
+    st.saturated_directions = {
+        "kernel_switch_specialist": {"saturated": True, "within_pct": 98.0},
+        "comm_specialist": {"saturated": False},
+    }
+    c._record_cycle_strategy_for_current_cycle()
+    row = st.cycle_strategy_log[-1]
+    assert row["cycle"] == 2
+    assert row["focus"] != "kernel_switch_specialist"
+    block = c._cycle_strategy_seed_block()
+    assert "=== Cycle 2 strategy ===" in block
+    assert f"focus={row['focus']}" in block
+
+
 def test_redirect_advisory_empty_when_cyclic_off(cyclic_coordinator, monkeypatch):
     c = cyclic_coordinator
     monkeypatch.setenv(CYCLIC_ENV, "0")

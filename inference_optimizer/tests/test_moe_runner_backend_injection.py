@@ -20,6 +20,7 @@ import pytest
 import yaml
 
 from inference_optimizer import cli
+from inference_optimizer import cli_model_gate
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
     DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND,
     HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV,
@@ -40,7 +41,8 @@ def _hermetic_env(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     # Without an explicit/env GPU type, _resolve_amd_gpu_type falls back to
     # autodetect; pin it OFF so non-AMD test cases never see real hardware.
-    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: None)
+    # Lives in cli_model_gate after the phase-6D fold; patch the real call site.
+    monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
     for key in (
         "CONC",
         "ISL",

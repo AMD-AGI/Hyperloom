@@ -29,7 +29,7 @@ name: SaFE Optimize Submit
 #
 # How to dispatch:
 #   • Single/few models      : `-f models='Qwen/Qwen2.5-7B-Instruct ...'`
-#   • Reproducible batch run : `-f candidates_file=ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json
+#   • Reproducible batch run : `-f candidates_file=ci/candidates/hf_downloads_gt100_rotate_2026-06-17.json
 #                              -f batch_index=0 -f batch_size=130`
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
@@ -37,15 +37,17 @@ on:
   # Rolling downloads>100 pool: 200 models TWICE a day, firing at UTC
   # 04:00 / 16:00 (Beijing 12:00 / 00:00). Each fire submits the
   # NEXT sequential 200-model slice of the rotate pool, now hosted off-repo at
-  # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate_2026-06-11.json
-  # (ordered not-run first; the 449 >12B multimodal models are front-loaded),
+  # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate.json
+  # (a date-less symlink that always points at the latest filtered pool;
+  # ordered not-run first; the 449 >12B multimodal models are front-loaded),
   # stepping batch 0,1,2,... and wrapping at the pool end. Both
   # exclude_leaderboard and exclude_active are OFF on schedule: slices are
   # disjoint, so the whole pool keeps cycling (re-running finished models too).
   # The tail batch is short (not head-wrapped) so consecutive fires never
   # double-submit the head models. Manual workflow_dispatch is unaffected.
-  schedule:
-    - cron: '0 4,16 * * *'
+  # PAUSED 2026-06-19: scheduled auto-run disabled on request. Uncomment to resume.
+  # schedule:
+  #   - cron: '0 4,16 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > legacy hf_top) ──────
@@ -54,7 +56,7 @@ on:
         required: false
         default: ''
       candidates_file:
-        description: 'Path to a candidates JSON built by ci/build_production_hf_pool.py (e.g. ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json). Used when models is empty.'
+        description: 'Path to a candidates JSON built by ci/build_production_hf_pool.py (e.g. ci/candidates/hf_downloads_gt100_rotate_2026-06-17.json). Used when models is empty.'
         required: false
         default: ''
       batch_index:
@@ -125,12 +127,14 @@ on:
         default: 'local'
         type: choice
         options: [local, claw]
-      gpu_type:
-        description: 'GPU type tag (overrides SaFE backend default MI355X). Leave empty to use script default (MI300X for core42).'
+      framework:
+        description: 'Serving framework override forwarded to optimize_submit.py as --framework. Leave empty to auto-detect from the model config.'
         required: false
         default: ''
-      inferencex_path:
-        description: 'Explicit InferenceX checkout path (dev override only). Leave empty (default) so install.sh clones a writable per-session copy instead of pinning a shared read-only mount.'
+        type: choice
+        options: ['', sglang, vllm]
+      gpu_type:
+        description: 'GPU type tag (overrides SaFE backend default MI355X). Leave empty to use script default (MI300X for core42).'
         required: false
         default: ''
       kernel_opt_backends:
@@ -207,6 +211,7 @@ jobs:
       count:  ${{ steps.matrix.outputs.count }}
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
+      HF_TOKEN_2:            ${{ secrets.HF_TOKEN_2 }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
       # Rolling cron cycles the downloads>100 pool (every size), ordered with
       # not-yet-run models first so the front-anchored window picks them up
@@ -215,7 +220,7 @@ jobs:
       # active, the window wraps and the whole 2426-model pool keeps repeating.
       # Schedule reads the rotate pool from /wekafs (off-repo, RO-mounted on the
       # hyperloom runners) so the large candidates JSON never bloats the git repo.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_downloads_gt100_rotate_2026-06-11.json', secrets.WEKAFS_CHENYI_DIR) || github.event.inputs.candidates_file }}
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_downloads_gt100_rotate.json', secrets.WEKAFS_CHENYI_DIR) || github.event.inputs.candidates_file }}
       # Schedule leaves batch_index empty so generate_hf_matrix derives a
       # SEQUENTIAL index from the scheduled-fire counter: each cron (UTC
       # 4/16) steps batch 0,1,2,... and wraps, marching the whole pool in
@@ -263,6 +268,7 @@ jobs:
       SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
       HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
       HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
+      HF_TOKEN_2:                       ${{ secrets.HF_TOKEN_2 }}
       SAFE_OPTIMIZE_REGISTER_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_REGISTER_WORKSPACE }}
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
@@ -284,6 +290,7 @@ jobs:
         continue-on-error: true
         env:
           HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          HF_TOKEN_2: ${{ secrets.HF_TOKEN_2 }}
           MODEL_REPO: ${{ matrix.model }}
         run: |
           set -euo pipefail
@@ -313,6 +320,7 @@ jobs:
           INPUT_TP:               ${{ github.event.inputs.tp }}
           INPUT_SUBMIT_JITTER_SEC: ${{ github.event.inputs.submit_jitter_sec }}
           INPUT_MODE:             ${{ github.event.inputs.mode }}
+          INPUT_FRAMEWORK:        ${{ github.event.inputs.framework }}
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
@@ -356,6 +364,10 @@ jobs:
             ARGS+=(--tp "${INPUT_TP}")
           fi
           ARGS+=(--mode "${INPUT_MODE:-local}")
+          # Optional framework override — empty keeps the script's auto-detect.
+          if [ -n "${INPUT_FRAMEWORK:-}" ]; then
+            ARGS+=(--framework "${INPUT_FRAMEWORK}")
+          fi
           if [ -n "${INPUT_GPU_TYPE:-}" ]; then
             ARGS+=(--gpu-type "${INPUT_GPU_TYPE}")
           fi

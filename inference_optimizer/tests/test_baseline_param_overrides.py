@@ -471,6 +471,98 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
     assert captured["env"]["RESULT_DIR"] == str(tmp_path / "redirect_leak")
 
 
+def test_baseline_executor_falls_back_to_shared_state_model_path(
+    tmp_path, monkeypatch
+):
+    # params has no model_path and MODEL_PATH is unset: without the SharedState
+    # fallback the bare YAML model name leaks into --model-path (sglang then
+    # treats it as an HF repo id and fails "is not a local folder").
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
+    output_dir = tmp_path / "ws"
+    captured: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        cfg_idx = cmd.index("--benchmark-config")
+        out_idx = cmd.index("--output-dir")
+        captured["cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        _fake_workspace(Path(cmd[out_idx + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=SimpleNamespace(
+            model_path="/wekafs/models/PrimeIntellect-Qwen3-1.7B",
+        ),
+    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert (
+        captured["cfg"]["benchmark"]["model"]
+        == "/wekafs/models/PrimeIntellect-Qwen3-1.7B"
+    )
+
+
+def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(
+    tmp_path, monkeypatch
+):
+    # Production form: the executor is a module-level singleton
+    # (self.shared_state is None) and live state arrives via ctx.extra.
+    # Without reading ctx.extra the bare YAML model name would leak.
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
+    output_dir = tmp_path / "ws"
+    captured: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        cfg_idx = cmd.index("--benchmark-config")
+        out_idx = cmd.index("--output-dir")
+        captured["cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        _fake_workspace(Path(cmd[out_idx + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(  # no shared_state — singleton form
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    task = SimpleNamespace(task_id="t-baseline-extra", params={
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+    })
+    ctx = SimpleNamespace(
+        task=task,
+        extra={
+            "shared_state": SimpleNamespace(
+                model_path="/wekafs/models/PrimeIntellect-Qwen3-1.7B",
+            ),
+        },
+    )
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert (
+        captured["cfg"]["benchmark"]["model"]
+        == "/wekafs/models/PrimeIntellect-Qwen3-1.7B"
+    )
+
+
 def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
     base = tmp_path / "base.yaml"
     _write_yaml(base)
@@ -611,3 +703,90 @@ def test_baseline_executor_rejects_bad_result_dir(tmp_path):
     assert result["status"] == "failed"
     assert result["error_class"] == "bad_param"
     assert "result_dir" in result["error"]
+
+
+# ── reference-script base layer (precedence + 0-degrade) ───────────────────
+def _fw_args(materialized: Path, env_name: str = "EXTRA_VLLM_ARGS") -> str:
+    cfg = yaml.safe_load(materialized.read_text())
+    return str(cfg["benchmark"]["envs"].get(env_name, ""))
+
+
+def test_reference_base_seeds_lowest_priority(tmp_path):
+    """Reference flags appear in the framework env at lowest priority."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm", model="/wekafs/models/X")
+    out = tmp_path / "out"
+    out.mkdir()
+    materialized = materialize_config_with_envs(
+        base, out,
+        model_path="/wekafs/models/X",
+        gpu_type="mi300x",
+        reference_server_args="--block-size 128 --attention-backend TRITON_ATTN",
+    )
+    args = _fw_args(materialized)
+    assert "--block-size 128" in args
+    assert "TRITON_ATTN" in args
+
+
+def test_reference_base_extra_args_override_wins(tmp_path):
+    """A per-task extra_server_args override beats the reference base, deduped once."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm", model="/wekafs/models/X")
+    out = tmp_path / "out"
+    out.mkdir()
+    materialized = materialize_config_with_envs(
+        base, out,
+        model_path="/wekafs/models/X",
+        gpu_type="mi300x",
+        reference_server_args="--block-size 128 --attention-backend TRITON_ATTN",
+        extra_server_args="--attention-backend ROCM_FLASH",
+    )
+    args = _fw_args(materialized)
+    # reference-only flag survives
+    assert args.count("--block-size") == 1
+    assert "--block-size 128" in args
+    # override flag wins and is not doubled (vllm dedup last-wins)
+    assert args.count("--attention-backend") == 1
+    assert "ROCM_FLASH" in args
+    assert "TRITON_ATTN" not in args
+
+
+def test_reference_envs_do_not_clobber_existing(tmp_path):
+    """reference_envs use setdefault — never override a YAML/CLI-set env."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm", model="/wekafs/models/X")
+    out = tmp_path / "out"
+    out.mkdir()
+    materialized = materialize_config_with_envs(
+        base, out,
+        model_path="/wekafs/models/X",
+        gpu_type="mi300x",
+        extra_envs={"VLLM_ROCM_USE_AITER": "1"},
+        reference_envs={"VLLM_ROCM_USE_AITER": "0", "VLLM_FP8_PADDING": "1"},
+    )
+    envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
+    # extra_envs (CLI) wins over reference; new reference key still lands.
+    assert envs["VLLM_ROCM_USE_AITER"] == "1"
+    assert envs["VLLM_FP8_PADDING"] == "1"
+
+
+def test_empty_reference_is_byte_identical(tmp_path):
+    """0-degrade: empty reference args/envs == omitting the kwargs entirely."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm", model="/wekafs/models/X")
+    out_a = tmp_path / "a"
+    out_a.mkdir()
+    out_b = tmp_path / "b"
+    out_b.mkdir()
+    m_with = materialize_config_with_envs(
+        base, out_a,
+        model_path="/wekafs/models/X", gpu_type="mi300x",
+        reference_server_args="", reference_envs=None,
+        out_name="x.yaml",
+    )
+    m_without = materialize_config_with_envs(
+        base, out_b,
+        model_path="/wekafs/models/X", gpu_type="mi300x",
+        out_name="x.yaml",
+    )
+    assert yaml.safe_load(m_with.read_text()) == yaml.safe_load(m_without.read_text())

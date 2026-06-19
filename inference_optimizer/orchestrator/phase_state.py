@@ -205,9 +205,16 @@ _INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset(
 def is_phase_interleave_enabled() -> bool:
     """Return True when EXPLORE↔KERNEL interleave is enabled (default OFF; env opt-in knob).
 
+    Interleave lets specialists in EXPLORE trigger KERNEL-class actions (and
+    KERNEL reach back to explore/specialist/integrate_patch) without waiting for
+    the phase machine. It is OFF by default (strict per-phase channel); set
+    ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` to an explicit on value
+    (``1``/``true``/``yes``/``on``) to enable it.
+
     Returns:
-        bool: True when ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` is one of
-        ``1``/``true``/``yes``/``on`` (case-insensitive); False otherwise.
+        bool: True only when ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` is one
+        of ``1``/``true``/``yes``/``on`` (case-insensitive); False otherwise
+        (including unset/empty).
     """
     raw = (os.environ.get(PHASE_INTERLEAVE_ENV) or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -490,6 +497,7 @@ DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
 # A macro-cycle "gained" when validated cumulative gain rose by more than this
 # (percentage points); guards against float noise being read as progress.
 DEFAULT_CYCLE_MIN_GAIN_PCT: float = 1e-6
+SATURATION_CONVERGENCE_ENV: str = "INFERENCE_OPTIMIZER_SATURATION_CONVERGENCE"
 
 # Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle so
 # late cycles can still capture small wins while the run still converges once
@@ -660,6 +668,24 @@ def should_reloop_to_explore(
     if (cycle + 1) >= int(max_cycles):
         evidence["reloop_blocked"] = "max_cycles"
         return False, evidence
+
+    # Long-run #10: physical ceiling convergence. If every roofline family that
+    # has dominated across cycles is now within its configured roofline
+    # saturation threshold, stop cleanly instead of relooping on noise-floor
+    # 0.1% gains. Env escape hatch restores the pure gain-based behavior.
+    sat_conv_enabled = os.environ.get(SATURATION_CONVERGENCE_ENV, "").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    sat = getattr(state, "saturated_directions", {}) or {}
+    if sat_conv_enabled and isinstance(sat, dict) and sat:
+        rows = [v for v in sat.values() if isinstance(v, dict)]
+        if rows and all(bool(v.get("saturated")) for v in rows):
+            evidence["reloop_blocked"] = "all_directions_saturated"
+            evidence["saturated_directions"] = sorted(str(k) for k in sat.keys())
+            return False, evidence
 
     # R7 global convergence.
     if effective_streak >= int(no_gain_cycles):
@@ -2179,6 +2205,135 @@ def make_lifecycle_event(
             # failing event creation: lifecycle logging is operator-facing
             # diagnostics and must never break the orchestration loop.
             pass
+    return event
+
+
+# ---------------------------------------------------------------------------
+# Phase-transition / lifecycle write-owner functions (folded back from the
+# former shared_state_phase.py satellite; phase 6B). They take ``state`` first
+# and own the phase_history / lifecycle bookkeeping, which belongs to this
+# phase-state domain (they build rows via make_history_row / make_lifecycle_event
+# defined above). ``SharedState`` keeps forwarding shims so existing callers
+# (``state.record_phase_transition`` etc.) are unchanged.
+# ---------------------------------------------------------------------------
+def record_phase_transition(
+    state,
+    *,
+    to_phase: str,
+    reason: str,
+    evidence: dict[str, Any] | None = None,
+    ts: str | None = None,
+    ts_unix: float | None = None,
+) -> dict[str, Any]:
+    """Append a phase_history row and atomically update ``phase`` fields; ``phase``/``phase_history`` are CORE_STATE_FIELDS so LLM update_state is rejected. Returns the inserted row.
+
+    Args:
+        to_phase (str): The phase being entered.
+        reason (str): The transition reason (from ``PHASE_EXIT_REASONS``).
+        evidence (dict[str, Any] | None): Optional structured evidence
+            attached to the history row.
+        ts (str | None): Optional ISO timestamp; defaults to now (UTC).
+        ts_unix (float | None): Optional Unix epoch matching ``ts``;
+            defaults to the current time.
+
+    Returns:
+        dict[str, Any]: The inserted phase_history row.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    import time as _time
+    from .shared_state import _PHASE_HISTORY_CAP
+
+    now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
+    now_unix = float(ts_unix if ts_unix is not None else _time.time())
+    row = make_history_row(
+        from_phase=state.phase or "",
+        to_phase=to_phase,
+        reason=reason,
+        evidence=evidence,
+        ts=now_ts,
+        ts_unix=now_unix,
+        cycle=int(getattr(state, "macro_cycle", 0) or 0),
+    )
+    history = list(state.phase_history or [])
+    history.append(row)
+    if len(history) > _PHASE_HISTORY_CAP:
+        history = history[-_PHASE_HISTORY_CAP:]
+    state.phase_history = history
+    state.phase = row["to_phase"]
+    state.phase_started_ts = now_ts
+    state.phase_started_unix = now_unix
+    return row
+
+
+def record_lifecycle_event(
+    state,
+    *,
+    step: str,
+    status: str,
+    phase: str | None = None,
+    label: str | None = None,
+    artifacts: dict[str, str] | None = None,
+    detail: str = "",
+    duration_s: float | None = None,
+    ts: str | None = None,
+) -> dict[str, Any]:
+    """Append a structured lifecycle event (#266, method 1).
+
+    Each event marks a phase/step boundary so operators can see — in
+    state.json, and via the launcher in chat — that a phase ran, where
+    its outputs went, and which artifact feeds the next phase.
+
+    ``step`` is the machine step/handler name (e.g. ``trace_analyze``);
+    ``label`` defaults to the human-friendly name from
+    :data:`LIFECYCLE_STEP_LABELS` so both naming dimensions are carried.
+    ``phase`` defaults to the current coordinator phase. ``seq`` is
+    monotonic across the cap so consumers can order events even after the
+    oldest rows are trimmed.
+
+    Coordinator-only writer (``policy.CORE_STATE_FIELDS`` guards
+    ``lifecycle`` so an LLM ``update_state`` cannot forge events).
+    Returns the inserted row.
+
+    Args:
+        step (str): The machine step/handler name (e.g. ``trace_analyze``).
+        status (str): The boundary status (e.g. ``START`` / ``END`` /
+            ``ERROR``).
+        phase (str | None): The owning phase; defaults to the current
+            coordinator phase.
+        label (str | None): Human-friendly step name; defaults to the
+            mapping in ``phase_state.LIFECYCLE_STEP_LABELS``.
+        artifacts (dict[str, str] | None): Optional produced-artifact
+            path map recorded on the event.
+        detail (str): Optional free-text detail.
+        duration_s (float | None): Optional step duration in seconds.
+        ts (str | None): Optional ISO timestamp; defaults to now (UTC).
+
+    Returns:
+        dict[str, Any]: The inserted lifecycle event row.
+    """
+    from .shared_state import _LIFECYCLE_CAP, _now_iso
+
+    events = state.lifecycle
+    if events is None:
+        events = state.lifecycle = []
+    next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
+    event = make_lifecycle_event(
+        step=step,
+        status=status,
+        phase=(phase if phase is not None else (state.phase or "")),
+        label=label,
+        artifacts=artifacts,
+        detail=detail,
+        duration_s=duration_s,
+        seq=next_seq,
+        ts=ts or _now_iso(),
+    )
+    # Append in place and trim only when over the cap, so the common
+    # per-step-boundary path is an O(1) append rather than copying the
+    # whole list on every call.
+    events.append(event)
+    if len(events) > _LIFECYCLE_CAP:
+        del events[: -_LIFECYCLE_CAP]
     return event
 
 

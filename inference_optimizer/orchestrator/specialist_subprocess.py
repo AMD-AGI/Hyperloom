@@ -26,6 +26,8 @@ from typing import Any
 
 from .trace.parse_usage import (
     parse_claude_stream_json_response,
+    parse_claude_stream_json_tool_calls,
+    parse_claude_stream_json_turn_usages,
     parse_claude_stream_json_usage,
 )
 
@@ -68,9 +70,16 @@ class SpecialistSubprocessConfig:
     extra_claude_args: tuple[str, ...] = ()
     """Operator escape hatch — appended verbatim to the claude command."""
 
+    leaf_agents_json: str | None = None
+    """``--agents`` JSON declaring leaf sub-agent types. None = built-in leaf."""
+
     per_turn_max_seconds: float = 600.0
-    """Wall-clock cap PER LLM turn; multiplied by ``max_turns`` to get the
-    per-task hard timeout."""
+    """Per-turn wall-clock fallback.
+
+    Coordinator-dispatched specialists inject an explicit ``wall_budget_sec``
+    (WS1). Only callers that omit that budget fall back to
+    ``max_turns * per_turn_max_seconds`` as a legacy per-task hard timeout.
+    """
 
     poll_interval_seconds: float = 5.0
     """How often the reaper polls done.json / process exit / heartbeat."""
@@ -100,8 +109,11 @@ class SpecialistSubprocessResult:
     elapsed_seconds: float = 0.0
 
     timed_out: bool = False
-    """True when the dispatcher killed the subprocess past the
-    ``max_turns * per_turn_max_seconds`` ceiling."""
+    """True when the dispatcher killed the subprocess past the wall-clock cap.
+
+    The cap is normally WS1 ``wall_budget_sec``; legacy direct callers fall
+    back to ``max_turns * per_turn_max_seconds`` when no budget is supplied.
+    """
 
     stale_heartbeat: bool = False
     """True when the heartbeat went stale and the dispatcher killed
@@ -129,6 +141,18 @@ class SpecialistSubprocessResult:
     the stream); pairing the parent-side prompt with this response lands the
     production specialist turn in ``conversations.jsonl``. ``None`` when no
     response text could be recovered (crash before any reply)."""
+
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    """Intel/tool calls (``{"tool", "query"}``) recovered from the same
+    stream-json log so the trace can surface what the specialist actually
+    read (WebSearch / WebFetch / pr_monitor / cortex_kb / ...). Empty when
+    none were made or the log was missing/truncated."""
+
+    turn_usages: list[dict[str, int | None]] = field(default_factory=list)
+    """Per-assistant-turn token usage recovered from the stream-json log so
+    the parent can trace the multi-turn subprocess as one ledger row per
+    model turn instead of a single cumulative ``turn=1`` lump. Empty when no
+    per-message usage was present (parent then falls back to ``usage``)."""
 
     error: str = ""
 
@@ -267,6 +291,7 @@ class SpecialistSubprocessDispatcher:
         allowed_tools: tuple[str, ...],
         max_turns: int,
         gpu_ids: tuple[int, ...] = (),
+        wall_budget_sec: float | None = None,
     ) -> SpecialistSubprocessResult:
         """Spawn a claude subprocess, reap it, return the parsed result.
 
@@ -288,7 +313,13 @@ class SpecialistSubprocessDispatcher:
             allowed_tools (tuple[str, ...]): Per-task tool whitelist
                 (post-:meth:`SpecialistRunner._resolve_tools`).
             max_turns (int): Hard cap on LLM turns; multiplied by the
-                config's ``per_turn_max_seconds`` for the wall-clock ceiling.
+                config's ``per_turn_max_seconds`` for the legacy wall-clock
+                ceiling (used only when ``wall_budget_sec`` is not supplied).
+            gpu_ids (tuple[int, ...]): GPU ids to expose to the subprocess.
+            wall_budget_sec (float | None): WS1 explicit wall-clock budget
+                (seconds). When provided it overrides the
+                ``max_turns × per_turn_max_seconds`` ceiling as the reaper's
+                hard kill deadline — turns are no longer the stop signal.
 
         Returns:
             SpecialistSubprocessResult: Parsed outcome — done payload (if
@@ -305,6 +336,16 @@ class SpecialistSubprocessDispatcher:
         if worktree is not None:
             done_candidates.append(worktree / "specialist_done.json")
         done_candidates.append(workspace / "specialist_done.json")
+        # WS1 incremental checkpoint: the agent atomically rewrites this
+        # partial as it accumulates findings (it does NOT trigger reap — only
+        # the final ``specialist_done.json`` does). When a budget kill lands
+        # before the final file is written, we recover the partial as the
+        # run's best-so-far result. Same worktree-first / workspace-fallback
+        # search order as the final file.
+        partial_candidates: list[Path] = []
+        if worktree is not None:
+            partial_candidates.append(worktree / "specialist_done.partial.json")
+        partial_candidates.append(workspace / "specialist_done.partial.json")
         heartbeat_file = workspace / "heartbeat.json"
 
         # Write the prompt file (system + user collapsed into one
@@ -354,7 +395,12 @@ class SpecialistSubprocessDispatcher:
             )
 
         # Reap loop — poll done-file / exit / heartbeat staleness / timeout.
-        max_seconds = float(max_turns) * float(self.config.per_turn_max_seconds)
+        # WS1: prefer the Coordinator-injected explicit wall budget; fall back
+        # to the legacy ``max_turns × per_turn`` ceiling only when unset.
+        if wall_budget_sec and wall_budget_sec > 0:
+            max_seconds = float(wall_budget_sec)
+        else:
+            max_seconds = float(max_turns) * float(self.config.per_turn_max_seconds)
         try:
             outcome = await self._reap_loop(
                 proc=proc,
@@ -378,6 +424,21 @@ class SpecialistSubprocessDispatcher:
                 if done_payload is not None:
                     break
 
+        # WS1: no final done.json (typically a budget kill / stale-heartbeat
+        # reap) — fall back to the most recent incremental partial so a
+        # killed-but-productive specialist still surfaces its best-so-far
+        # findings instead of being discarded as an empty timeout.
+        if done_payload is None:
+            for cand in partial_candidates:
+                if cand.exists():
+                    partial = self._read_done(cand)
+                    if partial is not None:
+                        partial["_recovered_from_partial"] = True
+                        done_payload = partial
+                        if not outcome.get("error"):
+                            outcome["error"] = "recovered_from_partial"
+                        break
+
         # 8. Token usage (full-trace B1): the Claude CLI's terminal
         #    ``stream-json`` result row carries the cumulative session
         #    ``usage``. Recover it from process.log so the production
@@ -391,6 +452,13 @@ class SpecialistSubprocessDispatcher:
         # is paired in by the parent runner). Best-effort: returns None on a
         # missing / truncated log.
         response = parse_claude_stream_json_response(process_log)
+        # Intel/tool calls (WebSearch / WebFetch / pr_monitor / cortex_kb /
+        # Read / Grep / ...) the specialist made — recovered from the same log
+        # so the trace can show what it read, not just its token total.
+        tool_calls = parse_claude_stream_json_tool_calls(process_log)
+        # Per-turn usage for fine-grained tracing (one ledger row per model
+        # turn); falls back to the cumulative ``usage`` when absent.
+        turn_usages = parse_claude_stream_json_turn_usages(process_log)
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
@@ -402,6 +470,8 @@ class SpecialistSubprocessDispatcher:
             patches=patches,
             usage=usage,
             response=response,
+            tool_calls=tool_calls,
+            turn_usages=turn_usages,
             error=outcome["error"],
         )
 
@@ -454,6 +524,11 @@ class SpecialistSubprocessDispatcher:
         tools_filtered = [t for t in allowed_tools if t != "emit_intent"]
         if tools_filtered:
             cmd.extend(["--allowedTools", ",".join(tools_filtered)])
+        # Declare leaf sub-agent types when the specialist may fan out via Task.
+        if "Task" in tools_filtered:
+            from .specialist_leaf import build_leaf_agents_json
+
+            cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
         if cfg.mcp_config_path:
             cmd.extend(["--mcp-config", cfg.mcp_config_path])
         # --add-dir order: worktree first (where writes go), workspace

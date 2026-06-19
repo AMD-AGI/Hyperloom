@@ -180,7 +180,13 @@ class Baseline(TypedDict, total=False):
         benchmark_report_path (str | None): Path to the benchmark report, or None.
         attempts_history (list[BaselineAttemptSummary]): Recorded baseline attempts.
         failure_streak (int): Consecutive baseline failures.
+        total_failures (int): Combined backstop count of ALL baseline failures
+            (any error_class); fast-fails when per-class streaks each stay below
+            threshold but the total reaches it.
         invocation (BenchmarkInvocation): Replayable launch record.
+        roofline_ceiling (dict[str, Any]): Standalone baseline-arm roofline
+            ceiling backup (theoretical peak + mem/cmp + perfmodel breakdown);
+            frontend ceiling fallback when the roofline step failed. {} when absent.
     """
 
     throughput_tok_s_per_gpu: float
@@ -192,7 +198,9 @@ class Baseline(TypedDict, total=False):
     benchmark_report_path: str | None
     attempts_history: list[BaselineAttemptSummary]
     failure_streak: int
+    total_failures: int
     invocation: BenchmarkInvocation
+    roofline_ceiling: dict[str, Any]
 
 
 # §4 Final state — SaFE contract core
@@ -1306,6 +1314,8 @@ class KBProvenance(TypedDict, total=False):
         warm_start_ts (str): ISO UTC timestamp of warm start.
         warm_start_recipe_seen (bool): Whether a warm recipe was seen.
         warm_start_recipe_tier (str): Tier of the seen warm recipe.
+        warm_start_recipe_source (str): KB path that supplied the applied
+            warm recipe (e.g. ``gbrain`` / ``cortex``); empty when none.
         warm_start_pitfall_count (int): Number of pitfalls injected at warm start.
         warm_start_lesson_count (int): Number of lessons injected at warm start.
         warm_replay (WarmReplayOutcome): Operator-visible warm-replay summary.
@@ -1330,6 +1340,8 @@ class KBProvenance(TypedDict, total=False):
     warm_start_ts: str
     warm_start_recipe_seen: bool
     warm_start_recipe_tier: str
+    # Which KB path (e.g. "gbrain" / "cortex") supplied the applied warm recipe.
+    warm_start_recipe_source: str
     warm_start_pitfall_count: int
     warm_start_lesson_count: int
     warm_replay: WarmReplayOutcome
@@ -1492,7 +1504,7 @@ class OptimizationStackEntry(TypedDict, total=False):
 
     Always-present fields: ``action`` / ``variant_name`` /
     ``candidate_extra_server_args`` / ``extra_envs`` / ``tput`` / ``ts`` /
-    ``workspace``. GEMM-tuning entries add ``tuned_file`` /
+    ``workspace``. GEMM-tuning entries add ``engine`` / ``tuned_file`` /
     ``final_report_path`` / ``source``. Other optionals: ``gain_pct`` /
     ``kernel_id`` / ``fingerprint`` / ``provenance`` / ``task_id`` /
     ``validated`` (within the last full-stack rebench).
@@ -1507,6 +1519,8 @@ class OptimizationStackEntry(TypedDict, total=False):
     workspace: str | None
     validated: bool
     # gemm_tuning evidence
+    # Tuning engine provenance: "geak" today; a forge-backed tuner will set "forge".
+    engine: str
     tuned_file: str
     final_report_path: str
     source: str
@@ -1520,6 +1534,92 @@ class OptimizationStackEntry(TypedDict, total=False):
     # explore KEEPs); specialist dial.
     operation_kind: str
     scope: str
+
+
+# GEMM tuning — top-level section for the fixed FP8 block-scale GEMM tuning
+# stage that runs at KERNEL entry. A peer of the source-level kernel rewrite
+# lanes; engine-tagged so the GEAK tuner ("geak") and a future forge-backed
+# tuner ("forge") share one home. Gain is mirrored here (optimization-layer
+# convenience) while ``attribution`` stays the authoritative roll-up.
+class GemmTuningRun(TypedDict, total=False):
+    """One GEMM-tuning run, keyed by the produced ``tuned_file`` CSV.
+
+    A run is a config search over many GEMM shapes (not a single-kernel
+    rewrite); its artifact is a dispatch CSV consumed via the
+    ``AITER_CONFIG_GEMM_A8W8_BLOCKSCALE`` env, not a kernel patch.
+
+    Attributes:
+        engine (str): Tuning engine provenance — ``"geak"`` today; a
+            forge-backed tuner records ``"forge"``.
+        status (str): Tool status (``ok`` / ``complete`` / ``skipped`` / ...).
+        decision (str): ``KEEP`` / ``REVERT``.
+        source (str): What triggered the run (``kernel_entry_auto`` / ...).
+        ts (str): ISO UTC timestamp of the run record.
+        precision (str): Workload precision (``fp8``).
+        framework (str): Serving framework (``sglang``).
+        gpu_type (str): Target GPU (``mi355x`` / ...).
+        tp (int): Tensor-parallel degree (locked workload knob).
+        conc (int): Concurrency (locked workload knob).
+        isl (int): Input sequence length (locked workload knob).
+        osl (int): Output sequence length (locked workload knob).
+        libtype (str): Tuner library family (``ck`` / ``cktile`` / ``all``).
+        baseline_tput (float | None): Pre-tuning throughput reference.
+        best_speedup (float | None): Tuned / baseline throughput ratio.
+        gain_pct (float | None): ``(best_speedup - 1) * 100``; mirrors
+            the optimization-stack KEEP gain for this run.
+        tuned_tput (float | None): ``baseline_tput * best_speedup``.
+        tuned_file (str): Absolute path to the produced dispatch CSV.
+        final_report_path (str): Absolute path to ``final_report.json``.
+        workspace (str): Run workspace directory.
+        adopted (bool): Whether this run's ``tuned_file`` landed as a KEEP
+            in ``optimization_stack``.
+        summary (dict[str, Any]): Tool-reported summary passthrough.
+        shapes (list[dict[str, Any]]): Optional per-shape CSV rows
+            (``M`` / ``N`` / ``K`` / ``libtype`` / ``kernelId`` / ``splitK`` /
+            ``us`` / ``tflops``); empty until a producer emits them.
+    """
+
+    engine: str
+    status: str
+    decision: str
+    source: str
+    ts: str
+    precision: str
+    framework: str
+    gpu_type: str
+    tp: int
+    conc: int
+    isl: int
+    osl: int
+    libtype: str
+    baseline_tput: float | None
+    best_speedup: float | None
+    gain_pct: float | None
+    tuned_tput: float | None
+    tuned_file: str
+    final_report_path: str
+    workspace: str
+    adopted: bool
+    summary: dict[str, Any]
+    shapes: list[dict[str, Any]]
+
+
+class GemmTuning(TypedDict, total=False):
+    """Top-level GEMM-tuning section envelope.
+
+    Attributes:
+        runs (list[GemmTuningRun]): Every GEMM-tuning run this session
+            recorded, newest-last, across engines.
+        adopted_engine (str): Engine of the KEEP that won (``""`` if none).
+        adopted_tuned_file (str): ``tuned_file`` of the adopted KEEP.
+        total_gain_pct (float): Summed gain of adopted runs; mirrors
+            ``attribution.phase_breakdown.gemm_tuning`` for convenience.
+    """
+
+    runs: list[GemmTuningRun]
+    adopted_engine: str
+    adopted_tuned_file: str
+    total_gain_pct: float
 
 
 # Kernel Roofline — hot-kernel table for the dashboard, mirroring
@@ -1649,13 +1749,19 @@ class DecisionTrace(TypedDict, total=False):
     ``decision_trace`` is one entry per decision (KEEP/REVERT journal row +
     dynamic_action dispatch event) with the LLM calls attributed to it.
     ``token_rollup`` summarises every call by phase / component / total.
-    ``unattributed_tokens`` is the bucket of calls that matched no decision
-    (kept so the per-decision sums + this reconcile to ``session_total``).
+    ``unattributed_tokens`` + ``overhead_tokens`` are the buckets of calls that
+    matched no decision (overhead = expected cross-decision spend; unattributed
+    = a real gap), kept so per-decision sums + these reconcile to
+    ``session_total``.
     """
 
     decision_trace: list[DecisionTraceEntry]
     token_rollup: TokenRollup
     unattributed_tokens: TokenBucket
+    # Inherently cross-decision LLM spend (orchestration / critic / robustness
+    # reactor turns) with no single owning decision — kept separate from
+    # ``unattributed_tokens`` (a genuine attribution gap). Additive/optional.
+    overhead_tokens: TokenBucket
 
 
 # ---------------------------------------------------------------------------
@@ -1691,16 +1797,23 @@ class TokenUsageAttribution(TypedDict, total=False):
     Attributes:
         attributed_to_decisions (TokenUsageBucket): Tokens whose call carried a
             ``task_id`` / ``dyn_id`` that joined to a KEEP/REVERT or
-            dynamic_action decision (e.g. specialist subprocess turns).
-        unattributed (TokenUsageBucket): Tokens from calls with no decision key
-            (orchestration / kernel / critic / proposal_scorer turns — these
-            are LLM-internal, not bound to a single tracked change).
+            dynamic_action decision (e.g. specialist subprocess turns, scorer
+            rounds keyed by their specialist task).
+        overhead (TokenUsageBucket): Inherently cross-decision spend
+            (orchestration / critic / robustness reactor turns) with no single
+            owning decision — expected shared cost, not an attribution gap.
+        unattributed (TokenUsageBucket): Tokens from calls that carried no
+            decision key and are not recognised overhead — a real attribution
+            gap to chase.
         attributed_calls_pct (float): Percentage of calls that were attributed.
+        overhead_calls_pct (float): Percentage of calls classed as overhead.
     """
 
     attributed_to_decisions: TokenUsageBucket
+    overhead: TokenUsageBucket
     unattributed: TokenUsageBucket
     attributed_calls_pct: float
+    overhead_calls_pct: float
 
 
 class TokenUsageTimelineEntry(TypedDict, total=False):
@@ -1732,9 +1845,9 @@ class TokenUsage(TypedDict, total=False):
     """Top-level, discoverable LLM-token-spend summary for the session.
 
     A promoted view over ``decision_trace.token_rollup`` (the full per-call
-    ledger ``reports/trace/llm_calls.jsonl`` + ``ext/*.jsonl``) plus a
-    timeline correlation. Purely derived — no new disk read — so it always
-    reconciles with ``decision_trace``.
+    ledger ``reports/trace/llm_calls.jsonl``) plus a timeline correlation.
+    Purely derived — no new disk read — so it always reconciles with
+    ``decision_trace``.
 
     Attributes:
         session_total (TokenUsageBucket): Whole-session total across every call.
@@ -1791,10 +1904,9 @@ class LangfusePushCounts(TypedDict, total=False):
             conversation text (vs token-only / text-only).
         generations_text_only (int): Generations from a conversation row only.
         generations_token_only (int): Generations from a token row only
-            (the typical out-of-process child case).
+            (an unpaired token half flushed at session end).
         scores_sent (int): Decision Scores created (span- + trace-level).
         spans_opened (int): Phase + agent spans created.
-        ext_shards_read (int): Out-of-process ``ext/*.jsonl`` shards swept at flush.
         errors (int): Swallowed send failures (a Langfuse outage never breaks
             the optimization loop).
     """
@@ -1805,7 +1917,6 @@ class LangfusePushCounts(TypedDict, total=False):
     generations_token_only: int
     scores_sent: int
     spans_opened: int
-    ext_shards_read: int
     errors: int
 
 
@@ -1882,6 +1993,8 @@ class SessionBreakdown(TypedDict, total=False):
         kb_provenance (KBProvenance): Cortex KB integration audit.
         specialist_runs (list[SpecialistRound]): Specialist sub-agent dispatch records.
         optimization_stack (list[OptimizationStackEntry]): Raw KEEP ledger passthrough.
+        gemm_tuning (GemmTuning): Fixed FP8 GEMM-tuning stage, engine-tagged
+            (geak today, forge later); empty {} on non-fp8/sglang or old sessions.
         kernel_roofline (KernelRoofline): Hot-kernel table for the dashboard.
         roofline (list[dict[str, Any]]): Per-snapshot roofline comparison list for
             the markdown report's ``## Roofline`` section.
@@ -1926,6 +2039,11 @@ class SessionBreakdown(TypedDict, total=False):
     # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``
     # with full per-entry evidence; the stack-derived sections summarise it.
     optimization_stack: list["OptimizationStackEntry"]
+    # Fixed FP8 block-scale GEMM-tuning stage (KERNEL entry). Engine-tagged
+    # (geak today, forge later) top-level section; gain mirrored here while
+    # ``attribution`` stays authoritative. Additive optional — empty {} on
+    # non-fp8/sglang sessions and on sessions that predate it.
+    gemm_tuning: GemmTuning
     # Hot-kernel table (spec §1), mirror of ``reports/kernel_roofline.json``.
     kernel_roofline: KernelRoofline
     # Kernel-agent attempt outcome summary (spec §A1); empty → dashboard hides Block 1.

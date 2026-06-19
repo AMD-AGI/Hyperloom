@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer import cli
+from inference_optimizer import cli_model_gate
 
 
 def _write_config(model_dir: Path, *, with_tokenizer: bool = True, **fields) -> None:
@@ -50,7 +51,10 @@ def _seed_state(session_dir: Path, monkeypatch):
 def _default_non_amd_gpu(monkeypatch):
     """Keep config checks hermetic unless a test passes gpu_type explicitly."""
     monkeypatch.delenv("GPU_TYPE", raising=False)
-    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: None)
+    # _detect_incompatible_model_config -> _resolve_amd_gpu_type ->
+    # _autodetect_gpu_type all live in cli_model_gate after the phase-6D fold;
+    # patch the real call site (cli re-exports the same object).
+    monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +178,20 @@ def test_detect_deepseek_v4_unrecognized_blocked(tmp_path):
         model_type="deepseek_v4",
         architectures=["DeepseekV4ForCausalLM"],
         max_position_embeddings=1048576,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "not recognized" in reason
+
+
+def test_detect_glm_moe_dsa_unrecognized_blocked(tmp_path):
+    # zai-org-GLM-5.1: Transformers does not recognize glm_moe_dsa →
+    # ModelConfig ValidationError during server init (any GPU).
+    m = tmp_path / "glm_moe_dsa"
+    _write_config(
+        m,
+        model_type="glm_moe_dsa",
+        architectures=["GlmMoeDsaForCausalLM"],
+        max_position_embeddings=131072,
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None and "not recognized" in reason
@@ -624,6 +642,36 @@ def test_detect_vocab_shape_match_not_blocked(tmp_path):
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
+def test_detect_vocab_shape_padded_not_blocked(tmp_path):
+    # actual > config vocab_size -> commonly a padded embedding (rounded up to
+    # an alignment / TP boundary while config keeps the unpadded value). The
+    # framework handles padding, so preflight must NOT skip such a checkpoint.
+    m = tmp_path / "qwen_vocab_padded"
+    _write_config(
+        m,
+        model_type="qwen2",
+        architectures=["Qwen2ForCausalLM"],
+        max_position_embeddings=4096,
+        vocab_size=151936,
+    )
+    _write_safetensors_header(
+        m,
+        {
+            "model.embed_tokens.weight": {
+                "dtype": "BF16",
+                "shape": [152064, 1536],  # padded up from 151936
+                "data_offsets": [0, 0],
+            },
+            "lm_head.weight": {
+                "dtype": "BF16",
+                "shape": [152064, 1536],
+                "data_offsets": [0, 0],
+            },
+        },
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
 def test_read_safetensors_header_parses_and_rejects(tmp_path):
     # Valid header round-trips; truncated / oversized headers return None.
     good = tmp_path / "model.safetensors"
@@ -808,3 +856,143 @@ def test_preflight_persists_under_strict_env(tmp_path, monkeypatch):
     assert cli._preflight_model_config_compat(_args(str(model)), sd) is True
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_config_incompatible"
+
+
+# ---------------------------------------------------------------------------
+# Private / third-party quantization formats (paroquant, MLX, mxtq, GGUF)
+# ---------------------------------------------------------------------------
+def test_private_quant_paroquant_blocks(tmp_path):
+    m = tmp_path / "paro"
+    _write_config(
+        m, model_type="qwen3_5", max_position_embeddings=32768,
+        quantization_config={"quant_method": "paroquant", "bits": 4,
+                             "group_size": 128, "krot": 8},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "paroquant" in reason
+
+
+def test_private_quant_mlx_affine_blocks(tmp_path):
+    # MTPLX / MLX 8-bit affine: mode set, no quant_method.
+    m = tmp_path / "mlx_affine"
+    _write_config(
+        m, model_type="qwen3_5", max_position_embeddings=32768,
+        quantization_config={"bits": 8, "group_size": 64, "mode": "affine"},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "MLX" in reason
+
+
+def test_private_quant_no_method_blocks(tmp_path):
+    # quantization_config carries bits/group_size but no quant_method/mode;
+    # sglang raises "Unknown quantization method: ''" in engine init.
+    m = tmp_path / "no_method"
+    _write_config(
+        m, model_type="llama", max_position_embeddings=32768,
+        quantization_config={"group_size": 64, "bits": 8},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "quant_method" in reason
+
+
+def test_private_quant_mxtq_blocks(tmp_path):
+    m = tmp_path / "mxtq"
+    _write_config(
+        m, model_type="qwen3_5_moe", max_position_embeddings=32768,
+        quantization_config={"weight_format": "mxtq", "method": "affine",
+                             "group_size": 64},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "mxtq" in reason
+
+
+def test_private_quant_mlx_weights_index_blocks(tmp_path):
+    # JANG/MLX often declares no quant config; the tell is '.biases'/'.scales'.
+    m = tmp_path / "mlx_weights"
+    _write_config(m, model_type="qwen3_5", max_position_embeddings=32768)
+    (m / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {
+            "lm_head.biases": "model-00001.safetensors",
+            "lm_head.scales": "model-00001.safetensors",
+            "model.embed_tokens.weight": "model-00001.safetensors",
+        }}), encoding="utf-8",
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "MLX" in reason
+
+
+def test_private_quant_gguf_only_blocks(tmp_path):
+    m = tmp_path / "gguf_only"
+    _write_config(m, model_type="qwen3_5_moe", max_position_embeddings=32768)
+    (m / "model-TQ3_4S.gguf").write_text("dummy", encoding="utf-8")
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "GGUF" in reason
+
+
+def test_standard_quant_fp8_not_blocked(tmp_path):
+    m = tmp_path / "fp8"
+    _write_config(
+        m, model_type="qwen3", max_position_embeddings=32768,
+        quantization_config={"quant_method": "fp8"},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_standard_quant_awq_gptq_not_blocked(tmp_path):
+    for method in ("awq", "gptq", "compressed-tensors"):
+        m = tmp_path / f"std_{method.replace('-', '_')}"
+        _write_config(
+            m, model_type="qwen3", max_position_embeddings=32768,
+            quantization_config={"quant_method": method},
+        )
+        assert cli._detect_incompatible_model_config(str(m)) is None, method
+
+
+def test_gguf_with_safetensors_not_blocked(tmp_path):
+    # A normal safetensors model that merely also ships a .gguf must still pass.
+    m = tmp_path / "gguf_plus_st"
+    _write_config(m, model_type="qwen3", max_position_embeddings=32768)
+    (m / "model.gguf").write_text("dummy", encoding="utf-8")
+    (m / "model.safetensors").write_text("dummy", encoding="utf-8")
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_gguf_with_auxiliary_bin_still_blocks(tmp_path):
+    # An arbitrary .bin next to GGUF is not an HF-loadable weight file.
+    m = tmp_path / "gguf_plus_aux_bin"
+    _write_config(m, model_type="qwen3", max_position_embeddings=32768)
+    (m / "model.gguf").write_text("dummy", encoding="utf-8")
+    (m / "tokenizer_cache.bin").write_text("dummy", encoding="utf-8")
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "GGUF" in reason
+
+
+def test_gguf_with_pytorch_model_bin_not_blocked(tmp_path):
+    # HF PyTorch weights are loadable by the default framework loaders.
+    m = tmp_path / "gguf_plus_hf_bin"
+    _write_config(m, model_type="qwen3", max_position_embeddings=32768)
+    (m / "model.gguf").write_text("dummy", encoding="utf-8")
+    (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_declared_standard_quant_with_scales_index_not_blocked(tmp_path):
+    # AWQ/GPTQ/compressed-tensors legitimately ship '.scales'/'.biases' tensors;
+    # a declared supported quant_method must NOT be misread as MLX (the weight-
+    # index tell only applies to checkpoints with NO quant_method declared).
+    for method in ("awq", "gptq", "compressed-tensors"):
+        m = tmp_path / f"std_scales_{method.replace('-', '_')}"
+        _write_config(
+            m, model_type="qwen3", max_position_embeddings=32768,
+            quantization_config={"quant_method": method},
+        )
+        (m / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {
+                "model.layers.0.self_attn.q_proj.scales":
+                    "model-00001.safetensors",
+                "model.layers.0.self_attn.q_proj.biases":
+                    "model-00001.safetensors",
+                "model.embed_tokens.weight": "model-00001.safetensors",
+            }}), encoding="utf-8",
+        )
+        assert cli._detect_incompatible_model_config(str(m)) is None, method

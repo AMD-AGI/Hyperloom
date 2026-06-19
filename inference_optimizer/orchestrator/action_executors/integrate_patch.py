@@ -20,12 +20,19 @@ Inputs (``ctx.task.params``)::
         ``specialist_done.patches_written``.
     config_changes (dict[str, str], optional) — env vars layered on
         the variant's launch env. Reverted with the patches on REVERT.
-    keep_threshold_pct (float, optional) — KEEP threshold; defaults to
-        DEFAULT_KEEP_THRESHOLD_PCT (1.0). No stack rebench here, so the
-        sole gate sits at the grid noise floor (1.0%) to avoid committing
-        noise-level "gains".
-    accuracy_baseline (float | dict, optional) — accuracy gate input;
-        forwarded to the existing accuracy gate utilities.
+    keep_threshold_pct (float, optional) — first-pass KEEP threshold;
+        defaults to DEFAULT_KEEP_THRESHOLD_PCT (1.0), the grid noise floor.
+        A KEEP is then re-confirmed by a full-stack rebench unless
+        ``enable_stack_rebench`` is False.
+    accuracy_baseline (float, optional) — baseline accuracy for the gate.
+        With a positive baseline the measured drop is enforced; without one,
+        the gate skips with a warning.
+    enable_stack_rebench (bool, optional) — when True (default) a KEEP
+        is confirmed by a second full-stack rebench (stability floor +
+        accuracy) before it is committed.
+    rebench_stable_threshold_pct (float, optional) — stability floor for
+        the confirmation rebench, as a percentage above ``base_tput``
+        (default 0.0).
     base_tput (float, optional) — baseline throughput to compare
         against. Falls back to ``SharedState.baseline_tput`` if zero.
     benchmark_script / result_dir / variant_timeout_sec — same
@@ -76,6 +83,7 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
+from ._stack_rebench import measure_stack_rebench
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -86,7 +94,7 @@ from ._workload_envs import (
 log = logging.getLogger(__name__)
 
 
-DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # D1: was 0.2 (below grid 1.0% noise floor; no stack rebench here)
+DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # grid noise floor; KEEP is re-confirmed by a stack rebench
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 long workload
 
 
@@ -101,15 +109,41 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _resolve_framework_root(explicit: str | None) -> Path | None:
+def _root_contains_patch_targets(root: Path, patch_paths: list[Path]) -> bool:
+    """True when *every* supplied patch has all its modify/delete targets
+    present under ``root`` (at some ``-p`` strip level).
+
+    A patch only applies in the package tree that actually contains the files
+    it edits; ``vllm/...`` patches can never apply under the ``aiter`` root.
+    Returns False if any patch is unreadable or has a missing target here.
+    """
+    if not patch_paths:
+        return False
+    for patch in patch_paths:
+        try:
+            text = patch.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        if patch_targets_missing(text, root):
+            return False
+    return True
+
+
+def _resolve_framework_root(
+    explicit: str | None, patch_paths: list[Path] | None = None,
+) -> Path | None:
     """Pick the framework source root for patches.
 
-    Precedence: explicit param → first existing
-    ``resolve_source_file_allowlist()`` entry. None when nothing resolves.
+    Precedence: explicit param → first allowlist root whose tree actually
+    contains the patch targets (target-aware: a ``vllm/...`` patch must apply
+    under the vllm root, not the first allowlist entry which is ``aiter``) →
+    first existing git root → first existing dir. None when nothing resolves.
 
     Args:
         explicit: Explicit framework-root override, or ``None`` to use the
             allowlist.
+        patch_paths: Patch target paths used to pick the allowlist root whose
+            tree actually contains them.
 
     Returns:
         The resolved framework source root, or ``None`` when nothing resolves.
@@ -122,13 +156,17 @@ def _resolve_framework_root(explicit: str | None) -> Path | None:
             "integrate_patch: framework_source_root override %r does not exist; falling back to allowlist",
             explicit,
         )
-    for root in resolve_source_file_allowlist():
-        p = Path(root)
+    roots = [Path(r) for r in resolve_source_file_allowlist()]
+    # Target-aware: prefer the root that actually holds the patch's targets.
+    if patch_paths:
+        for p in roots:
+            if p.is_dir() and _root_contains_patch_targets(p, patch_paths):
+                return p
+    for p in roots:
         if p.is_dir() and (p / ".git").exists():
             return p
     # Last resort: a non-git dir (prefer surfacing as clean apply_failed).
-    for root in resolve_source_file_allowlist():
-        p = Path(root)
+    for p in roots:
         if p.is_dir():
             return p
     return None
@@ -435,22 +473,31 @@ def _patch_touched_paths(
     framework_root: Path,
     patches: list[Path],
 ) -> list[str]:
-    """Repo-relative paths the applied ``patches`` modified/created.
+    """Repo-relative paths the applied ``patches`` created / modified / deleted.
 
     Used to scope the commit-on-KEEP to *only* the files this patch touched, so
     an unrelated dirty working tree under ``framework_root`` (generated files,
     manual edits, stray artifacts) is never swept into the ``hyperloom KEEP``
-    commit. Only paths that exist post-apply are emitted (pure deletions, the
-    rare KEEP shape, are skipped) so the subsequent ``git add`` pathspec can
-    never miss and silently stage nothing for the whole set.
+    commit.
+
+    Per header pair (``old`` ``---``, ``new`` ``+++``):
+      * created / modified → the ``new`` target exists post-apply → emit it.
+      * deleted (Issue 6) → ``new`` is ``/dev/null`` (or its target is gone)
+        and ``old`` existed pre-apply → emit the ``old`` path so the subsequent
+        ``git add -A -- <path>`` stages the *removal* of a tracked file.
+        Without this a pure-deletion KEEP committed nothing, and a later cycle's
+        ``git checkout -- .`` REVERT resurrected the deleted file.
+    A header that resolves to neither (matches nothing pre or post) is dropped
+    so ``git add`` cannot error on a bogus pathspec.
 
     Args:
         framework_root: The git checkout the patches were applied into.
         patches: The applied patch files to inspect.
 
     Returns:
-        The repo-relative paths the patches modified/created that exist
-        post-apply.
+        The repo-relative paths the patches created/modified (existing
+        post-apply) plus the old paths of pure deletions, so the subsequent
+        ``git add`` stages removals too.
     """
     out: list[str] = []
     for patch in patches:
@@ -463,17 +510,26 @@ def _patch_touched_paths(
             continue
         lvl = _commit_strip_level(framework_root, pairs)
         for old, new in pairs:
-            for raw in (new, old):
-                if not raw or raw == _PATCH_DEV_NULL:
-                    continue
-                rel = _strip_path_prefix(raw, lvl)
-                try:
-                    exists = (framework_root / rel).exists()
-                except OSError:
-                    exists = False
-                if exists and rel not in out:
-                    out.append(rel)
-                    break  # one resolved path per header pair
+            rel_new = (
+                _strip_path_prefix(new, lvl)
+                if new and new != _PATCH_DEV_NULL else None
+            )
+            rel_old = (
+                _strip_path_prefix(old, lvl)
+                if old and old != _PATCH_DEV_NULL else None
+            )
+            try:
+                new_exists = bool(rel_new) and (framework_root / rel_new).exists()
+            except OSError:
+                new_exists = False
+            if rel_new and new_exists:
+                # Created or modified — the post-apply file is on disk.
+                if rel_new not in out:
+                    out.append(rel_new)
+            elif rel_old:
+                # Deletion — new target is gone; stage the removal of old.
+                if rel_old not in out:
+                    out.append(rel_old)
     return out
 
 
@@ -547,6 +603,15 @@ def _git_commit_kept(
     return False, cp.stderr.strip()
 
 
+def _is_within(child: Path, root: Path) -> bool:
+    """True iff ``child`` is ``root`` or nested under it (both pre-resolved)."""
+    try:
+        child.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def _resolve_patch_paths(
     *,
     specialist_workspace: Path,
@@ -558,6 +623,13 @@ def _resolve_patch_paths(
     Order: ``params.patches`` → ``specialist_done.patches_written`` →
     filesystem scan of ``specialist_workspace/{worktree/,}patches/``.
     Entries normalised to absolute Paths; missing ones logged + dropped.
+
+    Security (Issue 5a): a resolved patch path must live inside the specialist
+    workspace (or its worktree). ``params.patches`` is LLM-/specialist-
+    controllable, so an absolute path pointing outside the sandbox (another
+    session's patch, ``/etc/...``) is dropped — otherwise it would be read and
+    ``git apply``-ed against the framework tree. Both sides are ``resolve()``-d
+    first so a legitimately symlinked workspace still matches.
 
     Args:
         specialist_workspace: The specialist task workspace to resolve
@@ -584,6 +656,11 @@ def _resolve_patch_paths(
                 for p in sorted(base.glob("*.diff")):
                     candidates.append(str(p))
 
+    allowed_roots = [
+        (specialist_workspace / "worktree").resolve(),
+        specialist_workspace.resolve(),
+    ]
+
     out: list[Path] = []
     for c in candidates:
         p = Path(c)
@@ -604,7 +681,15 @@ def _resolve_patch_paths(
                 specialist_workspace,
             )
             continue
-        out.append(p.resolve())
+        resolved = p.resolve()
+        if not any(_is_within(resolved, root) for root in allowed_roots):
+            log.warning(
+                "integrate_patch: patch %r resolves outside the specialist "
+                "workspace (%s); dropping for safety",
+                c, specialist_workspace,
+            )
+            continue
+        out.append(resolved)
     return out
 
 
@@ -723,6 +808,7 @@ class IntegratePatchExecutor:
                 ),
             }
         extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or extra.get("state")
         # Specialist workspace conventionally at runs/specialist/<id>/.
         specialist_workspace = self.session_dir / "runs" / "specialist" / specialist_task_id
         if not specialist_workspace.is_dir():
@@ -762,6 +848,7 @@ class IntegratePatchExecutor:
 
         framework_root = _resolve_framework_root(
             params.get("framework_source_root") or None,
+            patch_paths=patch_paths,
         )
         # Pure config_changes path works without a framework root.
         if patch_paths and framework_root is None:
@@ -814,6 +901,24 @@ class IntegratePatchExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
+        # Long-run #4: mark the non-transactional integrate window before any
+        # framework tree mutation. The Coordinator clears this after promoting
+        # the final KEEP/REVERT/APPLY_FAILED result into SharedState.
+        if shared_state is not None:
+            try:
+                shared_state.pending_integrate = {
+                    "specialist_task_id": specialist_task_id,
+                    "task_id": str(getattr(ctx.task, "task_id", "") or ""),
+                    "patches": [str(p) for p in patch_paths],
+                    "config_changes": dict(config_changes),
+                    "framework_source_root": str(framework_root or ""),
+                    "workspace": str(output_root),
+                    "ts": _now_iso(),
+                }
+                shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — sentinel is best-effort
+                log.exception("integrate_patch: failed to persist pending_integrate sentinel")
+
         # Stage 1: apply patches (best-effort with -3 fallback).
         applied: list[Path] = []
         apply_errors: list[dict[str, str]] = []
@@ -859,7 +964,6 @@ class IntegratePatchExecutor:
         # ``integrate_patch_requires_critic_verdict`` already gates the
         # delegate; this is belt-and-braces for paths that bypass PolicyGate
         # (legacy resume / test injection). No-ops when SharedState is absent.
-        shared_state = extra.get("shared_state") or extra.get("state")
         if shared_state is not None and not params.get("bypass_critic"):
             try:
                 recorded = shared_state.get_specialist_patch_verdict(
@@ -977,6 +1081,54 @@ class IntegratePatchExecutor:
                 "bench_result": bench_result,
                 "workspace": str(output_root),
             }
+
+        # Confirmation rebench: a patch only KEEPs if a second full-stack run
+        # still clears the stability floor and the accuracy gate.
+        if params.get("enable_stack_rebench", True) and base_tput > 0:
+            confirm = await self._confirm_stack_rebench(
+                params=params,
+                output_root=output_root,
+                config_changes_applied=config_changes_applied,
+                specialist_task_id=specialist_task_id,
+                base_tput=base_tput,
+            )
+            if not confirm["stable"] or confirm["accuracy_pass"] is False:
+                reverted = self._revert_patches(framework_root, applied)
+                reasons = []
+                if not confirm["stable"]:
+                    reasons.append(
+                        f"stack rebench {confirm['tput']} below stability floor {confirm['stable_floor']:.2f}"
+                    )
+                if confirm["accuracy_pass"] is False:
+                    reasons.append("accuracy regression on rebench")
+                await self._maybe_write_framework_pr_kb_record(
+                    done_payload=done_payload,
+                    outcome="reverted_smoke_fail",
+                    tps_delta_pct=float(delta_pct or 0.0),
+                    extra=extra,
+                )
+                return {
+                    "status": "reverted",
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "config_changes_applied": {},
+                    "output_throughput": new_tput,
+                    "delta_pct": delta_pct,
+                    "accuracy_pass": confirm["accuracy_pass"],
+                    "base_tput": base_tput,
+                    "keep_threshold_pct": keep_threshold_pct,
+                    "reason": "; ".join(reasons) or "stack rebench failed",
+                    "bench_result": bench_result,
+                    "stack_rebench": confirm,
+                    "workspace": str(output_root),
+                }
+            # Confirmed: the rebench tput is the headline.
+            if isinstance(confirm["tput"], (int, float)) and confirm["tput"] > 0:
+                new_tput = confirm["tput"]
+                delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
+            if confirm["accuracy_pass"] is not None:
+                accuracy_pass = confirm["accuracy_pass"]
 
         await self._maybe_write_framework_pr_kb_record(
             done_payload=done_payload,
@@ -1229,31 +1381,113 @@ class IntegratePatchExecutor:
                 "output_throughput": getattr(r, "output_throughput", None),
                 "ttft_ms": getattr(r, "ttft_ms", None),
                 "itl_ms": getattr(r, "itl_ms", None),
-                "result_dir": str(getattr(r, "result_dir", "")),
+                # ``VariantResult`` exposes the benchmark dir as ``workspace``
+                # (there is no ``result_dir`` attribute); using the wrong name
+                # left ``_grade_accuracy`` with an empty path so the accuracy
+                # gate silently skipped on every patch.
+                "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
             }
 
-        # Accuracy gate runs only on a succeeded bench with a baseline;
-        # else ``None`` (KEEP gate skips the accuracy check).
         accuracy_pass: bool | None = None
-        baseline_accuracy = params.get("accuracy_baseline")
-        if (
-            bench.get("status") == "succeeded"
-            and isinstance(baseline_accuracy, (int, float))
-            and float(baseline_accuracy) > 0
-        ):
-            try:
-                eval_results = parse_eval_results(bench["result_dir"])
-                if eval_results.get("score") is not None:
-                    accuracy_pass = accuracy_passed(
-                        eval_results["score"],
-                        float(baseline_accuracy),
-                    )
-            except Exception:  # noqa: BLE001
-                log.exception("integrate_patch: accuracy gate parse failed; treating as None (gate skipped)")
+        if bench.get("status") == "succeeded":
+            accuracy_pass = self._grade_accuracy(bench["workspace"], params.get("accuracy_baseline"))
 
         return bench, {"accuracy_pass": accuracy_pass}
+
+    @staticmethod
+    def _grade_accuracy(result_dir: str, baseline_accuracy: Any) -> bool | None:
+        """Grade a bench's accuracy against the baseline.
+
+        With a recorded baseline the measured drop is enforced; without one
+        (or no eval result) the check is skipped (``None``) and warned loudly.
+        """
+        # Accept numeric strings (e.g. ``"0.85"``) in addition to int/float so a
+        # baseline carried as text is not silently coerced to 0.0 (which would
+        # skip the gate). Non-numeric / missing values fall back to 0.0 (skip).
+        try:
+            baseline_value = float(baseline_accuracy)
+        except (TypeError, ValueError):
+            baseline_value = 0.0
+        try:
+            eval_results = parse_eval_results(result_dir)
+            new_accuracy = eval_results.get("accuracy")
+            if new_accuracy is not None and baseline_value > 0:
+                return accuracy_passed(baseline_value, float(new_accuracy))
+            if baseline_value <= 0:
+                log.warning(
+                    "integrate_patch: no baseline accuracy; accuracy gate skipped "
+                    "(throughput-only KEEP). Accuracy regressions will not be caught.",
+                )
+            else:
+                log.warning("integrate_patch: variant produced no accuracy result; gate skipped")
+        except Exception:  # noqa: BLE001
+            log.exception("integrate_patch: accuracy gate parse failed; treating as None (gate skipped)")
+        return None
+
+    async def _confirm_stack_rebench(
+        self,
+        *,
+        params: dict[str, Any],
+        output_root: Path,
+        config_changes_applied: dict[str, str],
+        specialist_task_id: str,
+        base_tput: float,
+    ) -> dict[str, Any]:
+        """Re-bench the patched stack once more and re-grade throughput + accuracy.
+
+        Mirrors the explore ledger's post-KEEP confirmation: a patch only KEEPs
+        if a second full-stack run still clears the stability floor and the
+        accuracy gate. Returns ``stable`` / ``tput`` / ``accuracy_pass`` / etc.
+        """
+        config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
+        resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
+        resolved_gpu = (
+            str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
+        )
+        override_script = sanitize_script_name(params.get("benchmark_script"))
+        override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        base_extra_args = str(params.get("base_extra_args") or "").strip()
+        config_path = materialize_config_with_envs(
+            config_path,
+            output_root,
+            model_path=resolved_model or None,
+            gpu_type=resolved_gpu or None,
+            benchmark_script=override_script,
+            out_name="integrate_patch.rebench.yaml",
+        )
+        variant = GridVariant(
+            name=f"integrate-patch-rebench-{specialist_task_id[:8]}",
+            extra_server_args=base_extra_args,
+            extra_envs=dict(config_changes_applied),
+            note=f"integrate_patch_rebench:{specialist_task_id}",
+        )
+        rebench = await measure_stack_rebench(
+            config_path=config_path,
+            base_extra_args=base_extra_args,
+            variant=variant,
+            base_tput=base_tput,
+            stable_threshold_pct=float(params.get("rebench_stable_threshold_pct", 0.0)),
+            output_slot=output_root / "stack_rebench",
+            variant_timeout_sec=int(params.get("variant_timeout_sec", self.variant_timeout_sec)),
+            model_path=resolved_model or None,
+            gpu_type=resolved_gpu or None,
+            benchmark_script=override_script,
+            result_dir=override_result_dir,
+            magpie_python=params.get("magpie_python") or None,
+        )
+        accuracy_pass = (
+            self._grade_accuracy(rebench.workspace, params.get("accuracy_baseline")) if rebench.workspace else None
+        )
+        return {
+            "stable": rebench.stable,
+            "tput": rebench.tput,
+            "workspace": rebench.workspace,
+            "warnings": rebench.warnings,
+            "stable_floor": rebench.stable_floor,
+            "accuracy_pass": accuracy_pass,
+        }
 
 
 __all__ = [
