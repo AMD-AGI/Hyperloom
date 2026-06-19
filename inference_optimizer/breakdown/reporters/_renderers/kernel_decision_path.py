@@ -34,7 +34,7 @@ def _fmt_duration(v: Any) -> str:
         return "—"
     if x < 60:
         return f"{x:.1f}s"
-    return f"{x/60:.1f}min"
+    return f"{x / 60:.1f}min"
 
 
 @register_renderer("kernel_decision_path")
@@ -73,13 +73,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     facts: list[str] = [
         f"Tracked {len(entries)} kernel(s) through the decision pipeline.",
     ]
-    n_with_kopt = sum(1 for e in entries
-                       if any((s or {}).get("step") == "kernel_opt" for s in e.get("steps") or []))
-    n_with_integ = sum(1 for e in entries
-                        if any((s or {}).get("step") == "integrate" for s in e.get("steps") or []))
-    facts.append(
-        f"Funnel: selected={len(entries)} → kernel_opt={n_with_kopt} → integrate={n_with_integ}."
-    )
+    n_with_kopt = sum(1 for e in entries if any((s or {}).get("step") == "kernel_opt" for s in e.get("steps") or []))
+    n_with_integ = sum(1 for e in entries if any((s or {}).get("step") == "integrate" for s in e.get("steps") or []))
+    facts.append(f"Funnel: selected={len(entries)} → kernel_opt={n_with_kopt} → integrate={n_with_integ}.")
 
     blocks: list[str] = []
     head = entries[:_MAX_KIDS]
@@ -102,23 +98,24 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         for s in shown:
             if not isinstance(s, dict):
                 continue
-            rows.append([
-                s.get("ts") or "",
-                s.get("step") or "",
-                s.get("backend") or "",
-                s.get("outcome") or "",
-                fmt_pct(s.get("gain_pct"), plus=True),
-                _fmt_duration(s.get("duration_seconds")),
-                s.get("decision_note") or "",
-            ])
+            rows.append(
+                [
+                    s.get("ts") or "",
+                    s.get("step") or "",
+                    s.get("backend") or "",
+                    s.get("outcome") or "",
+                    fmt_pct(s.get("gain_pct"), plus=True),
+                    _fmt_duration(s.get("duration_seconds")),
+                    s.get("decision_note") or "",
+                ]
+            )
         table = md_table(
-            ["ts", "step", "backend", "outcome", "gain", "dur", "note"], rows,
+            ["ts", "step", "backend", "outcome", "gain", "dur", "note"],
+            rows,
         )
         block_parts = [header, meta_line]
         if len(steps) > _MAX_STEPS_PER_KID:
-            block_parts.append(
-                f"  _Showing first {_MAX_STEPS_PER_KID} of {len(steps)} step(s)._"
-            )
+            block_parts.append(f"  _Showing first {_MAX_STEPS_PER_KID} of {len(steps)} step(s)._")
         if table:
             block_parts.append("")
             block_parts.append(table)

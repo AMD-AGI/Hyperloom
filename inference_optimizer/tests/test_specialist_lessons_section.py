@@ -64,7 +64,7 @@ async def test_warm_specialist_params_populates_warm_start_lessons(tmp_path: Pat
             "kind": "lesson",
             "confidence": 0.9,
             "attrs": {
-                "statement":       "--attention-backend AITER → +12.3%",
+                "statement": "--attention-backend AITER → +12.3%",
                 "measured_impact": "gain_pct=12.30",
                 "source_session_id": "session-A",
             },
@@ -113,16 +113,16 @@ def test_section_lessons_renders_each_lesson_with_metadata():
             "canonical_id": "lesson:abc",
             "confidence": 0.85,
             "attrs": {
-                "statement":          "--attention-backend AITER → +12.3%",
-                "measured_impact":    "gain_pct=12.30 throughput_after=875.0",
-                "source_session_id":  "session-A",
+                "statement": "--attention-backend AITER → +12.3%",
+                "measured_impact": "gain_pct=12.30 throughput_after=875.0",
+                "source_session_id": "session-A",
             },
         },
         {
             "canonical_id": "lesson:def",
             "confidence": 0.5,
             "attrs": {
-                "statement":       "VLLM_ROCM_USE_AITER=1 → +9.5%",
+                "statement": "VLLM_ROCM_USE_AITER=1 → +9.5%",
                 "measured_impact": "gain_pct=9.50",
             },
         },
@@ -139,8 +139,7 @@ def test_section_lessons_renders_each_lesson_with_metadata():
     assert "gain_pct=12.30 throughput_after=875.0" in text
 
 
-def test_section_lessons_renders_dict_measured_impact_as_human_readable_line(
-):
+def test_section_lessons_renders_dict_measured_impact_as_human_readable_line():
     """GAP 3 — a dict ``measured_impact`` is rendered as a human-readable summary instead of raw JSON."""
     lessons = [
         {
@@ -210,8 +209,7 @@ def test_section_lessons_skips_lessons_with_empty_statement():
     """Defensive: a KB row with empty ``statement`` is skipped."""
     lessons = [
         {"canonical_id": "lesson:empty", "attrs": {"statement": ""}},
-        {"canonical_id": "lesson:real",
-         "attrs": {"statement": "real one"}},
+        {"canonical_id": "lesson:real", "attrs": {"statement": "real one"}},
     ]
     rows = _section_lessons(_make_inp(lessons))
     text = "\n".join(rows)
@@ -222,10 +220,11 @@ def test_section_lessons_skips_lessons_with_empty_statement():
 
 def test_build_specialist_prompts_inserts_5b_between_recipe_and_pr_feed():
     """End-to-end: section 5b is inserted between section 5 (recipe) and 5c (pitfalls)."""
-    inp = _make_inp([
-        {"canonical_id": "lesson:x",
-         "attrs": {"statement": "x → +1%"}},
-    ])
+    inp = _make_inp(
+        [
+            {"canonical_id": "lesson:x", "attrs": {"statement": "x → +1%"}},
+        ]
+    )
     _system, user = build_specialist_prompts(inp)
     recipe_idx = user.index("## 5. WARM-START RECIPE SUMMARY")
     lessons_idx = user.index("## 5b. RELATED LESSONS")
@@ -249,8 +248,8 @@ def test_section_pitfalls_renders_each_pitfall_with_metadata():
             "canonical_id": "pitfall:abc",
             "confidence": 0.7,
             "attrs": {
-                "description":       "VLLM_ROCM_USE_AITER_FP4BMM=1 → crash on gfx942",
-                "severity":          "crash",
+                "description": "VLLM_ROCM_USE_AITER_FP4BMM=1 → crash on gfx942",
+                "severity": "crash",
                 "source_session_id": "session-A",
             },
         },
@@ -259,7 +258,7 @@ def test_section_pitfalls_renders_each_pitfall_with_metadata():
             "confidence": 0.4,
             "attrs": {
                 "description": "--max-num-seqs 1024 on MoE → -8% regress",
-                "severity":    "regress",
+                "severity": "regress",
             },
         },
     ]
@@ -278,9 +277,8 @@ def test_section_pitfalls_skips_pitfalls_with_empty_description():
     pitfalls = [
         {"canonical_id": "pitfall:empty", "attrs": {"description": ""}},
         # Legacy shape from the broken traps(symptom=) era.
-        {"raw": "{\"points\":[...legacy json blob...]}"},
-        {"canonical_id": "pitfall:real",
-         "attrs": {"description": "real one", "severity": "crash"}},
+        {"raw": '{"points":[...legacy json blob...]}'},
+        {"canonical_id": "pitfall:real", "attrs": {"description": "real one", "severity": "crash"}},
     ]
     rows = _section_pitfalls(_make_inp(pitfalls=pitfalls))
     text = "\n".join(rows)

@@ -108,17 +108,11 @@ def test_benchmark_match_fmha_prefers_mha_over_pa():
         "/sgl-workspace/aiter/op_tests/test_mha_fp8.py",
         "/sgl-workspace/aiter/op_tests/test_mha.py",
     ]
-    ordered = ko._match_benchmark_for_kernel(
-        "aiter::fmha_v3_varlen_fwd", bench
-    )
+    ordered = ko._match_benchmark_for_kernel("aiter::fmha_v3_varlen_fwd", bench)
     assert ordered[0].endswith("test_mha_fp8.py") or ordered[0].endswith("test_mha.py")
     # PA tests must come after MHA tests
-    pa_first_idx = next(
-        (i for i, p in enumerate(ordered) if Path(p).name.startswith("test_pa")), -1
-    )
-    mha_first_idx = next(
-        (i for i, p in enumerate(ordered) if "mha" in Path(p).name.lower()), -1
-    )
+    pa_first_idx = next((i for i, p in enumerate(ordered) if Path(p).name.startswith("test_pa")), -1)
+    mha_first_idx = next((i for i, p in enumerate(ordered) if "mha" in Path(p).name.lower()), -1)
     assert mha_first_idx < pa_first_idx, ordered
 
 
@@ -128,9 +122,7 @@ def test_benchmark_match_paged_attention_prefers_pa():
         "/sgl-workspace/aiter/op_tests/test_mha.py",
         "/sgl-workspace/aiter/op_tests/test_pa.py",
     ]
-    ordered = ko._match_benchmark_for_kernel(
-        "aiter::paged_attention_v1", bench
-    )
+    ordered = ko._match_benchmark_for_kernel("aiter::paged_attention_v1", bench)
     assert ordered[0].endswith("test_pa.py")
 
 

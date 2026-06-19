@@ -17,6 +17,9 @@ import tempfile
 from pathlib import Path
 
 _SENTINEL = "<your_benchmark.py>"  # presence == already patched
+# Upstream GEAK (ec61bdb+) replaced the task_runner.py examples with generic
+# placeholders; when this marker is present the YAML needs no Hyperloom patch.
+_UPSTREAM_FIXED_MARKER = "<your-test-command>"
 
 _OLD_BLOCK = (
     '    - Good example: `command="python3 scripts/task_runner.py performance", '
@@ -39,10 +42,14 @@ _DEFAULT_REL_PATH = Path("minisweagent/config/mini_kernel_strategy_list.yaml")
 
 
 def _locate_yaml() -> Path | None:
-    """Return the bundled GEAK strategy YAML path.
+    """Locate the bundled GEAK strategy YAML.
 
-    Resolves ``$HYPERLOOM_GEAK_PROMPT_YAML`` (test override) then the
-    minisweagent package; ``None`` when the package isn't importable.
+    Resolves ``$HYPERLOOM_GEAK_PROMPT_YAML`` (test override) first, then the
+    ``minisweagent`` package location.
+
+    Returns:
+        The YAML path, or ``None`` when the override file is missing or the
+        package isn't importable.
     """
     override = os.environ.get("HYPERLOOM_GEAK_PROMPT_YAML", "").strip()
     if override:
@@ -60,9 +67,17 @@ def _locate_yaml() -> Path | None:
 
 
 def _atomic_write(target: Path, content: str) -> None:
-    """Write ``content`` to ``target`` atomically via tempfile + replace."""
+    """Write content to a file atomically via a tempfile and replace.
+
+    Args:
+        target: Destination file path.
+        content: Text to write.
+    """
     with tempfile.NamedTemporaryFile(
-        "w", dir=str(target.parent), delete=False, encoding="utf-8",
+        "w",
+        dir=str(target.parent),
+        delete=False,
+        encoding="utf-8",
     ) as tmp:
         tmp.write(content)
         tmp_path = Path(tmp.name)
@@ -74,7 +89,15 @@ def _atomic_write(target: Path, content: str) -> None:
 
 
 def ensure_geak_prompt_patched() -> tuple[bool, str]:
-    """Patch the bundled YAML in-place; idempotent and fail-soft. Returns ``(ok, message)``."""
+    """Patch the bundled GEAK strategy YAML in place.
+
+    The operation is idempotent and fail-soft: it skips when already patched,
+    when the package is absent, or when upstream wording has drifted.
+
+    Returns:
+        A ``(ok, message)`` tuple where ``ok`` indicates success and
+        ``message`` is a human-readable status.
+    """
     yaml_path = _locate_yaml()
     if yaml_path is None:
         return False, "minisweagent not installed (skip)"
@@ -84,11 +107,10 @@ def ensure_geak_prompt_patched() -> tuple[bool, str]:
         return False, f"cannot read {yaml_path}: {exc}"
     if _SENTINEL in text:
         return True, f"already patched: {yaml_path}"
+    if _UPSTREAM_FIXED_MARKER in text:
+        return True, f"upstream already fixed (uses generic placeholders): {yaml_path}"
     if _OLD_BLOCK not in text:
-        # Upstream wording changed; refuse to guess and garble the YAML.
-        return False, (
-            f"upstream example block changed; manual review required: {yaml_path}"
-        )
+        return False, (f"upstream example block changed; manual review required: {yaml_path}")
     patched = text.replace(_OLD_BLOCK, _NEW_BLOCK, 1)
     if patched == text:
         return False, f"replace produced no change: {yaml_path}"
@@ -100,7 +122,14 @@ def ensure_geak_prompt_patched() -> tuple[bool, str]:
 
 
 def main() -> int:
-    """CLI entry for install.sh; exits 0 unless ``$HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED == 1``."""
+    """Run the patcher as a CLI entry point for ``install.sh``.
+
+    Exits 0 unless the patch fails and
+    ``$HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED == 1``.
+
+    Returns:
+        Process exit code (0 on success or soft-skip, 1 on required failure).
+    """
     ok, msg = ensure_geak_prompt_patched()
     status = "OK" if ok else "WARN"
     print(f"[geak-prompt-patcher] {status}: {msg}")

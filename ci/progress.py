@@ -45,7 +45,16 @@ def _load_json(path: Path) -> dict:
 
 
 def _summary_rows(summary_path: Path) -> list[dict]:
-    """Extract rows from a ci_summary.json; accepts `{"rows": [...]}`, `{"models": [...]}`, or a bare list."""
+    """Extract rows from a ci_summary.json file.
+
+    Accepts ``{"rows": [...]}``, ``{"models": [...]}``, or a bare list.
+
+    Args:
+        summary_path: Path to the ci_summary.json file.
+
+    Returns:
+        The extracted row dicts (empty when none found).
+    """
     data = _load_json(summary_path)
     if isinstance(data, list):
         return data
@@ -53,7 +62,16 @@ def _summary_rows(summary_path: Path) -> list[dict]:
 
 
 def _classify_status(row: dict) -> tuple[str, str | None]:
-    """Return (status, reason): completed (baseline+optimized), partial (one only), or failed (no usable data)."""
+    """Classify a summary row's completion status.
+
+    Args:
+        row: A ci_summary row dict.
+
+    Returns:
+        A ``(status, reason)`` tuple where status is ``"completed"``
+        (baseline + optimized + gain), ``"partial"`` (one data point), or
+        ``"failed"`` (no usable data); ``reason`` is ``None`` when completed.
+    """
     fs = row.get("final_status")
     submit = row.get("submit_status")
     has_opt = row.get("optimized_tok_per_gpu") is not None
@@ -84,12 +102,12 @@ def _row_to_entry(row: dict) -> dict:
     """
     status, reason = _classify_status(row)
     e = {
-        "repo_id":   row.get("model"),
-        "status":    status,
+        "repo_id": row.get("model"),
+        "status": status,
         "framework": row.get("framework"),
         "precision": row.get("precision"),
-        "tp":        row.get("tp"),
-        "params_b":  row.get("params_b"),
+        "tp": row.get("tp"),
+        "params_b": row.get("params_b"),
     }
     if reason:
         e["reason"] = reason
@@ -153,15 +171,13 @@ def cmd_promote(args: argparse.Namespace) -> int:
     if new_entries:
         print("New:")
         for e in new_entries[:15]:
-            print(f"  + {e['status']:9s} {e['repo_id']:60s} "
-                  f"{(e.get('gain_pct') or '—'):>7}")
+            print(f"  + {e['status']:9s} {e['repo_id']:60s} {(e.get('gain_pct') or '—'):>7}")
         if len(new_entries) > 15:
             print(f"  ... and {len(new_entries) - 15} more")
     if updates:
         print("Upgrades:")
         for u in updates[:10]:
-            print(f"  ~ {u['old']['status']} → {u['new']['status']}: "
-                  f"{u['new']['repo_id']}")
+            print(f"  ~ {u['old']['status']} → {u['new']['status']}: {u['new']['repo_id']}")
 
     if not args.write:
         print("\n(dry-run; pass --write to persist)")
@@ -201,8 +217,7 @@ def cmd_list_remaining(args: argparse.Namespace) -> int:
     done = {m["repo_id"] for m in already.get("models", [])}
 
     remaining = [r for r in cand_repos if r not in done]
-    print(f"# {len(remaining)} remaining of {len(cand_repos)} candidates "
-          f"(already_done excludes {len(done)})")
+    print(f"# {len(remaining)} remaining of {len(cand_repos)} candidates (already_done excludes {len(done)})")
     for r in remaining:
         print(r)
     return 0
@@ -245,8 +260,10 @@ def cmd_stats(args: argparse.Namespace) -> int:
     if gains:
         gains.sort(reverse=True)
         avg = sum(gains) / len(gains)
-        print(f"With gain%:   {len(gains)} (avg {avg:+.2f}%, "
-              f"top {gains[0]:+.2f}%, beat-0%: {sum(1 for g in gains if g > 0)})")
+        print(
+            f"With gain%:   {len(gains)} (avg {avg:+.2f}%, "
+            f"top {gains[0]:+.2f}%, beat-0%: {sum(1 for g in gains if g > 0)})"
+        )
 
     if args.candidates:
         cands = _load_json(Path(args.candidates))
@@ -256,7 +273,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
         remaining = cand_repos - done_repos
         print(f"\n=== vs candidates pool ({args.candidates}) ===")
         print(f"Pool size:    {len(cand_repos)}")
-        print(f"Already done: {len(intersect)} (= {len(intersect)*100/len(cand_repos):.0f}%)")
+        print(f"Already done: {len(intersect)} (= {len(intersect) * 100 / len(cand_repos):.0f}%)")
         print(f"Remaining:    {len(remaining)}")
     return 0
 
@@ -275,18 +292,15 @@ def main() -> int:
     pp = sub.add_parser("promote", help="merge ci_summary.json into already_done.json")
     pp.add_argument("summary", help="path to ci_summary.json")
     pp.add_argument("--already-done", default=str(DEFAULT_ALREADY))
-    pp.add_argument("--write", action="store_true",
-                    help="actually persist changes (without it, dry-run only)")
+    pp.add_argument("--write", action="store_true", help="actually persist changes (without it, dry-run only)")
 
-    pl = sub.add_parser("list-remaining",
-                        help="print candidates not yet in already_done")
+    pl = sub.add_parser("list-remaining", help="print candidates not yet in already_done")
     pl.add_argument("candidates", help="path to candidates JSON")
     pl.add_argument("--already-done", default=str(DEFAULT_ALREADY))
 
     ps = sub.add_parser("stats", help="counters from already_done.json")
     ps.add_argument("--already-done", default=str(DEFAULT_ALREADY))
-    ps.add_argument("--candidates", default=None,
-                    help="optional pool to compare against")
+    ps.add_argument("--candidates", default=None, help="optional pool to compare against")
 
     args = p.parse_args()
 

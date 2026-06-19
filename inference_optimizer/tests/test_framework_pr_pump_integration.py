@@ -24,27 +24,27 @@ _FRAMEWORK_PARAMETRISATION: tuple[str, ...] = ("sglang", "vllm", "atom")
 # Synthetic per-framework single-candidate batch fixtures (fa phase-discover shape).
 _FRAMEWORK_CANDIDATES: dict[str, dict[str, Any]] = {
     "sglang": {
-        "pr_url":   "https://github.com/sgl-project/sglang/pull/1",
+        "pr_url": "https://github.com/sgl-project/sglang/pull/1",
         "diff_url": "https://github.com/sgl-project/sglang/pull/1.diff",
-        "repo":     "sgl-project/sglang",
-        "ref":      "perf/x",
-        "title":    "perf: moe gemm fastpath",
+        "repo": "sgl-project/sglang",
+        "ref": "perf/x",
+        "title": "perf: moe gemm fastpath",
         "framework": "sglang",
     },
     "vllm": {
-        "pr_url":   "https://github.com/ROCm/vllm/pull/2",
+        "pr_url": "https://github.com/ROCm/vllm/pull/2",
         "diff_url": "https://github.com/ROCm/vllm/pull/2.diff",
-        "repo":     "ROCm/vllm",
-        "ref":      "perf/y",
-        "title":    "perf: paged attention prefill",
+        "repo": "ROCm/vllm",
+        "ref": "perf/y",
+        "title": "perf: paged attention prefill",
         "framework": "vllm",
     },
     "atom": {
-        "pr_url":   "https://github.com/ROCm/ATOM/pull/3",
+        "pr_url": "https://github.com/ROCm/ATOM/pull/3",
         "diff_url": "https://github.com/ROCm/ATOM/pull/3.diff",
-        "repo":     "ROCm/ATOM",
-        "ref":      "perf/z",
-        "title":    "perf: MTP scheduler + aiter fused_moe",
+        "repo": "ROCm/ATOM",
+        "ref": "perf/z",
+        "title": "perf: MTP scheduler + aiter fused_moe",
         "framework": "atom",
     },
 }
@@ -87,37 +87,43 @@ class _TasksStub:
     async def create_or_return_existing(self, **kwargs: Any) -> Any:
         self.created.append(kwargs)
         # Mimic enqueue → queued so the pump's idempotency check fires next tick.
-        self._queued.append(SimpleNamespace(
-            kind=kwargs.get("kind"),
-            task_id=f"t-{len(self.created)}",
-        ))
+        self._queued.append(
+            SimpleNamespace(
+                kind=kwargs.get("kind"),
+                task_id=f"t-{len(self.created)}",
+            )
+        )
         return self._queued[-1]
 
 
 def _make_approve_intents(prompt: str) -> list[Intent]:
     m = re.search(r"msg_id=([a-f0-9]+)", prompt)
     msg_id = m.group(1) if m else "x"
-    return [Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": msg_id,
-            "verdict":                "approve",
-            "reasoning":              "ok",
-        },
-    )]
+    return [
+        Intent(
+            type=IntentType.REVIEW_VERDICT,
+            payload={
+                "target_proposal_msg_id": msg_id,
+                "verdict": "approve",
+                "reasoning": "ok",
+            },
+        )
+    ]
 
 
 def _make_reject_intents(prompt: str, reason: str = "out of scope") -> list[Intent]:
     m = re.search(r"msg_id=([a-f0-9]+)", prompt)
     msg_id = m.group(1) if m else "x"
-    return [Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": msg_id,
-            "verdict":                "reject",
-            "reasoning":              reason,
-        },
-    )]
+    return [
+        Intent(
+            type=IntentType.REVIEW_VERDICT,
+            payload={
+                "target_proposal_msg_id": msg_id,
+                "verdict": "reject",
+                "reasoning": reason,
+            },
+        )
+    ]
 
 
 class _ScriptedCriticBackend:
@@ -137,11 +143,7 @@ class _ScriptedCriticBackend:
     ) -> Any:
         self.call_count += 1
         v = self._verdicts.pop(0) if self._verdicts else "approve"
-        intents = (
-            _make_approve_intents(prompt)
-            if v == "approve"
-            else _make_reject_intents(prompt)
-        )
+        intents = _make_approve_intents(prompt) if v == "approve" else _make_reject_intents(prompt)
         return SimpleNamespace(intents=intents, raw_text=f"({v})")
 
 
@@ -151,18 +153,10 @@ class _CoordinatorStub:
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
     _collect_framework_pr_priors = Coordinator._collect_framework_pr_priors
-    _select_next_framework_pr_candidate = (
-        Coordinator._select_next_framework_pr_candidate
-    )
-    _record_framework_pr_phase_done = (
-        Coordinator._record_framework_pr_phase_done
-    )
-    _critic_review_framework_pr_candidate = (
-        Coordinator._critic_review_framework_pr_candidate
-    )
-    _discover_next_framework_pr_batch = (
-        Coordinator._discover_next_framework_pr_batch
-    )
+    _select_next_framework_pr_candidate = Coordinator._select_next_framework_pr_candidate
+    _record_framework_pr_phase_done = Coordinator._record_framework_pr_phase_done
+    _critic_review_framework_pr_candidate = Coordinator._critic_review_framework_pr_candidate
+    _discover_next_framework_pr_batch = Coordinator._discover_next_framework_pr_batch
     _enqueue_framework_pr_task = Coordinator._enqueue_framework_pr_task
 
     def __init__(
@@ -267,10 +261,7 @@ def test_pump_reject_writes_progress_then_next_tick_picks_next(
     assert discover_calls.n == 1
     assert critic.call_count == 1
     assert stub.tasks.created == []
-    denied = [
-        r for r in stub.shared_state.framework_pr_phase_progress
-        if r.get("status") == "critic_denied"
-    ]
+    denied = [r for r in stub.shared_state.framework_pr_phase_progress if r.get("status") == "critic_denied"]
     assert len(denied) == 1
     assert denied[0]["candidate_id"] == "https://example.com/pr/1"
 
@@ -320,6 +311,7 @@ def test_pump_marks_phase_done_with_history_row_on_empty_discover(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """A clean empty discover payload flips ``framework_pr_phase_done`` and records a phase_history row; no Critic call."""
+
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "", "candidates": []}
 
@@ -331,9 +323,6 @@ def test_pump_marks_phase_done_with_history_row_on_empty_discover(
 
     assert stub.shared_state.framework_pr_phase_done is True
     assert critic.call_count == 0
-    rows = [
-        r for r in stub.shared_state.phase_history
-        if r.get("event") == "framework_pr_phase_done"
-    ]
+    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_pr_phase_done"]
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_empty_payload"

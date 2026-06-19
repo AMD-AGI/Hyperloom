@@ -31,18 +31,20 @@ _HIGH_RISK_CLI_PATTERNS: tuple[str, ...] = (
     "--decode-attention-backend",
 )
 
-_HIGH_RISK_ENV_KEYS: frozenset[str] = frozenset({
-    "VLLM_ROCM_USE_AITER",
-    "VLLM_ROCM_USE_AITER_LINEAR",
-    "VLLM_ROCM_USE_AITER_RMSNORM",
-    "VLLM_ROCM_USE_AITER_FP8BMM",
-    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-    "VLLM_ROCM_USE_AITER_TRITON_ROPE",
-    "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
-    "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT",
-    "AMDGCN_USE_BUFFER_OPS",
-    "SGLANG_USE_AITER",
-})
+_HIGH_RISK_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "VLLM_ROCM_USE_AITER",
+        "VLLM_ROCM_USE_AITER_LINEAR",
+        "VLLM_ROCM_USE_AITER_RMSNORM",
+        "VLLM_ROCM_USE_AITER_FP8BMM",
+        "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
+        "VLLM_ROCM_USE_AITER_TRITON_ROPE",
+        "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
+        "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT",
+        "AMDGCN_USE_BUFFER_OPS",
+        "SGLANG_USE_AITER",
+    }
+)
 
 
 def is_high_accuracy_risk(
@@ -92,9 +94,7 @@ def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
     ]
     result_files: list[Path] = []
     for pattern in search_paths:
-        result_files.extend(
-            Path(f) for f in glob.glob(str(pattern), recursive=True)
-        )
+        result_files.extend(Path(f) for f in glob.glob(str(pattern), recursive=True))
     if not result_files:
         return {"accuracy": None, "error": f"no results*.json in {workspace}"}
 
@@ -106,13 +106,11 @@ def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
 
     results = data.get("results", {})
     for task_name, metrics in results.items():
-        for key in ("exact_match,strict-match", "exact_match,flexible-extract",
-                    "exact_match,none", "acc,none"):
+        for key in ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none"):
             if key in metrics:
                 score = metrics[key]
                 if isinstance(score, (int, float)):
-                    log.info("accuracy_gate: task=%s metric=%s score=%.4f "
-                             "source=%s", task_name, key, score, latest)
+                    log.info("accuracy_gate: task=%s metric=%s score=%.4f source=%s", task_name, key, score, latest)
                     return {
                         "accuracy": float(score),
                         "task": task_name,

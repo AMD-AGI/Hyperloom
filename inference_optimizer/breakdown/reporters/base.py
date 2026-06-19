@@ -64,7 +64,15 @@ REGISTRY: list[tuple[str, RendererFn]] = []
 
 
 def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
-    """Decorator: register ``fn`` under ``section_id`` (re-registration replaces the prior entry)."""
+    """Decorator: register ``fn`` under ``section_id`` (re-registration replaces the prior entry).
+
+    Args:
+        section_id: Identifier under which the decorated renderer is stored.
+
+    Returns:
+        A decorator that registers the renderer function and returns it
+        unchanged.
+    """
 
     def _wrap(fn: RendererFn) -> RendererFn:
         """Register ``fn`` under ``section_id`` and return it unchanged.
@@ -109,8 +117,7 @@ def md_table(headers: list[str], rows: Iterable[list[Any]]) -> str:
     rows = list(rows)
     if not rows:
         return ""
-    out = ["| " + " | ".join(headers) + " |",
-           "|" + "|".join("---" for _ in headers) + "|"]
+    out = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
     for r in rows:
         out.append("| " + " | ".join(_md_cell(c) for c in r) + " |")
     return "\n".join(out)

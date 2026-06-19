@@ -20,6 +20,7 @@ from quantization_agent.driver.runner import (
 # resolve_skill_path
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_resolve_skill_path_defaults_to_package():
     p = resolve_skill_path()
     assert p.name == "SKILL.md"
@@ -35,6 +36,7 @@ def test_resolve_skill_path_respects_override(tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 # build_attempt_prompt
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_build_attempt_prompt_includes_skill_and_user_prompt(tmp_path):
     skill = tmp_path / "SKILL.md"
@@ -119,10 +121,9 @@ def test_build_attempt_prompt_default_threshold_message(tmp_path):
 # run_one_attempt — SDK injection
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_run_one_attempt_invokes_sdk_with_prompt(
-    tmp_path, fake_sdk, fake_options_cls
-):
+async def test_run_one_attempt_invokes_sdk_with_prompt(tmp_path, fake_sdk, fake_options_cls):
     skill = tmp_path / "SKILL.md"
     skill.write_text("skill", encoding="utf-8")
     qr = tmp_path / "qr"
@@ -145,9 +146,7 @@ async def test_run_one_attempt_invokes_sdk_with_prompt(
 
 
 @pytest.mark.asyncio
-async def test_run_one_attempt_sets_cwd_to_quark_root(
-    tmp_path, fake_sdk, fake_options_cls
-):
+async def test_run_one_attempt_sets_cwd_to_quark_root(tmp_path, fake_sdk, fake_options_cls):
     skill = tmp_path / "SKILL.md"
     skill.write_text("x", encoding="utf-8")
     qr = tmp_path / "qr"
@@ -167,9 +166,7 @@ async def test_run_one_attempt_sets_cwd_to_quark_root(
 
 
 @pytest.mark.asyncio
-async def test_run_one_attempt_captures_sdk_exception(
-    tmp_path, fake_sdk, fake_options_cls
-):
+async def test_run_one_attempt_captures_sdk_exception(tmp_path, fake_sdk, fake_options_cls):
     skill = tmp_path / "SKILL.md"
     skill.write_text("x", encoding="utf-8")
     qr = tmp_path / "qr"
@@ -191,9 +188,7 @@ async def test_run_one_attempt_captures_sdk_exception(
 
 
 @pytest.mark.asyncio
-async def test_run_one_attempt_aggregates_chunks(
-    tmp_path, fake_sdk, fake_options_cls
-):
+async def test_run_one_attempt_aggregates_chunks(tmp_path, fake_sdk, fake_options_cls):
     skill = tmp_path / "SKILL.md"
     skill.write_text("x", encoding="utf-8")
     qr = tmp_path / "qr"
@@ -228,9 +223,7 @@ async def test_run_one_attempt_skill_missing_raises(tmp_path, fake_sdk, fake_opt
 
 
 @pytest.mark.asyncio
-async def test_run_one_attempt_retry_picks_up_hypothesis(
-    tmp_path, fake_sdk, fake_options_cls
-):
+async def test_run_one_attempt_retry_picks_up_hypothesis(tmp_path, fake_sdk, fake_options_cls):
     skill = tmp_path / "SKILL.md"
     skill.write_text("x", encoding="utf-8")
     qr = tmp_path / "qr"
@@ -257,9 +250,7 @@ async def test_run_one_attempt_retry_picks_up_hypothesis(
 
 
 @pytest.mark.asyncio
-async def test_run_one_attempt_falls_back_when_cwd_unsupported(
-    tmp_path, fake_sdk
-):
+async def test_run_one_attempt_falls_back_when_cwd_unsupported(tmp_path, fake_sdk):
     """Older SDK builds without `cwd` kwarg should retry without it."""
 
     skill = tmp_path / "SKILL.md"
@@ -287,9 +278,7 @@ async def test_run_one_attempt_falls_back_when_cwd_unsupported(
 
 
 @pytest.mark.asyncio
-async def test_run_one_attempt_passes_model(
-    tmp_path, fake_sdk, fake_options_cls
-):
+async def test_run_one_attempt_passes_model(tmp_path, fake_sdk, fake_options_cls):
     skill = tmp_path / "SKILL.md"
     skill.write_text("x", encoding="utf-8")
     qr = tmp_path / "qr"
@@ -308,9 +297,7 @@ async def test_run_one_attempt_passes_model(
 
 
 @pytest.mark.asyncio
-async def test_run_one_attempt_log_callback_captures_chunks(
-    tmp_path, fake_sdk, fake_options_cls
-):
+async def test_run_one_attempt_log_callback_captures_chunks(tmp_path, fake_sdk, fake_options_cls):
     skill = tmp_path / "SKILL.md"
     skill.write_text("x", encoding="utf-8")
     qr = tmp_path / "qr"

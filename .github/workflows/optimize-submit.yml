@@ -17,8 +17,8 @@ name: SaFE Optimize Submit
 #                                    register, so download is overlapped
 #                                    with the rest of the batch (no serial
 #                                    prewarm stage that blocks optimize).
-#                                    schedule forces max_parallel=100 so the
-#                                    whole 100-model batch dispatches at once
+#                                    schedule forces max_parallel=200 so the
+#                                    whole 200-model batch dispatches at once
 #                                    (dispatch default stays 60).
 #   3. summarize  (hyperloom-4hhzn) — aggregate per-task artifacts into a
 #                                    ranked ci_summary.{md,json} (sorted by
@@ -29,19 +29,24 @@ name: SaFE Optimize Submit
 #
 # How to dispatch:
 #   • Single/few models      : `-f models='Qwen/Qwen2.5-7B-Instruct ...'`
-#   • Reproducible batch run : `-f candidates_file=ci/candidates/production_1000_from_hf_2026-05-25.json
+#   • Reproducible batch run : `-f candidates_file=ci/candidates/hf_downloads_gt100_rotate_2026-06-17.json
 #                              -f batch_index=0 -f batch_size=130`
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Rolling un-run pool: 100 models three times a day, firing at UTC
-  # 04:00 / 12:00 / 20:00 (Beijing 12:00 / 20:00 / 04:00). Each run submits the
-  # next 100 models from ci/candidates/unrun_excluding_manual_100.json that are
-  # NOT yet on the leaderboard AND not already running (exclude_leaderboard +
-  # exclude_active below), so the priority pool drains toward empty. Manual
-  # workflow_dispatch is unaffected.
+  # Rolling downloads>100 pool: 200 models TWICE a day, firing at UTC
+  # 04:00 / 16:00 (Beijing 12:00 / 00:00). Each fire submits the
+  # NEXT sequential 200-model slice of the rotate pool, now hosted off-repo at
+  # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate.json
+  # (a date-less symlink that always points at the latest filtered pool;
+  # ordered not-run first; the 449 >12B multimodal models are front-loaded),
+  # stepping batch 0,1,2,... and wrapping at the pool end. Both
+  # exclude_leaderboard and exclude_active are OFF on schedule: slices are
+  # disjoint, so the whole pool keeps cycling (re-running finished models too).
+  # The tail batch is short (not head-wrapped) so consecutive fires never
+  # double-submit the head models. Manual workflow_dispatch is unaffected.
   schedule:
-    - cron: '0 4,12,20 * * *'
+    - cron: '0 4,16 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > legacy hf_top) ──────
@@ -50,7 +55,7 @@ on:
         required: false
         default: ''
       candidates_file:
-        description: 'Path to a candidates JSON built by ci/build_production_hf_pool.py (e.g. ci/candidates/production_1000_from_hf_2026-05-25.json). Used when models is empty.'
+        description: 'Path to a candidates JSON built by ci/build_production_hf_pool.py (e.g. ci/candidates/hf_downloads_gt100_rotate_2026-06-17.json). Used when models is empty.'
         required: false
         default: ''
       batch_index:
@@ -76,7 +81,7 @@ on:
         required: false
         default: '7'
       max_parallel:
-        description: 'Max parallel optimize jobs (dispatch default 60; schedule forces 100 to match the 100-model batch).'
+        description: 'Max parallel optimize jobs (dispatch default 60; schedule forces 200 to match the 200-model batch).'
         required: false
         default: '60'
       submit_jitter_sec:
@@ -121,12 +126,14 @@ on:
         default: 'local'
         type: choice
         options: [local, claw]
-      gpu_type:
-        description: 'GPU type tag (overrides SaFE backend default MI355X). Leave empty to use script default (MI300X for core42).'
+      framework:
+        description: 'Serving framework override forwarded to optimize_submit.py as --framework. Leave empty to auto-detect from the model config.'
         required: false
         default: ''
-      inferencex_path:
-        description: 'Explicit InferenceX checkout path (dev override only). Leave empty (default) so install.sh clones a writable per-session copy instead of pinning a shared read-only mount.'
+        type: choice
+        options: ['', sglang, vllm]
+      gpu_type:
+        description: 'GPU type tag (overrides SaFE backend default MI355X). Leave empty to use script default (MI300X for core42).'
         required: false
         default: ''
       kernel_opt_backends:
@@ -203,26 +210,32 @@ jobs:
       count:  ${{ steps.matrix.outputs.count }}
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
+      HF_TOKEN_2:            ${{ secrets.HF_TOKEN_2 }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
-      # Rolling cron prioritizes the current not-on-leaderboard pool generated
-      # by ci/build_rolling_pool.py. The full merged corpus lives in
-      # ci/candidates/production_1000_from_hf_2026-05-25.json; the top-100 are
-      # reserved in manual_100.json for operator-triggered dispatch.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/unrun_excluding_manual_100.json' || github.event.inputs.candidates_file }}
-      # Schedule pins batch_index=0: every cron pulls the FIRST 100 of the
-      # (dynamically shrinking) un-run + not-active list, so rotation is driven
-      # by the leaderboard/active exclusions instead of a clock slot.
-      INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '0' || github.event.inputs.batch_index }}
-      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '100' || github.event.inputs.batch_size }}
+      # Rolling cron cycles the downloads>100 pool (every size), ordered with
+      # not-yet-run models first so the front-anchored window picks them up
+      # before the already-run tail. With exclude_leaderboard=false (see below)
+      # the pool never drains — once the front models finish and are no longer
+      # active, the window wraps and the whole 2426-model pool keeps repeating.
+      # Schedule reads the rotate pool from /wekafs (off-repo, RO-mounted on the
+      # hyperloom runners) so the large candidates JSON never bloats the git repo.
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_downloads_gt100_rotate.json', secrets.WEKAFS_CHENYI_DIR) || github.event.inputs.candidates_file }}
+      # Schedule leaves batch_index empty so generate_hf_matrix derives a
+      # SEQUENTIAL index from the scheduled-fire counter: each cron (UTC
+      # 4/16) steps batch 0,1,2,... and wraps, marching the whole pool in
+      # order then repeating. Anchored so the first fire at/after the anchor is
+      # batch 0 (= not-run head, since the pool is ordered not-run-first).
+      INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '' || github.event.inputs.batch_index }}
+      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '200' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
-      # Schedule EXCLUDES leaderboard-known models: the rolling cron only
-      # submits models with no leaderboard data yet, so each run makes forward
-      # progress and the pool drains to empty. We also exclude active workflows
-      # so cron never double-submits a model already running — the two
-      # exclusions together advance the "first 100" window every run.
-      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_leaderboard }}
-      INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
+      # Schedule does NOT exclude leaderboard-known models, and does NOT exclude
+      # active workflows: the sequential batches are disjoint slices, so each
+      # cron submits its own slice. Keeping both exclusions off means the whole
+      # downloads>100 pool keeps cycling (re-running finished models too) and the
+      # clean batch boundaries are preserved.
+      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
+      INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_active_workflows }}
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
@@ -247,13 +260,14 @@ jobs:
     timeout-minutes: 780
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(github.event_name == 'schedule' && '100' || github.event.inputs.max_parallel || '60') }}
+      max-parallel: ${{ fromJson(github.event_name == 'schedule' && '200' || github.event.inputs.max_parallel || '60') }}
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
       CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
       SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
       HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
       HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
+      HF_TOKEN_2:                       ${{ secrets.HF_TOKEN_2 }}
       SAFE_OPTIMIZE_REGISTER_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_REGISTER_WORKSPACE }}
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
@@ -275,6 +289,7 @@ jobs:
         continue-on-error: true
         env:
           HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          HF_TOKEN_2: ${{ secrets.HF_TOKEN_2 }}
           MODEL_REPO: ${{ matrix.model }}
         run: |
           set -euo pipefail
@@ -304,11 +319,14 @@ jobs:
           INPUT_TP:               ${{ github.event.inputs.tp }}
           INPUT_SUBMIT_JITTER_SEC: ${{ github.event.inputs.submit_jitter_sec }}
           INPUT_MODE:             ${{ github.event.inputs.mode }}
+          INPUT_FRAMEWORK:        ${{ github.event.inputs.framework }}
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
-          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom,core42-hyperloom,core42-hyperloom,core42-hyperloom,core42-hyperloom,core42-hyperloom,core42-hyperloom,core42-sandbox,core42-sandbox,core42-sandbox' || github.event.inputs.submit_workspaces || 'core42-hyperloom,core42-sandbox' }}
+          # Schedule sends the whole 200-model batch to core42-hyperloom ONLY,
+          # leaving core42-sandbox dedicated to the count-filler (optimize-tiny).
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom' || github.event.inputs.submit_workspaces || 'core42-hyperloom,core42-sandbox' }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
@@ -345,6 +363,10 @@ jobs:
             ARGS+=(--tp "${INPUT_TP}")
           fi
           ARGS+=(--mode "${INPUT_MODE:-local}")
+          # Optional framework override — empty keeps the script's auto-detect.
+          if [ -n "${INPUT_FRAMEWORK:-}" ]; then
+            ARGS+=(--framework "${INPUT_FRAMEWORK}")
+          fi
           if [ -n "${INPUT_GPU_TYPE:-}" ]; then
             ARGS+=(--gpu-type "${INPUT_GPU_TYPE}")
           fi

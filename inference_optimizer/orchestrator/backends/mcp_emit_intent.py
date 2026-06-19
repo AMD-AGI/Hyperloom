@@ -84,40 +84,37 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
             required payload field.
     """
     if not isinstance(payload, dict):
-        raise IntentValidationError(
-            f"emit_intent input must be an object, got {type(payload).__name__}"
-        )
+        raise IntentValidationError(f"emit_intent input must be an object, got {type(payload).__name__}")
     extra = set(payload.keys()) - {"intent_type", "payload"}
     if extra:
-        raise IntentValidationError(
-            f"emit_intent input has unexpected keys: {sorted(extra)!r}"
-        )
+        raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(extra)!r}")
     if "intent_type" not in payload or "payload" not in payload:
-        raise IntentValidationError(
-            "emit_intent input requires both 'intent_type' and 'payload'"
-        )
+        raise IntentValidationError("emit_intent input requires both 'intent_type' and 'payload'")
     try:
         intent_type = IntentType(payload["intent_type"])
     except ValueError as exc:
-        raise IntentValidationError(
-            f"emit_intent: unknown intent_type {payload['intent_type']!r}"
-        ) from exc
+        raise IntentValidationError(f"emit_intent: unknown intent_type {payload['intent_type']!r}") from exc
     inner = payload["payload"]
     if not isinstance(inner, dict):
-        raise IntentValidationError(
-            f"emit_intent: 'payload' must be an object, got {type(inner).__name__}"
-        )
+        raise IntentValidationError(f"emit_intent: 'payload' must be an object, got {type(inner).__name__}")
     required = _PAYLOAD_REQUIRED.get(intent_type, ())
     missing = [k for k in required if k not in inner]
     if missing:
         raise IntentValidationError(
-            f"emit_intent: intent_type={intent_type.value} missing required "
-            f"fields: {missing!r}"
+            f"emit_intent: intent_type={intent_type.value} missing required fields: {missing!r}"
         )
 
 
 async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
-    """Default handler — validate then ack; errors return is_error=True."""
+    """Default handler — validate then ack; errors return is_error=True.
+
+    Args:
+        args: The raw ``emit_intent`` tool input to validate.
+
+    Returns:
+        An MCP tool result dict acknowledging success, or carrying the
+        validation error with ``is_error=True``.
+    """
     try:
         validate_emit_intent_input(args)
     except IntentValidationError as exc:
@@ -161,6 +158,19 @@ def build_emit_intent_server(
     :class:`ClaudeAgentOptions.mcp_servers`, or ``None`` if the SDK lacks
     in-process MCP helpers. ``tool_factory`` / ``server_factory`` /
     ``handler`` are test seams.
+
+    Args:
+        sdk_module: Explicit SDK module to use, or ``None`` to import the real
+            one.
+        tool_factory: Override for the SDK ``tool`` decorator factory (tests).
+        server_factory: Override for the SDK ``create_sdk_mcp_server`` factory
+            (tests).
+        handler: Override for the tool handler; defaults to
+            :func:`_emit_intent_handler`.
+
+    Returns:
+        The constructed in-process MCP server config, or ``None`` when the SDK
+        lacks the required in-process MCP helpers.
     """
     sdk = _resolve_sdk(sdk_module)
     handler = handler or _emit_intent_handler
@@ -168,9 +178,7 @@ def build_emit_intent_server(
     if tool_factory is None:
         tool_factory = getattr(sdk, "tool", None) if sdk is not None else None
     if server_factory is None:
-        server_factory = (
-            getattr(sdk, "create_sdk_mcp_server", None) if sdk is not None else None
-        )
+        server_factory = getattr(sdk, "create_sdk_mcp_server", None) if sdk is not None else None
     if tool_factory is None or server_factory is None:
         log.info(
             "emit_intent MCP server unavailable (sdk=%s).",

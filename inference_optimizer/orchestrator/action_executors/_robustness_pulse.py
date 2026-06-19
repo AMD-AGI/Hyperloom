@@ -31,6 +31,14 @@ _OFF_VALUES = frozenset({"0", "false", "no", "off", ""})
 
 
 def _enabled() -> bool:
+    """Whether the robustness pulse should run.
+
+    Disabled under pytest (the pulse spawns a real subprocess that
+    bypasses test mocks) and via ``HYPERLOOM_GRID_ROBUSTNESS_PULSE``.
+
+    Returns:
+        ``True`` if the pulse is enabled in the current environment.
+    """
     # Disable inside pytest — the pulse spawns a real subprocess that bypasses
     # test mocks. Mirrors ``_run_magpie``'s guard.
     if os.environ.get("PYTEST_CURRENT_TEST"):
@@ -70,10 +78,7 @@ def _build_request(session_dir: Path, *, tick_index: int) -> dict[str, Any]:
     return {
         "kind": "coordinator_inbox",
         "session_id": session_id,
-        "raw_prompt": (
-            "=== Shared session state ===\n"
-            f"session_id={session_id}\n"
-        ),
+        "raw_prompt": (f"=== Shared session state ===\nsession_id={session_id}\n"),
         "context": {"tick_index": tick_index},
         "options": {
             "session_dir": str(session_dir),
@@ -105,7 +110,10 @@ async def pulse(*, tick_index: int = 0, timeout_s: float = _PULSE_TIMEOUT_SEC) -
     request = _build_request(session_dir, tick_index=tick_index)
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False, encoding="utf-8",
+            mode="w",
+            suffix=".json",
+            delete=False,
+            encoding="utf-8",
         ) as fh:
             json.dump(request, fh)
             req_path = fh.name
@@ -116,9 +124,14 @@ async def pulse(*, tick_index: int = 0, timeout_s: float = _PULSE_TIMEOUT_SEC) -
     try:
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "robustness_agent.runtime.cli", "tick",
-                "--request", req_path,
-                "--out", "-",
+                sys.executable,
+                "-m",
+                "robustness_agent.runtime.cli",
+                "tick",
+                "--request",
+                req_path,
+                "--out",
+                "-",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -127,12 +140,14 @@ async def pulse(*, tick_index: int = 0, timeout_s: float = _PULSE_TIMEOUT_SEC) -
             return False
         try:
             _, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_s,
+                proc.communicate(),
+                timeout=timeout_s,
             )
         except asyncio.TimeoutError:
             log.info(
                 "robustness pulse timed out after %.1fs at tick=%d; killing",
-                timeout_s, tick_index,
+                timeout_s,
+                tick_index,
             )
             try:
                 proc.kill()
@@ -145,7 +160,8 @@ async def pulse(*, tick_index: int = 0, timeout_s: float = _PULSE_TIMEOUT_SEC) -
             return True
         log.debug(
             "robustness pulse tick=%d exit=%d stderr=%r",
-            tick_index, proc.returncode,
+            tick_index,
+            proc.returncode,
             (stderr or b"")[:400].decode("utf-8", errors="replace"),
         )
         return False

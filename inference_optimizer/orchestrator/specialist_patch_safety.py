@@ -30,15 +30,17 @@ from typing import Any
 # Quantitative / priority fields rejected outright on any patch proposal:
 # throughput / gain numbers are the Coordinator's measured truth, never a
 # self-reported claim from the worker.
-FORBIDDEN_PROPOSAL_FIELDS: frozenset[str] = frozenset({
-    "expected_gain",
-    "expected_gain_pct",
-    "bench_evidence",
-    "confidence",
-    "score",
-    "rank",
-    "force_provenance",
-})
+FORBIDDEN_PROPOSAL_FIELDS: frozenset[str] = frozenset(
+    {
+        "expected_gain",
+        "expected_gain_pct",
+        "bench_evidence",
+        "confidence",
+        "score",
+        "rank",
+        "force_provenance",
+    }
+)
 
 
 # Numeric speedup claims smuggled into a qualitative argument / summary.
@@ -51,7 +53,8 @@ _NUMERIC_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 # Unified diff sanity: must contain at least one @@ hunk header.
 _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
-    r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.M,
+    r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@",
+    re.M,
 )
 
 # git-only metadata stripped before semantic diff comparison.
@@ -66,7 +69,8 @@ _DIFF_NORMALISE_DROP_LINES: tuple[re.Pattern[str], ...] = (
 
 # Patch path within a unified diff (``--- a/<p>`` / ``+++ b/<p>``).
 _PATCH_PATH_RE: re.Pattern[str] = re.compile(
-    r"^(?:---|\+\+\+) (?:a|b)/(?P<path>.+)$", re.M,
+    r"^(?:---|\+\+\+) (?:a|b)/(?P<path>.+)$",
+    re.M,
 )
 
 
@@ -83,7 +87,15 @@ _DEV_NULL = "/dev/null"
 
 
 def _strip_path_prefix(path: str, level: int) -> str:
-    """Strip ``level`` leading path components, mimicking ``git apply -p<level>``."""
+    """Strip ``level`` leading path components, mimicking ``git apply -p<level>``.
+
+    Args:
+        path: The diff header path to strip.
+        level: Number of leading components to drop (``<= 0`` is a no-op).
+
+    Returns:
+        The path with ``level`` leading components removed (basename floor).
+    """
     if level <= 0:
         return path
     parts = path.split("/")
@@ -98,16 +110,18 @@ def patch_file_targets(patch_text: str) -> list[tuple[str, str]]:
     Paths are the raw ``--- ``/``+++ `` tokens (may carry an ``a/``/``b/``
     prefix, a deep absolute prefix, or the ``/dev/null`` sentinel for a
     created/deleted file). Trailing ``\\t<timestamp>`` is stripped.
+
+    Args:
+        patch_text: The unified-diff text to scan.
+
+    Returns:
+        The list of ``(old_path, new_path)`` header pairs.
     """
     pairs: list[tuple[str, str]] = []
     lines = (patch_text or "").splitlines()
     i = 0
     while i < len(lines):
-        if (
-            lines[i].startswith("--- ")
-            and i + 1 < len(lines)
-            and lines[i + 1].startswith("+++ ")
-        ):
+        if lines[i].startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
             old = lines[i][4:].strip().split("\t")[0]
             new = lines[i + 1][4:].strip().split("\t")[0]
             pairs.append((old, new))
@@ -131,6 +145,14 @@ def patch_targets_missing(
     (e.g. patching a CUDA-only file on a ROCm build). Pure file *creations*
     (pre-image ``/dev/null``) are exempt. The returned paths are the raw
     pre-image tokens, suitable for an advisory back to the specialist.
+
+    Args:
+        patch_text: The unified-diff text to scan.
+        root: Framework source-tree root the targets are probed against.
+        strip_levels: ``-p`` strip levels to try when resolving each path.
+
+    Returns:
+        The raw pre-image token paths absent from ``root`` at every level.
     """
     missing: list[str] = []
     for old, _new in patch_file_targets(patch_text):
@@ -204,7 +226,12 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
 
 
 def cross_domain_rule_descriptors() -> list[dict[str, str]]:
-    """Return the cross-domain rules as the dict shape the Critic bundle uses."""
+    """Return the cross-domain rules as the dict shape the Critic bundle uses.
+
+    Returns:
+        One dict per cross-domain rule with ``rule_id`` / ``description`` /
+        ``failure_verdict`` / ``failure_reason_code`` keys.
+    """
     return [
         {
             "rule_id": r.rule_id,
@@ -217,7 +244,14 @@ def cross_domain_rule_descriptors() -> list[dict[str, str]]:
 
 
 def numeric_claims(text: str) -> list[str]:
-    """Return numeric-speedup claim substrings found in ``text``."""
+    """Return numeric-speedup claim substrings found in ``text``.
+
+    Args:
+        text: The free-text argument/summary to scan.
+
+    Returns:
+        The matched numeric-claim substrings (may be empty).
+    """
     hits: list[str] = []
     for pattern in _NUMERIC_CLAIM_PATTERNS:
         for match in pattern.finditer(text or ""):
@@ -226,22 +260,42 @@ def numeric_claims(text: str) -> list[str]:
 
 
 def is_unified_diff(text: str) -> bool:
-    """True iff ``text`` carries at least one unified-diff hunk header."""
+    """True iff ``text`` carries at least one unified-diff hunk header.
+
+    Args:
+        text: The candidate diff text.
+
+    Returns:
+        True when at least one ``@@`` hunk header is present.
+    """
     return bool(_UNIFIED_DIFF_HUNK_RE.search(text or ""))
 
 
 def normalise_diff_for_compare(text: str) -> str:
-    """Strip git-only metadata + trailing whitespace for semantic comparison."""
+    """Strip git-only metadata + trailing whitespace for semantic comparison.
+
+    Args:
+        text: The diff text to normalise.
+
+    Returns:
+        The normalised diff body (git-only lines and blank lines dropped).
+    """
     body = text or ""
     for pat in _DIFF_NORMALISE_DROP_LINES:
         body = pat.sub("", body)
-    return "\n".join(
-        line.rstrip() for line in body.splitlines() if line.strip()
-    )
+    return "\n".join(line.rstrip() for line in body.splitlines() if line.strip())
 
 
 def patch_escapes_tree(patch_text: str) -> str | None:
-    """Return the first offending path that escapes the tree, else ``None``."""
+    """Return the first offending path that escapes the tree, else ``None``.
+
+    Args:
+        patch_text: The unified-diff text to scan.
+
+    Returns:
+        The first absolute or ``..``-containing path, or ``None`` when none
+        escape the tree.
+    """
     for hit in _PATCH_PATH_RE.finditer(patch_text or ""):
         cand = hit.group("path").strip()
         if cand.startswith("/") or ".." in Path(cand).parts:
@@ -250,9 +304,9 @@ def patch_escapes_tree(patch_text: str) -> str | None:
 
 
 # Patch grounding verdicts.
-GROUND_APPLIES = "applies"      # git apply --check succeeded against clean base
-GROUND_STALE = "stale"          # valid diff but does not apply to clean base
-GROUND_NOT_DIFF = "not_diff"    # not a unified diff (no hunk header)
+GROUND_APPLIES = "applies"  # git apply --check succeeded against clean base
+GROUND_STALE = "stale"  # valid diff but does not apply to clean base
+GROUND_NOT_DIFF = "not_diff"  # not a unified diff (no hunk header)
 GROUND_PATH_ESCAPE = "path_escape"  # patch path escapes the tree
 GROUND_MISSING_TARGET = "missing_target"  # modify/delete target absent from base
 GROUND_UNCHECKED = "unchecked"  # no base available / git unavailable
@@ -274,9 +328,14 @@ class PatchGroundingResult:
         never apply, so it is dropped before it wastes an ``integrate_patch``
         benchmark slot (unlike ``stale``, which is kept because integrate's
         ``-p`` auto-detect / 3-way merge may still salvage it).
+
+        Returns:
+            True for structural-failure verdicts that should drop the patch.
         """
         return self.verdict in (
-            GROUND_NOT_DIFF, GROUND_PATH_ESCAPE, GROUND_MISSING_TARGET,
+            GROUND_NOT_DIFF,
+            GROUND_PATH_ESCAPE,
+            GROUND_MISSING_TARGET,
         )
 
 
@@ -292,6 +351,15 @@ def ground_patch_text(
     ``git apply --check`` grounding runs only when ``base_checkout`` is a real
     git checkout; otherwise the result is ``GROUND_UNCHECKED`` (advisory, never
     drops the patch) so a missing base never produces a false negative.
+
+    Args:
+        patch_text: The unified-diff text to validate and ground.
+        base_checkout: Clean git checkout to ground against, or ``None`` to
+            skip the ``git apply --check`` step.
+        git_timeout_sec: Timeout for the ``git apply --check`` subprocess.
+
+    Returns:
+        The :class:`PatchGroundingResult` with the verdict and detail.
     """
     if not is_unified_diff(patch_text):
         return PatchGroundingResult(GROUND_NOT_DIFF, "no unified-diff hunk header")
@@ -324,7 +392,8 @@ def ground_patch_text(
     if proc.returncode == 0:
         return PatchGroundingResult(GROUND_APPLIES)
     return PatchGroundingResult(
-        GROUND_STALE, (proc.stderr or "").strip()[:240],
+        GROUND_STALE,
+        (proc.stderr or "").strip()[:240],
     )
 
 
@@ -339,16 +408,15 @@ class PatchSafetyReport:
     forbidden_fields: list[str] = field(default_factory=list)
 
     def notes(self) -> list[str]:
-        """Render audit notes for SpecialistRunResult / session_breakdown."""
+        """Render audit notes for SpecialistRunResult / session_breakdown.
+
+        Returns:
+            Human-readable audit note strings for the recorded findings.
+        """
         out: list[str] = []
         if self.dropped:
-            out.append(
-                "patch_safety_dropped:"
-                + ",".join(f"{d['path']}({d['verdict']})" for d in self.dropped[:8])
-            )
-        missing = [
-            d for d in self.dropped if d.get("verdict") == GROUND_MISSING_TARGET
-        ]
+            out.append("patch_safety_dropped:" + ",".join(f"{d['path']}({d['verdict']})" for d in self.dropped[:8]))
+        missing = [d for d in self.dropped if d.get("verdict") == GROUND_MISSING_TARGET]
         if missing:
             out.append(
                 "patch_safety_missing_target:"
@@ -362,9 +430,7 @@ class PatchSafetyReport:
         if self.numeric_warnings:
             out.append("patch_safety_numeric:" + ",".join(self.numeric_warnings[:8]))
         if self.forbidden_fields:
-            out.append(
-                "patch_safety_forbidden_fields:" + ",".join(self.forbidden_fields[:8])
-            )
+            out.append("patch_safety_forbidden_fields:" + ",".join(self.forbidden_fields[:8]))
         return out
 
 
@@ -374,6 +440,13 @@ def scan_quantitative_claims(payload: dict[str, Any]) -> tuple[list[str], list[s
     Forbidden quantitative fields are a hard signal; numeric claims in the
     summary / qualitative argument are advisory warnings (the Coordinator's
     measured gain is the truth, not the claim).
+
+    Args:
+        payload: The specialist_done payload to scan.
+
+    Returns:
+        A ``(forbidden_fields_present, numeric_warning_strings)`` tuple, each
+        de-duped with order preserved.
     """
     forbidden = sorted(set((payload or {}).keys()) & FORBIDDEN_PROPOSAL_FIELDS)
     warnings: list[str] = []
@@ -384,12 +457,8 @@ def scan_quantitative_claims(payload: dict[str, Any]) -> tuple[list[str], list[s
     for proposal in (payload or {}).get("proposal_set") or []:
         if not isinstance(proposal, dict):
             continue
-        forbidden.extend(
-            sorted(set(proposal.keys()) & FORBIDDEN_PROPOSAL_FIELDS)
-        )
-        hits = numeric_claims(
-            str(proposal.get("expected_qualitative_argument") or "")
-        )
+        forbidden.extend(sorted(set(proposal.keys()) & FORBIDDEN_PROPOSAL_FIELDS))
+        hits = numeric_claims(str(proposal.get("expected_qualitative_argument") or ""))
         if hits:
             warnings.extend(hits)
     # de-dupe, preserve order
@@ -405,8 +474,15 @@ def vet_patches(
 ) -> tuple[list[str], list[dict[str, str]], dict[str, str]]:
     """Ground each patch file; drop clear garbage (non-diff / path escape).
 
-    Returns ``(kept_paths, dropped_records, grounding_by_path)``. Stale-but-valid
-    patches are kept (integrate_patch + Critic adjudicate) with a grounding note.
+    Stale-but-valid patches are kept (integrate_patch + Critic adjudicate)
+    with a grounding note.
+
+    Args:
+        patch_paths: File paths of the candidate patches to vet.
+        base_checkout: Clean git checkout to ground against, or ``None``.
+
+    Returns:
+        A ``(kept_paths, dropped_records, grounding_by_path)`` tuple.
     """
     kept: list[str] = []
     dropped: list[dict[str, str]] = []

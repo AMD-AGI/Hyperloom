@@ -64,7 +64,8 @@ def _seed_state(session_dir: Path, *, crash_count: int) -> SharedState:
 
 @pytest.mark.asyncio
 async def test_robustness_agent_real_runtime_heartbeat(
-    session_dir: Path, robustness_agent_root: Path,
+    session_dir: Path,
+    robustness_agent_root: Path,
 ):
     """Zero crash + empty inbox → real runtime emits a heartbeat envelope."""
     _seed_state(session_dir, crash_count=0)
@@ -88,8 +89,8 @@ async def test_robustness_agent_real_runtime_heartbeat(
             ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
             name="orchestration",
         ),
-        "kernel":     MockKernelBackend(),
-        "critic":     MockCriticBackend(),
+        "kernel": MockKernelBackend(),
+        "critic": MockCriticBackend(),
         "robustness": backend,
     }
     c = Coordinator(session_dir, backends=backends)
@@ -116,17 +117,16 @@ async def test_robustness_agent_real_runtime_heartbeat(
     envelope = emit["intent_envelope"]
     assert "intents" in envelope and isinstance(envelope["intents"], list)
     assert any(
-        i["intent_type"] == "send_message"
-        and i["payload"].get("topic") == "heartbeat"
-        for i in envelope["intents"]
+        i["intent_type"] == "send_message" and i["payload"].get("topic") == "heartbeat" for i in envelope["intents"]
     ), f"heartbeat missing from emit envelope: {envelope}"
 
 
 @pytest.mark.asyncio
 async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
-    session_dir: Path, robustness_agent_root: Path,
+    session_dir: Path,
+    robustness_agent_root: Path,
 ):
-    """P3_19: ``crash_count >= 10`` emits ``alert(high)`` only (no auto-escalate); Coordinator mirrors it from=robustness."""
+    """``crash_count >= 10`` emits ``alert(high)`` only (no auto-escalate); Coordinator mirrors it from=robustness."""
     _seed_state(session_dir, crash_count=10)
 
     backend = RobustnessAgentBackend(
@@ -140,8 +140,8 @@ async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
             ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
             name="orchestration",
         ),
-        "kernel":     MockKernelBackend(),
-        "critic":     MockCriticBackend(),
+        "kernel": MockKernelBackend(),
+        "critic": MockCriticBackend(),
         "robustness": backend,
     }
     c = Coordinator(session_dir, backends=backends)
@@ -152,13 +152,11 @@ async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
         assert alerts, "expected at least one alert on the bus"
         from_robustness = [a for a in alerts if a.from_agent == "robustness"]
         assert from_robustness, (
-            f"expected an alert with from=robustness, got "
-            f"{[(a.from_agent, a.payload) for a in alerts]}"
+            f"expected an alert with from=robustness, got {[(a.from_agent, a.payload) for a in alerts]}"
         )
         severities = {a.payload.get("severity") for a in from_robustness}
         assert "high" in severities, (
-            f"expected severity=high in {severities!r} for alerts "
-            f"{[a.payload for a in from_robustness]}"
+            f"expected severity=high in {severities!r} for alerts {[a.payload for a in from_robustness]}"
         )
     finally:
         await c.stop()
@@ -174,7 +172,8 @@ async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
 
 @pytest.mark.asyncio
 async def test_robustness_agent_workdir_is_per_turn(
-    session_dir: Path, robustness_agent_root: Path,
+    session_dir: Path,
+    robustness_agent_root: Path,
 ):
     """Each Coordinator tick allocates a new ``<turn>/`` subdir."""
     _seed_state(session_dir, crash_count=0)
@@ -190,8 +189,8 @@ async def test_robustness_agent_workdir_is_per_turn(
             ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
             name="orchestration",
         ),
-        "kernel":     MockKernelBackend(),
-        "critic":     MockCriticBackend(),
+        "kernel": MockKernelBackend(),
+        "critic": MockCriticBackend(),
         "robustness": backend,
     }
     c = Coordinator(session_dir, backends=backends)
@@ -203,11 +202,7 @@ async def test_robustness_agent_workdir_is_per_turn(
 
     workdir = session_dir / "robustness-workdir"
     turns = sorted(p.name for p in workdir.iterdir() if p.is_dir())
-    assert turns == ["000000", "000001", "000002"], (
-        f"per-turn workdir layout broken: {turns}"
-    )
+    assert turns == ["000000", "000001", "000002"], f"per-turn workdir layout broken: {turns}"
     for t in turns:
         for fname in ("request.json", "emit.json"):
-            assert (workdir / t / fname).is_file(), (
-                f"missing {fname} under {t}"
-            )
+            assert (workdir / t / fname).is_file(), f"missing {fname} under {t}"
