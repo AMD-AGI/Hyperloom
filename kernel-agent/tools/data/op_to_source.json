@@ -152,6 +152,30 @@
         "kernel_source_line": "15",
         "kernel_kind": "aiter_hip",
         "patchable": true
+      },
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi8ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void aiter::add_rmsnorm_quant_kernel<half, half, 256, 16, true, false, true, 1>(half*, half*, float*, half*, half*, half": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void aiter::add_rmsnorm_quant_kernel<half, half, 256, 24, true, false, true, 1>(half*, half*, float*, half*, half*, half": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void aiter::add_rmsnorm_quant_kernel<half, half, 256, 32, true, false, true, 1>(half*, half*, float*, half*, half*, half": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
       }
     }
   },
@@ -226,7 +250,14 @@
         "patchable": true
       }
     },
-    "sglang": {}
+    "sglang": {
+      "void ck::kernel_moe_gemmlds<ck::GridwiseMoeGemm<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::ColumnMajor,": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      }
+    }
   },
   "aiter::ck_moe_stage2": {
     "kind": "single",
@@ -248,7 +279,14 @@
         "patchable": true
       }
     },
-    "sglang": {}
+    "sglang": {
+      "void ck::kernel_moe_gemmlds<ck::GridwiseMoeGemm<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::ColumnMajor,": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      }
+    }
   },
   "aiter::dynamic_per_tensor_quant": {
     "kind": "single",
@@ -271,6 +309,18 @@
         "patchable": true
       },
       "_ZN5aiter19scaled_quant_kernelIDF16bDB8_EEvPT0_PKT_PKfi": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "18",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "_ZN5aiter20data_to_scale_kernelIDhDB8_EEvPfPKT_i": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "238",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "_ZN5aiter19scaled_quant_kernelIDhDB8_EEvPT0_PKT_PKfi": {
         "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
         "kernel_source_line": "18",
         "kernel_kind": "aiter_hip",
@@ -410,6 +460,12 @@
         "kernel_source_line": "12",
         "kernel_kind": "aiter_ck",
         "patchable": true
+      },
+      "_ZN7ck_tile6kentryILi1ENSFmhaBatchPrefillWithPagedKVCacheKernelINSBlockFmhaBatchPrefillPipelineQRKSVSAsyncINSBlockFmhaBa": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu",
+        "kernel_source_line": "12",
+        "kernel_kind": "aiter_ck",
+        "patchable": true
       }
     }
   },
@@ -448,6 +504,36 @@
         "patchable": true
       },
       "void ck_tile::kentry<2, ck_tile::MoeSortingClearWorkspaceKernel<ck_tile::MoeSortingClearWorkspaceProblem<false, 1024, 1>": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/moe_sorting_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "void ck_tile::kentry<2, ck_tile::MoeSortingKernel<ck_tile::MoeSortingProblemEx<int, float, 4, true, false, false, true, ": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/moe_sorting_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "void ck_tile::kentry<256, ck_tile::MoeSortingMultiPhaseKernel_P0_v1<ck_tile::MoeSortingProblemMp<int, float, unsigned ch": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/moe_sorting_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "void ck_tile::kentry<2, ck_tile::MoeSortingMultiPhaseKernel_P1<ck_tile::MoeSortingProblemMp<int, float, unsigned char, 1": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/moe_sorting_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "void ck_tile::kentry<2, ck_tile::MoeSortingMultiPhaseKernel_P23<ck_tile::MoeSortingProblemMp<int, float, unsigned char, ": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/moe_sorting_kernels.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "void ck_tile::kentry<2, ck_tile::MoeSortingMultiPhaseKernel_P23<ck_tile::MoeSortingProblemMp<int, float, int, 1, false, ": {
         "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_ck/moe_sorting_kernels.cu",
         "kernel_source_line": null,
         "kernel_kind": "aiter_ck",
@@ -492,7 +578,14 @@
         "note": "PyTorch ATen native elementwise direct-copy kernel (at::native), part of libtorch's HIP runtime - not an aiter kernel and has no editable source in this repo."
       }
     },
-    "sglang": {}
+    "sglang": {
+      "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat16 const*, c10::BFloat16 const*, float, int, int)": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_kernels.cu",
+        "kernel_source_line": "78",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    }
   },
   "aiter::rmsnorm": {
     "kind": "single",
@@ -527,6 +620,36 @@
         "patchable": true
       },
       "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi32ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void aiter::add_rmsnorm_quant_kernel<half, half, 256, 16, false, false, true, 1>(half*, half*, float*, half*, half*, hal": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void aiter::add_rmsnorm_quant_kernel<half, half, 256, 24, false, false, true, 1>(half*, half*, float*, half*, half*, hal": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void aiter::add_rmsnorm_quant_kernel<half, half, 256, 32, false, false, true, 1>(half*, half*, float*, half*, half*, hal": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void aiter::add_rmsnorm_quant_kernel<half, half, 64, 8, false, false, true, 1>(half*, half*, float*, half*, half*, half*": {
         "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
         "kernel_source_line": "15",
         "kernel_kind": "aiter_hip",
@@ -587,6 +710,12 @@
         "patchable": true,
         "host_dispatcher": "/sgl-workspace/aiter/csrc/kernels/rope/general_2c_cached_positions_fwd_kernels.cu",
         "note": "templated __global__ kernel kn_entry_2c_sbhd_cached_indirect_inplace defined in rope_common.h; profiler strips digits so it appears as kn_entryc_*; host op in general_2c_cached_positions_fwd_kernels.cu"
+      },
+      "void aiter::kn_entryc_sbhd_cached_indirect_inplace<aiter::OpCachedFwd, 0, true, false, true, true, 1, true, c10::BFloat1": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rope/rope_common.h",
+        "kernel_source_line": "3547",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
       }
     }
   },
@@ -604,7 +733,20 @@
         "patchable": true
       }
     },
-    "sglang": {}
+    "sglang": {
+      "_ZN4vllm3moe10moeSoftmaxIDF16bLi256EEEvPKT_PKbPfi": {
+        "kernel_source_path": "/sgl-workspace/sglang/sgl-kernel/csrc/moe/moe_topk_softmax_kernels.cu",
+        "kernel_source_line": "80",
+        "kernel_kind": "sgl_hip",
+        "patchable": true
+      },
+      "void vllm::moe::moeTopK<256>(float const*, bool const*, float*, int*, int*, int, int, int, int, bool)": {
+        "kernel_source_path": "/sgl-workspace/sglang/sgl-kernel/csrc/moe/moe_topk_sigmoid_kernels.cu",
+        "kernel_source_line": "102",
+        "kernel_kind": "sgl_hip",
+        "patchable": true
+      }
+    }
   },
   "hipLaunchKernel->void (anonymous namespace)::clamp_position_kernel<long>(long*, long const*, unsigned long) (Synthetic Op)": {
     "kind": "single",
@@ -733,6 +875,30 @@
         "kernel_kind": "sgl_hip",
         "patchable": true,
         "note": "__global__ allreduce_prototype_twoshot is defined in sgl-kernel's quick_all_reduce.h (included by quick_all_reduce.cu which exposes the qr_all_reduce op); the earlier aiter/csrc path was the wrong copy."
+      },
+      "void quickreduce::allreduce_prototype_twoshot<quickreduce::AllReduceTwoshot<__half, quickreduce::CodecQ8<__half, 2>, tru": {
+        "kernel_source_path": "/sgl-workspace/sglang/sgl-kernel/csrc/allreduce/quick_all_reduce.h",
+        "kernel_source_line": "23",
+        "kernel_kind": "sgl_hip",
+        "patchable": true
+      },
+      "void quickreduce::allreduce_prototype_twoshot<quickreduce::AllReduceTwoshot<__half, quickreduce::CodecQ8<__half, 4>, fal": {
+        "kernel_source_path": "/sgl-workspace/sglang/sgl-kernel/csrc/allreduce/quick_all_reduce.h",
+        "kernel_source_line": "23",
+        "kernel_kind": "sgl_hip",
+        "patchable": true
+      },
+      "void quickreduce::allreduce_prototype_twoshot<quickreduce::AllReduceTwoshot<__half, quickreduce::CodecQ8<__half, 4>, tru": {
+        "kernel_source_path": "/sgl-workspace/sglang/sgl-kernel/csrc/allreduce/quick_all_reduce.h",
+        "kernel_source_line": "23",
+        "kernel_kind": "sgl_hip",
+        "patchable": true
+      },
+      "void quickreduce::allreduce_prototype_twoshot<quickreduce::AllReduceTwoshot<__half, quickreduce::CodecQ8<__half, 2>, fal": {
+        "kernel_source_path": "/sgl-workspace/sglang/sgl-kernel/csrc/allreduce/quick_all_reduce.h",
+        "kernel_source_line": "23",
+        "kernel_kind": "sgl_hip",
+        "patchable": true
       }
     }
   },
@@ -821,6 +987,42 @@
         "kernel_source_line": "89",
         "kernel_kind": "sglang_hip",
         "patchable": true
+      },
+      "void (anonymous namespace)::store_kvcache<1024l, 2, false, long>((anonymous namespace)::StoreKVCacheParams)": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/elementwise/kvcache.cuh",
+        "kernel_source_line": "89",
+        "kernel_kind": "sglang_hip",
+        "patchable": true
+      },
+      "void (anonymous namespace)::store_kvcache<8192l, 4, false, long>((anonymous namespace)::StoreKVCacheParams)": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/elementwise/kvcache.cuh",
+        "kernel_source_line": "89",
+        "kernel_kind": "sglang_hip",
+        "patchable": true
+      },
+      "void (anonymous namespace)::store_kvcache<4096l, 4, false, long>((anonymous namespace)::StoreKVCacheParams)": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/elementwise/kvcache.cuh",
+        "kernel_source_line": "89",
+        "kernel_kind": "sglang_hip",
+        "patchable": true
+      },
+      "void (anonymous namespace)::store_kvcache<10240l, 4, false, long>((anonymous namespace)::StoreKVCacheParams)": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/elementwise/kvcache.cuh",
+        "kernel_source_line": "89",
+        "kernel_kind": "sglang_hip",
+        "patchable": true
+      },
+      "void (anonymous namespace)::store_kvcache<6144l, 4, false, long>((anonymous namespace)::StoreKVCacheParams)": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/elementwise/kvcache.cuh",
+        "kernel_source_line": "89",
+        "kernel_kind": "sglang_hip",
+        "patchable": true
+      },
+      "void (anonymous namespace)::store_kvcache<5120l, 2, false, long>((anonymous namespace)::StoreKVCacheParams)": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/elementwise/kvcache.cuh",
+        "kernel_source_line": "89",
+        "kernel_kind": "sglang_hip",
+        "patchable": true
       }
     }
   },
@@ -851,6 +1053,132 @@
         "patchable": true
       },
       "_Z35paged_attention_ll4mi_reduce_kernelIDF16_DF16_Li128ELi128ELi256ELi1ELb0EEvPT0_PKfS3_PKT_PKiS8_iiS3_": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "_Z39paged_attention_ll4mi_QKV_mfma16_kernelILi0EDF16_DF16_LN4vllm18Fp8KVCacheDataTypeE0ELi1ELi128ELi256ELb0ELi1ELi1EN7ck": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu",
+        "kernel_source_line": "341",
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "_Z39paged_attention_ll4mi_QKV_mfma16_kernelILi0EDF16_DF16_LN4vllm18Fp8KVCacheDataTypeE0ELi1ELi128ELi256ELb0ELi4ELi1EN7ck": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu",
+        "kernel_source_line": "341",
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_reduce_kernel<__hip_bfloat16, __hip_bfloat16, 128, 128, 256, 2, false>(__hip_bfloat16*, float": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_reduce_kernel<__hip_bfloat16, __hip_bfloat16, 128, 128, 256, 16, false>(__hip_bfloat16*, floa": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "_Z35paged_attention_ll4mi_reduce_kernelIDF16_DF16_Li128ELi128ELi256ELi2ELb0EEvPT0_PKfS3_PKT_PKiS8_iiS3_": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_reduce_kernel<__hip_bfloat16, __hip_bfloat16, 128, 128, 256, 8, false>(__hip_bfloat16*, float": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "_Z35paged_attention_ll4mi_reduce_kernelIDF16_DF16_Li128ELi128ELi256ELi8ELb0EEvPT0_PKfS3_PKT_PKiS8_iiS3_": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "_Z39paged_attention_ll4mi_QKV_mfma16_kernelILi0EDF16_DF16_LN4vllm18Fp8KVCacheDataTypeE0ELi1ELi256ELi256ELb0ELi2ELi1EN7ck": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu",
+        "kernel_source_line": "341",
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "_Z35paged_attention_ll4mi_reduce_kernelIDF16_DF16_Li256ELi256ELi256ELi1ELb0EEvPT0_PKfS3_PKT_PKiS8_iiS3_": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_reduce_kernel<__hip_bfloat16, __hip_bfloat16, 128, 128, 256, 4, false>(__hip_bfloat16*, float": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_QKV_mfma16_kernel<0, __hip_bfloat16, __hip_bfloat16, (vllm::Fp8KVCacheDataType)0, 1, 96, 256,": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu",
+        "kernel_source_line": "341",
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_reduce_kernel<__hip_bfloat16, __hip_bfloat16, 96, 96, 256, 1, false>(__hip_bfloat16*, float c": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "_Z39paged_attention_ll4mi_QKV_mfma16_kernelILi0EDF16_DF16_LN4vllm18Fp8KVCacheDataTypeE0ELi1ELi128ELi256ELb0ELi5ELi1EN7ck": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu",
+        "kernel_source_line": "341",
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "_Z39paged_attention_ll4mi_QKV_mfma16_kernelILi0EDF16_DF16_LN4vllm18Fp8KVCacheDataTypeE0ELi1ELi128ELi256ELb0ELi3ELi1EN7ck": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu",
+        "kernel_source_line": "341",
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "_Z39paged_attention_ll4mi_QKV_mfma16_kernelILi0EDF16_DF16_LN4vllm18Fp8KVCacheDataTypeE0ELi1ELi128ELi256ELb0ELi7ELi1EN7ck": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu",
+        "kernel_source_line": "341",
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_QKV_mfma16_kernel<0, __hip_bfloat16, __hip_bfloat16, (vllm::Fp8KVCacheDataType)0, 1, 256, 256": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention_ragged.cu",
+        "kernel_source_line": "341",
+        "kernel_kind": "aiter_ck",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_reduce_kernel<__hip_bfloat16, __hip_bfloat16, 256, 256, 256, 1, false>(__hip_bfloat16*, float": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "_Z35paged_attention_ll4mi_reduce_kernelIDF16_DF16_Li128ELi128ELi256ELi16ELb0EEvPT0_PKfS3_PKT_PKiS8_iiS3_": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_reduce_kernel<__hip_bfloat16, __hip_bfloat16, 128, 128, 256, 3, false>(__hip_bfloat16*, float": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "void paged_attention_ll4mi_reduce_kernel<__hip_bfloat16, __hip_bfloat16, 96, 96, 256, 8, false>(__hip_bfloat16*, float c": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
+        "kernel_source_line": "1900",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      },
+      "_Z35paged_attention_ll4mi_reduce_kernelIDF16_DF16_Li128ELi128ELi256ELi3ELb0EEvPT0_PKfS3_PKT_PKiS8_iiS3_": {
         "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/attention.cu",
         "kernel_source_line": "1900",
         "kernel_kind": "aiter_hip",
@@ -945,6 +1273,12 @@
       "_gemm_a8w8_blockscale_kernel_GROUP_K_GROUP_N_BLOCK_SIZE_M_BLOCK_SIZE_N_BLOCK_SIZE_K_GROUP_SIZE_M_NUM_KSPLIT_SPLITK_BLOCK": {
         "kernel_source_path": "/sgl-workspace/aiter/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a8w8_blockscale.py",
         "kernel_source_line": "46",
+        "kernel_kind": "triton",
+        "patchable": true
+      },
+      "_gemm_a8w8_blockscale_reduce_kernel_BLOCK_SIZE_M_BLOCK_SIZE_N_ACTUAL_KSPLIT_MAX_KSPLIT": {
+        "kernel_source_path": "/sgl-workspace/aiter/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a8w8_blockscale.py",
+        "kernel_source_line": "436",
         "kernel_kind": "triton",
         "patchable": true
       }
@@ -1223,8 +1557,270 @@
         "kernel_source_line": "5",
         "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_cu/asm_fmoe.cu",
         "patchable": true
+      },
+      "aiter::fmoe_bf16_pertokenFp8_g1u1_vs_silutg_psx256": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_cu/asm_fmoe.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_asm",
+        "patchable": true
+      },
+      "aiter::fmoe_bf16_pertokenFp8_g1u1_vs_silutg_psx384": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_cu/asm_fmoe.cu",
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_asm",
+        "patchable": true
       }
     },
     "vllm": {}
+  },
+  "sgl_kernel::gelu_tanh_and_mul": {
+    "kind": "single",
+    "python_launcher_path": [
+      "sgl_kernel/elementwise.py(273): gelu_tanh_and_mul"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN7sgl_hip10activation18act_and_mul_kernelI14__hip_bfloat16TnPFT_RKS3_EXadL_Z9gelu_tanhIS2_ES3_S5_EEEEvPS3_PS4_i": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/elementwise/activation.cuh",
+        "kernel_source_line": "55",
+        "kernel_kind": "sglang_hip",
+        "patchable": true
+      },
+      "_ZN7sgl_hip10activation18act_and_mul_kernelI6__halfTnPFT_RKS3_EXadL_Z9gelu_tanhIS2_ES3_S5_EEEEvPS3_PS4_i": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/elementwise/activation.cuh",
+        "kernel_source_line": "55",
+        "kernel_kind": "sglang_hip",
+        "patchable": true
+      }
+    }
+  },
+  "sglang_profiler::rmsnorm_rmsnorm2d_fwd_with_add": {
+    "kind": "single",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/layernorm.py(281): forward_aiter"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "void aiter::add_rmsnorm_quant_kernel<half, half, 256, 24, true, false, true, 1>(half*, half*, float*, half*, half*, half": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    }
+  },
+  "sglang_profiler::rmsnorm_rmsnorm2d_fwd": {
+    "kind": "single",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/layernorm.py(281): forward_aiter"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "void aiter::add_rmsnorm_quant_kernel<half, half, 256, 24, false, false, true, 1>(half*, half*, float*, half*, half*, hal": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    }
+  },
+  "sglang_profiler::utils_fused_qk_rope_reshape_and_cache": {
+    "kind": "single",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/rotary_embedding/base.py(335): forward_cuda"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_fused_qk_rope_reshape_and_cache_kernel": {
+        "kernel_source_path": "/sgl-workspace/aiter/aiter/ops/triton/_triton_kernels/fusions/fused_kv_cache.py",
+        "kernel_source_line": "381",
+        "kernel_kind": "triton",
+        "patchable": true
+      }
+    }
+  },
+  "aiter::topk_softmax_asm": {
+    "kind": "single",
+    "python_launcher_path": [
+      "aiter/fused_moe.py(1897): fused_topk"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "aiter::topksoftmaxx128x8_bf16": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/py_itfs_cu/asm_topksoftmax.cu",
+        "kernel_source_line": "4",
+        "kernel_kind": "aiter_asm",
+        "patchable": true
+      }
+    }
+  },
+  "sgl_kernel::gelu_and_mul": {
+    "kind": "single",
+    "python_launcher_path": [
+      "sgl_kernel/elementwise.py(288): gelu_and_mul"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN7sgl_hip10activation18act_and_mul_kernelI14__hip_bfloat16TnPFT_RKS3_EXadL_Z4geluIS2_ES3_S5_EEEEvPS3_PS4_i": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/elementwise/activation.cuh",
+        "kernel_source_line": "55",
+        "kernel_kind": "sglang_hip",
+        "patchable": true
+      }
+    }
+  },
+  "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": {
+    "kind": "single",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/nsa_backend.py(1852): _forward_tilelang"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "void at::native::vectorized_elementwise_kernel<8, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "torch_native_hip",
+        "patchable": false
+      },
+      "main_kernel": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    }
+  },
+  "sglang_profiler::pa_mqa_logits_deepgemm_fp8_paged_mqa_logits": {
+    "kind": "single",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/nsa/nsa_indexer.py(419): _get_topk_paged"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_gluon_deepgemm_fp8_paged_mqa_logits": {
+        "kernel_source_path": "/sgl-workspace/aiter/aiter/ops/triton/_triton_kernels/attention/pa_mqa_logits.py",
+        "kernel_source_line": "444",
+        "kernel_kind": "triton",
+        "patchable": true
+      }
+    }
+  },
+  "sgl_kernel::fast_topk_transform_fused": {
+    "kind": "single",
+    "python_launcher_path": [
+      "sgl_kernel/top_k.py(45): fast_topk_transform_fused"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "(anonymous namespace)::topk_transform_prefill_kernel((anonymous namespace)::FastTopKParams, int*, int const*, long, int ": {
+        "kernel_source_path": "/sgl-workspace/sglang/sgl-kernel/csrc/elementwise/topk.cu",
+        "kernel_source_line": "301",
+        "kernel_kind": "sgl_hip",
+        "patchable": true
+      }
+    }
+  },
+  "sglang_profiler::utils_set_mla_kv_buffer_triton_fp8_quant": {
+    "kind": "single",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py(1631): set_mla_kv_buffer"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "set_mla_kv_buffer_fp8_quant_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/mem_cache/utils.py",
+        "kernel_source_line": "114",
+        "kernel_kind": "triton",
+        "patchable": true
+      }
+    }
+  },
+  "HadamardTransformFn": {
+    "kind": "single",
+    "python_launcher_path": null,
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "void fast_hadamard_transform_kernel<fast_hadamard_transform_kernel_traits<16, 7, c10::BFloat16> >(HadamardParamsBase)": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/jit_kernel/csrc/fast-hadamard-transform/hadamard_jit.cuh",
+        "kernel_source_line": "121",
+        "kernel_kind": "sglang_hip",
+        "patchable": true
+      }
+    }
+  },
+  "sglang_profiler::tilelang_kernel_act_quant": {
+    "kind": "single",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/attention/nsa/nsa_indexer.py(1065): forward_cuda"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "act_quant_kernel__kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/nsa/tilelang_kernel.py",
+        "kernel_source_line": "78",
+        "kernel_kind": "tilelang",
+        "patchable": true
+      }
+    }
+  },
+  "aiter::_add_rmsnorm_cu": {
+    "kind": "single",
+    "python_launcher_path": [
+      "aiter/ops/rmsnorm.py(473): add_rmsnorm"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    }
+  },
+  "sglang_profiler::rmsnorm_rmsnorm": {
+    "kind": "single",
+    "python_launcher_path": [
+      "aiter/ops/rmsnorm.py(185): rmsnorm2d_fwd"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_aiter_rmsnorm_tiled_kernel": {
+        "kernel_source_path": null,
+        "kernel_source_line": null,
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    }
+  },
+  "aiter::_rmsnorm_cu": {
+    "kind": "single",
+    "python_launcher_path": [
+      "aiter/ops/rmsnorm.py(434): rmsnorm"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib": {
+        "kernel_source_path": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        "kernel_source_line": "15",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
+      }
+    }
   }
 }
