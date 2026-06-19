@@ -72,9 +72,13 @@ Do not manually pip-install SDKs, edit `~/.claude/config.json`, start Ray, or
 
 Set `$USER_DATA_PATH` to the workspace root, not the session dir. For sandboxes
 that do not persist exports across shell calls, copy
-`inference_optimizer/scripts/setup_env.sh.example` to
-`$USER_DATA_PATH/optimizer_runs/setup_env.sh`, fill in the workload block, and
-source it on each call.
+`inference_optimizer/scripts/setup_env.sh.example` to a **session-scoped** path:
+`$USER_DATA_PATH/optimizer_runs/setup_env_${CLAW_SESSION_ID:-$(date +%s)}.sh`,
+fill in the workload block, and source it on each call.
+
+**IMPORTANT**: never use a shared filename like `setup_env.sh` — concurrent
+sessions on different pods share `$USER_DATA_PATH` via WekaFS; a single file
+causes MODEL_PATH race conditions where sessions launch the wrong model.
 
 ```bash
 cd "$REPO_ROOT"
