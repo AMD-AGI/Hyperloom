@@ -227,11 +227,36 @@ def load_mapping() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _remap_aiter_meta(path: str) -> str:
+    """Remap a JSON ``…/aiter_meta/csrc/`` source path to the LIVE aiter csrc root.
+
+    The op_to_source.json is built in the python3.12 image where aiter ships as the
+    ``aiter_meta`` package (``/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/…``).
+    On a serve box where aiter lives elsewhere (e.g. python3.10 + ``/sgl-workspace/aiter``),
+    those paths don't exist, so HL's ``Path.exists()`` patchable gate drops EVERY CK/aiter
+    kernel (ck_moe, moe_sorting, topk_softmax, quant, …). Rewrite the build-time
+    ``aiter_meta/csrc/`` prefix to the runtime aiter csrc root reported by the installed
+    package (:func:`_aiter_csrc_root`). No-op when the live root is unknown or the path
+    isn't an aiter_meta path, so it's safe on the original python3.12 layout too.
+    """
+    if not path or "aiter_meta/csrc/" not in path:
+        return path
+    live = _aiter_csrc_root()  # e.g. "/sgl-workspace/aiter/csrc/"
+    if not live:
+        return path
+    idx = path.find("aiter_meta/csrc/")
+    tail = path[idx + len("aiter_meta/csrc/"):]
+    remapped = live.rstrip("/") + "/" + tail
+    # Only adopt the remap if it actually resolves on disk; else keep original.
+    return remapped if os.path.exists(remapped) else path
+
+
 def _absolutize_source(path: str) -> str:
     """Best-effort absolutize a kernel source path (JSON is pre-absolutized; defensive)."""
     if not path:
         return path
-    return path if path.startswith("/") else _PY_DIST_ROOT + path
+    abs_path = path if path.startswith("/") else _PY_DIST_ROOT + path
+    return _remap_aiter_meta(abs_path)
 
 
 def _is_editable_source(path: str | None, kernel_kind: str | None) -> bool:
