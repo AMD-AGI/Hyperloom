@@ -3665,6 +3665,17 @@ class Coordinator:
         kept: list[dict[str, Any]] = []
         reverted: list[dict[str, Any]] = []
         ts = datetime.now(timezone.utc).isoformat()
+        try:
+            from .action_executors.explore import _compute_explore_variant_timeout
+
+            per_tuner_timeout_sec = _compute_explore_variant_timeout(
+                baseline_runtime_sec=float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0),
+                kill_ratio=float(getattr(self.shared_state, "explore_overtime_kill_ratio", 1.5) or 1.5),
+                floor_sec=0,
+            )
+        except Exception:  # noqa: BLE001 - conservative fallback
+            per_tuner_timeout_sec = 15 * 60
+        per_tuner_budget_minutes = max(1, int((per_tuner_timeout_sec + 59) // 60))
 
         for cand in candidates:
             tuner_name = cand["tuner"]
@@ -3687,7 +3698,7 @@ class Coordinator:
                         "base_tput": running_tput,
                         "extra_envs": test_envs,
                         "keep_threshold_pct": 3.0,
-                        "budget_minutes": 15,
+                        "budget_minutes": per_tuner_budget_minutes,
                     },
                     session_dir=self.session_dir,
                 )
