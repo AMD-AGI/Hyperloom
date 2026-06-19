@@ -3673,6 +3673,7 @@ async def integrate_handler(
             "output_dir": str(workspace),
             "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
             "extra_server_args": extra_args,
+            "extra_envs": dict(payload.get("extra_envs") or {}),
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )

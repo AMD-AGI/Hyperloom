@@ -3677,6 +3677,7 @@ class Coordinator:
                 integrate_result = await integrate_handler(
                     {
                         "task_id": f"gemm_tune_e2e_{tuner_name}",
+                        "kernel_id": f"gemm_tune_{tuner_name}",
                         "source": "forge_gemm_tuning",
                         "base_tput": running_tput,
                         "extra_envs": test_envs,
@@ -3752,10 +3753,32 @@ class Coordinator:
                 len(kept), total_gain, len(reverted),
             )
         else:
+            stacked_envs = {}
+            total_gain = 0.0
             log.info(
                 "forge gemm E2E: all %d tuners REVERT, no E2E gain",
                 len(reverted),
             )
+
+        # Rewrite the stored GEMM tuning result to the *E2E-validated*
+        # outcome. This prevents the orchestration LLM from seeing the raw
+        # combined recommended_env and issuing a bundled integrate later.
+        result["e2e_results"] = {"kept": kept, "reverted": reverted}
+        result["recommended_env_raw"] = dict(result.get("recommended_env") or {})
+        result["extra_envs_raw"] = dict(result.get("extra_envs") or {})
+        result["recommended_env"] = dict(stacked_envs)
+        result["extra_envs"] = dict(stacked_envs)
+        result["e2e_gain_pct"] = round(float(total_gain), 4)
+        result["e2e_validated"] = True
+        result["requires_e2e_validation"] = False
+        if kept:
+            result["status"] = "complete"
+            result["decision"] = "KEEP"
+        else:
+            result["status"] = "complete"
+            result["decision"] = "REVERT"
+            result["micro_decision"] = "candidate_no_e2e_gain"
+        self.shared_state.last_gemm_tuning = dict(result)
 
     def _should_continue_kernel_after_gemm(self) -> bool:
         """Decide whether to run source-level kernel_opt right after GEMM tuning.
