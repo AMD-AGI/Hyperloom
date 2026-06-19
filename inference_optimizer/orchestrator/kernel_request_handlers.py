@@ -1507,6 +1507,10 @@ async def _run_forge_gemm_tuning(
 
     timeout = _gemm_tuning_timeout_sec(payload)
     cmd.extend(["--timeout", str(timeout)])
+    # Global timeout ensures the whole session (all tuners combined) stays
+    # within the budget. Forge will skip lower-priority tuners if time runs out,
+    # guaranteeing the highest-value tuner (MoE fmoe_ck) always runs first.
+    cmd.extend(["--global-timeout", str(timeout)])
 
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
 
