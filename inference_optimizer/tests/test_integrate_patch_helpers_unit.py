@@ -240,9 +240,84 @@ def test_git_commit_kept_scopes_add_to_paths(tmp_path, monkeypatch):
 
 # ---- _git_checkout_clean spawn failure ------------------------------------
 def test_git_checkout_clean_spawn_fail(tmp_path, monkeypatch):
+    """All subprocess calls fail → stash itself fails → checkout refuses."""
     monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
     ok, err = ip._git_checkout_clean(tmp_path)
-    assert ok is False and "spawn failed" in err
+    assert ok is False and "stash failed" in err
+
+
+# ---- _git_stash_if_dirty three-state tests --------------------------------
+def test_stash_if_dirty_clean_tree(tmp_path, monkeypatch):
+    """Clean working tree → returns 'clean'."""
+    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    state, note = ip._git_stash_if_dirty(tmp_path)
+    assert state == "clean"
+
+
+def test_stash_if_dirty_stash_success(tmp_path, monkeypatch):
+    """Dirty tree + stash succeeds → returns 'stashed'."""
+    calls = []
+    def _run(cmd, *a, **k):
+        calls.append(cmd)
+        if "status" in cmd:
+            return type("CP", (), {"returncode": 0, "stdout": "M foo.py\n", "stderr": ""})()
+        return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    monkeypatch.setattr(ip.subprocess, "run", _run)
+    state, note = ip._git_stash_if_dirty(tmp_path)
+    assert state == "stashed"
+    assert any("stash" in c for c in calls[-1])
+
+
+def test_stash_if_dirty_stash_fails(tmp_path, monkeypatch):
+    """Dirty tree + stash push fails → returns 'failed'."""
+    def _run(cmd, *a, **k):
+        if "status" in cmd:
+            return type("CP", (), {"returncode": 0, "stdout": "M foo.py\n", "stderr": ""})()
+        return type("CP", (), {"returncode": 1, "stdout": "", "stderr": "cannot stash"})()
+    monkeypatch.setattr(ip.subprocess, "run", _run)
+    state, note = ip._git_stash_if_dirty(tmp_path)
+    assert state == "failed"
+    assert "cannot stash" in note
+
+
+def test_stash_if_dirty_status_exception(tmp_path, monkeypatch):
+    """git status throws → returns 'failed'."""
+    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
+    state, note = ip._git_stash_if_dirty(tmp_path)
+    assert state == "failed"
+
+
+def test_checkout_clean_refuses_on_stash_failure(tmp_path, monkeypatch):
+    """Dirty tree + stash fails → _git_checkout_clean returns False (fail-closed)."""
+    def _run(cmd, *a, **k):
+        if "status" in cmd:
+            return type("CP", (), {"returncode": 0, "stdout": "M bar.py\n", "stderr": ""})()
+        if "stash" in cmd:
+            return type("CP", (), {"returncode": 1, "stdout": "", "stderr": "unmerged"})()
+        # checkout should NOT be reached
+        return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    monkeypatch.setattr(ip.subprocess, "run", _run)
+    ok, err = ip._git_checkout_clean(tmp_path)
+    assert ok is False
+    assert "refusing checkout" in err and "stash failed" in err
+
+
+def test_checkout_clean_proceeds_when_stash_succeeds(tmp_path):
+    """Integration: real git repo, dirty tree → stash + checkout succeeds."""
+    import subprocess as sp
+    sp.run(["git", "init", str(tmp_path)], capture_output=True)
+    sp.run(["git", "-C", str(tmp_path), "config", "user.email", "t@t"], capture_output=True)
+    sp.run(["git", "-C", str(tmp_path), "config", "user.name", "T"], capture_output=True)
+    (tmp_path / "f.py").write_text("orig\n")
+    sp.run(["git", "-C", str(tmp_path), "add", "-A"], capture_output=True)
+    sp.run(["git", "-C", str(tmp_path), "commit", "-m", "init"], capture_output=True)
+    (tmp_path / "f.py").write_text("dirty\n")
+    ok, err = ip._git_checkout_clean(tmp_path)
+    assert ok is True
+    assert (tmp_path / "f.py").read_text() == "orig\n"
+    # stash exists
+    cp = sp.run(["git", "-C", str(tmp_path), "stash", "list"], capture_output=True, text=True)
+    assert "hyperloom-auto-stash" in cp.stdout
 
 
 # ---- _resolve_patch_paths -------------------------------------------------
