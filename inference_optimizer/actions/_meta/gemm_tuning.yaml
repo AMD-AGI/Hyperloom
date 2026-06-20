@@ -26,9 +26,9 @@ preferred_model: null
 max_turns: 25
 lease_ttl_sec: 5400
 description: >
-  Deterministic GEMM dispatch tuning (forge-gemm-tune) or legacy GEAK A8W8
-  block-scale workflow. Forge supports bf16/fp8/fp4 MoE + dense, sglang + vllm.
-  Backend selected via GEMM_TUNING_BACKEND or KERNEL_OPT_BACKEND_ORDER.
+  GEMM dispatch tuning via forge-gemm-tune or legacy GEAK. Forge supports
+  bf16/fp8/fp4 MoE+dense on sglang/vllm; backend selected by
+  GEMM_TUNING_BACKEND.
 pipeline_phase: deep
 typical_runtime_min: 20.0
 applicable_when:
