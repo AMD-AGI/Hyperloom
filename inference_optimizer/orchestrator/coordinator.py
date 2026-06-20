@@ -3679,6 +3679,11 @@ class Coordinator:
         for cand in candidates:
             tuner_name = cand["tuner"]
             env = {cand["env_var"]: cand["env_value"]}
+            extra_server_args = (
+                "--moe-runner-backend aiter"
+                if tuner_name == "fmoe_ck" and str(getattr(self.shared_state, "framework", "") or "").lower() == "sglang"
+                else ""
+            )
             # Merge with previously KEEP'd envs for stacked validation.
             test_envs = dict(stacked_envs)
             test_envs.update(env)
@@ -3695,6 +3700,7 @@ class Coordinator:
                         "kernel_id": f"gemm_tune_{tuner_name}",
                         "source": "forge_gemm_tuning",
                         "base_tput": running_tput,
+                        "extra_server_args": extra_server_args,
                         "extra_envs": test_envs,
                         "keep_threshold_pct": 3.0,
                         "budget_minutes": per_tuner_budget_minutes,
@@ -3731,6 +3737,7 @@ class Coordinator:
                     "gain_pct": gain_pct,
                     "tput": new_tput,
                     "workspace": result.get("workspace"),
+                    "extra_server_args": extra_server_args,
                     "extra_envs": dict(stacked_envs),
                     "backend": "forge",
                     "source": "kernel_entry_auto",
@@ -3753,6 +3760,7 @@ class Coordinator:
                 "engine": "forge",
                 "tput": running_tput,
                 "variant_name": "forge_gemm_tuned",
+                "extra_server_args": "--moe-runner-backend aiter" if "AITER_CONFIG_FMOE" in stacked_envs else "",
                 "extra_envs": stacked_envs,
                 "workspace": result.get("workspace"),
             }
