@@ -16,6 +16,58 @@ from inference_optimizer.orchestrator import kernel_request_handlers as krh
 from inference_optimizer.orchestrator.shared_state import SharedState
 
 
+class TestForgeGemmHelperCoverage:
+    def test_resolve_backend_payload_env_and_default(self, monkeypatch):
+        monkeypatch.delenv("GEMM_TUNING_BACKEND", raising=False)
+        assert krh._resolve_gemm_tuning_backend({}) == "forge"
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        assert krh._resolve_gemm_tuning_backend({}) == "geak"
+        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "forge"
+        # Unknown values fall back to the default instead of surfacing an invalid backend.
+        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "forge"
+
+    def test_parse_forge_gemm_sentinel(self):
+        payload = {"status": "ok", "micro_decision": "candidate"}
+        text = "noise\nFORGE_GEMM_TUNE_RESULT_BEGIN\n" + json.dumps(payload) + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        assert krh._parse_forge_gemm_sentinel(text) == payload
+        assert krh._parse_forge_gemm_sentinel("no sentinel") is None
+        assert (
+            krh._parse_forge_gemm_sentinel(
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\nnot-json\nFORGE_GEMM_TUNE_RESULT_END"
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
+    def test_truthy_env_value_true(self, value):
+        assert krh._truthy_env_value(value) is True
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "off", None])
+    def test_truthy_env_value_false(self, value):
+        assert krh._truthy_env_value(value) is False
+
+    def test_resolve_forge_server_log_priority(self, tmp_path):
+        state = SharedState()
+        baseline = tmp_path / "baseline"
+        current = tmp_path / "current"
+        baseline.mkdir()
+        current.mkdir()
+        (baseline / "server.log").write_text("baseline", encoding="utf-8")
+        (current / "server.log").write_text("current", encoding="utf-8")
+        state.last_baseline = {"workspace": str(baseline)}
+        state.current_best = {"workspace": str(current)}
+
+        assert krh._resolve_forge_server_log(state, tmp_path) == str(current / "server.log")
+
+    def test_resolve_forge_server_log_bounded_runs_fallback(self, tmp_path):
+        state = SharedState()
+        log = tmp_path / "runs" / "explore" / "abc" / "server.log"
+        log.parent.mkdir(parents=True)
+        log.write_text("x", encoding="utf-8")
+
+        assert krh._resolve_forge_server_log(state, tmp_path) == str(log)
+
+
 def _ensure_torch_module(monkeypatch):
     try:
         import torch
