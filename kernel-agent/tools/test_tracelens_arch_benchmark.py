@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,6 +23,7 @@ _spec = importlib.util.spec_from_file_location(
 )
 tab = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
+sys.modules[_spec.name] = tab
 _spec.loader.exec_module(tab)
 
 
@@ -36,9 +38,7 @@ def tla():
     assert spec.loader is not None
     # Register before exec so self-referential dataclass annotations
     # (OpResolution.fanout: list["OpResolution"]) resolve under py3.10.
-    import sys as _sys
-
-    _sys.modules[spec.name] = mod
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
