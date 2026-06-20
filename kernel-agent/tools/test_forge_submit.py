@@ -87,22 +87,15 @@ def _backends_args(backends=""):
     return argparse.Namespace(backends=backends, benchmark_file="", test_harness_path="")
 
 
-def test_choose_backends_appends_geak_fallback_for_forge_only(monkeypatch):
-    # RCA root cause A: forge-only must not run without a geak safety net.
-    monkeypatch.delenv("FORGE_DISABLE_GEAK_FALLBACK", raising=False)
+def test_choose_backends_respects_forge_only_order(monkeypatch):
+    # KERNEL_OPT_BACKEND_ORDER / --backends is authoritative: forge means
+    # strict forge-only, no hidden GEAK fallback.
     selected, notes = ko.choose_backends(_backends_args("forge"), {})
-    assert selected == ["forge", "geak"]
-    assert notes.get("geak_fallback_appended") is True
-
-
-def test_choose_backends_geak_fallback_opt_out(monkeypatch):
-    monkeypatch.setenv("FORGE_DISABLE_GEAK_FALLBACK", "1")
-    selected, _ = ko.choose_backends(_backends_args("forge"), {})
     assert selected == ["forge"]
+    assert "geak_fallback_appended" not in notes
 
 
 def test_choose_backends_no_double_geak(monkeypatch):
-    monkeypatch.delenv("FORGE_DISABLE_GEAK_FALLBACK", raising=False)
     selected, _ = ko.choose_backends(_backends_args("forge,geak"), {})
     assert selected == ["forge", "geak"]
 
