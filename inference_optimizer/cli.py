@@ -5036,6 +5036,36 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 log.exception(
                     "emergency final report write failed (non-fatal)"
                 )
+        # Regardless of who wrote it (CLOSE sequencer or the safety-net
+        # above), mirror the breakdown to claw-synced storage. Two
+        # redundant best-effort copies, both non-fatal:
+        #   1. <workspace_root>/hyperloom/<sid>/ (the original
+        #      $USER_DATA_PATH-relative checkpoint-synced subtree);
+        #   2. the claw S3-sync ROOT (/workspace) with manifest.json +
+        #      session_breakdown.json, so the brain uploads them to the
+        #      deterministic root key the session collector reads
+        #      (users/<uid>/sessions/<csid>/...).
+        # The canonical weka write under session_dir stays the source of
+        # truth; a mirror failure MUST NOT mask the real stop_reason.
+        try:
+            from pathlib import Path as _Path
+            from .breakdown.claw_mirror import (
+                mirror_breakdown_to_claw_storage,
+                mirror_session_artifacts_to_claw_storage,
+            )
+            _sid = getattr(coordinator.shared_state, "session_id", "") or ""
+            mirror_breakdown_to_claw_storage(
+                _Path(session_dir) / "session_breakdown.json",
+                session_id=_sid,
+            )
+            mirrored = mirror_session_artifacts_to_claw_storage(session_dir)
+            if mirrored:
+                print(
+                    "Claw S3 mirror    : "
+                    + ", ".join(str(p) for p in mirrored)
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("claw-mirror finalize failed (non-fatal)")
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep used to run here as a post-hook. It is now a
