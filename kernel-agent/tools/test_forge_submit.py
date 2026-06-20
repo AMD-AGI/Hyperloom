@@ -64,23 +64,22 @@ def test_resolve_gpu_target_platform_map(monkeypatch):
 def test_fellow_for_source_type():
     assert forge_submit._fellow_for_source_type("triton") == "triton-fellow"
     assert forge_submit._fellow_for_source_type("python") == "triton-fellow"
-    assert forge_submit._fellow_for_source_type("hip_cpp") is None
     assert forge_submit._fellow_for_source_type("unknown") is None
 
 
-def test_fellow_compiled_gated_by_env(monkeypatch):
-    # Compiled fellows stay off by default (clean skip -> geak fallback).
-    monkeypatch.delenv("FORGE_ENABLE_COMPILED_FELLOWS", raising=False)
-    assert forge_submit._fellow_for_source_type("hip_cpp") is None
-    assert forge_submit._fellow_for_source_type("ck") is None
-    # Opt-in enables Kernel-Forge's native compiled fellows.
-    monkeypatch.setenv("FORGE_ENABLE_COMPILED_FELLOWS", "1")
+def test_fellow_compiled_enabled_by_default(monkeypatch):
+    # Compiled fellows are ON by default.
+    monkeypatch.delenv("FORGE_DISABLE_COMPILED_FELLOWS", raising=False)
     assert forge_submit._fellow_for_source_type("hip_cpp") == "hip-fellow"
     assert forge_submit._fellow_for_source_type("ck") == "ck-fellow"
     assert forge_submit._fellow_for_source_type("aiter") == "aiter-fellow"
     assert forge_submit._fellow_for_source_type("hipblaslt") == "hipblaslt-fellow"
     # Still None for genuinely unsupported types.
     assert forge_submit._fellow_for_source_type("vendor_binary") is None
+    # Opt-out disables compiled fellows (revert to triton-only -> geak fallback).
+    monkeypatch.setenv("FORGE_DISABLE_COMPILED_FELLOWS", "1")
+    assert forge_submit._fellow_for_source_type("hip_cpp") is None
+    assert forge_submit._fellow_for_source_type("ck") is None
 
 
 def _backends_args(backends=""):
@@ -167,8 +166,8 @@ def test_shapes_from_candidate_unparseable_falls_back():
 
 def test_submit_rederives_aiter_cu_source_type(tmp_path, monkeypatch):
     """An aiter .cu kernel arriving with source_type='unknown' is re-derived to
-    hip_cpp so forge maps it to hip-fellow (with compiled fellows enabled)."""
-    monkeypatch.setenv("FORGE_ENABLE_COMPILED_FELLOWS", "1")
+    hip_cpp so forge maps it to hip-fellow (compiled fellows enabled by default)."""
+    monkeypatch.delenv("FORGE_DISABLE_COMPILED_FELLOWS", raising=False)
     # unknown + .cu -> hip_cpp -> hip-fellow (not the triton-only skip).
     res = forge_submit.submit(
         source_file="/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu",
