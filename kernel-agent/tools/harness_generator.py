@@ -506,33 +506,49 @@ def _generate_setup_inputs(
     ref_func: FuncInfo | None,
     kernel_func: FuncInfo | None,
 ) -> str:
-    """Generate the setup_inputs(cfg) body, creating inputs only for args the test actually passes."""
+    """Generate the setup_inputs(cfg) body.
+
+    Inputs are created for the UNION of the kernel and reference function
+    parameters, so ``run_ref`` can never reference a key that ``setup_inputs``
+    did not create (root cause of the forge smoke-test ``KeyError`` that made
+    every attention-kernel session spin with zero gain).
+
+    Parameter element type is inferred from the parameter-name class
+    (index / int-scalar / float-scalar / dtype / weight) instead of defaulting
+    every argument to a 2D float tensor, which previously produced invalid
+    inputs (e.g. float ``block_tables`` / ``seq_lens``) that crashed on the
+    very first call.
+    """
     dim_vars = cfg_unpack.replace(" = cfg", "").split(", ")
     dim_vars = [v.strip() for v in dim_vars if v.strip() != "dtype"]
 
     lines = [f"    {cfg_unpack}"]
     lines.append("    torch.manual_seed(42)")
 
-    target_func = kernel_func or ref_func
-    if not target_func:
+    if not (kernel_func or ref_func):
         shape = ", ".join(dim_vars)
         lines.append(f'    x = torch.randn({shape}, dtype=dtype, device="cuda")')
         lines.append('    return {"x": x}')
         return "\n".join(lines)
 
-    call = None
-    if test_func:
-        call = analyzer.extract_call_to(test_func, target_func.name)
-
-    params = [p for p in target_func.params if p != "self"]
-
-    if call:
-        used_params = _match_call_args_to_params(call, params)
-    else:
-        used_params = [(p, None) for p in params]
-
     shape_2d = ", ".join(dim_vars[:2]) if len(dim_vars) >= 2 else dim_vars[0]
     shape_1d = dim_vars[-1] if dim_vars else "N"
+
+    # Union of kernel + ref params (dedup by name, preferring a concrete
+    # literal call value when one is available).
+    used_params: list[tuple[str, str | None]] = []
+    index_of: dict[str, int] = {}
+    for fn in (kernel_func, ref_func):
+        for name, call_value in _collect_used_params(analyzer, test_func, fn):
+            if name in index_of:
+                i = index_of[name]
+                prev = used_params[i][1]
+                if (call_value and not _is_variable(call_value)
+                        and not (prev and not _is_variable(prev))):
+                    used_params[i] = (name, call_value)
+                continue
+            index_of[name] = len(used_params)
+            used_params.append((name, call_value))
 
     inputs_items: list[str] = []
     for param_name, call_value in used_params:
@@ -541,19 +557,22 @@ def _generate_setup_inputs(
         # A literal call arg is stored directly.
         if call_value and not _is_variable(call_value):
             lines.append(f"    {param_name} = {call_value}")
-            inputs_items.append(f'"{param_name}": {param_name}')
-            continue
-
-        if _is_scalar_param(p_lower):
+        elif _is_dtype_param(p_lower):
+            lines.append(f"    {param_name} = dtype")
+        elif _is_index_param(p_lower):
+            lines.append(f'    {param_name} = torch.zeros({shape_2d}, dtype=torch.int32, device="cuda")')
+        elif _is_int_scalar_param(p_lower):
+            lines.append(f"    {param_name} = 1")
+        elif _is_float_scalar_param(p_lower):
+            lines.append(f"    {param_name} = 1.0")
+        elif _is_scalar_param(p_lower):
             val = "1e-06" if "eps" in p_lower else "0"
             lines.append(f"    {param_name} = {val}")
-            inputs_items.append(f'"{param_name}": {param_name}')
         elif _is_weight_param(p_lower):
             lines.append(f'    {param_name} = torch.randn({shape_1d}, dtype=dtype, device="cuda")')
-            inputs_items.append(f'"{param_name}": {param_name}')
         else:
             lines.append(f'    {param_name} = torch.randn({shape_2d}, dtype=dtype, device="cuda")')
-            inputs_items.append(f'"{param_name}": {param_name}')
+        inputs_items.append(f'"{param_name}": {param_name}')
 
     if not inputs_items:
         lines.append(f'    x = torch.randn({shape_2d}, dtype=dtype, device="cuda")')
@@ -561,6 +580,21 @@ def _generate_setup_inputs(
 
     lines.append("    return {" + ", ".join(inputs_items) + "}")
     return "\n".join(lines)
+
+
+def _collect_used_params(
+    analyzer: BenchmarkAnalyzer,
+    test_func: FuncInfo | None,
+    func: FuncInfo | None,
+) -> list[tuple[str, str | None]]:
+    """Return [(param, call_value_or_None), ...] for one function's params."""
+    if not func:
+        return []
+    call = analyzer.extract_call_to(test_func, func.name) if test_func else None
+    params = [p for p in func.params if p != "self"]
+    if call:
+        return _match_call_args_to_params(call, params)
+    return [(p, None) for p in params]
 
 
 def _match_call_args_to_params(
@@ -618,6 +652,93 @@ def _is_weight_param(name: str) -> bool:
     """
     WEIGHT_EXACT = {"weight", "w", "gamma", "bias", "beta"}
     return name in WEIGHT_EXACT or any(name.endswith(f"_{h}") for h in WEIGHT_EXACT)
+
+
+def _is_index_param(name: str) -> bool:
+    """Heuristically decide whether a parameter is an integer index/length tensor.
+
+    These (block tables, sequence lengths, indptr/indices) must be integer
+    tensors; building them with ``torch.randn`` (float) crashes the kernel on
+    the first call.
+
+    Args:
+        name (str): Lowercased parameter name.
+
+    Returns:
+        bool: True for index / sequence-length tensor parameters.
+    """
+    INDEX_EXACT = {
+        "block_tables", "block_table", "seq_lens", "seqlens", "context_lens",
+        "cu_seqlens", "kv_indptr", "qo_indptr", "block_tables_stride0",
+    }
+    if name in INDEX_EXACT:
+        return True
+    return (
+        name.endswith("_lens")
+        or name.endswith("_indices")
+        or name.endswith("_indptr")
+        or name.endswith("_idx")
+        or name.startswith("block_table")
+    )
+
+
+def _is_int_scalar_param(name: str) -> bool:
+    """Heuristically decide whether a parameter is an integer scalar.
+
+    Sizes, counts, lengths and strides are Python ints, not float tensors.
+
+    Args:
+        name (str): Lowercased parameter name.
+
+    Returns:
+        bool: True for integer scalar parameters.
+    """
+    INT_EXACT = {
+        "max_seq_len", "max_qlen", "num_kv_heads", "num_heads", "num_seqs",
+        "head_size", "block_size", "num_queries_per_kv", "high_precision",
+        "quant_algo", "partition_size", "max_num_partitions",
+    }
+    if name in INT_EXACT:
+        return True
+    return (
+        name.startswith("num_")
+        or name.startswith("max_")
+        or name.startswith("stride")
+        or name.endswith("_heads")
+        or name.endswith("_size")
+        or name.endswith("_len")
+        or name.endswith("_stride")
+    )
+
+
+def _is_float_scalar_param(name: str) -> bool:
+    """Heuristically decide whether a parameter is a float scalar.
+
+    Softmax scale and similar coefficients are float scalars. ``*_scale_cache``
+    style names are excluded since those are per-token scale tensors.
+
+    Args:
+        name (str): Lowercased parameter name.
+
+    Returns:
+        bool: True for float scalar parameters.
+    """
+    FLOAT_EXACT = {"scale", "softmax_scale", "sm_scale", "scaling", "alpha"}
+    if name in FLOAT_EXACT:
+        return True
+    return name.endswith("_scale") and "cache" not in name
+
+
+def _is_dtype_param(name: str) -> bool:
+    """Heuristically decide whether a parameter carries a dtype.
+
+    Args:
+        name (str): Lowercased parameter name.
+
+    Returns:
+        bool: True for dtype-carrying parameters (e.g. ``kv_cache_dtype``).
+    """
+    return name == "dtype" or name.endswith("_dtype")
 
 
 def _generate_run_kernel(
@@ -683,12 +804,9 @@ def _generate_run_func_body(
 
     if call:
         used = _match_call_args_to_params(call, params)
-        args_parts: list[str] = []
-        for param_name, call_value in used:
-            if call_value and not _is_variable(call_value):
-                args_parts.append(f'inputs["{param_name}"]')
-            else:
-                args_parts.append(f'inputs["{param_name}"]')
+        # Use .get so a ref-only param missing from setup_inputs degrades to
+        # None instead of raising KeyError at smoke-test time.
+        args_parts: list[str] = [f'inputs.get("{param_name}")' for param_name, _ in used]
     else:
         args_parts = [f'inputs.get("{p}")' for p in params]
 
