@@ -501,12 +501,14 @@ class TestRunGemmTuningHandler:
         )
 
         cmd = captured["cmd"]  # type: ignore[assignment]
-        assert cmd[cmd.index("--precision") + 1] == "fp8"
+        input_path = cmd[cmd.index("--input-json") + 1]
+        data = json.loads(Path(input_path).read_text())
+        assert data["precision"] == "fp8"
         # Do not force blockscale from Hyperloom. Forge should inspect
         # kernel_signature_log when available; without a log it defaults to
         # blockscale internally.
-        assert cmd[cmd.index("--quant-type") + 1] == "auto"
-        assert cmd.count("--conc") == 1
+        assert data["quant_type"] == "auto"
+        assert data["conc"] == 256
         assert result["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
 
     def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
@@ -548,8 +550,10 @@ class TestRunGemmTuningHandler:
         asyncio.run(krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path))
 
         cmd = captured["cmd"]  # type: ignore[assignment]
-        assert cmd[cmd.index("--precision") + 1] == "fp8"
-        assert cmd[cmd.index("--quant-type") + 1] == "per_token"
+        input_path = cmd[cmd.index("--input-json") + 1]
+        data = json.loads(Path(input_path).read_text())
+        assert data["precision"] == "fp8"
+        assert data["quant_type"] == "per_token"
 
     def test_forge_fallback_to_session_precision_when_no_quantization(self, tmp_path, monkeypatch):
         """When current_best has no --quantization, fall back to state.precision."""
@@ -576,8 +580,10 @@ class TestRunGemmTuningHandler:
         asyncio.run(krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path))
 
         cmd = captured["cmd"]  # type: ignore[assignment]
-        assert cmd[cmd.index("--precision") + 1] == "bf16"
-        assert cmd[cmd.index("--quant-type") + 1] == "auto"
+        input_path = cmd[cmd.index("--input-json") + 1]
+        data = json.loads(Path(input_path).read_text())
+        assert data["precision"] == "bf16"
+        assert data["quant_type"] == "auto"
 
 
 # _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror

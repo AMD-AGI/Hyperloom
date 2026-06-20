@@ -1484,42 +1484,41 @@ async def _run_forge_gemm_tuning(
     if not shapes_json:
         shapes_json = _resolve_forge_shapes(state, session_dir)
 
-    cmd = [
-        "python3", "-m", "forge_gemm_tune.cli", "run",
-        "--model-path", model_path,
-        "--framework", framework,
-        "--precision", precision,
-        "--quant-type", quant_type,
-        "--gpu-type", gpu_type,
-        "--tp", str(tp),
-        "--conc", str(conc),
-        "--mp", str(mp),
-        "--output-dir", str(workspace),
-        "--skip-gpu-check",
-    ]
-    if tokens:
-        cmd.extend(["--tokens", tokens])
-    if payload.get("untuned_csv"):
-        cmd.extend(["--untuned-csv", str(payload["untuned_csv"])])
-    if shapes_json:
-        cmd.extend(["--shapes-json", shapes_json])
-    if payload.get("tunableop_input"):
-        cmd.extend(["--tunableop-input", str(payload["tunableop_input"])])
-    if kernel_sig_log:
-        cmd.extend(["--kernel-signature-log", kernel_sig_log])
-
     timeout = _gemm_tuning_timeout_sec(payload)
-    cmd.extend(["--timeout", str(timeout)])
-    # Global timeout ensures the whole session (all tuners combined) stays
-    # within the budget. Forge will skip lower-priority tuners if time runs out,
-    # guaranteeing the highest-value tuner (MoE fmoe_ck) always runs first.
-    cmd.extend(["--global-timeout", str(timeout)])
-
-    # Thorough mode: exhaustive search when session budget allows (>= 24h)
-    # and enough GPUs are available (>= 4) to parallelize the sweep.
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
-    if session_max_min >= 1440 and mp >= 4:
-        cmd.append("--thorough")
+    input_payload = {
+        "model_path": model_path,
+        "framework": framework,
+        "precision": precision,
+        "quant_type": quant_type,
+        "gpu_type": gpu_type,
+        "tp": tp,
+        "conc": conc,
+        "mp": mp,
+        "output_dir": str(workspace),
+        "timeout": timeout,
+        # Global timeout ensures the whole session (all tuners combined) stays
+        # within the budget. Forge skips lower-priority tuners if time runs out.
+        "global_timeout": timeout,
+        "skip_gpu_check": True,
+        "tokens": tokens,
+        "untuned_csv": str(payload.get("untuned_csv") or ""),
+        "shapes_json": shapes_json,
+        "tunableop_input": str(payload.get("tunableop_input") or ""),
+        "kernel_signature_log": kernel_sig_log,
+        "tuner": str(payload.get("tuner") or ""),
+        # Thorough mode: exhaustive search when session budget allows (>= 24h)
+        # and enough GPUs are available (>= 4) to parallelize the sweep.
+        "thorough": bool(session_max_min >= 1440 and mp >= 4),
+    }
+    input_json = workspace / "forge_gemm_tuning_input.json"
+    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
+    cmd = [
+        "python3",
+        str(_kernel_agent_tool_path("forge_gemm_tuning.py")),
+        "--input-json",
+        str(input_json),
+    ]
 
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
 
