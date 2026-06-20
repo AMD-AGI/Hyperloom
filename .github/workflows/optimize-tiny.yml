@@ -56,8 +56,8 @@ jobs:
       CANDIDATES_FILE: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
       CANDIDATES_PATH: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
       BATCH_SIZE: '240'
-      # Count-filler runs go to the sandbox workspace only.
-      SUBMIT_WORKSPACES: 'core42-sandbox'
+      # Count-filler runs go to the hyperloom workspace only.
+      SUBMIT_WORKSPACES: 'core42-hyperloom'
     steps:
       - uses: actions/checkout@v6
 
