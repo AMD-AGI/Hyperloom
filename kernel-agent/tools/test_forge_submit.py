@@ -171,8 +171,8 @@ def test_submit_rederives_aiter_cu_source_type(tmp_path, monkeypatch):
     assert "supports triton only" not in (res.get("stderr_tail") or "")
 
 
-def test_submit_skips_non_triton(tmp_path):
-    """Stage 1 supports triton only; other source_types return a clean skip, no GPU work."""
+def test_submit_skips_untracked_source(tmp_path):
+    """Untracked source files return a clean skip before any live-tree work."""
     res = forge_submit.submit(
         source_file=str(tmp_path / "k.cpp"),
         prompt_file=tmp_path / "p.txt",
@@ -182,7 +182,7 @@ def test_submit_skips_non_triton(tmp_path):
         candidate={},
     )
     assert res["returncode"] == 2
-    assert "triton only" in res["stderr_tail"]
+    assert "kernel_repo is not a clean git checkout" in res["stderr_tail"]
 
 
 def test_autogen_driver_selection():
