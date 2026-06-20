@@ -3671,27 +3671,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 
-            # Safety-net artifact package -> /workspace. The CLOSE phase
-            # sequencer normally packages at step 2.6, but the wall-clock
-            # deadline path (_enter_closing_phase) and crash paths leave
-            # close_sequence_done False and never run the sequencer, so the
-            # bundle would be missing without this. Best-effort: failures
-            # must not mask stop_reason. Runs after the SBD/final.md +
-            # Langfuse flush above so the freshest products are bundled.
-            try:
-                from .breakdown import package_session_artifacts
-
-                pkg_path = package_session_artifacts(
-                    session_dir,
-                    session_id=str(
-                        getattr(coordinator.shared_state, "session_id", "") or "",
-                    ),
-                )
-                if pkg_path is not None:
-                    print(f"Artifact package  : {pkg_path}")
-            except Exception:  # noqa: BLE001
-                log.exception("session artifact package failed (non-fatal)")
-
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
@@ -5207,16 +5186,6 @@ def _run_recover_session(args: argparse.Namespace) -> int:
             print(f"  trace backfill    : rc={rc}")
         except Exception:  # noqa: BLE001
             log.exception("recover-session: trace backfill failed (non-fatal)")
-
-    # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
-    try:
-        from .breakdown import package_session_artifacts
-
-        pkg_path = package_session_artifacts(session_dir)
-        if pkg_path is not None:
-            print(f"  artifact package  : {pkg_path}")
-    except Exception:  # noqa: BLE001
-        log.exception("recover-session: artifact package failed (non-fatal)")
 
     return 0
 
