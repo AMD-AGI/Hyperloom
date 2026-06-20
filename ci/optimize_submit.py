@@ -1359,7 +1359,9 @@ class SafeOptimizeClient:
         # consecutive idle re-entries, before concluding. Only a real Stopped
         # (sandbox exit), a Succeeded, the deadline, or exhausted retries end it.
         idle_retries = 0
-        max_idle_retries = int(_env_float("SAFE_OPTIMIZE_SSE_IDLE_RETRIES", 3.0))
+        # Default 0: a single 1h idle window (idle_grace_s) is the whole budget;
+        # no resubscribe. Raise SAFE_OPTIMIZE_SSE_IDLE_RETRIES to re-enable retries.
+        max_idle_retries = int(_env_float("SAFE_OPTIMIZE_SSE_IDLE_RETRIES", 0.0))
         while sid and time.time() < deadline:
             sse_used = True
             log.info("[task %s] using SSE on clawSessionId=%s", task_id, sid[:8])
@@ -1465,12 +1467,16 @@ class SafeOptimizeClient:
         completion. The only reliable signal is sandboxStatus
         phase=Stopped/Terminated/Failed (sandbox pod actually exits).
 
-        Returns: "Stopped" | "idle_timeout" (no events >10min) | "deadline"
-        (per-task wall clock) | "stream_error" (caller falls back).
+        Returns: "Stopped" | "idle_timeout" (no events > idle_grace_s, default
+        1h) | "deadline" (per-task wall clock) | "stream_error" (caller falls
+        back).
         """
         url = f"{self.base_url}/claw-api/v1/chat/sessions/{session_id}/messages"
         last_evt = time.time()
-        idle_grace_s = 600  # 10 min of pure keepalive after the last event
+        # Idle grace: how long the SSE may be silent (keepalive-only) before we
+        # treat it as idle. Default 1h to cover slow model download + inference
+        # server startup, which emit no agent events. Configurable via env.
+        idle_grace_s = int(_env_float("SAFE_OPTIMIZE_SSE_IDLE_GRACE_S", 3600.0))
         try:
             with self._sess.get(url, stream=True, timeout=(10, 60)) as r:
                 if not r.ok:
