@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,6 +23,7 @@ _spec = importlib.util.spec_from_file_location(
 )
 tab = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
+sys.modules[_spec.name] = tab
 _spec.loader.exec_module(tab)
 
 
@@ -34,6 +36,7 @@ def tla():
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
