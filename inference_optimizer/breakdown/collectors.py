@@ -4837,7 +4837,7 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
                 try:
                     run[knob] = int(chosen)
                 except (TypeError, ValueError):
-                    pass
+                    continue  # best-effort int coercion; skip non-numeric knob values
         if raw.get("libtype"):
             run["libtype"] = str(raw.get("libtype"))
         if isinstance(raw.get("summary"), dict):
