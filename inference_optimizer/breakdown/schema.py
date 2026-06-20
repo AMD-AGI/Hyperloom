@@ -48,6 +48,10 @@ class SessionMeta(TypedDict, total=False):
         code_revision (str): Source revision of the optimizer.
         pid (int): Process id of the optimizer.
         session_dir (str): Absolute path to the session working directory.
+        user_data_path (str): ``USER_DATA_PATH`` root the run wrote under
+            (``session_dir`` nests beneath it in per_model_ts layout); empty
+            when unset. Lets a trace-based consumer locate the on-disk
+            artifacts without re-deriving the path.
         tick_count (int): Number of orchestration ticks executed.
         image (str | None): Fully-qualified container image, or None if unset.
     """
@@ -64,6 +68,7 @@ class SessionMeta(TypedDict, total=False):
     code_revision: str
     pid: int
     session_dir: str
+    user_data_path: str  # USER_DATA_PATH root the run wrote under (session_dir nests beneath it)
     tick_count: int
     image: str | None  # container image fully-qualified (or None if not configured)
 
