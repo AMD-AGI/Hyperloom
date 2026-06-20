@@ -3928,6 +3928,26 @@ class Coordinator:
 
         sdir = self.session_dir
         commit = str(getattr(self.shared_state, "code_revision", "") or "")
+        # Stage 1: replay GEAK-e2e's discovery substream (schema §3) so the
+        # assembler backfills each kernel's discovery-sourced fields
+        # (name/gpu_pct/bound_type/source_file). GEAK-e2e profiles via rocprofv3,
+        # not tracelens, so the route is ``bypass``; ``tool="geak"`` keeps the
+        # version provenance under geak instead of minting an empty bypass entry.
+        for run in (journey.get("discovery_runs") or []):
+            if not isinstance(run, dict):
+                continue
+            try:
+                instrument.record_kernel_discovery(
+                    sdir,
+                    source=str(run.get("source") or "bypass"),
+                    status=str(run.get("status") or "success"),
+                    hot_kernels=list(run.get("hot_kernels") or []),
+                    scan=run.get("scan") if isinstance(run.get("scan"), dict) else None,
+                    tool="geak",
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("perfskills kernel_journey discovery replay failed",
+                          exc_info=True)
         for k in (journey.get("kernels") or []):
             if not isinstance(k, dict):
                 continue
