@@ -235,10 +235,15 @@ def _absolutize_source(path: str) -> str:
 
 
 def _is_editable_source(path: str | None, kernel_kind: str | None) -> bool:
-    """True for an editable kernel source: native ``.cu``/``.cuh``/``.hip`` or a repo ``.py`` Triton kernel.
+    """True for an editable kernel source we can route one GEAK run at.
 
-    Inductor-generated Triton (``triton_inductor_generated`` / ``/tmp/torchinductor``)
-    is excluded: it is regenerated code, not an editable repo source.
+    Editable means either native device code (``.cu``/``.cuh``/``.hip``) or a
+    repo-resident Triton/TileLang ``.py`` kernel. The ``.py`` case is gated only
+    against *generated* Triton: ``triton_inductor_generated`` and any
+    ``torchinductor`` / ``/tmp/`` path are excluded because they are regenerated
+    code, not an editable repo source. The leaf's ``kernel_kind``
+    (``triton``/``tilelang``/...) does NOT otherwise restrict editability -- a
+    repo ``.py`` Triton/TileLang kernel is as routable as a ``.cu``.
     """
     if not path:
         return False
@@ -274,7 +279,10 @@ class OpResolver:
     ``vllm`` / ``sglang`` as ``{device_kernel_name: {kernel_source_path, ...}}``.
     Routability is derived (no stored ``status``): an op is routable iff its
     selected container has at least one ``patchable`` kernel whose
-    ``kernel_source_path`` is an editable source (see :func:`_is_editable_source`).
+    ``kernel_source_path`` is an editable source -- native ``.cu``/``.cuh``/``.hip``
+    OR a repo-resident Triton/TileLang ``.py`` kernel (only inductor-generated /
+    ``torchinductor`` / ``/tmp/`` Triton is excluded; see
+    :func:`_is_editable_source`).
 
     Resolution by ``kind``: ``single`` -> the container's editable source(s)
     (fanned out one GEAK run each); ``dispatch`` -> the single kernel whose name
@@ -329,7 +337,8 @@ class OpResolver:
         """Pick the editable source list, routing to the installed container.
 
         When both containers carry editable sources, prefer whichever is present
-        on disk; otherwise honor the ``framework`` hint, then sglang.
+        on disk; otherwise honor the ``framework`` hint (only ``vllm``/``sglang``
+        are recognized -- any other value falls through), then default to sglang.
         """
         def present(path: str) -> bool:
             try:
@@ -2706,7 +2715,9 @@ def load_op_category_map(
     return out
 
 
-def _expand_op_fanout(top: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _expand_op_fanout(
+    top: list[dict[str, Any]], framework: str | None = None,
+) -> list[dict[str, Any]]:
     """Resolve each op against the dictionary and fan out one candidate per ``.cu``.
 
     A routable op with N editable sources -- composite sub-kernels, or a
@@ -2716,11 +2727,14 @@ def _expand_op_fanout(top: list[dict[str, Any]]) -> list[dict[str, Any]]:
     through unchanged, with their :class:`OpResolution` cached on
     ``_op_resolution`` for the finalize loop.
 
-    Framework comes from ``HYPERLOOM_FRAMEWORK`` (an explicit override for the
-    rare/offline case where both or neither container source is on disk); in a
-    real container ``OpResolver._select_sources`` picks the installed path.
+    ``framework`` is the explicit trace framework (the analysis CLI's
+    ``--framework``); it disambiguates which container's source to route to when
+    both/neither are on disk. Only ``vllm``/``sglang`` are honored (the mapping's
+    container keys); any other value (e.g. ``atom``) or an empty/unset value
+    falls through to ``OpResolver._select_sources``' on-disk-presence-then-default
+    ordering.
     """
-    framework = os.environ.get("HYPERLOOM_FRAMEWORK", "").strip().lower() or None
+    framework = (framework or "").strip().lower() or None
     expanded: list[dict[str, Any]] = []
     for item in top:
         res = resolve_op_source(
@@ -3411,6 +3425,7 @@ def _finalize_candidates(
     *,
     total_dur: float | None = None,
     perf_report_csv_dir: Path | str | None = None,
+    framework: str | None = None,
 ) -> list[dict[str, Any]]:
     """Apply shared post-processing to parsed candidate rows.
 
@@ -3424,6 +3439,11 @@ def _finalize_candidates(
             ``top`` when omitted.
         perf_report_csv_dir: Optional CSV directory used to populate each
             item's ``tracelens_category``.
+        framework: Explicit trace framework from the analysis CLI's
+            ``--framework``; threaded into the resolver so a dual-framework image
+            routes to the correct container's source. Only ``vllm``/``sglang``
+            steer routing; other values (e.g. ``atom``) or empty fall back to
+            on-disk presence then default ordering.
 
     Returns:
         The finalized candidate list (the same ``top`` object).
@@ -3431,7 +3451,7 @@ def _finalize_candidates(
     op_cat_map = load_op_category_map(perf_report_csv_dir) if perf_report_csv_dir is not None else {}
     # Dict-first: resolve each op to its editable .cu (ground truth) and expand
     # composite fan-out into one candidate per sub-kernel before finalizing.
-    top = _expand_op_fanout(top)
+    top = _expand_op_fanout(top, framework=framework)
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
     # #727 companion: the fused-MoE expert kernel's top-level trace event carries
@@ -5838,6 +5858,7 @@ def main() -> int:
                             raw_det_candidates,
                             total_dur=total_dur or None,
                             perf_report_csv_dir=(tracelens_dir / "perf_report_csvs"),
+                            framework=args.framework or None,
                         )
                         append_log(
                             log_path,
@@ -5982,6 +6003,7 @@ def main() -> int:
                             raw_agent_candidates,
                             total_dur=total_dur or None,
                             perf_report_csv_dir=(skill_result.output_dir / "perf_report_csvs"),
+                            framework=args.framework or None,
                         )
                         append_log(
                             log_path,

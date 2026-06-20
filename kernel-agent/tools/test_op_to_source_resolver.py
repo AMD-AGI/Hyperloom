@@ -276,6 +276,56 @@ def test_expand_op_fanout_single_leaf_does_not_split(tla, monkeypatch) -> None:
     assert out[0]["_op_resolution"].primary_source == _EDITABLE_CU
 
 
+def test_expand_op_fanout_explicit_framework_selects_matching_source(tla, monkeypatch) -> None:
+    """An explicit ``framework`` routes to that container's source (#1 regression).
+
+    The same op carries both ``vllm`` and ``sglang`` editable sources at distinct
+    ``.cu`` paths and neither is on disk, so only the explicit framework decides.
+    ``HYPERLOOM_FRAMEWORK`` is cleared to prove the value comes from the arg, not env.
+    """
+    mapping = {
+        "aiter::foo": _entry(
+            "single",
+            vllm={"kv": _kernel(_EDITABLE_CU)},
+            sglang={"ks": _kernel(_EDITABLE_CU_2)},
+        )
+    }
+    monkeypatch.setattr(tla, "load_mapping", lambda: mapping)
+    monkeypatch.setenv("HYPERLOOM_FRAMEWORK", "sglang")
+
+    out_vllm = tla._expand_op_fanout(
+        [{"name": "aiter::foo", "duration_us": 100.0}], framework="vllm"
+    )
+    assert len(out_vllm) == 1
+    assert out_vllm[0]["_op_resolution"].primary_source == _EDITABLE_CU
+
+    out_sgl = tla._expand_op_fanout(
+        [{"name": "aiter::foo", "duration_us": 100.0}], framework="sglang"
+    )
+    assert out_sgl[0]["_op_resolution"].primary_source == _EDITABLE_CU_2
+
+
+def test_finalize_candidates_threads_framework_to_resolver(tla, monkeypatch) -> None:
+    """``_finalize_candidates(framework=...)`` selects the matching container's source (#1)."""
+    mapping = {
+        "aiter::foo": _entry(
+            "single",
+            vllm={"kv": _kernel(_EDITABLE_CU)},
+            sglang={"ks": _kernel(_EDITABLE_CU_2)},
+        )
+    }
+    monkeypatch.setattr(tla, "load_mapping", lambda: mapping)
+    monkeypatch.delenv("HYPERLOOM_FRAMEWORK", raising=False)
+
+    out = tla._finalize_candidates(
+        [{"name": "aiter::foo", "duration_us": 100.0, "source_file": ""}],
+        total_dur=100.0,
+        framework="vllm",
+    )[0]
+    assert out["source_file"] == _EDITABLE_CU
+    assert out["op_to_source_status"] == "resolved"
+
+
 def test_expand_op_fanout_dict_miss_passes_through(tla, monkeypatch) -> None:
     """A dictionary miss passes the item through unchanged with a None resolution."""
     monkeypatch.setattr(tla, "load_mapping", lambda: {})
