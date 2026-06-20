@@ -158,6 +158,7 @@ def test_finalize_candidates_stamps_trace_provenance():
             str(tools_dir / "tracelens_analysis.py"),
         )
         mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)
     finally:
         sys.path.remove(str(tools_dir))
