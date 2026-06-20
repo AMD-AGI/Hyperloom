@@ -585,6 +585,34 @@ class TestRunGemmTuningHandler:
         assert data["precision"] == "bf16"
         assert data["quant_type"] == "auto"
 
+    def test_forge_shapes_json_schema_validation(self, tmp_path):
+        good = tmp_path / "good_shapes.json"
+        good.write_text(json.dumps({"shapes": [{"M": 1, "N": 2, "K": 3}]}))
+        bad_empty = tmp_path / "bad_empty.json"
+        bad_empty.write_text(json.dumps({"shapes": []}))
+        bad_trace_shape = tmp_path / "bad_trace_shape.json"
+        bad_trace_shape.write_text(json.dumps([{"shape": [1, 2, 3]}]))
+
+        assert krh._is_forge_compatible_shapes_json(good) is True
+        assert krh._is_forge_compatible_shapes_json(bad_empty) is False
+        assert krh._is_forge_compatible_shapes_json(bad_trace_shape) is False
+        assert krh._is_forge_compatible_shapes_json(tmp_path / "missing.json") is False
+
+    def test_resolve_forge_shapes_prefers_compatible_artifact(self, tmp_path):
+        session_dir = tmp_path / "session"
+        shapes = tmp_path / "shapes.json"
+        shapes.write_text(json.dumps([{"m": 4, "n": 5, "k": 6}]))
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([{"shape": [1, 2, 3]}]))
+
+        state = SharedState()
+        state.last_trace_analyze = {
+            "shapes_json": str(bad),
+            "artifact_paths": {"gemm_shapes_json": str(shapes)},
+        }
+
+        assert krh._resolve_forge_shapes(state, session_dir) == str(shapes)
+
 
 # _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror
 # of the kernel-agent default (PR #301); the legacy 90 forced quick-mode timing.
