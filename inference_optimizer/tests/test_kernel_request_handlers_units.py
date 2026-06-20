@@ -67,6 +67,56 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._resolve_forge_server_log(state, tmp_path) == str(log)
 
+    def test_resolve_forge_precision_payload_override(self):
+        state = SharedState(precision="bf16")
+        assert krh._resolve_forge_precision_and_quant(
+            state,
+            {"precision": "fp8", "quant_type": "blockscale"},
+        ) == ("fp8", "blockscale")
+
+    def test_resolve_forge_precision_from_runtime_fp4(self):
+        state = SharedState(precision="bf16")
+        state.current_best = {"extra_server_args": "--quantization fp4", "extra_envs": {}}
+
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp4", "fp4")
+
+    def test_resolve_forge_precision_per_token_from_reference_env(self):
+        state = SharedState(precision="bf16")
+        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
+        state.reference_envs = {"SGLANG_USE_AITER_FP8_PER_TOKEN": "true"}
+
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
+
+    def test_forge_gemm_tune_available_by_path_and_import(self, monkeypatch):
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-gemm-tune")
+        assert krh._forge_gemm_tune_available() is True
+
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: object())
+        assert krh._forge_gemm_tune_available() is True
+
+        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: None)
+        assert krh._forge_gemm_tune_available() is False
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_reports_missing_cli(self, tmp_path, monkeypatch):
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: False)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "forge_gemm_tune_not_found"
+        assert result["backend"] == "forge"
+
 
 def _ensure_torch_module(monkeypatch):
     try:
