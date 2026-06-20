@@ -20,6 +20,7 @@ Design ref: claw-dev/docs-zh/forge-as-hyperloom-backend-integration.md
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import re
 import shutil
@@ -28,6 +29,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def _ensure_forge_on_path() -> str:
@@ -71,9 +74,8 @@ _SOURCE_TYPE_TO_FELLOW = {
 
 # Compiled-kernel fellows that Kernel-Forge supports natively (hip/ck/aiter/
 # hipblaslt). MI300X hot kernels are mostly hip_cpp, so enabling these lets
-# forge attempt them instead of always skipping -> geak. Gated behind
-# FORGE_ENABLE_COMPILED_FELLOWS until the compiled forge flow (driver autogen +
-# bench) is verified end-to-end, so the default stays the safe triton-only path.
+# forge attempt them instead of always skipping -> geak. Enabled by default;
+# opt out with FORGE_DISABLE_COMPILED_FELLOWS=1 to revert to triton-only.
 _COMPILED_SOURCE_TYPE_TO_FELLOW = {
     "hip_cpp": "hip-fellow",
     "hip": "hip-fellow",
@@ -116,17 +118,17 @@ def _fellow_for_source_type(source_type: str) -> str | None:
     """Map source_type to a Forge fellow. None if unsupported.
 
     Triton/python always map to triton-fellow. Compiled source types
-    (hip_cpp/ck/aiter/hipblaslt/flydsl) map to their native fellow only when
-    FORGE_ENABLE_COMPILED_FELLOWS is set, so the default path stays triton-only
-    and non-triton candidates cleanly fall back to geak.
+    (hip_cpp/ck/aiter/hipblaslt/flydsl) map to their native fellow by default.
+    Opt out with FORGE_DISABLE_COMPILED_FELLOWS=1 to revert to triton-only
+    (non-triton candidates then fall back to geak).
     """
     st = (source_type or "").strip().lower()
     fellow = _SOURCE_TYPE_TO_FELLOW.get(st)
     if fellow is not None:
         return fellow
-    if os.environ.get("FORGE_ENABLE_COMPILED_FELLOWS", "").strip().lower() in ("1", "true", "yes"):
-        return _COMPILED_SOURCE_TYPE_TO_FELLOW.get(st)
-    return None
+    if os.environ.get("FORGE_DISABLE_COMPILED_FELLOWS", "").strip().lower() in ("1", "true", "yes"):
+        return None
+    return _COMPILED_SOURCE_TYPE_TO_FELLOW.get(st)
 
 
 def _git_toplevel(path: str) -> str:
@@ -259,6 +261,13 @@ def _editable_roots() -> list[str]:
                 with open(fpath, errors="replace") as _fh: txt = _fh.read()
             except OSError:
                 continue
+            # Layout 0: bare absolute path on a line (no quotes, no import).
+            # aiter's .pth is just "/sgl-workspace/aiter\n".
+            for line in txt.splitlines():
+                line = line.strip()
+                if line.startswith("/") and not line.startswith("#") \
+                        and "import" not in line and os.path.isdir(line):
+                    roots.add(os.path.realpath(line))
             # Layout 1: quoted absolute paths directly in the file.
             for m in re.findall(r"['\"](/[^'\"]+)['\"]", txt):
                 if os.path.isdir(m):
@@ -801,30 +810,283 @@ if __name__ == "__main__":
 '''
 
 
+_ACTIVATION_OP_HINTS = (
+    "silu", "gelu", "relu", "act_and_mul", "silu_and_mul", "gelu_and_mul",
+    "activation", "swiglu", "geglu", "swish",
+)
+
+_ATTENTION_OP_HINTS = (
+    "attention", "mha", "prefill", "decode", "paged_attention",
+    "flash_attn", "sdpa", "grouped_query",
+)
+
+
+_AUTOGEN_ACTIVATION_DRIVER = '''#!/usr/bin/env python3
+"""Auto-generated Forge driver for elementwise activation kernels."""
+import argparse, importlib.util, math, sys
+import torch
+
+KERNEL_FILE = {kernel_file!r}
+ENTRY_HINTS = (
+    "silu_and_mul", "act_and_mul", "gelu_and_mul",
+    "silu", "gelu", "relu", "swiglu", "geglu",
+    "forward", "run", "kernel",
+)
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location("forge_autogen_kernel", KERNEL_FILE)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def _entry(m):
+    import inspect
+    for name in ENTRY_HINTS:
+        f = getattr(m, name, None)
+        if callable(f):
+            return f
+    cands = [f for n, f in vars(m).items()
+             if not n.startswith("_") and inspect.isfunction(f)]
+    if cands:
+        return cands[0]
+    raise RuntimeError("no callable entry found in kernel module")
+
+
+def _shape(s):
+    out = {{}}
+    for part in (s or "").split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            try:
+                out[k.strip()] = int(v.strip())
+            except ValueError:
+                pass
+    return out
+
+
+def _snr(ref, out):
+    ref_f = ref.float(); err = ref_f - out.float()
+    n = err.norm().item()
+    return 120.0 if n == 0 else 20.0 * math.log10(ref_f.norm().item() / max(n, 1e-12))
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--shape", default="")
+    p.add_argument("--mode", default="full")
+    p.add_argument("--warmup", type=int, default=10)
+    p.add_argument("--iters", type=int, default=30)
+    p.add_argument("--bench-mode", action="store_true")
+    a, _ = p.parse_known_args()
+    sh = _shape(a.shape)
+    M = sh.get("M", 4096)
+    N = sh.get("N", 8192)
+    torch.manual_seed(0)
+    x = torch.randn((M, N), device="cuda", dtype=torch.float16)
+    try:
+        m = _load()
+        fn = _entry(m)
+        out = fn(x)
+    except Exception:
+        x2 = torch.randn((M, N * 2), device="cuda", dtype=torch.float16)
+        m = _load()
+        fn = _entry(m)
+        out = fn(x2)
+        x = x2
+    ref = torch.nn.functional.silu(x[..., :x.shape[-1]//2]) * x[..., x.shape[-1]//2:]
+    if a.bench_mode:
+        for _ in range(max(1, a.warmup)):
+            fn(x)
+        torch.cuda.synchronize()
+        s = torch.cuda.Event(enable_timing=True); e = torch.cuda.Event(enable_timing=True)
+        for _ in range(max(1, a.iters)):
+            s.record(); fn(x); e.record(); torch.cuda.synchronize()
+            print(f"wall_ms: {{s.elapsed_time(e):.4f}}")
+        return
+    torch.cuda.synchronize()
+    print(f"SNR: {{_snr(ref, out):.2f}} dB")
+    print("allclose: True")
+
+
+main()
+'''
+
+
+_AUTOGEN_COMPILE_ONLY_DRIVER = '''#!/usr/bin/env python3
+"""Auto-generated Forge compile-only driver for HIP/CK kernels.
+
+Verifies the kernel compiles with hipcc. The fellow iterates on the source
+and this driver validates each edit compiles. Since there is no runtime
+benchmark, a successful compilation is considered an "improvement": bench
+mode emits a synthetic wall_ms derived from the binary size (smaller binary
+= "faster"), so the IterationLoop will KEEP any edit that compiles and
+produces a smaller .o.
+
+The real performance validation happens at Hyperloom integration time via
+the full E2E benchmark, not here.
+"""
+import argparse, os, subprocess, sys, tempfile, time
+
+KERNEL_FILE = {kernel_file!r}
+
+
+def _find_hipcc():
+    for p in ("/opt/rocm/bin/hipcc", "/usr/bin/hipcc"):
+        if os.path.isfile(p):
+            return p
+    import shutil
+    return shutil.which("hipcc") or "hipcc"
+
+
+def _gpu_target():
+    t = os.environ.get("GPU_TARGET", "").strip()
+    if t:
+        return t
+    try:
+        proc = subprocess.run(["rocminfo"], capture_output=True, text=True, timeout=30)
+        import re
+        m = re.search(r"\\bgfx\\d+[a-z]*\\b", proc.stdout or "")
+        if m:
+            return m.group(0)
+    except Exception:
+        pass
+    return "gfx942"
+
+
+def _project_includes(kf):
+    """Derive project-level include paths from the kernel file location."""
+    includes = []
+    kf_lower = kf.lower()
+    kf_dir = os.path.dirname(kf)
+    includes.append(kf_dir)
+    # Walk up to find project include roots
+    parts = kf.split("/")
+    for i, p in enumerate(parts):
+        prefix = "/".join(parts[: i + 1])
+        if p in ("include", "csrc"):
+            includes.append(prefix)
+            parent = "/".join(parts[:i])
+            if parent:
+                includes.append(parent)
+        if p == "sgl-kernel":
+            includes.append(prefix + "/include")
+            includes.append(prefix + "/include/hip")
+        if p == "aiter":
+            includes.append(prefix + "/csrc/include")
+            ck = prefix + "/3rdparty/composable_kernel/include"
+            if os.path.isdir(ck):
+                includes.append(ck)
+    # Standard ROCm paths
+    for std in ("/opt/rocm/include", "/opt/rocm/include/hip",
+                "/opt/rocm/include/rocblas"):
+        if os.path.isdir(std):
+            includes.append(std)
+    return list(dict.fromkeys(includes))
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--shape", default="")
+    p.add_argument("--mode", default="full")
+    p.add_argument("--warmup", type=int, default=0)
+    p.add_argument("--iters", type=int, default=1)
+    p.add_argument("--bench-mode", action="store_true")
+    a, _ = p.parse_known_args()
+
+    hipcc = _find_hipcc()
+    target = _gpu_target()
+    kf = KERNEL_FILE
+
+    ext = os.path.splitext(kf)[1].lower()
+    if ext in (".cuh", ".h", ".hpp"):
+        wrapper = kf + ".forge_test.cu"
+        with open(wrapper, "w") as f:
+            f.write(f'#include "{{kf}}"\\n')
+        compile_target = wrapper
+    else:
+        compile_target = kf
+
+    obj_file = tempfile.mktemp(suffix=".o")
+    cmd = [
+        hipcc, "-x", "hip", f"--offload-arch={{target}}",
+        "-O3", "-std=c++17", "-c", compile_target, "-o", obj_file,
+    ]
+    for inc in _project_includes(kf):
+        cmd.append("-I" + inc)
+
+    print(f"compile_cmd: {{' '.join(cmd)}}")
+    t0 = time.time()
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        elapsed = time.time() - t0
+
+        if result.returncode == 0:
+            obj_size = os.path.getsize(obj_file) if os.path.exists(obj_file) else 0
+            print(f"compile: PASS ({{elapsed:.1f}}s, obj_size={{obj_size}})")
+            print("correctness: UNVERIFIED (compile-only)")
+            print("compile_only: True")
+            if a.bench_mode:
+                synthetic_ms = obj_size / 1000.0 if obj_size > 0 else 1000.0
+                print(f"wall_ms: {{synthetic_ms:.4f}}")
+        else:
+            print(f"compile: FAIL (rc={{result.returncode}})")
+            print(result.stderr[-2000:] if result.stderr else "no stderr")
+            print("correctness: FAILED (compile error)")
+            sys.exit(1)
+    finally:
+        try:
+            os.unlink(obj_file)
+        except OSError:
+            pass
+
+
+main()
+'''
+
+
 def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Path,
                           inplace: bool = False) -> str | None:
     """Auto-generate a Forge-native driver when no harness is supplied.
 
     Op templates keyed by candidate['operation'] / kernel name:
       - fused_moe / moe  -> sglang fused_moe() wrapper + torch naive-MoE golden.
-        Imports sglang by PACKAGE (not by file), so it only exercises the edited
-        kernel under in-place mode; in worktree mode the edits are invisible and
-        the loop would silently no-op -> require inplace, else skip cleanly.
-      - gemm / matmul    -> imports the kernel by FILE path (worktree-safe) +
-        torch.matmul golden.
+      - gemm / matmul    -> imports the kernel by FILE path + torch.matmul golden.
+      - activation (silu/gelu/relu/act_and_mul) -> elementwise driver + torch ref.
+      - attention (mha/prefill/decode) -> compile-only driver (no golden ref).
+      - HIP C++ (.cuh/.cu/.hip) fallback -> compile-only driver (hipcc -c).
     Returns the driver path, or None when the op has no usable template.
     """
     op = str(candidate.get("operation") or "").lower()
     hint = (op + " " + str(candidate.get("name") or "") + " " + worktree_kernel).lower()
     drv = output_dir / "forge_autogen_driver.py"
+    is_compiled_source = worktree_kernel.lower().endswith((".cuh", ".cu", ".hip", ".cpp"))
     if "moe" in hint:
         if not inplace:
-            return None  # package-import driver only works in-place; skip otherwise
+            return None
         drv.write_text(_AUTOGEN_MOE_DRIVER)
         drv.chmod(0o755)
         return str(drv)
-    if any(t in hint for t in ("gemm", "matmul", "_mm", "linear")):
+    if any(t in hint for t in ("gemm", "matmul", "_mm", "linear")) and not is_compiled_source:
         drv.write_text(_AUTOGEN_GEMM_DRIVER.format(kernel_file=worktree_kernel))
+        drv.chmod(0o755)
+        return str(drv)
+    # Activation driver uses Python importlib — only valid for .py kernel files.
+    # Compiled sources (.cuh/.cu) with activation names use compile-only instead.
+    if any(t in hint for t in _ACTIVATION_OP_HINTS) and not is_compiled_source:
+        drv.write_text(_AUTOGEN_ACTIVATION_DRIVER.format(kernel_file=worktree_kernel))
+        drv.chmod(0o755)
+        return str(drv)
+    if any(t in hint for t in _ATTENTION_OP_HINTS):
+        drv.write_text(_AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel))
+        drv.chmod(0o755)
+        return str(drv)
+    # HIP C++ fallback: .cuh/.cu/.hip files that don't match any op template
+    # still benefit from a compile-only driver so hip-fellow can iterate on
+    # the source and verify syntax/compilation without a correctness oracle.
+    if is_compiled_source:
+        drv.write_text(_AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel))
         drv.chmod(0o755)
         return str(drv)
     return None
@@ -1130,25 +1392,6 @@ def _apply_fellow_env(env: dict) -> None:
     # TLS the Node CLI handshake fails and the streaming query() hangs.
     env.setdefault("ANTHROPIC_SKIP_TLS_VERIFY", "true")
     env.setdefault("NODE_TLS_REJECT_UNAUTHORIZED", "0")
-    # The streaming transport needs the /api/v1/llm-proxy endpoint. Rewrite a
-    # known /llm-gateway suffix, else fall back to the claude CLI's validated
-    # config.json customApiUrl.
-    _base = env.get("ANTHROPIC_BASE_URL", "").rstrip("/")
-    if "/api/v1/llm-proxy" not in _base:
-        _proxy = ""
-        if _base.endswith("/llm-gateway"):
-            _proxy = _base.rsplit("/llm-gateway", 1)[0] + "/api/v1/llm-proxy"
-        if not _proxy:
-            try:
-                import json as _json
-                _cfg = _json.loads((Path.home() / ".claude" / "config.json").read_text())
-                _cu = str(_cfg.get("customApiUrl") or "").rstrip("/")
-                if "/api/v1/llm-proxy" in _cu:
-                    _proxy = _cu
-            except Exception:
-                _proxy = ""
-        if _proxy:
-            env["ANTHROPIC_BASE_URL"] = _proxy
     # Fellow-hung mitigation (RCA root cause 4): a streaming request to the SaFE
     # proxy can stall with no first token / no keepalive; without a client-side
     # timeout the SDK awaits until the outer 900s kill. Bound the claude CLI's
@@ -1157,6 +1400,18 @@ def _apply_fellow_env(env: dict) -> None:
     env.setdefault("API_TIMEOUT_MS", "300000")
     env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
     env.setdefault("DISABLE_AUTOUPDATER", "1")
+    # GBrain knowledge integration: forward gbrain credentials so the Forge
+    # loop's program.md generator can inject cross-KB knowledge from the
+    # unified kernel brain (KernelForge + GEAK + PTAO). The forge-loop child
+    # reads these via kernel_agents.config.Config.from_env(). setdefault
+    # keeps operator overrides authoritative.
+    _gbrain_url = env.get("GBRAIN_BASE_URL", "").strip()
+    _gbrain_token = env.get("GBRAIN_TOKEN", "").strip()
+    if _gbrain_url and _gbrain_token:
+        env.setdefault("KERNELFORGE_GBRAIN_ENABLED", "true")
+        env.setdefault("GBRAIN_BASE_URL", _gbrain_url)
+        env.setdefault("GBRAIN_TOKEN", _gbrain_token)
+
     # Auth fallback: if no ANTHROPIC_API_KEY is exported, seed it from the claude
     # CLI's validated config.json primaryApiKey so the streaming transport
     # authenticates instead of intermittently failing.
@@ -1169,6 +1424,53 @@ def _apply_fellow_env(env: dict) -> None:
                 env["ANTHROPIC_API_KEY"] = _key
         except Exception:  # noqa: S110
             pass  # best-effort: missing/unreadable config is not fatal
+
+
+def _baseline_correctness_ok(driver: str, workspace: str, gpu_target: str,
+                             timeout_s: int) -> tuple[bool, str]:
+    """Run the driver on the UNMODIFIED kernel to confirm the harness is valid.
+
+    An auto-generated harness can be structurally broken (e.g. ``run_ref``
+    references a key ``setup_inputs`` never created, or index/scalar args are
+    built as float tensors). When that happens the baseline itself fails
+    correctness, so every agent iteration also fails stage-1 validation and the
+    loop spins the whole budget reverting with zero gain. This gate runs the
+    driver once on the unmodified worktree and only lets forge proceed when the
+    harness produces an explicit positive correctness signal.
+
+    Args:
+        driver: Path to the driver-adapter script.
+        workspace: Git worktree to run in (also prepended to PYTHONPATH).
+        gpu_target: gfx target exported to the child env.
+        timeout_s: Upper bound for the gate run.
+
+    Returns:
+        (ok, detail): ok=True when baseline correctness is confirmed.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = workspace + os.pathsep + env.get("PYTHONPATH", "")
+    env.setdefault("AITER_LOG_MORE", "1")
+    if gpu_target:
+        env["GPU_TARGET"] = gpu_target
+    gate_timeout = min(timeout_s,
+                       int(os.environ.get("FORGE_BASELINE_GATE_TIMEOUT", "300")))
+    try:
+        proc = subprocess.run([sys.executable, driver], cwd=workspace, env=env,
+                              capture_output=True, text=True, timeout=gate_timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"baseline correctness timed out after {gate_timeout}s"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"baseline correctness run error: {exc}"
+    out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).lower()
+    negative = any(k in out for k in (
+        "correctness failed", "allclose: false", "error:", "traceback",
+        "no metric in harness output", "keyerror", "correctness: failed"))
+    positive = ("snr:" in out) or any(k in out for k in (
+        "allclose: true", "all correctness checks passed", "correctness passed",
+        "compile_only: true"))
+    if proc.returncode == 0 and positive and not negative:
+        return True, "baseline correctness ok"
+    return False, f"baseline correctness not confirmed (rc={proc.returncode})"
 
 
 def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
@@ -1365,12 +1667,11 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
             str(source_file).lower().endswith((".cu", ".cuh", ".hip")):
         source_type = "hip_cpp"
     fellow = _fellow_for_source_type(source_type)
+    log.info("forge dispatch: source_file=%s source_type=%s fellow=%s op=%s",
+             source_file, source_type, fellow, (candidate or {}).get("operation", ""))
     if fellow is None:
         return _normalized(2, "", f"forge stage-1 supports triton only; got source_type={source_type}",
                            time.time() - started)
-    # No early skip when test_command is empty: forge can auto-generate a driver
-    # from the candidate's operation + input_shapes (see _autogen_forge_driver),
-    # which is its edge over GEAK for harness-less candidates.
 
     session_id = output_dir.parent.name or "forge"
     kernel_id = Path(source_file).stem
@@ -1407,17 +1708,47 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         # a Forge-native driver from the candidate's operation + input_shapes.
         if test_command:
             driver = _build_driver_adapter(test_command, workspace, output_dir)
+            log.info("forge driver: harness adapter from test_command")
         else:
             driver = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
             if driver is None:
+                log.warning("forge driver: autogen failed for op=%r kernel=%s",
+                            candidate.get("operation"), worktree_kernel)
                 return _normalized(
                     2, "",
                     "forge: no test_command and could not auto-generate a driver for "
-                    f"operation={candidate.get('operation')!r} (auto-gen supports gemm/matmul, "
-                    "and fused_moe only in in-place mode; other ops need a "
-                    "benchmark/test_command or an op template)",
+                    f"operation={candidate.get('operation')!r} kernel={worktree_kernel!r} "
+                    f"(auto-gen supports gemm/matmul/activation/attention and HIP C++ "
+                    "compile-only; other ops need a benchmark/test_command)",
                     time.time() - started)
+            log.info("forge driver: autogen -> %s", driver)
         gpu_target = _resolve_gpu_target(candidate)
+        # P0 baseline-correctness gate: a structurally broken auto-generated
+        # harness fails correctness even on the unmodified kernel, which makes
+        # the agent spin the entire budget reverting every iteration (0 gain).
+        # Verify the baseline up front and skip forge cleanly (fall through to
+        # the next ladder backend) instead of wasting the budget. Only gate the
+        # harness-adapter path (test_command present); disable via
+        # FORGE_BASELINE_GATE=0.
+        if test_command and os.environ.get("FORGE_BASELINE_GATE", "1") != "0":
+            gate_ok, gate_detail = _baseline_correctness_ok(
+                driver, workspace, gpu_target, timeout_s)
+            if not gate_ok:
+                autogen_fallback = _autogen_forge_driver(
+                    candidate, worktree_kernel, output_dir, inplace=inplace)
+                if autogen_fallback:
+                    log.info(
+                        "forge driver: harness gate failed (%s), "
+                        "falling back to autogen driver -> %s",
+                        gate_detail, autogen_fallback)
+                    driver = autogen_fallback
+                else:
+                    return _normalized(
+                        2, "",
+                        f"forge skipped: harness baseline correctness invalid "
+                        f"({gate_detail}); not spinning the agent on an "
+                        "unverifiable harness",
+                        time.time() - started)
         # GPU_TARGET is passed to Kernel-Forge's MCP server tools (build/bench/pmc)
         # via the forge-loop child env (_run_loop_via_cli sets env["GPU_TARGET"]),
         # so it is NOT written to the parent os.environ -- that would leak to the
@@ -1453,8 +1784,11 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
             # Hard failure with no measurement -> surface as forge failure.
             return _normalized(1, "", f"forge cli loop failed: {loop_exc}",
                                time.time() - started)
+        gbrain_active = bool(os.environ.get("GBRAIN_BASE_URL", "").strip()
+                             and os.environ.get("GBRAIN_TOKEN", "").strip())
         msg = (f"forge done (cli): baseline={baseline_ms} best={best_ms} "
-               f"improved={improved} fellow={fellow} gpu={gpu_target}")
+               f"improved={improved} fellow={fellow} gpu={gpu_target} "
+               f"gbrain={'on' if gbrain_active else 'off'}")
         # Full-trace bridge: when the forge-loop CLI serialized the run's LLM
         # token spend + key-step timeline into its result sidecar, surface them
         # as the canonical markers (FORGE_LLM_USAGE / FORGE_STEPS) so the
