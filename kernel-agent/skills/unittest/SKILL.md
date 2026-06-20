@@ -254,6 +254,56 @@ Proceed to **Phase 3** (validation).
 
 ---
 
+## Parameter typing & key consistency (CRITICAL — applies to Phase 1.5 and Phase 2)
+
+`setup_inputs` is the #1 source of broken harnesses. Filling **every** argument
+with `torch.randn(M, N)` produces float tensors where the kernel expects integer
+index tensors, scalars, or dtypes — so the baseline (unmodified kernel) crashes
+on the very first call, every patch fails stage-1 validation, and the whole
+forge/GEAK budget is spent reverting with zero gain. Build each argument by its
+semantic type, and make `setup_inputs` return the UNION of all keys that BOTH
+`run_kernel` and `run_ref` reference.
+
+### Element-type rules (infer from parameter name + kernel signature)
+
+| Parameter class | Examples | Build as |
+|---|---|---|
+| Float activation / weight tensor | `query`, `k_cache`, `v_cache`, `weight`, `x` | `torch.randn(shape, dtype=dtype, device="cuda")` |
+| Integer index / length tensor | `block_tables`, `seq_lens`, `context_lens`, `cu_seqlens`, `*_indptr`, `*_indices` | integer tensor with VALID values, e.g. `torch.randint(0, num_blocks, (num_seqs, max_blocks), dtype=torch.int32, device="cuda")`; lengths `≤ max_seq_len`. **NEVER** `torch.randn` |
+| Integer scalar | `max_seq_len`, `num_kv_heads`, `num_heads`, `head_size`, `block_size`, `num_seqs`, `num_queries_per_kv`, `high_precision` | a Python `int` consistent with the tensor shapes (e.g. `num_kv_heads = k_cache.shape[1]`) |
+| Float scalar | `scale`, `softmax_scale`, `sm_scale`, `eps` | a Python `float` (e.g. `scale = head_size ** -0.5`, `eps = 1e-6`) |
+| dtype / quant flag | `kv_cache_dtype`, `*_dtype` | a real `torch.dtype` or the string the kernel expects (e.g. `"auto"` / `"fp8"`), **NOT** a tensor |
+
+For paged-attention and other multi-tensor kernels, derive the shape dimensions
+(`num_seqs`, `num_heads`, `head_size`, `block_size`, `num_blocks`) ONCE and build
+every tensor/scalar from those same values so they are mutually consistent. A
+random `block_tables` that indexes past `num_blocks`, or a float `seq_lens`, will
+segfault or assert before any correctness check runs.
+
+### Key-consistency rule (prevents `KeyError` at smoke test)
+
+`run_kernel(inputs)` and `run_ref(inputs)` frequently have DIFFERENT signatures
+(e.g. the kernel takes `k_scale`/`v_scale` while the torch reference takes
+`k_scale_cache`/`v_scale_cache`/`num_queries_per_kv`/`dtype`). If `setup_inputs`
+only builds the kernel's args, `run_ref` raises `KeyError` and correctness fails
+on every config. Therefore:
+
+1. Enumerate the args read by BOTH `run_kernel` and `run_ref`.
+2. `setup_inputs` MUST return a key for the **UNION** of both arg sets.
+3. Prefer `inputs.get("name")` over `inputs["name"]` inside `run_kernel` /
+   `run_ref` so a genuinely optional arg degrades to `None` instead of raising.
+
+### Mandatory baseline self-test (do this before emitting test_command)
+
+Run the harness once on the UNMODIFIED kernel: `python3 <harness> --correctness`.
+If it does NOT print `ALL CORRECTNESS CHECKS PASSED` (or an explicit SNR/allclose
+pass), the harness is wrong — fix the parameter types / keys above and retry. Do
+NOT emit a `test_command` whose baseline fails correctness: the forge/GEAK loop
+cannot optimize against a harness the baseline itself can't pass, and will burn
+the entire budget reverting.
+
+---
+
 ## Phase 2 — Harness Generation (from scratch)
 
 ### 2.1 Collect shapes and dtypes
@@ -587,6 +637,13 @@ These are the most common reasons for harness rejection:
 - [ ] **Kernel import uses package path** (`from X import Y`), not importlib
 - [ ] **`torch.manual_seed(42)` in `setup_inputs`** — reproducible tensors
 - [ ] **`run_kernel` calls the kernel under test**, not the reference impl
+- [ ] **Argument element-types are correct** — index/length args are integer
+  tensors (NOT `torch.randn`), scalars are Python int/float, dtype args are real
+  dtypes/strings (see "Parameter typing & key consistency")
+- [ ] **`setup_inputs` returns the UNION of all keys** read by `run_kernel` AND
+  `run_ref` (no `KeyError` at smoke test); `run_*` use `inputs.get(...)`
+- [ ] **Baseline self-test passes** — `python3 <harness> --correctness` on the
+  unmodified kernel prints `ALL CORRECTNESS CHECKS PASSED`
 
 If any item is missing, fix it before proceeding. `validate_harness.py` will
 catch most of these, but self-checking first saves a retry cycle.
@@ -637,6 +694,8 @@ use its own test discovery.
 | `RuntimeError: expected ... got ...` | Tensor shape/dtype mismatch | Check kernel signature carefully |
 | `CUDA out of memory` | Configs too large | Reduce batch sizes, add `empty_cache()` |
 | `CORRECTNESS FAILED` | Bad reference impl or wrong tolerance | Compare against existing test's reference |
+| `CORRECTNESS FAILED` on baseline (unmodified kernel) | Wrong arg element-types (float index/seq_lens), or `setup_inputs` missing a key `run_ref` reads | Apply "Parameter typing & key consistency": int index tensors, scalar/dtype args, UNION of kernel+ref keys |
+| `KeyError: '<arg>'` | `setup_inputs` only built kernel args, not ref args | Return the UNION of `run_kernel` + `run_ref` keys; use `inputs.get(...)` |
 | `Timed out after 300s` | Kernel too slow at given shapes | Reduce config space, smaller shapes |
 | Missing `GEAK_SHAPES_USED` | Mode function doesn't print marker | Check print statement after loop |
 
