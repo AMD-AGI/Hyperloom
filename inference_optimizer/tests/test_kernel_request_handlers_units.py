@@ -117,6 +117,114 @@ class TestForgeGemmHelperCoverage:
         assert result["error_class"] == "forge_gemm_tune_not_found"
         assert result["backend"] == "forge"
 
+    def test_forge_gemm_tune_available_swallows_find_spec_error(self, monkeypatch):
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
+
+        def _boom(_name):
+            raise ValueError("ambiguous spec")
+
+        monkeypatch.setattr(krh.importlib.util, "find_spec", _boom)
+        assert krh._forge_gemm_tune_available() is False
+
+    def test_resolve_forge_precision_falls_back_to_bf16(self, monkeypatch):
+        # Empty session precision + no fp8/fp4 quantization → bf16/auto default.
+        state = SharedState(precision="")
+        state.current_best = {"extra_server_args": "", "extra_envs": {}}
+        import inference_optimizer.orchestrator.roofline_ceiling as rc
+
+        def _raise(*_a, **_k):
+            raise RuntimeError("no runtime workload")
+
+        monkeypatch.setattr(rc, "resolve_runtime_workload", _raise)
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
+
+    def test_resolve_forge_server_log_uses_baseline_when_no_current_best(self, tmp_path):
+        state = SharedState()
+        baseline = tmp_path / "baseline"
+        baseline.mkdir()
+        (baseline / "server.log").write_text("baseline", encoding="utf-8")
+        state.last_baseline = {"workspace": str(baseline)}
+
+        assert krh._resolve_forge_server_log(state, tmp_path) == str(baseline / "server.log")
+
+    def test_resolve_forge_shapes_reads_artifact_paths_dict(self, tmp_path):
+        state = SharedState()
+        shapes = tmp_path / "gemm_shapes.json"
+        shapes.write_text(json.dumps({"shapes": [{"m": 1, "n": 2, "k": 3}]}), encoding="utf-8")
+        state.last_trace_analyze = {"artifact_paths": {"gemm_shapes_json": str(shapes)}}
+
+        assert krh._resolve_forge_shapes(state, tmp_path) == str(shapes)
+
+    def test_resolve_forge_shapes_skips_incompatible_candidate(self, tmp_path):
+        state = SharedState()
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([{"only": "noMNK"}]), encoding="utf-8")
+        state.last_trace_analyze = {"shapes_json": str(bad)}
+
+        assert krh._resolve_forge_shapes(state, tmp_path) == ""
+
+    def test_is_forge_compatible_shapes_json_rejects_non_dict_sample(self, tmp_path):
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([123, 456]), encoding="utf-8")
+        assert krh._is_forge_compatible_shapes_json(bad) is False
+
+    def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
+        state = SharedState()
+        state.last_trace_analyze = ["not", "a", "dict"]
+        assert krh._resolve_forge_shapes(state, Path("/tmp")) == ""
+
+    def test_resolve_forge_shapes_finds_file_beside_candidates(self, tmp_path):
+        state = SharedState()
+        candidates = tmp_path / "candidates.json"
+        candidates.write_text("[]", encoding="utf-8")
+        shapes = tmp_path / "shapes.json"
+        shapes.write_text(json.dumps([{"M": 1, "N": 2, "K": 3}]), encoding="utf-8")
+        state.last_trace_analyze = {"candidates_path": str(candidates)}
+
+        assert krh._resolve_forge_shapes(state, tmp_path) == str(shapes)
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_requires_model_path(self, tmp_path, monkeypatch):
+        state = SharedState(precision="bf16", framework="sglang")
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.delenv("MODEL_PATH", raising=False)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "model_path_missing"
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_maps_failed_micro_decision(self, tmp_path, monkeypatch):
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"micro_decision": "failed"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 1, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "REVERT"
+        assert result["status"] == "failed"
+        assert result["backend"] == "forge"
+
 
 def _ensure_torch_module(monkeypatch):
     try:
