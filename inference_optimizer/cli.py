@@ -3220,6 +3220,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # published for the robustness monitor.
         session_lock = _acquire_session_lock_or_exit(session_dir)
         manifest = write_manifest(session_dir, args=args)
+        # One-shot Langfuse startup marker: ties the WekaFS user dir + session
+        # dir to code_revision/dependency commits the moment the session is
+        # created, so a run that aborts in pre-flight or is killed before a
+        # breakdown still leaves a correlatable trace. Best-effort, never fatal.
+        try:
+            from .orchestrator.trace.langfuse_emitter import record_session_start
+
+            record_session_start(session_dir)
+        except Exception:  # noqa: BLE001 — startup marker must never break launch
+            log.debug("langfuse record_session_start failed (non-fatal)", exc_info=True)
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
         _print_session_skeleton(session_dir)
