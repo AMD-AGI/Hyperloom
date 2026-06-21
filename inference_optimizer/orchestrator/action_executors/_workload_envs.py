@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -37,6 +38,13 @@ from ._grid_runner import (
     inject_sglang_watchdog_timeout,
     server_args_env_name,
 )
+
+_MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:[=\s]+)\S+")
+
+
+def _remove_moe_runner_backend_arg(args: str) -> str:
+    """Remove any existing SGLang MoE runner backend flag from an args string."""
+    return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
 from ._server_patcher import (
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
@@ -484,6 +492,11 @@ def materialize_config_with_envs(
 
         framework_env = server_args_env_name(bench.get("framework"))
         existing = str(envs.get(framework_env, "")).strip()
+        if framework_env == "EXTRA_SGLANG_ARGS" and "--moe-runner-backend" in str(server_args):
+            # For MoE backend exploration/tuning, the candidate value must
+            # replace the baseline's injected default (usually triton) rather
+            # than relying on duplicate last-wins flags.
+            existing = _remove_moe_runner_backend_arg(existing)
         if existing:
             envs[framework_env] = merge_server_args(existing, server_args)
         else:
