@@ -167,3 +167,42 @@ class TestIntegrateHandlerHonoursStateDefault:
 
         assert result["status"] == "failed"
         assert "base_tput" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_env_only_gemm_validation_runs_baseline_with_extra_envs(
+        self,
+        session_dir,
+        monkeypatch,
+    ):
+        """GEMM tuning validation has no patch; it must still run E2E with envs."""
+        _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
+        captured: dict[str, object] = {}
+
+        class FakeBaselineExecutor:
+            def __init__(self, *, session_dir):
+                self.session_dir = session_dir
+
+            async def __call__(self, ctx):
+                captured["params"] = dict(ctx.task.params)
+                return {"output_throughput": 1100.0, "completed_requests": 10}
+
+        from inference_optimizer.orchestrator.action_executors import baseline as baseline_mod
+
+        monkeypatch.setattr(baseline_mod, "BaselineExecutor", FakeBaselineExecutor)
+
+        result = await krh.integrate_handler(
+            {
+                "source": "forge_gemm_tuning",
+                "kernel_id": "gemm_tune_fmoe_ck",
+                "base_tput": 1000.0,
+                "config_path": "/tmp/base.yaml",
+                "extra_envs": {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"},
+                "budget_minutes": 1,
+            },
+            session_dir=session_dir,
+        )
+
+        assert result["status"] == "ok", result
+        assert result["decision"] == "KEEP"
+        assert result["new_tput"] == 1100.0
+        assert captured["params"]["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
