@@ -340,7 +340,7 @@ class OpResolver:
         if kind == "dispatch":
             return self._dispatch(op_name, entry, framework, device_kernel_name)
         if kind == "composite":
-            return self._composite(op_name, entry, framework)
+            return self._composite(op_name, entry, framework, device_kernel_name)
         return self._single(op_name, entry, framework)
 
     @staticmethod
@@ -453,9 +453,45 @@ class OpResolver:
         )
 
     def _composite(
-        self, op_name: str, entry: dict[str, Any], framework: str | None,
+        self,
+        op_name: str,
+        entry: dict[str, Any],
+        framework: str | None,
+        device_kernel_name: str | None = None,
     ) -> OpResolution:
-        """Resolve a ``composite`` entry into a fan-out over its editable kernels."""
+        """Resolve a ``composite`` entry into a fan-out over its editable kernels.
+
+        A ``composite`` profiler label aggregates several device kernels that fire
+        under one CPU op (e.g. the Triton fused-MoE label covers the MoE GEMM plus
+        co-firing quant/align helpers). When the trace reports the *dominant* device
+        kernel name for this op, narrow to the single editable source whose symbol
+        matches it (the same disambiguation ``dispatch`` uses via
+        :meth:`_kernel_matches`) instead of fanning out to every co-kernel source.
+        This keeps the hot kernel as the optimization target rather than splitting
+        ``duration_us`` evenly across minor helpers and sending GEAK at the wrong file.
+        Falls back to the full fan-out only when no device name is given or none of
+        the composite's editable kernels match it -- so behavior is unchanged for
+        composites without a trace device symbol.
+        """
+        name = (device_kernel_name or "").strip()
+        if name:
+            fw = (framework or "").strip().lower()
+            containers = (
+                [entry.get("sglang"), entry.get("vllm")]
+                if fw == "sglang"
+                else [entry.get("vllm"), entry.get("sglang")]
+            )
+            for container in containers:
+                for kname, info in (container or {}).items():
+                    if not isinstance(info, dict) or not self._kernel_matches(name, kname):
+                        continue
+                    path = info.get("kernel_source_path")
+                    if info.get("patchable") and _is_editable_source(path, info.get("kernel_kind")):
+                        return OpResolution(
+                            op_name=op_name, kind="composite", status=_ROUTABLE_STATUS,
+                            patchable=True, framework=framework,
+                            sources=[_absolutize_source(str(path))], matched_route=kname,
+                        )
         sources = self._select_sources(entry, framework)
         fanout = [
             OpResolution(
