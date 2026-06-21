@@ -61,7 +61,7 @@ VALID_FAMILIES: frozenset[str] = frozenset(
     }
 )
 
-VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex"})
+VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex", "forge"})
 
 # Coarse-grained pipeline phase for prompt_builder grouping; prompt-advisory
 # only (the real state machine lives in :mod:`phase_state`).
