@@ -16,6 +16,216 @@ from inference_optimizer.orchestrator import kernel_request_handlers as krh
 from inference_optimizer.orchestrator.shared_state import SharedState
 
 
+class TestForgeGemmHelperCoverage:
+    def test_resolve_backend_payload_env_and_default(self, monkeypatch):
+        monkeypatch.delenv("GEMM_TUNING_BACKEND", raising=False)
+        assert krh._resolve_gemm_tuning_backend({}) == "forge"
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        assert krh._resolve_gemm_tuning_backend({}) == "geak"
+        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "forge"
+        # Unknown values fall back to the default instead of surfacing an invalid backend.
+        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "forge"
+
+    def test_parse_forge_gemm_sentinel(self):
+        payload = {"status": "ok", "micro_decision": "candidate"}
+        text = "noise\nFORGE_GEMM_TUNE_RESULT_BEGIN\n" + json.dumps(payload) + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        assert krh._parse_forge_gemm_sentinel(text) == payload
+        assert krh._parse_forge_gemm_sentinel("no sentinel") is None
+        assert (
+            krh._parse_forge_gemm_sentinel(
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\nnot-json\nFORGE_GEMM_TUNE_RESULT_END"
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
+    def test_truthy_env_value_true(self, value):
+        assert krh._truthy_env_value(value) is True
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "off", None])
+    def test_truthy_env_value_false(self, value):
+        assert krh._truthy_env_value(value) is False
+
+    def test_resolve_forge_server_log_priority(self, tmp_path):
+        state = SharedState()
+        baseline = tmp_path / "baseline"
+        current = tmp_path / "current"
+        baseline.mkdir()
+        current.mkdir()
+        (baseline / "server.log").write_text("baseline", encoding="utf-8")
+        (current / "server.log").write_text("current", encoding="utf-8")
+        state.last_baseline = {"workspace": str(baseline)}
+        state.current_best = {"workspace": str(current)}
+
+        assert krh._resolve_forge_server_log(state, tmp_path) == str(current / "server.log")
+
+    def test_resolve_forge_server_log_bounded_runs_fallback(self, tmp_path):
+        state = SharedState()
+        log = tmp_path / "runs" / "explore" / "abc" / "server.log"
+        log.parent.mkdir(parents=True)
+        log.write_text("x", encoding="utf-8")
+
+        assert krh._resolve_forge_server_log(state, tmp_path) == str(log)
+
+    def test_resolve_forge_precision_payload_override(self):
+        state = SharedState(precision="bf16")
+        assert krh._resolve_forge_precision_and_quant(
+            state,
+            {"precision": "fp8", "quant_type": "blockscale"},
+        ) == ("fp8", "blockscale")
+
+    def test_resolve_forge_precision_from_runtime_fp4(self):
+        state = SharedState(precision="bf16")
+        state.current_best = {"extra_server_args": "--quantization fp4", "extra_envs": {}}
+
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp4", "fp4")
+
+    def test_resolve_forge_precision_per_token_from_reference_env(self):
+        state = SharedState(precision="bf16")
+        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
+        state.reference_envs = {"SGLANG_USE_AITER_FP8_PER_TOKEN": "true"}
+
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
+
+    def test_forge_gemm_tune_available_by_path_and_import(self, monkeypatch):
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-gemm-tune")
+        assert krh._forge_gemm_tune_available() is True
+
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: object())
+        assert krh._forge_gemm_tune_available() is True
+
+        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: None)
+        assert krh._forge_gemm_tune_available() is False
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_reports_missing_cli(self, tmp_path, monkeypatch):
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: False)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "forge_gemm_tune_not_found"
+        assert result["backend"] == "forge"
+
+    def test_forge_gemm_tune_available_swallows_find_spec_error(self, monkeypatch):
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
+
+        def _boom(_name):
+            raise ValueError("ambiguous spec")
+
+        monkeypatch.setattr(krh.importlib.util, "find_spec", _boom)
+        assert krh._forge_gemm_tune_available() is False
+
+    def test_resolve_forge_precision_falls_back_to_bf16(self, monkeypatch):
+        # Empty session precision + no fp8/fp4 quantization → bf16/auto default.
+        state = SharedState(precision="")
+        state.current_best = {"extra_server_args": "", "extra_envs": {}}
+        import inference_optimizer.orchestrator.roofline_ceiling as rc
+
+        def _raise(*_a, **_k):
+            raise RuntimeError("no runtime workload")
+
+        monkeypatch.setattr(rc, "resolve_runtime_workload", _raise)
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
+
+    def test_resolve_forge_server_log_uses_baseline_when_no_current_best(self, tmp_path):
+        state = SharedState()
+        baseline = tmp_path / "baseline"
+        baseline.mkdir()
+        (baseline / "server.log").write_text("baseline", encoding="utf-8")
+        state.last_baseline = {"workspace": str(baseline)}
+
+        assert krh._resolve_forge_server_log(state, tmp_path) == str(baseline / "server.log")
+
+    def test_resolve_forge_shapes_reads_artifact_paths_dict(self, tmp_path):
+        state = SharedState()
+        shapes = tmp_path / "gemm_shapes.json"
+        shapes.write_text(json.dumps({"shapes": [{"m": 1, "n": 2, "k": 3}]}), encoding="utf-8")
+        state.last_trace_analyze = {"artifact_paths": {"gemm_shapes_json": str(shapes)}}
+
+        assert krh._resolve_forge_shapes(state, tmp_path) == str(shapes)
+
+    def test_resolve_forge_shapes_skips_incompatible_candidate(self, tmp_path):
+        state = SharedState()
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([{"only": "noMNK"}]), encoding="utf-8")
+        state.last_trace_analyze = {"shapes_json": str(bad)}
+
+        assert krh._resolve_forge_shapes(state, tmp_path) == ""
+
+    def test_is_forge_compatible_shapes_json_rejects_non_dict_sample(self, tmp_path):
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([123, 456]), encoding="utf-8")
+        assert krh._is_forge_compatible_shapes_json(bad) is False
+
+    def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
+        state = SharedState()
+        state.last_trace_analyze = ["not", "a", "dict"]
+        assert krh._resolve_forge_shapes(state, Path("/tmp")) == ""
+
+    def test_resolve_forge_shapes_finds_file_beside_candidates(self, tmp_path):
+        state = SharedState()
+        candidates = tmp_path / "candidates.json"
+        candidates.write_text("[]", encoding="utf-8")
+        shapes = tmp_path / "shapes.json"
+        shapes.write_text(json.dumps([{"M": 1, "N": 2, "K": 3}]), encoding="utf-8")
+        state.last_trace_analyze = {"candidates_path": str(candidates)}
+
+        assert krh._resolve_forge_shapes(state, tmp_path) == str(shapes)
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_requires_model_path(self, tmp_path, monkeypatch):
+        state = SharedState(precision="bf16", framework="sglang")
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.delenv("MODEL_PATH", raising=False)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "model_path_missing"
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_maps_failed_micro_decision(self, tmp_path, monkeypatch):
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"micro_decision": "failed"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 1, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "REVERT"
+        assert result["status"] == "failed"
+        assert result["backend"] == "forge"
+
+
 def _ensure_torch_module(monkeypatch):
     try:
         import torch
@@ -334,7 +544,8 @@ class TestReusableSourceRootsAtom:
 
 # run_gemm_tuning_handler
 class TestRunGemmTuningHandler:
-    def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path):
+    def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         state = SharedState(precision="bf16", framework="sglang")
         state.save(tmp_path)
 
@@ -344,6 +555,7 @@ class TestRunGemmTuningHandler:
         assert result["error_class"] == "fp8_only_action"
 
     def test_builds_task_file_input_not_task_argv(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         root = tmp_path / "kernel-agent"
         tool = root / "tools" / "gemm_tuning.py"
         tool.parent.mkdir(parents=True)
@@ -404,6 +616,7 @@ class TestRunGemmTuningHandler:
         assert "--input-json" in captured["cmd"]  # type: ignore[operator]
 
     def test_generates_isolated_benchmark_script_when_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         root = tmp_path / "kernel-agent"
         tool = root / "tools" / "gemm_tuning.py"
         tool.parent.mkdir(parents=True)
@@ -455,6 +668,160 @@ class TestRunGemmTuningHandler:
         )
 
         assert result["status"] == "ok"
+
+    def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.current_best = {
+            "extra_server_args": "--quantization fp8 --fp8-gemm-backend aiter",
+            "extra_envs": {},
+        }
+        state.save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            captured["cmd"] = cmd
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "ok",
+                        "micro_decision": "candidate",
+                        "recommended_env": {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"},
+                        "tuners_run": [{"best_micro_speedup": 1.1}],
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path)
+        )
+
+        cmd = captured["cmd"]  # type: ignore[assignment]
+        input_path = cmd[cmd.index("--input-json") + 1]
+        data = json.loads(Path(input_path).read_text())
+        assert data["precision"] == "fp8"
+        # Do not force blockscale from Hyperloom. Forge should inspect
+        # kernel_signature_log when available; without a log it defaults to
+        # blockscale internally.
+        assert data["quant_type"] == "auto"
+        assert data["conc"] == 256
+        assert result["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
+
+    def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.current_best = {
+            "extra_server_args": "--quantization fp8 --fp8-gemm-backend aiter",
+            "extra_envs": {"SGLANG_USE_AITER_FP8_PER_TOKEN": "1"},
+        }
+        state.save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            captured["cmd"] = cmd
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "skipped",
+                        "micro_decision": "skipped",
+                        "recommended_env": {},
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        asyncio.run(krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path))
+
+        cmd = captured["cmd"]  # type: ignore[assignment]
+        input_path = cmd[cmd.index("--input-json") + 1]
+        data = json.loads(Path(input_path).read_text())
+        assert data["precision"] == "fp8"
+        assert data["quant_type"] == "per_token"
+
+    def test_forge_fallback_to_session_precision_when_no_quantization(self, tmp_path, monkeypatch):
+        """When current_best has no --quantization, fall back to state.precision."""
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/moe",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.current_best = {"extra_server_args": "", "extra_envs": {}}
+        state.save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            captured["cmd"] = cmd
+            return (0, json.dumps({"status": "ok", "micro_decision": "skipped"}), "")
+
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        asyncio.run(krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path))
+
+        cmd = captured["cmd"]  # type: ignore[assignment]
+        input_path = cmd[cmd.index("--input-json") + 1]
+        data = json.loads(Path(input_path).read_text())
+        assert data["precision"] == "bf16"
+        assert data["quant_type"] == "auto"
+
+    def test_forge_shapes_json_schema_validation(self, tmp_path):
+        good = tmp_path / "good_shapes.json"
+        good.write_text(json.dumps({"shapes": [{"M": 1, "N": 2, "K": 3}]}))
+        bad_empty = tmp_path / "bad_empty.json"
+        bad_empty.write_text(json.dumps({"shapes": []}))
+        bad_trace_shape = tmp_path / "bad_trace_shape.json"
+        bad_trace_shape.write_text(json.dumps([{"shape": [1, 2, 3]}]))
+
+        assert krh._is_forge_compatible_shapes_json(good) is True
+        assert krh._is_forge_compatible_shapes_json(bad_empty) is False
+        assert krh._is_forge_compatible_shapes_json(bad_trace_shape) is False
+        assert krh._is_forge_compatible_shapes_json(tmp_path / "missing.json") is False
+
+    def test_resolve_forge_shapes_prefers_compatible_artifact(self, tmp_path):
+        session_dir = tmp_path / "session"
+        shapes = tmp_path / "shapes.json"
+        shapes.write_text(json.dumps([{"m": 4, "n": 5, "k": 6}]))
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([{"shape": [1, 2, 3]}]))
+
+        state = SharedState()
+        state.last_trace_analyze = {
+            "shapes_json": str(bad),
+            "artifact_paths": {"gemm_shapes_json": str(shapes)},
+        }
+
+        assert krh._resolve_forge_shapes(state, session_dir) == str(shapes)
 
 
 # _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror

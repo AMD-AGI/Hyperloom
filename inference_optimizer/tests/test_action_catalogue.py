@@ -159,7 +159,8 @@ def test_gemm_tuning_action_metadata(registry):
     assert m.family == "deep_kernel"
     assert m.pipeline_phase == "deep"
     assert set(m.requires_lanes) == {"server_lifecycle", "workspace_mutation", "benchmark_lane"}
-    assert "precision == 'fp8'" in m.applicable_when
+    assert "framework in ('sglang', 'vllm')" in m.applicable_when
+    assert any("is_moe" in cond and "precision == 'fp8'" in cond for cond in m.applicable_when)
 
 
 def test_recover_owned_by_robustness_handle(registry):

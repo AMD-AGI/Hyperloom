@@ -521,6 +521,64 @@ PY
   fi
 }
 
+# --- 1b. forge-gemm-tune (KernelForge deterministic GEMM tuning CLI) ---
+_forge_gemm_tune_candidates() {
+  # Explicit override first.
+  [ -n "${FORGE_GEMM_TUNE_ROOT:-}" ] && printf '%s\n' "$FORGE_GEMM_TUNE_ROOT"
+  # KernelForge root aliases used by Hyperloom's forge backend.
+  [ -n "${FORGE_PATH:-}" ] && printf '%s\n' "${FORGE_PATH%/}/src/forge_gemm_tune" "${FORGE_PATH%/}/forge_gemm_tune"
+  [ -n "${KERNEL_FORGE_ROOT:-}" ] && printf '%s\n' "${KERNEL_FORGE_ROOT%/}/src/forge_gemm_tune" "${KERNEL_FORGE_ROOT%/}/forge_gemm_tune"
+  [ -n "${KERNEL_FORGE_PATH:-}" ] && printf '%s\n' "${KERNEL_FORGE_PATH%/}/src/forge_gemm_tune" "${KERNEL_FORGE_PATH%/}/forge_gemm_tune"
+  # Local sibling worktree / checkout fallbacks.
+  printf '%s\n' \
+    "${REPO_ROOT%/}/../KernelForge/src/forge_gemm_tune" \
+    "${REPO_ROOT%/}/../KernelForge/forge_gemm_tune" \
+    "${REPO_ROOT%/}/../wt-forge-gemm-tune/src/forge_gemm_tune" \
+    "${REPO_ROOT%/}/../wt-forge-gemm-tune/forge_gemm_tune"
+}
+
+_resolve_forge_gemm_tune_root() {
+  local cand
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    if [ -f "${cand%/}/pyproject.toml" ] && { [ -f "${cand%/}/forge_gemm_tune/cli.py" ] || [ -f "${cand%/}/cli.py" ]; }; then
+      realpath "$cand" 2>/dev/null || printf '%s\n' "$cand"
+      return 0
+    fi
+  done < <(_forge_gemm_tune_candidates)
+  return 1
+}
+
+ensure_forge_gemm_tune() {
+  local root resolved
+  if root="$(_resolve_forge_gemm_tune_root)"; then
+    log "ensuring forge-gemm-tune from ${root}"
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+      "$PYTHON" -c "import forge_gemm_tune" >/dev/null 2>&1 \
+        && log "forge-gemm-tune import OK" \
+        || warn "forge-gemm-tune not importable (check-only; would install from ${root})"
+      return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "would run: ${PYTHON} -m pip install -e ${root}"
+      return 0
+    fi
+    resolved="$("$PYTHON" -c 'import forge_gemm_tune, os; print(os.path.realpath(os.path.dirname(forge_gemm_tune.__file__)))' 2>/dev/null || true)"
+    case "$resolved" in
+      "$root" | "$root"/*)
+        log "forge-gemm-tune already installed from ${root}; skipping editable reinstall"
+        ;;
+      *)
+        "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$root"
+        "$PYTHON" -c "import forge_gemm_tune; import forge_gemm_tune.cli" >/dev/null
+        log "forge-gemm-tune installed OK from ${root}"
+        ;;
+    esac
+  else
+    warn "forge-gemm-tune source not found; forge GEMM tuning will fail unless preinstalled. Set FORGE_PATH or FORGE_GEMM_TUNE_ROOT."
+  fi
+}
+
 # --- 2. Magpie ---
 # The install state is the checkout under $MAGPIE_DIR (default:
 # the pod-local open-source repo tree), not whatever `import Magpie` resolves
@@ -1022,6 +1080,7 @@ chain_framework_agent() {
 }
 
 ensure_inference_optimizer
+ensure_forge_gemm_tune
 ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /
 # InferenceX clones + the chained kernel-agent GEAK/OOB/TraceLens clones).
