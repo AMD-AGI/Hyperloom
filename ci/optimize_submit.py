@@ -1821,9 +1821,22 @@ def process_model(
                 repo_id.replace("/", "-")),
         )
         if compat:
+            reason, detail = compat
             rec.status = "skipped"
-            rec.error = f"{compat[0]}: {compat[1]}"
-            log.warning("[%s] skipping (compat): %s", repo_id, rec.error)
+            rec.error = f"{reason}: {detail}"
+            log.warning(
+                "[%s] PRE-FLIGHT FILTERED — repo_id=%s rule=%s reason=%s "
+                "arch=%s params=%.1fB max_position_embeddings=%s framework=%s — "
+                "skipping: NOT submitting, no Claw session created",
+                repo_id,
+                repo_id,
+                reason,
+                detail,
+                detected.arch,
+                detected.params_b,
+                detected.max_position_embeddings or "?",
+                detected.framework,
+            )
             return rec
 
     framework = overrides.get("framework") or (detected.framework if detected else "")
