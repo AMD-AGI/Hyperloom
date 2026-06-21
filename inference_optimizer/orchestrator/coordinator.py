@@ -3683,6 +3683,14 @@ class Coordinator:
             # benchmark_serving.py) so final/sweep numbers are cross-harness 可比.
             "bench_client": "auto",
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
+            # Pin the serving / optimization GPU set so PerfSkills never guesses:
+            # honour an explicit visibility mask, else 0..tp-1 (matches run_e2e
+            # map_args' own default). Removes ambiguity when Hyperloom drives.
+            "gpu_ids": (
+                os.environ.get("HIP_VISIBLE_DEVICES")
+                or os.environ.get("CUDA_VISIBLE_DEVICES")
+                or ",".join(str(i) for i in range(int(os.environ.get("TP", "1") or 1)))
+            ),
         }
         if bench_protocol:
             handoff["bench_protocol"] = bench_protocol
@@ -3747,11 +3755,37 @@ class Coordinator:
                  from_phase or "<unknown>", runner_timeout, kill_timeout,
                  budget_known, " ".join(cmd))
 
+        # Run in its own process group so a timeout can SIGTERM the whole
+        # runner -> run_e2e -> vllm/node tree (grace to flush result.json), then
+        # SIGKILL. A bare subprocess.run(timeout=) would SIGKILL only the direct
+        # child and orphan run_e2e + its servers.
+        term_grace = int(os.environ.get("PERFSKILLS_TERM_GRACE_S", "180"))
+
         def _run() -> subprocess.CompletedProcess:
-            return subprocess.run(
-                cmd, capture_output=True, text=True, timeout=kill_timeout,
-                env=dict(os.environ),
+            p = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env=dict(os.environ), start_new_session=True,
             )
+
+            def _killpg(sig: int) -> None:
+                try:
+                    os.killpg(os.getpgid(p.pid), sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+            try:
+                out, err = p.communicate(timeout=kill_timeout)
+            except subprocess.TimeoutExpired:
+                _killpg(signal.SIGTERM)
+                try:
+                    out, err = p.communicate(timeout=term_grace)
+                except subprocess.TimeoutExpired:
+                    _killpg(signal.SIGKILL)
+                    out, err = p.communicate()
+                raise subprocess.TimeoutExpired(
+                    cmd, kill_timeout, output=out, stderr=err,
+                )
+            return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
         try:
             proc = await asyncio.to_thread(_run)
@@ -3759,8 +3793,38 @@ class Coordinator:
             if proc.returncode != 0:
                 log.warning("PerfSkills runner rc=%s: %s", proc.returncode, stderr_tail)
         except subprocess.TimeoutExpired:
-            log.warning("PerfSkills runner exceeded kill_timeout=%ds; killed to "
-                        "protect the closing window", kill_timeout)
+            log.warning("PerfSkills runner exceeded kill_timeout=%ds; SIGTERM'd "
+                        "to let it flush, then reclaimed the closing window",
+                        kill_timeout)
+            # The graceful SIGTERM gives run_e2e a window to flush result.json
+            # (recover-from-disk). If it landed a real win, keep it instead of
+            # discarding the whole KERNEL phase as a timeout.
+            flushed = out_dir / "result.json"
+            recovered: dict[str, Any] = {}
+            if flushed.is_file():
+                try:
+                    recovered = json.loads(flushed.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    recovered = {}
+            if recovered.get("status") == "ok":
+                log.info("PerfSkills flushed an OK result.json under SIGTERM "
+                         "grace; promoting the recovered win despite the cap.")
+                state.perfskills_result = recovered
+                self._promote_perfskills_result(recovered)
+                self._record_perfskills_kernel_journey(recovered)
+                self._record_phase_entry_evidence(perfskills={
+                    "status": recovered.get("status"),
+                    "throughput_speedup": recovered.get("throughput_speedup"),
+                    "final_throughput_tok_s": recovered.get("final_throughput_tok_s"),
+                    "eval_dir": recovered.get("eval_dir"),
+                    "report_path": recovered.get("report_path"),
+                    "runner_timeout_s": runner_timeout,
+                    "flushed_under_sigterm": True,
+                })
+                state.save(self.session_dir)
+                state.set_pending_escalate_hint(
+                    _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+                return
             _finish_skip({
                 "status": "error",
                 "error_class": "timeout",

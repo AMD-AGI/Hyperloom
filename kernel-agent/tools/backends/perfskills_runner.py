@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -134,24 +135,44 @@ def call_perfskills(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
     # never override the caller's budget — when Hyperloom drives, PerfSkills'
     # time MUST come from Hyperloom (the --timeout-s it passes). Standalone runs
     # resolve timeout_s to the 12h default (or an explicit env, see _main).
-    env["PERFSKILLS_E2E_TIMEOUT_S"] = str(timeout_s)
+    # Split the inner SOFT deadline from the outer HARD kill so run_e2e can
+    # self-stop (anyio.fail_after) and FLUSH result.json (recover-from-disk)
+    # before we SIGKILL. Previously both were timeout_s, so the flush was killed
+    # mid-write -> "no_result_json" and the measured win was lost.
+    flush_grace = int(os.environ.get("PERFSKILLS_FLUSH_GRACE_S", "180"))
+    inner_timeout = max(60, timeout_s - flush_grace)
+    env["PERFSKILLS_E2E_TIMEOUT_S"] = str(inner_timeout)  # run_e2e's anyio budget
 
     started = time.time()
+    # start_new_session=True -> run_e2e + its vllm/node children share a process
+    # group we can signal as a unit (prevents leaked-server orphans).
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=env, start_new_session=True,
+    )
+
+    def _killpg(sig: int) -> None:
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_s, env=env,
-        )
+        stdout, stderr = proc.communicate(timeout=timeout_s)
         returncode = proc.returncode
-        stdout_tail = (proc.stdout or "")[-4000:]
-        stderr_tail = (proc.stderr or "")[-4000:]
-    except subprocess.TimeoutExpired as e:
-        return {
-            "status": "error", "error": f"PerfSkills timed out after {timeout_s}s",
-            "returncode": -1, "stdout_tail": str(e.stdout or "")[-4000:],
-            "stderr_tail": str(e.stderr or "")[-4000:],
-            "elapsed_s": round(time.time() - started, 2),
-            "handoff_path": str(handoff_path), "result_path": str(result_path),
-        }
+    except subprocess.TimeoutExpired:
+        # Be polite first: SIGTERM lets run_e2e's handler flush result.json,
+        # then escalate to SIGKILL if it overruns the grace window.
+        _killpg(signal.SIGTERM)
+        try:
+            stdout, stderr = proc.communicate(timeout=flush_grace)
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            _killpg(signal.SIGKILL)
+            stdout, stderr = proc.communicate()
+            returncode = -1
+    stdout_tail = (stdout or "")[-4000:]
+    stderr_tail = (stderr or "")[-4000:]
 
     result: dict = {}
     if result_path.is_file():
