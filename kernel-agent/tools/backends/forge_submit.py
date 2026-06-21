@@ -1390,6 +1390,9 @@ def _apply_fellow_env(env: dict) -> None:
             env["PATH"] = bindir + os.pathsep + cur_path if cur_path else bindir
     # The AMD SaFE proxy presents an internal/self-signed cert; without skipping
     # TLS the Node CLI handshake fails and the streaming query() hangs.
+    base_url = str(env.get("ANTHROPIC_BASE_URL") or "").strip()
+    if base_url.endswith("/llm-gateway"):
+        env["ANTHROPIC_BASE_URL"] = base_url[: -len("/llm-gateway")] + "/api/v1/llm-proxy"
     env.setdefault("ANTHROPIC_SKIP_TLS_VERIFY", "true")
     env.setdefault("NODE_TLS_REJECT_UNAUTHORIZED", "0")
     # Fellow-hung mitigation (RCA root cause 4): a streaming request to the SaFE
