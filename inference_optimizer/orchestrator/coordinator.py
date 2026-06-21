@@ -3623,7 +3623,7 @@ class Coordinator:
             self.shared_state.optimization_stack or []
         )
 
-    async def _validate_forge_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:  # pragma: no cover
+    async def _validate_forge_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
         """Sequentially E2E-validate each forge tuner's env independently.
 
         Like kernel_opt's per-kernel integrate: try each tuner's env one by
