@@ -214,6 +214,138 @@ def test_all_gates_pass_enables(tmp_path, monkeypatch):
     assert em._session_label == "claw-XYZ"
 
 
+def test_enabling_seeds_default_flush_interval(tmp_path, monkeypatch):
+    # When the operator has not pinned a flush cadence, building the client
+    # tightens the SDK auto-flush interval so a killed run still lands its
+    # latest observations.
+    _enable_env(monkeypatch)
+    monkeypatch.delenv("LANGFUSE_FLUSH_INTERVAL", raising=False)
+    monkeypatch.delenv("LANGFUSE_FLUSH_AT", raising=False)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(tmp_path / "SID")
+    assert em.enabled is True
+    import os
+
+    assert os.environ["LANGFUSE_FLUSH_INTERVAL"] == "1"
+    # flush_at is intentionally left to the SDK default (no per-event HTTP).
+    assert "LANGFUSE_FLUSH_AT" not in os.environ
+
+
+def test_operator_flush_interval_is_respected(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_FLUSH_INTERVAL", "10")
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    lfe.LangfuseEmitter(tmp_path / "SID")
+    import os
+
+    assert os.environ["LANGFUSE_FLUSH_INTERVAL"] == "10"
+
+
+def test_session_start_emits_marker_with_provenance(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    monkeypatch.setenv("USER_DATA_PATH", "/weka/users/alice")
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    monkeypatch.setenv("HYPERLOOM_CUSTOM_FLAG", "on")
+    monkeypatch.setenv("MY_API_TOKEN", "super-secret-value")
+    sd = tmp_path / "SID"
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "manifest.json").write_text(
+        json.dumps(
+            {
+                "session_id": "SID",
+                "model_name": "TestModel",
+                "claw_session_id": "claw-XYZ",
+                "sandbox_user_id": "alice",
+                "code_revision": "abc1234",
+                "session_dir": str(sd),
+                "host": "node-7",
+                "image": "registry/hyperloom:tag",
+                "pid": 4242,
+                "stack_fingerprint": {"rocm": "6.2", "vllm": "0.6"},
+                "workload": {"isl": 128, "osl": 256},
+                "dependencies": {"magpie": {"path": "/weka/magpie", "commit": "deadbee"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+    em.record_session_start()
+
+    marker = client.span_named("session_start")
+    assert marker is not None
+    out = marker.kwargs.get("output") or {}
+    # The full manifest is carried verbatim.
+    assert out["claw_session_id"] == "claw-XYZ"
+    assert out["sandbox_user_id"] == "alice"
+    assert out["code_revision"] == "abc1234"
+    assert out["session_dir"] == str(sd)
+    assert out["host"] == "node-7"
+    assert out["image"] == "registry/hyperloom:tag"
+    assert out["pid"] == 4242
+    assert out["stack_fingerprint"] == {"rocm": "6.2", "vllm": "0.6"}
+    assert out["workload"] == {"isl": 128, "osl": 256}
+    assert out["dependencies"]["magpie"]["commit"] == "deadbee"
+    assert out["user_data_path"] == "/weka/users/alice"
+    # Environment snapshot is attached, with secret-looking values redacted.
+    env = out["env"]
+    assert env["HYPERLOOM_CUSTOM_FLAG"] == "on"
+    assert env["USER_DATA_PATH"] == "/weka/users/alice"
+    assert env["MY_API_TOKEN"] == "***redacted***"
+    assert env["LANGFUSE_SECRET_KEY"] == "***redacted***"
+    # Scalar correlation keys also land on the observation metadata.
+    meta = marker.kwargs.get("metadata") or {}
+    assert meta["code_revision"] == "abc1234"
+    assert meta["user_data_path"] == "/weka/users/alice"
+    # Trace is grouped on the claw session id from the first observation.
+    assert marker.trace_update is not None
+    assert marker.trace_update["session_id"] == "claw-XYZ"
+    assert client.flushed >= 1
+
+
+def test_redact_env_keeps_names_redacts_secret_values():
+    snap = lfmap.redact_env(
+        {
+            "PATH": "/usr/bin",
+            "HF_TOKEN": "hf_xxx",
+            "AWS_SECRET_ACCESS_KEY": "abc",
+            "DB_PASSWORD": "pw",
+            "PLAIN": "value",
+        }
+    )
+    assert snap["PATH"] == "/usr/bin"
+    assert snap["PLAIN"] == "value"
+    assert snap["HF_TOKEN"] == "***redacted***"
+    assert snap["AWS_SECRET_ACCESS_KEY"] == "***redacted***"
+    assert snap["DB_PASSWORD"] == "***redacted***"
+
+
+def test_session_start_is_idempotent(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd, claw_session_id="claw-XYZ")
+    em = lfe.LangfuseEmitter(sd)
+    em.record_session_start()
+    em.record_session_start()
+    assert len([s for s in client.spans if s.kwargs.get("name") == "session_start"]) == 1
+
+
+def test_session_start_noop_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+    assert em.enabled is False
+    em.record_session_start()
+    assert client.span_named("session_start") is None
+
+
 def test_trace_id_falls_back_to_internal_id_without_claw(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()

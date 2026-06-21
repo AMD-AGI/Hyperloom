@@ -1246,6 +1246,44 @@ def _resolve_max_model_len(isl: int, osl: int, model_path: str) -> int:
         return min(desired, maxpos)
     return desired
 
+def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
+    """Best-effort: push the just-written ``session_breakdown.json`` to Langfuse.
+
+    The pre-flight gates below fail-fast *before* ``coordinator.run()``'s
+    ``finally`` — the one place a normal session flushes Langfuse and attaches
+    the breakdown document. Without this, an early-aborted session writes
+    ``session_breakdown.json`` to disk (so the on-disk collector path still
+    forwards it downstream) but never emits the trace/observation to Langfuse,
+    leaving the session absent from Langfuse entirely. Mirror ``cli``'s
+    end-of-session order (flush -> patch -> record) so the attached document
+    carries the post-flush receipt counts.
+
+    No-op unless ``HYPERLOOM_LANGFUSE_ENABLE`` + the ``LANGFUSE_*`` connection
+    vars are set; never raises (a Langfuse outage must not mask the stop
+    reason). Call only *after* ``write_breakdown_json`` has run.
+
+    Args:
+        session_dir (Path): The session root directory whose breakdown is
+            pushed to Langfuse.
+    """
+    try:
+        from .breakdown import patch_breakdown_langfuse
+        from .orchestrator.trace.langfuse_emitter import (
+            flush_session,
+            record_session_breakdown,
+        )
+
+        flush_session(session_dir)
+        patch_breakdown_langfuse(session_dir)
+        record_session_breakdown(session_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+        print(
+            f"WARNING: failed to emit session_breakdown to Langfuse on "
+            f"fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+
+
 def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bool:
     """Fail fast when ``max_position_embeddings < ISL+OSL+headroom`` (no --context-length stretch by policy).
 
@@ -1320,6 +1358,10 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
             f"fail-fast: {exc!r}",
             file=sys.stderr,
         )
+    # Langfuse parity: this gate exits before coordinator.run()'s finally, so
+    # push the breakdown to Langfuse here too (else the session is on disk for
+    # the collector but missing from Langfuse).
+    _emit_breakdown_to_langfuse(session_dir)
     print(f"ERROR: {reason}", file=sys.stderr)
     return True
 
@@ -1389,6 +1431,10 @@ def _preflight_model_config_compat(
             f"fail-fast: {exc!r}",
             file=sys.stderr,
         )
+    # Langfuse parity: this gate exits before coordinator.run()'s finally, so
+    # push the breakdown to Langfuse here too (else the session is on disk for
+    # the collector but missing from Langfuse).
+    _emit_breakdown_to_langfuse(session_dir)
     print(f"ERROR: {reason}", file=sys.stderr)
     return True
 
@@ -1507,5 +1553,9 @@ def _preflight_unsupported_model_arch(
             f"model fail-fast: {exc!r}",
             file=sys.stderr,
         )
+    # Langfuse parity: this gate exits before coordinator.run()'s finally, so
+    # push the breakdown to Langfuse here too (else the session is on disk for
+    # the collector but missing from Langfuse).
+    _emit_breakdown_to_langfuse(session_dir)
     print(f"ERROR: {reason}", file=sys.stderr)
     return True
