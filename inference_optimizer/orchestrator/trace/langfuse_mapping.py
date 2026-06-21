@@ -23,11 +23,34 @@ it only reshapes dicts and parses timestamps.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 UNPHASED = "(unphased)"
 UNKNOWN_AGENT = "(unknown)"
+
+# Env-var name fragments whose *value* is redacted before the environment
+# snapshot is attached to the session_start marker. The key name is kept (so
+# you still see the variable existed), but the secret value never leaves the
+# sandbox. Matched case-insensitively as a substring.
+_SENSITIVE_ENV_MARKERS: tuple[str, ...] = (
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "PASSPHRASE",
+    "CREDENTIAL",
+    "PRIVATE_KEY",
+    "PRIVATEKEY",
+    "API_KEY",
+    "APIKEY",
+    "ACCESS_KEY",
+    "SECRET_KEY",
+    "AUTH",
+    "SIGNATURE",
+)
+_REDACTED = "***redacted***"
 
 
 def correlation_seed(manifest: dict[str, Any], fallback: str) -> str:
@@ -311,6 +334,62 @@ def trace_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def redact_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """Snapshot the process environment with secret values redacted.
+
+    Keeps every variable name (so debuggers can see what was set) but replaces
+    the value of anything whose name looks like a credential (see
+    :data:`_SENSITIVE_ENV_MARKERS`) with a placeholder, so the session_start
+    marker never ships secrets to Langfuse.
+
+    Args:
+        environ: The process environment mapping (e.g. ``os.environ``).
+
+    Returns:
+        A plain dict copy with sensitive values redacted.
+    """
+    out: dict[str, str] = {}
+    for key, value in environ.items():
+        upper = key.upper()
+        if any(marker in upper for marker in _SENSITIVE_ENV_MARKERS):
+            out[key] = _REDACTED
+        else:
+            out[key] = value
+    return out
+
+
+def session_start_payload(
+    manifest: dict[str, Any],
+    *,
+    user_data_path: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Assemble the one-shot session-start document.
+
+    Carries the *entire* ``manifest.json`` (identity, provenance, workload,
+    dependency commits, stack fingerprint, host/image/pid, ...) plus the
+    WekaFS user-data root and a redacted environment snapshot, so a run that
+    aborts in pre-flight or is killed before producing a breakdown still leaves
+    a fully self-describing Langfuse trace.
+
+    Args:
+        manifest: Parsed ``manifest.json`` dict (copied verbatim into the
+            payload).
+        user_data_path: WekaFS user-data root (the ``USER_DATA_PATH`` env),
+            passed in by the caller so this stays free of env coupling.
+        env: Process environment to snapshot; redacted via :func:`redact_env`.
+            Omitted from the payload when ``None``.
+
+    Returns:
+        JSON-serializable startup document.
+    """
+    payload: dict[str, Any] = dict(manifest or {})
+    payload["user_data_path"] = user_data_path or None
+    if env is not None:
+        payload["env"] = redact_env(env)
+    return payload
+
+
 def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
     """Project one ``decision_trace.jsonl`` row onto zero or more Score dicts.
 
@@ -437,6 +516,8 @@ __all__ = [
     "pair_key",
     "parse_ts",
     "phase_of",
+    "redact_env",
+    "session_start_payload",
     "span_key",
     "trace_metadata",
     "usage_details",
