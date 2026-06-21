@@ -27,6 +27,7 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
     inject_sglang_moe_runner_backend,
 )
 from inference_optimizer.orchestrator.action_executors._workload_envs import (
+    _remove_moe_runner_backend_arg,
     materialize_config_with_envs,
 )
 
@@ -239,3 +240,15 @@ def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypat
     assert sglang_args.count("--moe-runner-backend") == 1
     assert "ck" in sglang_args
     assert "triton" not in sglang_args
+
+
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        ("--foo 1 --moe-runner-backend triton --bar 2", "--foo 1 --bar 2"),
+        ("--foo 1 --moe-runner-backend=triton", "--foo 1"),
+        ("--moe-runner-backend aiter", ""),
+    ],
+)
+def test_remove_moe_runner_backend_arg(args, expected):
+    assert _remove_moe_runner_backend_arg(args) == expected
