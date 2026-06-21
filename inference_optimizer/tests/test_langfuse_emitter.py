@@ -214,6 +214,35 @@ def test_all_gates_pass_enables(tmp_path, monkeypatch):
     assert em._session_label == "claw-XYZ"
 
 
+def test_enabling_seeds_default_flush_interval(tmp_path, monkeypatch):
+    # When the operator has not pinned a flush cadence, building the client
+    # tightens the SDK auto-flush interval so a killed run still lands its
+    # latest observations.
+    _enable_env(monkeypatch)
+    monkeypatch.delenv("LANGFUSE_FLUSH_INTERVAL", raising=False)
+    monkeypatch.delenv("LANGFUSE_FLUSH_AT", raising=False)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(tmp_path / "SID")
+    assert em.enabled is True
+    import os
+
+    assert os.environ["LANGFUSE_FLUSH_INTERVAL"] == "1"
+    # flush_at is intentionally left to the SDK default (no per-event HTTP).
+    assert "LANGFUSE_FLUSH_AT" not in os.environ
+
+
+def test_operator_flush_interval_is_respected(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_FLUSH_INTERVAL", "10")
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    lfe.LangfuseEmitter(tmp_path / "SID")
+    import os
+
+    assert os.environ["LANGFUSE_FLUSH_INTERVAL"] == "10"
+
+
 def test_trace_id_falls_back_to_internal_id_without_claw(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()

@@ -47,6 +47,7 @@ from .trace_env import (
     ENV_LANGFUSE_HOST,
     ENV_LANGFUSE_PUBLIC_KEY,
     ENV_LANGFUSE_SECRET_KEY,
+    apply_flush_defaults,
     langfuse_credentials,
     langfuse_credentials_complete,
     langfuse_live_enabled,
@@ -431,6 +432,10 @@ class LangfuseEmitter:
             )
             return False
         try:
+            # Tighten the SDK auto-flush cadence before the singleton is built
+            # so a session killed before cli.finally still lands its latest
+            # observations (marking where the run died).
+            apply_flush_defaults()
             creds = langfuse_credentials()
             self._client = get_client()
             log.info(
