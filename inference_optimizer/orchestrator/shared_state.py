@@ -583,6 +583,11 @@ class SharedState:
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Most recent run_optimization_done so Orch doesn't re-dispatch the same kernel_id every tick.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
+    # Most recent run_optimization dispatch skipped with no eligible kernels
+    # (empty batch, no named kernel). Recorded honestly as a non-failure so the
+    # breakdown can surface it; it is otherwise invisible in sbd (the result has
+    # no backend and no kernel_id).
+    last_kernel_opt_dispatch_skip: dict[str, Any] = field(default_factory=dict)
     # Per-action audit (kernel parity): each ``last_<action>`` is the most recent attempt snapshot; ``<action>_attempts`` is a capped list.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)

@@ -340,6 +340,36 @@ class TestForgeGemmHelperCoverage:
         assert result["status"] == "failed"
         assert result["backend"] == "forge"
 
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_tags_engine_forge(self, tmp_path, monkeypatch):
+        """Forge runs must carry ``engine='forge'`` so the breakdown attributes
+        them to the forge source instead of the ``geak`` default."""
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "skipped"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["engine"] == "forge"
+
 
 def _ensure_torch_module(monkeypatch):
     try:
@@ -835,6 +865,55 @@ class TestRunGemmTuningHandler:
         assert data["quant_type"] == "auto"
         assert data["conc"] == 256
         assert result["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
+
+    def test_handler_writes_gemm_tuning_audit_row(self, tmp_path, monkeypatch):
+        """run_gemm_tuning_handler appends a source-attribution audit row that
+        the Langfuse emitter backfills as a ``gemm_tuning:<engine>`` span."""
+        from inference_optimizer.session_paths import gemm_tuning_steps_path
+
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.save(tmp_path)
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "ok",
+                        "micro_decision": "candidate",
+                        "recommended_env": {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"},
+                        "tuners_run": [{"tuner": "fmoe_ck", "best_micro_speedup": 1.1}],
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        asyncio.run(krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path))
+
+        rows = [
+            json.loads(line)
+            for line in gemm_tuning_steps_path(tmp_path).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["kind"] == "gemm_tuning"
+        assert row["engine"] == "forge"
+        assert row["decision"] == "KEEP"
+        assert row["tuners_run"][0]["tuner"] == "fmoe_ck"
 
     def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
