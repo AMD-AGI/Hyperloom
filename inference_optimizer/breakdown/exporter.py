@@ -44,9 +44,16 @@ def _leaderboard_suppression_reason(session: dict[str, Any], final: dict[str, An
     hint so invalid model/config rows cannot be mistaken for valid zero-gain
     measurements downstream.
     """
-    session_stop_reason = str((session or {}).get("stop_reason") or "").strip()
-    final_stop_reason = str((final or {}).get("stop_reason") or "").strip()
-    for reason in (session_stop_reason, final_stop_reason):
+    session_section = session or {}
+    final_section = final or {}
+    candidates = (
+        session_section.get("stop_reason"),
+        final_section.get("stop_reason"),
+        session_section.get("status"),
+        final_section.get("status"),
+    )
+    for candidate in candidates:
+        reason = str(candidate or "").strip()
         if reason in _LEADERBOARD_SUPPRESSED_STOP_REASONS:
             return reason
     return None

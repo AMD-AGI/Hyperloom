@@ -34,6 +34,22 @@ class TestLeaderboardSuppressionReason:
             == "baseline_failed"
         )
 
+    def test_uses_status_when_stop_reason_is_missing(self):
+        assert (
+            ex._leaderboard_suppression_reason(
+                {"status": "model_config_incompatible"},
+                {"stop_reason": ""},
+            )
+            == "model_config_incompatible"
+        )
+        assert (
+            ex._leaderboard_suppression_reason(
+                {},
+                {"status": "baseline_arg_error"},
+            )
+            == "baseline_arg_error"
+        )
+
     def test_normal_terminal_reason_stays_eligible(self):
         assert ex._leaderboard_suppression_reason({"stop_reason": "target_reached"}, {}) is None
 
