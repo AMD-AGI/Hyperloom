@@ -47,6 +47,23 @@ def test_multimodal_by_vision_config():
                     "max_position_embeddings": 4096}) == "multimodal"
 
 
+def test_bare_for_conditional_generation_without_vision_is_kept():
+    # Text-only MoE that merely use the *ForConditionalGeneration suffix
+    # (no vision_config) must NOT be filtered as multimodal.
+    assert _reason({"architectures": ["Qwen3_5MoeForConditionalGeneration"],
+                    "model_type": "qwen3_5_moe",
+                    "max_position_embeddings": 262144}) is None
+    assert _reason({"architectures": ["KimiK25ForConditionalGeneration"],
+                    "model_type": "kimi_k25",
+                    "max_position_embeddings": 131072}) is None
+
+
+def test_for_conditional_generation_with_vision_config_is_multimodal():
+    assert _reason({"architectures": ["Qwen3_5MoeForConditionalGeneration"],
+                    "model_type": "qwen3_5_moe", "vision_config": {"x": 1},
+                    "max_position_embeddings": 262144}) == "multimodal"
+
+
 def test_short_ctx_at_threshold():
     assert _reason({"architectures": ["LlamaForCausalLM"],
                     "max_position_embeddings": 2048}) == "short_ctx"
@@ -99,6 +116,16 @@ def test_normal_model_is_kept():
 def test_non_dict_config_is_kept():
     assert model_compat.unrunnable_reason(None) is None
     assert model_compat.unrunnable_reason("nope") is None
+
+
+def test_whitelist_exempts_otherwise_filtered_model():
+    cfg = {"architectures": ["Qwen2_5_VLForConditionalGeneration"],
+           "vision_config": {"x": 1}, "max_position_embeddings": 128000}
+    wl = {"org/keep-me"}
+    # Without whitelist -> filtered; whitelisted repo -> exempt (None).
+    assert model_compat.unrunnable_reason(cfg, repo="org/keep-me") == ("multimodal", "arch=Qwen2_5_VLForConditionalGeneration")
+    assert model_compat.unrunnable_reason(cfg, repo="org/keep-me", whitelist=wl) is None
+    assert model_compat.unrunnable_reason(cfg, repo="org/other", whitelist=wl) is not None
 
 
 # ── missing_tokenizer (needs local model dir) ───────────────────────────────
