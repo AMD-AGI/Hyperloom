@@ -240,7 +240,7 @@ class IntentRouter:
         self,
         *,
         source: str,
-        pending: "PendingProposal",
+        pending: "PendingProposal",  # noqa: F821 - deferred ref; imported lazily in handlers to avoid import cycle.
         verdict: str,
         reasoning: str,
     ) -> None:
@@ -707,8 +707,7 @@ class IntentRouter:
                     # been integrated yet (IR-3: integration is mandatory).
                     await self._auto_enqueue_pending_integrations()
                 if kind == "run_gemm_tuning":
-                    self.shared_state.record_gemm_tuning(result)
-                    self.shared_state.save(self.session_dir)
+                    await self._handle_gemm_tuning_result(result)
                 if kind == "integrate":
                     if result.get("status") != "skipped":
                         self.shared_state.record_kernel_integrate_result(result)

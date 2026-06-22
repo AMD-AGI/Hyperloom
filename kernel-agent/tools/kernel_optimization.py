@@ -635,16 +635,10 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     }
 
     if user_backends:
-        # Geak fallback (RCA root cause A): a forge-only order (e.g.
-        # KERNEL_OPT_BACKEND_ORDER=forge) used to return ["forge"] with no
-        # fallback, so when forge skips a non-triton candidate (or misses a
-        # KEEP) the run produced ZERO optimization. Append geak as a safety net
-        # when forge is requested but geak isn't already in the ladder. Opt out
-        # with FORGE_DISABLE_GEAK_FALLBACK=1 for strict forge-only experiments.
-        disable_fallback = os.environ.get("FORGE_DISABLE_GEAK_FALLBACK", "").strip().lower() in ("1", "true", "yes")
-        if "forge" in user_backends and "geak" not in user_backends and not disable_fallback:
-            user_backends = user_backends + ["geak"]
-            notes["geak_fallback_appended"] = True
+        # Explicit user/env backend order is authoritative. Do not append
+        # hidden fallbacks: KERNEL_OPT_BACKEND_ORDER=forge means strict
+        # forge-only. Operators that want GEAK fallback must include it in the
+        # env/order explicitly (e.g. forge,geak).
         if "geak" in user_backends and not benchmark_available:
             notes["geak_without_benchmark"] = True
         return user_backends, notes
@@ -1612,6 +1606,11 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         "source_promoted_from_launcher": bool(
             candidate.get("source_promoted_from_launcher"),
         ),
+        # Dict-first resolution attribution: the device kernel symbol that
+        # disambiguated dispatch, and the full .cu set this op spans (sibling
+        # context; each .cu is optimized in its own fanned-out GEAK run).
+        "device_kernel_name": str(candidate.get("device_kernel_name", "") or ""),
+        "kernel_sources": list[Any](candidate.get("kernel_sources") or []),
     }
     if benchmark_shape_cases:
         metadata["benchmark_shape_cases"] = benchmark_shape_cases
@@ -1711,6 +1710,23 @@ def build_prompt(
             "   patches that drop required host entry functions or that submit a\n"
             "   standalone `PYBIND11_MODULE` / `TORCH_LIBRARY` block absent from the\n"
             "   target file.\n"
+        )
+    # Device-symbol focus: when the op was resolved to its .cu via the curated
+    # op_to_source dictionary (esp. dispatch/composite), name the exact device
+    # kernel symbol so the rewrite targets the right __global__ in a multi-kernel file.
+    device_symbol_block = ""
+    device_kernel_name = str(candidate.get("device_kernel_name", "") or "").strip()
+    if (
+        candidate.get("source_resolution_method") == "op_to_source"
+        and device_kernel_name
+    ):
+        device_symbol_block = (
+            "\n>>> DEVICE KERNEL FOCUS <<<\n"
+            f"This op (`{kernel_name}`) dispatches to the device kernel symbol:\n"
+            f"  {device_kernel_name}\n"
+            f"resolved to the editable source: {source_file}\n"
+            "If the file defines multiple `__global__` kernels, focus your rewrite on\n"
+            "the one matching the symbol above; preserve all other kernels verbatim.\n"
         )
     # Quote the per-backend wall-clock so GEAK's task-mode parser infers the right mode (>=120min→full).
     if backend == "geak":
@@ -1950,6 +1966,7 @@ def build_prompt(
                 else ""
             ),
             promotion_block,
+            device_symbol_block,
             "",
             "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",
             "```json",

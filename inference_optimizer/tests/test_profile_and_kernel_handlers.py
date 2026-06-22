@@ -636,6 +636,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
 def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     tmp_path,
     monkeypatch,
+    caplog,
 ):
     """Patcher False ⇒ EXTRA_VLLM_ARGS keeps only the §1 safe set (else unpatched vLLM crashes on unknown JSON key)."""
     import yaml
@@ -643,11 +644,16 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    caplog.set_level("WARNING")
     out = _materialize_config_with_envs(src, tmp_path)
-    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    extra = envs["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 5888" in extra, extra
     assert "capture_torch_profiler_dir" not in extra, extra
     assert "detailed_trace_annotation" not in extra, extra
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
+    assert envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
+    assert "TraceLens runtime patch unavailable" in caplog.text
 
 
 def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
@@ -2535,6 +2541,37 @@ async def test_run_optimization_handler_missing_kernel_id(session_dir):
     )
     assert res["status"] == "failed"
     assert "kernel_id" in res["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_handler_empty_queue_skips_cleanly(session_dir, tmp_path):
+    # Empty eligible queue (all candidates non-reusable) with no specific kernel
+    # named (the post-GEMM auto pass shape) must finish as a clean skip, not a
+    # "missing 'kernel_id'" GEAK failure.
+    candidates_path = _write_candidates_json(
+        tmp_path,
+        {
+            "hot_kernels": [
+                {
+                    "kernel_id": "k001",
+                    "name": "fused_moe",
+                    "source_file": "/sgl-workspace/aiter/moe.py",
+                    "reusable_native_kernel": False,
+                    "duration_us": 100.0,
+                    "gpu_pct": 12.0,
+                },
+            ],
+        },
+    )
+    assert krh._batch_kernel_candidates({"candidates_path": str(candidates_path)}) == []
+    res = await krh.run_optimization_handler(
+        {"candidates_path": str(candidates_path), "session_id": session_dir.name},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "skipped"
+    assert res["reason"] == "no_eligible_kernels"
+    assert res.get("error_class") is None
+    assert res["kernels_considered"] == 1
 
 
 @pytest.mark.asyncio

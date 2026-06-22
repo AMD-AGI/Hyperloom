@@ -61,6 +61,9 @@ from pathlib import Path
 
 import requests
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import model_compat  # noqa: E402  (local sibling module: shared compat rules)
+
 log = logging.getLogger("optimize-submit")
 
 
@@ -86,7 +89,7 @@ DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
 DEFAULT_MAX_HOURS = 12.0
-DEFAULT_TARGET_GAIN = 100.0
+DEFAULT_TARGET_GAIN = 500.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16
 # Models whose config.json ``max_position_embeddings`` is at or below this are
@@ -564,6 +567,8 @@ class DetectedConfig:
     # Raw ``config.json`` ``max_position_embeddings`` (0 when absent); used for
     # the absolute small-context skip floor (``MIN_MAX_POSITION_EMBEDDINGS``).
     max_position_embeddings: int = 0
+    # Raw ``config.json`` dict, used by the shared model_compat pre-flight.
+    raw_config: dict = field(default_factory=dict)
 
 
 def _quant_type(config: dict) -> str:
@@ -853,6 +858,7 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str, gpu_type: str | None = None
         params_b=params_b,
         max_context_tokens=max_context_tokens,
         max_position_embeddings=max_position_embeddings,
+        raw_config=config,
     )
     log.info(
         "[%s] arch=%s params=%.1fB context=%d framework=%s precision=%s gpu=%s tp=%d conc=%d",
@@ -1359,10 +1365,12 @@ class SafeOptimizeClient:
         # consecutive idle re-entries, before concluding. Only a real Stopped
         # (sandbox exit), a Succeeded, the deadline, or exhausted retries end it.
         idle_retries = 0
-        max_idle_retries = int(_env_float("SAFE_OPTIMIZE_SSE_IDLE_RETRIES", 3.0))
+        # Default 0: a single 1h idle window (idle_grace_s) is the whole budget;
+        # no resubscribe. Raise SAFE_OPTIMIZE_SSE_IDLE_RETRIES to re-enable retries.
+        max_idle_retries = int(_env_float("SAFE_OPTIMIZE_SSE_IDLE_RETRIES", 0.0))
         while sid and time.time() < deadline:
             sse_used = True
-            log.info("[task %s] using SSE on clawSessionId=%s", task_id, sid[:8])
+            log.info("[task %s] using SSE on clawSessionId=%s", task_id, sid)
             sse_reason = self._sse_wait_until_done(sid, deadline)
             log.info("[task %s] SSE finished: reason=%s", task_id, sse_reason)
             try:
@@ -1465,12 +1473,16 @@ class SafeOptimizeClient:
         completion. The only reliable signal is sandboxStatus
         phase=Stopped/Terminated/Failed (sandbox pod actually exits).
 
-        Returns: "Stopped" | "idle_timeout" (no events >10min) | "deadline"
-        (per-task wall clock) | "stream_error" (caller falls back).
+        Returns: "Stopped" | "idle_timeout" (no events > idle_grace_s, default
+        1h) | "deadline" (per-task wall clock) | "stream_error" (caller falls
+        back).
         """
         url = f"{self.base_url}/claw-api/v1/chat/sessions/{session_id}/messages"
         last_evt = time.time()
-        idle_grace_s = 600  # 10 min of pure keepalive after the last event
+        # Idle grace: how long the SSE may be silent (keepalive-only) before we
+        # treat it as idle. Default 1h to cover slow model download + inference
+        # server startup, which emit no agent events. Configurable via env.
+        idle_grace_s = int(_env_float("SAFE_OPTIMIZE_SSE_IDLE_GRACE_S", 3600.0))
         try:
             with self._sess.get(url, stream=True, timeout=(10, 60)) as r:
                 if not r.ok:
@@ -1795,6 +1807,37 @@ def process_model(
                 f"(isl={isl}, osl={osl}, reserve={DEFAULT_CONTEXT_RESERVE_TOKENS})"
             )
             log.warning("[%s] skipping: %s", repo_id, rec.error)
+            return rec
+
+        # Shared structural compatibility pre-flight (multimodal, Gemma2,
+        # Phi3 longrope, dual-chunk attention, ModelOpt FP8, FlashInfer,
+        # missing tokenizer). Uses the real downloaded config + local model dir
+        # so doomed models are skipped before a Claw session is created.
+        compat = model_compat.unrunnable_reason(
+            detected.raw_config,
+            repo=repo_id,
+            model_dir=os.path.join(
+                os.environ.get("CI_MODELS_DIR", "/wekafs/models"),
+                repo_id.replace("/", "-")),
+            whitelist=model_compat.load_whitelist(),
+        )
+        if compat:
+            reason, detail = compat
+            rec.status = "skipped"
+            rec.error = f"{reason}: {detail}"
+            log.warning(
+                "[%s] PRE-FLIGHT FILTERED — repo_id=%s rule=%s reason=%s "
+                "arch=%s params=%.1fB max_position_embeddings=%s framework=%s — "
+                "skipping: NOT submitting, no Claw session created",
+                repo_id,
+                repo_id,
+                reason,
+                detail,
+                detected.arch,
+                detected.params_b,
+                detected.max_position_embeddings or "?",
+                detected.framework,
+            )
             return rec
 
     framework = overrides.get("framework") or (detected.framework if detected else "")
@@ -4040,7 +4083,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target-gain",
         type=float,
         default=float(os.environ.get("SAFE_OPTIMIZE_TARGET_GAIN", DEFAULT_TARGET_GAIN)),
-        help="Target gain %% passed to the Hyperloom optimizer prompt (default: 30).",
+        help="Target gain %% passed to the Hyperloom optimizer prompt (default: 500).",
     )
     parser.add_argument(
         "--results-path",

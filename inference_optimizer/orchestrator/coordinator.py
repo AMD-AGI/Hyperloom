@@ -3547,7 +3547,7 @@ class Coordinator:
             return
 
         log.info(
-            "KERNEL entry: running FP8 GEMM tuning before source-level kernel_opt",
+            "KERNEL entry: running GEMM tuning before source-level kernel_opt",
         )
         self._record_phase_entry_evidence(
             gemm_tuning={"status": "running", "source": "kernel_entry_auto"},
@@ -3570,9 +3570,7 @@ class Coordinator:
                 "error_class": exc.__class__.__name__,
                 "error": repr(exc),
             }
-        self.shared_state.record_gemm_tuning(result)
-        self._promote_gemm_tuning_keep(result)
-        self.shared_state.save(self.session_dir)
+        await self._handle_gemm_tuning_result(result)
         status = str(result.get("status") or "unknown")
         await self.bus.append_and_seq(
             Message.new(
@@ -4131,6 +4129,20 @@ class Coordinator:
             except Exception:  # noqa: BLE001
                 pass
 
+    async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
+        """Record and post-process a run_gemm_tuning result from any entrypoint.
+
+        Both the KERNEL-entry auto hook and orchestration-issued
+        ``run_gemm_tuning`` requests must converge here; otherwise forge
+        results can bypass per-tuner E2E validation.
+        """
+        self.shared_state.record_gemm_tuning(result)
+        if result.get("requires_e2e_validation") and result.get("backend") == "forge":
+            await self._validate_forge_gemm_tuning_e2e(result)
+        else:
+            self._promote_gemm_tuning_keep(result)
+        self.shared_state.save(self.session_dir)
+
     def _promote_gemm_tuning_keep(self, result: dict[str, Any]) -> None:
         """Promote a successful GEMM tuning run into the main gain ledger.
 
@@ -4139,6 +4151,10 @@ class Coordinator:
         optimization stack (deduped on tuned file), updates ``current_best``,
         and stamps ``cumulative_gain`` / ``cumulative_gain_validated`` since
         the GEMM benchmark is itself an end-to-end serving measurement.
+
+        For forge-gemm-tune results (``requires_e2e_validation=True``), the
+        entry is promoted but ``cumulative_gain_validated`` is NOT stamped —
+        downstream E2E validation (explore action) must confirm the gain.
 
         Args:
             result (dict[str, Any]): The GEMM tuning handler result; ignored if
@@ -4159,26 +4175,49 @@ class Coordinator:
             return
         if speedup <= 1.0 or baseline <= 0:
             return
-        tuned_tput = baseline * speedup
-        tuned_file = str(result.get("tuned_file") or "")
+
+        backend = str(result.get("backend") or "geak").strip().lower()
+        ts = datetime.now(timezone.utc).isoformat()
+
+        # Resolve extra_envs: forge provides recommended_env/extra_envs;
+        # GEAK infers from tuned_file.
+        if backend == "forge":
+            extra_envs = dict(result.get("extra_envs") or result.get("recommended_env") or {})
+            tuned_file = ""
+            artifacts = result.get("artifacts") or {}
+            if isinstance(artifacts, dict) and artifacts:
+                tuned_file = str(next(iter(artifacts.values()), ""))
+            if not tuned_file:
+                tuned_file = str(next(iter(extra_envs.values()), "")) if extra_envs else ""
+            variant_name = "forge_gemm_tuned"
+        else:
+            tuned_file = str(result.get("tuned_file") or "")
+            extra_envs = (
+                {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file} if tuned_file else {}
+            )
+            variant_name = "a8w8_blockscale_tuned_gemm"
+
         final_report = str(result.get("final_report_path") or "")
+
+        # GEAK path: E2E already validated internally.
+        # (Forge path is handled by _validate_forge_gemm_tuning_e2e before this.)
+        tuned_tput = baseline * speedup
         existing = {
             str(item.get("tuned_file") or "")
             for item in (self.shared_state.optimization_stack or [])
             if isinstance(item, dict) and item.get("action") == "gemm_tuning"
         }
-        ts = datetime.now(timezone.utc).isoformat()
-        engine = str(result.get("engine") or "geak")
+
         entry = {
             "action": "gemm_tuning",
-            "engine": engine,
-            "variant_name": "a8w8_blockscale_tuned_gemm",
+            "variant_name": variant_name,
             "tuned_file": tuned_file,
             "final_report_path": final_report,
             "gain_pct": (speedup - 1.0) * 100.0,
             "tput": tuned_tput,
             "workspace": result.get("workspace"),
-            "extra_envs": ({"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file} if tuned_file else {}),
+            "extra_envs": extra_envs,
+            "backend": backend,
             "source": "kernel_entry_auto",
             "ts": ts,
         }
@@ -4186,25 +4225,221 @@ class Coordinator:
             self.shared_state.optimization_stack.append(entry)
             self.shared_state.append_stack_gain_entry(
                 action="gemm_tuning",
-                variant_name="a8w8_blockscale_tuned_gemm",
+                variant_name=variant_name,
                 new_tput=tuned_tput,
                 ts=ts,
             )
         self.shared_state.current_best = {
             "action": "gemm_tuning",
-            "engine": engine,
+            "engine": backend,
             "tput": tuned_tput,
-            "variant_name": "a8w8_blockscale_tuned_gemm",
+            "variant_name": variant_name,
             "tuned_file": tuned_file,
             "final_report_path": final_report,
             "workspace": result.get("workspace"),
-            "extra_envs": entry["extra_envs"],
+            "extra_envs": extra_envs,
         }
         self.shared_state.cumulative_gain = (speedup - 1.0) * 100.0
-        # GEMM's tuned benchmark is end-to-end serving, so it's already a validated stack measurement.
         self.shared_state.cumulative_gain_validated = self.shared_state.cumulative_gain
         self.shared_state.cumulative_gain_validated_ts = ts
-        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
+        self.shared_state.cumulative_gain_validated_stack_len = len(
+            self.shared_state.optimization_stack or []
+        )
+
+    def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
+        """Sync the latest GEMM history row after forge E2E rewrites ``result``."""
+        if not isinstance(result, dict):
+            return
+        entry = dict(result)
+        attempts = list(getattr(self.shared_state, "gemm_tuning_attempts", []) or [])
+        if attempts and isinstance(attempts[-1], dict):
+            entry.setdefault("ts", attempts[-1].get("ts"))
+            attempts[-1] = entry
+        else:
+            entry.setdefault("ts", datetime.now(timezone.utc).isoformat())
+            attempts.append(entry)
+        self.shared_state.gemm_tuning_attempts = attempts
+        self.shared_state.last_gemm_tuning = entry
+
+    async def _validate_forge_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
+        """Sequentially E2E-validate each forge tuner's env independently.
+
+        Like kernel_opt's per-kernel integrate: try each tuner's env one by
+        one. KEEPs accumulate (stacked envs); REVERTs are discarded. This
+        prevents one bad tuner from dragging down the whole set.
+        """
+        from .kernel_request_handlers import integrate_handler
+
+        tuners_run = result.get("tuners_run") or []
+        # Sort by priority: fmoe_ck (MoE) first, dense tuners second.
+        # The original list is already priority-sorted by forge CLI.
+        candidates = []
+        for t in tuners_run:
+            if not isinstance(t, dict):
+                continue
+            if t.get("status") != "ok":
+                continue
+            if int(t.get("improved_shapes") or 0) <= 0:
+                continue
+            env_var = str(t.get("env_var") or "").strip()
+            env_value = str(t.get("env_value") or "").strip()
+            if env_var and env_value:
+                candidates.append({
+                    "tuner": t.get("tuner") or "unknown",
+                    "env_var": env_var,
+                    "env_value": env_value,
+                    "micro_speedup": float(t.get("best_micro_speedup") or 1.0),
+                })
+
+        if not candidates:
+            log.info("forge gemm tuning: no candidates to E2E validate")
+            return
+
+        baseline_tput = float(self.shared_state.baseline_tput or 0.0)
+        running_tput = float(
+            (self.shared_state.current_best or {}).get("tput") or baseline_tput
+        )
+        stacked_envs: dict[str, str] = {}
+        kept: list[dict[str, Any]] = []
+        reverted: list[dict[str, Any]] = []
+        ts = datetime.now(timezone.utc).isoformat()
+        try:
+            from .action_executors.explore import _compute_explore_variant_timeout
+
+            per_tuner_timeout_sec = _compute_explore_variant_timeout(
+                baseline_runtime_sec=float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0),
+                kill_ratio=float(getattr(self.shared_state, "explore_overtime_kill_ratio", 1.5) or 1.5),
+            )
+        except Exception:  # noqa: BLE001 - conservative fallback
+            per_tuner_timeout_sec = 15 * 60
+        per_tuner_budget_minutes = max(1, int((per_tuner_timeout_sec + 59) // 60))
+
+        for cand in candidates:
+            tuner_name = cand["tuner"]
+            env = {cand["env_var"]: cand["env_value"]}
+            extra_server_args = (
+                "--moe-runner-backend aiter"
+                if tuner_name == "fmoe_ck" and str(getattr(self.shared_state, "framework", "") or "").lower() == "sglang"
+                else ""
+            )
+            # Merge with previously KEEP'd envs for stacked validation.
+            test_envs = dict(stacked_envs)
+            test_envs.update(env)
+
+            log.info(
+                "forge gemm E2E: validating tuner=%s env=%s (base_tput=%.1f)",
+                tuner_name, cand["env_var"], running_tput,
+            )
+
+            try:
+                integrate_result = await integrate_handler(
+                    {
+                        "task_id": f"gemm_tune_e2e_{tuner_name}",
+                        "kernel_id": f"gemm_tune_{tuner_name}",
+                        "source": "forge_gemm_tuning",
+                        "base_tput": running_tput,
+                        "extra_server_args": extra_server_args,
+                        "extra_envs": test_envs,
+                        "keep_threshold_pct": 3.0,
+                        "budget_minutes": per_tuner_budget_minutes,
+                    },
+                    session_dir=self.session_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "forge gemm E2E: integrate failed for %s: %s",
+                    tuner_name, exc,
+                )
+                reverted.append({**cand, "reason": repr(exc)})
+                continue
+
+            decision = str(integrate_result.get("decision") or "").upper()
+            new_tput = float(integrate_result.get("new_tput") or 0.0)
+            gain_pct = float(integrate_result.get("gain_pct") or 0.0)
+
+            log.info(
+                "forge gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%",
+                tuner_name, decision, new_tput, gain_pct,
+            )
+
+            if decision == "KEEP" and new_tput > running_tput:
+                stacked_envs.update(env)
+                running_tput = new_tput
+                kept.append({**cand, "tput": new_tput, "gain_pct": gain_pct})
+
+                # Push to optimization_stack.
+                entry = {
+                    "action": "gemm_tuning",
+                    "variant_name": f"forge_{tuner_name}",
+                    "tuned_file": cand["env_value"],
+                    "gain_pct": gain_pct,
+                    "tput": new_tput,
+                    "workspace": result.get("workspace"),
+                    "extra_server_args": extra_server_args,
+                    "extra_envs": dict(stacked_envs),
+                    "backend": "forge",
+                    "source": "kernel_entry_auto",
+                    "ts": ts,
+                }
+                self.shared_state.optimization_stack.append(entry)
+                self.shared_state.append_stack_gain_entry(
+                    action="gemm_tuning",
+                    variant_name=f"forge_{tuner_name}",
+                    new_tput=new_tput,
+                    ts=ts,
+                )
+            else:
+                reverted.append({**cand, "reason": f"decision={decision}, gain={gain_pct:.2f}%"})
+
+        # Update current_best and cumulative_gain with final stacked result.
+        if kept:
+            self.shared_state.current_best = {
+                "action": "gemm_tuning",
+                "engine": "forge",
+                "tput": running_tput,
+                "variant_name": "forge_gemm_tuned",
+                "extra_server_args": "--moe-runner-backend aiter" if "AITER_CONFIG_FMOE" in stacked_envs else "",
+                "extra_envs": stacked_envs,
+                "workspace": result.get("workspace"),
+            }
+            total_gain = (running_tput - baseline_tput) / baseline_tput * 100.0 if baseline_tput > 0 else 0.0
+            self.shared_state.cumulative_gain = total_gain
+            self.shared_state.cumulative_gain_validated = total_gain
+            self.shared_state.cumulative_gain_validated_ts = ts
+            self.shared_state.cumulative_gain_validated_stack_len = len(
+                self.shared_state.optimization_stack or []
+            )
+            log.info(
+                "forge gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
+                len(kept), total_gain, len(reverted),
+            )
+        else:
+            stacked_envs = {}
+            total_gain = 0.0
+            log.info(
+                "forge gemm E2E: all %d tuners REVERT, no E2E gain",
+                len(reverted),
+            )
+
+        # Rewrite the stored GEMM tuning result to the *E2E-validated*
+        # outcome. This prevents the orchestration LLM from seeing the raw
+        # combined recommended_env and issuing a bundled integrate later.
+        result["e2e_results"] = {"kept": kept, "reverted": reverted}
+        result["recommended_env_raw"] = dict(result.get("recommended_env") or {})
+        result["extra_envs_raw"] = dict(result.get("extra_envs") or {})
+        result["recommended_env"] = dict(stacked_envs)
+        result["extra_envs"] = dict(stacked_envs)
+        result["e2e_gain_pct"] = round(float(total_gain), 4)
+        result["e2e_validated"] = True
+        result["requires_e2e_validation"] = False
+        if kept:
+            result["status"] = "complete"
+            result["decision"] = "KEEP"
+        else:
+            result["status"] = "complete"
+            result["decision"] = "REVERT"
+            result["micro_decision"] = "candidate_no_e2e_gain"
+        self._replace_latest_gemm_tuning_attempt(result)
 
     def _should_continue_kernel_after_gemm(self) -> bool:
         """Decide whether to run source-level kernel_opt right after GEMM tuning.
@@ -5916,42 +6151,6 @@ class Coordinator:
                 detail=repr(exc)[:240],
             )
 
-        # ---------------- Step 2.6: artifact package -> /workspace -------
-        # Bundle the curated result/report/analysis files (incl. the
-        # session_breakdown just written in step 2) into a single zip
-        # placed under ``/workspace`` so the Claw sandbox sync ships it
-        # to object storage even when ``$USER_DATA_PATH`` points at a
-        # wekafs path outside ``/workspace`` (the common production case).
-        # Best-effort: failures are recorded but never abort the close
-        # sequence. The zip carries its own PACKAGE_MANIFEST log of what
-        # went in / what was missing.
-        try:
-            from ..breakdown import package_session_artifacts
-
-            pkg_path = package_session_artifacts(
-                self.session_dir,
-                session_id=str(getattr(self.shared_state, "session_id", "") or ""),
-            )
-            if pkg_path is not None:
-                await self._record_close_step(
-                    "artifact_package",
-                    status="done",
-                    detail=str(pkg_path),
-                )
-            else:
-                await self._record_close_step(
-                    "artifact_package",
-                    status="skipped",
-                    detail="no artifacts matched or dest unwritable",
-                )
-        except Exception as exc:  # noqa: BLE001 — defensive
-            log.exception("CLOSE step 2.6 (artifact_package) failed")
-            await self._record_close_step(
-                "artifact_package",
-                status="failed",
-                detail=repr(exc)[:240],
-            )
-
         # ---------------- Step 4: fact finalize (Cortex commit) ----------
         # The canonical step-4 "Cortex session commit": writes
         # update_recipe + finalises the local journal (final_throughput /
@@ -7602,10 +7801,11 @@ class Coordinator:
         ).strip().lower() in {"1", "true", "yes", "on"}
 
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
-        """Decide whether FP8 SGLang GEMM tuning must run before kernel_opt.
+        """Decide whether GEMM tuning must run before kernel_opt.
 
-        Only required for ``precision='fp8'`` + ``framework='sglang'`` sessions
-        whose ``last_gemm_tuning`` has not yet reached a terminal status.
+        When using forge-gemm-tune backend: eligible for any framework
+        (sglang/vllm) and any precision with a MoE model or FP8 dense.
+        When using GEAK backend: only FP8 + SGLang (legacy behavior).
 
         Returns:
             bool: ``True`` when GEMM tuning should run before source-level
@@ -7616,7 +7816,32 @@ class Coordinator:
         ss = self.shared_state
         precision = str(getattr(ss, "precision", "") or "").strip().lower()
         framework = str(getattr(ss, "framework", "") or "").strip().lower()
-        if precision != "fp8" or framework != "sglang":
+
+        from .kernel_request_handlers import _resolve_gemm_tuning_backend
+
+        backend = _resolve_gemm_tuning_backend({})
+
+        if backend == "forge":
+            # forge-gemm-tune supports: any MoE model, FP8 dense,
+            # bf16/fp8/fp4 precision, sglang/vllm frameworks.
+            is_moe = bool(
+                getattr(ss, "is_moe", False)
+                or getattr(ss, "model_is_moe", False)
+                or "moe" in str(getattr(ss, "model_type", "") or "").lower()
+                or "moe" in str(getattr(ss, "model_class", "") or "").lower()
+            )
+            eligible = (
+                framework in ("sglang", "vllm", "vllm-aiter")
+                and (
+                    is_moe
+                    or precision in ("fp8", "fp4", "mxfp4")
+                )
+            )
+        else:
+            # GEAK: legacy FP8 + SGLang only.
+            eligible = (precision == "fp8" and framework == "sglang")
+
+        if not eligible:
             return False
         last = getattr(ss, "last_gemm_tuning", {}) or {}
         status = str(last.get("status") or "").strip().lower()

@@ -862,6 +862,15 @@ def collect_session(
         "code_revision": str(manifest.get("code_revision") or ""),
         "pid": int(manifest.get("pid") or 0),
         "session_dir": str(session_dir),
+        # USER_DATA_PATH root (the operator-chosen workspace base; session_dir
+        # nests under it in per_model_ts layout). Snapshotted in the manifest at
+        # session start; env is the in-process fallback for older manifests.
+        "user_data_path": str(
+            manifest.get("user_data_path")
+            or state.get("user_data_path")
+            or os.environ.get("USER_DATA_PATH")
+            or ""
+        ),
         "tick_count": int(state.get("tick") or 0),
     }
 
@@ -4608,6 +4617,7 @@ def collect_kernel_optimization_summary(
         "rejection_breakdown",
         "unattempted_reason_breakdown",
         "failure_reason_breakdown",
+        "dispatch_skip_reason",
         "field_glossary",
     ):
         val = out.get(key)
@@ -4847,7 +4857,7 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
                 try:
                     run[knob] = int(chosen)
                 except (TypeError, ValueError):
-                    pass
+                    continue  # best-effort int coercion; skip non-numeric knob values
         if raw.get("libtype"):
             run["libtype"] = str(raw.get("libtype"))
         if isinstance(raw.get("summary"), dict):

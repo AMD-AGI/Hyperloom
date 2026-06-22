@@ -66,6 +66,124 @@ def test_get_imports():
     assert any("import torch" in i for i in imports)
 
 
+def test_get_imports_dedents_function_local():
+    """Regression: ast.walk yields imports nested inside functions with their
+    source indentation; emitted verbatim at the harness module top they raise
+    'unexpected indent'. get_imports must dedent them to valid top-level imports.
+    """
+    import ast as _ast
+
+    src = (
+        "import torch\n"
+        "def f():\n"
+        "    import math\n"
+        "    return math.pi\n"
+    )
+    a = hg.BenchmarkAnalyzer(src)
+    imports = a.get_imports()
+    assert "import math" in imports, imports
+    # Joined imports must form valid top-level Python (no IndentationError).
+    _ast.parse("\n".join(imports))
+
+
+def test_aiter_harness_recognizes_perftest(tmp_path):
+    """Regression: aiter op_tests that time the op with @perftest (not
+    @benchmark) must be picked up by the aiter idiom path and emit a valid
+    harness (previously they fell through to the weaker generic path)."""
+    import ast as _ast
+
+    src = (
+        "import torch\n"
+        "import aiter\n"
+        "from aiter.test_common import perftest, run_perftest\n"
+        "@perftest\n"
+        "def bench_op(m, n, k, dtype):\n"
+        "    x = torch.randn(m, k, dtype=dtype)\n"
+        "    return run_perftest(aiter.gemm, x)\n"
+    )
+    bench = tmp_path / "test_op.py"
+    bench.write_text(src, encoding="utf-8")
+    a = hg.BenchmarkAnalyzer(src)
+    out = hg._try_generate_aiter_harness(
+        analyzer=a,
+        decorated=a.get_decorated_functions(),
+        candidate={"input_shapes": {"M": 64, "N": 64, "K": 64}, "precision": "bf16"},
+        source_file=str(bench),
+        benchmark_path=bench,
+        out_dir=tmp_path,
+        log=lambda _m: None,
+    )
+    assert out is not None
+    _ast.parse(Path(out.harness_path).read_text(encoding="utf-8"))
+
+
+def test_aiter_harness_maps_tracelens_list_shapes(tmp_path):
+    """AITer idiom generation must understand production TraceLens list shapes."""
+    import ast as _ast
+
+    src = (
+        "import torch\n"
+        "import aiter\n"
+        "from aiter.test_common import perftest, run_perftest\n"
+        "@perftest\n"
+        "def bench_op(m, n, k, dtype):\n"
+        "    x = torch.randn(m, k, dtype=dtype)\n"
+        "    return run_perftest(aiter.gemm, x)\n"
+    )
+    bench = tmp_path / "test_list_shape_op.py"
+    bench.write_text(src, encoding="utf-8")
+    a = hg.BenchmarkAnalyzer(src)
+    out = hg._try_generate_aiter_harness(
+        analyzer=a,
+        decorated=a.get_decorated_functions(),
+        candidate={
+            "input_shapes": [
+                {"call_num": 1, "shape": "(32, 32) bf16"},
+                {"call_num": 9, "shape": "(64, 128, 256) bf16"},
+            ],
+            "precision": "bf16",
+        },
+        source_file=str(bench),
+        benchmark_path=bench,
+        out_dir=tmp_path,
+        log=lambda _m: None,
+    )
+    assert out is not None
+    code = Path(out.harness_path).read_text(encoding="utf-8")
+    _ast.parse(code)
+    assert "'m': 64" in code
+    assert "'n': 128" in code
+    assert "'k': 256" in code
+
+
+def test_aiter_harness_rejects_incomplete_shape_kwargs(tmp_path):
+    """Do not emit dtype-only/partial calls when required m/n/k values are absent."""
+    src = (
+        "import torch\n"
+        "import aiter\n"
+        "from aiter.test_common import perftest, run_perftest\n"
+        "@perftest\n"
+        "def bench_op(m, n, k, dtype):\n"
+        "    x = torch.randn(m, k, dtype=dtype)\n"
+        "    return run_perftest(aiter.gemm, x)\n"
+    )
+    bench = tmp_path / "test_bad_shape_op.py"
+    bench.write_text(src, encoding="utf-8")
+    a = hg.BenchmarkAnalyzer(src)
+    logs: list[str] = []
+    out = hg._try_generate_aiter_harness(
+        analyzer=a,
+        decorated=a.get_decorated_functions(),
+        candidate={"input_shapes": [{"call_num": 5, "shape": "(64, 128) bf16"}]},
+        source_file=str(bench),
+        benchmark_path=bench,
+        out_dir=tmp_path,
+        log=logs.append,
+    )
+    assert out is None
+    assert any("missing values" in msg for msg in logs)
+
+
 def test_get_decorated_functions():
     a = hg.BenchmarkAnalyzer(BENCH_SRC)
     dec = a.get_decorated_functions()
@@ -422,3 +540,186 @@ def _inject_fake_validate(monkeypatch, *, harness_ok, bench_ok, force_file=False
         monkeypatch.setitem(sys.modules, "validate_harness", mod)
     if force_file:
         monkeypatch.setattr(hg.Path, "is_file", lambda self: True)
+
+
+# ---- new type-inference predicates (P1) ----
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("block_tables", True),
+        ("seq_lens", True),
+        ("context_lens", True),
+        ("kv_indptr", True),
+        ("block_table_foo", True),
+        ("query", False),
+        ("scale", False),
+    ],
+)
+def test_is_index_param(name, expected):
+    assert hg._is_index_param(name) is expected
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("max_seq_len", True),
+        ("num_kv_heads", True),
+        ("num_queries_per_kv", True),
+        ("head_size", True),
+        ("block_size", True),
+        ("query", False),
+        ("scale", False),
+    ],
+)
+def test_is_int_scalar_param(name, expected):
+    assert hg._is_int_scalar_param(name) is expected
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("scale", True),
+        ("softmax_scale", True),
+        ("k_scale", True),
+        ("k_scale_cache", False),
+        ("query", False),
+    ],
+)
+def test_is_float_scalar_param(name, expected):
+    assert hg._is_float_scalar_param(name) is expected
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("dtype", True),
+        ("kv_cache_dtype", True),
+        ("q_dtype", True),
+        ("query", False),
+    ],
+)
+def test_is_dtype_param(name, expected):
+    assert hg._is_dtype_param(name) is expected
+
+
+# ---- attention-like harness: union keys + correct types (P1 + P2) ----
+
+ATTN_BENCH_SRC = """\
+import torch
+
+@perftest
+def torch_ref(query, k_cache, v_cache, block_tables, seq_lens, max_seq_len,
+              kv_cache_dtype, num_kv_heads, scale, alibi_slopes,
+              k_scale_cache, v_scale_cache, num_queries_per_kv, dtype):
+    return query
+
+@perftest
+def triton_kernel(query, k_cache, v_cache, block_tables, seq_lens, max_seq_len,
+                  kv_cache_dtype, num_kv_heads, scale, alibi_slopes,
+                  k_scale, v_scale):
+    return query
+
+@benchmark
+def test_main():
+    triton_kernel(query, k_cache, v_cache, block_tables, seq_lens, max_seq_len,
+                  kv_cache_dtype, num_kv_heads, scale, alibi_slopes, k_scale, v_scale)
+    torch_ref(query, k_cache, v_cache, block_tables, seq_lens, max_seq_len,
+              kv_cache_dtype, num_kv_heads, scale, alibi_slopes,
+              k_scale_cache, v_scale_cache, num_queries_per_kv, dtype)
+"""
+
+
+def _setup_keys(body: str) -> set[str]:
+    """Parse the dict keys returned by a generated setup_inputs body."""
+    import ast
+
+    tree = ast.parse("def setup_inputs(cfg):\n" + body)
+    keys: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+            for k in node.value.keys:
+                if isinstance(k, ast.Constant):
+                    keys.add(k.value)
+    return keys
+
+
+def _referenced_keys(body: str) -> set[str]:
+    """Parse inputs.get("X") / inputs["X"] keys referenced by a run_* body."""
+    import ast
+
+    tree = ast.parse("def run_x(inputs):\n" + body)
+    refs: set[str] = set()
+    for node in ast.walk(tree):
+        # inputs.get("X")
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "inputs"
+                and node.args and isinstance(node.args[0], ast.Constant)):
+            refs.add(node.args[0].value)
+        # inputs["X"]
+        if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+                and node.value.id == "inputs"
+                and isinstance(node.slice, ast.Constant)):
+            refs.add(node.slice.value)
+    return refs
+
+
+def test_setup_inputs_union_covers_ref_only_keys():
+    """run_ref must never reference a key setup_inputs didn't create (P2)."""
+    a = hg.BenchmarkAnalyzer(ATTN_BENCH_SRC)
+    dec = a.get_decorated_functions()
+    test_func = a.get_test_function(dec)
+    ref_func, kernel_func = a.classify_functions(dec)
+
+    setup_body = hg._generate_setup_inputs(
+        a, test_func, "M, N, dtype = cfg", ref_func, kernel_func)
+    ref_body = hg._generate_run_ref(a, test_func, ref_func, kernel_func)
+
+    setup_keys = _setup_keys(setup_body)
+    ref_refs = _referenced_keys(ref_body)
+
+    # ref-only params are present in setup_inputs (union of kernel + ref).
+    for k in ("k_scale_cache", "v_scale_cache", "num_queries_per_kv", "dtype"):
+        assert k in setup_keys, f"{k} missing from setup_inputs (would KeyError)"
+    # every key run_ref touches exists -> no smoke-test KeyError.
+    assert ref_refs <= setup_keys, f"run_ref refs not in setup: {ref_refs - setup_keys}"
+
+
+def test_setup_inputs_infers_correct_types():
+    """Index/scalar/dtype args must not be built as 2D float tensors (P1)."""
+    a = hg.BenchmarkAnalyzer(ATTN_BENCH_SRC)
+    dec = a.get_decorated_functions()
+    test_func = a.get_test_function(dec)
+    ref_func, kernel_func = a.classify_functions(dec)
+
+    body = hg._generate_setup_inputs(
+        a, test_func, "M, N, dtype = cfg", ref_func, kernel_func)
+
+    # index tensors are int, not randn float
+    assert 'block_tables = torch.zeros(M, N, dtype=torch.int32' in body
+    assert 'seq_lens = torch.zeros(M, N, dtype=torch.int32' in body
+    # int scalars
+    assert "max_seq_len = 1" in body
+    assert "num_kv_heads = 1" in body
+    assert "num_queries_per_kv = 1" in body
+    # float scalar
+    assert "scale = 1.0" in body
+    # dtype carried from cfg
+    assert "kv_cache_dtype = dtype" in body
+    # block_tables/seq_lens must NOT be randn float
+    assert "block_tables = torch.randn" not in body
+    assert "seq_lens = torch.randn" not in body
+
+
+def test_run_func_body_uses_get_not_subscript():
+    """run_* bodies must use inputs.get to avoid KeyError (P2)."""
+    a = hg.BenchmarkAnalyzer(ATTN_BENCH_SRC)
+    dec = a.get_decorated_functions()
+    test_func = a.get_test_function(dec)
+    ref_func, kernel_func = a.classify_functions(dec)
+    body = hg._generate_run_func_body(a, test_func, ref_func)
+    assert 'inputs.get(' in body
+    assert 'inputs["' not in body

@@ -29,6 +29,30 @@ def test_same_minor_fallback(tmp_path):
     assert got is not None and got.name == "config_vllm_v0.21.0.patch"
 
 
+def test_rc_dev_version_uses_same_minor_patch(tmp_path):
+    d = _mk_patches(tmp_path, ["0.21.0", "0.22.0"])
+    got = sp._resolve_vllm_patch_file(
+        d,
+        "0.22.1rc1.dev259+g23d65ff98.localfp8.aiter1be6",
+    )
+    assert got is not None and got.name == "config_vllm_v0.22.0.patch"
+
+
+def test_local_build_suffix_uses_release_patch(tmp_path):
+    d = _mk_patches(tmp_path, ["0.21.0", "0.22.0"])
+    got = sp._resolve_vllm_patch_file(d, "0.22.0+rocm722")
+    assert got is not None and got.name == "config_vllm_v0.22.0.patch"
+
+
+def test_rc_dev_version_nearest_lower_when_minor_missing(tmp_path):
+    d = _mk_patches(tmp_path, ["0.20.0", "0.21.0"])
+    got = sp._resolve_vllm_patch_file(
+        d,
+        "0.22.1rc1.dev259+g23d65ff98.localfp8.aiter1be6",
+    )
+    assert got is not None and got.name == "config_vllm_v0.21.0.patch"
+
+
 def test_same_minor_never_picks_newer_patch(tmp_path):
     d = _mk_patches(tmp_path, ["0.21.0", "0.21.10"])
     # 0.21.10 is same-minor but newer than running 0.21.5, so skip it.

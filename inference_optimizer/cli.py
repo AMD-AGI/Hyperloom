@@ -2616,6 +2616,86 @@ def _argv_has_option(argv: list[str], option: str) -> bool:
     return any(arg == option or arg.startswith(prefix) for arg in argv)
 
 
+def _positive_int_arg(value: str) -> int:
+    """argparse type for positive integer knobs."""
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
+def _parse_conc_values(raw: str, *, source: str = "CONC") -> list[int]:
+    """Parse a positive integer or comma ladder without mutating env."""
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    tokens = [tok.strip() for tok in text.split(",") if tok.strip()]
+    try:
+        values = [int(tok) for tok in tokens]
+    except ValueError:
+        print(
+            f"ERROR: {source}={text!r} is not an integer or comma-separated integer ladder. "
+            "Use --conc N for one baseline concurrency, or "
+            "--conc-sweep-concs 4,16,128 for a ladder.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if not values or any(v <= 0 for v in values):
+        print(
+            f"ERROR: {source}={text!r} must contain positive integer value(s).",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return values
+
+
+def _parse_conc_env_default() -> int:
+    """Resolve ``$CONC`` for argparse; comma ladders use first value as baseline."""
+    values = _parse_conc_values(os.environ.get("CONC", ""), source="CONC")
+    return values[0] if values else 8
+
+
+def _parse_conc_sweep_default() -> str:
+    """Resolve the sweep ladder, defaulting a comma ``$CONC`` into the sweep."""
+    explicit = os.environ.get("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", "").strip()
+    if explicit:
+        return explicit
+    raw = os.environ.get("CONC", "").strip()
+    if not raw:
+        return "1,2,4,8,16,32,64,128"
+    values = _parse_conc_values(raw, source="CONC")
+    if len(values) > 1:
+        return ",".join(str(v) for v in values)
+    return "1,2,4,8,16,32,64,128"
+
+
+def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
+    """Resolve run-wide MAX_MODEL_LEN with explicit operator values winning."""
+    if getattr(args, "max_model_len", None):
+        return int(args.max_model_len), "--max-model-len"
+    max_model_len_env = os.environ.get("MAX_MODEL_LEN", "").strip()
+    if max_model_len_env:
+        try:
+            return _positive_int_arg(max_model_len_env), "$MAX_MODEL_LEN"
+        except argparse.ArgumentTypeError as exc:
+            print(
+                f"ERROR: MAX_MODEL_LEN={max_model_len_env!r} is invalid: {exc}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+    return (
+        _resolve_max_model_len(
+            args.isl,
+            args.osl,
+            str(args.model or ""),
+        ),
+        "auto",
+    )
+
+
 def _export_workload_envs_for_optimize(
     args: argparse.Namespace,
     *,
@@ -2697,6 +2777,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
+    operator_server_args = str(getattr(args, "server_args", "") or "").strip()
+    if operator_server_args:
+        os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
     # Re-export $TP/$CONC/$EP when explicitly supplied (always for multi-node); skip defaults in single-node.
     _export_workload_envs_for_optimize(
         args,
@@ -3047,12 +3130,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.gpu_type = None
             print("GPU type        : <unset> (Magpie will auto-detect)")
 
-        # MAX_MODEL_LEN = ISL+OSL+headroom clamped to native window (see _resolve_max_model_len); exported for YAML.
-        max_model_len = _resolve_max_model_len(
-            args.isl,
-            args.osl,
-            str(args.model or ""),
-        )
+        # MAX_MODEL_LEN is operator-overridable. Auto resolution only runs when
+        # neither --max-model-len nor $MAX_MODEL_LEN was supplied.
+        max_model_len, max_model_len_source = _resolve_run_max_model_len(args)
+        args.max_model_len = max_model_len
         os.environ["MAX_MODEL_LEN"] = str(max_model_len)
         os.environ["ISL"] = str(args.isl)
         os.environ["OSL"] = str(args.osl)
@@ -3076,7 +3157,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
         print(
             f"Workload        : ISL={args.isl} OSL={args.osl} "
-            f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision} "
+            f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
+            f"PRECISION={args.precision} "
             f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
         )
 
@@ -3088,6 +3170,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # published for the robustness monitor.
         session_lock = _acquire_session_lock_or_exit(session_dir)
         manifest = write_manifest(session_dir, args=args)
+        # One-shot Langfuse startup marker: ties the WekaFS user dir + session
+        # dir to code_revision/dependency commits the moment the session is
+        # created, so a run that aborts in pre-flight or is killed before a
+        # breakdown still leaves a correlatable trace. Best-effort, never fatal.
+        try:
+            from .orchestrator.trace.langfuse_emitter import record_session_start
+
+            record_session_start(session_dir)
+        except Exception:  # noqa: BLE001 — startup marker must never break launch
+            log.debug("langfuse record_session_start failed (non-fatal)", exc_info=True)
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
         _print_session_skeleton(session_dir)
@@ -3539,27 +3631,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 
-            # Safety-net artifact package -> /workspace. The CLOSE phase
-            # sequencer normally packages at step 2.6, but the wall-clock
-            # deadline path (_enter_closing_phase) and crash paths leave
-            # close_sequence_done False and never run the sequencer, so the
-            # bundle would be missing without this. Best-effort: failures
-            # must not mask stop_reason. Runs after the SBD/final.md +
-            # Langfuse flush above so the freshest products are bundled.
-            try:
-                from .breakdown import package_session_artifacts
-
-                pkg_path = package_session_artifacts(
-                    session_dir,
-                    session_id=str(
-                        getattr(coordinator.shared_state, "session_id", "") or "",
-                    ),
-                )
-                if pkg_path is not None:
-                    print(f"Artifact package  : {pkg_path}")
-            except Exception:  # noqa: BLE001
-                log.exception("session artifact package failed (non-fatal)")
-
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
@@ -3761,11 +3832,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--conc",
-        type=int,
-        default=int(os.environ.get("CONC", "8") or 8),
+        type=_positive_int_arg,
+        default=_parse_conc_env_default(),
         help="Magpie client concurrency cap (max in-flight requests). "
         "Resolution: --conc > $CONC env > 8. Symmetric with --tp; "
-        "agent can pass `--conc N` directly from the prompt.",
+        "agent can pass `--conc N` directly from the prompt. If $CONC is "
+        "a comma ladder (e.g. 4,16,128), Hyperloom uses the first value as "
+        "the baseline cap and forwards the ladder to --conc-sweep-concs.",
+    )
+    opt.add_argument(
+        "--max-model-len",
+        dest="max_model_len",
+        type=_positive_int_arg,
+        default=None,
+        help="Explicit server-facing MAX_MODEL_LEN. Resolution: "
+        "--max-model-len > $MAX_MODEL_LEN > auto(ISL+OSL+headroom, "
+        "clamped to native context). Explicit values are preserved and "
+        "exported into the materialized Magpie YAML.",
+    )
+    opt.add_argument(
+        "--server-args",
+        dest="server_args",
+        type=str,
+        default=os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", ""),
+        help="Framework server args to apply in every phase. Routed through "
+        "the framework-specific EXTRA_*_ARGS env in Magpie YAMLs "
+        "(EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS / EXTRA_ATOM_ARGS). "
+        "Example: --server-args \"--kv-cache-dtype fp8_e4m3 "
+        "--gpu-memory-utilization 0.85\".",
     )
     opt.add_argument(
         "--ep",
@@ -4592,10 +4686,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
         type=str,
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS",
-            "1,2,4,8,16,32,64,128",
-        ),
+        default=_parse_conc_sweep_default(),
         help="Comma-separated CONC ladder for --enable-conc-sweep. Default 1,2,4,8,16,32,64,128.",
     )
     opt.add_argument(
@@ -5075,16 +5166,6 @@ def _run_recover_session(args: argparse.Namespace) -> int:
             print(f"  trace backfill    : rc={rc}")
         except Exception:  # noqa: BLE001
             log.exception("recover-session: trace backfill failed (non-fatal)")
-
-    # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
-    try:
-        from .breakdown import package_session_artifacts
-
-        pkg_path = package_session_artifacts(session_dir)
-        if pkg_path is not None:
-            print(f"  artifact package  : {pkg_path}")
-    except Exception:  # noqa: BLE001
-        log.exception("recover-session: artifact package failed (non-fatal)")
 
     return 0
 
