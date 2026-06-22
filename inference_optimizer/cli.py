@@ -2748,6 +2748,76 @@ def _argv_has_option(argv: list[str], option: str) -> bool:
     return any(arg == option or arg.startswith(prefix) for arg in argv)
 
 
+def _positive_int_arg(value: str) -> int:
+    """argparse type for positive integer knobs."""
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
+def _parse_conc_env_default() -> int:
+    """Resolve ``$CONC`` for argparse, accepting a comma ladder as sweep input."""
+    raw = os.environ.get("CONC", "").strip()
+    if not raw:
+        return 8
+    tokens = [tok.strip() for tok in raw.split(",") if tok.strip()]
+    try:
+        values = [int(tok) for tok in tokens]
+    except ValueError:
+        print(
+            f"ERROR: CONC={raw!r} is not an integer or comma-separated integer ladder. "
+            "Use --conc N for one baseline concurrency, or "
+            "--conc-sweep-concs 4,16,128 for a ladder.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if not values or any(v <= 0 for v in values):
+        print(
+            f"ERROR: CONC={raw!r} must contain positive integer value(s).",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if len(values) > 1:
+        # Preserve the user's ladder for the post-sweep action while picking a
+        # single baseline concurrency. ``max`` keeps the historical "cap"
+        # interpretation of CONC and prevents downstream int() coercions from
+        # seeing the comma string.
+        os.environ.setdefault(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS",
+            ",".join(str(v) for v in values),
+        )
+        os.environ["CONC"] = str(max(values))
+    return max(values)
+
+
+def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
+    """Resolve run-wide MAX_MODEL_LEN with explicit operator values winning."""
+    if getattr(args, "max_model_len", None):
+        return int(args.max_model_len), "--max-model-len"
+    max_model_len_env = os.environ.get("MAX_MODEL_LEN", "").strip()
+    if max_model_len_env:
+        try:
+            return _positive_int_arg(max_model_len_env), "$MAX_MODEL_LEN"
+        except argparse.ArgumentTypeError as exc:
+            print(
+                f"ERROR: MAX_MODEL_LEN={max_model_len_env!r} is invalid: {exc}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+    return (
+        _resolve_max_model_len(
+            args.isl,
+            args.osl,
+            str(args.model or ""),
+        ),
+        "auto",
+    )
+
+
 def _export_workload_envs_for_optimize(
     args: argparse.Namespace,
     *,
@@ -2829,6 +2899,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
+    operator_server_args = str(getattr(args, "server_args", "") or "").strip()
+    if operator_server_args:
+        os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
     # Re-export $TP/$CONC/$EP when explicitly supplied (always for multi-node); skip defaults in single-node.
     _export_workload_envs_for_optimize(
         args,
@@ -3179,12 +3252,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.gpu_type = None
             print("GPU type        : <unset> (Magpie will auto-detect)")
 
-        # MAX_MODEL_LEN = ISL+OSL+headroom clamped to native window (see _resolve_max_model_len); exported for YAML.
-        max_model_len = _resolve_max_model_len(
-            args.isl,
-            args.osl,
-            str(args.model or ""),
-        )
+        # MAX_MODEL_LEN is operator-overridable. Auto resolution only runs when
+        # neither --max-model-len nor $MAX_MODEL_LEN was supplied.
+        max_model_len, max_model_len_source = _resolve_run_max_model_len(args)
+        args.max_model_len = max_model_len
         os.environ["MAX_MODEL_LEN"] = str(max_model_len)
         os.environ["ISL"] = str(args.isl)
         os.environ["OSL"] = str(args.osl)
@@ -3208,7 +3279,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
         print(
             f"Workload        : ISL={args.isl} OSL={args.osl} "
-            f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision} "
+            f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
+            f"PRECISION={args.precision} "
             f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
         )
 
@@ -3903,11 +3975,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--conc",
-        type=int,
-        default=int(os.environ.get("CONC", "8") or 8),
+        type=_positive_int_arg,
+        default=_parse_conc_env_default(),
         help="Magpie client concurrency cap (max in-flight requests). "
         "Resolution: --conc > $CONC env > 8. Symmetric with --tp; "
-        "agent can pass `--conc N` directly from the prompt.",
+        "agent can pass `--conc N` directly from the prompt. If $CONC is "
+        "a comma ladder (e.g. 4,16,128), Hyperloom uses the max as the "
+        "baseline cap and forwards the ladder to --conc-sweep-concs.",
+    )
+    opt.add_argument(
+        "--max-model-len",
+        dest="max_model_len",
+        type=_positive_int_arg,
+        default=None,
+        help="Explicit server-facing MAX_MODEL_LEN. Resolution: "
+        "--max-model-len > $MAX_MODEL_LEN > auto(ISL+OSL+headroom, "
+        "clamped to native context). Explicit values are preserved and "
+        "exported into the materialized Magpie YAML.",
+    )
+    opt.add_argument(
+        "--server-args",
+        dest="server_args",
+        type=str,
+        default=os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", ""),
+        help="Framework server args to apply in every phase. Routed through "
+        "the framework-specific EXTRA_*_ARGS env in Magpie YAMLs "
+        "(EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS / EXTRA_ATOM_ARGS). "
+        "Example: --server-args \"--kv-cache-dtype fp8_e4m3 "
+        "--gpu-memory-utilization 0.85\".",
     )
     opt.add_argument(
         "--ep",
