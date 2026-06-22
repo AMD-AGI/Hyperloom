@@ -47,6 +47,7 @@ from .trace_env import (
     ENV_LANGFUSE_HOST,
     ENV_LANGFUSE_PUBLIC_KEY,
     ENV_LANGFUSE_SECRET_KEY,
+    apply_flush_defaults,
     langfuse_credentials,
     langfuse_credentials_complete,
     langfuse_live_enabled,
@@ -383,6 +384,7 @@ class LangfuseEmitter:
             "generations_paired": 0,  # of which had both token + text halves
             "generations_text_only": 0,
             "generations_token_only": 0,
+            "session_start_recorded": 0,  # 1 once the startup marker was sent
             "scores_sent": 0,  # decision Scores created (span + trace)
             "spans_opened": 0,  # phase + agent spans created
             "ext_shards_read": 0,  # out-of-process ext/*.jsonl files swept
@@ -431,6 +433,10 @@ class LangfuseEmitter:
             )
             return False
         try:
+            # Tighten the SDK auto-flush cadence before the singleton is built
+            # so a session killed before cli.finally still lands its latest
+            # observations (marking where the run died).
+            apply_flush_defaults()
             creds = langfuse_credentials()
             self._client = get_client()
             log.info(
@@ -726,6 +732,73 @@ class LangfuseEmitter:
                 self._counts["errors"] += 1
                 log.debug("langfuse: client.flush failed", exc_info=True)
             self._flushed = True
+            self._write_receipt()
+
+    def record_session_start(self) -> None:
+        """Emit a one-shot ``session_start`` marker the moment a session begins.
+
+        Attached directly to the session's ``trace_id`` (independent of the
+        lazy root span and of any LLM traffic), so a run that aborts in
+        pre-flight or is killed before producing a breakdown still leaves a
+        Langfuse trace tying the WekaFS user dir + session dir to its
+        ``code_revision`` and dependency commits. Idempotent (cross-process via
+        the persisted receipt) and best-effort (never raises).
+        """
+        if not self._enabled:
+            return
+        if self._counts.get("session_start_recorded"):
+            return
+        # Cross-process guard mirrors record_session_breakdown: a prior process
+        # (original run or a `recover-session`) may have already marked start.
+        persisted = read_receipt(self.session_dir) or {}
+        if (persisted.get("counts") or {}).get("session_start_recorded"):
+            self._counts["session_start_recorded"] = 1
+            return
+        import os
+
+        payload = lfmap.session_start_payload(
+            self._manifest,
+            user_data_path=(os.environ.get("USER_DATA_PATH") or "").strip() or None,
+            env=os.environ,
+        )
+        try:
+            obs = _start_obs(
+                self._client,
+                name="session_start",
+                as_type="span",
+                trace_context={"trace_id": self._trace_id},
+                input=None,
+                output=payload,
+                metadata={
+                    "claw_session_id": payload.get("claw_session_id"),
+                    "sandbox_user_id": payload.get("sandbox_user_id"),
+                    "code_revision": payload.get("code_revision"),
+                    "session_dir": payload.get("session_dir"),
+                    "user_data_path": payload.get("user_data_path"),
+                    "host": payload.get("host"),
+                    "image": payload.get("image"),
+                },
+            )
+            # Stamp trace name/session_id so the trace is grouped and visible
+            # from the very first observation, even with no LLM calls.
+            _set_trace_attrs(
+                obs,
+                name=self._trace_name(),
+                session_id=self._session_label,
+                metadata=lfmap.trace_metadata(self._manifest),
+            )
+            _end_obs(obs, None)
+            self._counts["session_start_recorded"] = 1
+        except Exception:  # noqa: BLE001
+            self._counts["errors"] += 1
+            log.debug("langfuse: record_session_start failed", exc_info=True)
+        finally:
+            try:
+                self._client.flush()
+            except Exception:  # noqa: BLE001
+                self._counts["errors"] += 1
+                log.debug("langfuse: flush after session_start failed", exc_info=True)
+            # Persist the flag so a later process (recovery) skips re-emitting.
             self._write_receipt()
 
     def record_session_breakdown(self, breakdown: dict[str, Any]) -> None:
@@ -1186,6 +1259,19 @@ def get_emitter(session_dir: Path) -> LangfuseEmitter:
             emitter = LangfuseEmitter(Path(session_dir))
             _REGISTRY[key] = emitter
         return emitter
+
+
+def record_session_start(session_dir: Path) -> None:
+    """Module-level convenience: emit the startup marker for ``session_dir``.
+
+    Call once right after ``manifest.json`` is written, before any heavy
+    bring-up / pre-flight, so the session's Langfuse trace exists from the
+    start. No-op when live push is disabled; best-effort (never raises).
+
+    Args:
+        session_dir: Session directory whose startup marker is emitted.
+    """
+    get_emitter(session_dir).record_session_start()
 
 
 def flush_session(session_dir: Path) -> None:
