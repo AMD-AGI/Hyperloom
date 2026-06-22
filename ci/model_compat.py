@@ -11,7 +11,9 @@ All rules are config-deterministic except ``missing_tokenizer`` (needs the local
 model dir) and gated/404 (network); the config rules are therefore safe to run
 both offline (pool build) and online (after prewarm, before submit).
 """
+import functools
 import json
+import os
 import re
 import time
 import urllib.error
@@ -20,10 +22,36 @@ import urllib.request
 # Context window at or below this is too small to be worth a sandbox slot.
 SHORT_CTX_MAX = 2048
 
-# Vision / multimodal architectures the text serving path cannot start.
+# Curated daily-fixed pool: every repo listed there is hand-picked and may
+# intentionally include otherwise-filtered models (e.g. multimodal MoE run in
+# text mode). Such repos are exempt from ALL compatibility filtering.
+DAILY_FIXED_DEFAULT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "candidates", "inferencex_daily_fixed.json")
+
+
+@functools.lru_cache(maxsize=8)
+def load_whitelist(path=None):
+    """Return the set of repo ids exempt from filtering (the daily-fixed pool)."""
+    path = path or DAILY_FIXED_DEFAULT
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return frozenset(c["repo_id"] for c in d.get("candidates", [])
+                         if c.get("repo_id"))
+    except Exception:
+        return frozenset()
+
+# Explicit vision / multimodal architecture markers. NOTE: we deliberately do
+# NOT match the bare ``*ForConditionalGeneration`` suffix — several text-only
+# MoE models (e.g. Qwen3_5Moe / KimiK25) use that suffix without being vision
+# models. Genuine multimodal models are caught here by an explicit vision
+# token, by a vision ``model_type``, or by a ``vision_config`` block (see
+# ``unrunnable_reason``).
 VISION_ARCH = re.compile(
-    r"(ForConditionalGeneration|Llava|InternVL|Idefics|PaliGemma|Florence|"
-    r"Mllama|VLForCausalLM|Qwen\w*VL|VLMoe|Gemma3ForConditional|Llama4|Mistral3)",
+    r"(Llava|InternVL|Idefics\d?|PaliGemma|Florence|Mllama|Qwen\w*VL|VLForCausalLM|"
+    r"VLMoe|Gemma3ForConditional|Gemma4ForConditional|Llama4ForConditional|"
+    r"Mistral3ForConditional|Ernie\w*VL|MiniCPMV|GotOcr|Keye|Step3VL)",
     re.I)
 VISION_MT = {"llava", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "internvl", "mllama",
              "idefics", "idefics2", "idefics3", "paligemma", "llava_next",
@@ -58,19 +86,23 @@ def has_tokenizer(model_dir):
     return bool(files & _TOKENIZER_FILES)
 
 
-def unrunnable_reason(config, repo="", model_dir=None):
+def unrunnable_reason(config, repo="", model_dir=None, whitelist=None):
     """Return ``(reason, detail)`` if the model cannot run on the ROCm stack,
     else ``None``.
 
     Args:
         config: Parsed HF ``config.json`` dict.
-        repo: Optional repo id (for messages only).
+        repo: Optional repo id (for messages and whitelist match).
         model_dir: Optional local model directory; enables the
             ``missing_tokenizer`` check when weights are present.
+        whitelist: Optional set of repo ids exempt from all filtering (e.g. the
+            curated daily-fixed pool). Pass ``model_compat.load_whitelist()``.
 
     Rules: multimodal, short_ctx, phi3_longrope, dual_chunk_attention, gemma2,
     modelopt_fp8, attn_backend (flashinfer), missing_tokenizer.
     """
+    if whitelist and repo and repo in whitelist:
+        return None  # curated/whitelisted repo -> never filtered
     if not isinstance(config, dict):
         return None
     archs = config.get("architectures") or []
@@ -80,8 +112,11 @@ def unrunnable_reason(config, repo="", model_dir=None):
     rope = config.get("rope_scaling") or {}
     blob = json.dumps(config).lower()
 
-    # 1) multimodal / VL
-    if (VISION_ARCH.search(arch) or mt in VISION_MT or "vision_config" in config
+    # 1) multimodal / VL — explicit vision arch token, vision model_type, or a
+    #    vision_config/vision_tower block. Bare *ForConditionalGeneration is NOT
+    #    treated as multimodal on its own (text-only MoE use it too).
+    if (VISION_ARCH.search(arch) or mt in VISION_MT
+            or isinstance(config.get("vision_config"), dict)
             or "vision_tower" in blob):
         return ("multimodal", f"arch={arch or mt}")
 
