@@ -395,9 +395,10 @@ async def test_subprocess_path_injects_llm_stability_env(
     fake_framework_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The dispatcher must inject a client-side LLM-transport timeout
-    (API_TIMEOUT_MS + disable flags) so a stalled gateway stream raises
-    instead of hanging the claude subprocess forever (Sandbox-hang RCA)."""
+    """The dispatcher injects low-risk claude-code stability flags but does not
+    set API_TIMEOUT_MS by default. Specialist liveness is governed by the
+    Hyperloom-owned process.log / heartbeat stale reaper, avoiding external
+    total-request timeout semantics for long streaming responses."""
     # Ensure no inherited values mask the setdefault under test.
     for var in (
         "API_TIMEOUT_MS",
@@ -428,7 +429,7 @@ async def test_subprocess_path_injects_llm_stability_env(
     result = await runner.run(ctx)
 
     assert result.status in ("succeeded", "empty_synthesised")
-    assert result.specialist_done["api_timeout_ms"] == "300000"
+    assert result.specialist_done["api_timeout_ms"] == ""
     assert result.specialist_done["disable_autoupdater"] == "1"
     assert result.specialist_done["disable_nonessential"] == "1"
 

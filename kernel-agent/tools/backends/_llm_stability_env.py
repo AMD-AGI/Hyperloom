@@ -4,15 +4,14 @@
 
 Hyperloom RCA (Sandbox hang): a streaming request to the SaFE/LiteLLM gateway
 can return a partial response (``stop_reason=None``) and then stop pushing
-chunks while the TCP connection stays alive. Without a *client-side* request
-timeout the SDK/CLI awaits forever on ``socket.read()``, which freezes the
-whole call chain (specialist -> coordinator -> optimizer) and leaves the pod
-running idle with no breakdown ever flushed.
+chunks while the TCP connection stays alive. Hyperloom-owned idle monitors
+(process-log/heartbeat stale checks, or per-message SDK ``wait_for``) should
+decide whether that stream is stalled.
 
-``API_TIMEOUT_MS`` bounds the claude-code client's own HTTP request so a stalled
-stream raises a normal error that propagates up through every wrapper instead of
-hanging. The two ``*_DISABLE_*`` knobs cut non-essential / auto-update traffic
-that can also block in headless containers.
+``API_TIMEOUT_MS`` is opt-in because external clients may interpret it as a
+total request timeout, which could kill a legitimate long streaming response.
+The default helper only cuts non-essential / auto-update traffic that can also
+block in headless containers.
 
 This is the single source of truth for those knobs; ``forge_submit`` already
 applied them inline (its original RCA fix) and now delegates here. ``setdefault``
@@ -32,7 +31,7 @@ __all__ = ["DEFAULT_API_TIMEOUT_MS", "apply_llm_stability_env"]
 def apply_llm_stability_env(
     env: MutableMapping[str, str],
     *,
-    api_timeout_ms: str = DEFAULT_API_TIMEOUT_MS,
+    api_timeout_ms: str | None = None,
 ) -> None:
     """Inject client-side LLM-transport timeout/stability knobs into ``env``.
 
@@ -41,8 +40,10 @@ def apply_llm_stability_env(
 
     Args:
         env: The environment mapping to harden (mutated in place).
-        api_timeout_ms: Per-request claude-code timeout, in milliseconds.
+        api_timeout_ms: Optional per-request claude-code timeout, in
+            milliseconds. ``None`` leaves ``API_TIMEOUT_MS`` untouched.
     """
-    env.setdefault("API_TIMEOUT_MS", str(api_timeout_ms))
+    if api_timeout_ms is not None:
+        env.setdefault("API_TIMEOUT_MS", str(api_timeout_ms))
     env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
     env.setdefault("DISABLE_AUTOUPDATER", "1")

@@ -27,7 +27,10 @@ from inference_optimizer.orchestrator.kernel_request_handlers import _run_subpro
 def test_apply_llm_stability_env_sets_defaults():
     env: dict[str, str] = {}
     apply_llm_stability_env(env)
-    assert env["API_TIMEOUT_MS"] == DEFAULT_API_TIMEOUT_MS == "300000"
+    # API_TIMEOUT_MS is opt-in: some external clients treat it as a total
+    # request timeout, which can kill a legitimate long streaming response.
+    assert "API_TIMEOUT_MS" not in env
+    assert DEFAULT_API_TIMEOUT_MS == "300000"
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert env["DISABLE_AUTOUPDATER"] == "1"
 
@@ -35,7 +38,7 @@ def test_apply_llm_stability_env_sets_defaults():
 def test_apply_llm_stability_env_respects_operator_override():
     env = {"API_TIMEOUT_MS": "60000"}
     apply_llm_stability_env(env)
-    # setdefault must not clobber an operator-set value.
+    # The helper must not clobber an operator-set value.
     assert env["API_TIMEOUT_MS"] == "60000"
     assert env["DISABLE_AUTOUPDATER"] == "1"
 
@@ -105,5 +108,7 @@ async def test_run_subprocess_kills_grandchild_on_timeout(tmp_path):
         try:
             os.kill(gc_pid, signal.SIGKILL)
         except OSError:
+            # The process may already have disappeared between the liveness
+            # check and best-effort cleanup; nothing remains to clean up.
             pass
         pytest.fail(f"grandchild pid={gc_pid} survived the timeout reap (orphaned)")

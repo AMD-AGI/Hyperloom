@@ -1102,9 +1102,11 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
             # Reap the whole tree, then drain whatever partial output landed.
             kill_my_spawned_server(proc)
             try:
-                stdout, stderr = proc.communicate(timeout=30)
+                proc.communicate(timeout=30)
             except subprocess.TimeoutExpired:
-                stdout, stderr = "", ""
+                # The process group was already signalled; do not block cleanup
+                # waiting for a wedged child to flush pipes.
+                pass
             raise
         finally:
             # Defense in depth: never leave a descendant of this call running.

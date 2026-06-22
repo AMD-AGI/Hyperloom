@@ -31,7 +31,7 @@ DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 # socket.read() and freeze the whole optimizer chain (Hyperloom Sandbox-hang
 # RCA). We bound the wait for EACH next SDK message (inactivity, not total) so a
 # stalled stream aborts while a legitimately long-but-progressing analysis is
-# untouched. Aligns with forge's 300s API_TIMEOUT_MS; env-overridable.
+# untouched. Env-overridable.
 _DEFAULT_STREAM_IDLE_TIMEOUT_SEC = 300.0
 
 
@@ -548,11 +548,10 @@ async def run_tracelens_skill(
         query, options_cls = _import_sdk()
         sdk_query_factory = sdk_query_factory or query
         sdk_options_cls = sdk_options_cls or options_cls
-        # Only harden the real SDK path; tests inject fakes and skip this. The
-        # SDK spawns the claude CLI, which reads these from the process env, so a
-        # stalled gateway request aborts client-side instead of hanging forever
-        # (kept in sync with backends/_llm_stability_env.py).
-        os.environ.setdefault("API_TIMEOUT_MS", "300000")
+        # Only harden the real SDK path; tests inject fakes and skip this. Keep
+        # API_TIMEOUT_MS opt-in because external clients may interpret it as a
+        # total request timeout. The per-message wait_for below is the
+        # Hyperloom-controlled idle timeout.
         os.environ.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         os.environ.setdefault("DISABLE_AUTOUPDATER", "1")
 

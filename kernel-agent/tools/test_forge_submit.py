@@ -390,9 +390,10 @@ def test_report_informational_timing_not_kept_does_not_trigger_keep(tmp_path):
     assert ko._extract_correctness_from_report(report) is False
 
 
-def test_apply_fellow_env_claude_path_and_timeout(tmp_path, monkeypatch):
+def test_apply_fellow_env_claude_path_and_stability_flags(tmp_path, monkeypatch):
     """G3+G4: child env gets FORGE_CLAUDE_BIN + claude dir on PATH, plus the
-    fellow-hung mitigations (API_TIMEOUT_MS / disable flags)."""
+    low-risk fellow stability flags. API_TIMEOUT_MS is opt-in because external
+    clients may treat it as a total request timeout."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     claude = bindir / "claude"
@@ -403,25 +404,25 @@ def test_apply_fellow_env_claude_path_and_timeout(tmp_path, monkeypatch):
     forge_submit._apply_fellow_env(env)
     assert env["FORGE_CLAUDE_BIN"] == str(claude)
     assert str(bindir) in env["PATH"].split(os.pathsep)
-    assert env["API_TIMEOUT_MS"] == "300000"
+    assert "API_TIMEOUT_MS" not in env
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert env["DISABLE_AUTOUPDATER"] == "1"
 
 
 def test_apply_fellow_env_timeout_respects_operator_override(monkeypatch):
-    """setdefault must not clobber an operator-set API_TIMEOUT_MS."""
+    """Existing operator-set API_TIMEOUT_MS must pass through untouched."""
     env = {"API_TIMEOUT_MS": "60000"}
     forge_submit._apply_fellow_env(env)
     assert env["API_TIMEOUT_MS"] == "60000"
 
 
 def test_llm_stability_env_helper_sets_defaults():
-    """The shared kernel-side helper sets the client-side LLM timeout knobs."""
+    """The shared kernel-side helper sets only low-risk defaults."""
     import _llm_stability_env
 
     env: dict[str, str] = {}
     _llm_stability_env.apply_llm_stability_env(env)
-    assert env["API_TIMEOUT_MS"] == "300000"
+    assert "API_TIMEOUT_MS" not in env
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert env["DISABLE_AUTOUPDATER"] == "1"
 
@@ -432,6 +433,14 @@ def test_llm_stability_env_helper_respects_override():
     env = {"API_TIMEOUT_MS": "1000"}
     _llm_stability_env.apply_llm_stability_env(env)
     assert env["API_TIMEOUT_MS"] == "1000"
+
+
+def test_llm_stability_env_helper_can_opt_in_to_api_timeout():
+    import _llm_stability_env
+
+    env: dict[str, str] = {}
+    _llm_stability_env.apply_llm_stability_env(env, api_timeout_ms="120000")
+    assert env["API_TIMEOUT_MS"] == "120000"
 
 
 def _capture_cli_env(tmp_path, monkeypatch, worktree_kernel):
