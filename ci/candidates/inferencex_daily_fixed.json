@@ -303,20 +303,6 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 19,
-      "label": "DeepSeek-R1-0528",
-      "repo_id": "deepseek-ai/DeepSeek-R1-0528",
-      "framework": "sglang",
-      "precision": "FP8",
-      "tp": 8,
-      "conc": 64,
-      "registered": true,
-      "is_top": false,
-      "note": "Supplementary >256B model (~685B, arch=DeepseekV3ForCausalLM, native dtypes [F8_E4M3:681B,BF16:4B,F32:0B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
-      "params_b": 685
-    },
-    {
-      "pool_id": "inferencex-daily-fixed",
       "pool_index": 20,
       "label": "DeepSeek-V3",
       "repo_id": "deepseek-ai/DeepSeek-V3",
