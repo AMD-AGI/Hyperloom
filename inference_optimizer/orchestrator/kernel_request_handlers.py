@@ -2014,6 +2014,25 @@ async def run_optimization_handler(
             )
             if canon:
                 single_payload["kernel_id"] = canon
+            elif not _names_specific_kernel(single_payload):
+                # Empty eligible queue and the request named no specific target
+                # (e.g. the post-GEMM auto pass dispatches a batch with no id).
+                # All candidates are already tried/rejected, below the size
+                # cutoff, or not reusable. Finish cleanly instead of falling
+                # into the single-kernel path, which would surface
+                # "missing 'kernel_id'" and mis-report an empty work queue as a
+                # GEAK failure. A "skipped" status (no error_class / REVERT
+                # decision) is not counted as a failure by the breakdown
+                # recorder.
+                return {
+                    "status": "skipped",
+                    "reason": "no_eligible_kernels",
+                    "kernels_considered": len(_all_kernel_candidates(payload)),
+                    "message": (
+                        "no eligible kernels to optimize (all candidates already "
+                        "tried/rejected, below the size cutoff, or not reusable)"
+                    ),
+                }
         single_payload["_single_kernel"] = True
         return await _run_optimization_single(single_payload, session_dir=session_dir)
     return await _run_optimization_batch(
@@ -2278,6 +2297,29 @@ def _resolve_candidate_id(
         if _normalize_kernel_id(str(cand.get("kernel_id") or "")) == target:
             return str(cand.get("kernel_id") or "")
     return ""
+
+
+def _names_specific_kernel(payload: dict) -> bool:
+    """Return ``True`` when the payload targets one specific kernel/source.
+
+    A specific target is an explicit ``kernel_id``, a ``source_file`` to
+    optimize, or an inline ``candidate`` dict. The post-GEMM auto pass dispatches
+    a batch with none of these, which is the empty-work-queue case that should be
+    skipped cleanly rather than routed into the single-kernel path.
+
+    Args:
+        payload: The run_optimization request payload.
+
+    Returns:
+        ``True`` if the request names a specific kernel/source, else ``False``.
+    """
+    if str(payload.get("kernel_id") or "").strip():
+        return True
+    if str(payload.get("source_file") or "").strip():
+        return True
+    if isinstance(payload.get("candidate"), dict):
+        return True
+    return False
 
 
 def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:

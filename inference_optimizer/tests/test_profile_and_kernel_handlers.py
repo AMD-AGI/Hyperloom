@@ -2538,6 +2538,37 @@ async def test_run_optimization_handler_missing_kernel_id(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_run_optimization_handler_empty_queue_skips_cleanly(session_dir, tmp_path):
+    # Empty eligible queue (all candidates non-reusable) with no specific kernel
+    # named (the post-GEMM auto pass shape) must finish as a clean skip, not a
+    # "missing 'kernel_id'" GEAK failure.
+    candidates_path = _write_candidates_json(
+        tmp_path,
+        {
+            "hot_kernels": [
+                {
+                    "kernel_id": "k001",
+                    "name": "fused_moe",
+                    "source_file": "/sgl-workspace/aiter/moe.py",
+                    "reusable_native_kernel": False,
+                    "duration_us": 100.0,
+                    "gpu_pct": 12.0,
+                },
+            ],
+        },
+    )
+    assert krh._batch_kernel_candidates({"candidates_path": str(candidates_path)}) == []
+    res = await krh.run_optimization_handler(
+        {"candidates_path": str(candidates_path), "session_id": session_dir.name},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "skipped"
+    assert res["reason"] == "no_eligible_kernels"
+    assert res.get("error_class") is None
+    assert res["kernels_considered"] == 1
+
+
+@pytest.mark.asyncio
 async def test_run_optimization_handler_dry_run(session_dir):
     payload = {
         "kernel_id": "fake_kernel_1",
