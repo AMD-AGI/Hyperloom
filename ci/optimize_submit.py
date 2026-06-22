@@ -1820,6 +1820,7 @@ def process_model(
                 os.environ.get("CI_MODELS_DIR", "/wekafs/models"),
                 repo_id.replace("/", "-")),
             whitelist=model_compat.load_whitelist(),
+            gpu_type=gpu_type,
         )
         if compat:
             reason, detail = compat
