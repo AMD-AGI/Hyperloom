@@ -124,7 +124,7 @@ jobs:
                   "tp": "1",
                   "exclude_leaderboard": "false",
                   "exclude_active_workflows": "false",
-                  "max_parallel": "205",
+                  "max_parallel": "198",
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
                   "task_timeout_min": "720",
                   "max_hours": "12",
