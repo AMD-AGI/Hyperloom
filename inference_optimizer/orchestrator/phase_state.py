@@ -1396,6 +1396,74 @@ def warm_replay_in_flight(state: Any) -> bool:
     return str(outcome.get("status") or "").strip() == "in_flight"
 
 
+def _kernel_opt_max_failures() -> int:
+    """Resolve the kernel infra-failure retry budget (lazy import)."""
+    from .shared_state import resolve_kernel_opt_max_failures
+
+    return resolve_kernel_opt_max_failures()
+
+
+def kernel_work_pending(state: Any) -> bool:
+    """Return True while KERNEL has work that can still affect validated gain.
+
+    This guards the non-terminal ``skip_to_sweep`` handoff: a plateau hint should
+    not end KERNEL while a KEEP still needs integrate, or while a kernel-agent
+    attempt is only partially recorded, or while trace analysis still exposes
+    hot reusable kernels that have not received a kernel_opt attempt. Hard
+    time/budget exits are still handled by :func:`exit_normal_kernel`.
+    """
+    try:
+        if bool(getattr(state, "has_keep_pending_integrate", False)):
+            return True
+    except Exception:
+        pass
+
+    try:
+        untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
+        if callable(untried_hot) and bool(untried_hot()):
+            return True
+    except Exception:
+        pass
+
+    rejected = {str(x) for x in (getattr(state, "rejected_kernel_ids", None) or [])}
+    integrated: set[str] = set()
+    for entry in getattr(state, "optimization_stack", None) or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("action") or "") == "integrate":
+            kid = str(entry.get("kernel_id") or "")
+            if kid:
+                integrated.add(kid)
+
+    attempts = getattr(state, "kernel_opt_attempts", None) or {}
+    if not isinstance(attempts, dict):
+        return False
+    for kid, attempt in attempts.items():
+        kernel_id = str(kid or "")
+        if kernel_id in rejected or kernel_id in integrated:
+            continue
+        if not isinstance(attempt, dict):
+            continue
+        decision = str(attempt.get("last_decision") or "").strip().upper()
+        status = str(attempt.get("last_status") or "").strip().lower()
+        rejected_reason = str(attempt.get("rejected_reason") or "").strip()
+        if decision == "KEEP":
+            return True
+        if decision == "REVERT" or rejected_reason:
+            continue
+        if status == "failed":
+            try:
+                failure_count = int(attempt.get("failure_count") or 0)
+            except (TypeError, ValueError):
+                failure_count = 0
+            if 0 < failure_count < _kernel_opt_max_failures():
+                return True
+            continue
+        if decision in ("", "PARTIAL", "NEEDS_REVIEW"):
+            return True
+    return False
+
+
 def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """``baseline_tput > 0`` and warm-replay settled → ``prelude_done`` (else ``None``).
 
@@ -1562,10 +1630,11 @@ def exit_normal_kernel(
         exit, or ``None`` when KERNEL should continue.
     """
     if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
-        return "kernel_no_more_leverage", {
-            "evidence": "kernel_no_more_leverage",
-            "hint": ESCALATE_HINT_SKIP_TO_SWEEP,
-        }
+        if not kernel_work_pending(state):
+            return "kernel_no_more_leverage", {
+                "evidence": "kernel_no_more_leverage",
+                "hint": ESCALATE_HINT_SKIP_TO_SWEEP,
+            }
     rejected = getattr(state, "rejected_kernel_ids", None) or []
     rejected_count = len(rejected) if isinstance(rejected, list) else 0
     remaining = phase_budget_remaining_seconds(
@@ -2415,6 +2484,7 @@ __all__ = [
     "is_valid_escalate_hint",
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",
+    "kernel_work_pending",
     "make_history_row",
     "normalize_budget_pct",
     "phase_budget_remaining_seconds",

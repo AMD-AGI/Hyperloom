@@ -89,9 +89,8 @@ def test_preflight_fails_for_2048_model(tmp_path, monkeypatch):
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_context_window_too_small"
     # PR-review-1: fail-fast must emit session_breakdown.json itself (it exits before coordinator.run's try/finally).
-    breakdown = sd / "session_breakdown.json"
-    assert breakdown.exists()
-    assert json.loads(breakdown.read_text(encoding="utf-8"))
+    breakdown = json.loads((sd / "session_breakdown.json").read_text(encoding="utf-8"))
+    assert breakdown["session"]["stop_reason"] == "model_context_window_too_small"
 
 
 def test_preflight_passes_for_4096_model(tmp_path, monkeypatch):
