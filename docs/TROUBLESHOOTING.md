@@ -1,36 +1,42 @@
-# Troubleshooting
+---
+myst:
+    html_meta:
+        "description": "Diagnose and fix common Hyperloom failures: auth-proxy 401s, Ray GPU issues, VRAM exhaustion, TraceLens CLI errors, KB write failures, and session resume problems."
+        "keywords": "Hyperloom, troubleshooting, auth-proxy, Ray, VRAM, OOM, GEAK, TraceLens, IntelliKit, KB, LLM inference, AMD GPU, session resume, debugging"
+---
+# Troubleshooting Hyperloom
 
 A consolidated symptom → cause → fix index for the failures Hyperloom
 users hit most often. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
-[`src/hyperloom/inference_optimizer/SKILL.md`](../src/hyperloom/inference_optimizer/SKILL.md),
-[`src/hyperloom/agents/kernel/SKILL.md`](../src/hyperloom/agents/kernel/SKILL.md),
-[`src/hyperloom/agents/critic/SKILL.md`](../src/hyperloom/agents/critic/SKILL.md),
-[`src/hyperloom/agents/robustness/SKILL.md`](../src/hyperloom/agents/robustness/SKILL.md).
+[`inference_optimizer/SKILL.md`](../inference_optimizer/SKILL.md),
+[`kernel-agent/SKILL.md`](../kernel-agent/SKILL.md),
+[`critic-agent/SKILL.md`](../critic-agent/SKILL.md),
+[`robustness-agent/SKILL.md`](../robustness-agent/SKILL.md).
 
 ---
 
 ## Auth-proxy 401
 
-**Symptom.** A tool exits with one of:
+**Symptom**: A tool exits with one of:
 
 * `HTTP 401 Unauthorized`
 * `Primus.00009 token not present`
 * `Claude SDK exit code 1`
 * `OpenAI SDK: AuthenticationError`
 
-**Cause.** The OOB auth-proxy on `127.0.0.1:4002` is down or stuck.
+**Cause**: The OOB auth-proxy on `127.0.0.1:4002` is down or stuck.
 The proxy is what rewrites the upstream `x-api-key` header to
 `Authorization: Bearer <SAFE_API_KEY>` for the AMD primus-safe
-gateway. Without it, every `claude` / `codex` CLI request 401s.
+gateway. Without it, every `claude` or `codex` CLI request 401s.
 
-**Fix.** Re-run the supervisor (idempotent — noop if healthy):
+**Fix**: Re-run the supervisor (idempotent — noop if healthy):
 
 ```bash
-bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/ensure_auth_proxy.sh"
+bash "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh"
 ```
 
-It TCP-probes `:4002`, then HTTP-probes via `curl`. If the port is
+It TCP-probes `:4002`, then HTTP-probes using `curl`. If the port is
 open but the probe times out (stuck proxy), it kills the existing
 `auth_proxy.py` process and relaunches.
 
@@ -40,21 +46,21 @@ open but the probe times out (stuck proxy), it kills the existing
 * Verify nothing else is on port 4002:
   `ss -ltnp | grep :4002`.
 * Override the port if 4002 is occupied:
-  `AUTH_PROXY_PORT=4012 bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"`.
+  `AUTH_PROXY_PORT=4012 bash "$REPO_ROOT/kernel-agent/scripts/install.sh"`.
 
-See [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §5 for proxy internals.
+See [Hyperloom authentication and credentials](reference/authentication.md) §5 for proxy internals.
 
 ---
 
 ## Ray `--num-gpus` rejected
 
-**Symptom.** `ray start --head ... --num-gpus=N` fails with
+**Symptom**: `ray start --head ... --num-gpus=N` fails with
 `Error: no such option: --num-gpus` or similar Click errors.
 
-**Cause.** Click ≥ 8.3 is incompatible with the Ray 2.44 CLI shipped
+**Cause**: Click ≥ 8.3 is incompatible with the Ray 2.44 CLI shipped
 by Hyperloom's installer.
 
-**Fix.**
+**Fix**:
 
 ```bash
 pip install --quiet 'click<8.3.0' 'ray[default]==2.44.1'
@@ -68,14 +74,14 @@ venv rebuild.
 
 ## Ray tasks stuck pending forever
 
-**Symptom.** `ray status` shows pending tasks; GPU usage is 0% even
+**Symptom**: `ray status` shows pending tasks; GPU usage is 0% even
 though the node has free GPUs.
 
-**Cause.** Ray was started with `--num-gpus=0` (or omitted, which
+**Cause**: Ray was started with `--num-gpus=0` (or omitted, which
 defaults to 0 on some images). GEAK and OOB submit tasks with
 `num_gpus>=1` and will wait indefinitely.
 
-**Fix.**
+**Fix**:
 
 ```bash
 RAY_NUM_GPUS="${RAY_NUM_GPUS:-$(python3 -c 'import torch; print(torch.cuda.device_count() or 1)')}"
@@ -87,14 +93,14 @@ ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dash
 ray status
 ```
 
-> **Note.** `hyperloom.inference_optimizer.cli` does **not** auto-start Ray.
+> **Note.** `inference_optimizer.cli` does **not** auto-start Ray.
 > Always start it before launching `inference_optimizer optimize`.
 
 ---
 
-## Ray raylet unstable / zombie (fd-limit too low)
+## Ray raylet unstable or zombie (fd-limit too low)
 
-**Symptom.** During GEAK dispatch the raylet aborts on startup
+**Symptom**: During GEAK dispatch the raylet aborts on startup
 (`SIGABRT`), or `ray stop` reports it could not be stopped and leaves
 it behind, e.g.:
 
@@ -104,12 +110,12 @@ the grace period 16 seconds. Remaining processes [... name='raylet',
 status='zombie' ...]
 ```
 
-**Cause.** At the container default `ulimit -n` (1024) the open-files
+**Cause**: At the container default `ulimit -n` (1024) the open-files
 limit is far too low for the raylet, which opens many fds (sockets,
 plasma store, per-worker pipes) — on a 384-CPU node with hundreds of
 workers it needs `nofile >= 65536` (issue #433).
 
-**Fix.** Launch the kernel-agent container with a high open-files limit
+**Fix**: Launch the kernel-agent container with a high open-files limit
 (this is a **hard requirement** — only the container launch can lift the
 *hard* cap):
 
@@ -119,8 +125,8 @@ docker run --ulimit nofile=1048576 ...   # minimum: --ulimit nofile=65536
 
 The runtime also runs an fd-limit preflight that raises this process's
 *soft* limit (up to the hard cap) before every `ray start`
-(`src/hyperloom/agents/kernel/scripts/install.sh` `ensure_fd_limit_for_ray` and
-`src/hyperloom/agents/kernel/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
+(`kernel-agent/scripts/install.sh` `ensure_fd_limit_for_ray` and
+`kernel-agent/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
 high hard cap is enough; you do not need to set the soft limit yourself.
 Override the target with `RAY_MIN_NOFILE` if needed. If the preflight
 warns that the **hard** cap is below the target, the container was not
@@ -128,20 +134,20 @@ launched with `--ulimit nofile=...` — fix the launch command.
 
 ---
 
-## VRAM exhaustion / IR-1 error
+## VRAM exhaustion or IR-1 error
 
-**Symptom.** Inference server exits with `HSA: out of memory`,
+**Symptom**: Inference server exits with `HSA: out of memory`,
 `std::runtime_error: ROCm IR-1`, `OOM` during the prefill step, or
 the baseline benchmark fails with VRAM allocation errors.
 
-**Cause.** One of:
+**Cause**: One of:
 
 * `TP` is too small for the model's weights.
 * `MAX_MODEL_LEN` is set higher than the KV cache budget allows at
   the current `CONC`.
 * A previous server process leaked memory and didn't release it.
 
-**Fix.**
+**Fix**:
 
 1. Confirm no zombie inference server is holding VRAM:
    `rocm-smi --showmemuse` then kill stragglers with
@@ -161,22 +167,22 @@ context.
 
 ## GEAK fails fast with "profiler_mcp not installed"
 
-**Symptom.** GEAK attempts abort within 4 minutes with zero-byte
+**Symptom**: GEAK attempts abort within 4 minutes with zero-byte
 baseline files; logs mention a missing `profiler_mcp` or one of the
 other GEAK MCP packages.
 
-**Cause.** `install.sh` did not finish installing all five GEAK MCP
+**Cause**: `install.sh` did not finish installing all five GEAK MCP
 packages (`rag-mcp`, `profiler-mcp`, `metrix-mcp`,
 `cross-session-memory-mcp`, `automated-test-discovery`). Common
 trigger: pip install failed on a transient registry hiccup and the
 installer continued.
 
-**Fix.**
+**Fix**:
 
 ```bash
-bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
+bash "$REPO_ROOT/kernel-agent/scripts/install.sh" --check-only
 # If --check-only reports missing packages, re-run without --check-only:
-bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
+bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
 ```
 
 The installer is idempotent and re-installs only what's missing.
@@ -185,19 +191,19 @@ The installer is idempotent and re-installs only what's missing.
 
 ## TraceLens CLI not found
 
-**Symptom.** `tracelens_analysis` returns `CLI not found` or
+**Symptom**: `tracelens_analysis` returns `CLI not found` or
 `TraceLens_generate_perf_report_pytorch_inference: command not found`.
 
-**Cause.** TraceLens-internal isn't installed, or the legacy
+**Cause**: TraceLens-internal isn't installed, or the legacy
 training-mode CLI is being looked for (no longer accepted as of v0.4).
 
-**Fix.**
+**Fix**:
 
 1. Re-run `install.sh` (it clones AMD-AGI/TraceLens into the pod-local
    open-source checkout root, pins it to a fixed SHA, runs `pip install -e`,
    and smokes the CLI):
    ```bash
-   bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
    ```
 2. If `install.sh` succeeds but the CLI still isn't on PATH, install
    manually. By default use the installer-managed clone; only point
@@ -205,7 +211,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    explicit operator override — that skips both the clone and the SHA
    pin:
    ```bash
-   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens}"
+   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens}"
    cd "$TRACELENS_ROOT"
    pip install -e .
    TraceLens_generate_perf_report_pytorch_inference --help
@@ -216,82 +222,42 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
 
 ---
 
-## TraceLens root dangling after the /tmp → /opt default move (#722)
-
-**Symptom.** On a pod provisioned before #722, `trace_analyze` still fails
-with `TraceLens root not found` (or `incomplete (not a git checkout)`) even
-after a tmp-reaper wipe, and the runtime never self-heals it.
-
-**Cause.** The open-source deps default moved from the ephemeral
-`${TMPDIR:-/tmp}/hyperloom/open-source-repos` to the pod-internal
-`/opt/hyperloom/open-source-repos`. A stale `kernel-agent.env.sh` (or `.env`)
-that still pins `TRACELENS_ROOT` to the old `/tmp/...` path is treated as an
-**explicit operator override**: self-heal is scoped to the installer-managed
-default only, so a non-default `/tmp` path is never auto-re-cloned and fails
-fast once `/tmp` is reaped.
-
-**Fix.** Pick one:
-
-1. **Re-run the installer (preferred).** Drop the stale pin so the default is
-   re-resolved to `/opt`, then reinstall:
-   ```bash
-   # remove any hard-coded old /tmp TRACELENS_ROOT from env/.env first
-   unset TRACELENS_ROOT
-   bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
-   ```
-   The installer rewrites `kernel-agent.env.sh` with the `/opt` default and
-   clones+pins TraceLens there.
-2. **Point the deps root at a writable dir** if the pod runs as non-root or
-   `/opt` is read-only (the installer `mkdir -p`s the root, so it must be
-   writable):
-   ```bash
-   export HYPERLOOM_OPEN_SOURCE_ROOT="$USER_DATA_PATH/open-source-repos"
-   unset TRACELENS_ROOT
-   bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
-   ```
-3. **Keep an operator checkout** only if you deliberately maintain one — set
-   `TRACELENS_ROOT` to that path. It is adopted as-is (no clone, no SHA pin,
-   no self-heal), so you own keeping it present and on the right ref.
-
----
-
 ## Cursor backend gets HTTP 401 (separate from auth-proxy)
 
-**Symptom.** The OOB `cursor` backend specifically returns 401 even
+**Symptom**: The OOB `cursor` backend specifically returns 401 even
 though `claude` / `codex` work fine.
 
-**Cause.** `CURSOR_API_KEY` is missing or invalid. The Cursor backend
+**Cause**: `CURSOR_API_KEY` is missing or invalid. The Cursor backend
 talks to Cursor's own gateway, **not** the AMD primus-safe gateway,
 and requires a separate `crsr_...` key.
 
-**Fix.**
+**Fix**:
 
-* If you don't have a Cursor account: nothing to do. `cursor` is the tail of the
-  default `forge,geak,claude,codex,cursor` ladder but is auto-dropped when
-  `CURSOR_API_KEY` is unset, so the default `forge,geak,claude,codex` run is
-  fully functional without it. If you explicitly requested `--backends cursor`
-  and don't have a key, remove the flag.
+* If you don't have a Cursor account: do not include `cursor` in
+  `KERNEL_OPT_BACKEND_ORDER`. The default `forge,geak` ladder is fully
+  functional without it. If you explicitly requested `--backends cursor` and
+  don't have a key, remove the flag.
 * If you do have a Cursor account:
   ```bash
   export CURSOR_API_KEY=crsr_...
-  bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"   # picks up the new key
+  bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"   # picks up the new key
   ```
 
-See [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §3 for the Cursor key
+See [Hyperloom authentication and credentials](reference/authentication.md) §3 for the Cursor key
 specifics.
 
 ---
 
 ## Resume fails: "manifest.json not found"
 
-**Symptom.** `inference_optimizer optimize --resume` exits with
+**Symptom**: `inference_optimizer optimize --resume` exits with
 `manifest.json missing` or `state.json missing`.
 
-**Cause.** `USER_DATA_PATH` points at a different directory than the
+**Cause**: `USER_DATA_PATH` points at a different directory than the
 original session, or the session never reached the point of writing
 `manifest.json` (failed before the session manifest was written).
 
-**Fix.**
+**Fix**:
 
 1. Verify env:
    ```bash
@@ -311,13 +277,13 @@ original session, or the session never reached the point of writing
 
 ## KB writes silently failing
 
-**Symptom.** Recipe KB warm-start is empty, gbrain read-side enrichment is
+**Symptom**: Recipe KB warm-start is empty, `--cortex-kb-url` enrichment is
 missing, or new local KB records do not appear under the selected local KB root.
 
-**Cause.** The local recipe KB root is on a read-only/full mount, permission is
-denied, or the optional remote gbrain KB is unreachable.
+**Cause**: The local recipe KB root is on a read-only/full mount, permission is
+denied, or the optional remote Cortex KB URL is unreachable.
 
-**Fix.**
+**Fix**:
 
 1. Resolve and test the local KB root:
    ```bash
@@ -326,27 +292,27 @@ denied, or the optional remote gbrain KB is unreachable.
    mkdir -p "$KB_ROOT"
    touch "$KB_ROOT/.write-test" && rm "$KB_ROOT/.write-test"
    ```
-2. If you configured `GBRAIN_BASE_URL` / `GBRAIN_TOKEN`, verify gbrain
-   reachability from inside the same pod. If it is intentionally unavailable,
-   unset them and run local-only.
+2. If you passed `--cortex-kb-url` or exported `CORTEX_KB_URL`, verify the URL
+   from inside the same pod. If it is intentionally unavailable, remove the URL
+   and run local-only.
 3. To skip KB hooks deliberately for a diagnosis run, pass `--degraded-kb`.
 
 KB unreachability is **never** fatal. Hyperloom continues with local-only or
-degraded KB behaviour. See [`KB_GUIDE.md`](KB_GUIDE.md) for the detailed
+degraded KB behavior. See [Integrate Recipe/Cortex knowledge base in Hyperloom](reference/integrate-kb.md) for the detailed
 resolver order.
 
 ---
 
 ## InferenceX target comparison missing
 
-**Symptom.** Target-analysis step writes a `no_target_gpu_configured`
+**Symptom**: Target-analysis step writes a `no_target_gpu_configured`
 marker and the run proceeds without an external reference (no "vs
 B200" number in the report).
 
-**Cause.** `--compare-against-gpu` was not supplied. Since v0.6, the
+**Cause**: `--compare-against-gpu` was not supplied. Since v0.6, the
 `classify` action no longer derives this automatically.
 
-**Fix.** Add the flag at launch:
+**Fix**: Add the flag at launch:
 
 ```bash
 inference_optimizer optimize ... --compare-against-gpu B200
@@ -359,15 +325,15 @@ runs against your local baseline.
 
 ## `result.json` written outside the session dir
 
-**Symptom.** A benchmark "succeeds" but the breakdown shows
+**Symptom**: A benchmark "succeeds" but the breakdown shows
 `baseline.throughput_tok_s_per_gpu = null`; logs reference a
 `result.json` written to `--result-dir /tmp/...` outside
 `$USER_DATA_PATH`.
 
-**Cause.** A model-specific InferenceX-native benchmark script
+**Cause**: A model-specific InferenceX-native benchmark script
 hardcodes `--result-dir`, bypassing Hyperloom's session-dir pinning.
 
-**Fix.** Set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` to the directories
+**Fix**: Set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` to the directories
 the script writes to:
 
 ```bash
@@ -376,7 +342,7 @@ export INFERENCE_OPTIMIZER_RESCUE_PATHS="/tmp/inferencex_results:/var/tmp/bench"
 
 The harvest step scans these on each tick and copies any orphaned
 `result.json` into the session dir. See
-[`CONFIGURATION_REFERENCE.md`](CONFIGURATION_REFERENCE.md) §6.
+[Environment variables](reference/environment-variables.md) §6.
 
 ---
 
@@ -386,7 +352,7 @@ Three commands give you a fast situation report:
 
 ```bash
 # 1. Are events landing?
-python -m hyperloom.inference_optimizer.tools.event_counts
+python -m inference_optimizer.scripts.event_counts
 
 # 2. What was the last action's outcome?
 jq '.optimization_stack | last' "$SESSION_DIR/state.json"
@@ -395,12 +361,14 @@ jq '.optimization_stack | last' "$SESSION_DIR/state.json"
 tail -n 5 "$USER_DATA_PATH"/agents/robustness/findings/*.jsonl 2>/dev/null
 ```
 
-See [`OPERATOR_SCRIPTS.md`](OPERATOR_SCRIPTS.md) for the full set of
+See [Hyperloom operator scripts](reference/operator-scripts.md) for the full set of
 inspection tools.
 
 ---
 
-## Still stuck
+## Getting more help
+
+If the steps above did not resolve your issue, use the following options to get help.
 
 * Open an issue at
   [https://github.com/AMD-AGI/Hyperloom/issues](https://github.com/AMD-AGI/Hyperloom/issues)

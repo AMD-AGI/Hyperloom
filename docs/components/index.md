@@ -1,8 +1,14 @@
-# Components
+---
+myst:
+    html_meta:
+        "description": "Explore Hyperloom's specialized components: IntelliKit for GPU profiling, Magpie for benchmarking, TraceLens for trace analysis, and GEAK for kernel optimization."
+        "keywords": "Hyperloom, components, IntelliKit, Magpie, TraceLens, GEAK, GPU profiling, benchmarking, kernel optimization, AMD GPU, ROCm"
+---
+# Hyperloom components
 
 Hyperloom orchestrates several specialized tools. Each has its own
 documentation page; the overarching optimization flow that ties them together
-is described in [How the optimization loop works](../HOW_THE_OPTIMIZATION_LOOP_WORKS.md).
+is described in [Hyperloom optimization loop](../conceptual/optimization-loop.md).
 
 | Component | Role | Source |
 |-----------|------|--------|

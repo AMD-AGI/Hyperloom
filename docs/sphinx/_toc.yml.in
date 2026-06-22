@@ -1,0 +1,68 @@
+defaults:
+  numbered: False
+  maxdepth: 6
+root: index
+
+subtrees:
+- entries:
+  - file: what-is-hyperloom.md
+    title: What is Hyperloom?
+  - file: release-notes.md
+    title: Release notes
+  - file: compatibility.md
+    title: Compatibility matrix
+
+- caption: Install
+  entries:
+  - file: install/hyperloom-installation.md
+    title: Install Hyperloom
+
+- caption: Components
+  entries:
+  - file: components/index.md
+    title: Overview
+
+- caption: How to
+  entries:
+  - file: how-to/optimize.md
+    title: Run a Hyperloom optimization 
+
+- caption: Conceptual
+  entries:
+  - file: conceptual/optimization-loop.md
+    title: Hyperloom optimization loop
+
+- caption: Examples
+  entries:
+  - file: examples/deepseek-case-study.md
+    title: Case Study — DeepSeek-R1
+  - file: examples/glm5-case-study.md
+    title: Case Study — GLM-5
+
+- caption: Reference
+  entries:
+  - file: reference/api-reference.rst
+    title: API reference
+  - file: reference/environment-variables.md
+    title: Environment variables
+  - file: reference/authentication.md
+    title: Authentication and credentials
+  - file: reference/integrate-kb.md
+    title: Integrate a knowledge base
+  - file: reference/upgrade.md
+    title: Upgrade Hyperloom version
+  - file: reference/session-breakdown.md
+    title: session_breakdown.json integration
+  - file: reference/operations.md
+    title: Self-hosting and operations
+  - file: reference/operator-scripts.md
+    title: Operator scripts
+  - file: troubleshooting.md
+    title: Troubleshooting
+
+- caption: About
+  entries:
+  - file: about.md
+    title: About
+  - file: license.rst
+    title: License

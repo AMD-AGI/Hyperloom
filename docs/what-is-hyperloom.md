@@ -1,0 +1,54 @@
+---
+myst:
+    html_meta:
+        "description": "Learn how Hyperloom autonomously optimizes LLM inference on AMD GPUs using an agentic search loop — profiling, benchmarking, and iteratively rewriting code."
+        "keywords": "Hyperloom, LLM inference, AMD GPU, optimization, agentic, ROCm, GEMM tuning, kernel optimization, throughput, TraceLens, Magpie, GEAK, IntelliKit"
+---
+
+# What is Hyperloom?
+
+Hyperloom is an agentic system that autonomously optimizes large language model (LLM) inference on AMD
+GPUs. It treats optimization as a search problem: given a workload, it
+explores candidate optimizations — backend swaps, server parameters, general matrix multiplication (GEMM)
+tuning, kernel rewrites, parallelism configs — one change at a time, always
+measuring against the real workload and using prior results plus knowledge base (KB) priors to
+choose the next move.
+
+Provide your workload, and the agent delivers a fully optimized codebase:
+profiling against peak hardware potential, identifying bottlenecks, and
+iteratively rewriting code to maximize throughput on AMD GPUs.
+
+## The optimization loop
+
+- **Workload understanding and profiling** — Submit your workload; the agent
+   profiles it with TraceLens (trace collection using Magpie), capturing
+   bottlenecks and roofline targets.
+- **Code optimization loop** — The core of Hyperloom. The agent explores
+   candidates one change at a time: **Think → Implement → Benchmark → Decide**.
+   In parallel, hot kernels are optimized asynchronously using Kernel-Forge,
+   GEAK, and explicitly-enabled out-of-box (OOB) backends.
+- **Validated delivery** — Every change is correctness-gated before
+   acceptance. When the loop exits, the runtime writes the final report,
+   reproducible session artifacts, and `session_breakdown.json` for downstream
+   delivery workflows.
+
+## Components
+
+Hyperloom is composed of multiple tools, each documented on its own page:
+
+| Component | Role |
+|-----------|------|
+| [IntelliKit](components/intellikit.md) | Low-level GPU profiling primitives |
+| [Magpie](components/magpie.md) | Benchmark engine with trace-collection support |
+| [TraceLens](components/tracelens.md) | Agentic trace analysis and roofline targets |
+| [GEAK](components/geak.md) | GPU kernel generation and optimization (Triton / HIP / FlyDSL) |
+| [AgentKernelArena]() | |
+
+## Next steps
+
+Use these resources to get started with Hyperloom:
+
+- [Install Hyperloom](install/hyperloom-installation.md) — Set up Hyperloom locally or through the hosted UI.
+- [Run your first optimization](how-to/optimize.md) — Step-by-step usage.
+- [API reference](reference/api-reference.rst) — Generated from in-code docstrings.
+- [Release notes](release-notes.md) — Per-version changes.

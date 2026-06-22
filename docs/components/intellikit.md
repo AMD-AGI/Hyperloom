@@ -1,9 +1,15 @@
+---
+myst:
+    html_meta:
+        "description": "Learn about IntelliKit, Hyperloom's GPU profiling and validation toolkit. Covers Kerncap, Metrix, Linex, Nexus, Accordo, and MCP server packages for AMD GPU workloads."
+        "keywords": "IntelliKit, Hyperloom, GPU profiling, AMD GPU, ROCm, Kerncap, Metrix, Linex, Nexus, Accordo, MCP, kernel optimization, HIP, hardware counters, benchmarking"
+---
 # IntelliKit
 
-IntelliKit is a set of **agent-first Python tools for AMD-focused performance
-and validation**. Most of the stack targets GPUs through ROCm, turning hardware
-counters, traces, dispatch data, and HSA packets into clear Python APIs and
-Model Context Protocol (MCP) servers. It is structured as a monorepo of
+IntelliKit is a set of agent-first Python tools for AMD-focused performance
+and validation. Most of the stack targets GPUs through ROCm, turning hardware
+counters, traces, dispatch data, and Heterogeneous System Architecture (HSA) packets into clear Python APIs and
+Model Context Protocol (MCP) servers. It's structured as a monorepo of
 independently installable packages (Kerncap, Metrix, Linex, Nexus, Accordo, plus
 the `rocm_mcp` and `uprof_mcp` server bundles).
 
@@ -12,30 +18,31 @@ Within Hyperloom, IntelliKit is not called directly. It sits underneath
 profiling primitives. Hyperloom therefore depends on IntelliKit transitively,
 through Magpie.
 
-- **Source:** <https://github.com/AMDResearch/intellikit>
-- **License:** MIT
+- **Documentation**: 
+- **Source**: <https://github.com/AMDResearch/intellikit>
+- **License**: MIT
 
-## Overview
+## Packages and tools
 
 IntelliKit groups its tools around a kernel optimization workflow —
 **isolate → profile → inspect → validate** — with MCP servers and agent skills
-to wire the tools into LLM clients:
+to wire the tools into large language model (LLM) clients:
 
-- **Kerncap** — isolate a kernel: capture GPU dispatches and build standalone,
+- **Kerncap** — Isolate a kernel: capture GPU dispatches and build standalone,
   replayable reproducers (HIP, Triton).
-- **Metrix** — profile: human-readable metrics from hardware counters
+- **Metrix** — Profile: human-readable metrics from hardware counters
   (bandwidth, cache, etc.).
-- **Linex** — profile: source-line timing and stalls (compile with `-g` for
+- **Linex** — Profile: source-line timing and stalls (compile with `-g` for
   `file:line` mapping).
-- **Nexus** — inspect: from HSA packets, see what actually ran, including source
+- **Nexus** — Inspect: from HSA packets, see what actually ran, including source
   and assembly.
-- **Accordo** — validate: prove an optimized kernel still matches a reference.
+- **Accordo** — Validate: prove an optimized kernel still matches a reference.
 - **rocm_mcp** — MCP servers for HIP compile, HIP docs, `rocminfo`, and
   `amd-smi`.
-- **uprof_mcp** — host-side CPU hotspot analysis via an MCP bridge to AMD uProf.
+- **uprof_mcp** — Host-side CPU hotspot analysis through an MCP bridge to AMD uProf.
 
 The stack requires Python 3.10+ and ROCm 6.0+ for the GPU packages (ROCm 7.0+
-for Linex). Accordo and Nexus additionally compile C++ during install (via
+for Linex). Accordo and Nexus additionally compile C++ during install (through
 [KernelDB](https://github.com/AMDResearch/KernelDB)) and need `cmake`,
 `libdwarf-dev`, and `libzstd-dev`.
 
@@ -75,6 +82,8 @@ which ships these dependencies.
 
 ## Usage
 
+IntelliKit exposes both a Python API and console entry points, with MCP server support for integrating directly into LLM agent workflows.
+
 ### Python API
 
 Metrix exposes a simple profiling API:
@@ -91,7 +100,7 @@ for kernel in results.kernels:
 
 ### Console entry points
 
-Each package installs its own console scripts (CLIs and/or `*-mcp` MCP servers):
+Each IntelliKit package installs these console scripts (CLIs and/or `*-mcp` MCP servers):
 
 | Package | CLI | MCP server entry point |
 |---------|-----|------------------------|
@@ -123,10 +132,10 @@ Cursor, Claude, and Codex.
 
 ## Role in Hyperloom
 
-Hyperloom does not reference IntelliKit directly. Kernel profiling and
+Hyperloom doesn't reference IntelliKit directly. Kernel profiling and
 validation in Hyperloom is powered by [Magpie](magpie.md), which in turn relies
 on IntelliKit for some of its low-level GPU profiling primitives. IntelliKit is
-thus an indirect, transitive dependency reached through Magpie.
+an indirect, transitive dependency reached through Magpie.
 
 ## API reference
 

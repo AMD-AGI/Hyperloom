@@ -1,68 +1,57 @@
+.. meta::
+  :description: Learn how Hyperloom autonomously optimizes large language model inference on AMD GPUs — from installation and components to API reference and case studies.
+  :keywords: Hyperloom, LLM inference, AMD GPU, optimization, agentic, ROCm, GEMM tuning, kernel optimization, throughput, TraceLens, Magpie, GEAK, IntelliKit, documentation
+
+***********************
 Hyperloom documentation
-========================
+***********************
 
-Hyperloom is an agentic system that autonomously optimizes LLM inference on AMD
-GPU platforms. It treats optimization as a search problem: given a workload, it
+Hyperloom is an agentic system that autonomously optimizes large language model (LLM) inference on AMD
+GPUs. It treats optimization as a search problem: given a workload, it
 explores candidate optimizations one change at a time, always measuring against
-the real workload and using prior results plus KB priors to choose the next
-move. This site is generated with Sphinx; the **API Reference** is built
-automatically from the in-code Google-style docstrings via ``autodoc`` and
-``napoleon``.
+the real workload and using prior results plus knowledge base (KB) priors to choose the next
+move.
 
-.. toctree::
-   :maxdepth: 1
-   :caption: Hyperloom
+The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyperloom <https://github.com/AMD-AGI/Hyperloom>`_.
 
-   overview
-   release_notes
-   compatibility
-   components/index
+.. grid:: 2
+  :gutter: 3
 
-.. toctree::
-   :maxdepth: 1
-   :caption: Get Started
+  .. grid-item-card:: Install
 
-   installation
+    * :doc:`Install Hyperloom </install/hyperloom-installation>`
 
-.. toctree::
-   :maxdepth: 2
-   :caption: API Reference
+  .. grid-item-card:: Components
 
-   api/index
+    * :doc:`IntelliKit </components/intellikit>`
+    * :doc:`Magpie </components/magpie>`
+    * :doc:`TraceLens </components/tracelens>`
+    * :doc:`GEAK </components/geak>`
+    * :doc:`AgentKernelArena <>`
 
-.. toctree::
-   :maxdepth: 1
-   :caption: How-to Guides
+  .. grid-item-card:: How to
 
-   how_to_optimize
-   HOW_THE_OPTIMIZATION_LOOP_WORKS
-   HOWTO_RUN_GEAK_V4_END_TO_END
-   OPERATIONS
-   OPERATOR_SCRIPTS
-   CONFIGURATION_REFERENCE
-   ENV_AND_AUTH
-   KB_GUIDE
-   INTEGRATION_SESSION_BREAKDOWN
-   TROUBLESHOOTING
-   UPGRADING
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Case Studies
-
-   CASE_STUDY_GLM5
-   CASE_STUDY_DEEPSEEK_R1
-
-.. toctree::
-   :maxdepth: 1
-   :caption: About
-
-   about
+    * :doc:`Run a Hyperloom optimization </how-to/optimize>`
 
 
-Indices and tables
-==================
+  .. grid-item-card:: Conceptual
 
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`
+    * :doc:`Hyperloom optimization loop <conceptual/optimization-loop>`
+  
+  .. grid-item-card:: Examples
+
+    * :doc:`Case Study — DeepSeek-R1 </examples/deepseek-case-study>`
+    * :doc:`Case Study — GLM-5 </examples/glm5-case-study>`
+
+  .. grid-item-card:: Reference
+
+    * :doc:`API reference </reference/api-reference>`
+    * :doc:`Environment variables </reference/environment-variables>`
+    * :doc:`Authentication and credentials </reference/authentication>`
+    * :doc:`Integrate a knowledge base </reference/integrate-kb>`
+    * :doc:`Upgrade Hyperloom version </reference/upgrade>`
+    * :doc:`Session breakdown integration </reference/session-breakdown>`
+    * :doc:`Self-hosting and operations </reference/operations>`
+    * :doc:`Operator scripts </reference/operator-scripts>`
+    * :doc:`Troubleshooting <troubleshooting>`  
+

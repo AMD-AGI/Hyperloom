@@ -18,7 +18,7 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 | Variable               | Required | Default | Description                                                                                                                                                                                            |
 |------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `SAFE_API_KEY`         | yes      | —       | AMD primus-safe LLM gateway key. Format `ak-...`. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased).                                                        |
-| `OPENAI_BASE_URL`      | yes      | —       | LLM gateway URL. Production: `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`.                                                                                                                  |
+| `OPENAI_BASE_URL`      | yes      | —       | LLM gateway URL. Production: `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1`.                                                                                                                  |
 | `CURSOR_API_KEY`       | no       | unset   | Cursor SDK key (prefix `crsr_...`) for the OOB `cursor` kernel-opt backend. **Never inherited from `SAFE_API_KEY`.** When unset, Hyperloom auto-drops `cursor` from the default kernel-opt ladder.       |
 | `CURSOR_DEFAULT_MODEL` | no       | `claude-opus-4-7` | Override the default Cursor model id.                                                                                                                                                          |
 | `CLAUDE_MODEL`         | no       | `claude-opus-4-7` | Claude model id for OOB Claude attempts.                                                                                                                                                       |
@@ -39,13 +39,13 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 | Variable                                  | Required             | Default                                                            | Description                                                                                                                                                                          |
 |-------------------------------------------|----------------------|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `REPO_ROOT`                               | yes (local mode)     | `$(pwd)` when invoked from the repo root                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts.                                                                                                                     |
-| `OOB_SRC`                                 | yes for OOB backends | —                                                                  | Path to the `OOB/` subdirectory inside the KernelForge clone.                                                                                                                        |
+| `OOB_SRC`                                 | yes for OOB backends | —                                                                  | Path to the `OOB/` subdirectory inside the Primus-Claw clone.                                                                                                                        |
 | `INFERENCEX_PATH`                         | yes for baseline / target analysis | —                                                    | Path to the SemiAnalysisAI/InferenceX repo.                                                                                                                                          |
-| `TRACELENS_ROOT`                          | no (installer auto-clones) | `${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/agents/kernel/scripts/install.sh` clones the public repo into the pod-local open-source checkout root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
+| `TRACELENS_ROOT`                          | no (installer auto-clones) | `${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `kernel-agent/scripts/install.sh` clones the public repo into the pod-local open-source checkout root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `USER_DATA_PATH`                          | no                   | `/workspace/hyperloom`                                             | Session directory root (logs, runs, mirrors, breakdown). Replaces the retired `INFERENCE_OPTIMIZER_SESSION_DIR` and `WORKSPACE_PATH`.                                                |
-| `HYPERLOOM_ROOT`                          | no                   | `$HYPERLOOM_RUNTIME_DIR/source-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the pod-local open-source root (`HYPERLOOM_OPEN_SOURCE_ROOT`, default `/opt/hyperloom/open-source-repos`), not this path. |
-| `HYPERLOOM_OPEN_SOURCE_ROOT`              | no                   | `/opt/hyperloom/open-source-repos`                                 | Pod-local, non-ephemeral (NOT /tmp) root for auto-cloned open-source dependencies such as Magpie, TraceLens, GEAK, and OOB. Decoupled from `USER_DATA_PATH` so shared session storage does not collocate concurrent pods' checkouts. The installer creates it with `mkdir -p`, so the pod must be able to write `/opt`; if the container runs as non-root with a read-only `/opt`, set this to a writable dir (e.g. `$USER_DATA_PATH/open-source-repos`). Local Mode note: `src/hyperloom/inference_optimizer/assets/local_setup.sh` accepts the alias `HYPERLOOM_DEPS_ROOT` (and `--deps-root`) for the same root; it exports the resolved value as `HYPERLOOM_OPEN_SOURCE_ROOT` both into the current shell and into `local-setup.env.sh`, so `install.sh` / `paths.open_source_root()` / the trace-analyze handler and tool resolve the SAME default TraceLens path. Always `source local-setup.env.sh` before running install/optimize in a fresh shell. |
-| `MAGPIE_PATH`                             | no                   | `$HYPERLOOM_OPEN_SOURCE_ROOT/Magpie`                               | Magpie source root for benchmark wrappers.                                                                                                                                            |
+| `HYPERLOOM_ROOT`                          | no                   | `$HYPERLOOM_RUNTIME_DIR/source-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the pod-local open-source root (`HYPERLOOM_OPEN_SOURCE_ROOT` / `$TMPDIR`), not this path. |
+| `HYPERLOOM_OPEN_SOURCE_ROOT`              | no                   | `${TMPDIR:-/tmp}/hyperloom/open-source-repos`                      | Pod-local root for auto-cloned open-source dependencies such as Magpie, TraceLens, GEAK, and OOB. Decoupled from `USER_DATA_PATH` so shared session storage does not collocate concurrent pods' checkouts. |
+| `MAGPIE_DIR`                              | no                   | `$HYPERLOOM_OPEN_SOURCE_ROOT/Magpie`                               | Magpie source root for benchmark wrappers.                                                                                                                                            |
 | `SESSION_DIR`                             | no (robustness-agent)| scan known paths                                                   | Path containing `storage/conductor.db`; the robustness FindingSink writes under `{session_dir}/agents/robustness/findings/{session_id}.jsonl`.                                       |
 | `ROBUSTNESS_SERVER_URL`                   | no (robustness-agent)| scan known DNS                                                     | M1 primary data source; empty disables the primary path and forces local-only probes.                                                                                                |
 | `WORKSPACE_PATH` *(deprecated)*           | no                   | unset                                                              | **Retired** during the all-artefacts-under-`USER_DATA_PATH` migration. Logged with a warning when set; do not rely on it. See [UPGRADING.md](UPGRADING.md).                            |
@@ -79,7 +79,6 @@ read them when invoked standalone.
 | `CONC`            | `8`         | Benchmark concurrency.                                               |
 | `ISL`             | `256`       | Input sequence length.                                               |
 | `OSL`             | `256`       | Output sequence length.                                              |
-| `PROFILE_OSL`     | unset → `min(OSL, 1024)` | Profiling-phase output sequence length (set by `--profile-osl`). Overrides `OSL` for the roofline/profile server **only** so its torch-profiler trace stays serializable; baseline/optimize phases still run at `OSL`. When unset, the profile phase uses `min(OSL, 1024)` and is auto-lowered further if needed to keep the capture window within the serialization cap. |
 | `MAX_MODEL_LEN`   | `8192`      | Server-side max sequence length.                                     |
 | `PRECISION`       | `bf16`      | Model precision (`bf16`, `fp8`, `mxfp4`, ...).                       |
 | `RANDOM_RANGE_RATIO` | unset    | Optional Magpie random-range jitter.                                 |
@@ -87,28 +86,13 @@ read them when invoked standalone.
 | `HIP_VISIBLE_DEVICES` | inherited | Standard HIP visible-device mask.                                   |
 | `RUN_EVAL`        | `true`      | Runs the accuracy eval step inside the workload runner by default. Set to `false`/`0`/`no`/`off` to disable; disabling emits a warning. |
 
-### Warm-throughput measurement controls
-
-These controls keep the baseline, explore/grid candidates, validation, and
-integrate-patch measurements on the same hot measure-round basis when
-single-node server lifecycle reuse is available. Leave them enabled together for
-normal leaderboard/gain runs. If you opt out of any one of them for debugging,
-treat the session as a measurement-mode experiment and re-run `baseline` before
-comparing gains with normal sessions.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN` | `1` | Baseline runs a discarded cold warmup round, then records the hot second-round throughput as `baseline_tput`; the discarded first round is retained as `baseline_cold_tput` for audit. Set to `0`/`false`/`no`/`off` for the legacy single-round baseline. |
-| `INFERENCE_OPTIMIZER_RUN_GRID_WARMUP` | `1` outside pytest | `run_grid` performs the same discarded-warmup + hot-measure flow when no explicit `server_lifecycle` was supplied and the Magpie YAML is lifecycle-eligible. This covers shared grid users such as validation, sweep, and integrate-patch. Set to `0`/`false`/`no`/`off` only when deliberately measuring cold single rounds. |
-| `INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION` | `1` | Explore uses a discarded warmup before the decision round when lifecycle reuse is eligible, so candidate KEEP/REVERT math is compared against the hot `baseline_tput` contract. Set to `0`/`false`/`no`/`off` to force the legacy cold decision path. |
-
 ---
 
 ## 5. Kernel-opt backend selection
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `KERNEL_OPT_BACKEND_ORDER`     | unset                         | Comma-separated override for the kernel-opt backend ladder. Values: `forge`, `geak`, `claude`, `codex`, `cursor`. Honoured before the auto-derived default `forge,geak,claude,codex,cursor` (Forge-GEAK-OOB); `cursor` is auto-dropped from the default when `CURSOR_API_KEY` is unset.                    |
+| `KERNEL_OPT_BACKEND_ORDER`     | unset                         | Comma-separated override for the kernel-opt backend ladder. Values: `forge`, `geak`, `claude`, `codex`, `cursor`. Honoured before the auto-derived default `forge,geak`; OOB backends (`claude`, `codex`, `cursor`) require an explicit override.                    |
 | `KERNEL_OPT_MAX_PARALLEL`      | `2`                           | Max parallel kernel-opt attempts per request (per-kernel race fan-out).                                                                                                                            |
 | `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL` | unset           | Cap on how many `PARTIAL` kernel-opt verdicts an action can yield before it short-circuits to `NEEDS_REVIEW`. Useful for keeping budget contained when GEAK is consistently timing out.            |
 
@@ -118,7 +102,7 @@ comparing gains with normal sessions.
 
 | Variable                                          | Default                                                                | Description                                                                                                                                            |
 |---------------------------------------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`      | union with `/sgl-workspace/{aiter,sglang,vllm}`                        | Colon-separated list of source roots used by PolicyGate and flag discovery. Populated automatically by `src/hyperloom/agents/kernel/scripts/install.sh`'s probe step.   |
+| `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`      | union with `/sgl-workspace/{aiter,sglang,vllm}`                        | Colon-separated list of source roots used by PolicyGate and flag discovery. Populated automatically by `kernel-agent/scripts/install.sh`'s probe step.   |
 | `INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS`          | derived from sglang source                                             | Path override for the file used to enumerate sglang server flags.                                                                                       |
 | `INFERENCE_OPTIMIZER_VLLM_ARG_UTILS`              | derived from vllm source                                               | Path override for the file used to enumerate vllm CLI flags.                                                                                            |
 | `INFERENCE_OPTIMIZER_RESCUE_PATHS`                | unset                                                                  | Colon-separated list of extra directories the harvest step scans for stray `result.json` files written outside the session dir (InferenceX-native scripts that hardcode `--result-dir`). |
@@ -134,15 +118,16 @@ comparing gains with normal sessions.
 | Variable                              | Default                | Description                                                                                                                          |
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | `HYPERLOOM_LOCAL_KB_ROOT`             | `$USER_DATA_PATH/kb`   | Filesystem root for the local recipe-snapshot KB store. Overridden by `--local-kb-root`. See [KB_GUIDE.md](KB_GUIDE.md).             |
-| `CORTEX_KB_URL`                       | unset                  | Cortex KB base URL used only by the **Critic agent**'s per-proposal assess enrichment (`/v2/reasoning/assess`). Also set by `--cortex-kb-url`. This is NOT the recipe KB — recipe reads go to gbrain. Nothing is contacted unless configured. |
-| `RECIPE_KB_MIRROR_MODE`               | `external`             | gbrain mirror mode (applies when gbrain is configured). `external` (default): an out-of-band CronJob ingests the local store into gbrain. `inline`: best-effort in-process mirror of each local write into gbrain (local write stays authoritative). |
+| `CORTEX_KB_URL`                       | unset                  | Optional remote Cortex KB service URL. Also set by `--cortex-kb-url`. No remote KB is contacted unless this is configured.            |
+| `RECIPE_KB_REMOTE`                    | `auto`                 | Remote KB **read** mode (writes always stay local). `auto` (default, also when unset) composites gbrain + Cortex dual-read only when **both** are configured, else uses the single configured remote, else local-only. `both` always composites around whatever is configured (even one source). `gbrain` reads from gbrain only (paired with `RECIPE_KB_MIRROR_MODE`). Any other value (or unset `CORTEX_KB_URL`) resolves to a single Cortex remote when `CORTEX_KB_URL` is set, else local-only. See [KB_GUIDE.md](KB_GUIDE.md). |
+| `RECIPE_KB_MIRROR_MODE`               | `external`             | gbrain mirror mode (only when `RECIPE_KB_REMOTE=gbrain`). `external` (default): an out-of-band CronJob ingests the local store into gbrain. `inline`: best-effort in-process mirror of each local write into gbrain (local write stays authoritative). |
 | `HYPERLOOM_SPECIALIST_KB_MCP_URL`     | unset                  | Read-only KB-graph (`cortex_kb`) MCP endpoint advertised to specialist subprocesses; also settable via `--specialist-kb-mcp-url`. When unset, falls back to the gbrain MCP derived from `$GBRAIN_BASE_URL` (+ `/mcp`). Specialist KB writes always stay local. |
 | `HYPERLOOM_SPECIALIST_KB_MCP_TOKEN`   | unset                  | Bearer token for `HYPERLOOM_SPECIALIST_KB_MCP_URL` (sent as `Authorization: Bearer …`).                                              |
-| `GBRAIN_BASE_URL` / `GBRAIN_TOKEN`    | unset                  | gbrain knowledge-graph base URL + bearer token. Used both for the recipe-KB remote-read path (enabled whenever these are set, unless `--degraded-kb`) and as the default specialist `cortex_kb` MCP endpoint (`$GBRAIN_BASE_URL/mcp`) when no explicit override is set. |
+| `GBRAIN_BASE_URL` / `GBRAIN_TOKEN`    | unset                  | gbrain knowledge-graph base URL + bearer token. Used both for the gbrain remote-read path (`RECIPE_KB_REMOTE=auto`/`both`/`gbrain`) and as the default specialist `cortex_kb` MCP endpoint (`$GBRAIN_BASE_URL/mcp`) when no explicit override is set. |
 | `CRITIC_AGENT_ROOT`                   | derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `ROBUSTNESS_AGENT_ROOT`               | derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
 | `ROBUSTNESS_LLM_RCA_DISABLED`         | unset                  | Set to `1` to forcibly disable the LLM RCA engine even when credentials are present.                                                 |
-| `ROBUSTNESS_AGENT_ENABLE_HARD_ACTIONS`| unset                  | M4 milestone gate for scheduling-police hard actions (`prune_branch`, `kill_task`, ...). Default keeps them disabled.                |
+| `ROBUSTNESS_AGENT_ENABLE_HARD_ACTIONS`| unset                  | M4 milestone gate for scheduling-police hard actions (`prune_branch`, `force_dispatch`, ...). Default keeps them disabled.           |
 | `LLM_MODEL`                           | `claude-opus-4-7`      | RCA model name for robustness-agent.                                                                                                 |
 | `ROBUST_ANALYZER_URL`                 | scan known DNS         | Optional hybrid-provider endpoint used by robustness-agent local/server data-source discovery.                                      |
 
@@ -158,21 +143,18 @@ populate `session_breakdown.json` for downstream consumers
 |-------------------|--------------------------------------------------------------------------------------------|
 | `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. Set by the PrimusClaw sandbox; unset for local runs. |
 | `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by PrimusClaw; unset for local runs.                                            |
-| `HYPERLOOM_LANGFUSE_ENABLE` | Master switch (default **off**) for live Langfuse trace push. NOTE: when this flag is on in the environment / `.env`, `assets/install.sh` auto-installs the optional `langfuse` SDK on demand (and skips it entirely when off), so no separate `pip install '...[trace]'` is required. When `1/true/yes/on` *and* the three `LANGFUSE_*` credentials are set, every in-process LLM call is mirrored into Langfuse while the run is live, and a session-end flush backfills the out-of-process children (geak / oob / robustness / specialist) and KEEP/REVERT decision Scores. The local `reports/trace/*.jsonl` ledger is always written regardless. If the SDK is unavailable, live push degrades to a no-op. **Correlation:** the Langfuse trace id and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session id for standalone runs, so live push and the offline `backfill_langfuse` CLI collapse onto one trace per PrimusClaw session. **Span layout:** `trace → phase span (PRELUDE/EXPLORE/KERNEL/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/oob/…) → Generation`; each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision (trace-level fallback when no matching span exists). **Receipt:** every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting whether the push was enabled (or the `disabled_reason`), the redacted connection config (host + key-presence booleans, never the keys), the derived `trace_id`/`session_id`, and how many generations/scores/spans were actually sent — so an operator can confirm post-hoc whether a run reached Langfuse. |
+| `HYPERLOOM_LANGFUSE_ENABLE` | Master switch (default **off**) for live Langfuse trace push. NOTE: when this flag is on in the environment / `.env`, `scripts/install.sh` auto-installs the optional `langfuse` SDK on demand (and skips it entirely when off), so no separate `pip install '...[trace]'` is required. When `1/true/yes/on` *and* the three `LANGFUSE_*` credentials are set, every in-process LLM call is mirrored into Langfuse while the run is live, and a session-end flush backfills the out-of-process children (geak / oob / robustness / specialist) and KEEP/REVERT decision Scores. The local `reports/trace/*.jsonl` ledger is always written regardless. If the SDK is unavailable, live push degrades to a no-op. **Correlation:** the Langfuse trace id and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session id for standalone runs, so live push and the offline `backfill_langfuse` CLI collapse onto one trace per PrimusClaw session. **Span layout:** `trace → phase span (PRELUDE/EXPLORE/KERNEL/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/oob/…) → Generation`; each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision (trace-level fallback when no matching span exists). **Receipt:** every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting whether the push was enabled (or the `disabled_reason`), the redacted connection config (host + key-presence booleans, never the keys), the derived `trace_id`/`session_id`, and how many generations/scores/spans were actually sent — so an operator can confirm post-hoc whether a run reached Langfuse. |
 
-#### Langfuse / artifact-package — security & known limitations
+#### Langfuse — security & known limitations
 
 * **Sensitive data surface.** When live push is on, `conversations.jsonl`
   (and Langfuse Generations) carry full prompt/response text. `redact_secrets`
   scrubs common token shapes (Bearer, `sk-`/`pk-`, GitHub tokens, some
   `KEY=value`) but is **not** a complete DLP filter — bare keys without a
-  recognizable prefix (e.g. raw AWS `AKIA…`) can slip through. The artifact
-  packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
-  default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under `/workspace`
-  for the Claw sync. If a session may contain customer code / secrets, define
-  an explicit retention + access-control policy for both the Langfuse project
-  and the `/workspace` package destination, and consider disabling live push
-  or loose packaging for those runs.
+  recognizable prefix (e.g. raw AWS `AKIA…`) can slip through. If a session
+  may contain customer code / secrets, define an explicit retention +
+  access-control policy for the Langfuse project, and consider disabling live
+  push for those runs.
 * **`live push` + `backfill_langfuse` overlap.** Both derive the same
   `trace_id` from `claw_session_id`, so running the offline backfill *after* a
   live run re-emits the out-of-process children onto the same trace and can
@@ -180,10 +162,6 @@ populate `session_breakdown.json` for downstream consumers
   recovery tool only when live push did not run.
 * **`flush_session` is idempotent.** A second flush only re-writes the receipt
   (no re-emit), so a duplicated CLOSE step won't double-push.
-* **Package truncation.** The bundle caps at 5000 files / 256 MB. On a very
-  long session the cap can stop the bundle short; the `PACKAGE_MANIFEST` then
-  sets `truncated: true` and lists `dropped_files`, so consumers must not treat
-  a truncated package as complete.
 * **Generation duration is ~0.** Both live and backfill stamp a single
   timestamp (`end == start`), so Langfuse shows no meaningful per-Generation
   duration — counts/usage are accurate, latency is not captured.
@@ -202,7 +180,7 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
 * `by_component` — per-agent breakdown (orchestration / kernel / critic /
   specialist / proposal_scorer / geak / oob / …), each with the same
   convenience totals.
-* `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / EXPLORE / SWEEP / …).
+* `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_PR / EXPLORE / SWEEP / …).
 * `attribution` — `attributed_to_decisions` vs `unattributed` split plus
   `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
   to a KEEP/REVERT or dynamic_action decision (e.g. specialist subprocess
@@ -243,7 +221,7 @@ window (`MODEL_CONTEXT_WINDOWS`; 200k default), scaled by the fractions below.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE` | off | EXPLORE↔KERNEL_AGENT phase interleave, **off by default** (matches `origin/main`). Set to `1`/`true`/`yes`/`on` to opt in: EXPLORE may then propose kernel_agent-owned actions and KERNEL may propose the explore triple (`explore`/`specialist`/`integrate_patch`). Default-off keeps phase gating strict. |
+| `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE` | off | EXPLORE↔KERNEL phase interleave, **off by default** (matches `origin/main`). Set to `1`/`true`/`yes`/`on` to opt in: EXPLORE may then propose kernel-owned actions and KERNEL may propose the explore triple (`explore`/`specialist`/`integrate_patch`). Default-off keeps phase gating strict. |
 | `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY` | detected GPU count | Max number of GPU-specialist leases (the `gpu_research_lane` pool size). When set it wins (parsed as a non-negative int; `0` disables `needs_gpu=true` dispatch). When unset it defaults to the visible GPU count probed at launch (`detect_gpu_count()`), which honours `ROCR_VISIBLE_DEVICES` → `HIP_VISIBLE_DEVICES` → `CUDA_VISIBLE_DEVICES`, else whole-machine via `rocm-smi`. |
 | `INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES` | derived from mask | Explicit comma/semicolon-separated **absolute** GPU id pool for specialists (capped to capacity). When unset, the pool is derived from the visible-device mask (`ROCR_VISIBLE_DEVICES`, then `HIP`/`CUDA`) so specialists stay on the operator's pinned cards; with no mask set it falls back to `0..capacity-1`. The leased ids are written verbatim into each specialist subprocess's `ROCR_VISIBLE_DEVICES`. |
 
