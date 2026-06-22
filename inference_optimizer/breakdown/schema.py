@@ -1903,6 +1903,14 @@ class SessionBreakdown(TypedDict, total=False):
         schema_version (str): Schema version string (see ``SCHEMA_VERSION``).
         exported_at_utc (str): ISO UTC timestamp the file was exported.
         exporter_version (str): Version of the exporter that produced the file.
+        leaderboard_eligible (bool): Producer-side hint for Pulse / ingester
+            gating. False for terminal fail-fast rows that must not be shown
+            on public leaderboards.
+        leaderboard_suppression_reason (str | None): Canonical stop reason
+            explaining why ``leaderboard_eligible`` is false.
+        show_on_leaderboard (bool): Optional hard override emitted only when
+            false; successful rows omit it so Pulse can keep applying its own
+            quality gates.
         session (SessionMeta): Session identity, timing, and host context.
         workload (Workload): Model/framework/serving configuration.
         baseline (Baseline): Pre-optimization reference performance.
@@ -1940,6 +1948,9 @@ class SessionBreakdown(TypedDict, total=False):
     schema_version: str
     exported_at_utc: str
     exporter_version: str
+    leaderboard_eligible: bool
+    leaderboard_suppression_reason: str | None
+    show_on_leaderboard: bool
 
     session: SessionMeta
     workload: Workload
