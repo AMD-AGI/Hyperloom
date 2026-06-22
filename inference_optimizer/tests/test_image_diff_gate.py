@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import math
 
 import pytest
@@ -13,12 +14,10 @@ from inference_optimizer.orchestrator.action_executors import _image_diff as idf
 
 # numpy/Pillow are optional in the control process; PSNR-math tests are skipped
 # when unavailable, but the degrade-to-skip behaviour is always tested.
-_HAS_IMAGING = True
-try:  # pragma: no cover - availability probe
-    import numpy as _np  # noqa: F401
-    from PIL import Image as _Image  # noqa: F401
-except ImportError:  # pragma: no cover
-    _HAS_IMAGING = False
+_HAS_IMAGING = (
+    importlib.util.find_spec("numpy") is not None
+    and importlib.util.find_spec("PIL.Image") is not None
+)
 
 requires_imaging = pytest.mark.skipif(
     not _HAS_IMAGING, reason="numpy/Pillow not installed"

@@ -24,7 +24,7 @@ import logging
 import math
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def find_latest_image(directory: Path | str) -> Optional[Path]:
         candidates.extend(directory.rglob(f"*{ext}"))
     if not candidates:
         return None
-    return max(candidates, key=lambda p: _safe_mtime(p))
+    return max(candidates, key=_safe_mtime)
 
 
 def compute_psnr(baseline_img: Path | str, candidate_img: Path | str) -> Optional[float]:
