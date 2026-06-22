@@ -915,6 +915,10 @@ class Perfskills(TypedDict, total=False):
         tpot_mean_ms (float | None): Median TPOT (ms).
         output_parity (str | None): Output-parity verdict.
         accepted_kernels (list[Any]): Per-kernel changes the e2e accepted.
+        accepted_kernels_source (str | None): Provenance of ``accepted_kernels``
+            -- ``result`` (producer-populated), ``kernel_journey_backfill``
+            (derived from ``kernel_journey.json`` when the result list was
+            empty), or ``None`` (no accepted kernels).
         accepted_heads (list[Any]): Per-head changes the e2e accepted.
         kernels_optimized (int): ``len(accepted_kernels)``.
         accepted_config (dict[str, Any]): Accepted serving config.
@@ -943,6 +947,7 @@ class Perfskills(TypedDict, total=False):
     tpot_mean_ms: float | None
     output_parity: str | None
     accepted_kernels: list[Any]
+    accepted_kernels_source: str | None
     accepted_heads: list[Any]
     kernels_optimized: int
     accepted_config: dict[str, Any]

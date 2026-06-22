@@ -100,6 +100,153 @@ def test_collect_perfskills_full_success_maps_fields(tmp_path: Path) -> None:
     assert out["eval_dir"] == "runs/perfskills/eval"
 
 
+def _write_kernel_journey(eval_dir: Path) -> Path:
+    """Write a minimal kernel_journey.json with one integrated KEEP kernel."""
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    kj = {
+        "schema_version": 1,
+        "kernels": [
+            {
+                "kernel_id": "fused_moe_kernel_gptq_awq",
+                "name": "fused_moe_kernel_gptq_awq",
+                "gpu_pct": 50.64,
+                "micro_speedup": 1.5902,
+                "dispatch": {"dispatched": True, "backends": ["geak"]},
+                "backend_result": {
+                    "verification": {"micro_speedup": 1.5902, "best_backend": "geak"},
+                },
+                "e2e": {
+                    "kernel_id": "fused_moe_kernel_gptq_awq",
+                    "integrated": True,
+                    "e2e_gain_pct": 16.049,
+                    "validated": True,
+                    "decision": "KEEP",
+                    "target_file": "config/integrate_moe_tuned/E=384.json",
+                    "extra_server_args": "--max-num-batched-tokens 16384",
+                },
+            },
+            {
+                # Cut-off kernel: dispatched but no e2e → must NOT be accepted.
+                "kernel_id": "fwd_grouped_kernel_stage1",
+                "name": "fwd_grouped_kernel_stage1",
+                "gpu_pct": 15.55,
+                "dispatch": {"dispatched": True, "backends": ["geak"]},
+                "backend_result": {"attempts": [], "verification": {}},
+            },
+        ],
+    }
+    path = eval_dir / "kernel_journey.json"
+    path.write_text(json.dumps(kj), encoding="utf-8")
+    return path
+
+
+def test_collect_perfskills_backfills_accepted_kernels_from_journey(tmp_path: Path) -> None:
+    # result.json shipped the aggregate win but an empty accepted_kernels (a
+    # recovered/intermediate flush). The sibling kernel_journey.json holds the
+    # integrated KEEP kernel, so the collector must back-fill it.
+    eval_dir = tmp_path / "perfskills" / "eval"
+    _write_kernel_journey(eval_dir)
+    state = {
+        "kernel_optimizer": "perfskills",
+        "perfskills_result": {
+            "status": "ok",
+            "baseline_throughput_tok_s": 461.314,
+            "final_throughput_tok_s": 535.352,
+            "throughput_speedup": 1.1605,
+            "accepted_kernels": [],
+            "recovered_from_disk": True,
+            "eval_dir": str(eval_dir),
+        },
+    }
+    warnings: list[str] = []
+    out = collect_perfskills(tmp_path, state, warnings)
+
+    assert out["kernels_optimized"] == 1
+    assert out["accepted_kernels_source"] == "kernel_journey_backfill"
+    only = out["accepted_kernels"][0]
+    assert only["kernel_id"] == "fused_moe_kernel_gptq_awq"
+    assert only["decision"] == "KEEP"
+    assert only["backend"] == "geak"
+    assert only["e2e_gain_pct"] == 16.049
+    assert only["micro_speedup"] == 1.5902
+    assert only["source"] == "kernel_journey_backfill"
+
+
+def test_collect_perfskills_backfill_via_explicit_journey_path(tmp_path: Path) -> None:
+    # kernel_journey_path takes precedence over deriving it from eval_dir.
+    eval_dir = tmp_path / "perfskills" / "eval"
+    kj_path = _write_kernel_journey(eval_dir)
+    state = {
+        "kernel_optimizer": "perfskills",
+        "perfskills_result": {
+            "status": "ok",
+            "throughput_speedup": 1.16,
+            "accepted_kernels": [],
+            "kernel_journey_path": str(kj_path),
+        },
+    }
+    out = collect_perfskills(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+    assert out["accepted_kernels_source"] == "kernel_journey_backfill"
+
+
+def test_collect_perfskills_does_not_overwrite_populated_kernels(tmp_path: Path) -> None:
+    # A producer-populated accepted_kernels list must be preserved verbatim and
+    # marked as sourced from the result, never replaced by the journey.
+    eval_dir = tmp_path / "perfskills" / "eval"
+    _write_kernel_journey(eval_dir)
+    state = {
+        "kernel_optimizer": "perfskills",
+        "perfskills_result": {
+            "status": "ok",
+            "throughput_speedup": 1.16,
+            "accepted_kernels": ["rmsnorm"],
+            "eval_dir": str(eval_dir),
+        },
+    }
+    out = collect_perfskills(tmp_path, state, [])
+    assert out["accepted_kernels"] == ["rmsnorm"]
+    assert out["accepted_kernels_source"] == "result"
+    assert out["kernels_optimized"] == 1
+
+
+def test_collect_perfskills_no_backfill_on_failure(tmp_path: Path) -> None:
+    # A non-ok run must not back-fill (the e2e never landed a real win).
+    eval_dir = tmp_path / "perfskills" / "eval"
+    _write_kernel_journey(eval_dir)
+    state = {
+        "kernel_optimizer": "perfskills",
+        "perfskills_result": {
+            "status": "error",
+            "error_class": "timeout",
+            "accepted_kernels": [],
+            "eval_dir": str(eval_dir),
+        },
+    }
+    out = collect_perfskills(tmp_path, state, [])
+    assert out["accepted_kernels"] == []
+    assert out["accepted_kernels_source"] is None
+    assert out["kernels_optimized"] == 0
+
+
+def test_collect_perfskills_backfill_missing_journey_is_noop(tmp_path: Path) -> None:
+    # ok run but no kernel_journey.json on disk → empty list, no crash.
+    eval_dir = tmp_path / "perfskills" / "eval"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "kernel_optimizer": "perfskills",
+        "perfskills_result": {
+            "status": "ok",
+            "throughput_speedup": 1.16,
+            "accepted_kernels": [],
+            "eval_dir": str(eval_dir),
+        },
+    }
+    out = collect_perfskills(tmp_path, state, [])
+    assert out["accepted_kernels"] == []
+    assert out["accepted_kernels_source"] is None
+
+
 def test_collect_perfskills_speedup_only_gain_and_bad_kernels(tmp_path: Path) -> None:
     state = {
         "kernel_optimizer": "perfskills",
