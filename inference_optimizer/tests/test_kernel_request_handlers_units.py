@@ -216,6 +216,25 @@ class TestForgeGemmHelperCoverage:
     def test_resolve_forge_untuned_csv_no_specialist_dir(self, tmp_path):
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == ""
 
+    def test_read_forge_result_json(self, tmp_path):
+        (tmp_path / "result.json").write_text(
+            json.dumps({"status": "skipped", "tuners_skipped": [{"tuner": "a8w8"}]}),
+            encoding="utf-8",
+        )
+        out = krh._read_forge_result_json(tmp_path)
+        assert out["status"] == "skipped"
+        assert krh._read_forge_result_json(tmp_path / "missing") == {}
+
+    def test_derive_gemm_skip_reason(self):
+        skipped = [
+            {"tuner": "a8w8_blockscale", "skip_reason": "needs csv"},
+            {"tuner": "fmoe_ck", "skip_reason": ""},
+            {"tuner": "x"},
+        ]
+        assert krh._derive_gemm_skip_reason(skipped) == "a8w8_blockscale: needs csv"
+        assert krh._derive_gemm_skip_reason(None) == ""
+        assert krh._derive_gemm_skip_reason([]) == ""
+
     def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
         state = SharedState()
         state.last_trace_analyze = ["not", "a", "dict"]
