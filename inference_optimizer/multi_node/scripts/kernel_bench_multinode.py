@@ -63,13 +63,22 @@ def _tail_bytes(s: str | None, limit: int) -> str:
 
 
 def _stage_files(workspace: Path, files_b64: dict[str, str]) -> list[str]:
-    """Decode each ``{relative_path: base64_content}`` into the workspace (rejecting ``/`` or ``..`` paths)."""
+    """Decode each ``{relative_path: base64_content}`` into the workspace (rejecting ``/`` or ``..`` paths).
+
+    Args:
+        workspace: Directory the files are decoded into.
+        files_b64: Mapping of relative path to base64-encoded content.
+
+    Returns:
+        list[str]: The absolute paths of the files written.
+
+    Raises:
+        ValueError: If a staging path is absolute or contains ``..``.
+    """
     staged: list[str] = []
     for rel, b64 in (files_b64 or {}).items():
         if rel.startswith("/") or ".." in Path(rel).parts:
-            raise ValueError(
-                f"staging path must be relative and free of '..': {rel!r}"
-            )
+            raise ValueError(f"staging path must be relative and free of '..': {rel!r}")
         dst = workspace / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(base64.b64decode(b64.encode("ascii")))
@@ -84,7 +93,22 @@ def _bench_remote(
     result_glob: str,
     timeout_sec: int,
 ) -> dict:
-    """Run a kernel micro-benchmark on this (head) pod; the caller already pinned us to a GPU node."""
+    """Run a kernel micro-benchmark on this (head) pod; the caller already pinned us to a GPU node.
+
+    Args:
+        workspace: Absolute directory used as CWD for the bench command.
+        bench_command: Shell command run via ``bash -lc``.
+        files_b64_json: JSON ``{rel_path: base64_content}`` of files to stage.
+        result_glob: Glob (relative to workspace) of artifacts to read back.
+        timeout_sec: Hard timeout for the bench command.
+
+    Returns:
+        dict: Per-host result with return code, elapsed time, stdout/stderr
+        tails, staged files, and read-back artifacts.
+
+    Raises:
+        ValueError: If ``files_b64_json`` is not valid JSON.
+    """
     host = socket.gethostname()
     ws = Path(workspace)
     ws.mkdir(parents=True, exist_ok=True)
@@ -115,20 +139,26 @@ def _bench_remote(
         except OSError:
             continue
         if size > _MAX_ARTIFACT_BYTES:
-            artifacts.append({
-                "path": str(path),
-                "size_bytes": size,
-                "content": None,
-                "skipped_reason": f"size > {_MAX_ARTIFACT_BYTES} bytes",
-            })
+            artifacts.append(
+                {
+                    "path": str(path),
+                    "size_bytes": size,
+                    "content": None,
+                    "skipped_reason": f"size > {_MAX_ARTIFACT_BYTES} bytes",
+                }
+            )
             continue
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            artifacts.append({
-                "path": str(path), "size_bytes": size, "content": None,
-                "skipped_reason": f"read failed: {exc!r}",
-            })
+            artifacts.append(
+                {
+                    "path": str(path),
+                    "size_bytes": size,
+                    "content": None,
+                    "skipped_reason": f"read failed: {exc!r}",
+                }
+            )
             continue
         # Best-effort JSON parse, falling back to raw text.
         parsed: Any = None
@@ -136,9 +166,13 @@ def _bench_remote(
             parsed = json.loads(content)
         except json.JSONDecodeError:
             parsed = content
-        artifacts.append({
-            "path": str(path), "size_bytes": size, "content": parsed,
-        })
+        artifacts.append(
+            {
+                "path": str(path),
+                "size_bytes": size,
+                "content": parsed,
+            }
+        )
 
     return {
         "host": host,
@@ -154,7 +188,14 @@ def _bench_remote(
 
 
 def _pick_gpu_node() -> str:
-    """Return the head-pod node id (GPU-bearing, co-located with the caller); fall back to any alive GPU node."""
+    """Return the head-pod node id (GPU-bearing, co-located with the caller); fall back to any alive GPU node.
+
+    Returns:
+        str: The Ray ``NodeID`` to pin the bench actor to.
+
+    Raises:
+        RuntimeError: If there are no alive nodes, or none with a GPU.
+    """
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if not nodes:
         raise RuntimeError("no alive Ray nodes for kernel bench")
@@ -192,16 +233,20 @@ def _do_bench(args: argparse.Namespace) -> int:
     BenchActor = ray.remote(num_cpus=1, num_gpus=1)(_bench_remote)
     ref = BenchActor.options(
         scheduling_strategy=NodeAffinitySchedulingStrategy(
-            node_id=node_id, soft=False,
+            node_id=node_id,
+            soft=False,
         ),
     ).remote(
-        args.workspace, args.bench_command, args.files_b64_json,
-        args.result_glob, args.timeout_sec,
+        args.workspace,
+        args.bench_command,
+        args.files_b64_json,
+        args.result_glob,
+        args.timeout_sec,
     )
 
     try:
         res = ray.get(ref, timeout=args.timeout_sec + 60)
-        ok = (res.get("returncode") == 0)
+        ok = res.get("returncode") == 0
         payload = {
             "command": "bench",
             "status": "ok" if ok else "failed",
@@ -238,16 +283,15 @@ def main() -> int:
     sub = p.add_subparsers(dest="command", required=True)
 
     bp = sub.add_parser("bench", help="compile + run a kernel micro-benchmark on a GPU node")
-    bp.add_argument("--workspace", required=True,
-                    help="absolute dir on pod that will be CWD for the bench")
-    bp.add_argument("--bench-command", required=True,
-                    help="shell command to invoke (passed to 'bash -lc')")
-    bp.add_argument("--files-b64-json", default="{}",
-                    help='JSON {rel_path: base64_content} of helper files to stage into workspace')
-    bp.add_argument("--result-glob", default="*.json",
-                    help="glob (relative to workspace) of result artifacts to read back")
-    bp.add_argument("--timeout-sec", type=int, default=600,
-                    help="hard timeout for the bench command (default 600s)")
+    bp.add_argument("--workspace", required=True, help="absolute dir on pod that will be CWD for the bench")
+    bp.add_argument("--bench-command", required=True, help="shell command to invoke (passed to 'bash -lc')")
+    bp.add_argument(
+        "--files-b64-json", default="{}", help="JSON {rel_path: base64_content} of helper files to stage into workspace"
+    )
+    bp.add_argument(
+        "--result-glob", default="*.json", help="glob (relative to workspace) of result artifacts to read back"
+    )
+    bp.add_argument("--timeout-sec", type=int, default=600, help="hard timeout for the bench command (default 600s)")
 
     args = p.parse_args()
     if args.command == "bench":

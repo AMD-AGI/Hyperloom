@@ -21,10 +21,12 @@ class MockRobustnessBackend:
 
     name: str = "robustness-mock"
     alert_after_ticks: int | None = None
-    alert_payload: dict[str, Any] = field(default_factory=lambda: {
-        "severity": "low",
-        "summary": "(mock robustness scheduled alert)",
-    })
+    alert_payload: dict[str, Any] = field(
+        default_factory=lambda: {
+            "severity": "low",
+            "summary": "(mock robustness scheduled alert)",
+        }
+    )
 
     def __post_init__(self) -> None:
         """Initialise per-instance tick counter and call log."""

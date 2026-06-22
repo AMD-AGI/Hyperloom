@@ -4,11 +4,10 @@
 
 This is the *second* of the two parallel trace sinks. The first -- the
 local ``reports/trace/*.jsonl`` ledger -- is always written and its format
-is unchanged. This module mirrors each in-process LLM call into Langfuse as
-a Generation *while the run is live*, plus a session-end ``flush_session``
-that backfills the out-of-process children (geak / oob / robustness /
-specialist subprocess, which only surface their tokens in ``ext/*.jsonl``
-after the parent parses them) and the KEEP/REVERT decision Scores.
+is unchanged. This module mirrors each LLM call into Langfuse as a Generation
+*while the run is live*, plus a session-end ``flush_session`` that backfills
+the recipe-KB / specialist-intel audit spans and the KEEP/REVERT decision
+Scores.
 
 Three gates decide whether anything is sent (all must pass, else no-op):
 
@@ -37,7 +36,9 @@ from typing import Any
 
 from ...session_paths import (
     decision_trace_path,
+    forge_steps_path,
     recipe_snapshot_audit_jsonl,
+    specialist_intel_path,
     trace_dir,
     trace_ext_dir,
 )
@@ -46,6 +47,7 @@ from .trace_env import (
     ENV_LANGFUSE_HOST,
     ENV_LANGFUSE_PUBLIC_KEY,
     ENV_LANGFUSE_SECRET_KEY,
+    apply_flush_defaults,
     langfuse_credentials,
     langfuse_credentials_complete,
     langfuse_live_enabled,
@@ -79,7 +81,11 @@ def _receipt_path(session_dir: Path) -> Path:
 
 
 def _sdk_available() -> bool:
-    """Whether the optional ``langfuse`` SDK can be imported (no side effects)."""
+    """Whether the optional ``langfuse`` SDK can be imported (no side effects).
+
+    Returns:
+        True when the ``langfuse`` SDK can be located, False otherwise.
+    """
     import importlib.util
 
     try:
@@ -94,6 +100,13 @@ def _to_ns(dt: Any) -> int | None:
     v4's OTEL-based SDK wants integer ns for ``end_time``; v2/v3 accepted a
     ``datetime``. Returns None for a None/zero input so callers can omit the
     kwarg entirely. Best-effort: an unparseable value yields None.
+
+    Args:
+        dt: the datetime to convert (any other type yields ``None``).
+
+    Returns:
+        Integer nanoseconds since the epoch, or ``None`` for a ``None`` /
+        non-datetime / unparseable input.
     """
     if dt is None:
         return None
@@ -116,6 +129,14 @@ def _start_obs(parent: Any, **kwargs: Any) -> Any:
     TypeError, retry without it. This keeps backdated timestamps where the
     SDK supports them and degrades to "start = now" only on the SDKs that
     require it, instead of unconditionally dropping the timestamp.
+
+    Args:
+        parent: the parent observation (or client) to create the child on.
+        **kwargs: the keyword arguments forwarded to ``start_observation``;
+            ``start_time`` is dropped on a retry if the SDK rejects it.
+
+    Returns:
+        The newly started observation.
     """
     try:
         return parent.start_observation(**kwargs)
@@ -133,6 +154,13 @@ def _end_time_wants_int(obs: Any) -> bool:
     OTEL span, so a "try datetime then retry int" pattern double-ends the
     span and emits a noisy "Calling end() on an ended span" warning.
     Falls back to datetime (False) when the annotation can't be read.
+
+    Args:
+        obs: the observation whose ``end`` signature is inspected.
+
+    Returns:
+        True when the SDK's ``end(end_time=...)`` wants integer ns (v4), False
+        when it wants a datetime (v2/v3) or the annotation can't be read.
     """
     try:
         import inspect
@@ -151,6 +179,10 @@ def _end_obs(obs: Any, end_dt: Any) -> None:
     Picks the right ``end_time`` type up front (see :func:`_end_time_wants_int`)
     so the span is never ended twice. Falls back to a bare ``end()`` if the
     typed call is rejected, so a signature change can't strand an open span.
+
+    Args:
+        obs: the observation to end (``None`` is a no-op).
+        end_dt: the end time as a datetime; ``None`` ends with no explicit time.
     """
     if obs is None:
         return
@@ -179,6 +211,13 @@ def _otel_attr_value(v: Any) -> Any:
     the SDK log ``Invalid type ... for attribute`` and drop it. So: skip
     ``None``, pass scalars through, and JSON-stringify everything else
     (e.g. the ``workload`` dict) so it still lands on the trace as text.
+
+    Args:
+        v: the metadata value to coerce.
+
+    Returns:
+        The value unchanged when it is a str/bool/int/float, a JSON string for
+        any other non-``None`` value, or ``None`` to skip ``None`` inputs.
     """
     if v is None:
         return None
@@ -206,6 +245,12 @@ def _set_trace_attrs(
     attributes directly on the underlying span (``langfuse.trace.name``,
     ``session.id``, ``langfuse.trace.metadata.*``). Best-effort: a missing
     API on either side just means the trace label isn't set, never a raise.
+
+    Args:
+        span: the span/observation whose trace-level attributes are stamped.
+        name: optional trace name.
+        session_id: optional session id to group the trace.
+        metadata: optional trace-level metadata mapping.
     """
     try:
         span.update_trace(name=name, session_id=session_id, metadata=metadata)
@@ -319,7 +364,8 @@ class LangfuseEmitter:
         # upload correlate on claw_session_id (fallback internal session id).
         self._manifest: dict[str, Any] = _load_json(_manifest_path(self.session_dir))
         self._session_label: str | None = lfmap.langfuse_session_id(
-            self._manifest, self.session_dir.name,
+            self._manifest,
+            self.session_dir.name,
         )
         self._trace_id: str | None = lfmap.derive_trace_id(
             lfmap.correlation_seed(self._manifest, self.session_dir.name),
@@ -334,17 +380,20 @@ class LangfuseEmitter:
         # ``disabled_reason`` is the gate that tripped when not enabled.
         self._disabled_reason: str | None = None
         self._counts: dict[str, int] = {
-            "generations_sent": 0,      # Generations successfully started
-            "generations_paired": 0,    # of which had both token + text halves
+            "generations_sent": 0,  # Generations successfully started
+            "generations_paired": 0,  # of which had both token + text halves
             "generations_text_only": 0,
             "generations_token_only": 0,
-            "scores_sent": 0,           # decision Scores created (span + trace)
-            "spans_opened": 0,          # phase + agent spans created
-            "ext_shards_read": 0,       # out-of-process ext/*.jsonl files swept
-            "breakdown_recorded": 0,    # 1 once the full SBD JSON was attached
-            "kb_spans_sent": 0,         # KB trace spans (assess/priors/recipe)
-            "recipe_audit_read": 0,     # recipe_snapshot/.audit.jsonl rows swept
-            "errors": 0,                # swallowed send failures
+            "session_start_recorded": 0,  # 1 once the startup marker was sent
+            "scores_sent": 0,  # decision Scores created (span + trace)
+            "spans_opened": 0,  # phase + agent spans created
+            "ext_shards_read": 0,  # out-of-process ext/*.jsonl files swept
+            "breakdown_recorded": 0,  # 1 once the full SBD JSON was attached
+            "kb_spans_sent": 0,  # KB trace spans (assess/priors/recipe)
+            "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl rows swept
+            "specialist_intel_read": 0,  # specialist_intel.jsonl rows swept
+            "forge_steps_read": 0,  # forge_steps.jsonl rows swept
+            "errors": 0,  # swallowed send failures
         }
         self._flushed = False
         self._enabled = self._init_client()
@@ -356,6 +405,10 @@ class LangfuseEmitter:
         Records ``_disabled_reason`` (``disabled`` / ``no_credentials`` /
         ``sdk_missing`` / ``init_failed``) so the receipt can explain *why*
         nothing was pushed. Correlation is already resolved in ``__init__``.
+
+        Returns:
+            bool: True when all three gates pass and the SDK client was built;
+                False (a no-op emitter) otherwise.
         """
         if not langfuse_live_enabled():
             self._disabled_reason = "disabled"
@@ -375,15 +428,22 @@ class LangfuseEmitter:
                 "langfuse: SDK not importable (%s: %s); live push disabled. "
                 "Install the optional dependency: pip install 'hyperloom-"
                 "inference_optimizer[trace]'.",
-                type(exc).__name__, exc,
+                type(exc).__name__,
+                exc,
             )
             return False
         try:
+            # Tighten the SDK auto-flush cadence before the singleton is built
+            # so a session killed before cli.finally still lands its latest
+            # observations (marking where the run died).
+            apply_flush_defaults()
             creds = langfuse_credentials()
             self._client = get_client()
             log.info(
                 "langfuse: live push enabled (host=%s, session=%s, trace_id=%s)",
-                creds.get("LANGFUSE_HOST"), self._session_label, self._trace_id,
+                creds.get("LANGFUSE_HOST"),
+                self._session_label,
+                self._trace_id,
             )
             return True
         except Exception:  # noqa: BLE001
@@ -393,7 +453,11 @@ class LangfuseEmitter:
 
     @property
     def enabled(self) -> bool:
-        """Whether live push to Langfuse is enabled for this session."""
+        """Whether live push to Langfuse is enabled for this session.
+
+        Returns:
+            bool: True when live push is enabled for this session.
+        """
         return self._enabled
 
     # -- span hierarchy (trace -> phase -> agent -> generation) ---------
@@ -406,7 +470,14 @@ class LangfuseEmitter:
         return str(self._manifest.get("model_name") or self._session_label or "hyperloom")
 
     def _ensure_root(self, start: Any) -> Any:
-        """Lazily open the root span and stamp trace-level attrs once."""
+        """Lazily open the root span and stamp trace-level attrs once.
+
+        Args:
+            start: the start time for the root span.
+
+        Returns:
+            The cached or newly opened root span.
+        """
         if self._root_span is None:
             self._root_span = _start_obs(
                 self._client,
@@ -441,7 +512,9 @@ class LangfuseEmitter:
             root = self._ensure_root(start)
             span = _start_obs(
                 root,
-                name=f"phase:{phase}", as_type="span", start_time=start,
+                name=f"phase:{phase}",
+                as_type="span",
+                start_time=start,
                 metadata={"phase": phase},
             )
             self._phase_spans[phase] = span
@@ -450,14 +523,25 @@ class LangfuseEmitter:
 
     def _ensure_agent_span(self, phase: str, agent: str, start: Any) -> Any:
         """Get-or-create the per-(phase, agent) span. This is the 'which agent
-        did what' layer; Generations and decision Scores attach here."""
+        did what' layer; Generations and decision Scores attach here.
+
+        Args:
+            phase: Phase name.
+            agent: Agent name.
+            start: Span start time.
+
+        Returns:
+            The cached or newly opened (phase, agent) span.
+        """
         key = (phase, agent)
         span = self._agent_spans.get(key)
         if span is None:
             phase_span = self._ensure_phase_span(phase, start)
             span = _start_obs(
                 phase_span,
-                name=f"agent:{agent}", as_type="span", start_time=start,
+                name=f"agent:{agent}",
+                as_type="span",
+                start_time=start,
                 metadata={"phase": phase, "agent": agent},
             )
             self._agent_spans[key] = span
@@ -466,7 +550,11 @@ class LangfuseEmitter:
 
     # -- live ingest ----------------------------------------------------
     def record_llm_call(self, row: dict[str, Any]) -> None:
-        """Buffer a token row; emit the Generation if its text half is in."""
+        """Buffer a token row; emit the Generation if its text half is in.
+
+        Args:
+            row: the token (``llm``) row to buffer.
+        """
         if not self._enabled:
             return
         try:
@@ -475,7 +563,11 @@ class LangfuseEmitter:
             log.debug("langfuse: record_llm_call failed", exc_info=True)
 
     def record_conversation(self, row: dict[str, Any]) -> None:
-        """Buffer a conversation row; emit the Generation if its tokens are in."""
+        """Buffer a conversation row; emit the Generation if its tokens are in.
+
+        Args:
+            row: the conversation (``conv``) row to buffer.
+        """
         if not self._enabled:
             return
         try:
@@ -557,11 +649,24 @@ class LangfuseEmitter:
         token_row: dict[str, Any] | None,
         conv_row: dict[str, Any] | None,
     ) -> None:
-        """Emit one Generation, nested under its phase -> agent span."""
+        """Emit one Generation, nested under its phase -> agent span.
+
+        Args:
+            token_row: the token-half row, or ``None`` when only text is in.
+            conv_row: the conversation-half row, or ``None`` when only tokens
+                are in.
+        """
         base = token_row or conv_row or {}
         phase = lfmap.phase_of(base)
         agent = lfmap.agent_of(base)
-        start = lfmap.parse_ts(base.get("ts"))
+        # ``ts`` is stamped at write time (just after the model call returns),
+        # so it approximates the call END. When the token row carries a
+        # measured ``latency_ms`` we backdate the generation start to
+        # ``ts - latency`` and end at ``ts`` so the leaf shows a real duration
+        # instead of a zero-width point. Without a latency we fall back to the
+        # legacy behaviour (start == end == ts).
+        end = lfmap.parse_ts(base.get("ts"))
+        start = lfmap.generation_start(end, (token_row or {}).get("latency_ms"))
         has_text = conv_row is not None
         try:
             parent = self._ensure_agent_span(phase, agent, start)
@@ -576,7 +681,7 @@ class LangfuseEmitter:
                 metadata=lfmap.generation_metadata(base, phase=phase, has_text=has_text),
                 usage_details=lfmap.usage_details(token_row or {}),
             )
-            _end_obs(gen, start)
+            _end_obs(gen, end)
             self._counts["generations_sent"] += 1
             if token_row is not None and conv_row is not None:
                 self._counts["generations_paired"] += 1
@@ -590,15 +695,15 @@ class LangfuseEmitter:
 
     # -- session-end reconcile ------------------------------------------
     def flush_session(self) -> None:
-        """Emit leftovers + out-of-process Generations + decision Scores, then flush.
+        """Emit leftover halves + audit spans + decision Scores, then flush.
 
         Run once at session end (from the Coordinator/CLI). Safe to call when
         disabled (no-op). **Idempotent**: a second call is a no-op for the
         push side -- it only re-writes the receipt. Without this guard a
-        re-run would re-scan ``ext/*.jsonl`` + ``decision_trace`` and re-emit
-        the same out-of-process Generations / Scores, producing duplicates in
-        Langfuse (the derived trace_id keeps re-runs on one trace, but the
-        children would still double up).
+        re-run would re-scan the audit logs + ``decision_trace`` and re-emit
+        the same audit spans / Scores, producing duplicates in Langfuse (the
+        derived trace_id keeps re-runs on one trace, but the children would
+        still double up).
         """
         if not self._enabled:
             # Still drop a receipt so the breakdown can report *why* nothing
@@ -613,6 +718,8 @@ class LangfuseEmitter:
             self._flush_pending_halves()
             self._flush_ext_shards()
             self._flush_recipe_kb_audit()
+            self._flush_specialist_intel()
+            self._flush_forge_steps()
             self._flush_decision_scores()
             self._close_spans()
         except Exception:  # noqa: BLE001
@@ -627,6 +734,73 @@ class LangfuseEmitter:
             self._flushed = True
             self._write_receipt()
 
+    def record_session_start(self) -> None:
+        """Emit a one-shot ``session_start`` marker the moment a session begins.
+
+        Attached directly to the session's ``trace_id`` (independent of the
+        lazy root span and of any LLM traffic), so a run that aborts in
+        pre-flight or is killed before producing a breakdown still leaves a
+        Langfuse trace tying the WekaFS user dir + session dir to its
+        ``code_revision`` and dependency commits. Idempotent (cross-process via
+        the persisted receipt) and best-effort (never raises).
+        """
+        if not self._enabled:
+            return
+        if self._counts.get("session_start_recorded"):
+            return
+        # Cross-process guard mirrors record_session_breakdown: a prior process
+        # (original run or a `recover-session`) may have already marked start.
+        persisted = read_receipt(self.session_dir) or {}
+        if (persisted.get("counts") or {}).get("session_start_recorded"):
+            self._counts["session_start_recorded"] = 1
+            return
+        import os
+
+        payload = lfmap.session_start_payload(
+            self._manifest,
+            user_data_path=(os.environ.get("USER_DATA_PATH") or "").strip() or None,
+            env=os.environ,
+        )
+        try:
+            obs = _start_obs(
+                self._client,
+                name="session_start",
+                as_type="span",
+                trace_context={"trace_id": self._trace_id},
+                input=None,
+                output=payload,
+                metadata={
+                    "claw_session_id": payload.get("claw_session_id"),
+                    "sandbox_user_id": payload.get("sandbox_user_id"),
+                    "code_revision": payload.get("code_revision"),
+                    "session_dir": payload.get("session_dir"),
+                    "user_data_path": payload.get("user_data_path"),
+                    "host": payload.get("host"),
+                    "image": payload.get("image"),
+                },
+            )
+            # Stamp trace name/session_id so the trace is grouped and visible
+            # from the very first observation, even with no LLM calls.
+            _set_trace_attrs(
+                obs,
+                name=self._trace_name(),
+                session_id=self._session_label,
+                metadata=lfmap.trace_metadata(self._manifest),
+            )
+            _end_obs(obs, None)
+            self._counts["session_start_recorded"] = 1
+        except Exception:  # noqa: BLE001
+            self._counts["errors"] += 1
+            log.debug("langfuse: record_session_start failed", exc_info=True)
+        finally:
+            try:
+                self._client.flush()
+            except Exception:  # noqa: BLE001
+                self._counts["errors"] += 1
+                log.debug("langfuse: flush after session_start failed", exc_info=True)
+            # Persist the flag so a later process (recovery) skips re-emitting.
+            self._write_receipt()
+
     def record_session_breakdown(self, breakdown: dict[str, Any]) -> None:
         """Attach the complete ``session_breakdown.json`` document to the trace.
 
@@ -636,6 +810,10 @@ class LangfuseEmitter:
         live spans (the normal order: write file -> flush -> patch langfuse ->
         record here). Idempotent (a second call is a no-op) and best-effort:
         any send failure is swallowed and never breaks shutdown.
+
+        Args:
+            breakdown: the complete ``session_breakdown.json`` document to
+                attach; a non-dict or empty value is a no-op.
         """
         if not self._enabled or not isinstance(breakdown, dict) or not breakdown:
             return
@@ -666,7 +844,9 @@ class LangfuseEmitter:
             # Stamp trace name/session_id too, so a session whose only trace
             # artifact is the breakdown (e.g. no LLM calls) is still grouped.
             _set_trace_attrs(
-                obs, name=self._trace_name(), session_id=self._session_label,
+                obs,
+                name=self._trace_name(),
+                session_id=self._session_label,
             )
             _end_obs(obs, None)
             self._counts["breakdown_recorded"] = 1
@@ -739,8 +919,7 @@ class LangfuseEmitter:
         design). Each row becomes a ``kb:recipe_snapshot:<method>`` span under
         the ``recipe_kb`` agent so the trace shows which backend served the
         warm-start recipe, the request, and how it resolved. Read out-of-band
-        at session end (mirrors :meth:`_flush_ext_shards`); idempotent via the
-        ``flush_session`` guard.
+        at session end; idempotent via the ``flush_session`` guard.
         """
         rows = _load_jsonl(recipe_snapshot_audit_jsonl(self.session_dir))
         for row in rows:
@@ -758,6 +937,78 @@ class LangfuseEmitter:
                     "hit": bool(row.get("hit")),
                 },
                 ts=row.get("ts"),
+            )
+
+    def _flush_specialist_intel(self) -> None:
+        """Backfill specialist intel/tool calls as per-call ``intel:<tool>`` spans.
+
+        The specialist runner appends one row per recovered tool call to
+        ``reports/trace/specialist_intel.jsonl`` (the production specialist is a
+        subprocess with no Langfuse handle, so the parent persists the audit).
+        Each row becomes an ``intel:<tool>`` span under the ``specialist`` agent
+        so the trace shows what a specialist actually read (WebSearch / WebFetch
+        / pr_monitor / cortex_kb / Read / Grep / ...), not just its token total.
+        Read out-of-band at session end (mirrors :meth:`_flush_recipe_kb_audit`);
+        idempotent via the ``flush_session`` guard.
+        """
+        rows = _load_jsonl(specialist_intel_path(self.session_dir))
+        for row in rows:
+            self._counts["specialist_intel_read"] += 1
+            tool = str(row.get("tool") or "tool")
+            self.record_kb_span(
+                name=f"intel:{tool}",
+                agent="specialist",
+                output=row,
+                metadata={
+                    "kind": "specialist_intel",
+                    "tool": tool,
+                    "task_id": row.get("task_id"),
+                    "turn": row.get("turn"),
+                    "query": row.get("query"),
+                },
+                ts=row.get("ts"),
+            )
+
+    def _flush_forge_steps(self) -> None:
+        """Backfill the Kernel-Forge loop's key steps as ``forge:*`` spans.
+
+        ``kernel_request_handlers`` records each forge attempt's per-iteration
+        steps (rationale / validation / bench / keep-revert) and a run summary
+        to ``reports/trace/forge_steps.jsonl``. Each row becomes a
+        ``forge:iter:<n>`` (or ``forge:summary``) span under the ``forge`` agent
+        so a trace shows forge's decision process, not just its token total.
+        Read out-of-band at session end (mirrors :meth:`_flush_specialist_intel`);
+        idempotent via the ``flush_session`` guard.
+        """
+        for row in _load_jsonl(forge_steps_path(self.session_dir)):
+            self._counts["forge_steps_read"] += 1
+            kind = str(row.get("kind") or "iteration")
+            if kind == "summary":
+                name = "forge:summary"
+                metadata = {
+                    "kind": "forge_summary",
+                    "kernel_id": row.get("kernel_id"),
+                    "iterations": row.get("iterations"),
+                    "kept": row.get("kept"),
+                    "speedup": row.get("speedup"),
+                    "improved": row.get("improved"),
+                    "termination_reason": row.get("termination_reason"),
+                }
+            else:
+                name = f"forge:iter:{row.get('iteration')}"
+                metadata = {
+                    "kind": "forge_iteration",
+                    "kernel_id": row.get("kernel_id"),
+                    "iteration": row.get("iteration"),
+                    "decision": row.get("decision"),
+                    "wall_ms": row.get("wall_ms"),
+                    "snr_db": row.get("snr_db"),
+                    "validation_passed": row.get("validation_passed"),
+                    "pmc_diagnosis": row.get("pmc_diagnosis"),
+                }
+            self.record_kb_span(
+                name=name, agent="forge", output=row,
+                metadata=metadata, ts=row.get("ts"),
             )
 
     def _flush_decision_scores(self) -> None:
@@ -782,7 +1033,10 @@ class LangfuseEmitter:
             step_span = self._open_decision_span(drow, phase, agent)
             for score in scores:
                 self._create_score(
-                    score, phase=phase, agent=agent, span=step_span,
+                    score,
+                    phase=phase,
+                    agent=agent,
+                    span=step_span,
                 )
             if step_span is not None:
                 self._safe_end(step_span)
@@ -795,6 +1049,14 @@ class LangfuseEmitter:
         ``grid`` to ``orchestration`` (grid proposals are orchestration-driven),
         so the per-decision score still lands under a real agent span instead of
         always falling back to the trace level.
+
+        Args:
+            proposer: the resolved proposer label from the decision metadata.
+
+        Returns:
+            str: the span-attachable agent name (``specialist`` / ``orchestration``
+                for the collapsed aliases, else the proposer or the unknown-agent
+                fallback).
         """
         p = (proposer or "").strip()
         if p.startswith("specialist:"):
@@ -804,7 +1066,10 @@ class LangfuseEmitter:
         return p or lfmap.UNKNOWN_AGENT
 
     def _open_decision_span(
-        self, drow: dict[str, Any], phase: str, agent: str,
+        self,
+        drow: dict[str, Any],
+        phase: str,
+        agent: str,
     ) -> Any:
         """Open an ``optimization_step:<operation_kind>`` span for one decision.
 
@@ -812,16 +1077,33 @@ class LangfuseEmitter:
         operation_kind + proposer + effect in metadata so dashboards/Langfuse can
         filter steps directly. Returns the span, or ``None`` when no parent is
         open or the SDK rejects the call (best-effort; never raises).
+
+        Args:
+            drow: the decision_trace row carrying the ``decision`` payload.
+            phase: the phase that owns the decision (used to locate the parent).
+            agent: the agent that owns the decision (used to locate the parent).
+
+        Returns:
+            The opened ``optimization_step`` span, or ``None`` when no parent is
+            open or the SDK rejects the call.
         """
-        parent = (
-            self._agent_spans.get((phase, agent))
-            or self._phase_spans.get(phase)
-            or self._root_span
-        )
+        parent = self._agent_spans.get((phase, agent)) or self._phase_spans.get(phase) or self._root_span
         if parent is None:
             return None
         dec = drow.get("decision") or {}
         op_kind = str(dec.get("operation_kind") or "decision")
+        # Per-decision token cost (incl. the specialist + scorer spend now
+        # keyed to this task) so a trace can rank decisions by what they cost.
+        tokens = drow.get("tokens") if isinstance(drow.get("tokens"), dict) else {}
+        cost_total = None
+        try:
+            cost_total = (
+                int(tokens.get("total_in", 0) or 0)
+                + int(tokens.get("total_out", 0) or 0)
+                + int(tokens.get("total_cache", 0) or 0)
+            ) or None
+        except (TypeError, ValueError):
+            cost_total = None
         md = {
             "operation_kind": op_kind,
             "proposer": dec.get("component"),
@@ -837,19 +1119,27 @@ class LangfuseEmitter:
             "tick": drow.get("tick"),
             "metrics": dec.get("metrics"),
             "proposal_scores": dec.get("proposal_scores"),
+            "cost_tokens_total": cost_total,
+            "cost_calls": (tokens.get("calls") or None),
         }
         md = {k: v for k, v in md.items() if v is not None}
         try:
             return _start_obs(
-                parent, name=f"optimization_step:{op_kind}",
-                as_type="span", metadata=md,
+                parent,
+                name=f"optimization_step:{op_kind}",
+                as_type="span",
+                metadata=md,
             )
         except Exception:  # noqa: BLE001
             log.debug("langfuse: open decision span failed", exc_info=True)
             return None
 
     def _create_score(
-        self, score: dict[str, Any], *, phase: str, agent: str,
+        self,
+        score: dict[str, Any],
+        *,
+        phase: str,
+        agent: str,
         span: Any = None,
     ) -> None:
         """Attach a Langfuse Score to a step span / agent span / the trace.
@@ -884,7 +1174,8 @@ class LangfuseEmitter:
         except Exception:  # noqa: BLE001
             self._counts["errors"] += 1
             log.debug(
-                "langfuse: create_score failed for %s", score.get("name"),
+                "langfuse: create_score failed for %s",
+                score.get("name"),
                 exc_info=True,
             )
 
@@ -898,6 +1189,11 @@ class LangfuseEmitter:
         is True once :meth:`flush_session` has run (so the out-of-process ext
         shards and decision scores are reflected); before that it reports the
         in-process running totals.
+
+        Returns:
+            dict[str, Any]: a redacted receipt dict (enabled flag, disabled
+                reason, config, trace/session ids, correlation key, and push
+                counts) mirroring the ``langfuse`` breakdown section.
         """
         creds = langfuse_credentials()
         config = {
@@ -914,9 +1210,7 @@ class LangfuseEmitter:
             "trace_id": self._trace_id,
             "session_id": self._session_label,
             "correlated_on": (
-                "claw_session_id"
-                if str(self._manifest.get("claw_session_id") or "").strip()
-                else "internal_session_id"
+                "claw_session_id" if str(self._manifest.get("claw_session_id") or "").strip() else "internal_session_id"
             ),
             "counts": dict(self._counts),
             "counts_final": self._flushed,
@@ -950,7 +1244,14 @@ _REGISTRY_LOCK = threading.Lock()
 
 
 def get_emitter(session_dir: Path) -> LangfuseEmitter:
-    """Return the per-session emitter, building it once (cached by session)."""
+    """Return the per-session emitter, building it once (cached by session).
+
+    Args:
+        session_dir: Session directory the emitter is keyed by.
+
+    Returns:
+        LangfuseEmitter: the cached or newly built emitter for the session.
+    """
     key = str(Path(session_dir).resolve())
     with _REGISTRY_LOCK:
         emitter = _REGISTRY.get(key)
@@ -960,13 +1261,38 @@ def get_emitter(session_dir: Path) -> LangfuseEmitter:
         return emitter
 
 
+def record_session_start(session_dir: Path) -> None:
+    """Module-level convenience: emit the startup marker for ``session_dir``.
+
+    Call once right after ``manifest.json`` is written, before any heavy
+    bring-up / pre-flight, so the session's Langfuse trace exists from the
+    start. No-op when live push is disabled; best-effort (never raises).
+
+    Args:
+        session_dir: Session directory whose startup marker is emitted.
+    """
+    get_emitter(session_dir).record_session_start()
+
+
 def flush_session(session_dir: Path) -> None:
-    """Module-level convenience: flush the emitter for ``session_dir``."""
+    """Module-level convenience: flush the emitter for ``session_dir``.
+
+    Args:
+        session_dir: Session directory whose emitter is flushed.
+    """
     get_emitter(session_dir).flush_session()
 
 
 def _read_breakdown_file(session_dir: Path) -> dict[str, Any]:
-    """Load the written ``session_breakdown.json`` for ``session_dir`` ({} if absent)."""
+    """Load the written ``session_breakdown.json`` for ``session_dir`` ({} if absent).
+
+    Args:
+        session_dir: Session directory whose breakdown file is read.
+
+    Returns:
+        dict[str, Any]: the parsed breakdown object, or ``{}`` when the file is
+            missing, unreadable, or not a JSON object.
+    """
     import json
 
     from ...breakdown import BREAKDOWN_FILENAME
@@ -991,6 +1317,10 @@ def record_session_breakdown(
     the attached document is the complete, post-flush form). Reads the file
     from disk when ``breakdown`` is not supplied. No-op when live push is
     disabled; best-effort (never raises).
+
+    Args:
+        session_dir: Session directory whose trace the breakdown attaches to.
+        breakdown: the breakdown document; read from disk when ``None``.
     """
     if breakdown is None:
         breakdown = _read_breakdown_file(Path(session_dir))
@@ -1004,6 +1334,13 @@ def read_receipt(session_dir: Path) -> dict[str, Any] | None:
     collector, since its counts are final) or ``None`` if no receipt was
     written -- e.g. the breakdown is being assembled before ``flush_session``
     ran, or live push never happened.
+
+    Args:
+        session_dir: Session directory whose persisted receipt is read.
+
+    Returns:
+        dict[str, Any] | None: the post-flush receipt dict, or ``None`` when no
+            receipt was written or it is unreadable.
     """
     import json
 

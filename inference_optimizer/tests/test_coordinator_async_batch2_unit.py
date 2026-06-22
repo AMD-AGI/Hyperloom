@@ -3,19 +3,23 @@
 """Batch 2 coverage for Coordinator: synchronous context readers, the
 no-progress circuit-breaker signal, resume replay, orchestration-conversation
 reset, and lifecycle teardown (stop / Cortex T4 safety net)."""
+
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from inference_optimizer.orchestrator.backends import (
     Backend,
     MockBackend,
+    MockTurn,
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.message_bus import Message
+from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
@@ -25,13 +29,13 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     sd = make_session_dir()
     from .conftest import seed_target_analysis_marker
+
     seed_target_analysis_marker(sd)
     return sd
 
 
 def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE,
-                  payload={"topic": "heartbeat", "body_md": "ok"})
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
 
 def _silent_plan() -> ScriptedPlan:
@@ -40,8 +44,7 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends() -> dict[str, Backend]:
     return {
-        name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "kernel", "critic", "robustness")
+        name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel", "critic", "robustness")
     }
 
 
@@ -58,9 +61,7 @@ def test_context_inbox_reader_empty(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_context_inbox_reader_with_events(coord: Coordinator) -> None:
-    await coord.bus.append_and_seq(
-        Message.new("kernel", "orchestration", "heartbeat", {"body_md": "hi"})
-    )
+    await coord.bus.append_and_seq(Message.new("kernel", "orchestration", "heartbeat", {"body_md": "hi"}))
     out = coord._context_inbox_reader()
     assert "(no inbox events)" not in out
     assert isinstance(out, str)
@@ -74,8 +75,7 @@ def test_recent_outcomes_reader_empty(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_recent_outcomes_reader_with_rows(coord: Coordinator) -> None:
     await coord.bus.append_and_seq(
-        Message.new("kernel", "*", "delegated_result",
-                    {"action_name": "explore", "status": "succeeded"})
+        Message.new("kernel", "*", "delegated_result", {"action_name": "explore", "status": "succeeded"})
     )
     out = coord._context_recent_outcomes_reader(top_k=4)
     assert "Recent action outcomes" in out
@@ -114,6 +114,493 @@ def test_reset_orchestration_conversation_swallows_hook_error(coord: Coordinator
     assert coord._orchestration_seeded is False
 
 
+@pytest.mark.asyncio
+async def test_resume_consistency_marks_unvalidated_and_rebuilds_current_best(coord: Coordinator) -> None:
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.optimization_stack = [
+        {
+            "action": "explore",
+            "variant_name": "v1",
+            "candidate_extra_server_args": "--a 1",
+            "extra_envs": {"A": "1"},
+            "tput": 110.0,
+        },
+        {
+            "action": "integrate_patch",
+            "variant_name": "p1",
+            "candidate_extra_server_args": "--b 2",
+            "extra_envs": {"B": "2"},
+            "tput": 120.0,
+        },
+    ]
+    coord.shared_state.cumulative_gain_validated_stack_len = 1
+    coord.shared_state.current_best = {"extra_server_args": "--stale 1", "extra_envs": {}}
+
+    report = await coord._resume_consistency_pass()
+
+    warning_kinds = {w["kind"] for w in report["warnings"]}
+    assert "resume_unvalidated_keeps" in warning_kinds
+    assert "resume_inconsistent_current_best" in warning_kinds
+    assert coord.shared_state.resume_pending_revalidation is True
+    assert coord.shared_state.current_best["extra_server_args"] == "--a 1 --b 2"
+    assert coord.shared_state.current_best["extra_envs"] == {"A": "1", "B": "2"}
+    assert "rebuilt_current_best_config_from_stack" in report["fixes"]
+    assert any(
+        isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench"
+        for f in report["fixes"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordinator) -> None:
+    coord._resumed_from["is_resume"] = True
+    await coord.bus.append_and_seq(
+        Message.new(
+            "coordinator",
+            "*",
+            "delegated_result",
+            {
+                "task_id": "ti-orphan",
+                "kind": "integrate_patch",
+                "state": "succeeded",
+                "result": {
+                    "status": "kept",
+                    "specialist_task_id": "spec-orphan",
+                    "output_throughput": 123.0,
+                },
+            },
+        )
+    )
+
+    report = await coord._resume_consistency_pass()
+
+    replay = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "replayed_orphaned_keep")
+    assert replay["orphan_kind"] == "integrate_patch"
+    assert replay["variant"] == "spec-orphan"
+    assert coord.shared_state.optimization_stack[-1]["action"] == "integrate_patch"
+    assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-orphan"
+    assert coord.shared_state.resume_pending_revalidation is True
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordinator) -> None:
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.pending_integrate = {"task_id": "ti-pending", "specialist_task_id": "spec-pending"}
+    await coord.bus.append_and_seq(
+        Message.new(
+            "coordinator",
+            "*",
+            "delegated_result",
+            {
+                "task_id": "ti-pending",
+                "kind": "integrate_patch",
+                "state": "succeeded",
+                "result": {
+                    "status": "kept",
+                    "specialist_task_id": "spec-pending",
+                    "output_throughput": 125.0,
+                },
+            },
+        )
+    )
+
+    report = await coord._resume_consistency_pass()
+
+    replay = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "replayed_pending_integrate")
+    assert replay["task_id"] == "ti-pending"
+    assert replay["appended"] is True
+    assert coord.shared_state.pending_integrate == {}
+    assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-pending"
+    assert coord.shared_state.resume_pending_revalidation is True
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinator, monkeypatch) -> None:
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.pending_integrate = {
+        "task_id": "ti-roll",
+        "framework_source_root": "/tmp/framework",
+        "patches": ["/tmp/p.diff"],
+    }
+    monkeypatch.setattr(
+        coord,
+        "_resume_rollback_pending_integrate",
+        lambda pending: {"reversed": list(pending["patches"]), "failed": []},
+    )
+
+    report = await coord._resume_consistency_pass()
+
+    rolled = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "rolled_back_pending_integrate")
+    assert rolled["task_id"] == "ti-roll"
+    assert rolled["reversed"] == ["/tmp/p.diff"]
+    assert coord.shared_state.pending_integrate == {}
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_clears_stale_pending_integrate(coord: Coordinator) -> None:
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.pending_integrate = {"task_id": "ti-stale"}
+
+    report = await coord._resume_consistency_pass()
+
+    cleared = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "cleared_stale_pending_integrate")
+    assert cleared["task_id"] == "ti-stale"
+    assert coord.shared_state.pending_integrate == {}
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_discards_orphaned_integrate_keep_missing_workspace(
+    coord: Coordinator,
+    tmp_path: Path,
+) -> None:
+    coord._resumed_from["is_resume"] = True
+    missing_workspace = tmp_path / "missing-workspace"
+    await coord.bus.append_and_seq(
+        Message.new(
+            "coordinator",
+            "*",
+            "delegated_result",
+            {
+                "task_id": "ti-missing",
+                "kind": "integrate_patch",
+                "state": "succeeded",
+                "result": {
+                    "status": "kept",
+                    "specialist_task_id": "spec-missing",
+                    "output_throughput": 125.0,
+                    "workspace": str(missing_workspace),
+                },
+            },
+        )
+    )
+
+    report = await coord._resume_consistency_pass()
+
+    discarded = next(w for w in report["warnings"] if w["kind"] == "orphaned_keep_discarded")
+    assert discarded["orphan_kind"] == "integrate_patch"
+    assert discarded["variant"] == "spec-missing"
+    assert coord.shared_state.optimization_stack == []
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_reverify_best_env_queues_explore(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESUME_REVERIFY_BEST", "1")
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.current_best = {
+        "variant_name": "best",
+        "extra_server_args": "--best 1",
+        "extra_envs": {"BEST": "1"},
+        "tput": 123.0,
+    }
+
+    report = await coord._resume_consistency_pass()
+
+    queued = await coord.tasks.queued()
+    assert any(t.kind == "explore" and t.params.get("source") == "resume_reverify_best" for t in queued)
+    assert any(
+        isinstance(f, dict) and f.get("kind") == "queued_resume_reverify_best"
+        for f in report["fixes"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_discards_orphan_when_workspace_missing(coord: Coordinator) -> None:
+    # Gap B: an integrate_patch KEEP whose run workspace is gone is discarded +
+    # surfaced (alert), never silently treated as applied.
+    coord._resumed_from["is_resume"] = True
+    await coord.bus.append_and_seq(
+        Message.new(
+            "coordinator",
+            "*",
+            "delegated_result",
+            {
+                "task_id": "ti-gone",
+                "kind": "integrate_patch",
+                "state": "succeeded",
+                "result": {
+                    "status": "kept",
+                    "specialist_task_id": "spec-gone",
+                    "output_throughput": 123.0,
+                    "workspace": "/nonexistent/path/spec-gone",
+                },
+            },
+        )
+    )
+
+    report = await coord._resume_consistency_pass()
+
+    assert any(w.get("kind") == "orphaned_keep_discarded" for w in report["warnings"])
+    assert not any(
+        isinstance(e, dict) and e.get("variant_name") == "spec-gone"
+        for e in coord.shared_state.optimization_stack
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_explore_orphan_alerts_not_replayed(coord: Coordinator) -> None:
+    # Gap B: explore KEEPs are ambiguous vs KEEP_UNSTABLE eviction → alert, never
+    # resurrect.
+    coord._resumed_from["is_resume"] = True
+    await coord.bus.append_and_seq(
+        Message.new(
+            "coordinator",
+            "*",
+            "delegated_result",
+            {
+                "task_id": "te-orphan",
+                "kind": "explore",
+                "state": "succeeded",
+                "result": {
+                    "status": "kept",
+                    "best_variant": {"name": "ev-1", "extra_envs": {"A": "1"}},
+                    "output_throughput": 123.0,
+                },
+            },
+        )
+    )
+
+    report = await coord._resume_consistency_pass()
+
+    assert any(w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "explore" for w in report["warnings"])
+    assert not any(
+        isinstance(e, dict) and e.get("variant_name") == "ev-1" for e in coord.shared_state.optimization_stack
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_replays_pending_integrate_with_kept_result(coord: Coordinator) -> None:
+    # Gap C: a crashed integrate window WITH a kept result → replay the append +
+    # clear the sentinel.
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.pending_integrate = {"task_id": "ti-half", "specialist_task_id": "spec-half"}
+    await coord.bus.append_and_seq(
+        Message.new(
+            "coordinator",
+            "*",
+            "delegated_result",
+            {
+                "task_id": "ti-half",
+                "kind": "integrate_patch",
+                "state": "succeeded",
+                "result": {
+                    "status": "kept",
+                    "specialist_task_id": "spec-half",
+                    "output_throughput": 130.0,
+                    "config_changes_applied": {"BAR": "2"},
+                },
+            },
+        )
+    )
+
+    report = await coord._resume_consistency_pass()
+
+    assert any(isinstance(f, dict) and f.get("kind") == "replayed_pending_integrate" for f in report["fixes"])
+    assert coord.shared_state.pending_integrate == {}
+    assert any(
+        isinstance(e, dict) and e.get("variant_name") == "spec-half"
+        for e in coord.shared_state.optimization_stack
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_rolls_back_pending_integrate_without_kept(coord: Coordinator, monkeypatch) -> None:
+    # Gap C: a crashed integrate window with NO kept result but applied patches →
+    # reverse-apply (rollback) + clear the sentinel.
+    import inference_optimizer.orchestrator.action_executors.integrate_patch as ip
+
+    reversed_calls: list[str] = []
+
+    def _fake_reverse(root, patch):
+        reversed_calls.append(str(patch))
+        return True, ""
+
+    monkeypatch.setattr(ip, "_git_apply_reverse", _fake_reverse)
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.pending_integrate = {
+        "task_id": "ti-crash",
+        "specialist_task_id": "spec-crash",
+        "framework_source_root": "/tmp/fw",
+        "patches": ["/tmp/fw/p1.diff"],
+    }
+
+    report = await coord._resume_consistency_pass()
+
+    assert reversed_calls == ["/tmp/fw/p1.diff"]
+    assert any(isinstance(f, dict) and f.get("kind") == "rolled_back_pending_integrate" for f in report["fixes"])
+    assert coord.shared_state.pending_integrate == {}
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_clears_stale_pending_integrate_with_specialist_id(coord: Coordinator) -> None:
+    # Gap C: a sentinel with no kept result and no patches → cleared as stale.
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.pending_integrate = {"task_id": "ti-stale", "specialist_task_id": "spec-stale"}
+
+    report = await coord._resume_consistency_pass()
+
+    assert any(isinstance(f, dict) and f.get("kind") == "cleared_stale_pending_integrate" for f in report["fixes"])
+    assert coord.shared_state.pending_integrate == {}
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: Coordinator) -> None:
+    # Gap A: unvalidated KEEPs (validated_stack_len < len(stack)) → flag + a
+    # tagged full-stack revalidation explore task.
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.optimization_stack = [
+        {
+            "action": "explore",
+            "variant_name": "v1",
+            "candidate_extra_server_args": "--a 1",
+            "extra_envs": {"A": "1"},
+            "tput": 110.0,
+        }
+    ]
+    coord.shared_state.cumulative_gain_validated_stack_len = 0
+
+    report = await coord._resume_consistency_pass()
+
+    assert coord.shared_state.resume_pending_revalidation is True
+    queued = await coord.tasks.queued()
+    assert any(t.kind == "explore" and t.params.get("source") == "resume_stack_revalidate" for t in queued)
+    assert any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
+
+
+@pytest.mark.asyncio
+async def test_resume_stack_revalidate_promote_clears_flag_and_sets_watermark(coord: Coordinator) -> None:
+    # Gap A: when the tagged revalidation explore promotes, the watermark is set
+    # to len(stack) and the pending flag clears from the measured tput.
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.optimization_stack = [
+        {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
+    ]
+    coord.shared_state.cumulative_gain_validated_stack_len = 0
+    task = SimpleNamespace(task_id="tr-1", params={"source": "resume_stack_revalidate"})
+    await coord._promote_to_shared_state(
+        "explore",
+        {"winners": [], "best_variant": None, "output_throughput": 121.0},
+        task=task,
+    )
+
+    assert coord.shared_state.resume_pending_revalidation is False
+    assert coord.shared_state.cumulative_gain_validated_stack_len == 1
+    assert coord.shared_state.cumulative_gain_validated == pytest.approx(21.0)
+
+
+@pytest.mark.asyncio
+async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinator) -> None:
+    # A revalidation rebench that produced no valid measurement must NOT clear
+    # the pending flag — reports must keep warning until the stack is confirmed.
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.optimization_stack = [
+        {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
+    ]
+    coord.shared_state.cumulative_gain_validated_stack_len = 0
+    task = SimpleNamespace(task_id="tr-fail", params={"source": "resume_stack_revalidate"})
+    await coord._promote_to_shared_state(
+        "explore",
+        {"winners": [], "best_variant": None, "output_throughput": 0.0},
+        task=task,
+    )
+
+    assert coord.shared_state.resume_pending_revalidation is True
+    assert coord.shared_state.cumulative_gain_validated_stack_len == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_reverify_best_promote_clears_flag(coord: Coordinator) -> None:
+    # The env-gated current_best recheck (source=resume_reverify_best) is also a
+    # revalidation source and clears the flag on a valid measurement.
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.optimization_stack = [
+        {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
+    ]
+    coord.shared_state.cumulative_gain_validated_stack_len = 0
+    task = SimpleNamespace(task_id="rb-1", params={"source": "resume_reverify_best"})
+    await coord._promote_to_shared_state(
+        "explore",
+        {"winners": [], "best_variant": None, "output_throughput": 118.0},
+        task=task,
+    )
+
+    assert coord.shared_state.resume_pending_revalidation is False
+    assert coord.shared_state.cumulative_gain_validated_stack_len == 1
+
+
+@pytest.mark.asyncio
+async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coordinator) -> None:
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.pending_integrate = {"task_id": "ti-1"}
+    task = SimpleNamespace(task_id="ti-1", params={})
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "specialist_task_id": "spec-1",
+            "output_throughput": 112.0,
+            "delta_pct": 12.0,
+            "accuracy_pass": True,
+            "config_changes_applied": {"X": "1"},
+            "patches_applied": ["p.diff"],
+            "patches_reverted": [],
+            "workspace": "/tmp/integrate",
+        },
+        task=task,
+    )
+
+    assert coord.shared_state.pending_integrate == {}
+    assert coord.shared_state.current_best["action"] == "integrate_patch"
+    assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-1"
+    assert coord.shared_state.cumulative_gain_validated == pytest.approx(12.0)
+    assert coord.shared_state.cumulative_gain_validated_stack_len == len(coord.shared_state.optimization_stack)
+
+
+@pytest.mark.asyncio
+async def test_reactor_pass_records_context_tokens(coord: Coordinator) -> None:
+    backend = MockBackend(
+        ScriptedPlan(
+            turns=[
+                MockTurn(
+                    intents=[_heartbeat()],
+                    raw_text="ok",
+                    metadata={
+                        "input_tokens": 10,
+                        "cache_read_input_tokens": 20,
+                        "cache_creation_input_tokens": 30,
+                    },
+                )
+            ]
+        ),
+        name="orchestration",
+    )
+    backend.conversational = True  # type: ignore[attr-defined]
+    coord.backends["orchestration"] = backend
+    await coord._reactor_pass("orchestration")
+    assert coord._checkpoint_tracker.context_tokens_now == 60
+
+
+@pytest.mark.asyncio
+async def test_reactor_pass_chars_fallback_without_token_metadata(coord: Coordinator) -> None:
+    backend = MockBackend(
+        ScriptedPlan(turns=[MockTurn(intents=[_heartbeat()], raw_text="raw-reply", metadata={})]),
+        name="orchestration",
+    )
+    backend.conversational = True  # type: ignore[attr-defined]
+    coord.backends["orchestration"] = backend
+    coord._checkpoint_tracker.chars_since_last = 0
+    await coord._reactor_pass("orchestration")
+    assert coord._checkpoint_tracker.context_tokens_now == 0
+    assert coord._checkpoint_tracker.chars_since_last > len("raw-reply")
+
+
 # -- _conversation_progress_signal ------------------------------------------
 def test_progress_signal_first_call_seeds_marker(coord: Coordinator) -> None:
     coord._progress_marker = {}
@@ -145,16 +632,15 @@ def test_progress_signal_flags_stall(coord: Coordinator) -> None:
 # -- replay_for_resume ------------------------------------------------------
 @pytest.mark.asyncio
 async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator) -> None:
-    p1 = Message.new("kernel", "orchestration", "proposal",
-                     {"action_name": "explore", "predicted_gain_pct": 3.0})
+    p1 = Message.new("kernel", "orchestration", "proposal", {"action_name": "explore", "predicted_gain_pct": 3.0})
     await coord.bus.append_and_seq(p1)
-    p2 = Message.new("kernel", "orchestration", "proposal",
-                     {"action_name": "baseline", "predicted_gain_pct": 1.0})
+    p2 = Message.new("kernel", "orchestration", "proposal", {"action_name": "baseline", "predicted_gain_pct": 1.0})
     await coord.bus.append_and_seq(p2)
     # A verdict that decides p2 only.
     await coord.bus.append_and_seq(
-        Message.new("critic", "orchestration", "review_verdict",
-                    {"target_proposal_msg_id": p2.msg_id, "verdict": "approve"})
+        Message.new(
+            "critic", "orchestration", "review_verdict", {"target_proposal_msg_id": p2.msg_id, "verdict": "approve"}
+        )
     )
     out = await coord.replay_for_resume()
     assert out["pending_restored"] == 1
@@ -164,14 +650,16 @@ async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator
 
 @pytest.mark.asyncio
 async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> None:
-    p1 = Message.new("kernel", "orchestration", "proposal",
-                     {"action_name": "explore"})
+    p1 = Message.new("kernel", "orchestration", "proposal", {"action_name": "explore"})
     await coord.bus.append_and_seq(p1)
     # Legacy verdict event: no 'verdict' summary but a verdict_map dict.
     await coord.bus.append_and_seq(
-        Message.new("critic", "orchestration", "review_verdict",
-                    {"target_proposal_msg_id": p1.msg_id,
-                     "verdict_map": {"x": "ok"}})
+        Message.new(
+            "critic",
+            "orchestration",
+            "review_verdict",
+            {"target_proposal_msg_id": p1.msg_id, "verdict_map": {"x": "ok"}},
+        )
     )
     out = await coord.replay_for_resume()
     assert out["verdicts_seen"] == 1
@@ -180,7 +668,9 @@ async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> N
 
 # -- _format_analysis_md fallback (path read) -------------------------------
 def test_context_analysis_reader_path_fallback_on_format_error(
-    coord: Coordinator, tmp_path, monkeypatch,
+    coord: Coordinator,
+    tmp_path,
+    monkeypatch,
 ) -> None:
     md = tmp_path / "analysis.md"
     md.write_text("# roofline snapshot\n", encoding="utf-8")
@@ -195,13 +685,13 @@ def test_context_analysis_reader_path_fallback_on_format_error(
 
 
 def test_context_analysis_reader_unreadable_path(
-    coord: Coordinator, monkeypatch,
+    coord: Coordinator,
+    monkeypatch,
 ) -> None:
-    coord.shared_state.last_trace_analyze = {
-        "analysis_md_path": "/nonexistent/dir/analysis.md"
-    }
+    coord.shared_state.last_trace_analyze = {"analysis_md_path": "/nonexistent/dir/analysis.md"}
     monkeypatch.setattr(
-        coord.shared_state, "_format_analysis_md_full",
+        coord.shared_state,
+        "_format_analysis_md_full",
         lambda: (_ for _ in ()).throw(RuntimeError("x")),
     )
     out = coord._context_analysis_reader()
@@ -224,8 +714,8 @@ async def test_stop_cancels_and_closes(coord: Coordinator) -> None:
 # -- _pump_dispatcher_once --------------------------------------------------
 def _sub_result(task_id: str, *, state: str = "succeeded", result=None, error=None):
     from inference_optimizer.orchestrator.sub_agent_runner import SubAgentResult
-    return SubAgentResult(task_id=task_id, state=state,
-                          result=result if result is not None else {}, error=error)
+
+    return SubAgentResult(task_id=task_id, state=state, result=result if result is not None else {}, error=error)
 
 
 @pytest.mark.asyncio
@@ -237,17 +727,24 @@ async def test_pump_dispatcher_noop_when_empty(coord: Coordinator) -> None:
 async def test_pump_dispatcher_explore_promotes(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     task = await coord.tasks.create(
-        kind="explore", params={}, idempotency_key="disp-explore",
+        kind="explore",
+        params={},
+        idempotency_key="disp-explore",
     )
 
     async def fake_run(t, **kw):
-        return _sub_result(t.task_id, result={
-            "status": "succeeded",
-            "winners": [{"name": "v0", "extra_server_args": "--tp 1"}],
-            "best_variant": {"name": "v0", "extra_server_args": "--tp 1"},
-            "output_throughput": 900.0, "round_id": "r1",
-            "losers": [], "skipped_dup": [],
-        })
+        return _sub_result(
+            t.task_id,
+            result={
+                "status": "succeeded",
+                "winners": [{"name": "v0", "extra_server_args": "--tp 1"}],
+                "best_variant": {"name": "v0", "extra_server_args": "--tp 1"},
+                "output_throughput": 900.0,
+                "round_id": "r1",
+                "losers": [],
+                "skipped_dup": [],
+            },
+        )
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
     await coord._pump_dispatcher_once()
@@ -260,15 +757,19 @@ async def test_pump_dispatcher_explore_promotes(coord: Coordinator, monkeypatch)
 async def test_pump_dispatcher_specialist_bookkeeping(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "0")
     await coord.tasks.create(
-        kind="specialist", params={"domain": "kernel"},
+        kind="specialist",
+        params={"domain": "kernel"},
         idempotency_key="disp-spec",
     )
 
     async def fake_run(t, **kw):
-        return _sub_result(t.task_id, result={
-            "status": "succeeded",
-            "specialist_done": {"patches_written": []},
-        })
+        return _sub_result(
+            t.task_id,
+            result={
+                "status": "succeeded",
+                "specialist_done": {"patches_written": []},
+            },
+        )
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
     await coord._pump_dispatcher_once()
@@ -279,7 +780,9 @@ async def test_pump_dispatcher_specialist_bookkeeping(coord: Coordinator, monkey
 @pytest.mark.asyncio
 async def test_pump_dispatcher_absorbs_spawn_exception(coord: Coordinator, monkeypatch) -> None:
     await coord.tasks.create(
-        kind="explore", params={}, idempotency_key="disp-boom",
+        kind="explore",
+        params={},
+        idempotency_key="disp-boom",
     )
 
     async def fake_run(t, **kw):
@@ -296,13 +799,20 @@ class _FakeRunResult:
         self.raw_text = raw_text
 
 
-def _make_conversational(coord: Coordinator) -> None:
+def _make_conversational(coord: Coordinator, *, raw_text: str | None = None) -> None:
     backend = coord.backends["orchestration"]
     backend.conversational = True  # type: ignore[attr-defined]
     backend.reset_conversation = lambda: None  # type: ignore[attr-defined]
+    # A well-formed checkpoint reply (valid JSON) so the compaction "taken" path
+    # runs; pass raw_text= to exercise the degenerate (non-JSON) path.
+    reply = raw_text if raw_text is not None else (
+        '```json\n{"current_plan": "tune MoE", "hypotheses": ["h1"], '
+        '"tried_and_why": ["explored attention backends"], "pending": ["p1"], '
+        '"learnings": ["l1"]}\n```'
+    )
 
     async def _run(**kw):
-        return _FakeRunResult("SUMMARY: explored attention backends; next: tune MoE")
+        return _FakeRunResult(reply)
 
     backend.run = _run  # type: ignore[assignment]
 
@@ -316,6 +826,7 @@ async def test_checkpoint_disabled_returns_false(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_checkpoint_policy_declines(coord: Coordinator) -> None:
     import time
+
     _make_conversational(coord)
     coord._checkpoint_enabled = True
     coord._orchestration_seeded = True
@@ -325,6 +836,9 @@ async def test_checkpoint_policy_declines(coord: Coordinator) -> None:
         def should_checkpoint(self, **kw):
             return False
 
+        def is_hard_compaction(self, n):
+            return False
+
     coord._checkpoint_policy = _Policy()
     assert await coord._maybe_checkpoint_orchestration(tick=5) is False
 
@@ -332,6 +846,7 @@ async def test_checkpoint_policy_declines(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_checkpoint_taken_compacts_memory(coord: Coordinator) -> None:
     import time
+
     _make_conversational(coord)
     coord._checkpoint_enabled = True
     coord._orchestration_seeded = True
@@ -341,18 +856,189 @@ async def test_checkpoint_taken_compacts_memory(coord: Coordinator) -> None:
         def should_checkpoint(self, **kw):
             return True
 
+        def is_hard_compaction(self, n):
+            return False
+
     coord._checkpoint_policy = _Policy()
     took = await coord._maybe_checkpoint_orchestration(tick=12, phase_changed=True)
     assert took is True
     # next turn re-seeds from the compacted memory
     assert coord._orchestration_seeded is False
     assert coord.shared_state.orchestration_memory
+    # rollback ring captured the record (long-run #1)
+    assert len(coord.shared_state.orchestration_memory_history) == 1
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_history_ring_caps_at_ten(coord: Coordinator) -> None:
+    import time
+
+    coord._checkpoint_enabled = True
+    coord._run_started_monotonic = time.monotonic()
+    _always_checkpoint(coord)
+    backend = coord.backends["orchestration"]
+    backend.conversational = True  # type: ignore[attr-defined]
+    backend.reset_conversation = lambda: None  # type: ignore[attr-defined]
+
+    for i in range(12):
+        async def _run(**kw):
+            return _FakeRunResult(
+                f'```json\n{{"current_plan": "plan {i}", "hypotheses": ["h{i}"], '
+                f'"tried_and_why": [], "pending": [], "learnings": []}}\n```'
+            )
+
+        backend.run = _run  # type: ignore[assignment]
+        coord._orchestration_seeded = True
+        assert await coord._maybe_checkpoint_orchestration(tick=i + 1) is True
+
+    hist = coord.shared_state.orchestration_memory_history
+    assert len(hist) == 10
+    assert hist[0]["current_plan"] == "plan 2"
+    assert hist[-1]["current_plan"] == "plan 11"
+
+
+def test_checkpoint_policy_context_fraction_env(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION", "0.5")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CTX_HARD_FRACTION", "0.75")
+    sd = make_session_dir()
+    from .conftest import seed_target_analysis_marker
+
+    seed_target_analysis_marker(sd)
+    backends = _build_backends()
+    backends["orchestration"].model = "claude-opus-4-8"  # type: ignore[attr-defined]
+    c = Coordinator(sd, backends=backends)
+    assert c._checkpoint_policy.context_token_soft == 100_000
+    assert c._checkpoint_policy.context_token_hard == 150_000
+
+
+def test_orchestration_memory_rollback_env(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK", "2")
+    sd = make_session_dir()
+    from .conftest import seed_target_analysis_marker
+
+    seed_target_analysis_marker(sd)
+    state = SharedState.load_or_init(sd)
+    state.orchestration_memory = {"current_plan": "latest"}
+    state.orchestration_memory_history = [
+        {"current_plan": "older"},
+        {"current_plan": "middle"},
+        {"current_plan": "latest"},
+    ]
+    state.save(sd)
+
+    c = Coordinator(sd, backends=_build_backends())
+    assert c.shared_state.orchestration_memory == {"current_plan": "middle"}
+    assert "current_plan: middle" in c._orchestration_seed_memory
+
+
+def _always_checkpoint(coord: Coordinator) -> None:
+    class _Policy:
+        def should_checkpoint(self, **kw):
+            return True
+
+        def is_hard_compaction(self, n):  # default: not hard
+            return False
+
+    coord._checkpoint_policy = _Policy()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_degenerate_non_hard_skips_and_preserves(coord: Coordinator) -> None:
+    import time
+
+    # Non-JSON reply → degenerate; not near the window → skip compaction.
+    _make_conversational(coord, raw_text="just prose, no JSON object here")
+    coord._checkpoint_enabled = True
+    coord._orchestration_seeded = True
+    coord._run_started_monotonic = time.monotonic()
+    coord.shared_state.orchestration_memory = {"current_plan": "keep me"}
+    _always_checkpoint(coord)
+
+    took = await coord._maybe_checkpoint_orchestration(tick=7)
+    assert took is False
+    # conversation NOT reset (history preserved) and prior memory untouched
+    assert coord._orchestration_seeded is True
+    assert coord.shared_state.orchestration_memory == {"current_plan": "keep me"}
+    assert coord._consec_degenerate_ckpt == 1
+    assert coord._checkpoint_tracker.last_tick == 7
+    assert coord._checkpoint_tracker.chars_since_last == 0
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_degenerate_three_times_emits_medium_observation(coord: Coordinator) -> None:
+    import time
+
+    _make_conversational(coord, raw_text="just prose, no JSON object here")
+    coord._checkpoint_enabled = True
+    coord._orchestration_seeded = True
+    coord._run_started_monotonic = time.monotonic()
+    _always_checkpoint(coord)
+
+    for tick in (1, 2, 3):
+        assert await coord._maybe_checkpoint_orchestration(tick=tick) is False
+
+    rows = await coord.bus.tail(topic="observation", n=20)
+    degraded = [
+        m.payload
+        for m in rows
+        if m.payload.get("kind") == "orchestration_checkpoint_degraded"
+    ]
+    assert any(p.get("severity") == "medium" and p.get("consecutive") == 3 for p in degraded)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_degenerate_hard_uses_fallback(coord: Coordinator) -> None:
+    import time
+
+    _make_conversational(coord, raw_text="still no JSON")
+    coord._checkpoint_enabled = True
+    coord._orchestration_seeded = True
+    coord._run_started_monotonic = time.monotonic()
+    coord.shared_state.phase = "EXPLORE"
+
+    class _Policy:
+        def should_checkpoint(self, **kw):
+            return True
+
+        def is_hard_compaction(self, n):  # near the window → force
+            return True
+
+    coord._checkpoint_policy = _Policy()
+    took = await coord._maybe_checkpoint_orchestration(tick=20)
+    # hard path compacts via deterministic fallback even on a degenerate reply
+    assert took is True
+    assert coord._orchestration_seeded is False
+    assert coord.shared_state.orchestration_memory.get("current_plan", "").startswith("[auto]")
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_resets_tracker(coord: Coordinator) -> None:
+    import time
+
+    _make_conversational(coord)
+    coord._checkpoint_enabled = True
+    coord._orchestration_seeded = True
+    coord._run_started_monotonic = time.monotonic()
+    coord._checkpoint_tracker.chars_since_last = 999
+    _always_checkpoint(coord)
+
+    async def _boom(**kw):
+        raise RuntimeError("backend down")
+
+    coord.backends["orchestration"].run = _boom  # type: ignore[assignment]
+    took = await coord._maybe_checkpoint_orchestration(tick=30)
+    assert took is False
+    # tracker reset even on failure → no checkpoint storm next tick (#2)
+    assert coord._checkpoint_tracker.chars_since_last == 0
 
 
 # -- _compose_prompt advisory + telemetry append paths ----------------------
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_all_advisory_blocks(
-    coord: Coordinator, monkeypatch,
+    coord: Coordinator,
+    monkeypatch,
 ) -> None:
     ss = coord.shared_state
     monkeypatch.setattr(ss, "to_policy_denial_summary", lambda top_k=6: "DENIAL")
@@ -364,18 +1050,28 @@ async def test_compose_prompt_orchestration_all_advisory_blocks(
     monkeypatch.setattr(coord, "_priors_match_advisory_block", lambda: "PRIORS-BLOCK")
     monkeypatch.setattr(coord, "_plateau_advisory_block", lambda: "PLATEAU-BLOCK")
     from inference_optimizer.orchestrator import research_hints as rh
+
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-BLOCK")
 
     out = await coord._compose_prompt("orchestration")
-    for token in ("DENIAL", "WARM-BLOCK", "GAPS-BLOCK", "HINTS-BLOCK",
-                  "GAP-BLOCK", "SCORES-BLOCK", "PRIORS-BLOCK", "MIX-BLOCK",
-                  "PLATEAU-BLOCK"):
+    for token in (
+        "DENIAL",
+        "WARM-BLOCK",
+        "GAPS-BLOCK",
+        "HINTS-BLOCK",
+        "GAP-BLOCK",
+        "SCORES-BLOCK",
+        "PRIORS-BLOCK",
+        "MIX-BLOCK",
+        "PLATEAU-BLOCK",
+    ):
         assert token in out
 
 
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_advisory_blocks_raise(
-    coord: Coordinator, monkeypatch,
+    coord: Coordinator,
+    monkeypatch,
 ) -> None:
     ss = coord.shared_state
 
@@ -391,6 +1087,7 @@ async def test_compose_prompt_orchestration_advisory_blocks_raise(
     monkeypatch.setattr(coord, "_priors_match_advisory_block", _boom)
     monkeypatch.setattr(coord, "_plateau_advisory_block", _boom)
     from inference_optimizer.orchestrator import research_hints as rh
+
     monkeypatch.setattr(rh, "summarise_for_prompt", _boom)
 
     # Every advisory failure is swallowed; the prompt still renders.
@@ -400,7 +1097,8 @@ async def test_compose_prompt_orchestration_advisory_blocks_raise(
 
 @pytest.mark.asyncio
 async def test_compose_prompt_robustness_telemetry_raises(
-    coord: Coordinator, monkeypatch,
+    coord: Coordinator,
+    monkeypatch,
 ) -> None:
     def _boom(*a, **k):
         raise RuntimeError("telemetry failed")
@@ -418,7 +1116,8 @@ async def test_compose_prompt_robustness_telemetry_raises(
 
 @pytest.mark.asyncio
 async def test_compose_prompt_robustness_lists_stale_specialists(
-    coord: Coordinator, monkeypatch,
+    coord: Coordinator,
+    monkeypatch,
 ) -> None:
     async def _stale():
         return [{"task_id": "spec-stale", "running_seconds": 999}]
@@ -432,29 +1131,34 @@ async def test_compose_prompt_robustness_lists_stale_specialists(
 # -- _promote_to_shared_state additional branches ---------------------------
 def _ptask(tid: str, kind: str):
     from inference_optimizer.orchestrator.task_registry import Task
-    return Task(task_id=tid, kind=kind, state="running", params={},
-                idempotency_key=f"{tid}-k")
+
+    return Task(task_id=tid, kind=kind, state="running", params={}, idempotency_key=f"{tid}-k")
 
 
 @pytest.mark.asyncio
 async def test_promote_baseline_no_warmup_parses_materialized(
-    coord: Coordinator, monkeypatch,
+    coord: Coordinator,
+    monkeypatch,
 ) -> None:
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"  # skip cascade
     import inference_optimizer.orchestrator.coordinator as mod
-    monkeypatch.setattr(mod, "_parse_baseline_workload_extra",
-                        lambda path: {"isl": 256})
-    await coord._promote_to_shared_state("baseline", {
-        "output_throughput": 1000.0,  # no warmup_round_tput -> else branch
-        "materialized_config": "/tmp/run.yaml",
-    })
+
+    monkeypatch.setattr(mod, "_parse_baseline_workload_extra", lambda path: {"isl": 256})
+    await coord._promote_to_shared_state(
+        "baseline",
+        {
+            "output_throughput": 1000.0,  # no warmup_round_tput -> else branch
+            "materialized_config": "/tmp/run.yaml",
+        },
+    )
     assert coord.shared_state.baseline_tput == 1000.0
     assert coord.shared_state.baseline_workload_extra == {"isl": 256}
 
 
 @pytest.mark.asyncio
 async def test_promote_baseline_materialized_parse_raises(
-    coord: Coordinator, monkeypatch,
+    coord: Coordinator,
+    monkeypatch,
 ) -> None:
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"
     import inference_optimizer.orchestrator.coordinator as mod
@@ -463,10 +1167,13 @@ async def test_promote_baseline_materialized_parse_raises(
         raise RuntimeError("parse failed")
 
     monkeypatch.setattr(mod, "_parse_baseline_workload_extra", _boom)
-    await coord._promote_to_shared_state("baseline", {
-        "output_throughput": 1000.0,
-        "materialized_config": "/tmp/run.yaml",
-    })
+    await coord._promote_to_shared_state(
+        "baseline",
+        {
+            "output_throughput": 1000.0,
+            "materialized_config": "/tmp/run.yaml",
+        },
+    )
     assert coord.shared_state.baseline_config_path == "/tmp/run.yaml"
 
 
@@ -475,7 +1182,9 @@ async def test_promote_profile_skipped_clears_pending(coord: Coordinator) -> Non
     task = _ptask("prof-1", "profile")
     coord.shared_state.auto_roofline_pending_task_id = "prof-1"
     await coord._promote_to_shared_state(
-        "profile", {"status": "skipped", "error_class": "x"}, task=task,
+        "profile",
+        {"status": "skipped", "error_class": "x"},
+        task=task,
     )
     assert coord.shared_state.auto_roofline_pending_task_id == ""
 
@@ -488,8 +1197,7 @@ async def test_promote_profile_succeeded_reanchors(coord: Coordinator) -> None:
     coord.shared_state.cumulative_gain_validated = 10.0
     await coord._promote_to_shared_state(
         "profile",
-        {"status": "succeeded", "main_trace_path": "/tmp/t.json",
-         "output_throughput": 880.0},
+        {"status": "succeeded", "main_trace_path": "/tmp/t.json", "output_throughput": 880.0},
         task=task,
     )
     assert coord.shared_state.auto_roofline_pending_task_id == ""
@@ -502,7 +1210,9 @@ async def test_promote_roofline_succeeded_clears_pending(coord: Coordinator) -> 
     coord.shared_state.baseline_tput = 800.0
     coord.shared_state.cumulative_gain_validated = 5.0
     await coord._promote_to_shared_state(
-        "roofline", {"status": "succeeded"}, task=task,
+        "roofline",
+        {"status": "succeeded"},
+        task=task,
     )
     assert coord.shared_state.auto_roofline_pending_task_id == ""
 
@@ -512,7 +1222,9 @@ async def test_promote_roofline_skipped_clears_pending(coord: Coordinator) -> No
     task = _ptask("roof-2", "roofline")
     coord.shared_state.auto_roofline_pending_task_id = "roof-2"
     await coord._promote_to_shared_state(
-        "roofline", {"status": "skipped"}, task=task,
+        "roofline",
+        {"status": "skipped"},
+        task=task,
     )
     assert coord.shared_state.auto_roofline_pending_task_id == ""
 
@@ -522,18 +1234,21 @@ async def test_promote_explore_discovered_flags_and_bad_winner(
     coord: Coordinator,
 ) -> None:
     coord.shared_state.baseline_tput = 800.0
-    await coord._promote_to_shared_state("explore", {
-        "explore_search_update": {"round_id": "r1"},
-        "discovered_flags_update": {
-            "framework": "sglang",
-            "backend_flags": ["--x"],
-            "param_flags": [],
-            "source_path": "/tmp/p",
-            "discovery_error": "parse glitch",
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "explore_search_update": {"round_id": "r1"},
+            "discovered_flags_update": {
+                "framework": "sglang",
+                "backend_flags": ["--x"],
+                "param_flags": [],
+                "source_path": "/tmp/p",
+                "discovery_error": "parse glitch",
+            },
+            "winners": ["not-a-dict"],  # skipped by the dict guard
+            "round_id": "r1",
         },
-        "winners": ["not-a-dict"],  # skipped by the dict guard
-        "round_id": "r1",
-    })
+    )
     assert coord.shared_state.discovered_flags_error == "parse glitch"
 
 
@@ -543,36 +1258,45 @@ async def test_promote_framework_pr_updates_batch_max_gain(coord: Coordinator) -
     coord.shared_state.framework_pr_batches = [
         {"batch_id": "b1", "max_gain_pct_observed_in_batch": 1.0},
     ]
-    await coord._promote_to_shared_state("framework_pr", {
-        "status": "kept",
-        "candidate": {"candidate_id": "c1", "pr_url": "http://x/1"},
-        "batch_id": "b1",
-        "delta_pct": 7.0,
-        "output_throughput": 856.0,
-    })
-    assert coord.shared_state.framework_pr_batches[0][
-        "max_gain_pct_observed_in_batch"] == 7.0
+    await coord._promote_to_shared_state(
+        "framework_pr",
+        {
+            "status": "kept",
+            "candidate": {"candidate_id": "c1", "pr_url": "http://x/1"},
+            "batch_id": "b1",
+            "delta_pct": 7.0,
+            "output_throughput": 856.0,
+        },
+    )
+    assert coord.shared_state.framework_pr_batches[0]["max_gain_pct_observed_in_batch"] == 7.0
 
 
 @pytest.mark.asyncio
 async def test_promote_sweep_chains_conc_sweep(coord: Coordinator) -> None:
     coord.shared_state.conc_sweep_enabled = True
-    await coord._promote_to_shared_state("sweep", {
-        "status": "succeeded",
-        "grid_size": 4,
-        "pareto_front": [{"x": 1}],
-    })
+    await coord._promote_to_shared_state(
+        "sweep",
+        {
+            "status": "succeeded",
+            "grid_size": 4,
+            "pareto_front": [{"x": 1}],
+        },
+    )
 
 
 @pytest.mark.asyncio
 async def test_promote_conc_sweep_records(coord: Coordinator) -> None:
     task = _ptask("cs-1", "conc_sweep")
-    await coord._promote_to_shared_state("conc_sweep", {
-        "status": "succeeded",
-        "was_skipped": False,
-        "summary": {"best_speedup": 1.2, "best_conc": 64, "successful_pairs": 3},
-        "report_json_path": "/tmp/cs.json",
-    }, task=task)
+    await coord._promote_to_shared_state(
+        "conc_sweep",
+        {
+            "status": "succeeded",
+            "was_skipped": False,
+            "summary": {"best_speedup": 1.2, "best_conc": 64, "successful_pairs": 3},
+            "report_json_path": "/tmp/cs.json",
+        },
+        task=task,
+    )
 
 
 # -- _scan_stale_specialists (running rows) ---------------------------------
@@ -580,12 +1304,16 @@ async def test_promote_conc_sweep_records(coord: Coordinator) -> None:
 async def test_scan_stale_specialists_flags_running(coord: Coordinator) -> None:
     coord._specialist_stale_sec = 0  # any running specialist is "stale"
     spec = await coord.tasks.create(
-        kind="specialist", params={}, idempotency_key="stale-spec",
+        kind="specialist",
+        params={},
+        idempotency_key="stale-spec",
     )
     await coord.tasks.transition(spec.task_id, "running")
     # A non-specialist running task is skipped by the kind guard.
     other = await coord.tasks.create(
-        kind="explore", params={}, idempotency_key="stale-other",
+        kind="explore",
+        params={},
+        idempotency_key="stale-other",
     )
     await coord.tasks.transition(other.task_id, "running")
     stale = await coord._scan_stale_specialists()
@@ -603,13 +1331,16 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
 
     monkeypatch.setattr(coord, "_handle_delegate", _fake_delegate)
     intent = Intent(type=IntentType.DELEGATE, payload={"idempotency_key": "wave"})
-    await coord._fan_out_specialist_wave("orchestration", intent, {
-        "domain": "kernel",
-        "tasks": [
-            {"task_description": "scout fused moe", "task_summary": "moe",
-             "mode": "patch", "lane": "gpu"},
-        ],
-    })
+    await coord._fan_out_specialist_wave(
+        "orchestration",
+        intent,
+        {
+            "domain": "kernel",
+            "tasks": [
+                {"task_description": "scout fused moe", "task_summary": "moe", "mode": "patch", "lane": "gpu"},
+            ],
+        },
+    )
     assert len(seen) == 1
     assert seen[0]["scope"] == "freeform"
     assert seen[0]["task_description"] == "scout fused moe"
@@ -630,17 +1361,26 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
         "roofline_snapshot_id": "snap-1",
         "hot_kernels_top15": [{"name": "gemm"}],
     }
-    monkeypatch.setattr(state, "find_gap", lambda cid: {
-        "symptom": "mem bound", "layer": "attention",
-        "domain_hint": "kernel", "severity": "high",
-        "attempts": [{"r": 1}],
-    })
+    monkeypatch.setattr(
+        state,
+        "find_gap",
+        lambda cid: {
+            "symptom": "mem bound",
+            "layer": "attention",
+            "domain_hint": "kernel",
+            "severity": "high",
+            "attempts": [{"r": 1}],
+        },
+    )
     monkeypatch.setattr(coord, "_target_gap_advisory_block", lambda: "GAP-NOTES")
     from inference_optimizer.orchestrator import research_hints as rh
+
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
     import inference_optimizer.orchestrator.shared_state as ss_mod
+
     monkeypatch.setattr(ss_mod, "render_model_arch_compact", lambda a: "ARCH-NOTES")
     from inference_optimizer.orchestrator import framework_paths as fp
+
     monkeypatch.setattr(fp, "resolve_source_file_allowlist", lambda: ["/src/root"])
 
     params: dict = {"domain": "kernel", "gap_canonical_id": "g1"}
@@ -658,16 +1398,18 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
 @pytest.mark.asyncio
 async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
     from inference_optimizer.orchestrator.task_registry import Task
+
     coord.cortex_kb = object()  # non-None -> KB amend path
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
     monkeypatch.setattr(coord, "_kb_amend_recipe", lambda **k: amends.append(k))
-    task = Task(task_id="fact-keep", kind="explore", state="succeeded",
-                params={}, idempotency_key="fk")
+    task = Task(task_id="fact-keep", kind="explore", state="succeeded", params={}, idempotency_key="fk")
     coord._record_fact_per_task(
-        task=task, source_session_id="sess",
-        result_dict={"gain_pct": 6.0, "output_throughput": 950.0}, kept=True,
+        task=task,
+        source_session_id="sess",
+        result_dict={"gain_pct": 6.0, "output_throughput": 950.0},
+        kept=True,
     )
     assert amends and "append_lesson" in amends[0]
 
@@ -675,15 +1417,17 @@ async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatc
 @pytest.mark.asyncio
 async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypatch) -> None:
     from inference_optimizer.orchestrator.task_registry import Task
+
     coord.cortex_kb = object()
     amends: list[dict] = []
     monkeypatch.setattr(coord, "_kb_amend_recipe", lambda **k: amends.append(k))
     monkeypatch.setattr(coord, "_pitfall_severity_for", lambda rd: "high")
-    task = Task(task_id="fact-revert", kind="integrate_patch", state="failed",
-                params={}, idempotency_key="fr")
+    task = Task(task_id="fact-revert", kind="integrate_patch", state="failed", params={}, idempotency_key="fr")
     coord._record_fact_per_task(
-        task=task, source_session_id="sess",
-        result_dict={"error_class": "oom", "reason": "bad"}, kept=False,
+        task=task,
+        source_session_id="sess",
+        result_dict={"error_class": "oom", "reason": "bad"},
+        kept=False,
     )
     assert amends and "append_pitfall" in amends[0]
 
@@ -692,20 +1436,25 @@ async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypat
 @pytest.mark.asyncio
 async def test_plateau_advisory_explore_triggered(coord: Coordinator, monkeypatch) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
+
     coord.shared_state.phase = ps.PHASE_EXPLORE
-    monkeypatch.setattr(ps, "compute_plateau_explore",
-                        lambda *a, **k: (True, {"recent_keep_gain_pct": 0.1,
-                                                "empty_streak": 3}))
+    monkeypatch.setattr(
+        ps, "compute_plateau_explore", lambda *a, **k: (True, {"recent_keep_gain_pct": 0.1, "empty_streak": 3})
+    )
     out = coord._plateau_advisory_block()
     assert "EXPLORE plateau detected" in out
+    # Cyclic mode (default): footer must state the deterministic EXPLORE→KERNEL
+    # advance, not the stale "informational only" claim.
+    assert "advances EXPLORE" in out and "KERNEL" in out
+    assert "informational" not in out
 
 
 @pytest.mark.asyncio
 async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
+
     coord.shared_state.phase = ps.PHASE_KERNEL
-    monkeypatch.setattr(ps, "compute_plateau_kernel",
-                        lambda *a, **k: (True, {"revert_streak": 4}))
+    monkeypatch.setattr(ps, "compute_plateau_kernel", lambda *a, **k: (True, {"revert_streak": 4}))
     out = coord._plateau_advisory_block()
     assert "KERNEL plateau detected" in out
 
@@ -713,10 +1462,11 @@ async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch
 @pytest.mark.asyncio
 async def test_plateau_advisory_framework_pr_triggered(coord: Coordinator, monkeypatch) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
+
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_PR
-    monkeypatch.setattr(ps, "compute_plateau_framework_pr",
-                        lambda *a, **k: (True, {"lookback": 3,
-                                                "batch_max_gains": [0.1]}))
+    monkeypatch.setattr(
+        ps, "compute_plateau_framework_pr", lambda *a, **k: (True, {"lookback": 3, "batch_max_gains": [0.1]})
+    )
     out = coord._plateau_advisory_block()
     assert "FRAMEWORK_PR plateau detected" in out
 
@@ -742,12 +1492,11 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
 
 @pytest.mark.asyncio
 async def test_record_specialist_result_no_dead_research_evidence_log(
-    coord: Coordinator, caplog,
+    coord: Coordinator,
+    caplog,
 ) -> None:
-    """Regression (#486 leftover): the deleted ``_aggregate_research_evidence``
-    call raised AttributeError that was swallowed into a spammy error log on
-    every specialist result. The dead call must be gone, so no such error is
-    logged."""
+    """Regression (#486): successful specialist recording must not emit the
+    research-evidence failure log."""
     import logging
 
     task = _ptask("rec-spec-dead", "specialist")
@@ -760,18 +1509,14 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
             },
             source="specialist:rec-spec-dead",
         )
-    assert not any(
-        "research-evidence aggregation failed" in r.getMessage()
-        for r in caplog.records
-    )
+    assert not any("research evidence aggregation failed" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
 async def test_record_specialist_result_research_scout(coord: Coordinator, monkeypatch) -> None:
     task = _ptask("rec-spec-2", "specialist")
     harvested: list[dict] = []
-    monkeypatch.setattr(coord, "_harvest_research_scout",
-                        lambda dp: harvested.append(dp))
+    monkeypatch.setattr(coord, "_harvest_research_scout", lambda dp: harvested.append(dp))
     await coord._record_specialist_result(
         task=task,
         done_payload={
@@ -871,6 +1616,7 @@ def test_run_action_now_sync_no_loop(coord: Coordinator, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> None:
     from inference_optimizer.orchestrator.policy import PolicyDenied
+
     recorded: list = []
 
     def _deny(source, intent):
@@ -906,6 +1652,7 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
     async def _mk(name):
         async def _h(source, intent):
             seen.append(name)
+
         return _h
 
     routes = {
@@ -917,8 +1664,10 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
         IntentType.SPECIALIST_DONE: "_handle_specialist_done",
     }
     for it, attr in routes.items():
+
         async def _h(source, intent, _n=attr):
             seen.append(_n)
+
         monkeypatch.setattr(coord, attr, _h)
     for it in routes:
         await coord._handle_intent("orchestration", Intent(type=it, payload={}))
@@ -929,9 +1678,9 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
 @pytest.mark.asyncio
 async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeypatch) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
+
     coord.shared_state.phase = "EXPLORE"
-    monkeypatch.setattr(ps, "compute_next_phase",
-                        lambda *a, **k: ("EXPLORE", "x", {}))
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("EXPLORE", "x", {}))
 
     async def _scout():
         return None
@@ -943,10 +1692,11 @@ async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeyp
 @pytest.mark.asyncio
 async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypatch) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
+
     coord.shared_state.phase = "PRELUDE"
-    monkeypatch.setattr(ps, "compute_next_phase",
-                        lambda *a, **k: ("EXPLORE", "robustness_escalated",
-                                         {"evidence": "llm_escalation"}))
+    monkeypatch.setattr(
+        ps, "compute_next_phase", lambda *a, **k: ("EXPLORE", "robustness_escalated", {"evidence": "llm_escalation"})
+    )
 
     async def _entered(*, from_phase, to_phase):
         return None
@@ -959,11 +1709,12 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
 @pytest.mark.asyncio
 async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monkeypatch) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
+
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.stop_reason = ""
-    monkeypatch.setattr(ps, "compute_next_phase",
-                        lambda *a, **k: (ps.PHASE_CLOSE, "target_reached",
-                                         {"terminal": True}))
+    monkeypatch.setattr(
+        ps, "compute_next_phase", lambda *a, **k: (ps.PHASE_CLOSE, "target_reached", {"terminal": True})
+    )
 
     async def _entered(*, from_phase, to_phase):
         return None
@@ -976,20 +1727,34 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
 # -- _materialize_approved_proposal -----------------------------------------
 def _pending(action_name: str, payload: dict, msg_id: str = "prop-1"):
     from inference_optimizer.orchestrator.coordinator import PendingProposal
+
     return PendingProposal(
-        proposal_msg_id=msg_id, from_agent="orchestration",
-        action_name=action_name, predicted_gain_pct=3.0, payload=payload,
+        proposal_msg_id=msg_id,
+        from_agent="orchestration",
+        action_name=action_name,
+        predicted_gain_pct=3.0,
+        payload=payload,
     )
 
 
 @pytest.mark.asyncio
 async def test_materialize_explore_filters_grid(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
-    pending = _pending("explore", {"params": {"grid": [
-        {"name": "v0"}, {"name": "v1"}, "non-dict-slot",
-    ]}})
+    pending = _pending(
+        "explore",
+        {
+            "params": {
+                "grid": [
+                    {"name": "v0"},
+                    {"name": "v1"},
+                    "non-dict-slot",
+                ]
+            }
+        },
+    )
     await coord._materialize_approved_proposal(
-        pending, approved_variant_names={"v0"},
+        pending,
+        approved_variant_names={"v0"},
     )
     tail = await coord.bus.tail(topic="decision", n=10)
     assert any(m.payload.get("kind") == "approved_proposal" for m in tail)
@@ -1002,9 +1767,7 @@ async def test_materialize_sweep_stamps_base(coord: Coordinator) -> None:
     coord.shared_state.baseline_config_path = "/tmp/base.yaml"
     pending = _pending("sweep", {"params": {}}, msg_id="prop-sweep")
     await coord._materialize_approved_proposal(pending)
-    task = await coord.tasks.get(
-        (await coord.tasks.queued())[0].task_id
-    )
+    task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
     assert task.kind == "sweep"
 
 
@@ -1019,8 +1782,7 @@ async def test_materialize_duplicate_idempotency_skips(coord: Coordinator) -> No
 
 # -- _handle_delegate branches ----------------------------------------------
 def _delegate(action_name: str, key: str, params=None) -> Intent:
-    payload = {"action_name": action_name, "params": params or {},
-               "idempotency_key": key}
+    payload = {"action_name": action_name, "params": params or {}, "idempotency_key": key}
     return Intent(type=IntentType.DELEGATE, payload=payload)
 
 
@@ -1031,16 +1793,20 @@ async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) 
     monkeypatch.setattr(coord, "_sequence_denial_for_action", lambda a, proposed_params=None: None)
     await coord._handle_delegate("orchestration", _delegate("explore", "d-pruned"))
     # advisory observation recorded but the task is still queued
-    assert (await coord.tasks.queued())
+    assert await coord.tasks.queued()
 
 
 @pytest.mark.asyncio
 async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) -> None:
     from inference_optimizer.orchestrator.policy import PolicyDenied
+
     monkeypatch.setattr(
-        coord, "_sequence_denial_for_action",
+        coord,
+        "_sequence_denial_for_action",
         lambda a, proposed_params=None: PolicyDenied(
-            "blocked", rule="exec_order", hint="wait",
+            "blocked",
+            rule="exec_order",
+            hint="wait",
         ),
     )
     recorded: list = []
@@ -1072,6 +1838,7 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
 # -- _maybe_autosubmit_specialist_patches early returns ---------------------
 def _make_real_patch(coord: Coordinator, sid: str) -> None:
     from inference_optimizer.session_paths import runs_dir
+
     wt = runs_dir(coord.session_dir, "specialist", sid) / "worktree"
     wt.mkdir(parents=True, exist_ok=True)
     (wt / "kernel.py").write_text("# patched\n", encoding="utf-8")
@@ -1080,15 +1847,15 @@ def _make_real_patch(coord: Coordinator, sid: str) -> None:
 @pytest.mark.asyncio
 async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkeypatch) -> None:
     from inference_optimizer.orchestrator.task_registry import Task
+
     sid = "spec-verdict"
     _make_real_patch(coord, sid)
-    monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict",
-                        lambda s: {"verdict": "approve"})
-    task = Task(task_id=sid, kind="specialist", state="running",
-                params={}, idempotency_key="kv1")
+    monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda s: {"verdict": "approve"})
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv1")
     n_before = len(coord.state.pending_proposals)
     await coord._maybe_autosubmit_specialist_patches(
-        task=task, done_payload={"patches_written": ["kernel.py"]},
+        task=task,
+        done_payload={"patches_written": ["kernel.py"]},
     )
     assert len(coord.state.pending_proposals) == n_before  # no new proposal
 
@@ -1097,18 +1864,21 @@ async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkey
 async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> None:
     from inference_optimizer.orchestrator.task_registry import Task
     from inference_optimizer.orchestrator.coordinator import PendingProposal
+
     sid = "spec-inflight"
     _make_real_patch(coord, sid)
     coord.state.pending_proposals["existing"] = PendingProposal(
-        proposal_msg_id="existing", from_agent="coordinator",
-        action_name="integrate_patch", predicted_gain_pct=0.0,
+        proposal_msg_id="existing",
+        from_agent="coordinator",
+        action_name="integrate_patch",
+        predicted_gain_pct=0.0,
         payload={"params": {"specialist_task_id": sid}},
     )
-    task = Task(task_id=sid, kind="specialist", state="running",
-                params={}, idempotency_key="kv2")
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv2")
     n_before = len(coord.state.pending_proposals)
     await coord._maybe_autosubmit_specialist_patches(
-        task=task, done_payload={"patches_written": ["kernel.py"]},
+        task=task,
+        done_payload={"patches_written": ["kernel.py"]},
     )
     assert len(coord.state.pending_proposals) == n_before  # in-flight -> skip
 
@@ -1116,21 +1886,29 @@ async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> N
 # -- _promote_warm_replay branches ------------------------------------------
 def _warm_task():
     from inference_optimizer.orchestrator.task_registry import Task
-    return Task(task_id="warm-x", kind="replay_warm_recipe", state="running",
-                params={"extra_envs": {"HSA_FORCE": "1"},
-                        "baseline_tput_anchor": 800.0},
-                idempotency_key="warm-k")
+
+    return Task(
+        task_id="warm-x",
+        kind="replay_warm_recipe",
+        state="running",
+        params={"extra_envs": {"HSA_FORCE": "1"}, "baseline_tput_anchor": 800.0},
+        idempotency_key="warm-k",
+    )
 
 
 def test_promote_warm_replay_already_pushed(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     coord.shared_state.optimization_stack = [{"action": "replay_warm_recipe"}]
     coord._promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 900.0}, task=_warm_task(),
+        {"status": "succeeded", "output_throughput": 900.0},
+        task=_warm_task(),
     )
     # idempotency guard keeps a single warm_replay entry
-    n = sum(1 for e in coord.shared_state.optimization_stack
-            if isinstance(e, dict) and e.get("action") == "replay_warm_recipe")
+    n = sum(
+        1
+        for e in coord.shared_state.optimization_stack
+        if isinstance(e, dict) and e.get("action") == "replay_warm_recipe"
+    )
     assert n == 1
 
 
@@ -1191,8 +1969,8 @@ async def test_cortex_finalize_merges_existing_row(coord: Coordinator, monkeypat
 async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch) -> None:
     async def _fake_run(task, **kw):
         from inference_optimizer.orchestrator.sub_agent_runner import SubAgentResult
-        return SubAgentResult(task_id=task.task_id, state="succeeded",
-                              result={}, error=None)
+
+        return SubAgentResult(task_id=task.task_id, state="succeeded", result={}, error=None)
 
     monkeypatch.setattr(coord.sub, "run_task", _fake_run)
     await coord._on_enter_close(from_phase="SWEEP")
@@ -1203,6 +1981,7 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
 # -- _pump_framework_pr_phase -----------------------------------------------
 def _enter_framework_pr(coord: Coordinator) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
+
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_PR
     coord.shared_state.framework_pr_phase_done = False
 
@@ -1223,8 +2002,7 @@ async def test_pump_framework_pr_phase_done_noop(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_pump_framework_pr_skips_when_task_inflight(coord: Coordinator) -> None:
     _enter_framework_pr(coord)
-    await coord.tasks.create(kind="framework_pr", params={},
-                             idempotency_key="fpr-inflight")
+    await coord.tasks.create(kind="framework_pr", params={}, idempotency_key="fpr-inflight")
     await coord._pump_framework_pr_phase()  # a framework_pr task exists -> return
 
 
@@ -1238,8 +2016,7 @@ async def test_pump_framework_pr_discover_empty_marks_done(coord: Coordinator, m
         return False
 
     monkeypatch.setattr(coord, "_discover_next_framework_pr_batch", _disc)
-    monkeypatch.setattr(coord, "_record_framework_pr_phase_done",
-                        lambda **k: None)
+    monkeypatch.setattr(coord, "_record_framework_pr_phase_done", lambda **k: None)
     await coord._pump_framework_pr_phase()
     assert coord.shared_state.framework_pr_phase_done is True
 
@@ -1247,8 +2024,7 @@ async def test_pump_framework_pr_discover_empty_marks_done(coord: Coordinator, m
 @pytest.mark.asyncio
 async def test_pump_framework_pr_critic_rejects(coord: Coordinator, monkeypatch) -> None:
     _enter_framework_pr(coord)
-    monkeypatch.setattr(coord, "_select_next_framework_pr_candidate",
-                        lambda: {"candidate_id": "c1", "batch_id": "b1"})
+    monkeypatch.setattr(coord, "_select_next_framework_pr_candidate", lambda: {"candidate_id": "c1", "batch_id": "b1"})
 
     async def _review(cand):
         return {"verdict": "reject", "rationale": "unsafe"}
@@ -1262,8 +2038,7 @@ async def test_pump_framework_pr_critic_rejects(coord: Coordinator, monkeypatch)
 @pytest.mark.asyncio
 async def test_pump_framework_pr_approve_enqueues(coord: Coordinator, monkeypatch) -> None:
     _enter_framework_pr(coord)
-    monkeypatch.setattr(coord, "_select_next_framework_pr_candidate",
-                        lambda: {"candidate_id": "c2", "batch_id": "b2"})
+    monkeypatch.setattr(coord, "_select_next_framework_pr_candidate", lambda: {"candidate_id": "c2", "batch_id": "b2"})
 
     async def _review(cand):
         return {"verdict": "approve"}

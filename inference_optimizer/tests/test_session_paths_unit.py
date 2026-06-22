@@ -2,6 +2,7 @@
 
 """Unit tests for the per-session path helpers (single source of truth for
 every path inside a session directory)."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -55,11 +56,9 @@ def test_reports_and_report_file():
 def test_trace_paths():
     assert sp.trace_dir(SD) == SD / "reports" / "trace"
     assert sp.llm_calls_path(SD).name == "llm_calls.jsonl"
-    assert sp.trace_ext_dir(SD) == SD / "reports" / "trace" / "ext"
-    assert sp.ext_trace_path(SD, "geak", 1234).name == "geak-1234.jsonl"
-    assert sp.ext_trace_path(SD, "", 1).name == "unknown-1.jsonl"
     assert sp.decision_trace_path(SD).name == "decision_trace.jsonl"
     assert sp.conversations_path(SD).name == "conversations.jsonl"
+    assert sp.proposal_task_map_path(SD).name == "proposal_task_map.jsonl"
 
 
 def test_research_and_competitor_paths():

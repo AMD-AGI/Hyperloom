@@ -43,16 +43,26 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
 
     Sets ``PYTHONPATH=<root>/src`` + ``cwd=<root>`` so the package resolves
     without a pip-install (matching the critic-agent convention).
+
+    Args:
+        call: The invocation descriptor with phase, request / output paths,
+            working directory, and subprocess env.
+
+    Raises:
+        BackendError: If the phase is not ``tick``, the subprocess times out,
+            cannot start, or exits non-zero.
     """
     if call.phase != "tick":
-        raise BackendError(
-            f"RobustnessAgentBackend: unsupported runtime phase {call.phase!r} "
-            f"(expected 'tick')"
-        )
+        raise BackendError(f"RobustnessAgentBackend: unsupported runtime phase {call.phase!r} (expected 'tick')")
     cmd = [
-        sys.executable, "-m", "robustness_agent.runtime.cli", "tick",
-        "--request", str(call.request_path),
-        "--out", str(call.out_path),
+        sys.executable,
+        "-m",
+        "robustness_agent.runtime.cli",
+        "tick",
+        "--request",
+        str(call.request_path),
+        "--out",
+        str(call.out_path),
     ]
     try:
         proc = subprocess.run(
@@ -70,14 +80,12 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
         ) from exc
     except FileNotFoundError as exc:
         raise BackendError(
-            f"robustness-agent runtime.cli tick could not start "
-            f"(python={sys.executable!r}, cwd={call.cwd}): {exc}"
+            f"robustness-agent runtime.cli tick could not start (python={sys.executable!r}, cwd={call.cwd}): {exc}"
         ) from exc
 
     if proc.returncode != 0:
         raise BackendError(
-            f"robustness-agent runtime.cli tick exited rc={proc.returncode}: "
-            f"stderr={proc.stderr.strip()[:500]!r}"
+            f"robustness-agent runtime.cli tick exited rc={proc.returncode}: stderr={proc.stderr.strip()[:500]!r}"
         )
 
 
@@ -127,10 +135,7 @@ class RobustnessAgentBackend:
         """
         self.robustness_agent_root = Path(self.robustness_agent_root)
         self.session_dir = Path(self.session_dir)
-        cli_module = (
-            self.robustness_agent_root / "src" / "robustness_agent"
-            / "runtime" / "cli.py"
-        )
+        cli_module = self.robustness_agent_root / "src" / "robustness_agent" / "runtime" / "cli.py"
         if not cli_module.is_file():
             raise BackendError(
                 f"RobustnessAgentBackend: src/robustness_agent/runtime/cli.py "
@@ -140,11 +145,15 @@ class RobustnessAgentBackend:
 
         if self.runtime_caller_factory is not None:
             object.__setattr__(
-                self, "_runtime_caller", self.runtime_caller_factory(),
+                self,
+                "_runtime_caller",
+                self.runtime_caller_factory(),
             )
         else:
             object.__setattr__(
-                self, "_runtime_caller", _default_runtime_caller,
+                self,
+                "_runtime_caller",
+                _default_runtime_caller,
             )
 
         self._options = dict(self.options or {})
@@ -221,64 +230,88 @@ class RobustnessAgentBackend:
         try:
             emit = json.loads(emit_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise BackendError(
-                f"RobustnessAgentBackend: failed to read emit.json from "
-                f"{emit_path}: {exc}"
-            ) from exc
+            raise BackendError(f"RobustnessAgentBackend: failed to read emit.json from {emit_path}: {exc}") from exc
 
         envelope = emit.get("intent_envelope")
         if not isinstance(envelope, dict):
             raise BackendError(
-                f"RobustnessAgentBackend: emit.json missing intent_envelope "
-                f"(got keys={sorted(emit.keys())!r})"
+                f"RobustnessAgentBackend: emit.json missing intent_envelope (got keys={sorted(emit.keys())!r})"
             )
         try:
             intents = validate_envelope(envelope)
         except IntentValidationError as exc:
-            raise NoIntentEmitted(
-                f"robustness_agent_envelope_invalid: {exc}"
-            ) from exc
+            raise NoIntentEmitted(f"robustness_agent_envelope_invalid: {exc}") from exc
 
         parse_warnings = list(emit.get("parse_warnings") or [])
         runtime_tick_index = emit.get("tick_index")
-        intent_summary = [
-            (i.type.value, i.payload.get("severity") or i.payload.get("topic"))
-            for i in intents
-        ]
+        intent_summary = [(i.type.value, i.payload.get("severity") or i.payload.get("topic")) for i in intents]
         log.info(
-            "robustness_agent_backend turn=%d session=%s tick_index=%s "
-            "intents=%s parse_warnings=%d",
-            turn_idx, session_id, runtime_tick_index,
-            intent_summary, len(parse_warnings),
+            "robustness_agent_backend turn=%d session=%s tick_index=%s intents=%s parse_warnings=%d",
+            turn_idx,
+            session_id,
+            runtime_tick_index,
+            intent_summary,
+            len(parse_warnings),
         )
-        self.calls.append({
-            "turn_idx": turn_idx,
-            "tick_index": runtime_tick_index,
-            "intents": intent_summary,
-            "parse_warnings": parse_warnings,
-            "workdir": str(workdir),
-        })
+        self.calls.append(
+            {
+                "turn_idx": turn_idx,
+                "tick_index": runtime_tick_index,
+                "intents": intent_summary,
+                "parse_warnings": parse_warnings,
+                "workdir": str(workdir),
+            }
+        )
 
         # Author-time breakdown capture: record this robustness signal before
         # the backend prunes old workdirs (composed into critic_robustness).
         try:
             from ...breakdown.recorder import instrument
+
             instrument.record_robustness_signal(
-                self.session_dir, workdir=workdir,
+                self.session_dir,
+                workdir=workdir,
             )
         except Exception:  # noqa: BLE001
             pass
 
+        metadata: dict[str, Any] = {
+            "session_id": session_id,
+            "turn_idx": turn_idx,
+            "tick_index": runtime_tick_index,
+            "parse_warnings": parse_warnings,
+        }
+        # Fold any RCA-LLM token spend the runtime reported into the metadata
+        # under the canonical counter keys, so the Coordinator's reactor trace
+        # records a ``component=robustness`` ledger row instead of silently
+        # dropping it. Absent on the common no-LLM (Noop) path.
+        self._merge_llm_usage(metadata, emit.get("llm_usage"))
+
         return BackendTurnResult(
             intents=intents,
             raw_text="(robustness-agent)",
-            metadata={
-                "session_id": session_id,
-                "turn_idx": turn_idx,
-                "tick_index": runtime_tick_index,
-                "parse_warnings": parse_warnings,
-            },
+            metadata=metadata,
         )
+
+    @staticmethod
+    def _merge_llm_usage(metadata: dict[str, Any], usage: Any) -> None:
+        """Map a runtime ``llm_usage`` block onto canonical metadata counters.
+
+        The robustness runtime reports ``{input_tokens, output_tokens, calls,
+        latency_ms, model}``. We surface ``input_tokens`` / ``output_tokens``
+        (the keys the reactor trace looks for) plus ``model`` so the ledger row
+        carries a model name. No-op when ``usage`` is missing or shapeless.
+        """
+        if not isinstance(usage, dict):
+            return
+        it = usage.get("input_tokens")
+        ot = usage.get("output_tokens")
+        if it is None and ot is None:
+            return
+        metadata["input_tokens"] = it
+        metadata["output_tokens"] = ot
+        if usage.get("model"):
+            metadata["model"] = usage.get("model")
 
     def _allocate_workdir(self, turn_idx: int) -> Path:
         """Create and return a per-turn workdir, pruning stale ones first.
@@ -334,7 +367,12 @@ class RobustnessAgentBackend:
 
     def _build_runtime_env(self) -> dict[str, str]:
         """Build subprocess env with ``<root>/src`` prepended to PYTHONPATH
-        (preserving any existing value) so the CLI module resolves."""
+        (preserving any existing value) so the CLI module resolves.
+
+        Returns:
+            A copy of the current environment with ``PYTHONPATH`` and the
+            robustness session-dir hint applied.
+        """
         env = dict(os.environ)
         src = str(self.robustness_agent_root / "src")
         existing = env.get("PYTHONPATH", "").strip()

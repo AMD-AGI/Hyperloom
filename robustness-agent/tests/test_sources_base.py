@@ -63,6 +63,7 @@ def _data(label: str) -> SourceData:
 # Source data merging
 # ---------------------------------------------------------------------------
 
+
 def test_source_data_merge_preserves_existing_fields():
     primary = SourceData(
         session_pods=[{"pod": "a"}],
@@ -93,6 +94,7 @@ def test_source_data_merge_inherits_degraded_reason_when_missing():
 # DegradeRouter happy path
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_router_happy_path_uses_primary_only():
     clock = _FakeClock()
@@ -111,6 +113,7 @@ async def test_router_happy_path_uses_primary_only():
 # ---------------------------------------------------------------------------
 # DegradeRouter degrade after consecutive failures
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_router_degrades_after_three_failures(caplog):
@@ -148,6 +151,7 @@ async def test_router_degrades_after_three_failures(caplog):
 # DegradeRouter recovery after recheck interval
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_router_recovers_after_recheck_window(caplog):
     clock = _FakeClock()
@@ -157,7 +161,7 @@ async def test_router_recovers_after_recheck_window(caplog):
             SourceUnavailable("a"),
             SourceUnavailable("b"),
             SourceUnavailable("c"),  # degrade after this
-            _data("server"),         # recovery probe
+            _data("server"),  # recovery probe
         ],
     )
     fallback = _ScriptedSource("local", [_data("local"), _data("local"), _data("local")])
@@ -188,6 +192,7 @@ async def test_router_recovers_after_recheck_window(caplog):
 # Fallback failures
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_router_returns_empty_when_both_unavailable():
     clock = _FakeClock()
@@ -202,6 +207,7 @@ async def test_router_returns_empty_when_both_unavailable():
 # ---------------------------------------------------------------------------
 # Unexpected exceptions in primary count as failures but do not crash
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_router_treats_unexpected_exception_as_failure(caplog):

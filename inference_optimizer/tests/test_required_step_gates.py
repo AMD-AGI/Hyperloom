@@ -43,9 +43,9 @@ def _backends_full() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel":        MockKernelBackend(),
-        "critic":        MockCriticBackend(),
-        "robustness":    MockRobustnessBackend(),
+        "kernel": MockKernelBackend(),
+        "critic": MockCriticBackend(),
+        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -72,7 +72,8 @@ def _seed_post_baseline(coord: Coordinator) -> None:
 def test_baseline_allowed_without_target_analysis(session_dir):
     """``baseline`` is no longer blocked on a missing target_baseline.json."""
     coord = Coordinator(
-        session_dir, backends=_backends_full(),
+        session_dir,
+        backends=_backends_full(),
         compare_against_gpu="b300",
     )
     assert coord._sequence_denial_for_action("baseline") is None
@@ -97,23 +98,30 @@ def test_integrate_gate_inactive_without_keep(session_dir):
     assert coord._kernel_opt_keep_pending() == ""
 
 
-def _seed_kernel_opt_state(coord, *, kernel_id: str, decision: str,
-                            micro: float = 1.5,
-                            source_file: str = "/p/dummy.py",
-                            artifact: str = "/tmp/dummy.py") -> None:
+def _seed_kernel_opt_state(
+    coord,
+    *,
+    kernel_id: str,
+    decision: str,
+    micro: float = 1.5,
+    source_file: str = "/p/dummy.py",
+    artifact: str = "/tmp/dummy.py",
+) -> None:
     """Mimic the streaming-record write path (PR-B) so the integrate gate fires realistically."""
-    coord.shared_state.record_kernel_opt({
-        "status": "ok",
-        "kernel_id": kernel_id,
-        "source_file": source_file,
-        "proposal": {"decision": decision, "reasons": []},
-        "verification": {
-            "micro_speedup": micro,
-            "best_artifact_path": artifact,
-            "compile_passed": True,
-            "correctness_passed": True,
-        },
-    })
+    coord.shared_state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": kernel_id,
+            "source_file": source_file,
+            "proposal": {"decision": decision, "reasons": []},
+            "verification": {
+                "micro_speedup": micro,
+                "best_artifact_path": artifact,
+                "compile_passed": True,
+                "correctness_passed": True,
+            },
+        }
+    )
 
 
 def test_integrate_gate_inactive_when_decision_not_keep(session_dir):
@@ -127,7 +135,10 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(
-        coord, kernel_id="k-rmsnorm", decision="KEEP", micro=4.13,
+        coord,
+        kernel_id="k-rmsnorm",
+        decision="KEEP",
+        micro=4.13,
         source_file="/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
     )
     assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
@@ -137,12 +148,13 @@ def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(
-        coord, kernel_id="k-rmsnorm", decision="KEEP",
+        coord,
+        kernel_id="k-rmsnorm",
+        decision="KEEP",
         source_file="/p/rmsnorm.py",
     )
     coord.shared_state.optimization_stack = [
-        {"action": "integrate", "kernel_id": "k-rmsnorm",
-         "target_file": "/p/rmsnorm.py"},
+        {"action": "integrate", "kernel_id": "k-rmsnorm", "target_file": "/p/rmsnorm.py"},
     ]
     assert coord._kernel_opt_keep_pending() == ""
 
@@ -160,7 +172,9 @@ def test_pending_keep_no_longer_blocks_other_actions(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(
-        coord, kernel_id="k-rmsnorm", decision="KEEP",
+        coord,
+        kernel_id="k-rmsnorm",
+        decision="KEEP",
         source_file="/p/rmsnorm.py",
     )
     assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
@@ -183,12 +197,23 @@ def test_report_allowed_when_hot_reusable_kernels_untried(session_dir):
     """``report`` is allowed even with untried reusable hot kernels."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 23.7, "reusable_native_kernel": True,
-         "source_file": "/sgl/aiter/ops/moe_op.py"},
-        {"kernel_id": "k002", "gpu_pct": 37.3, "reusable_native_kernel": True,
-         "source_file": "/sgl/aiter/ops/moe_op.py"},
-    ])
+    _seed_trace_analyze(
+        coord,
+        hot_kernels=[
+            {
+                "kernel_id": "k001",
+                "gpu_pct": 23.7,
+                "reusable_native_kernel": True,
+                "source_file": "/sgl/aiter/ops/moe_op.py",
+            },
+            {
+                "kernel_id": "k002",
+                "gpu_pct": 37.3,
+                "reusable_native_kernel": True,
+                "source_file": "/sgl/aiter/ops/moe_op.py",
+            },
+        ],
+    )
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
     coord.shared_state.explore_attempts = [{"variant_name": "x"}]
     assert coord._sequence_denial_for_action("report") is None
@@ -199,12 +224,13 @@ def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
     """The mission summary surfaces the untried reusable hot kernels as a neutral fact."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-        {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
-         "source_file": "/p/rmsnorm.py"},
-    ])
+    _seed_trace_analyze(
+        coord,
+        hot_kernels=[
+            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
+        ],
+    )
     summary = coord.shared_state.to_mission_summary()
     assert "untried_hot_kernels" in summary
     assert "k001" in summary
@@ -216,10 +242,12 @@ def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
     """``report`` is never sequence-denied for hot-kernel reasons."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-    ])
+    _seed_trace_analyze(
+        coord,
+        hot_kernels=[
+            {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+        ],
+    )
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
     assert coord._sequence_denial_for_action("report") is None
 
@@ -238,8 +266,7 @@ def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
         if denied is None:
             continue
         assert "trace_analyze must run first" not in str(denied), (
-            f"{action!r} hit the removed trace_analyze action-layer "
-            f"gate: {denied!s}"
+            f"{action!r} hit the removed trace_analyze action-layer gate: {denied!s}"
         )
 
 
@@ -299,6 +326,7 @@ def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
     from inference_optimizer.orchestrator.kernel_request_handlers import (
         get_handler,
     )
+
     assert get_handler("select_kernels") is None
     assert get_handler("trace_analyze") is not None
 

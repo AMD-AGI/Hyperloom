@@ -11,11 +11,11 @@
     "matrix; the workflow forwards them to optimize_submit.py as",
     "--manual --framework --precision --tp --concurrency so per-model config",
     "is FIXED (no auto-detect). Precision is per-model NATIVE because MI300X",
-    "(gfx942) has no native FP4: FP8 for R1/GLM-4.7/Qwen3-Next/Qwen3.6/MiMo, INT4 for",
-    "Kimi, FP4 only for MXFP4-native gpt-oss. Qwen3.6 weights are BF16 (~67G, no",
+    "(gfx942) has no native FP4: FP8 for R1/GLM-4.7/Qwen3-Next/Qwen3.6/MiMo/Kimi,",
+    "BF16 for Llama-3.1-8B, FP4 only for MXFP4-native gpt-oss. Qwen3.6 weights are BF16 (~67G, no",
     "quantization_config); FP4 was a no-op — run dynamic FP8 on MI300X instead.",
     "tp8 everywhere except",
-    "MiniMax M2.5/M2.7 (tp4 - their FP8 block-128 weights are not divisible",
+    "MiniMax M2.7 (tp4 - its FP8 block-128 weights are not divisible",
     "by 8: 1536/8=192 is not a multiple of 128). Kimi & MiMo run on sglang",
     "(vLLM tp8 MLA assert / missing arch respectively).",
     "",
@@ -31,12 +31,11 @@
     "endpoint": "GET /api/playground/models?workspace=core42-hyperloom",
     "checked_at": "2026-06-13",
     "all_registered": false,
-    "note": "Original 8 rows are Ready in core42-hyperloom and pre-staged under /wekafs/models/<org>-<repo>, so SaFE register hits local_path mode (no re-download). Added GLM-4.7-FP8 and DeepSeek-V4-Flash on 2026-06-13 to make a 10-model daily pool. GLM-5 and GLM-5.1 were dropped 2026-06-05 (multi-node only; running single-node models here). Substitutions vs the original wishlist: MiniMax-M3 -> MiniMax-M2.5 (no official M3); MiMo-V2-PRO -> MiMo-V2.5-Pro (no MiMo-V2-PRO). Qwen3.6 repo is Qwen/Qwen3.6-35B-A3B (no -Instruct suffix).",
+    "note": "Original 8 rows are Ready in core42-hyperloom and pre-staged under /wekafs/models/<org>-<repo>, so SaFE register hits local_path mode (no re-download). Added GLM-4.7-FP8 and DeepSeek-V4-Flash on 2026-06-13 to make a 10-model daily pool. GLM-5 and GLM-5.1 were dropped 2026-06-05 (multi-node only; running single-node models here). Substitutions vs the original wishlist: MiniMax-M3 -> MiniMax-M2.5 (no official M3); MiMo-V2-PRO -> MiMo-V2.5-Pro (no MiMo-V2-PRO). Qwen3.6 repo is Qwen/Qwen3.6-35B-A3B (no -Instruct suffix). 2026-06-16: replaced MiniMax-M2.5 with meta-llama/Llama-3.1-8B-Instruct (most-downloaded Llama, ~6.44M dl; gated repo, needs HF_TOKEN); Kimi K2.6 switched from INT4 to FP8.",
     "playground_ids": {
       "deepseek-ai/DeepSeek-R1-0528": "deepseek-r1-0528-kmbd8",
       "moonshotai/Kimi-K2.6": "kimi-k2-6-k9cpr",
       "MiniMaxAI/MiniMax-M2.7": "minimax-m2.7-swn8g",
-      "MiniMaxAI/MiniMax-M2.5": "minimax-m2.5-d2kd2",
       "Qwen/Qwen3-Next-80B-A3B-Instruct": "qwen3-next-80b-a3b-instruct-fh9n7",
       "Qwen/Qwen3.6-35B-A3B": "qwen3-6-35b-a3b-8h5dl",
       "openai/gpt-oss-120b": "gpt-oss-120b-xhkql",
@@ -58,7 +57,8 @@
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "FP8-native upstream. MI300X has no native FP4; FP4 baseline failed to start, so baseline at FP8. sglang+tp8 starts cleanly."
+      "note": "FP8-native upstream. MI300X has no native FP4; FP4 baseline failed to start, so baseline at FP8. sglang+tp8 starts cleanly.",
+      "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -66,11 +66,12 @@
       "label": "Kimi K2.6",
       "repo_id": "moonshotai/Kimi-K2.6",
       "framework": "sglang",
-      "precision": "INT4",
+      "precision": "FP8",
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "INT4 compressed-tensors native. vLLM tp8 hits MLA num_head%16 assert; sglang handles tp8 cleanly. ~554G weights -> ~69G/GPU at tp8."
+      "note": "Run at FP8 (switched from INT4). vLLM tp8 hits MLA num_head%16 assert; sglang handles tp8 cleanly. sglang dynamic-quantizes to FP8 on MI300X; per-GPU memory rises vs the INT4 weights but stays within tp8 headroom.",
+      "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -82,19 +83,21 @@
       "tp": 4,
       "conc": 64,
       "registered": true,
-      "note": "FP8 block-128 native. tp8 crashes: intermediate 1536/8=192 not divisible by 128 (observed). tp4 -> 384=3x128 OK, ~54G/GPU (no OOM)."
+      "note": "FP8 block-128 native. tp8 crashes: intermediate 1536/8=192 not divisible by 128 (observed). tp4 -> 384=3x128 OK, ~54G/GPU (no OOM).",
+      "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
       "pool_index": 3,
-      "label": "MiniMax M2.5",
-      "repo_id": "MiniMaxAI/MiniMax-M2.5",
+      "label": "Llama 3.1 8B Instruct",
+      "repo_id": "meta-llama/Llama-3.1-8B-Instruct",
       "framework": "vllm",
-      "precision": "FP8",
-      "tp": 4,
+      "precision": "BF16",
+      "tp": 8,
       "conc": 64,
-      "registered": true,
-      "note": "FP8 block-128 native. Same tp8 192-not-div-128 crash as M2.7; tp4 OK (~54G/GPU). Kept original FP8 (not amd MXFP4 variant) per decision."
+      "registered": false,
+      "note": "Most-downloaded Llama on HF (~6.44M dl). Dense 8B, BF16-native (no quantization_config); MI300X has no native FP4, so run BF16. 32 attention heads / 8 KV heads divide by tp8 cleanly. Gated repo (gated=manual): SaFE register/download needs HF_TOKEN with the Llama license accepted; not pre-staged in core42-hyperloom yet. Replaces MiniMax-M2.5 in the daily pool.",
+      "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -106,7 +109,8 @@
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "FP8-native. A3B MoE; tp8 keeps per-GPU memory low and starts fine. -Instruct-FP8 variant also registered."
+      "note": "FP8-native. A3B MoE; tp8 keeps per-GPU memory low and starts fine. -Instruct-FP8 variant also registered.",
+      "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -118,7 +122,8 @@
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "Ready (local /wekafs/models/Qwen-Qwen3.6-35B-A3B, id qwen3-6-35b-a3b-8h5dl). Weights are BF16 (~67G, no quantization_config); original FP4 was a no-op on MI300X. Run dynamic FP8 instead — tp8 ~8.4G/GPU, huge headroom. Official repo has NO -Instruct suffix."
+      "note": "Ready (local /wekafs/models/Qwen-Qwen3.6-35B-A3B, id qwen3-6-35b-a3b-8h5dl). Weights are BF16 (~67G, no quantization_config); original FP4 was a no-op on MI300X. Run dynamic FP8 instead — tp8 ~8.4G/GPU, huge headroom. Official repo has NO -Instruct suffix.",
+      "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -130,7 +135,8 @@
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "Ready (local_path /wekafs/models/openai-gpt-oss-120b, hasInferenceX). MXFP4-native — FP4 is a natural fit."
+      "note": "Ready (local_path /wekafs/models/openai-gpt-oss-120b, hasInferenceX). MXFP4-native — FP4 is a natural fit.",
+      "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -142,7 +148,8 @@
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "vLLM lacks this arch; needs sglang 0.5.11 ROCm image (verified registered). ~963G -> tp8 required (~120G/GPU). FP8 baseline."
+      "note": "vLLM lacks this arch; needs sglang 0.5.11 ROCm image (verified registered). ~963G -> tp8 required (~120G/GPU). FP8 baseline.",
+      "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -154,11 +161,38 @@
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "FP8 compressed-tensors native. Added to make the daily fixed pool 10 models; follows the existing large-FP8-MoE sglang+tp8+conc64 pattern."
+      "note": "FP8 compressed-tensors native. Added to make the daily fixed pool 10 models; follows the existing large-FP8-MoE sglang+tp8+conc64 pattern.",
+      "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
       "pool_index": 9,
+      "label": "Mixtral-8x7B-Instruct v0.1",
+      "repo_id": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+      "framework": "vllm",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": false,
+      "note": "MixtralForCausalLM, 8 experts top-2 (~46.7B MoE), BF16 native (no quantization_config), 32k context. MI300X (gfx942) has no native FP4, so run dynamic FP8 (same large-MoE pattern as Qwen3.6). Single-node vLLM+tp8+conc64.",
+      "is_top": true
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 10,
+      "label": "Gemma-4 26B-A4B it",
+      "repo_id": "google/gemma-4-26B-A4B-it",
+      "framework": "vllm",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": false,
+      "note": "Gemma4ForConditionalGeneration — MULTIMODAL (vision+audio+text), MoE ~26B total / ~4B active, BF16 native (no quantization_config), 256k (262144) context. New Gemma4 arch is not in sglang's known-arch set, so vLLM. MI300X has no native FP4 -> dynamic FP8. Gated google repo (needs HF_TOKEN with gemma access). CAVEAT: multimodal head + 256k KV cache may need higher tp / context limiting; verify it serves for text-gen before relying on results.",
+      "is_top": true
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 11,
       "label": "DeepSeek V4 Flash",
       "repo_id": "deepseek-ai/DeepSeek-V4-Flash",
       "framework": "vllm",
@@ -166,7 +200,218 @@
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "Upstream mixed FP4 experts + FP8 dense/attention, tracked as FP8 for the fixed daily pool. Uses the existing single-node vLLM+tp8+conc64 pattern."
+      "is_top": true,
+      "note": "Upstream mixed FP4 experts + FP8 dense/attention, tracked as FP8 for the fixed daily pool. Single-node vLLM+tp8+conc64 pattern."
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 12,
+      "label": "Ling-1T",
+      "repo_id": "inclusionAI/Ling-1T",
+      "framework": "sglang",
+      "precision": "BF16",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~1000B, arch=BailingMoeV2ForCausalLM, native dtypes [BF16:1000B,F32:0B], precision=BF16) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 1000
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 13,
+      "label": "DeepSeek-V3.2",
+      "repo_id": "deepseek-ai/DeepSeek-V3.2",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~685B, arch=DeepseekV32ForCausalLM, native dtypes [F8_E4M3:681B,BF16:4B,F32:0B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 685
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 14,
+      "label": "DeepSeek-V3.2-Exp",
+      "repo_id": "deepseek-ai/DeepSeek-V3.2-Exp",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~685B, arch=DeepseekV32ForCausalLM, native dtypes [F8_E4M3:681B,BF16:4B,F32:0B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 685
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 15,
+      "label": "DeepSeek-V3.2-Speciale",
+      "repo_id": "deepseek-ai/DeepSeek-V3.2-Speciale",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~685B, arch=DeepseekV32ForCausalLM, native dtypes [F8_E4M3:681B,BF16:4B,F32:0B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 685
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 16,
+      "label": "DeepSeek-R1",
+      "repo_id": "deepseek-ai/DeepSeek-R1",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~685B, arch=DeepseekV3ForCausalLM, native dtypes [F8_E4M3:681B,BF16:4B,F32:0B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 685
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 17,
+      "label": "DeepSeek-V3",
+      "repo_id": "deepseek-ai/DeepSeek-V3",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~685B, arch=DeepseekV3ForCausalLM, native dtypes [F8_E4M3:681B,BF16:4B,F32:0B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 685
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 18,
+      "label": "DeepSeek-V3-0324",
+      "repo_id": "deepseek-ai/DeepSeek-V3-0324",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~685B, arch=DeepseekV3ForCausalLM, native dtypes [F8_E4M3:681B,BF16:4B,F32:0B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 685
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 19,
+      "label": "DeepSeek-V3.1",
+      "repo_id": "deepseek-ai/DeepSeek-V3.1",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~685B, arch=DeepseekV3ForCausalLM, native dtypes [F8_E4M3:681B,BF16:4B,F32:0B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 685
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 20,
+      "label": "DeepSeek-V3.1-Terminus",
+      "repo_id": "deepseek-ai/DeepSeek-V3.1-Terminus",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~685B, arch=DeepseekV3ForCausalLM, native dtypes [F8_E4M3:681B,BF16:4B,F32:0B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 685
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 21,
+      "label": "DeepSeek-Prover-V2-671B",
+      "repo_id": "deepseek-ai/DeepSeek-Prover-V2-671B",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~685B, arch=DeepseekV3ForCausalLM, native dtypes [F8_E4M3:681B,BF16:4B,F32:0B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 685
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 22,
+      "label": "Ling-2.6-1T",
+      "repo_id": "inclusionAI/Ling-2.6-1T",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~1026B, arch=BailingMoeV2_5ForCausalLM, native dtypes [F8_E4M3:1009B,BF16:16B,F32:0B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 1026
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 23,
+      "label": "Qwen3-Coder-480B-A35B-Instruct",
+      "repo_id": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+      "framework": "vllm",
+      "precision": "BF16",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~480B, arch=Qwen3MoeForCausalLM, native dtypes [BF16:480B], precision=BF16) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 480
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 24,
+      "label": "MiniMax-M1-80k",
+      "repo_id": "MiniMaxAI/MiniMax-M1-80k",
+      "framework": "sglang",
+      "precision": "BF16",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~456B, arch=MiniMaxM1ForCausalLM, native dtypes [BF16:456B,F32:0B], precision=BF16) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 456
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 25,
+      "label": "Trinity-Large-Thinking",
+      "repo_id": "arcee-ai/Trinity-Large-Thinking",
+      "framework": "vllm",
+      "precision": "BF16",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~399B, arch=AfmoeForCausalLM, native dtypes [BF16:399B,F32:0B], precision=BF16) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 399
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 26,
+      "label": "cogito-671b-v2.1-FP8",
+      "repo_id": "deepcogito/cogito-671b-v2.1-FP8",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "is_top": false,
+      "note": "Supplementary >256B model (~671B, arch=DeepseekV3ForCausalLM, native dtypes [F8_E4M3:669B,BF16:2B], precision=FP8) added 2026-06-21; pre-staged under /wekafs/models. Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
+      "params_b": 671
     }
   ]
 }

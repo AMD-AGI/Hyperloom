@@ -2,7 +2,7 @@
 
 r"""Parse the Coordinator-style ``_compose_prompt`` text into structured fields.
 
-The Coordinator () hands every reactor a prompt with
+The Coordinator hands every reactor a prompt with
 the following layout:
 
 ```
@@ -292,9 +292,7 @@ def parse_inbox_prompt(text: str) -> ParsedPrompt:
                     # Malformed line is a coordinator bug, not fatal — surface
                     # via ``extras['malformed_inbox']`` for audit.
                     bucket = parsed.extras.setdefault("malformed_inbox", "")
-                    parsed.extras["malformed_inbox"] = (
-                        bucket + ("\n" if bucket else "") + raw_line.strip()
-                    )
+                    parsed.extras["malformed_inbox"] = bucket + ("\n" if bucket else "") + raw_line.strip()
                     continue
                 parsed.inbox.append(row)
                 if row.topic == "proposal" and isinstance(row.payload, dict):

@@ -2,6 +2,7 @@
 
 """Branch coverage for benchmark-result parsing: leak harvesting, rescue-path
 salvage, raw-result merging, TPOT derivation, and OSL resolution."""
+
 from __future__ import annotations
 
 import json
@@ -98,12 +99,9 @@ def test_derive_tpot_success():
 def test_is_valid_measurement():
     assert br.is_valid_measurement(None) is False
     assert br.is_valid_measurement("nope") is False
-    assert br.is_valid_measurement(
-        {"output_throughput": 10.0, "completed_requests": 5}) is True
-    assert br.is_valid_measurement(
-        {"output_throughput": 0.0, "completed_requests": 5}) is False
-    assert br.is_valid_measurement(
-        {"output_throughput": 10.0, "completed_requests": 0}) is False
+    assert br.is_valid_measurement({"output_throughput": 10.0, "completed_requests": 5}) is True
+    assert br.is_valid_measurement({"output_throughput": 0.0, "completed_requests": 5}) is False
+    assert br.is_valid_measurement({"output_throughput": 10.0, "completed_requests": 0}) is False
 
 
 # ---- _resolve_leak_roots --------------------------------------------------
@@ -144,8 +142,7 @@ def test_materialize_rescue_copy_error(tmp_path, monkeypatch):
     leak_dir = tmp_path / "leak"
     leak_dir.mkdir()
     src = _write_json(leak_dir / "inferencex_result.json", {"x": 1})
-    monkeypatch.setattr(br.shutil, "copy2",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
+    monkeypatch.setattr(br.shutil, "copy2", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
     assert br._materialize_rescue_into_workspace(src, tmp_path / "ws") is None
 
 
@@ -161,8 +158,7 @@ def test_rescue_candidate_paths_env_dir_and_file(tmp_path, monkeypatch):
     leak.mkdir()
     f = _write_json(leak / "inferencex_result_1.json", {"x": 1})
     standalone = _write_json(tmp_path / "extra.json", {"y": 2})
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS",
-                       f"{leak}:{standalone}")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", f"{leak}:{standalone}")
     ws = tmp_path / "ws"
     ws.mkdir()
     cands = br._rescue_candidate_paths(ws)
@@ -174,14 +170,14 @@ def test_rescue_candidate_paths_env_dir_and_file(tmp_path, monkeypatch):
 def test_rescue_candidate_paths_mtime_gate(tmp_path, monkeypatch):
     leak = _write_json(tmp_path / "inferencex_result.json", {"x": 1})
     import os
+
     old = leak.stat().st_mtime - 1000
     os.utime(leak, (old, old))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
     ws = tmp_path / "ws"
     ws.mkdir()
     # subprocess started way after the leak's mtime -> stale -> dropped
-    cands = br._rescue_candidate_paths(
-        ws, subprocess_started_unix=leak.stat().st_mtime + 10000)
+    cands = br._rescue_candidate_paths(ws, subprocess_started_unix=leak.stat().st_mtime + 10000)
     assert cands == []
 
 
@@ -189,8 +185,7 @@ def test_rescue_candidate_paths_dedup_and_in_ws(tmp_path, monkeypatch):
     ws = tmp_path / "ws"
     ws.mkdir()
     inside = _write_json(ws / "inferencex_result.json", {"x": 1})
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS",
-                       f"{inside}:{inside}")  # duplicate + inside ws
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", f"{inside}:{inside}")  # duplicate + inside ws
     assert br._rescue_candidate_paths(ws) == []
 
 
@@ -220,6 +215,7 @@ def test_harvest_skips_non_file(tmp_path):
 
 def test_harvest_mtime_gate(tmp_path):
     import os
+
     leak_root = tmp_path / "workspace"
     leak_root.mkdir()
     f = leak_root / "server.log"
@@ -227,22 +223,18 @@ def test_harvest_mtime_gate(tmp_path):
     old = f.stat().st_mtime - 5000
     os.utime(f, (old, old))
     dest = tmp_path / "dest"
-    out = br.harvest_leaked_artifacts(
-        dest, leak_root=leak_root,
-        subprocess_started_unix=f.stat().st_mtime + 10000)
+    out = br.harvest_leaked_artifacts(dest, leak_root=leak_root, subprocess_started_unix=f.stat().st_mtime + 10000)
     assert out == []
 
 
 def test_harvest_dest_mkdir_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "mkdir",
-                        lambda self, *a, **k: (_ for _ in ()).throw(OSError("ro")))
+    monkeypatch.setattr(Path, "mkdir", lambda self, *a, **k: (_ for _ in ()).throw(OSError("ro")))
     out = br.harvest_leaked_artifacts(tmp_path / "dest")
     assert out == []
 
 
 def test_harvest_missing_root(tmp_path):
-    out = br.harvest_leaked_artifacts(
-        tmp_path / "dest", leak_root=tmp_path / "nonexistent")
+    out = br.harvest_leaked_artifacts(tmp_path / "dest", leak_root=tmp_path / "nonexistent")
     assert out == []
 
 
@@ -259,8 +251,7 @@ def test_harvest_copy_error(tmp_path, monkeypatch):
     leak_root = tmp_path / "workspace"
     leak_root.mkdir()
     (leak_root / "server.log").write_text("log", encoding="utf-8")
-    monkeypatch.setattr(br.shutil, "copy2",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
+    monkeypatch.setattr(br.shutil, "copy2", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
     out = br.harvest_leaked_artifacts(tmp_path / "dest", leak_root=leak_root)
     assert out == []
 
@@ -270,8 +261,12 @@ def test_extract_from_report_only():
     report = {
         "success": True,
         "framework": "sglang",
-        "throughput": {"output_throughput": 100.0, "completed_requests": 50,
-                       "request_throughput": 5.0, "duration_seconds": 10.0},
+        "throughput": {
+            "output_throughput": 100.0,
+            "completed_requests": 50,
+            "request_throughput": 5.0,
+            "duration_seconds": 10.0,
+        },
         "latency": {"ttft": {"mean_ms": 20.0}, "e2el": {"mean_ms": 200.0}},
     }
     m = br.extract_benchmark_measurement(report)
@@ -282,9 +277,13 @@ def test_extract_from_report_only():
 def test_extract_with_workspace_raw(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
-    _write_json(ws / "result.json", {
-        "output_throughput": 80.0, "completed_requests": 40,
-    })
+    _write_json(
+        ws / "result.json",
+        {
+            "output_throughput": 80.0,
+            "completed_requests": 40,
+        },
+    )
     report = {"success": False, "throughput": {}, "latency": {}}
     m = br.extract_benchmark_measurement(report, workspace=ws)
     assert m["valid_measurement"] is True
@@ -303,13 +302,17 @@ def test_extract_skips_raw_without_throughput(tmp_path):
 def test_extract_rescue_path(tmp_path, monkeypatch):
     ws = tmp_path / "ws"
     ws.mkdir()
-    leak = _write_json(tmp_path / "inferencex_result.json", {
-        "output_throughput": 90.0, "completed_requests": 45,
-    })
+    leak = _write_json(
+        tmp_path / "inferencex_result.json",
+        {
+            "output_throughput": 90.0,
+            "completed_requests": 45,
+        },
+    )
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
     m = br.extract_benchmark_measurement(
-        {"throughput": {}}, workspace=ws,
-        subprocess_started_unix=leak.stat().st_mtime - 100)
+        {"throughput": {}}, workspace=ws, subprocess_started_unix=leak.stat().st_mtime - 100
+    )
     assert m["valid_measurement"] is True
     assert any("rescued_from_leaked_path" in w for w in m["nonfatal_warnings"])
 
@@ -317,28 +320,29 @@ def test_extract_rescue_path(tmp_path, monkeypatch):
 def test_extract_rescue_copy_failed_warning(tmp_path, monkeypatch):
     ws = tmp_path / "ws"
     ws.mkdir()
-    leak = _write_json(tmp_path / "inferencex_result.json", {
-        "output_throughput": 90.0, "completed_requests": 45,
-    })
+    leak = _write_json(
+        tmp_path / "inferencex_result.json",
+        {
+            "output_throughput": 90.0,
+            "completed_requests": 45,
+        },
+    )
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
     # copy into workspace fails -> recorded path falls back to the leak path
-    monkeypatch.setattr(br, "_materialize_rescue_into_workspace",
-                        lambda *a, **k: None)
+    monkeypatch.setattr(br, "_materialize_rescue_into_workspace", lambda *a, **k: None)
     m = br.extract_benchmark_measurement(
-        {"throughput": {}}, workspace=ws,
-        subprocess_started_unix=leak.stat().st_mtime - 100)
+        {"throughput": {}}, workspace=ws, subprocess_started_unix=leak.stat().st_mtime - 100
+    )
     assert m["valid_measurement"] is True
-    assert any("rescued_copy_into_workspace_failed" in w
-               for w in m["nonfatal_warnings"])
+    assert any("rescued_copy_into_workspace_failed" in w for w in m["nonfatal_warnings"])
 
 
 def test_extract_rescue_skips_no_throughput(tmp_path, monkeypatch):
     ws = tmp_path / "ws"
     ws.mkdir()
-    leak = _write_json(tmp_path / "inferencex_result.json",
-                       {"completed_requests": 5})  # no output_throughput
+    leak = _write_json(tmp_path / "inferencex_result.json", {"completed_requests": 5})  # no output_throughput
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
     m = br.extract_benchmark_measurement(
-        {"throughput": {}}, workspace=ws,
-        subprocess_started_unix=leak.stat().st_mtime - 100)
+        {"throughput": {}}, workspace=ws, subprocess_started_unix=leak.stat().st_mtime - 100
+    )
     assert m["valid_measurement"] is False

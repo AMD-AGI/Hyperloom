@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-import pytest
 
 from inference_optimizer.orchestrator.action_executors import (
     _multi_node_env as mne,
@@ -27,9 +26,7 @@ class _FakeTasks:
         self.calls = []
 
     async def create_or_return_existing(self, *, kind, params, idempotency_key):
-        self.calls.append(
-            {"kind": kind, "params": params, "idempotency_key": idempotency_key}
-        )
+        self.calls.append({"kind": kind, "params": params, "idempotency_key": idempotency_key})
         return SimpleNamespace(task_id="explore-task-1"), False
 
 
@@ -56,7 +53,10 @@ def _task(task_id="task-abcdef1234"):
 def _run(self_obj, *, domain, proposals, task=None):
     asyncio.run(
         Coordinator._maybe_materialize_mn_explore(
-            self_obj, task=task or _task(), domain=domain, proposals=proposals,
+            self_obj,
+            task=task or _task(),
+            domain=domain,
+            proposals=proposals,
         )
     )
 
@@ -80,10 +80,14 @@ def test_proposals_with_no_args_or_envs_are_dropped(monkeypatch):
     # apply -> dropped. If all are dropped, no explore task is enqueued.
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
     s = _fake_self()
-    _run(s, domain="moe", proposals=[
-        {"name": "research-only", "reason": "investigate later"},
-        "not-a-dict",  # non-dict entries are skipped
-    ])
+    _run(
+        s,
+        domain="moe",
+        proposals=[
+            {"name": "research-only", "reason": "investigate later"},
+            "not-a-dict",  # non-dict entries are skipped
+        ],
+    )
     assert s.tasks.calls == []
 
 
@@ -125,9 +129,7 @@ def test_multi_node_builds_explore_grid(monkeypatch):
 def test_grid_capped_at_grid_cap(monkeypatch):
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
     s = _fake_self()
-    proposals = [
-        {"name": f"v{i}", "extra_args": f"--flag {i}"} for i in range(20)
-    ]
+    proposals = [{"name": f"v{i}", "extra_args": f"--flag {i}"} for i in range(20)]
     _run(s, domain="params", proposals=proposals)
     grid = s.tasks.calls[0]["params"]["grid"]
     assert len(grid) == Coordinator._MN_AUTO_EXPLORE_GRID_CAP

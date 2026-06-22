@@ -2,6 +2,7 @@
 
 """Coverage for framework_pr git/subprocess helpers: rev-parse / reset-hard /
 commit error+success branches, repo-id normalization, and same-repo gating."""
+
 from __future__ import annotations
 
 import subprocess
@@ -65,7 +66,9 @@ def test_git_reset_hard_success(monkeypatch) -> None:
 
 def test_git_reset_hard_reset_spawn_failure(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess, "run", _seq_runner([subprocess.TimeoutExpired("git", 60)]),
+        fp.subprocess,
+        "run",
+        _seq_runner([subprocess.TimeoutExpired("git", 60)]),
     )
     ok, err = fp._git_reset_hard(Path("/repo"), "sha")
     assert ok is False and "reset --hard spawn failed" in err
@@ -79,7 +82,8 @@ def test_git_reset_hard_reset_nonzero(monkeypatch) -> None:
 
 def test_git_reset_hard_clean_spawn_failure(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess, "run",
+        fp.subprocess,
+        "run",
         _seq_runner([_CP(0), FileNotFoundError("git")]),
     )
     ok, err = fp._git_reset_hard(Path("/repo"), "sha")
@@ -88,7 +92,9 @@ def test_git_reset_hard_clean_spawn_failure(monkeypatch) -> None:
 
 def test_git_reset_hard_clean_nonzero(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess, "run", _seq_runner([_CP(0), _CP(1, "", "clean failed")]),
+        fp.subprocess,
+        "run",
+        _seq_runner([_CP(0), _CP(1, "", "clean failed")]),
     )
     ok, err = fp._git_reset_hard(Path("/repo"), "sha")
     assert ok is False and err == "clean failed"
@@ -98,7 +104,8 @@ def test_git_reset_hard_clean_nonzero(monkeypatch) -> None:
 def test_git_commit_keep_success(monkeypatch) -> None:
     # add -A ok, commit ok, rev-parse returns new sha
     monkeypatch.setattr(
-        fp.subprocess, "run",
+        fp.subprocess,
+        "run",
         _seq_runner([_CP(0), _CP(0), _CP(0, "newsha\n")]),
     )
     sha, err = fp._git_commit_keep(Path("/repo"), "msg")
@@ -119,7 +126,8 @@ def test_git_commit_keep_add_nonzero(monkeypatch) -> None:
 
 def test_git_commit_keep_commit_spawn_failure(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess, "run",
+        fp.subprocess,
+        "run",
         _seq_runner([_CP(0), subprocess.TimeoutExpired("git", 60)]),
     )
     sha, err = fp._git_commit_keep(Path("/repo"), "msg")
@@ -128,7 +136,9 @@ def test_git_commit_keep_commit_spawn_failure(monkeypatch) -> None:
 
 def test_git_commit_keep_commit_nonzero(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess, "run", _seq_runner([_CP(0), _CP(1, "", "nothing to commit")]),
+        fp.subprocess,
+        "run",
+        _seq_runner([_CP(0), _CP(1, "", "nothing to commit")]),
     )
     sha, err = fp._git_commit_keep(Path("/repo"), "msg")
     assert sha is None and err == "nothing to commit"
@@ -136,7 +146,8 @@ def test_git_commit_keep_commit_nonzero(monkeypatch) -> None:
 
 def test_git_commit_keep_head_unreadable(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess, "run",
+        fp.subprocess,
+        "run",
         _seq_runner([_CP(0), _CP(0), _CP(1, "", "")]),
     )
     sha, err = fp._git_commit_keep(Path("/repo"), "msg")
@@ -198,7 +209,8 @@ def test_candidate_is_same_repo_non_github_origin(monkeypatch) -> None:
 
 def test_candidate_is_same_repo_matching_github(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp, "_run_git",
+        fp,
+        "_run_git",
         lambda *a, **k: (True, "https://github.com/Owner/Name.git\n", ""),
     )
     assert fp._candidate_is_same_repo({"repo": "Owner/Name"}, Path("/repo")) is True
@@ -206,7 +218,8 @@ def test_candidate_is_same_repo_matching_github(monkeypatch) -> None:
 
 def test_candidate_is_same_repo_differing_github(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp, "_run_git",
+        fp,
+        "_run_git",
         lambda *a, **k: (True, "https://github.com/Other/Repo.git\n", ""),
     )
     assert fp._candidate_is_same_repo({"repo": "Owner/Name"}, Path("/repo")) is False

@@ -15,7 +15,6 @@ ci/
 ├── ci-config.yaml           # Model list + runtime configuration
 ├── prompt_template.md       # Prompt template sent to the Claw Agent
 ├── inferenceX_models.yaml   # InferenceX API model name mapping
-├── claw-integration.md      # Claw integration flow doc (for Claw team coordination)
 ├── AB_TEST.md               # A/B test usage guide (for GEAK/TraceLens and related teams)
 ├── test_claw_flow.py        # End-to-end Claw API test script
 ├── requirements.txt         # Python dependencies

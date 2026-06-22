@@ -32,8 +32,7 @@ _FakeToolUseBlock.__name__ = "ToolUseBlock"
 class _FakeMessage:
     """SDK message with content[] (blocks) + optional usage dict."""
 
-    def __init__(self, *, content: list = None, usage: dict | None = None,
-                  result: str | None = None):
+    def __init__(self, *, content: list = None, usage: dict | None = None, result: str | None = None):
         self.content = content or []
         if usage is not None:
             self.usage = usage
@@ -187,12 +186,14 @@ async def test_usage_non_numeric_value_coerced_to_zero():
     """Non-numeric token values → coerce to 0 (defensive against gateway proxies)."""
     messages = [
         _FakeMessage(content=[_emit_intent_block()]),
-        _FakeMessage(usage={
-            "input_tokens": "n/a",
-            "cache_creation_input_tokens": None,
-            "cache_read_input_tokens": "garbage",
-            "output_tokens": 50,
-        }),
+        _FakeMessage(
+            usage={
+                "input_tokens": "n/a",
+                "cache_creation_input_tokens": None,
+                "cache_read_input_tokens": "garbage",
+                "output_tokens": 50,
+            }
+        ),
     ]
     backend = _make_backend(messages)
     result = await backend.run(prompt="hello")
@@ -209,12 +210,14 @@ async def test_last_usage_wins_when_multiple_result_messages():
     messages = [
         _FakeMessage(content=[_emit_intent_block()]),
         _FakeMessage(usage={"input_tokens": 50, "cache_read_input_tokens": 100}),
-        _FakeMessage(usage={
-            "input_tokens": 200,
-            "cache_creation_input_tokens": 5000,
-            "cache_read_input_tokens": 15000,
-            "output_tokens": 100,
-        }),
+        _FakeMessage(
+            usage={
+                "input_tokens": 200,
+                "cache_creation_input_tokens": 5000,
+                "cache_read_input_tokens": 15000,
+                "output_tokens": 100,
+            }
+        ),
     ]
     backend = _make_backend(messages)
     result = await backend.run(prompt="hello")

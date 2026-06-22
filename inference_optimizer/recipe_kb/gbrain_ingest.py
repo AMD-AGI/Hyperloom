@@ -23,6 +23,7 @@ expects: ``type: recipe`` + ``tags: kind:/model:/gpu:/framework:`` +
 flat ``attrs`` (model/hardware/framework/framework_version/precision +
 best_config_args / best_config_envs / best_throughput).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -49,9 +50,19 @@ log = logging.getLogger(__name__)
 # reinterpreted (digit-leading versions like ``0_5_11`` -> octal, tokens
 # with ``:`` / spaces / YAML keywords) is JSON-quoted.
 _SAFE_BAREWORD = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*$")
-_YAML_KEYWORDS = frozenset({
-    "true", "false", "null", "yes", "no", "on", "off", "none", "~",
-})
+_YAML_KEYWORDS = frozenset(
+    {
+        "true",
+        "false",
+        "null",
+        "yes",
+        "no",
+        "on",
+        "off",
+        "none",
+        "~",
+    }
+)
 
 _TAG_CLEAN = str.maketrans({" ": "-", "\t": "-", "/": "-"})
 
@@ -79,6 +90,12 @@ def _scalar(value: Any) -> str:
     ``type``. Everything else is JSON double-quoted (valid YAML) so the
     parser never reinterprets a number-ish / bool-ish / underscore-
     separated token — e.g. ``0_5_11`` must not become octal ``329``.
+
+    Args:
+        value: The scalar value to render.
+
+    Returns:
+        A YAML-safe token: bare for safe identifiers, JSON-quoted otherwise.
     """
     if value is None:
         return "null"
@@ -93,7 +110,15 @@ def _scalar(value: Any) -> str:
 
 
 def _emit_yaml(obj: Mapping[str, Any], indent: int = 0) -> str:
-    """Minimal recursive YAML emitter for scalars / nested dicts / scalar lists."""
+    """Minimal recursive YAML emitter for scalars / nested dicts / scalar lists.
+
+    Args:
+        obj: The mapping to render as YAML.
+        indent: Current indentation depth (two spaces per level).
+
+    Returns:
+        The rendered YAML text.
+    """
     pad = "  " * indent
     lines: list[str] = []
     for key, val in obj.items():
@@ -118,10 +143,18 @@ def _emit_yaml(obj: Mapping[str, Any], indent: int = 0) -> str:
 # best_config keys that are NOT environment variables (launch args under
 # the canonical/legacy name + the nested env containers + current_best
 # passthrough metadata copied by ``coordinator._build_recipe_payload``).
-_NON_ENV_BEST_CONFIG_KEYS = frozenset({
-    CANONICAL_KEY, LEGACY_KEY, "extra_envs", "envs", "args",
-    "name", "tput", "accuracy",
-})
+_NON_ENV_BEST_CONFIG_KEYS = frozenset(
+    {
+        CANONICAL_KEY,
+        LEGACY_KEY,
+        "extra_envs",
+        "envs",
+        "args",
+        "name",
+        "tput",
+        "accuracy",
+    }
+)
 
 
 def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
@@ -143,6 +176,12 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
     Reads the args via the compat helper (canonical with read-only legacy
     fallback). For envs, a nested map wins; otherwise the remaining scalar
     sibling keys (minus non-env metadata) are taken as flat envs.
+
+    Args:
+        best_config: The champion config dict in either nested or flat shape.
+
+    Returns:
+        A tuple of the launch-args string and the env-var dict.
     """
     args = read_extra_server_args(dict(best_config)).strip()
     nested = best_config.get("extra_envs")
@@ -154,15 +193,22 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
         envs = {
             str(k): str(v)
             for k, v in best_config.items()
-            if k not in _NON_ENV_BEST_CONFIG_KEYS
-            and not isinstance(v, (Mapping, list, tuple))
+            if k not in _NON_ENV_BEST_CONFIG_KEYS and not isinstance(v, (Mapping, list, tuple))
         }
     return args, envs
 
 
 def _has_shareable_signal(recipe: Mapping[str, Any]) -> bool:
-    """Return True when a seed-only recipe carries reusable prior signal."""
-    for s in (recipe.get("sessions") or []):
+    """Return True when a seed-only recipe carries reusable prior signal.
+
+    Args:
+        recipe: The recipe dict to inspect.
+
+    Returns:
+        ``True`` when the recipe has a positive-throughput session, any
+        negative-knowledge list, or architecture/model-class hints.
+    """
+    for s in recipe.get("sessions") or []:
         if not isinstance(s, Mapping):
             continue
         try:
@@ -186,6 +232,13 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     even pure seed-only anchors are mirrored so future gbrain reads can hit the
     5-tuple (tier=seed_only); set RECIPE_KB_MIRROR_REQUIRE_SIGNAL=1 to restore
     the old stricter gate (best_config OR reusable prior).
+
+    Args:
+        recipe: The v2 recipe dict to convert.
+
+    Returns:
+        A ``(slug, content)`` page tuple, or ``None`` when the recipe lacks a
+        canonical id (or fails the strict mirror gate).
     """
     best_config = recipe.get("best_config") if isinstance(recipe.get("best_config"), Mapping) else {}
     canonical = str(recipe.get("canonical_id") or "").strip()
@@ -204,6 +257,8 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "framework": framework,
         "framework_version": str(recipe.get("framework_version") or ""),
         "precision": str(recipe.get("precision") or ""),
+        "model_type": str(recipe.get("model_type") or ""),
+        "architectures": list(recipe.get("architectures") or []),
         "best_config_args": args,
         "best_config_envs": envs,
         "best_throughput": float(recipe.get("best_throughput") or 0.0),
@@ -228,12 +283,22 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     _stack_fp = recipe.get("stack_fingerprint")
     if isinstance(_stack_fp, Mapping) and _stack_fp:
         attrs["stack_fingerprint"] = {str(k): str(v) for k, v in _stack_fp.items()}
+    _model_type = str(recipe.get("model_type") or "")
+    _architectures_raw = recipe.get("architectures") or []
+    if isinstance(_architectures_raw, list):
+        _arch_str = "+".join(sorted(str(a).strip().lower() for a in _architectures_raw if str(a or "").strip()))
+    else:
+        _arch_str = str(_architectures_raw).strip().lower()
     tags = [
         "kind:recipe",
         f"model:{_tag_value(model)}",
         f"gpu:{_tag_value(hardware)}",
         f"framework:{_tag_value(framework)}",
     ]
+    if _model_type:
+        tags.append(f"model_type:{_tag_value(_model_type)}")
+    if _arch_str:
+        tags.append(f"architectures:{_arch_str}")
     frontmatter: dict[str, Any] = {
         "type": "recipe",
         "tags": tags,
@@ -243,7 +308,7 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "confidence": float(recipe.get("confidence") or 0.85),
         "attrs": attrs,
     }
-    # Stable slug from the 5-tuple canonical (colons -> path levels).
+    # Stable slug from the 7-tuple canonical (colons -> path levels).
     slug = "recipe-snapshot/" + canonical.replace(":", "/")
     body_lines = [
         f"# Recipe {canonical}",
@@ -265,7 +330,17 @@ def ingest_local_to_gbrain(
     mcp: _GbrainMcp | None,
     dry_run: bool,
 ) -> dict[str, int]:
-    """Ingest a list of v2 recipe dicts into gbrain. Returns counters."""
+    """Ingest a list of v2 recipe dicts into gbrain. Returns counters.
+
+    Args:
+        recipes: The v2 recipe dicts to ingest.
+        mcp: The gbrain MCP client, or ``None`` to skip the actual writes.
+        dry_run: When ``True``, count rows as ingested without writing.
+
+    Returns:
+        A counters dict with ``total`` / ``ingested`` / ``skipped_*`` /
+        ``errors`` tallies.
+    """
     stats = {
         "total": len(recipes),
         "ingested": 0,
@@ -302,6 +377,13 @@ def mirror_recipe(recipe: Mapping[str, Any], mcp: _GbrainMcp | None) -> bool:
     ``canonical_id``, strict-gate rejection, no mcp) or on a transport
     error. Never raises — the local write is authoritative and a gbrain
     hiccup must not affect it.
+
+    Args:
+        recipe: The recipe dict to mirror.
+        mcp: The gbrain MCP client, or ``None`` to skip mirroring.
+
+    Returns:
+        ``True`` when a page was written, ``False`` when skipped or on error.
     """
     if mcp is None:
         return False
@@ -318,12 +400,18 @@ def mirror_recipe(recipe: Mapping[str, Any], mcp: _GbrainMcp | None) -> bool:
 
 
 def build_mirror_mcp_from_env() -> _GbrainMcp | None:
-    """Build a write-side gbrain MCP client from env (background timeout)."""
+    """Build a write-side gbrain MCP client from env (background timeout).
+
+    Returns:
+        A configured :class:`_GbrainMcp`, or ``None`` when ``GBRAIN_BASE_URL``
+        / ``GBRAIN_TOKEN`` are not set.
+    """
     base_url = (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
     token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
     if not base_url or not token:
         return None
     from .. import recipe_snapshot_constants as C
+
     return _GbrainMcp(base_url, token, C.DEFAULT_HTTP_TIMEOUT_SEC)
 
 
@@ -394,8 +482,11 @@ def main(argv: list[str] | None = None) -> int:
         Process exit code (``0`` on success, non-zero on usage errors).
     """
     ap = argparse.ArgumentParser(description="Bulk-ingest local recipe snapshots into gbrain.")
-    ap.add_argument("--local-kb-root", default=os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", ""),
-                    help="LocalRecipeStore root (default: $HYPERLOOM_LOCAL_KB_ROOT)")
+    ap.add_argument(
+        "--local-kb-root",
+        default=os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", ""),
+        help="LocalRecipeStore root (default: $HYPERLOOM_LOCAL_KB_ROOT)",
+    )
     ap.add_argument("--gbrain-url", default=os.environ.get("GBRAIN_BASE_URL", ""))
     ap.add_argument("--token", default=os.environ.get("GBRAIN_TOKEN", ""))
     ap.add_argument("--limit", type=int, default=0, help="max recipes to scan (0=all)")
@@ -410,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     from .local_store import LocalRecipeStore
 
     store = LocalRecipeStore(root=Path(args.local_kb_root))
-    recipes = store.list_recent(limit=args.limit or 100000)
+    recipes = store.list_all_live_recipes()
     dry = not args.write
     mcp = None
     if not dry:
@@ -418,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
             print("--write requires GBRAIN_BASE_URL + GBRAIN_TOKEN")
             return 2
         from .. import recipe_snapshot_constants as C
+
         mcp = _GbrainMcp(args.gbrain_url, args.token, C.DEFAULT_HTTP_TIMEOUT_SEC)
 
     stats = ingest_local_to_gbrain(recipes=recipes, mcp=mcp, dry_run=dry)

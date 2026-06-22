@@ -72,7 +72,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 |---|---|
 | `--critic-agent selected but critic-agent runtime not found` | `export CRITIC_AGENT_ROOT=/path/to/critic-agent`, or `git -C "$REPO_ROOT" submodule update --init critic-agent`. |
 | `runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `critic-agent/AGENTS.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
-| `runtime.cli ... timed out after 30s` | KB stuck. If `CRITIC_KB_CLIENT_MODE=live`, drop to `inmemory`. Reproducing in `inmemory` is a bug — that path must not block on I/O. |
+| `runtime.cli ... timed out after 30s` | Critic runtime or optional KB enrichment is stuck. If `CRITIC_KB_CLIENT_MODE=live`, drop to the default `inmemory` mode; if `CORTEX_KB_URL` is set, unset it to skip `/v2/reasoning/assess` while debugging. A default local-only run should not block on remote I/O. |
 | All verdicts `('needs_review','critic_unavailable')` + `kb_skipped=missing_critical_context` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
 
 ### Run-time signals
@@ -84,8 +84,12 @@ Bypass with `--critic-mock` for offline / smoke runs. See
   `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must
   contain explicit correctness evidence.
-- `stop_reason=no_more_leverage`: stop and report; only resume if the user
-  changes workload / search space / model / strategy.
+- `stop_reason=global_converged`: the cyclic phase machine exhausted leverage
+  across macro-cycles (R7: consecutive no-gain cycles); stop and report, only
+  resume if the user changes workload / search space / model / strategy.
+  (Leverage exhaustion *within* a single phase is now the non-terminal
+  phase-exit reason `explore_no_more_leverage` / `kernel_no_more_leverage`,
+  which switches lever rather than ending the run.)
 - `stop_reason=policy_loop`: Coordinator hit ≥10 consecutive `policy_denied`
   events for the same action/rule pair; all top actions may be locked or pruned.
   Inspect `SharedState.policy_denial_history` and the per-tick `Policy denials`

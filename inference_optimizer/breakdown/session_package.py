@@ -130,7 +130,11 @@ def _dest_root() -> Path:
 
 
 def _loose_enabled() -> bool:
-    """Whether to also drop loose (unzipped) copies. Defaults to True."""
+    """Whether to also drop loose (unzipped) copies. Defaults to True.
+
+    Returns:
+        ``True`` unless the env override disables loose copies.
+    """
     raw = (os.environ.get(ENV_PACKAGE_LOOSE) or "").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
@@ -149,6 +153,14 @@ def _copy_loose_tree(
     safe. A stale file from a previous, larger selection is left as-is;
     the per-run ``PACKAGE_MANIFEST`` is the source of truth for what this
     run actually included.
+
+    Args:
+        included: Tuples of ``(source path, relative path, size)`` to copy.
+        manifest: Manifest dict written alongside the copied files.
+        loose_dir: Destination root for the loose tree.
+
+    Returns:
+        The number of files successfully copied.
     """
     loose_dir.mkdir(parents=True, exist_ok=True)
     copied = 0
@@ -162,10 +174,12 @@ def _copy_loose_tree(
             log.warning("session package: failed to copy loose file %s", rel)
     try:
         (loose_dir / MANIFEST_JSON_NAME).write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8",
+            json.dumps(manifest, indent=2),
+            encoding="utf-8",
         )
         (loose_dir / MANIFEST_TXT_NAME).write_text(
-            _manifest_text(manifest), encoding="utf-8",
+            _manifest_text(manifest),
+            encoding="utf-8",
         )
     except OSError:
         log.warning("session package: failed to write loose manifest")
@@ -174,7 +188,14 @@ def _copy_loose_tree(
 
 def _iter_session_files(session_dir: Path) -> list[Path]:
     """All files under session_dir (one walk), so glob matching is a
-    single pass instead of N globs each re-walking the tree."""
+    single pass instead of N globs each re-walking the tree.
+
+    Args:
+        session_dir: Root directory to walk.
+
+    Returns:
+        Absolute paths of every file found under ``session_dir``.
+    """
     out: list[Path] = []
     for dp, _dn, fn in os.walk(session_dir):
         for f in fn:
@@ -188,6 +209,14 @@ def _select(session_dir: Path) -> tuple[list[Path], list[str]]:
     A glob is reported "unmatched" when it selected zero files — useful
     audit signal in the manifest (e.g. conc_sweep_summary absent because
     the sweep was skipped).
+
+    Args:
+        session_dir: Session directory whose files are matched against the
+            package globs.
+
+    Returns:
+        A tuple of the matched absolute paths and the patterns that matched
+        nothing.
     """
     all_files = _iter_session_files(session_dir)
     rels = {p: p.relative_to(session_dir).as_posix() for p in all_files}
@@ -220,6 +249,13 @@ def _glob_match(rel: str, pattern: str) -> bool:
       by replacing ``**`` with a sentinel that fnmatch's ``*`` covers.
     * otherwise → require the path to have the same number of segments,
       matching each segment with fnmatch so ``*`` stays within a segment.
+
+    Args:
+        rel: POSIX-style relative path to test.
+        pattern: Glob pattern, possibly containing ``**``.
+
+    Returns:
+        ``True`` when ``rel`` matches ``pattern``.
     """
     if "**" in pattern:
         # fnmatch's '*' already spans '/', so '**' == '*' for our purpose.
@@ -361,15 +397,22 @@ def package_session_artifacts(
                 log.warning(
                     "session package: hit size/count cap, TRUNCATING bundle "
                     "(included=%d, bytes=%d, dropped=%d). Manifest flagged "
-                    "truncated=true.", len(included), total, len(dropped),
+                    "truncated=true.",
+                    len(included),
+                    total,
+                    len(dropped),
                 )
                 break
             included.append((p, p.relative_to(sd).as_posix(), sz))
             total += sz
 
         manifest = _build_manifest(
-            sd, sid, [(rel, sz) for _, rel, sz in included], missing_globs,
-            truncated=truncated, dropped_files=dropped,
+            sd,
+            sid,
+            [(rel, sz) for _, rel, sz in included],
+            missing_globs,
+            truncated=truncated,
+            dropped_files=dropped,
         )
 
         root = Path(dest_root).resolve() if dest_root else _dest_root()
@@ -400,7 +443,9 @@ def package_session_artifacts(
 
         log.info(
             "session package: wrote %s (%d files, %d bytes pre-zip)",
-            target, len(included), total,
+            target,
+            len(included),
+            total,
         )
 
         # Also lay the same files down loose (uncompressed, original tree)
@@ -412,7 +457,8 @@ def package_session_artifacts(
                 copied = _copy_loose_tree(included, manifest, root)
                 log.info(
                     "session package: copied %d loose files into %s",
-                    copied, root,
+                    copied,
+                    root,
                 )
             except Exception:  # noqa: BLE001 — loose copy must not mask the zip
                 log.exception("session package: loose copy failed (non-fatal)")

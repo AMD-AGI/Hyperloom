@@ -27,35 +27,36 @@ from inference_optimizer.protocol.action_surfaces import (
 # ``integrate_patch``.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
     # prep (3)
-    "target_analysis":      "prep",
-    "baseline":             "prep",
+    "target_analysis": "prep",
+    "baseline": "prep",
     # GAP 1 — Coordinator-internal one-shot warm-recipe replay.
-    "replay_warm_recipe":   "prep",
+    "replay_warm_recipe": "prep",
     # analysis (2) — Coordinator-internal, selected by enable_roofline.
-    "roofline":             "analysis",
-    "profile":              "analysis",
+    "roofline": "analysis",
+    "profile": "analysis",
     # shallow (5) — ``explore`` is the merged grid-runner entry.
-    "explore":              "shallow",
-    "integrate_patch":      "shallow",
+    "explore": "shallow",
+    "integrate_patch": "shallow",
     # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor.
-    "framework_pr":         "shallow",
-    "sweep":                "shallow",
+    "framework_pr": "shallow",
+    "sweep": "shallow",
     # SWEEP-phase post-sweep concurrency comparison.
-    "conc_sweep":           "shallow",
-    "report":               "shallow",
-    "session_breakdown":    "shallow",
+    "conc_sweep": "shallow",
+    "report": "shallow",
+    "session_breakdown": "shallow",
     # creative (1) — unified specialist dispatch (scope: domain/domains/freeform).
-    "specialist":           "creative",
+    "specialist": "creative",
     # deep_kernel (6)
-    "kernel_opt":           "deep_kernel",
-    "integrate":            "deep_kernel",
+    "kernel_opt": "deep_kernel",
+    "integrate": "deep_kernel",
     "deep_kernel_analysis": "deep_kernel",
-    "operator_tuning":      "deep_kernel",
+    "operator_tuning": "deep_kernel",
     "vendor_kernel_config": "deep_kernel",
-    "gemm_tuning":          "deep_kernel",
+    "gemm_tuning": "deep_kernel",
     # resilience (1)
-    "recover":              "resilience",
+    "recover": "resilience",
 }
+
 
 @pytest.fixture
 def registry() -> ActionRegistry:
@@ -97,15 +98,17 @@ def test_action_surface_constants_are_shared():
 
 def test_prompt_enabled_actions_are_live_registry_actions(registry):
     retired = {
-        "setup", "classify", "backends", "params",
-        "validate_stack", "select_kernels",
+        "setup",
+        "classify",
+        "backends",
+        "params",
+        "validate_stack",
+        "select_kernels",
     }
     enabled = set(SURFACE_FULL_ENABLED_ACTIONS) | set(SURFACE_NO_KERNEL_ENABLED_ACTIONS)
     assert not (enabled & retired)
     for name in enabled:
-        assert registry.get(name) is not None, (
-            f"prompt-visible action {name!r} must have action metadata"
-        )
+        assert registry.get(name) is not None, f"prompt-visible action {name!r} must have action metadata"
     assert SURFACE_KERNEL_OWNED_ACTIONS <= set(SURFACE_FULL_ENABLED_ACTIONS)
     assert SURFACE_KERNEL_OWNED_ACTIONS.isdisjoint(set(SURFACE_NO_KERNEL_ENABLED_ACTIONS))
 
@@ -114,15 +117,17 @@ def test_phase_allowlist_actions_are_live_registry_actions(registry):
     from inference_optimizer.orchestrator.phase_state import PHASE_ALLOWED_ACTIONS
 
     retired = {
-        "setup", "classify", "backends", "params",
-        "validate_stack", "select_kernels",
+        "setup",
+        "classify",
+        "backends",
+        "params",
+        "validate_stack",
+        "select_kernels",
     }
     phase_actions = set().union(*PHASE_ALLOWED_ACTIONS.values())
     assert not (phase_actions & retired)
     for name in phase_actions:
-        assert registry.get(name) is not None, (
-            f"phase allowlist action {name!r} must have action metadata"
-        )
+        assert registry.get(name) is not None, f"phase allowlist action {name!r} must have action metadata"
 
 
 def test_action_surface_sets_are_phase_aligned():
@@ -134,15 +139,10 @@ def test_action_surface_sets_are_phase_aligned():
 
     all_phase_actions = set().union(*PHASE_ALLOWED_ACTIONS.values())
     assert SURFACE_KERNEL_OWNED_ACTIONS <= PHASE_ALLOWED_ACTIONS[PHASE_KERNEL]
-    assert (
-        SURFACE_INTERNAL_ONLY_ACTION_NAMES - SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS
-    ) <= all_phase_actions
+    assert (SURFACE_INTERNAL_ONLY_ACTION_NAMES - SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS) <= all_phase_actions
     assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS <= SURFACE_INTERNAL_ONLY_ACTION_NAMES
     assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS.isdisjoint(all_phase_actions)
-    assert (
-        SURFACE_FRAMEWORK_PR_INTERNAL_ACTION_NAMES
-        <= PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK_PR]
-    )
+    assert SURFACE_FRAMEWORK_PR_INTERNAL_ACTION_NAMES <= PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK_PR]
     assert SURFACE_GRID_INJECTABLE_ACTIONS <= all_phase_actions
 
 
@@ -159,7 +159,8 @@ def test_gemm_tuning_action_metadata(registry):
     assert m.family == "deep_kernel"
     assert m.pipeline_phase == "deep"
     assert set(m.requires_lanes) == {"server_lifecycle", "workspace_mutation", "benchmark_lane"}
-    assert "precision == 'fp8'" in m.applicable_when
+    assert "framework in ('sglang', 'vllm')" in m.applicable_when
+    assert any("is_moe" in cond and "precision == 'fp8'" in cond for cond in m.applicable_when)
 
 
 def test_recover_owned_by_robustness_handle(registry):
@@ -178,8 +179,10 @@ def test_every_action_uses_only_known_lanes(registry):
     # v0.8 M5 (KB_design §3.7) introduced ``research_lane`` for the
     # LLM specialist sub-agent; known-lanes set must include it.
     known = {
-        "server_lifecycle", "workspace_mutation",
-        "benchmark_lane", "profile_lane",
+        "server_lifecycle",
+        "workspace_mutation",
+        "benchmark_lane",
+        "profile_lane",
         "research_lane",
     }
     for m in registry.all():
@@ -190,8 +193,7 @@ def test_every_action_uses_only_known_lanes(registry):
 def test_every_action_has_emit_intent_tool(registry):
     for m in registry.all():
         assert "emit_intent" in m.allowed_tools, (
-            f"{m.name}: emit_intent missing from allowed_tools — every "
-            f"reactor needs it to communicate"
+            f"{m.name}: emit_intent missing from allowed_tools — every reactor needs it to communicate"
         )
 
 
@@ -199,9 +201,7 @@ def test_actions_with_workspace_lane_have_edit_tool(registry):
     """Anything that mutates the workspace must declare Edit."""
     for m in registry.all():
         if "workspace_mutation" in m.requires_lanes:
-            assert "Edit" in m.allowed_tools, (
-                f"{m.name}: requires workspace_mutation but doesn't declare Edit"
-            )
+            assert "Edit" in m.allowed_tools, f"{m.name}: requires workspace_mutation but doesn't declare Edit"
 
 
 def test_lease_ttl_sec_consistent_with_cost(registry):
@@ -211,8 +211,7 @@ def test_lease_ttl_sec_consistent_with_cost(registry):
             continue
         expected_min_ttl = m.cost_minutes_p75 * 60
         assert m.lease_ttl_sec >= expected_min_ttl * 0.5, (
-            f"{m.name}: lease_ttl_sec={m.lease_ttl_sec} too low for "
-            f"cost_minutes_p75={m.cost_minutes_p75}"
+            f"{m.name}: lease_ttl_sec={m.lease_ttl_sec} too low for cost_minutes_p75={m.cost_minutes_p75}"
         )
 
 
@@ -224,10 +223,7 @@ def test_runs_actions_match_pipeline_phases(registry):
         _runs_actions,
     )
 
-    expected = frozenset(
-        a.name for a in registry.all()
-        if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
-    )
+    expected = frozenset(a.name for a in registry.all() if a.pipeline_phase in _RUNS_WORKSPACE_PHASES)
     actual = _runs_actions()
     assert actual == expected, (
         f"runs_actions drift: actual={sorted(actual)!r} expected={sorted(expected)!r}; "
@@ -250,10 +246,7 @@ def test_runs_actions_fallback_matches_registry(registry):
         _RUNS_WORKSPACE_PHASES,
     )
 
-    expected = frozenset(
-        a.name for a in registry.all()
-        if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
-    )
+    expected = frozenset(a.name for a in registry.all() if a.pipeline_phase in _RUNS_WORKSPACE_PHASES)
     assert _RUNS_ACTIONS_FALLBACK == expected, (
         f"_RUNS_ACTIONS_FALLBACK drift: fallback={sorted(_RUNS_ACTIONS_FALLBACK)!r} "
         f"registry-derived={sorted(expected)!r}; update _RUNS_ACTIONS_FALLBACK "
@@ -294,10 +287,7 @@ def test_cli_real_executors_consistent_with_runs_actions():
 def test_every_action_has_non_empty_description(registry):
     for m in registry.all():
         assert m.description, f"{m.name}: description must be non-empty"
-        assert "\n" not in m.description, (
-            f"{m.name}: description must be a single line, got "
-            f"{m.description!r}"
-        )
+        assert "\n" not in m.description, f"{m.name}: description must be a single line, got {m.description!r}"
         assert len(m.description) <= 200, (
             f"{m.name}: description too long ({len(m.description)} chars); "
             f"keep it under ~200 chars to avoid bloating the system prompt"
@@ -307,8 +297,7 @@ def test_every_action_has_non_empty_description(registry):
 def test_every_action_has_valid_pipeline_phase(registry):
     for m in registry.all():
         assert m.pipeline_phase in VALID_PIPELINE_PHASES, (
-            f"{m.name}: pipeline_phase={m.pipeline_phase!r} not in "
-            f"{sorted(VALID_PIPELINE_PHASES)!r}"
+            f"{m.name}: pipeline_phase={m.pipeline_phase!r} not in {sorted(VALID_PIPELINE_PHASES)!r}"
         )
 
 
@@ -317,9 +306,7 @@ def test_typical_runtime_min_positive_for_active_actions(registry):
     for m in registry.all():
         if m.cost_minutes_p50 == 0:
             continue
-        assert m.typical_runtime_min > 0, (
-            f"{m.name}: typical_runtime_min must be > 0 when cost > 0"
-        )
+        assert m.typical_runtime_min > 0, f"{m.name}: typical_runtime_min must be > 0 when cost > 0"
 
 
 def test_explore_action_metadata(registry):
@@ -341,6 +328,4 @@ def test_kernel_owned_actions_in_deep_pipeline_phase(registry):
         if name == "deep_kernel_analysis":
             assert m.pipeline_phase == "analysis"
         else:
-            assert m.pipeline_phase == "deep", (
-                f"{name}: expected pipeline_phase='deep', got {m.pipeline_phase!r}"
-            )
+            assert m.pipeline_phase == "deep", f"{name}: expected pipeline_phase='deep', got {m.pipeline_phase!r}"

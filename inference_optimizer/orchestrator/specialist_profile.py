@@ -41,8 +41,11 @@ LANE_GPU = "gpu"
 LANE_VALUES: frozenset[str] = frozenset({LANE_CPU, LANE_GPU})
 
 
-# Backward-compatible defaults: a bare ``specialist`` dispatch keeps the legacy
-# single-domain, patch-authoring, GPU-leased behaviour.
+# Defaults. A dispatch that carries a domain/tag anchor keeps the legacy
+# single-domain, patch-authoring, GPU-leased behaviour (DEFAULT_MODE/_LANE).
+# A *truly bare* dispatch (no scope and no domain/tag anchor) is inferred to be
+# ``freeform`` and therefore resolves to the cheap, read-only research/CPU lane
+# — "safe & cheap first" (KB_design §3.5; the long-run cost lower-bound guard).
 DEFAULT_SCOPE = SCOPE_DOMAIN
 DEFAULT_MODE = MODE_PATCH
 DEFAULT_BENCH = False
@@ -80,7 +83,11 @@ class SpecialistProfile:
     def grants_bench_tool(self) -> bool:
         """True iff this dispatch may use the in-loop ``run_bench`` tool. Only
         patch-authoring specialists with ``bench=True`` qualify (bench has no
-        meaning for read-only research)."""
+        meaning for read-only research).
+
+        Returns:
+            ``True`` when the profile is patch-mode with ``bench=True``.
+        """
         return self.mode == MODE_PATCH and self.bench
 
 
@@ -111,18 +118,57 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _infer_scope(p: dict[str, Any]) -> str:
+    """Infer the dispatch scope when none is explicitly given.
+
+    A dispatch that carries a domain/tag anchor is a real (cross-)domain
+    specialist; one with no anchor at all is treated as ``freeform`` so a bare
+    dispatch defaults to the cheap read-only lane instead of the expensive
+    patch/GPU lane.
+
+    Args:
+        p: The dispatch params to inspect for domain/tag anchors.
+
+    Returns:
+        ``SCOPE_DOMAINS`` for two-or-more tags, ``SCOPE_DOMAIN`` for one, or
+        ``SCOPE_FREEFORM`` when no anchor is present.
+    """
+    # Local import avoids a module-load cycle (specialist_domains is heavier).
+    from .specialist_domains import normalize_dispatch_tags
+
+    tags = normalize_dispatch_tags(p)
+    if len(tags) >= 2:
+        return SCOPE_DOMAINS
+    if tags:
+        return SCOPE_DOMAIN
+    return SCOPE_FREEFORM
+
+
 def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfile:
     """Read ``scope`` / ``mode`` / ``bench`` / ``lane`` from dispatch params.
 
     Unknown / missing values fall back to the legacy-compatible defaults so the
     resolver never raises; PolicyGate is the place that *rejects* malformed
     dispatches, this helper only normalises for the runtime.
+
+    When ``scope`` is absent/unknown it is *inferred* from the presence of a
+    domain/tag anchor: anchored dispatches resolve to ``domain``/``domains``
+    (legacy patch/GPU default preserved), while a truly bare dispatch resolves
+    to ``freeform`` → ``research`` → ``cpu`` (safe & cheap first).
+
+    Args:
+        params: The dispatch params carrying ``scope`` / ``mode`` / ``bench`` /
+            ``lane``, or ``None``.
+
+    Returns:
+        The resolved :class:`SpecialistProfile` with legacy-compatible
+        fallbacks applied.
     """
     p = params or {}
 
     scope = str(p.get("scope") or "").strip().lower()
     if scope not in SCOPE_VALUES:
-        scope = DEFAULT_SCOPE
+        scope = _infer_scope(p)
 
     mode = str(p.get("mode") or "").strip().lower()
     if mode not in MODE_VALUES:

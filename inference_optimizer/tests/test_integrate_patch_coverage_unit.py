@@ -45,17 +45,13 @@ def _init_git_repo(path: Path) -> None:
     env["GIT_AUTHOR_EMAIL"] = "t@t.local"
     env["GIT_COMMITTER_NAME"] = "T"
     env["GIT_COMMITTER_EMAIL"] = "t@t.local"
-    subprocess.run(["git", "init", "-b", "main", str(path)], check=True,
-                   capture_output=True, env=env)
+    subprocess.run(["git", "init", "-b", "main", str(path)], check=True, capture_output=True, env=env)
     (path / "src.py").write_text("def f():\n    return 1\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(path), "add", "."], check=True,
-                   capture_output=True, env=env)
-    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"], check=True,
-                   capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"], check=True, capture_output=True, env=env)
 
 
-def _write_workspace(session_dir: Path, task_id: str, *,
-                     proposal_set: list | None = None) -> Path:
+def _write_workspace(session_dir: Path, task_id: str, *, proposal_set: list | None = None) -> Path:
     workspace = session_dir / "runs" / "specialist" / task_id
     (workspace / "worktree" / "patches").mkdir(parents=True, exist_ok=True)
     p = workspace / "worktree" / "patches" / "001.patch"
@@ -64,21 +60,26 @@ def _write_workspace(session_dir: Path, task_id: str, *,
         "patches_written": [f"patches/{p.name}"],
         "proposal_set": proposal_set or [],
     }
-    (workspace / "specialist_done.json").write_text(json.dumps(payload),
-                                                    encoding="utf-8")
+    (workspace / "specialist_done.json").write_text(json.dumps(payload), encoding="utf-8")
     return workspace
 
 
-def _make_ctx(task_id: str, params: dict[str, Any],
-              extra: dict | None = None) -> RunnerContext:
-    task = Task(task_id=task_id, kind="integrate_patch", state="queued",
-                params=params, idempotency_key=task_id, requires_lanes=tuple())
+def _make_ctx(task_id: str, params: dict[str, Any], extra: dict | None = None) -> RunnerContext:
+    task = Task(
+        task_id=task_id,
+        kind="integrate_patch",
+        state="queued",
+        params=params,
+        idempotency_key=task_id,
+        requires_lanes=tuple(),
+    )
     return RunnerContext(task=task, lease=None, extra=extra or {})
 
 
 def _stub_bench(result: dict, gate: dict):
     async def _b(self, **kwargs):
         return result, gate
+
     return _b
 
 
@@ -97,7 +98,10 @@ async def test_no_framework_root(tmp_path, monkeypatch):
     session = tmp_path / "s"
     session.mkdir()
     _write_workspace(session, "spec")
-    monkeypatch.setattr(ip, "_resolve_framework_root", lambda explicit: None)
+    monkeypatch.setattr(
+        ip, "_resolve_framework_root",
+        lambda explicit, patch_paths=None: None,
+    )
     ex = IntegratePatchExecutor(session_dir=session)
     res = await ex(_make_ctx("t", {"specialist_task_id": "spec"}))
     assert res["status"] == "apply_failed"
@@ -118,10 +122,13 @@ async def test_rejected_by_critic(tmp_path):
             return "reject"
 
     ex = IntegratePatchExecutor(session_dir=session)
-    res = await ex(_make_ctx(
-        "t", {"specialist_task_id": "spec", "framework_source_root": str(repo)},
-        extra={"shared_state": _SS()},
-    ))
+    res = await ex(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo)},
+            extra={"shared_state": _SS()},
+        )
+    )
     assert res["status"] == "rejected_by_critic"
     # patch was reverted -> tree restored
     assert (repo / "src.py").read_text().endswith("return 1\n")
@@ -137,17 +144,127 @@ async def test_keep_path(tmp_path, monkeypatch):
     _write_workspace(session, "spec")
     ex = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(
-        IntegratePatchExecutor, "_bench_patch",
-        _stub_bench({"output_throughput": 200.0, "status": "succeeded"},
-                    {"accuracy_pass": None}),
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
     )
-    res = await ex(_make_ctx("t", {
-        "specialist_task_id": "spec", "framework_source_root": str(repo),
-        "base_tput": 100.0,
-    }))
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+                "enable_stack_rebench": False,
+            },
+        )
+    )
     assert res["status"] == "kept"
     assert res["delta_pct"] == 100.0
     assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+def _stub_confirm(result: dict):
+    async def _c(self, **kwargs):
+        return result
+
+    return _c
+
+
+# ---- KEEP confirmed by stack rebench ----
+@pytest.mark.asyncio
+async def test_keep_confirmed_by_rebench(tmp_path, monkeypatch):
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
+    )
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_confirm_stack_rebench",
+        _stub_confirm(
+            {"stable": True, "tput": 190.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": True}
+        ),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
+        )
+    )
+    assert res["status"] == "kept"
+    # headline tput becomes the confirmed rebench value
+    assert res["output_throughput"] == 190.0
+    assert res["delta_pct"] == 90.0
+
+
+# ---- REVERT when rebench misses the stability floor ----
+@pytest.mark.asyncio
+async def test_revert_when_rebench_unstable(tmp_path, monkeypatch):
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
+    )
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_confirm_stack_rebench",
+        _stub_confirm(
+            {"stable": False, "tput": 80.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": None}
+        ),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
+        )
+    )
+    assert res["status"] == "reverted"
+    assert "stability floor" in res["reason"]
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+# ---- REVERT when rebench shows an accuracy regression ----
+@pytest.mark.asyncio
+async def test_revert_when_rebench_accuracy_fails(tmp_path, monkeypatch):
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": True}),
+    )
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_confirm_stack_rebench",
+        _stub_confirm(
+            {"stable": True, "tput": 190.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": False}
+        ),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
+        )
+    )
+    assert res["status"] == "reverted"
+    assert "accuracy regression on rebench" in res["reason"]
 
 
 # ---- REVERT path (low throughput) ----
@@ -160,14 +277,20 @@ async def test_revert_low_throughput(tmp_path, monkeypatch):
     _write_workspace(session, "spec")
     ex = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(
-        IntegratePatchExecutor, "_bench_patch",
-        _stub_bench({"output_throughput": 50.0, "status": "succeeded"},
-                    {"accuracy_pass": None}),
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 50.0, "status": "succeeded"}, {"accuracy_pass": None}),
     )
-    res = await ex(_make_ctx("t", {
-        "specialist_task_id": "spec", "framework_source_root": str(repo),
-        "base_tput": 100.0,
-    }))
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+            },
+        )
+    )
     assert res["status"] == "reverted"
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
@@ -182,14 +305,20 @@ async def test_revert_accuracy_fail(tmp_path, monkeypatch):
     _write_workspace(session, "spec")
     ex = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(
-        IntegratePatchExecutor, "_bench_patch",
-        _stub_bench({"output_throughput": 500.0, "status": "succeeded"},
-                    {"accuracy_pass": False}),
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 500.0, "status": "succeeded"}, {"accuracy_pass": False}),
     )
-    res = await ex(_make_ctx("t", {
-        "specialist_task_id": "spec", "framework_source_root": str(repo),
-        "base_tput": 100.0,
-    }))
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+            },
+        )
+    )
     assert res["status"] == "reverted"
     assert "accuracy regression" in res["reason"]
 
@@ -208,9 +337,15 @@ async def test_bench_exception_reverts(tmp_path, monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", _raise)
-    res = await ex(_make_ctx("t", {
-        "specialist_task_id": "spec", "framework_source_root": str(repo),
-    }))
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+            },
+        )
+    )
     assert res["status"] == "reverted"
     assert res["error_class"] == "bench_exception"
 
@@ -229,9 +364,15 @@ async def test_bench_script_mismatch_reverts(tmp_path, monkeypatch):
         raise FrameworkScriptMismatchError("mismatch")
 
     monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", _raise)
-    res = await ex(_make_ctx("t", {
-        "specialist_task_id": "spec", "framework_source_root": str(repo),
-    }))
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+            },
+        )
+    )
     assert res["status"] == "reverted"
     assert res["error_class"] == "framework_script_mismatch"
 
@@ -263,14 +404,21 @@ async def test_framework_pr_kb_writeback(tmp_path, monkeypatch):
     )
     ex = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(
-        IntegratePatchExecutor, "_bench_patch",
-        _stub_bench({"output_throughput": 200.0, "status": "succeeded"},
-                    {"accuracy_pass": True}),
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": True}),
     )
-    res = await ex(_make_ctx("t", {
-        "specialist_task_id": "spec", "framework_source_root": str(repo),
-        "base_tput": 100.0,
-    }))
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+                "enable_stack_rebench": False,
+            },
+        )
+    )
     assert res["status"] == "kept"
     assert calls["outcome"] == "integrated"
     assert calls["pr_url"] == "https://example/pr/1"
@@ -283,16 +431,17 @@ async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     payload = {"proposal_set": [{"provenance": "specialist:serving:framework_pr"}]}
     # No fa_pr_url / fa_pr_sha -> early return, no exception.
     await ex._maybe_write_framework_pr_kb_record(
-        done_payload=payload, outcome="integrated", tps_delta_pct=1.0, extra={},
+        done_payload=payload,
+        outcome="integrated",
+        tps_delta_pct=1.0,
+        extra={},
     )
 
 
 def test_find_framework_pr_proposal():
     assert IntegratePatchExecutor._find_framework_pr_proposal(None) is None
     assert IntegratePatchExecutor._find_framework_pr_proposal({"proposal_set": "x"}) is None
-    assert IntegratePatchExecutor._find_framework_pr_proposal(
-        {"proposal_set": [{"provenance": "kernel:x"}]}
-    ) is None
+    assert IntegratePatchExecutor._find_framework_pr_proposal({"proposal_set": [{"provenance": "kernel:x"}]}) is None
     found = IntegratePatchExecutor._find_framework_pr_proposal(
         {"proposal_set": [{"provenance": "specialist:serving:framework_pr:y", "id": 1}]}
     )
@@ -314,8 +463,7 @@ def test_detect_p_level_none_for_unmatched(tmp_path):
     _init_git_repo(repo)
     bad = tmp_path / "bad.patch"
     bad.write_text(
-        "diff --git a/zzz.py b/zzz.py\n--- a/zzz.py\n+++ b/zzz.py\n"
-        "@@ -1,1 +1,1 @@\n-X\n+Y\n",
+        "diff --git a/zzz.py b/zzz.py\n--- a/zzz.py\n+++ b/zzz.py\n@@ -1,1 +1,1 @@\n-X\n+Y\n",
         encoding="utf-8",
     )
     assert _detect_p_level(repo, bad, three_way=False) is None
@@ -340,7 +488,9 @@ class _FakeVR:
         self.output_throughput = kw.get("output_throughput", 123.0)
         self.ttft_ms = kw.get("ttft_ms", 10.0)
         self.itl_ms = kw.get("itl_ms", 5.0)
-        self.result_dir = kw.get("result_dir", "/tmp/rd")
+        # Mirror the real VariantResult attribute name (``workspace``); the
+        # bench code reads ``r.workspace`` for the accuracy-gate eval dir.
+        self.workspace = kw.get("workspace", "/tmp/rd")
         self.error = kw.get("error", "")
         self.nonfatal_warnings = kw.get("nonfatal_warnings", [])
 
@@ -349,8 +499,7 @@ class _FakeVR:
 async def test_bench_patch_no_accuracy(tmp_path, monkeypatch):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "materialize_config_with_envs",
-                        lambda *a, **k: cfg)
+    monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
         return [_FakeVR(output_throughput=200.0)]
@@ -374,11 +523,10 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
     monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
-        return [_FakeVR(status="succeeded", result_dir=str(tmp_path))]
+        return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd: {"score": 0.9})
-    monkeypatch.setattr(ip, "accuracy_passed", lambda s, b: True)
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd: {"accuracy": 0.9})
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     bench, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.8},
@@ -387,6 +535,51 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
         specialist_task_id="abcdef123456",
     )
     assert gate["accuracy_pass"] is True
+
+
+@pytest.mark.asyncio
+async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("x: 1\n", encoding="utf-8")
+    monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: cfg)
+
+    async def _fake_run_grid(**kwargs):
+        return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
+
+    monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
+    # A large accuracy drop must fail the gate (exercises real key + arg order).
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd: {"accuracy": 0.50})
+    ex = IntegratePatchExecutor(session_dir=tmp_path)
+    _, gate = await ex._bench_patch(
+        params={"config_path": str(cfg), "accuracy_baseline": 0.95},
+        output_root=tmp_path,
+        config_changes_applied={},
+        specialist_task_id="abcdef123456",
+    )
+    assert gate["accuracy_pass"] is False
+
+
+@pytest.mark.asyncio
+async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeypatch, caplog):
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("x: 1\n", encoding="utf-8")
+    monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: cfg)
+
+    async def _fake_run_grid(**kwargs):
+        return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
+
+    monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd: {"accuracy": 0.9})
+    ex = IntegratePatchExecutor(session_dir=tmp_path)
+    with caplog.at_level("WARNING"):
+        _, gate = await ex._bench_patch(
+            params={"config_path": str(cfg)},
+            output_root=tmp_path,
+            config_changes_applied={},
+            specialist_task_id="abcdef123456",
+        )
+    assert gate["accuracy_pass"] is None
+    assert any("no baseline accuracy" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

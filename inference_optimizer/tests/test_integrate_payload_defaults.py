@@ -49,7 +49,8 @@ class TestFillIntegrateDefaultsFromState:
         )
 
         out = krh._fill_integrate_defaults_from_state(
-            {"kernel_id": "k_abc"}, session_dir=session_dir,
+            {"kernel_id": "k_abc"},
+            session_dir=session_dir,
         )
 
         assert out["base_tput"] == 800.0
@@ -95,7 +96,8 @@ class TestFillIntegrateDefaultsFromState:
         _seed_state(session_dir)  # all defaults zero/empty
 
         out = krh._fill_integrate_defaults_from_state(
-            {"kernel_id": "k_abc"}, session_dir=session_dir,
+            {"kernel_id": "k_abc"},
+            session_dir=session_dir,
         )
 
         assert "base_tput" not in out or out["base_tput"] in (0.0, 0)
@@ -107,7 +109,8 @@ class TestFillIntegrateDefaultsFromState:
 
         payload = {"kernel_id": "k_abc"}
         out = krh._fill_integrate_defaults_from_state(
-            payload, session_dir=session_dir,
+            payload,
+            session_dir=session_dir,
         )
 
         assert "base_tput" not in payload
@@ -137,27 +140,69 @@ class TestFillIntegrateDefaultsFromState:
 class TestIntegrateHandlerHonoursStateDefault:
     @pytest.mark.asyncio
     async def test_missing_base_tput_in_payload_still_runs_when_state_has_one(
-        self, session_dir, monkeypatch,
+        self,
+        session_dir,
+        monkeypatch,
     ):
         """The ``base_tput <= 0`` hard-check must not fire when state has a baseline."""
         _seed_state(session_dir, baseline_tput=800.0)
 
         result = await krh.integrate_handler(
-            {"kernel_id": "k_no_artifact"}, session_dir=session_dir,
+            {"kernel_id": "k_no_artifact"},
+            session_dir=session_dir,
         )
 
         assert result["status"] == "failed"
-        assert result.get("error") != (
-            "integrate_handler requires base_tput > 0 to compute KEEP/REVERT"
-        )
+        assert result.get("error") != ("integrate_handler requires base_tput > 0 to compute KEEP/REVERT")
 
     @pytest.mark.asyncio
     async def test_no_base_tput_anywhere_still_fails_with_clear_error(
-        self, session_dir,
+        self,
+        session_dir,
     ):
         result = await krh.integrate_handler(
-            {"kernel_id": "k_orphan"}, session_dir=session_dir,
+            {"kernel_id": "k_orphan"},
+            session_dir=session_dir,
         )
 
         assert result["status"] == "failed"
         assert "base_tput" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_env_only_gemm_validation_runs_baseline_with_extra_envs(
+        self,
+        session_dir,
+        monkeypatch,
+    ):
+        """GEMM tuning validation has no patch; it must still run E2E with envs."""
+        _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
+        captured: dict[str, object] = {}
+
+        class FakeBaselineExecutor:
+            def __init__(self, *, session_dir):
+                self.session_dir = session_dir
+
+            async def __call__(self, ctx):
+                captured["params"] = dict(ctx.task.params)
+                return {"output_throughput": 1100.0, "completed_requests": 10}
+
+        from inference_optimizer.orchestrator.action_executors import baseline as baseline_mod
+
+        monkeypatch.setattr(baseline_mod, "BaselineExecutor", FakeBaselineExecutor)
+
+        result = await krh.integrate_handler(
+            {
+                "source": "forge_gemm_tuning",
+                "kernel_id": "gemm_tune_fmoe_ck",
+                "base_tput": 1000.0,
+                "config_path": "/tmp/base.yaml",
+                "extra_envs": {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"},
+                "budget_minutes": 1,
+            },
+            session_dir=session_dir,
+        )
+
+        assert result["status"] == "ok", result
+        assert result["decision"] == "KEEP"
+        assert result["new_tput"] == 1100.0
+        assert captured["params"]["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}

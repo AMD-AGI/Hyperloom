@@ -24,7 +24,13 @@ from ...protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import BackendError, BackendTurnResult, parse_call_timeout_env
+from .base import (
+    BackendError,
+    BackendTurnResult,
+    RetryPolicy,
+    parse_call_timeout_env,
+    retry_with_backoff,
+)
 from .mcp_context_tools import (
     CONTEXT_TOOL_QUALIFIED_NAMES,
     MCP_SERVER_NAME as CONTEXT_MCP_SERVER_NAME,
@@ -74,9 +80,21 @@ _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC: float = 300.0
 # Built-in tools disallowed in raw_completion mode so the model produces
 # exactly one text turn (no agentic tool loop).
 _RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
-    "Bash", "BashOutput", "KillShell", "Read", "Write", "Edit",
-    "NotebookEdit", "Glob", "Grep", "Task", "WebFetch", "WebSearch",
-    "TodoWrite", "ExitPlanMode", "SlashCommand",
+    "Bash",
+    "BashOutput",
+    "KillShell",
+    "Read",
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "Glob",
+    "Grep",
+    "Task",
+    "WebFetch",
+    "WebSearch",
+    "TodoWrite",
+    "ExitPlanMode",
+    "SlashCommand",
 )
 
 
@@ -84,18 +102,21 @@ def _import_sdk() -> tuple[Any, Any, Any]:
     """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise.
 
     Only ``claude_agent_sdk`` is supported (``claude_code_sdk`` deprecated).
+
+    Returns:
+        A tuple of the SDK ``query`` callable, the ``ClaudeAgentOptions``
+        class, and the imported SDK module.
+
+    Raises:
+        BackendError: If ``claude_agent_sdk`` is not installed or is missing
+            the required ``query`` / ``ClaudeAgentOptions`` attributes.
     """
     try:
         sdk = importlib.import_module("claude_agent_sdk")
     except ImportError as exc:
-        raise BackendError(
-            "claude-agent-sdk not installed; run "
-            "`pip install claude-agent-sdk` (>= 0.1.65)."
-        ) from exc
+        raise BackendError("claude-agent-sdk not installed; run `pip install claude-agent-sdk` (>= 0.1.65).") from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
-        raise BackendError(
-            "claude_agent_sdk loaded but missing query / ClaudeAgentOptions"
-        )
+        raise BackendError("claude_agent_sdk loaded but missing query / ClaudeAgentOptions")
     return sdk.query, sdk.ClaudeAgentOptions, sdk
 
 
@@ -137,6 +158,10 @@ class ClaudeBackend:
             default=120.0,
         )
     )
+    # Bounded transient-failure retry/backoff (R6): a multi-day run must absorb
+    # gateway stalls / 5xx / connection blips instead of failing the turn.
+    # Env override via INFERENCE_OPTIMIZER_LLM_RETRY_* (ATTEMPTS=1 disables).
+    retry_policy: RetryPolicy = field(default_factory=RetryPolicy.from_env)
 
     # Test seams — set these to bypass SDK import / network calls.
     sdk_query_factory: Callable[..., Any] | None = None
@@ -192,13 +217,18 @@ class ClaudeBackend:
             # override the timeout via the env var below.
             if self.max_turns_default < _CONVERSATIONAL_MIN_MAX_TURNS:
                 self.max_turns_default = _CONVERSATIONAL_MIN_MAX_TURNS
-            if os.environ.get(
-                "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC", "",
-            ).strip() == "":
+            if (
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC",
+                    "",
+                ).strip()
+                == ""
+            ):
                 # No explicit operator override -> raise the floor so the
                 # extra tool round-trips don't trip the 120s wall.
                 self.call_timeout_s = max(
-                    self.call_timeout_s, _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC,
+                    self.call_timeout_s,
+                    _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC,
                 )
         if self.raw_completion:
             self.enable_mcp_emit_intent = False
@@ -267,24 +297,68 @@ class ClaudeBackend:
             system_prompt=system_prompt,
             resume_session_id=resume_session,
         )
+
         # Timeout guard: an upstream proxy stall must not park the reactor.
-        try:
-            (
-                intents, raw_text, tool_block_count, usage, session_id,
-            ) = await asyncio.wait_for(
+        # Bounded retry/backoff (R6) absorbs transient stalls / blips across a
+        # multi-day run; a per-attempt wall-clock cap still bounds each try.
+        async def _one_attempt() -> tuple[Any, ...]:
+            """Run one bounded SDK invocation under the per-attempt timeout.
+
+            Returns:
+                The collected ``_invoke_and_collect`` result tuple.
+
+            Raises:
+                asyncio.TimeoutError: If the attempt exceeds ``call_timeout_s``.
+            """
+            return await asyncio.wait_for(
                 self._invoke_and_collect(full_prompt, options),
                 timeout=self.call_timeout_s,
             )
-        except asyncio.TimeoutError as exc:
-            self.calls.append({
-                "warn": (
-                    f"claude SDK call timed out after {self.call_timeout_s:.0f}s; "
-                    "treating as no-intent so the reactor pass can proceed"
+
+        def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
+            """Record a transient-failure retry warning into the call log.
+
+            Args:
+                attempt: The 1-based attempt number that failed.
+                exc: The transient exception raised by the attempt.
+                delay: Seconds to wait before the next retry.
+            """
+            self.calls.append(
+                {
+                    "warn": (f"claude SDK transient failure (attempt {attempt}): {exc!r}; retrying in {delay:.2f}s"),
+                }
+            )
+
+        try:
+            (
+                intents,
+                raw_text,
+                tool_block_count,
+                usage,
+                session_id,
+            ) = await retry_with_backoff(
+                _one_attempt,
+                policy=self.retry_policy,
+                retry_on=(
+                    asyncio.TimeoutError,
+                    BackendError,
+                    ConnectionError,
+                    OSError,
                 ),
-            })
+                on_retry=_note_retry,
+            )
+        except asyncio.TimeoutError as exc:
+            self.calls.append(
+                {
+                    "warn": (
+                        f"claude SDK call timed out after {self.call_timeout_s:.0f}s "
+                        f"(retries exhausted); treating as no-intent so the reactor "
+                        "pass can proceed"
+                    ),
+                }
+            )
             raise BackendError(
-                f"Claude backend timed out after {self.call_timeout_s:.0f}s "
-                "(likely upstream proxy stall)"
+                f"Claude backend timed out after {self.call_timeout_s:.0f}s (likely upstream proxy stall)"
             ) from exc
         # Capture the SDK session token for the next conversational resume;
         # only overwrite on a non-empty id so a stream without a terminal
@@ -303,31 +377,30 @@ class ClaudeBackend:
             )
             if session_id:
                 self._session_id = session_id
-        cache_creation = self._safe_int(
-            usage.get("cache_creation_input_tokens") if usage else None
-        )
-        cache_read = self._safe_int(
-            usage.get("cache_read_input_tokens") if usage else None
-        )
+        cache_creation = self._safe_int(usage.get("cache_creation_input_tokens") if usage else None)
+        cache_read = self._safe_int(usage.get("cache_read_input_tokens") if usage else None)
         input_tokens = self._safe_int(usage.get("input_tokens") if usage else None)
         output_tokens = self._safe_int(usage.get("output_tokens") if usage else None)
-        self.calls.append({
-            "prompt_chars": len(full_prompt),
-            "tool_blocks": tool_block_count,
-            "intents": len(intents),
-            "max_turns": max_turns_use,
-            "cache_creation_input_tokens": cache_creation,
-            "cache_read_input_tokens": cache_read,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        })
+        self.calls.append(
+            {
+                "prompt_chars": len(full_prompt),
+                "tool_blocks": tool_block_count,
+                "intents": len(intents),
+                "max_turns": max_turns_use,
+                "cache_creation_input_tokens": cache_creation,
+                "cache_read_input_tokens": cache_read,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
+        )
         if not intents and not self.raw_completion and not allow_no_intent:
             raise NoIntentEmitted(
                 f"claude reply contained no parseable emit_intent tool_use "
                 f"blocks (raw_text_len={len(raw_text)}, tool_blocks={tool_block_count})"
             )
         return BackendTurnResult(
-            intents=intents, raw_text=raw_text,
+            intents=intents,
+            raw_text=raw_text,
             metadata={
                 "tool_blocks": tool_block_count,
                 "model": self.model,
@@ -383,6 +456,10 @@ class ClaudeBackend:
 
         ``None`` detaches it. Best-effort: a build failure is recorded as a
         soft warning and leaves the backend usable without the pull tools.
+
+        Args:
+            provider: The context provider to back the pull tools, or ``None``
+                to detach the context-tools server.
         """
         if provider is None:
             self._context_server_config = None
@@ -416,7 +493,12 @@ class ClaudeBackend:
 
     @property
     def conversation_session_id(self) -> str | None:
-        """Current SDK session token (conversational mode), or None."""
+        """Current SDK session token (conversational mode), or None.
+
+        Returns:
+            The captured SDK session id in conversational mode, otherwise
+            ``None``.
+        """
         return self._session_id if self.conversational else None
 
     def _build_options(
@@ -485,18 +567,27 @@ class ClaudeBackend:
 
         Older SDK builds lack ``resume``; fall back to a stateless turn
         (with a one-time warning) rather than crashing the reactor.
+
+        Args:
+            kwargs: Keyword arguments to pass to the SDK options constructor.
+
+        Returns:
+            A constructed SDK options instance.
+
+        Raises:
+            TypeError: If the constructor rejects a keyword other than
+                ``resume``.
         """
         try:
             return self.sdk_options_cls(**kwargs)
         except TypeError as exc:
             if "resume" in kwargs:
                 kwargs.pop("resume", None)
-                self.calls.append({
-                    "warn": (
-                        "SDK ClaudeAgentOptions rejected resume= "
-                        f"({exc!r}); falling back to stateless turn"
-                    ),
-                })
+                self.calls.append(
+                    {
+                        "warn": (f"SDK ClaudeAgentOptions rejected resume= ({exc!r}); falling back to stateless turn"),
+                    }
+                )
                 return self.sdk_options_cls(**kwargs)
             raise
 
@@ -518,6 +609,15 @@ class ClaudeBackend:
 
         `usage` (cache_creation/read_input_tokens) measures prompt-cache
         effectiveness against the SECTION-A/B stable-prefix design (§5.1, §8.8).
+
+        Args:
+            prompt: The composed prompt to stream to the SDK.
+            options: The SDK options object configuring this turn.
+
+        Returns:
+            A tuple ``(intents, raw_text, tool_block_count, usage, session_id)``
+            where ``usage`` is the latest cumulative usage dict and
+            ``session_id`` is the SDK session token (or ``None``).
         """
         intents: list[Intent] = []
         text_chunks: list[str] = []
@@ -559,9 +659,9 @@ class ClaudeBackend:
             if "error result: success" in err_str:
                 if intents:
                     log.warning(
-                        "claude SDK raised '%s' but %d intents already collected; "
-                        "returning partial results",
-                        err_str, len(intents),
+                        "claude SDK raised '%s' but %d intents already collected; returning partial results",
+                        err_str,
+                        len(intents),
                     )
                 else:
                     log.warning(
@@ -620,10 +720,14 @@ class ClaudeBackend:
         """
         raw_input = getattr(block, "input", None) or {}
         try:
-            envelope = {"intents": [{
-                "intent_type": raw_input.get("intent_type"),
-                "payload": raw_input.get("payload") or {},
-            }]}
+            envelope = {
+                "intents": [
+                    {
+                        "intent_type": raw_input.get("intent_type"),
+                        "payload": raw_input.get("payload") or {},
+                    }
+                ]
+            }
             validated = validate_envelope(envelope)
         except IntentValidationError as exc:
             log.info("claude tool_use validation failed: %s", exc)

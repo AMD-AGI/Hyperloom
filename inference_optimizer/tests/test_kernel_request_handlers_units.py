@@ -16,6 +16,216 @@ from inference_optimizer.orchestrator import kernel_request_handlers as krh
 from inference_optimizer.orchestrator.shared_state import SharedState
 
 
+class TestForgeGemmHelperCoverage:
+    def test_resolve_backend_payload_env_and_default(self, monkeypatch):
+        monkeypatch.delenv("GEMM_TUNING_BACKEND", raising=False)
+        assert krh._resolve_gemm_tuning_backend({}) == "forge"
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        assert krh._resolve_gemm_tuning_backend({}) == "geak"
+        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "forge"
+        # Unknown values fall back to the default instead of surfacing an invalid backend.
+        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "forge"
+
+    def test_parse_forge_gemm_sentinel(self):
+        payload = {"status": "ok", "micro_decision": "candidate"}
+        text = "noise\nFORGE_GEMM_TUNE_RESULT_BEGIN\n" + json.dumps(payload) + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        assert krh._parse_forge_gemm_sentinel(text) == payload
+        assert krh._parse_forge_gemm_sentinel("no sentinel") is None
+        assert (
+            krh._parse_forge_gemm_sentinel(
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\nnot-json\nFORGE_GEMM_TUNE_RESULT_END"
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
+    def test_truthy_env_value_true(self, value):
+        assert krh._truthy_env_value(value) is True
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "off", None])
+    def test_truthy_env_value_false(self, value):
+        assert krh._truthy_env_value(value) is False
+
+    def test_resolve_forge_server_log_priority(self, tmp_path):
+        state = SharedState()
+        baseline = tmp_path / "baseline"
+        current = tmp_path / "current"
+        baseline.mkdir()
+        current.mkdir()
+        (baseline / "server.log").write_text("baseline", encoding="utf-8")
+        (current / "server.log").write_text("current", encoding="utf-8")
+        state.last_baseline = {"workspace": str(baseline)}
+        state.current_best = {"workspace": str(current)}
+
+        assert krh._resolve_forge_server_log(state, tmp_path) == str(current / "server.log")
+
+    def test_resolve_forge_server_log_bounded_runs_fallback(self, tmp_path):
+        state = SharedState()
+        log = tmp_path / "runs" / "explore" / "abc" / "server.log"
+        log.parent.mkdir(parents=True)
+        log.write_text("x", encoding="utf-8")
+
+        assert krh._resolve_forge_server_log(state, tmp_path) == str(log)
+
+    def test_resolve_forge_precision_payload_override(self):
+        state = SharedState(precision="bf16")
+        assert krh._resolve_forge_precision_and_quant(
+            state,
+            {"precision": "fp8", "quant_type": "blockscale"},
+        ) == ("fp8", "blockscale")
+
+    def test_resolve_forge_precision_from_runtime_fp4(self):
+        state = SharedState(precision="bf16")
+        state.current_best = {"extra_server_args": "--quantization fp4", "extra_envs": {}}
+
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp4", "fp4")
+
+    def test_resolve_forge_precision_per_token_from_reference_env(self):
+        state = SharedState(precision="bf16")
+        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
+        state.reference_envs = {"SGLANG_USE_AITER_FP8_PER_TOKEN": "true"}
+
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
+
+    def test_forge_gemm_tune_available_by_path_and_import(self, monkeypatch):
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-gemm-tune")
+        assert krh._forge_gemm_tune_available() is True
+
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: object())
+        assert krh._forge_gemm_tune_available() is True
+
+        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: None)
+        assert krh._forge_gemm_tune_available() is False
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_reports_missing_cli(self, tmp_path, monkeypatch):
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: False)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "forge_gemm_tune_not_found"
+        assert result["backend"] == "forge"
+
+    def test_forge_gemm_tune_available_swallows_find_spec_error(self, monkeypatch):
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
+
+        def _boom(_name):
+            raise ValueError("ambiguous spec")
+
+        monkeypatch.setattr(krh.importlib.util, "find_spec", _boom)
+        assert krh._forge_gemm_tune_available() is False
+
+    def test_resolve_forge_precision_falls_back_to_bf16(self, monkeypatch):
+        # Empty session precision + no fp8/fp4 quantization → bf16/auto default.
+        state = SharedState(precision="")
+        state.current_best = {"extra_server_args": "", "extra_envs": {}}
+        import inference_optimizer.orchestrator.roofline_ceiling as rc
+
+        def _raise(*_a, **_k):
+            raise RuntimeError("no runtime workload")
+
+        monkeypatch.setattr(rc, "resolve_runtime_workload", _raise)
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
+
+    def test_resolve_forge_server_log_uses_baseline_when_no_current_best(self, tmp_path):
+        state = SharedState()
+        baseline = tmp_path / "baseline"
+        baseline.mkdir()
+        (baseline / "server.log").write_text("baseline", encoding="utf-8")
+        state.last_baseline = {"workspace": str(baseline)}
+
+        assert krh._resolve_forge_server_log(state, tmp_path) == str(baseline / "server.log")
+
+    def test_resolve_forge_shapes_reads_artifact_paths_dict(self, tmp_path):
+        state = SharedState()
+        shapes = tmp_path / "gemm_shapes.json"
+        shapes.write_text(json.dumps({"shapes": [{"m": 1, "n": 2, "k": 3}]}), encoding="utf-8")
+        state.last_trace_analyze = {"artifact_paths": {"gemm_shapes_json": str(shapes)}}
+
+        assert krh._resolve_forge_shapes(state, tmp_path) == str(shapes)
+
+    def test_resolve_forge_shapes_skips_incompatible_candidate(self, tmp_path):
+        state = SharedState()
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([{"only": "noMNK"}]), encoding="utf-8")
+        state.last_trace_analyze = {"shapes_json": str(bad)}
+
+        assert krh._resolve_forge_shapes(state, tmp_path) == ""
+
+    def test_is_forge_compatible_shapes_json_rejects_non_dict_sample(self, tmp_path):
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([123, 456]), encoding="utf-8")
+        assert krh._is_forge_compatible_shapes_json(bad) is False
+
+    def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
+        state = SharedState()
+        state.last_trace_analyze = ["not", "a", "dict"]
+        assert krh._resolve_forge_shapes(state, Path("/tmp")) == ""
+
+    def test_resolve_forge_shapes_finds_file_beside_candidates(self, tmp_path):
+        state = SharedState()
+        candidates = tmp_path / "candidates.json"
+        candidates.write_text("[]", encoding="utf-8")
+        shapes = tmp_path / "shapes.json"
+        shapes.write_text(json.dumps([{"M": 1, "N": 2, "K": 3}]), encoding="utf-8")
+        state.last_trace_analyze = {"candidates_path": str(candidates)}
+
+        assert krh._resolve_forge_shapes(state, tmp_path) == str(shapes)
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_requires_model_path(self, tmp_path, monkeypatch):
+        state = SharedState(precision="bf16", framework="sglang")
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.delenv("MODEL_PATH", raising=False)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "model_path_missing"
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_maps_failed_micro_decision(self, tmp_path, monkeypatch):
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"micro_decision": "failed"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 1, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "REVERT"
+        assert result["status"] == "failed"
+        assert result["backend"] == "forge"
+
+
 def _ensure_torch_module(monkeypatch):
     try:
         import torch
@@ -62,6 +272,7 @@ class TestBackendOrder:
 
         assert krh._backend_order({}) == ["geak", "codex"]
 
+
 # _candidate_env_allowed
 class TestCandidateEnvAllowed:
     @pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"])
@@ -90,10 +301,7 @@ class TestRuntimeGeneratedKernel:
         if not markers:
             pytest.skip("no runtime markers in build")
         marker = next(iter(markers))
-        assert (
-            krh._is_runtime_generated_kernel("kernel", f"/tmp/{marker}_x.py")
-            is True
-        )
+        assert krh._is_runtime_generated_kernel("kernel", f"/tmp/{marker}_x.py") is True
 
     def test_reusable_source_root_overrides_compile_marker(self):
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
@@ -103,10 +311,7 @@ class TestRuntimeGeneratedKernel:
         marker = next(iter(markers))
         reusable_root = next(iter(roots))
         # Name matches but source lives under a reusable root → False.
-        assert (
-            krh._is_runtime_generated_kernel(marker, f"{reusable_root}/foo.py")
-            is False
-        )
+        assert krh._is_runtime_generated_kernel(marker, f"{reusable_root}/foo.py") is False
 
 
 # _split_server_args
@@ -136,33 +341,49 @@ class TestLoadCandidateMetadata:
 
     def test_reads_kernel_from_disk(self, tmp_path):
         candidates = tmp_path / "hot.json"
-        candidates.write_text(json.dumps({
-            "hot_kernels": [
-                {"kernel_id": "k0", "name": "first"},
-                {"kernel_id": "k1", "name": "second"},
-            ],
-        }))
-        out = krh._load_candidate_metadata({
-            "candidates_path": str(candidates),
-            "kernel_id": "k1",
-        })
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {"kernel_id": "k0", "name": "first"},
+                        {"kernel_id": "k1", "name": "second"},
+                    ],
+                }
+            )
+        )
+        out = krh._load_candidate_metadata(
+            {
+                "candidates_path": str(candidates),
+                "kernel_id": "k1",
+            }
+        )
         assert out["name"] == "second"
 
     def test_returns_empty_on_missing_kernel(self, tmp_path):
         candidates = tmp_path / "hot.json"
         candidates.write_text(json.dumps({"hot_kernels": []}))
-        assert krh._load_candidate_metadata({
-            "candidates_path": str(candidates),
-            "kernel_id": "missing",
-        }) == {}
+        assert (
+            krh._load_candidate_metadata(
+                {
+                    "candidates_path": str(candidates),
+                    "kernel_id": "missing",
+                }
+            )
+            == {}
+        )
 
     def test_returns_empty_on_bad_json(self, tmp_path):
         candidates = tmp_path / "hot.json"
         candidates.write_text("{not json")
-        assert krh._load_candidate_metadata({
-            "candidates_path": str(candidates),
-            "kernel_id": "x",
-        }) == {}
+        assert (
+            krh._load_candidate_metadata(
+                {
+                    "candidates_path": str(candidates),
+                    "kernel_id": "x",
+                }
+            )
+            == {}
+        )
 
 
 # _load_materialized_workload_metadata
@@ -201,13 +422,16 @@ class TestLoadMaterializedWorkloadMetadata:
         "framework,env_name,expected_args",
         [
             ("sglang", "EXTRA_SGLANG_ARGS", "--mem-fraction-static=0.8"),
-            ("vllm",   "EXTRA_VLLM_ARGS",   "--gpu-memory-utilization 0.9"),
-            ("atom",   "EXTRA_ATOM_ARGS",
-             "--trust-remote-code --level 2 --enable-expert-parallel"),
+            ("vllm", "EXTRA_VLLM_ARGS", "--gpu-memory-utilization 0.9"),
+            ("atom", "EXTRA_ATOM_ARGS", "--trust-remote-code --level 2 --enable-expert-parallel"),
         ],
     )
     def test_server_args_read_from_per_framework_env_key(
-        self, tmp_path, framework, env_name, expected_args,
+        self,
+        tmp_path,
+        framework,
+        env_name,
+        expected_args,
     ):
         """The handler reads the per-framework ``EXTRA_<FRAMEWORK>_ARGS`` slot, not always ``EXTRA_SGLANG_ARGS``."""
         cfg = tmp_path / f"magpie_{framework}.yaml"
@@ -227,8 +451,7 @@ class TestLoadMaterializedWorkloadMetadata:
         runtime = out["runtime_args"]
         assert runtime["framework"] == framework
         assert runtime["server_args"] == expected_args, (
-            f"framework={framework!r} expected server_args="
-            f"{expected_args!r}; got {runtime['server_args']!r}."
+            f"framework={framework!r} expected server_args={expected_args!r}; got {runtime['server_args']!r}."
         )
 
     def test_atom_server_args_not_read_from_extra_sglang_args(self, tmp_path):
@@ -285,22 +508,13 @@ class TestReusableSourceRootsAtom:
     def test_includes_atom_editable_path(self):
         # The matcher lowercases its source-file input, so the stored prefix is
         # lowercase ``/app/atom/atom/`` even though the real path is ``/app/ATOM/atom/``.
-        assert any(
-            "/app/atom/atom/" in r.lower()
-            for r in krh._reusable_source_roots()
-        )
+        assert any("/app/atom/atom/" in r.lower() for r in krh._reusable_source_roots())
 
     def test_includes_atom_site_packages_python_3_10(self):
-        assert any(
-            "/opt/venv/lib/python3.10/site-packages/atom/" in r
-            for r in krh._reusable_source_roots()
-        )
+        assert any("/opt/venv/lib/python3.10/site-packages/atom/" in r for r in krh._reusable_source_roots())
 
     def test_includes_atom_site_packages_python_3_12(self):
-        assert any(
-            "/opt/venv/lib/python3.12/site-packages/atom/" in r
-            for r in krh._reusable_source_roots()
-        )
+        assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in krh._reusable_source_roots())
 
     def test_atom_path_classified_as_reusable(self):
         """An atom-owned kernel source under /app/ATOM/atom/ is NOT runtime-generated even if its name matches a compile marker."""
@@ -309,7 +523,8 @@ class TestReusableSourceRootsAtom:
             pytest.skip("compile markers empty in build")
         marker = next(iter(markers))
         result = krh._is_runtime_generated_kernel(
-            marker, "/app/ATOM/atom/model_engine/model_runner.py",
+            marker,
+            "/app/ATOM/atom/model_engine/model_runner.py",
         )
         assert result is False
 
@@ -321,14 +536,16 @@ class TestReusableSourceRootsAtom:
         marker = next(iter(markers))
         # Under /app/ but not /app/ATOM/atom/ → runtime-generated (not reusable).
         result = krh._is_runtime_generated_kernel(
-            marker, "/app/session_dir/runs/baseline/foo.py",
+            marker,
+            "/app/session_dir/runs/baseline/foo.py",
         )
         assert result is True
 
 
 # run_gemm_tuning_handler
 class TestRunGemmTuningHandler:
-    def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path):
+    def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         state = SharedState(precision="bf16", framework="sglang")
         state.save(tmp_path)
 
@@ -338,6 +555,7 @@ class TestRunGemmTuningHandler:
         assert result["error_class"] == "fp8_only_action"
 
     def test_builds_task_file_input_not_task_argv(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         root = tmp_path / "kernel-agent"
         tool = root / "tools" / "gemm_tuning.py"
         tool.parent.mkdir(parents=True)
@@ -365,23 +583,31 @@ class TestRunGemmTuningHandler:
             data = json.loads(Path(input_path).read_text())
             assert data["framework"] == "sglang"
             assert data["precision"] == "fp8"
-            return 0, json.dumps({
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.2,
-                "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
-            }), ""
+            return (
+                0,
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "decision": "KEEP",
+                        "best_speedup": 1.2,
+                        "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
+                    }
+                ),
+                "",
+            )
 
         monkeypatch.setattr(krh, "_run_subprocess", fake_run)
 
-        result = asyncio.run(krh.run_gemm_tuning_handler(
-            {
-                "benchmark_script": "/workspace/run_sglang_test.sh",
-                "dry_run": True,
-                "task_id": "t1",
-            },
-            session_dir=tmp_path,
-        ))
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler(
+                {
+                    "benchmark_script": "/workspace/run_sglang_test.sh",
+                    "dry_run": True,
+                    "task_id": "t1",
+                },
+                session_dir=tmp_path,
+            )
+        )
 
         assert result["status"] == "ok"
         cmd_text = " ".join(captured["cmd"])  # type: ignore[arg-type]
@@ -390,6 +616,7 @@ class TestRunGemmTuningHandler:
         assert "--input-json" in captured["cmd"]  # type: ignore[operator]
 
     def test_generates_isolated_benchmark_script_when_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         root = tmp_path / "kernel-agent"
         tool = root / "tools" / "gemm_tuning.py"
         tool.parent.mkdir(parents=True)
@@ -415,24 +642,186 @@ class TestRunGemmTuningHandler:
             bench = Path(data["benchmark_script"])
             text = bench.read_text()
             assert bench.name == "geak_gemm_benchmark.sh"
-            assert "PORT=\"${PORT:-18888}\"" in text
+            assert 'PORT="${PORT:-18888}"' in text
             assert "pgrep" not in text
             assert data["benchmark_script"].endswith("geak_gemm_benchmark.sh")
-            return 0, json.dumps({
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.1,
-                "tuned_file": "/tmp/tuned.csv",
-            }), ""
+            return (
+                0,
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "decision": "KEEP",
+                        "best_speedup": 1.1,
+                        "tuned_file": "/tmp/tuned.csv",
+                    }
+                ),
+                "",
+            )
 
         monkeypatch.setattr(krh, "_run_subprocess", fake_run)
 
-        result = asyncio.run(krh.run_gemm_tuning_handler(
-            {"dry_run": True, "task_id": "auto"},
-            session_dir=tmp_path,
-        ))
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler(
+                {"dry_run": True, "task_id": "auto"},
+                session_dir=tmp_path,
+            )
+        )
 
         assert result["status"] == "ok"
+
+    def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.current_best = {
+            "extra_server_args": "--quantization fp8 --fp8-gemm-backend aiter",
+            "extra_envs": {},
+        }
+        state.save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            captured["cmd"] = cmd
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "ok",
+                        "micro_decision": "candidate",
+                        "recommended_env": {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"},
+                        "tuners_run": [{"best_micro_speedup": 1.1}],
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path)
+        )
+
+        cmd = captured["cmd"]  # type: ignore[assignment]
+        input_path = cmd[cmd.index("--input-json") + 1]
+        data = json.loads(Path(input_path).read_text())
+        assert data["precision"] == "fp8"
+        # Do not force blockscale from Hyperloom. Forge should inspect
+        # kernel_signature_log when available; without a log it defaults to
+        # blockscale internally.
+        assert data["quant_type"] == "auto"
+        assert data["conc"] == 256
+        assert result["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
+
+    def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.current_best = {
+            "extra_server_args": "--quantization fp8 --fp8-gemm-backend aiter",
+            "extra_envs": {"SGLANG_USE_AITER_FP8_PER_TOKEN": "1"},
+        }
+        state.save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            captured["cmd"] = cmd
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "skipped",
+                        "micro_decision": "skipped",
+                        "recommended_env": {},
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        asyncio.run(krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path))
+
+        cmd = captured["cmd"]  # type: ignore[assignment]
+        input_path = cmd[cmd.index("--input-json") + 1]
+        data = json.loads(Path(input_path).read_text())
+        assert data["precision"] == "fp8"
+        assert data["quant_type"] == "per_token"
+
+    def test_forge_fallback_to_session_precision_when_no_quantization(self, tmp_path, monkeypatch):
+        """When current_best has no --quantization, fall back to state.precision."""
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/moe",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.current_best = {"extra_server_args": "", "extra_envs": {}}
+        state.save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            captured["cmd"] = cmd
+            return (0, json.dumps({"status": "ok", "micro_decision": "skipped"}), "")
+
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        asyncio.run(krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path))
+
+        cmd = captured["cmd"]  # type: ignore[assignment]
+        input_path = cmd[cmd.index("--input-json") + 1]
+        data = json.loads(Path(input_path).read_text())
+        assert data["precision"] == "bf16"
+        assert data["quant_type"] == "auto"
+
+    def test_forge_shapes_json_schema_validation(self, tmp_path):
+        good = tmp_path / "good_shapes.json"
+        good.write_text(json.dumps({"shapes": [{"M": 1, "N": 2, "K": 3}]}))
+        bad_empty = tmp_path / "bad_empty.json"
+        bad_empty.write_text(json.dumps({"shapes": []}))
+        bad_trace_shape = tmp_path / "bad_trace_shape.json"
+        bad_trace_shape.write_text(json.dumps([{"shape": [1, 2, 3]}]))
+
+        assert krh._is_forge_compatible_shapes_json(good) is True
+        assert krh._is_forge_compatible_shapes_json(bad_empty) is False
+        assert krh._is_forge_compatible_shapes_json(bad_trace_shape) is False
+        assert krh._is_forge_compatible_shapes_json(tmp_path / "missing.json") is False
+
+    def test_resolve_forge_shapes_prefers_compatible_artifact(self, tmp_path):
+        session_dir = tmp_path / "session"
+        shapes = tmp_path / "shapes.json"
+        shapes.write_text(json.dumps([{"m": 4, "n": 5, "k": 6}]))
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([{"shape": [1, 2, 3]}]))
+
+        state = SharedState()
+        state.last_trace_analyze = {
+            "shapes_json": str(bad),
+            "artifact_paths": {"gemm_shapes_json": str(shapes)},
+        }
+
+        assert krh._resolve_forge_shapes(state, session_dir) == str(shapes)
 
 
 # _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror
@@ -441,11 +830,11 @@ class TestDefaultGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
         [
-            (None, 130.0),       # unset -> full default
-            ("", 130.0),         # empty -> full default
+            (None, 130.0),  # unset -> full default
+            ("", 130.0),  # empty -> full default
             ("full", 130.0),
-            ("FULL", 130.0),     # case-insensitive
-            ("  full  ", 130.0), # whitespace tolerated
+            ("FULL", 130.0),  # case-insensitive
+            ("  full  ", 130.0),  # whitespace tolerated
             ("garbage", 130.0),  # unknown values fall back to full
             ("quick", 70.0),
             ("QUICK", 70.0),
@@ -471,12 +860,18 @@ class TestGeakBudgetMinutes:
         monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "115")
         assert krh._geak_budget_minutes({}) == 115.0
 
-    @pytest.mark.parametrize("geak_run_mode, expected", [
-        ("full", 130.0),
-        ("quick", 70.0),
-    ])
+    @pytest.mark.parametrize(
+        "geak_run_mode, expected",
+        [
+            ("full", 130.0),
+            ("quick", 70.0),
+        ],
+    )
     def test_falls_through_to_helper_when_no_overrides(
-        self, monkeypatch, geak_run_mode, expected,
+        self,
+        monkeypatch,
+        geak_run_mode,
+        expected,
     ):
         monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
         monkeypatch.setenv("GEAK_RUN_MODE", geak_run_mode)
@@ -526,7 +921,11 @@ class TestDefaultKernelBatchParallel:
         ],
     )
     def test_scales_with_visible_gpus(
-        self, patch_torch, n_gpus, per_task, expected,
+        self,
+        patch_torch,
+        n_gpus,
+        per_task,
+        expected,
     ):
         patch_torch(n_gpus, per_task=per_task)
         assert krh._default_kernel_batch_parallel() == expected
@@ -541,10 +940,7 @@ class TestDefaultKernelBatchParallel:
 
     def test_zero_visible_gpus_returns_legacy_fallback(self, patch_torch):
         patch_torch(0)
-        assert (
-            krh._default_kernel_batch_parallel()
-            == krh._DEFAULT_KERNEL_BATCH_PARALLEL
-        )
+        assert krh._default_kernel_batch_parallel() == krh._DEFAULT_KERNEL_BATCH_PARALLEL
 
     def test_torch_failure_returns_legacy_fallback(self, monkeypatch):
         torch = _ensure_torch_module(monkeypatch)
@@ -554,10 +950,7 @@ class TestDefaultKernelBatchParallel:
 
         monkeypatch.setattr(torch.cuda, "device_count", _boom)
         monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
-        assert (
-            krh._default_kernel_batch_parallel()
-            == krh._DEFAULT_KERNEL_BATCH_PARALLEL
-        )
+        assert krh._default_kernel_batch_parallel() == krh._DEFAULT_KERNEL_BATCH_PARALLEL
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +964,7 @@ class TestDefaultKernelBatchParallel:
 # second ladder, so keep the sequential GEAK-first / OOB-fallback ladder.
 # Operators / tests can force the decision via payload or env.
 # ---------------------------------------------------------------------------
+
 
 class TestShouldParallelizeBackends:
     @pytest.fixture
@@ -594,20 +988,25 @@ class TestShouldParallelizeBackends:
         [
             # 1 GPU/task: need room for both ladders -> visible_gpus >= 2.
             # The kernel count is irrelevant (batch width is capped elsewhere).
-            (8, 1, 3, True),     # 8 >= 2
-            (8, 1, 7, True),     # 8 >= 2 (kernel count no longer gates)
-            (8, 1, 100, True),   # 8 >= 2 even when candidates >> gpus
-            (2, 1, 1, True),     # 2 >= 2 boundary
-            (1, 1, 1, False),    # 1 < 2 -> no room for a second ladder
+            (8, 1, 3, True),  # 8 >= 2
+            (8, 1, 7, True),  # 8 >= 2 (kernel count no longer gates)
+            (8, 1, 100, True),  # 8 >= 2 even when candidates >> gpus
+            (2, 1, 1, True),  # 2 >= 2 boundary
+            (1, 1, 1, False),  # 1 < 2 -> no room for a second ladder
             # Multi-GPU reservations: need room for TWO per_task backends.
-            (8, 4, 1, True),     # 8 >= 8 boundary
-            (8, 4, 5, True),     # 8 >= 8 (candidate count irrelevant)
-            (8, 8, 1, False),    # 8 < 16 -> can't fit a 2nd 8-GPU backend
-            (16, 8, 1, True),    # 16 >= 16
+            (8, 4, 1, True),  # 8 >= 8 boundary
+            (8, 4, 5, True),  # 8 >= 8 (candidate count irrelevant)
+            (8, 8, 1, False),  # 8 < 16 -> can't fit a 2nd 8-GPU backend
+            (16, 8, 1, True),  # 16 >= 16
         ],
     )
     def test_gpu_aware_threshold(
-        self, patch_torch, n_gpus, per_task, num_candidates, expected,
+        self,
+        patch_torch,
+        n_gpus,
+        per_task,
+        num_candidates,
+        expected,
     ):
         patch_torch(n_gpus, per_task=per_task)
         assert krh._should_parallelize_backends({}, num_candidates) is expected
@@ -633,21 +1032,37 @@ class TestShouldParallelizeBackends:
 
     def test_payload_override_enables_below_threshold(self, patch_torch):
         patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
-        assert krh._should_parallelize_backends(
-            {"parallel_backends": True}, 5,
-        ) is True
-        assert krh._should_parallelize_backends(
-            {"parallel_backends": "on"}, 5,
-        ) is True
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": True},
+                5,
+            )
+            is True
+        )
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": "on"},
+                5,
+            )
+            is True
+        )
 
     def test_payload_override_disables_above_threshold(self, patch_torch):
         patch_torch(64, per_task=1)  # GPU-aware math would say True
-        assert krh._should_parallelize_backends(
-            {"parallel_backends": False}, 1,
-        ) is False
-        assert krh._should_parallelize_backends(
-            {"parallel_backends": "no"}, 1,
-        ) is False
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": False},
+                1,
+            )
+            is False
+        )
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": "no"},
+                1,
+            )
+            is False
+        )
 
     def test_env_override(self, patch_torch, monkeypatch):
         patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
@@ -667,6 +1082,7 @@ class TestShouldParallelizeBackends:
 # budget even when ``max_parallel`` is set higher.
 # ---------------------------------------------------------------------------
 
+
 class TestBatchParallelConcurrencyCap:
     def test_caps_concurrency_to_gpu_budget(self, tmp_path, monkeypatch):
         # 8 visible GPUs, 1 GPU/task -> safe concurrency = 8 // (2*1) = 4.
@@ -677,7 +1093,11 @@ class TestBatchParallelConcurrencyCap:
         state = {"in_flight": 0, "peak": 0}
 
         async def fake_sequence(
-            base_payload, candidate, *, session_dir, parallel_backends=False,
+            base_payload,
+            candidate,
+            *,
+            session_dir,
+            parallel_backends=False,
         ):
             assert parallel_backends is True
             state["in_flight"] += 1
@@ -696,15 +1116,15 @@ class TestBatchParallelConcurrencyCap:
 
         monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
         candidates = [
-            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py",
-             "reusable_native_kernel": True}
-            for i in range(10)
+            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py", "reusable_native_kernel": True} for i in range(10)
         ]
-        out = asyncio.run(krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy", "max_parallel": 10},
-            candidates=candidates,
-            session_dir=tmp_path,
-        ))
+        out = asyncio.run(
+            krh._run_optimization_batch(
+                payload={"candidates_path": "/dummy", "backend_order": "geak,claude,codex", "max_parallel": 10},
+                candidates=candidates,
+                session_dir=tmp_path,
+            )
+        )
 
         assert out["parallel_backends"] is True
         # max_parallel echoes the capped value (10 -> 4).
@@ -719,7 +1139,11 @@ class TestBatchParallelConcurrencyCap:
         monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")  # force parallel
 
         async def fake_sequence(
-            base_payload, candidate, *, session_dir, parallel_backends=False,
+            base_payload,
+            candidate,
+            *,
+            session_dir,
+            parallel_backends=False,
         ):
             return {
                 "status": "ok",
@@ -731,15 +1155,15 @@ class TestBatchParallelConcurrencyCap:
 
         monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
         candidates = [
-            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py",
-             "reusable_native_kernel": True}
-            for i in range(3)
+            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py", "reusable_native_kernel": True} for i in range(3)
         ]
-        out = asyncio.run(krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy", "max_parallel": 7},
-            candidates=candidates,
-            session_dir=tmp_path,
-        ))
+        out = asyncio.run(
+            krh._run_optimization_batch(
+                payload={"candidates_path": "/dummy", "backend_order": "geak,claude,codex", "max_parallel": 7},
+                candidates=candidates,
+                session_dir=tmp_path,
+            )
+        )
 
         assert out["parallel_backends"] is True
         assert out["max_parallel"] == 7  # uncapped (visible GPU count unknown)
@@ -773,14 +1197,9 @@ class TestReconcileKernelId:
         # Non-empty ids are never guessed. A pure hallucination should flow to
         # the reusable-native guard / CLI skip path rather than being mapped to
         # an unrelated candidate.
+        assert krh._reconcile_kernel_id("aiter.silu_and_mul", self.CANDS) == "aiter.silu_and_mul"
         assert (
-            krh._reconcile_kernel_id("aiter.silu_and_mul", self.CANDS)
-            == "aiter.silu_and_mul"
-        )
-        assert (
-            krh._reconcile_kernel_id(
-                "framework_sglang_silu_and_mul_m64", self.CANDS
-            )
+            krh._reconcile_kernel_id("framework_sglang_silu_and_mul_m64", self.CANDS)
             == "framework_sglang_silu_and_mul_m64"
         )
 
@@ -790,12 +1209,9 @@ class TestReconcileKernelId:
 # rejects the real k00x rather than the raw hallucinated alias.
 class TestResolveCandidateId:
     SKIPPED = [
-        {"kernel_id": "k001", "name": "aten::mm",
-         "reusable_native_kernel": False, "source_file": ""},
-        {"kernel_id": "k003", "name": "aten::mm",
-         "reusable_native_kernel": False, "source_file": ""},
-        {"kernel_id": "k010", "name": "aiter::rmsnorm",
-         "reusable_native_kernel": False, "source_file": ""},
+        {"kernel_id": "k001", "name": "aten::mm", "reusable_native_kernel": False, "source_file": ""},
+        {"kernel_id": "k003", "name": "aten::mm", "reusable_native_kernel": False, "source_file": ""},
+        {"kernel_id": "k010", "name": "aiter::rmsnorm", "reusable_native_kernel": False, "source_file": ""},
     ]
 
     def test_exact_id(self):
@@ -821,10 +1237,15 @@ class TestResolveCandidateId:
 class TestAllKernelCandidates:
     def test_union_of_hot_and_skipped(self, tmp_path):
         cp = tmp_path / "kc.json"
-        cp.write_text(json.dumps({
-            "hot_kernels": [{"kernel_id": "k005", "name": "moe"}],
-            "skipped_kernels": [{"kernel_id": "k001", "name": "aten::mm"}],
-        }), encoding="utf-8")
+        cp.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [{"kernel_id": "k005", "name": "moe"}],
+                    "skipped_kernels": [{"kernel_id": "k001", "name": "aten::mm"}],
+                }
+            ),
+            encoding="utf-8",
+        )
         out = krh._all_kernel_candidates({"candidates_path": str(cp)})
         assert {c["kernel_id"] for c in out} == {"k005", "k001"}
 

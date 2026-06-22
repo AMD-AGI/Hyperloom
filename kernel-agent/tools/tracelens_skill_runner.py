@@ -24,6 +24,9 @@ from typing import Any, Callable, Iterable
 DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 
+# Strips a ``Kernel N:`` label prefix from a kernel-name cell piece.
+_KERNEL_LABEL_RE = re.compile(r"^\s*Kernel\s+\d+\s*:\s*", re.IGNORECASE)
+
 # #266 transcript field cap: a single tool_result / text / thinking block can
 # be megabytes (a big file Read, a CSV dump), and the transcript is diagnostic
 # only — so cap every serialized string field. Without this the
@@ -169,15 +172,19 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
 
     candidates: list[Path] = []
     if trace_input.is_dir():
-        candidates.extend([
-            trace_input / "capture_traces",
-            trace_input / "graph_capture",
-        ])
+        candidates.extend(
+            [
+                trace_input / "capture_traces",
+                trace_input / "graph_capture",
+            ]
+        )
     for trace_file in trace_files[:1]:
-        candidates.extend([
-            trace_file.parent / "capture_traces",
-            trace_file.parent.parent / "capture_traces",
-        ])
+        candidates.extend(
+            [
+                trace_file.parent / "capture_traces",
+                trace_file.parent.parent / "capture_traces",
+            ]
+        )
     for candidate in candidates:
         if candidate.is_dir():
             return candidate
@@ -224,14 +231,8 @@ def build_orchestrator_prompt(
     else:
         exec_mode = "default"
 
-    internal_root_text = (
-        str(tracelens_internal_root) if tracelens_internal_root
-        else "(not installed; OSS-only mode)"
-    )
-    tl_extension_text = (
-        "TraceLens_internal" if tracelens_internal_root
-        else "(unset)"
-    )
+    internal_root_text = str(tracelens_internal_root) if tracelens_internal_root else "(not installed; OSS-only mode)"
+    tl_extension_text = "TraceLens_internal" if tracelens_internal_root else "(unset)"
 
     comparison_scope = "standalone"
     capture_text = str(capture_folder) if capture_folder else "N/A"
@@ -287,9 +288,7 @@ def _import_sdk() -> tuple[Any, Any]:
     try:
         import claude_agent_sdk as sdk  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised via caller fallback
-        raise RuntimeError(
-            "claude_agent_sdk not installed; run inference_optimizer/kernel-agent install first"
-        ) from exc
+        raise RuntimeError("claude_agent_sdk not installed; run kernel-agent/scripts/install.sh first") from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
     return sdk.query, sdk.ClaudeAgentOptions
@@ -319,8 +318,15 @@ def _iter_message_text(message: Any) -> Iterable[str]:
 
 
 def _cap_str(value: str, limit: int = _TRANSCRIPT_FIELD_MAX_CHARS) -> str:
-    """Truncate a transcript string to ``limit`` chars with a clip marker so a
-    reader can tell the field was bounded (#266)."""
+    """Truncate a transcript string, appending a clip marker when bounded.
+
+    Args:
+        value: The string to truncate.
+        limit: Maximum length before truncation.
+
+    Returns:
+        The original string, or a truncated copy with a clip marker (#266).
+    """
     if len(value) <= limit:
         return value
     return value[:limit] + f"... [truncated {len(value) - limit} chars]"
@@ -334,7 +340,15 @@ def _json_safe(value: Any, *, cap: bool = True) -> Any:
     write infallible so a serialization edge case never aborts a TraceLens
     run (#266). When ``cap`` is set every string (at any nesting depth) is
     bounded to ``_TRANSCRIPT_FIELD_MAX_CHARS`` so a megabyte tool_result cannot
-    bloat the transcript."""
+    bloat the transcript.
+
+    Args:
+        value: The value to coerce.
+        cap: When ``True``, bound every nested string to the field max.
+
+    Returns:
+        A JSON-serializable representation of ``value``.
+    """
     if isinstance(value, str):
         return _cap_str(value) if cap else value
     if isinstance(value, dict):
@@ -356,7 +370,14 @@ def _serialize_sdk_block(block: Any) -> dict[str, Any]:
     union of fields those types expose, rather than importing the SDK's
     concrete block classes. This mirrors
     ``ClaudeBackend._iter_blocks`` so the runner stays decoupled from
-    claude-agent-sdk internals."""
+    claude-agent-sdk internals.
+
+    Args:
+        block: An SDK content block (or a plain dict).
+
+    Returns:
+        A JSON-safe record describing the block.
+    """
     if isinstance(block, dict):
         record = _json_safe(block)
         if isinstance(record, dict):
@@ -403,7 +424,15 @@ def _serialize_sdk_message(message: Any, *, seq: int) -> dict[str, Any]:
     The record carries the message class name (``AssistantMessage`` /
     ``ResultMessage`` / ...), its content blocks, and — when present on a
     terminal ``ResultMessage`` — the consolidated ``result`` text and the
-    Anthropic ``usage`` dict (token accounting)."""
+    Anthropic ``usage`` dict (token accounting).
+
+    Args:
+        message: An SDK stream message.
+        seq: The message sequence number within the stream.
+
+    Returns:
+        A JSON-safe transcript record for the message.
+    """
     record: dict[str, Any] = {
         "seq": seq,
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -532,16 +561,13 @@ async def run_tracelens_skill(
     except OSError as exc:  # noqa: BLE001
         transcript_fh = None
         if log:
-            log(f"[claude-sdk] WARNING: cannot open transcript "
-                f"{transcript_path}: {exc}")
+            log(f"[claude-sdk] WARNING: cannot open transcript {transcript_path}: {exc}")
     try:
         async for message in sdk_query_factory(prompt=prompt, options=options):
             if transcript_fh is not None:
                 try:
                     record = _serialize_sdk_message(message, seq=transcript_seq)
-                    transcript_fh.write(
-                        json.dumps(record, ensure_ascii=False) + "\n"
-                    )
+                    transcript_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
                     transcript_fh.flush()
                     transcript_seq += 1
                     transcript_written = True
@@ -565,17 +591,14 @@ async def run_tracelens_skill(
                 # Closing the diagnostic transcript must never abort an
                 # otherwise-successful run; surface it as a warning instead.
                 if log:
-                    log(f"[claude-sdk] WARNING: cannot close transcript "
-                        f"{transcript_path}: {exc}")
+                    log(f"[claude-sdk] WARNING: cannot close transcript {transcript_path}: {exc}")
 
     # Final report is ``analysis.md`` (contract since #148; the v0.2 standalone_analysis.md
     # fallback was dropped in #203 for masking orchestrator failures with stale data).
     report_path = output_dir / "analysis.md"
     if not report_path.exists():
         if sdk_error:
-            raise RuntimeError(
-                f"TraceLens SDK runner failed before writing {report_path}: {sdk_error}"
-            )
+            raise RuntimeError(f"TraceLens SDK runner failed before writing {report_path}: {sdk_error}")
         raise RuntimeError(f"TraceLens SDK runner did not write {report_path}")
 
     artifact_paths = {
@@ -597,8 +620,7 @@ async def run_tracelens_skill(
             transcript_path.unlink(missing_ok=True)
         except OSError as exc:
             if log:
-                log(f"[claude-sdk] WARNING: cannot remove empty transcript "
-                    f"{transcript_path}: {exc}")
+                log(f"[claude-sdk] WARNING: cannot remove empty transcript {transcript_path}: {exc}")
     if sdk_error:
         artifact_paths["tracelens_agent_sdk_error"] = sdk_error
 
@@ -642,9 +664,7 @@ _DATA_TABLE_HEADER_TOKENS = (
     "bound",
 )
 # Lowercased canonical header tokens; separates the 9 typed fields from trailing extras.
-_DATA_TABLE_CANONICAL_KEY_SET = frozenset(
-    tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS
-)
+_DATA_TABLE_CANONICAL_KEY_SET = frozenset(tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS)
 _PITEM_MARKER_RE = re.compile(
     r"<!--\s*impact-begin\s+kind=p_item\s+([^>]*?)-->",
     re.IGNORECASE,
@@ -692,9 +712,22 @@ def _parse_marker_attrs(blob: str) -> dict[str, str]:
 
 
 def _extract_between(
-    text: str, start_marker: str, end_markers: tuple[str, ...],
+    text: str,
+    start_marker: str,
+    end_markers: tuple[str, ...],
 ) -> str:
-    """Return the substring between ``start_marker`` and the earliest ``end_markers`` (tail if none; empty if start absent)."""
+    """Extract the substring between a start marker and the earliest end marker.
+
+    Args:
+        text: The text to search.
+        start_marker: Marker that begins the region.
+        end_markers: Candidate markers that end the region; the earliest match
+            wins.
+
+    Returns:
+        The trimmed substring, the tail when no end marker is found, or an
+        empty string when the start marker is absent.
+    """
     start = text.find(start_marker)
     if start == -1:
         return ""
@@ -706,42 +739,63 @@ def _extract_between(
 
 
 def _extract_pitem_prose(body: str) -> dict[str, Any]:
-    """Extract Identification / Reasoning / Resolution / Impact-estimate fields from a P-item body (all default empty/0.0)."""
+    """Extract prose and impact fields from a P-item body.
+
+    Args:
+        body: The Markdown body of a single P-item.
+
+    Returns:
+        A dict with ``identification``, ``reasoning_for_slowdown``,
+        ``resolution``, and impact estimates (defaulting to empty / 0.0).
+    """
     identification = _extract_between(
-        body, _IDENTIFICATION_LABEL,
+        body,
+        _IDENTIFICATION_LABEL,
         (_DATA_LABEL, _REASONING_LABEL, _RESOLUTION_LABEL, _IMPACT_LABEL),
     )
     reasoning = _extract_between(
-        body, _REASONING_LABEL, (_RESOLUTION_LABEL, _IMPACT_LABEL),
+        body,
+        _REASONING_LABEL,
+        (_RESOLUTION_LABEL, _IMPACT_LABEL),
     )
     resolution = _extract_between(body, _RESOLUTION_LABEL, (_IMPACT_LABEL,))
     low_match = _IMPACT_LOW_RE.search(body)
     high_match = _IMPACT_HIGH_RE.search(body)
     return {
-        "identification":         identification,
+        "identification": identification,
         "reasoning_for_slowdown": reasoning,
-        "resolution":             resolution,
-        "impact_low_ms":          _safe_float(low_match.group(1)) if low_match else 0.0,
-        "impact_low_e2e_pct":     _safe_float(low_match.group(2)) if low_match else 0.0,
-        "impact_high_ms":         _safe_float(high_match.group(1)) if high_match else 0.0,
-        "impact_high_e2e_pct":    _safe_float(high_match.group(2)) if high_match else 0.0,
+        "resolution": resolution,
+        "impact_low_ms": _safe_float(low_match.group(1)) if low_match else 0.0,
+        "impact_low_e2e_pct": _safe_float(low_match.group(2)) if low_match else 0.0,
+        "impact_high_ms": _safe_float(high_match.group(1)) if high_match else 0.0,
+        "impact_high_e2e_pct": _safe_float(high_match.group(2)) if high_match else 0.0,
     }
 
 
 def _extract_pitem_categories(text: str) -> list[dict[str, Any]]:
-    """Return per-P-item metadata (``category``/``low``/``mid``/``high``), in priority order, from p_item markers."""
+    """Extract per-P-item category and impact metadata in priority order.
+
+    Args:
+        text: The full report text containing ``p_item`` markers.
+
+    Returns:
+        A list of dicts with ``category`` and ``impact_score*`` fields, one
+        per P-item marker.
+    """
 
     items: list[dict[str, Any]] = []
     for match in _PITEM_MARKER_RE.finditer(text):
         attrs = _parse_marker_attrs(match.group(1))
         if "category" not in attrs:
             continue
-        items.append({
-            "category": attrs.get("category", ""),
-            "impact_score_low": _safe_float(attrs.get("low")),
-            "impact_score": _safe_float(attrs.get("mid")),
-            "impact_score_high": _safe_float(attrs.get("high")),
-        })
+        items.append(
+            {
+                "category": attrs.get("category", ""),
+                "impact_score_low": _safe_float(attrs.get("low")),
+                "impact_score": _safe_float(attrs.get("mid")),
+                "impact_score_high": _safe_float(attrs.get("high")),
+            }
+        )
     return items
 
 
@@ -775,12 +829,22 @@ def _split_data_blocks(text: str) -> list[tuple[int, str, str]]:
 
 
 def _extract_data_table(body: str) -> list[list[str]]:
-    """Pull the 9-column markdown table that follows ``**Data:**`` (raw header + data cells; ends at blank line or next ``**Field:**``)."""
+    """Pull the 9-column markdown table that follows a ``**Data:**`` marker.
+
+    The table includes the raw header and data cells and ends at a blank line
+    or the next ``**Field:**`` marker.
+
+    Args:
+        body: The P-item body text to scan.
+
+    Returns:
+        The table rows as lists of cell strings.
+    """
 
     marker = body.find("**Data:**")
     if marker < 0:
         return []
-    tail = body[marker + len("**Data:**"):]
+    tail = body[marker + len("**Data:**") :]
     rows: list[list[str]] = []
     in_table = False
     for line in tail.splitlines():
@@ -799,6 +863,24 @@ def _extract_data_table(body: str) -> list[list[str]]:
         cells = [cell.strip() for cell in stripped.split("|")[1:-1]]
         rows.append(cells)
     return rows
+
+
+def _parse_kernel_name_cell(raw: str) -> list[str]:
+    """Parse the ``Kernel Name`` cell into clean device kernel names.
+
+    The going-forward report may list several kernels per row as
+    ``Kernel 1: a<br>Kernel 2: b``; split those on ``<br>`` and strip the
+    ``Kernel N:`` labels. A single bare kernel name passes through. Placeholders
+    (``-`` / ``—``) and empties are dropped.
+    """
+    if not raw:
+        return []
+    names: list[str] = []
+    for piece in raw.replace("<br>", "\n").split("\n"):
+        name = _KERNEL_LABEL_RE.sub("", piece).strip()
+        if name and name not in {"-", "—"} and name not in names:
+            names.append(name)
+    return names
 
 
 def _row_to_candidate(
@@ -837,10 +919,7 @@ def _row_to_candidate(
         return None
     record = dict(zip(headers, cells))
     # Trailing extras (spec allows appended columns) preserved verbatim for downstream consumers.
-    extra_columns = {
-        key: value for key, value in record.items()
-        if key not in _DATA_TABLE_CANONICAL_KEY_SET
-    }
+    extra_columns = {key: value for key, value in record.items() if key not in _DATA_TABLE_CANONICAL_KEY_SET}
 
     name = record.get("operation", "").strip()
     if not name or name in {"-", "—"}:
@@ -850,6 +929,13 @@ def _row_to_candidate(
     kernel_path = record.get("kernel path", "").strip()
     if kernel_path in {"-", "—"}:
         kernel_path = ""
+    # Device kernel symbol(s) (TraceLens "Kernel Name" column, an appended extra):
+    # the mangled __global__ name(s) used to disambiguate dispatch ops in the
+    # op -> source resolver. The going-forward report may list several kernels per
+    # row ("Kernel 1: a<br>Kernel 2: b"); keep the full list and use the first for
+    # dispatch matching. Placeholders normalize to "".
+    device_kernel_names = _parse_kernel_name_cell(record.get("kernel name", ""))
+    device_kernel_name = device_kernel_names[0] if device_kernel_names else ""
     # Promote a framework-relative launcher path to its absolute on-disk source so the
     # patchability gate passes; verbatim launcher kept on tracelens_launcher_path below.
     resolved_source_file = kernel_path
@@ -880,6 +966,10 @@ def _row_to_candidate(
         "source_file": resolved_source_file,
         # PR-B §1: keep raw Kernel Path verbatim so aggregation's AST resolution survives _finalize_candidates' source_file overwrite.
         "tracelens_launcher_path": kernel_path,
+        # Device kernel symbol for dispatch resolution (op -> source); "" when absent.
+        "device_kernel_name": device_kernel_name,
+        # Full list when the row names multiple kernels (composite); [] when absent.
+        "device_kernel_names": device_kernel_names,
         "source_type": "tracelens_report",
         "shapes": shapes,
         "tracelens_category": category,
@@ -921,7 +1011,17 @@ _IDLE_PCT_TABLE_RE = re.compile(
 
 
 def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
-    """Extract ``Idle %`` from the Executive Summary table in ``analysis.md`` (§1/§2 idle-gate); ``None`` on missing/unparseable so callers skip the gate gracefully."""
+    """Extract ``Idle %`` from an ``analysis.md`` Executive Summary table.
+
+    Used by the §1/§2 idle gate.
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+
+    Returns:
+        The idle percentage, or ``None`` when missing/unparseable so callers
+        skip the gate gracefully.
+    """
     try:
         text = md_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -939,7 +1039,14 @@ def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
 
 
 def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
-    """Per-row sort key for the ``Lower Efficiency`` budget filter (§2); rows with no efficiency (0.0) sort last."""
+    """Compute the per-row sort key for the ``Lower Efficiency`` filter (§2).
+
+    Args:
+        candidate: A candidate row carrying ``efficiency_percent``.
+
+    Returns:
+        The efficiency value, or ``inf`` so rows with no efficiency sort last.
+    """
     eff = candidate.get("efficiency_percent")
     try:
         value = float(eff)
@@ -951,7 +1058,19 @@ def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
 
 
 def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
-    """Parse the TraceLens ``analysis.md`` final report into hot-kernels in §2 priority order (P-item, then lower efficiency within); empty/missing → []."""
+    """Parse a TraceLens ``analysis.md`` report into hot-kernel rows.
+
+    Rows are returned in §2 priority order (P-item, then lower efficiency
+    within each item).
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+        top_k: Maximum number of hot-kernel rows to return.
+
+    Returns:
+        The hot-kernel rows, or an empty list when the report is missing or
+        unparseable.
+    """
 
     if not md_path.exists():
         return []
@@ -975,23 +1094,36 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
         if not rows:
             continue
         header_row = [cell.strip().lower() for cell in rows[0]]
-        # Validate first 9 cells against the canonical schema; reject narrower/reordered headers (silent wrong-mapping would corrupt candidates).
+        # Validate by PRESENCE of every canonical column (matched by name anywhere
+        # in the header), not by fixed position. ``_row_to_candidate`` reads cells
+        # name-keyed (``dict(zip(headers, cells))`` -> ``record.get("kernel path")``),
+        # so any column ORDER works as long as every required name is present and
+        # the per-cell names stay aligned. This tolerates a remapped report that
+        # INSERTS or APPENDS extra columns (e.g. a ``Source Path`` column the
+        # path-resolution step adds) — TraceLens's own spec permits appended
+        # columns, and downstream consumers must not break when one is added.
+        # We normalize each header cell to its canonical name when it CONTAINS one
+        # (e.g. "kernel path (resolved)" -> "kernel path") so name-keyed lookup
+        # still hits; unknown extras (e.g. "source path") are kept verbatim.
         if len(header_row) < canonical_width:
             continue
-        header_prefix = header_row[:canonical_width]
-        if header_prefix != headers_canonical:
-            normalized: list[str] = []
-            for cell in header_prefix:
-                match = next(
-                    (canon for canon in headers_canonical if canon in cell),
-                    cell,
-                )
-                normalized.append(match)
-            if normalized != headers_canonical:
-                continue
-            header_prefix = normalized
-        # Splice normalized canonical names back into the full header (extras kept verbatim).
-        header_row = header_prefix + header_row[canonical_width:]
+        normalized_header: list[str] = []
+        for cell in header_row:
+            match = next(
+                (canon for canon in headers_canonical if canon == cell or canon in cell),
+                cell,
+            )
+            normalized_header.append(match)
+        # Accept EXTRA/INSERTED columns (e.g. a ``Source Path`` column the
+        # path-resolution remap appends) but still REJECT genuine REORDERING of the
+        # canonical columns — a swap (e.g. Bound<->Efficiency) is a corrupt report
+        # and must be skipped, not silently mis-read. So: every canonical column
+        # must be present AND the canonical columns must appear in their canonical
+        # relative order (extras may be interleaved anywhere).
+        canonical_in_header = [c for c in normalized_header if c in headers_canonical]
+        if canonical_in_header != headers_canonical:
+            continue
+        header_row = normalized_header
         # P-item meta by 1-based rank (P1 → pitems[0]); a missing entry => category unknown.
         pitem_meta = pitems[rank - 1] if rank - 1 < len(pitems) else {}
         category = pitem_meta.get("category", "")
@@ -1033,13 +1165,33 @@ _LAUNCHER_PATH_RE = re.compile(
     r"(?P<path>.+?)\((?P<line>\d+)\)\s*:\s*(?P<func>[A-Za-z_][A-Za-z0-9_]*)\s*$",
 )
 # Placeholders for unresolved Kernel Paths; must not survive parsing (else all group under a bogus path).
-_LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset({
-    "", "-", "—", "–", "n/a", "none", "null", "tbd", "unknown",
-})
+_LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
+    {
+        "",
+        "-",
+        "—",
+        "–",
+        "n/a",
+        "none",
+        "null",
+        "tbd",
+        "unknown",
+    }
+)
 
 
 def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]:
-    """Parse a TraceLens kernel-path to ``(path, line, function_name)`` (accepts ``<path>(<line>): <func>``/``<path>#L<line>``/bare; placeholders → ``("", None, None)``)."""
+    """Parse a TraceLens kernel-path into its components.
+
+    Accepts ``<path>(<line>): <func>``, ``<path>#L<line>``, or a bare path.
+
+    Args:
+        kernel_path: The kernel-path string to parse.
+
+    Returns:
+        A ``(path, line, function_name)`` tuple; placeholders and empty input
+        return ``("", None, None)``.
+    """
     if not kernel_path:
         return "", None, None
     text = kernel_path.strip()
@@ -1069,8 +1221,10 @@ _FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
         "/sgl-workspace/vllm",
     ),
     # atom fallback roots for CSV-only / static-analysis parses (import atom may not have run).
-    # Kept in sync with the _REUSABLE_SOURCE_ROOTS in kernel_request_handlers / tracelens_analysis
-    # (pinned by test_framework_paths_units.py). /app/ATOM is the editable-install parent.
+    # Kept in sync with the reusable-source roots in kernel_request_handlers
+    # (``_reusable_source_roots``) / tracelens_analysis (``_reusable_roots`` /
+    # ``KNOWN_SEARCH_ROOTS``), pinned by test_framework_paths_units.py. /app/ATOM
+    # is the editable-install parent.
     "atom": (
         "/app/ATOM",
         "/usr/local/lib/python3.12/dist-packages",
@@ -1083,7 +1237,13 @@ _FRAMEWORK_SOURCE_ROOTS_ENV = "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS"
 
 
 def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
-    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` (comma-separated ``pkg=/abs/parent``) into ``{pkg: (root,...)}``; unparseable entries skipped."""
+    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` into a package-root map.
+
+    The variable is a comma-separated list of ``pkg=/abs/parent`` entries.
+
+    Returns:
+        A ``{pkg: (root, ...)}`` mapping; unparseable entries are skipped.
+    """
     raw = os.environ.get(_FRAMEWORK_SOURCE_ROOTS_ENV, "").strip()
     if not raw:
         return {}
@@ -1101,7 +1261,14 @@ def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
 
 
 def _package_root_parent(pkg: str) -> str | None:
-    """Return the directory containing ``pkg/`` on the live ``sys.path`` via find_spec; ``None`` if not importable."""
+    """Find the directory containing a package on the live ``sys.path``.
+
+    Args:
+        pkg: The importable package name.
+
+    Returns:
+        The directory containing ``pkg/``, or ``None`` when not importable.
+    """
     try:
         spec = importlib.util.find_spec(pkg)
     except (ImportError, ValueError):
@@ -1121,7 +1288,16 @@ def _package_root_parent(pkg: str) -> str | None:
 def _resolve_launcher_to_abs_source(
     kernel_path: str,
 ) -> tuple[str, int | None, str | None] | None:
-    """Resolve a TraceLens launcher-path to an absolute file; ``(abs_file, line, function_name)`` only when the file exists, else ``None`` (conservative miss → caller's grep locator)."""
+    """Resolve a TraceLens launcher-path to an absolute source file.
+
+    Args:
+        kernel_path: The TraceLens launcher-path to resolve.
+
+    Returns:
+        An ``(abs_file, line, function_name)`` tuple only when the file
+        exists, else ``None`` (a conservative miss defers to the caller's grep
+        locator).
+    """
     raw_path, line, func = _parse_launcher_path(kernel_path)
     if not raw_path:
         return None
@@ -1157,7 +1333,16 @@ def _resolve_launcher_to_abs_source(
 
 
 def _function_line_from_ast(path: Path, function_name: str) -> int | None:
-    """Return the lineno of the first (Async)FunctionDef in ``path`` named ``function_name``; ``None`` if unreadable/unparseable/absent."""
+    """Find the line number of a named function definition via AST.
+
+    Args:
+        path: The source file to parse.
+        function_name: The function name to locate.
+
+    Returns:
+        The first matching ``def``/``async def`` line, or ``None`` when the
+        file is unreadable, unparseable, or the function is absent.
+    """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, UnicodeDecodeError):
@@ -1173,14 +1358,23 @@ def _resolve_source_target(
     *,
     source_root: Path | None,
 ) -> dict[str, Any] | None:
-    """Resolve a candidate's launcher path to a ``(source_path, definition_line, function_name)`` triple; ``None`` when unparseable. AST line overrides the reported call-site line when resolvable."""
+    """Resolve a candidate's launcher path to a source-target triple.
+
+    The AST-derived definition line overrides the reported call-site line when
+    resolvable.
+
+    Args:
+        candidate: The candidate dict carrying launcher/source paths.
+        source_root: Optional root to resolve relative paths against.
+
+    Returns:
+        A ``(source_path, definition_line, function_name)`` dict, or ``None``
+        when the path is unparseable.
+    """
     # Prefer verbatim tracelens_launcher_path so AST resolution survives _finalize_candidates'
     # source_file overwrite; fall back to source_file / kernel_path for non-TraceLens candidates.
     kernel_path = str(
-        candidate.get("tracelens_launcher_path")
-        or candidate.get("source_file")
-        or candidate.get("kernel_path")
-        or ""
+        candidate.get("tracelens_launcher_path") or candidate.get("source_file") or candidate.get("kernel_path") or ""
     )
     raw_path, reported_line, reported_func = _parse_launcher_path(kernel_path)
     if not raw_path:
@@ -1195,20 +1389,32 @@ def _resolve_source_target(
         if ast_line is not None:
             definition_line = ast_line
     return {
-        "source_path":      str(source_path),
-        "definition_line":  definition_line,
-        "function_name":    function_name,
-        "reported_path":    raw_path,
-        "reported_line":    reported_line,
-        "reported_func":    reported_func,
-        "ast_resolved":     bool(reported_func and source_path.exists()
-                                  and reported_func == function_name
-                                  and reported_line != definition_line),
+        "source_path": str(source_path),
+        "definition_line": definition_line,
+        "function_name": function_name,
+        "reported_path": raw_path,
+        "reported_line": reported_line,
+        "reported_func": reported_func,
+        "ast_resolved": bool(
+            reported_func
+            and source_path.exists()
+            and reported_func == function_name
+            and reported_line != definition_line
+        ),
     }
 
 
 _NATIVE_SOURCE_SUFFIXES = (
-    ".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h", ".c",
+    ".cu",
+    ".cuh",
+    ".hip",
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".hpp",
+    ".hh",
+    ".h",
+    ".c",
 )
 
 
@@ -1220,6 +1426,12 @@ def _is_native_source(path: str) -> bool:
     keying a task_group on that line splits one device kernel across
     groups. Callers therefore drop the line/function key components for
     these files.
+
+    Args:
+        path: The source file path to classify.
+
+    Returns:
+        ``True`` for C/C++/HIP/CUDA source files.
     """
     return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
 
@@ -1231,7 +1443,14 @@ def _normalize_operation_key(operation: str) -> str:
     SAME kernel profiled at different dtypes/shapes — e.g.
     ``rmsnorm_kernel<bf16>`` vs ``rmsnorm_kernel<fp16>`` — groups together,
     while DISTINCT kernels (different base names) stay separate (the Q1
-    invariant). Returns the original string when stripping leaves nothing.
+    invariant).
+
+    Args:
+        operation: The TraceLens operation name.
+
+    Returns:
+        The canonicalized operation name, or the original string when
+        stripping leaves nothing.
     """
     s = str(operation).strip()
     if "<" not in s:
@@ -1255,7 +1474,24 @@ def aggregate_by_source_function(
     *,
     source_root: Path | str | None = None,
 ) -> list[dict[str, Any]]:
-    """Group TraceLens candidates into per-kernel ``task_group`` dicts, sorted by aggregate time (desc). Native (.cu/.hip/.cpp) key on ``(source_path, function)`` only (collapse #420 over-split instantiations); Python key on ``(operation, path, line, function)`` since one caller frame can launch distinct kernels (Q1). Each group carries task_group_id/source_path/definition_line/function_name/kernel_ids/primary_kernel_id/rows/aggregate_*. Unparseable candidates left out for legacy per-kernel dispatch."""
+    """Group TraceLens candidates into per-kernel ``task_group`` dicts.
+
+    Groups are sorted by aggregate time (descending). Native (.cu/.hip/.cpp)
+    candidates key on ``(source_path, function)`` only (collapsing #420
+    over-split instantiations); Python candidates key on
+    ``(operation, path, line, function)`` since one caller frame can launch
+    distinct kernels (Q1). Each group carries ``task_group_id``,
+    ``source_path``, ``definition_line``, ``function_name``, ``kernel_ids``,
+    ``primary_kernel_id``, ``rows``, and ``aggregate_*`` fields.
+
+    Args:
+        candidates: The TraceLens candidate rows to group.
+        source_root: Optional root to resolve relative source paths against.
+
+    Returns:
+        The task-group dicts. Unparseable candidates are left out for legacy
+        per-kernel dispatch.
+    """
     if not candidates:
         return []
     root: Path | None = None
@@ -1293,22 +1529,22 @@ def aggregate_by_source_function(
         bucket = groups.get(key)
         if bucket is None:
             bucket = {
-                "task_group_id":          "",  # filled below after sorting
-                "operation":              operation,
-                "source_path":            src_norm,
-                "definition_line":        target["definition_line"],
-                "function_name":          target["function_name"],
-                "ast_resolved":           bool(target.get("ast_resolved")),
-                "reported_path":          target["reported_path"],
-                "kernel_ids":             [],
-                "primary_kernel_id":      "",
-                "rows":                   [],
-                "aggregate_duration_us":  0.0,
-                "aggregate_call_count":   0,
-                "aggregate_gpu_pct":      0.0,
+                "task_group_id": "",  # filled below after sorting
+                "operation": operation,
+                "source_path": src_norm,
+                "definition_line": target["definition_line"],
+                "function_name": target["function_name"],
+                "ast_resolved": bool(target.get("ast_resolved")),
+                "reported_path": target["reported_path"],
+                "kernel_ids": [],
+                "primary_kernel_id": "",
+                "rows": [],
+                "aggregate_duration_us": 0.0,
+                "aggregate_call_count": 0,
+                "aggregate_gpu_pct": 0.0,
                 # Q2: distinct per-P-item prose (deduped by (rank, title)) so build_prompt renders every P-item when one function spans multiple.
-                "all_pitem_prose":        [],
-                "_pitem_prose_seen":      set(),  # popped before return
+                "all_pitem_prose": [],
+                "_pitem_prose_seen": set(),  # popped before return
             }
             groups[key] = bucket
         kid = str(cand.get("kernel_id") or "") or cand.get("name") or ""
@@ -1324,17 +1560,19 @@ def aggregate_by_source_function(
         pitem_key = (pitem_rank, pitem_title)
         if pitem_key not in bucket["_pitem_prose_seen"]:
             bucket["_pitem_prose_seen"].add(pitem_key)
-            bucket["all_pitem_prose"].append({
-                "rank":                    pitem_rank,
-                "title":                   pitem_title,
-                "identification":          str(cand.get("identification") or "").strip(),
-                "reasoning_for_slowdown":  str(cand.get("reasoning_for_slowdown") or "").strip(),
-                "resolution":              str(cand.get("resolution") or "").strip(),
-                "impact_low_ms":           _safe_float(cand.get("impact_low_ms")),
-                "impact_low_e2e_pct":      _safe_float(cand.get("impact_low_e2e_pct")),
-                "impact_high_ms":          _safe_float(cand.get("impact_high_ms")),
-                "impact_high_e2e_pct":     _safe_float(cand.get("impact_high_e2e_pct")),
-            })
+            bucket["all_pitem_prose"].append(
+                {
+                    "rank": pitem_rank,
+                    "title": pitem_title,
+                    "identification": str(cand.get("identification") or "").strip(),
+                    "reasoning_for_slowdown": str(cand.get("reasoning_for_slowdown") or "").strip(),
+                    "resolution": str(cand.get("resolution") or "").strip(),
+                    "impact_low_ms": _safe_float(cand.get("impact_low_ms")),
+                    "impact_low_e2e_pct": _safe_float(cand.get("impact_low_e2e_pct")),
+                    "impact_high_ms": _safe_float(cand.get("impact_high_ms")),
+                    "impact_high_e2e_pct": _safe_float(cand.get("impact_high_e2e_pct")),
+                }
+            )
         try:
             bucket["aggregate_duration_us"] += float(cand.get("duration_us") or 0.0)
         except (TypeError, ValueError):
@@ -1357,19 +1595,19 @@ def aggregate_by_source_function(
         group["task_group_id"] = f"tg{idx:03d}"
         # Heaviest row (by duration) becomes primary; the rest are additional benchmark cases.
         group["rows"].sort(
-            key=lambda r: float(r.get("duration_us") or 0.0), reverse=True,
+            key=lambda r: float(r.get("duration_us") or 0.0),
+            reverse=True,
         )
         if group["rows"]:
             primary = group["rows"][0]
-            group["primary_kernel_id"] = str(
-                primary.get("kernel_id") or primary.get("name") or ""
-            )
+            group["primary_kernel_id"] = str(primary.get("kernel_id") or primary.get("name") or "")
         group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
         group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
         # Sort prose by rank (P1 first); drop entirely-empty entries.
         group["all_pitem_prose"].sort(key=lambda e: (e["rank"], e["title"]))
         group["all_pitem_prose"] = [
-            e for e in group["all_pitem_prose"]
+            e
+            for e in group["all_pitem_prose"]
             if e["rank"]
             or e["identification"]
             or e["reasoning_for_slowdown"]

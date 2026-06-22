@@ -127,9 +127,7 @@ def test_local_setup_uses_internal_extension_when_root_set(tmp_path: Path) -> No
     primus = _git_repo(remotes / "Primus-Claw", {"OOB/README.md": "oob\n"})
     inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
     tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
-    internal_checkout = _git_repo(
-        tmp_path / "existing" / "TraceLens-internal", {"README.md": "internal\n"}
-    )
+    internal_checkout = _git_repo(tmp_path / "existing" / "TraceLens-internal", {"README.md": "internal\n"})
 
     result = _run_local_setup(
         tmp_path,
@@ -256,7 +254,7 @@ def test_local_setup_deps_root_stays_pod_local_under_session_dir(tmp_path: Path)
     assert str(expected_deps / "Primus-Claw") in result.stdout
     assert str(expected_deps / "TraceLens") in result.stdout
     assert str(expected_deps / "TraceLens-internal") not in result.stdout
-    assert "0ebaa7109992b98b8f747a0fc0973e0f3b65d5d9" in result.stdout
+    assert "dee7fa3182b1ee0d2085a364a2542d8f49acc0f6" in result.stdout
 
 
 def test_local_setup_explicit_deps_root_overrides_pod_local(tmp_path: Path) -> None:
@@ -291,9 +289,7 @@ _HELP_SCRIPTS = {
 }
 
 
-def _run_help(
-    script: Path, tmp_path: Path, user_data_path: str | None
-) -> subprocess.CompletedProcess[str]:
+def _run_help(script: Path, tmp_path: Path, user_data_path: str | None) -> subprocess.CompletedProcess[str]:
     """Run ``bash <script> --help`` with a hermetic environment."""
     env = _clean_base_env()
     repo_stub = tmp_path / "repo_stub"
@@ -362,7 +358,7 @@ def test_install_scripts_guard_mirror_writes_with_flock(script: Path) -> None:
     # The lock must live in the pod-local open-source root it guards, not on the
     # shared $HYPERLOOM_RUNTIME_DIR — otherwise separate pod roots block each other.
     assert 'exec 9>"${_open_source_root}/.install.lock"' in text, script
-    assert '${HYPERLOOM_RUNTIME_DIR}/.install.lock' not in text, script
+    assert "${HYPERLOOM_RUNTIME_DIR}/.install.lock" not in text, script
 
 
 def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
@@ -371,17 +367,8 @@ def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
         pytest.skip("flock not available on this host")
     lock = tmp_path / ".install.lock"
     order = tmp_path / "order"
-    worker_src = (
-        'exec 9>"$1"\n'
-        "flock 9\n"
-        'echo "start-$2" >> "$3"\n'
-        "sleep 0.5\n"
-        'echo "end-$2" >> "$3"\n'
-    )
-    procs = [
-        subprocess.Popen(["bash", "-c", worker_src, "worker", str(lock), tag, str(order)])
-        for tag in ("A", "B")
-    ]
+    worker_src = 'exec 9>"$1"\nflock 9\necho "start-$2" >> "$3"\nsleep 0.5\necho "end-$2" >> "$3"\n'
+    procs = [subprocess.Popen(["bash", "-c", worker_src, "worker", str(lock), tag, str(order)]) for tag in ("A", "B")]
     for proc in procs:
         assert proc.wait(timeout=30) == 0
     lines = order.read_text(encoding="utf-8").split()
@@ -400,19 +387,16 @@ def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
 def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
     # Both deps pinned to a full 40-char SHA, operator-overridable; immune to HEAD drift (bugs.md §C #1).
     text = IO_INSTALL.read_text(encoding="utf-8")
-    assert (
-        '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"'
-        in text
-    )
+    assert '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"' in text
     assert 'MAGPIE_DIR="${MAGPIE_DIR:-${_open_source_root}/Magpie}"' in text
     assert 'INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX}"' in text
     assert "export HYPERLOOM_OPEN_SOURCE_ROOT" not in text
-    assert re.search(
-        r'^MAGPIE_REF="\$\{MAGPIE_REF:-[0-9a-fA-F]{40}\}"', text, re.M
-    ), "MAGPIE_REF must default to a full 40-char commit SHA and be overridable"
-    assert re.search(
-        r'^INFERENCEX_REF="\$\{INFERENCEX_REF:-[0-9a-fA-F]{40}\}"', text, re.M
-    ), "INFERENCEX_REF must default to a full 40-char commit SHA and be overridable"
+    assert re.search(r'^MAGPIE_REF="\$\{MAGPIE_REF:-[0-9a-fA-F]{40}\}"', text, re.M), (
+        "MAGPIE_REF must default to a full 40-char commit SHA and be overridable"
+    )
+    assert re.search(r'^INFERENCEX_REF="\$\{INFERENCEX_REF:-[0-9a-fA-F]{40}\}"', text, re.M), (
+        "INFERENCEX_REF must default to a full 40-char commit SHA and be overridable"
+    )
 
 
 def test_io_install_uses_sha_aware_fetch_checkout_for_both_deps() -> None:
@@ -421,13 +405,12 @@ def test_io_install_uses_sha_aware_fetch_checkout_for_both_deps() -> None:
     assert "^[0-9a-fA-F]{7,40}$" in text, "missing raw-SHA detection regex"
     assert 'fetch --depth 1 origin "$ref"' in text, "missing shallow SHA fetch"
     assert "checkout -q FETCH_HEAD" in text, "missing detached SHA checkout"
-    assert (
-        'git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_DIR" "$MAGPIE_REF" "Magpie"' in text
-    ), "ensure_magpie must clone via the pinned fetch-checkout helper"
-    assert (
-        'git_fetch_pinned "$INFERENCEX_REPO" "$INFERENCEX_PATH" "$INFERENCEX_REF" "InferenceX"'
-        in text
-    ), "ensure_inferencex must clone via the pinned fetch-checkout helper"
+    assert 'git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_DIR" "$MAGPIE_REF" "Magpie"' in text, (
+        "ensure_magpie must clone via the pinned fetch-checkout helper"
+    )
+    assert 'git_fetch_pinned "$INFERENCEX_REPO" "$INFERENCEX_PATH" "$INFERENCEX_REF" "InferenceX"' in text, (
+        "ensure_inferencex must clone via the pinned fetch-checkout helper"
+    )
     # Regression guard: no unpinned clone of latest HEAD.
     assert 'git clone --depth 1 "$MAGPIE_REPO"' not in text
     assert 'git clone --depth 1 "$INFERENCEX_REPO"' not in text

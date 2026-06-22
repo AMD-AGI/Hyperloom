@@ -23,6 +23,7 @@ Design constraints (§4/§6):
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,13 +49,15 @@ def _now_iso() -> str:
 # trace_analyze fails with one of these warnings carrying ``non_empty_modes``,
 # re-issue ONCE with the first non-empty mode (from TraceLens's splitter, not
 # a local heuristic). Single-retry to prevent loops.
-_AUTO_RETRY_WARNING_CODES = frozenset({
-    "steady_state_chunk_empty",
-    "steady_state_chunk_missing",
-    # low-quality chunk (non-empty but busy_ratio below threshold with a
-    # better alternate); same recovery path via ``non_empty_modes``.
-    "steady_state_chunk_low_quality",
-})
+_AUTO_RETRY_WARNING_CODES = frozenset(
+    {
+        "steady_state_chunk_empty",
+        "steady_state_chunk_missing",
+        # low-quality chunk (non-empty but busy_ratio below threshold with a
+        # better alternate); same recovery path via ``non_empty_modes``.
+        "steady_state_chunk_low_quality",
+    }
+)
 
 
 def _extract_steady_state_retry_mode(
@@ -62,9 +65,13 @@ def _extract_steady_state_retry_mode(
 ) -> "tuple[str, dict[str, Any]] | None":
     """Inspect a failed trace_analyze result for a steady-state recovery hint.
 
-    Returns ``(mode, warning_dict)`` when a recovery warning carries an
-    alternate in ``non_empty_modes`` / ``available_modes`` (first one picked,
-    splitter-sorted); ``None`` otherwise (caller falls to ``_failed()``).
+    Args:
+        ta_result: The failed trace_analyze result to inspect for warnings.
+
+    Returns:
+        ``(mode, warning_dict)`` when a recovery warning carries an alternate
+        in ``non_empty_modes`` / ``available_modes`` (first one picked,
+        splitter-sorted); ``None`` otherwise (caller falls to ``_failed()``).
     """
     if not isinstance(ta_result, dict):
         return None
@@ -78,11 +85,7 @@ def _extract_steady_state_retry_mode(
             continue
         # Both warnings name the splitter-accepted alternates
         # (non_empty_modes / available_modes).
-        modes = (
-            w.get("non_empty_modes")
-            or w.get("available_modes")
-            or []
-        )
+        modes = w.get("non_empty_modes") or w.get("available_modes") or []
         if not isinstance(modes, list):
             continue
         for candidate in modes:
@@ -93,7 +96,14 @@ def _extract_steady_state_retry_mode(
 
 def _extract_trace_path(profile_result: dict[str, Any]) -> str:
     """Pick the trace path like Coordinator's ``_promote_to_shared_state``:
-    prefer ``main_trace_path`` (merged), else ``trace_files[0]``."""
+    prefer ``main_trace_path`` (merged), else ``trace_files[0]``.
+
+    Args:
+        profile_result: The profile sub-step result to read the trace from.
+
+    Returns:
+        The resolved trace path, or an empty string if none is present.
+    """
     if not isinstance(profile_result, dict):
         return ""
     direct = profile_result.get("main_trace_path")
@@ -117,6 +127,15 @@ def _failed(
 
     ``phase`` names the failed sub-step (profile / profile_no_trace /
     trace_analyze); ``sub_result`` is pruned to known keys for audit.
+
+    Args:
+        phase: Name of the failed sub-step.
+        error: Human-readable error message.
+        sub_result: The failed sub-step's result, pruned to known keys for
+            audit when provided.
+
+    Returns:
+        The canonical failure result dict.
     """
     out: dict[str, Any] = {
         "status": "failed",
@@ -128,12 +147,56 @@ def _failed(
     if isinstance(sub_result, dict):
         out["sub_result"] = {
             k: sub_result.get(k)
-            for k in ("status", "error", "error_class",
-                      "main_trace_path", "trace_files",
-                      "analysis_md_path", "hot_kernels")
+            for k in (
+                "status",
+                "error",
+                "error_class",
+                "main_trace_path",
+                "trace_files",
+                "analysis_md_path",
+                "hot_kernels",
+            )
             if k in sub_result
         }
     return out
+
+
+def _profile_err_text(profile_result: Any) -> str:
+    """Flatten a profile result's error fields into one blob for cuda-graph
+    capture-failure detection."""
+    if not isinstance(profile_result, dict):
+        return ""
+    parts = [
+        str(profile_result.get(k) or "")
+        for k in ("error", "error_class", "error_excerpt", "stderr_tail")
+    ]
+    sub = profile_result.get("sub_result")
+    if isinstance(sub, dict):
+        parts += [str(sub.get(k) or "") for k in ("error", "error_class")]
+    return "\n".join(parts)
+
+
+def _profile_server_log_tail(profile_result: Any, max_bytes: int = 16384) -> str:
+    """Return the tail of the newest engine ``server.log`` for a profile run.
+
+    The seq_lens/get_num_new_pages assert and SIGQUIT surface only in the engine
+    ``server.log`` (not the profile result fields), so feed it to the cuda-graph
+    capture-failure detector. Best-effort: returns "" on any miss.
+    """
+    if not isinstance(profile_result, dict):
+        return ""
+    base = profile_result.get("trace_dir") or profile_result.get("workspace")
+    if not base:
+        return ""
+    try:
+        from .benchmark_result import _find_server_logs
+
+        logs = _find_server_logs(Path(str(base)))
+        if not logs:
+            return ""
+        return logs[0].read_bytes()[-max_bytes:].decode("utf-8", "replace")
+    except (OSError, ImportError):
+        return ""
 
 
 class RooflineExecutor:
@@ -214,11 +277,28 @@ class RooflineExecutor:
         profile_result: dict[str, Any] | None = None
         trace_path = ""
         last_error = ""
+        profile_warning: dict[str, Any] | None = None
         # Track the last failure kind so the no-trace contract is preserved
         # (profile_no_trace_failed) instead of collapsing into profile_failed.
         last_phase = "profile"
+        # One-shot: after a cuda-graph capture crash
+        # (hipErrorStreamCaptureUnsupported) the next attempt boots eager so the
+        # torch-profiler stream capture cannot collide (mirrors baseline).
+        disable_cuda_graph = False
+        # Resolve framework so the eager fallback picks the correct flag (vLLM
+        # needs --enforce-eager, sglang --disable-cuda-graph). Internal roofline
+        # tasks omit params["framework"], so fall back to env then shared_state.
+        framework = self._resolve_framework(ctx)
+        from .baseline import (
+            _disable_cuda_graph_flag,
+            _is_cuda_graph_capture_failure,
+        )
+        eager_flag = _disable_cuda_graph_flag(framework)
         for attempt in range(1, _PROFILE_MAX_ATTEMPTS + 1):
-            profile_ctx = self._wrap_profile_ctx(ctx)
+            profile_ctx = self._wrap_profile_ctx(
+                ctx, disable_cuda_graph=disable_cuda_graph,
+                framework=framework,
+            )
             try:
                 profile_result = await profile_executor(profile_ctx)
             except Exception as exc:  # noqa: BLE001
@@ -226,54 +306,92 @@ class RooflineExecutor:
                 last_error = f"profile_executor raised: {exc!r}"
                 log.warning(
                     "roofline profile attempt %d/%d failed (exception): %s",
-                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
+                    last_error,
                 )
+                if not disable_cuda_graph and _is_cuda_graph_capture_failure(
+                    last_error
+                ):
+                    disable_cuda_graph = True
+                    log.warning(
+                        "roofline: cuda-graph capture failure detected; next "
+                        "attempt boots eager (%s)",
+                        eager_flag,
+                    )
                 continue
             if not isinstance(profile_result, dict):
                 last_phase = "profile"
-                last_error = (
-                    f"profile_executor returned non-dict: "
-                    f"{type(profile_result).__name__}"
-                )
+                last_error = f"profile_executor returned non-dict: {type(profile_result).__name__}"
                 log.warning(
                     "roofline profile attempt %d/%d failed (bad return): %s",
-                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
-                )
-                continue
-            if profile_result.get("status") != "succeeded":
-                last_phase = "profile"
-                last_error = str(
-                    profile_result.get("error") or "profile sub-step failed"
-                )
-                log.warning(
-                    "roofline profile attempt %d/%d failed: %s",
-                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
+                    last_error,
                 )
                 continue
             trace_path = _extract_trace_path(profile_result)
+            if profile_result.get("status") != "succeeded":
+                if trace_path:
+                    # SGLang/InferenceX can emit a duplicate stop_profile
+                    # failure after a trace was already flushed successfully.
+                    profile_warning = {
+                        "status": profile_result.get("status"),
+                        "error_class": profile_result.get("error_class"),
+                        "error": profile_result.get("error"),
+                    }
+                    log.warning(
+                        "roofline profile attempt %d/%d returned status=%r "
+                        "but produced trace=%s; continuing to trace_analyze",
+                        attempt,
+                        _PROFILE_MAX_ATTEMPTS,
+                        profile_result.get("status"),
+                        trace_path,
+                    )
+                    break
+                last_phase = "profile"
+                last_error = str(profile_result.get("error") or "profile sub-step failed")
+                log.warning(
+                    "roofline profile attempt %d/%d failed: %s",
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
+                    last_error,
+                )
+                if not disable_cuda_graph and _is_cuda_graph_capture_failure(
+                    last_error,
+                    _profile_err_text(profile_result),
+                    _profile_server_log_tail(profile_result),
+                ):
+                    disable_cuda_graph = True
+                    log.warning(
+                        "roofline: cuda-graph capture failure detected; next "
+                        "attempt boots eager (%s)",
+                        eager_flag,
+                    )
+                continue
             if not trace_path:
                 last_phase = "profile_no_trace"
                 last_error = (
-                    "profile succeeded but no trace_path in result "
-                    "(missing both main_trace_path and trace_files[0])"
+                    "profile succeeded but no trace_path in result (missing both main_trace_path and trace_files[0])"
                 )
                 log.warning(
                     "roofline profile attempt %d/%d: no trace path",
-                    attempt, _PROFILE_MAX_ATTEMPTS,
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
                 )
                 continue
             # Success
             if attempt > 1:
                 log.info(
                     "roofline profile succeeded on attempt %d/%d",
-                    attempt, _PROFILE_MAX_ATTEMPTS,
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
                 )
             break
         else:
             return _failed(
                 last_phase,
-                f"all {_PROFILE_MAX_ATTEMPTS} profile attempts failed; "
-                f"last: {last_error}",
+                f"all {_PROFILE_MAX_ATTEMPTS} profile attempts failed; last: {last_error}",
                 sub_result=profile_result,
             )
 
@@ -284,9 +402,7 @@ class RooflineExecutor:
         # clear happens only on the trace_analyze failure path below.
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_status = "succeeded"
-        self.shared_state.last_profile_args = str(
-            (ctx.task.params or {}).get("base_extra_args") or ""
-        )
+        self.shared_state.last_profile_args = str((ctx.task.params or {}).get("base_extra_args") or "")
 
         # ---- Step 2: trace_analyze ----------------------------------------
         # Pin the snapshot's arm so the ceiling's precision is anchored to the
@@ -297,11 +413,7 @@ class RooflineExecutor:
         # Pin every roofline's arm explicitly so the ceiling precision never
         # relies on a transient current_best inference: PRELUDE measures the
         # baseline arm; all other reasons (watermark etc.) measure current_best.
-        roofline_arm = (
-            "baseline"
-            if str(_task_params.get("reason") or "") == "prelude_initial"
-            else "current_best"
-        )
+        roofline_arm = "baseline" if str(_task_params.get("reason") or "") == "prelude_initial" else "current_best"
         ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
         if roofline_arm:
             ta_payload["roofline_arm"] = roofline_arm
@@ -338,9 +450,7 @@ class RooflineExecutor:
                 # Marker against retry loops; single-retry is enforced by not
                 # re-entering this block regardless of the second outcome.
                 "_n26_auto_retry": True,
-                "_n26_retry_from_mode": (
-                    source_warning.get("requested_mode") or ""
-                ),
+                "_n26_retry_from_mode": (source_warning.get("requested_mode") or ""),
             }
             if roofline_arm:
                 ta_payload_retry["roofline_arm"] = roofline_arm
@@ -353,10 +463,7 @@ class RooflineExecutor:
                 self.shared_state.last_trace_analyze = {}
                 return _failed(
                     "trace_analyze",
-                    (
-                        f"trace_analyze_handler raised on N26 auto-retry "
-                        f"(mode={retry_mode}): {exc!r}"
-                    ),
+                    (f"trace_analyze_handler raised on N26 auto-retry (mode={retry_mode}): {exc!r}"),
                 )
             if not isinstance(ta_result, dict):
                 self.shared_state.last_trace_analyze = {}
@@ -371,14 +478,15 @@ class RooflineExecutor:
             # Stamp ``n26_auto_retry`` so the recorder / prompt surface
             # "snapshot came from an auto-retry" (best-effort).
             if isinstance(ta_result, dict):
-                ta_result.setdefault("n26_auto_retry", {
-                    "applied": True,
-                    "from_mode": (
-                        source_warning.get("requested_mode") or "mixed"
-                    ),
-                    "to_mode": retry_mode,
-                    "source_warning_code": source_warning.get("code"),
-                })
+                ta_result.setdefault(
+                    "n26_auto_retry",
+                    {
+                        "applied": True,
+                        "from_mode": (source_warning.get("requested_mode") or "mixed"),
+                        "to_mode": retry_mode,
+                        "source_warning_code": source_warning.get("code"),
+                    },
+                )
 
         if ta_result.get("status") != "ok":
             self.shared_state.last_trace_analyze = {}
@@ -389,15 +497,9 @@ class RooflineExecutor:
             )
 
         # #431: trace_analyze status=ok but ZERO hot kernels means cuda-graph capture folded per-kernel time into hipGraphLaunch wrappers (degraded input, not a TraceLens failure). Append a trace_health_warnings entry so the LLM re-profiles in eager mode instead of reading top=[] as "no kernels".
-        hot = (
-            ta_result.get("hot_kernels_top15")
-            or ta_result.get("hot_kernels")
-            or []
-        )
+        hot = ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
         trace_health = profile_result.get("trace_health") or {}
-        attribution_degraded = bool(
-            not hot and trace_health.get("per_kernel_attribution_degraded")
-        )
+        attribution_degraded = bool(not hot and trace_health.get("per_kernel_attribution_degraded"))
         if attribution_degraded:
             warning = {
                 "code": "cuda_graph_attribution_degraded",
@@ -411,9 +513,7 @@ class RooflineExecutor:
                     "EXTRA_VLLM_ARGS) so per-step annotations fire, or enable "
                     "a capture-fold fallback over capture_traces/."
                 ),
-                "capture_traces_present": bool(
-                    trace_health.get("capture_traces_present")
-                ),
+                "capture_traces_present": bool(trace_health.get("capture_traces_present")),
             }
             health = list(ta_result.get("trace_health_warnings") or [])
             health.append(warning)
@@ -441,9 +541,7 @@ class RooflineExecutor:
                     "trace_input": str(trace_path),
                     "analysis_md_path": str(cached.get("analysis_md_path") or ""),
                     "candidates_path": str(cached.get("candidates_path") or ""),
-                    "kernel_roofline_path": str(
-                        cached.get("kernel_roofline_path") or ""
-                    ),
+                    "kernel_roofline_path": str(cached.get("kernel_roofline_path") or ""),
                 },
                 detail=f"hot_kernels={len(hot)}",
                 duration_s=time.monotonic() - _lc_t0,
@@ -454,7 +552,7 @@ class RooflineExecutor:
         except Exception:  # noqa: BLE001 — defensive
             log.debug("roofline: lifecycle emit failed", exc_info=True)
 
-        return {
+        result = {
             "status": "succeeded",
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
@@ -468,6 +566,10 @@ class RooflineExecutor:
             # appended to trace_health_warnings for the prompt/audit).
             "kernel_attribution_degraded": attribution_degraded,
         }
+        if profile_warning is not None:
+            result["profile_recovered"] = True
+            result["profile_warning"] = profile_warning
+        return result
 
     # Helpers (instance methods so tests can subclass / monkeypatch)
     @staticmethod
@@ -485,21 +587,57 @@ class RooflineExecutor:
         sd = ctx.extra.get("session_dir") if ctx.extra else None
         return Path(sd) if sd else Path(".")
 
+    def _resolve_framework(self, ctx: RunnerContext) -> str:
+        """Resolve the active framework: task params > FRAMEWORK env >
+        shared_state.framework. Internal roofline tasks omit params["framework"],
+        so the fallbacks keep the eager flag framework-correct (mirrors baseline).
+        """
+        params = ctx.task.params or {}
+        fw = str(params.get("framework") or "").strip()
+        if fw:
+            return fw
+        fw = os.environ.get("FRAMEWORK", "").strip()
+        if fw:
+            return fw
+        return str(getattr(self.shared_state, "framework", "") or "").strip()
+
     @staticmethod
-    def _wrap_profile_ctx(parent_ctx: RunnerContext) -> RunnerContext:
+    def _wrap_profile_ctx(
+        parent_ctx: RunnerContext, *, disable_cuda_graph: bool = False,
+        framework: str = "",
+    ) -> RunnerContext:
         """Construct a child RunnerContext for profile_executor.
 
         Bypasses SubAgentRunner's child Task creation (avoids double task
         accounting); the child carries kind="profile" + same params and
-        inherits the lease (no profile_lane re-acquire).
+        inherits the lease (no profile_lane re-acquire). When
+        ``disable_cuda_graph`` is set (post capture-crash retry), the
+        framework-correct eager flag is folded into ``base_extra_args``
+        (``framework`` resolved by the caller via params/env/shared_state).
+
+        Args:
+            parent_ctx: The parent runner context to derive the child from.
+            disable_cuda_graph: Whether to inject the eager fallback flag.
+            framework: Framework name used to choose the correct eager flag.
+
+        Returns:
+            A child ``RunnerContext`` for the profile sub-step.
         """
         from ..task_registry import Task
+
         parent_task = parent_ctx.task
+        params = dict(parent_task.params or {})
+        if disable_cuda_graph:
+            from .baseline import _with_cuda_graph_disabled
+            params["base_extra_args"] = _with_cuda_graph_disabled(
+                str(params.get("base_extra_args") or ""),
+                framework or str(params.get("framework") or ""),
+            )
         sub_task = Task(
             task_id=f"{parent_task.task_id}-profile",
             kind="profile",
             state="running",
-            params=dict(parent_task.params or {}),
+            params=params,
             idempotency_key=f"{parent_task.idempotency_key}-profile",
             requires_lanes=list(parent_task.requires_lanes or []),
             allowed_tools=list(parent_task.allowed_tools or []),
@@ -514,7 +652,14 @@ class RooflineExecutor:
 
 
 def make_roofline_executor(*, shared_state: Any) -> RooflineExecutor:
-    """Production factory used by `cli._register_executors`."""
+    """Production factory used by `cli._register_executors`.
+
+    Args:
+        shared_state: The SharedState instance the executor will mutate.
+
+    Returns:
+        A configured ``RooflineExecutor``.
+    """
     return RooflineExecutor(shared_state=shared_state)
 
 

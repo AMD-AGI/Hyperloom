@@ -12,11 +12,17 @@ from inference_optimizer import session_paths
 
 # ---- _coerce_hint ----
 
+
 def test_coerce_hint_valid():
-    out = rh._coerce_hint({
-        "what": " do x ", "source": " paper ", "domain_tags": "moe",
-        "expected_impact": "+5%", "accuracy_risk": "low",
-    })
+    out = rh._coerce_hint(
+        {
+            "what": " do x ",
+            "source": " paper ",
+            "domain_tags": "moe",
+            "expected_impact": "+5%",
+            "accuracy_risk": "low",
+        }
+    )
     assert out["what"] == "do x"
     assert out["source"] == "paper"
     assert out["domain_tags"] == ["moe"]
@@ -31,16 +37,20 @@ def test_coerce_hint_rejects():
 
 # ---- load / append ----
 
+
 def test_load_hints_missing(tmp_path):
     assert rh.load_hints(tmp_path) == []
 
 
 def test_append_and_load_hints(tmp_path):
-    added, dropped = rh.append_hints(tmp_path, [
-        {"what": "enable cudagraph", "source": "blog"},
-        {"what": "no source here"},  # dropped
-        {"what": "enable cudagraph", "source": "blog"},  # dup
-    ])
+    added, dropped = rh.append_hints(
+        tmp_path,
+        [
+            {"what": "enable cudagraph", "source": "blog"},
+            {"what": "no source here"},  # dropped
+            {"what": "enable cudagraph", "source": "blog"},  # dup
+        ],
+    )
     assert added == 1
     assert dropped == 1
     hints = rh.load_hints(tmp_path)
@@ -67,15 +77,24 @@ def test_write_hints_skeleton(tmp_path):
 
 
 def test_render_md_with_hints():
-    md = rh._render_md([{
-        "what": "x", "expected_impact": "", "accuracy_risk": "",
-        "domain_tags": [], "status": "proposed", "source": "s",
-    }])
+    md = rh._render_md(
+        [
+            {
+                "what": "x",
+                "expected_impact": "",
+                "accuracy_risk": "",
+                "domain_tags": [],
+                "status": "proposed",
+                "source": "s",
+            }
+        ]
+    )
     assert "## 1. x" in md
     assert "domain_tags: -" in md
 
 
 # ---- competitor target ----
+
 
 def test_write_competitor_target_no_source(tmp_path):
     assert rh.write_competitor_target(tmp_path, {"per_conc": [{"conc": 1}]}) is False
@@ -83,11 +102,17 @@ def test_write_competitor_target_no_source(tmp_path):
 
 
 def test_write_and_load_competitor_target(tmp_path):
-    ok = rh.write_competitor_target(tmp_path, {
-        "gpu": "MI300", "model": "m", "framework": "sglang", "precision": "fp8",
-        "per_conc": [{"conc": 8, "tput_per_gpu": 100.0, "source": "vendor"}],
-        "notes": "n",
-    })
+    ok = rh.write_competitor_target(
+        tmp_path,
+        {
+            "gpu": "MI300",
+            "model": "m",
+            "framework": "sglang",
+            "precision": "fp8",
+            "per_conc": [{"conc": 8, "tput_per_gpu": 100.0, "source": "vendor"}],
+            "notes": "n",
+        },
+    )
     assert ok is True
     loaded = rh.load_competitor_target(tmp_path)
     assert loaded["gpu"] == "MI300"
@@ -107,11 +132,11 @@ def test_load_competitor_target_bad(tmp_path):
 
 # ---- gap analysis ----
 
+
 def _target():
     return {
         "per_conc": [
-            {"conc": 8, "tput_per_gpu": 100.0, "tpot_ms": 10.0,
-             "interactivity": 100.0, "source": "v"},
+            {"conc": 8, "tput_per_gpu": 100.0, "tpot_ms": 10.0, "interactivity": 100.0, "source": "v"},
             {"conc": 16, "tput_per_gpu": 200.0, "tpot_ms": 20.0, "source": "v"},
         ],
     }
@@ -148,14 +173,17 @@ def test_match_target_row_no_conc():
 
 # ---- summaries ----
 
+
 def test_full_gap_summary_empty():
     assert rh.full_gap_summary(None) == ""
 
 
 def test_full_gap_summary_with_priority():
     gap = {
-        "throughput_gap_pct": 10.0, "tpot_ratio": 1.5,
-        "interactivity_gap_pct": 5.0, "source": "v",
+        "throughput_gap_pct": 10.0,
+        "tpot_ratio": 1.5,
+        "interactivity_gap_pct": 5.0,
+        "source": "v",
     }
     out = rh.full_gap_summary(gap)
     assert "TPOT ratio" in out
@@ -163,6 +191,7 @@ def test_full_gap_summary_with_priority():
 
 
 # ---- variant matching ----
+
 
 def test_match_variants_to_priors():
     hints = [{"what": "enable cudagraph decode", "domain_tags": ["decode"]}]
@@ -188,10 +217,12 @@ def test_priors_match_summary_rows():
 
 
 def test_summarise_for_prompt(tmp_path):
-    rh.append_hints(tmp_path, [
-        {"what": "do x", "source": "s", "expected_impact": "+5%",
-         "accuracy_risk": "low"},
-    ])
+    rh.append_hints(
+        tmp_path,
+        [
+            {"what": "do x", "source": "s", "expected_impact": "+5%", "accuracy_risk": "low"},
+        ],
+    )
     out = rh.summarise_for_prompt(tmp_path)
     assert "do x" in out
     assert "source=s" in out

@@ -108,8 +108,10 @@ class UpdateStatusTimingTests(unittest.TestCase):
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
         import importlib.util
+
         spec = importlib.util.spec_from_file_location(
-            "tracelens_analysis_under_test", TRACE_TOOL,
+            "tracelens_analysis_under_test",
+            TRACE_TOOL,
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
@@ -234,9 +236,9 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"', install_text)
         self.assertIn('OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"', install_text)
         self.assertIn('run cp -r "$oob_install_src" "${OOB_ROOT}"', install_text)
-        self.assertIn('removing stale OOB install root without pyproject.toml', install_text)
+        self.assertIn("removing stale OOB install root without pyproject.toml", install_text)
         self.assertIn('run rm -rf "${OOB_ROOT}"', install_text)
-        self.assertNotIn('${OOB_SRC}/oob_cli/pyproject.toml', install_text)
+        self.assertNotIn("${OOB_SRC}/oob_cli/pyproject.toml", install_text)
         self.assertNotIn('warn "OOB source has no pyproject.toml at $OOB_SRC"\n        return 0', install_text)
         # Override is read but never written into a generated env file.
         self.assertNotIn("export HYPERLOOM_OPEN_SOURCE_ROOT", install_text)
@@ -251,7 +253,7 @@ class KernelAgentToolTests(unittest.TestCase):
             'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_ROOT}"',
             install_text,
         )
-        # GEAK v3.2.0 ships 4 MCP tool folders (metrix-mcp removed; transitive via profiler-mcp).
+        # GEAK v3.2.1 ships 4 MCP tool folders (metrix-mcp removed; transitive via profiler-mcp).
         for _mcp in (
             "rag-mcp",
             "profiler-mcp",
@@ -259,14 +261,14 @@ class KernelAgentToolTests(unittest.TestCase):
             "automated-test-discovery",
         ):
             self.assertIn(_mcp, install_text)
-        # Pin the v3.2.0 install-loop ordering so re-adding metrix-mcp regresses this.
+        # Pin the v3.2.1 install-loop ordering so re-adding metrix-mcp regresses this.
         self.assertIn(
             "for _geak_mcp in rag-mcp profiler-mcp \\\n"
             "                    cross-session-memory-mcp automated-test-discovery; do",
             install_text,
         )
         self.assertIn(
-            'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \\\n'
+            "python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \\\n"
             '        "${GEAK_ROOT}/mcp_tools/${_geak_mcp}"',
             install_text,
         )
@@ -299,24 +301,28 @@ class KernelAgentToolTests(unittest.TestCase):
             trace_tool_text,
         )
         self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens}"', install_text)
-        self.assertNotIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
+        self.assertNotIn(
+            'TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/hyperloom/TraceLens-internal}"', install_text
+        )
         self.assertNotIn("Executor asks", skill_text)
         # Public TraceLens is cloned into the pod-local repo tree by default; TRACELENS_ROOT overrides.
         self.assertIn(
             'TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"',
             install_text,
         )
-        self.assertIn('TRACELENS_REF="0ebaa7109992b98b8f747a0fc0973e0f3b65d5d9"', install_text)
+        self.assertIn('TRACELENS_REF="dee7fa3182b1ee0d2085a364a2542d8f49acc0f6"', install_text)
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
         self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$TRACELENS_ROOT"', install_text)
         self.assertIn('git -C "$TRACELENS_ROOT" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
-        self.assertNotIn('TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"', install_text)
+        self.assertNotIn(
+            'TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"', install_text
+        )
         # Read-only internal root may trigger a writable mirror (optional extension).
         self.assertIn(
             'TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"',
             install_text,
         )
-        self.assertIn('export TRACELENS_INTERNAL_ROOT', install_text)
+        self.assertIn("export TRACELENS_INTERNAL_ROOT", install_text)
         self.assertIn(
             "echo \"export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'\"",
             install_text,
@@ -349,14 +355,22 @@ class KernelAgentToolTests(unittest.TestCase):
                 source_file=f"{_FRAMEWORK_ROOT}/unmapped.py",
             )
 
-            result = run_json([
-                sys.executable, str(TRACE_TOOL),
-                "--trace-input", str(trace),
-                "--session-id", "s1",
-                "--model-name", "test-model",
-                "--framework", "sglang",
-                "--dry-run",
-            ], workspace=workspace)
+            result = run_json(
+                [
+                    sys.executable,
+                    str(TRACE_TOOL),
+                    "--trace-input",
+                    str(trace),
+                    "--session-id",
+                    "s1",
+                    "--model-name",
+                    "test-model",
+                    "--framework",
+                    "sglang",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
             self.assertEqual(result["trace_input_type"], "file")
             self.assertEqual(result["hot_kernels"][0]["kernel_id"], "k001")
@@ -378,14 +392,22 @@ class KernelAgentToolTests(unittest.TestCase):
             with gzip.open(gz_trace, "wt", encoding="utf-8") as fh:
                 fh.write(raw_trace.read_text(encoding="utf-8"))
 
-            result = run_json([
-                sys.executable, str(TRACE_TOOL),
-                "--trace-input", str(capture),
-                "--session-id", "s2",
-                "--model-name", "test-model",
-                "--framework", "sglang",
-                "--dry-run",
-            ], workspace=workspace)
+            result = run_json(
+                [
+                    sys.executable,
+                    str(TRACE_TOOL),
+                    "--trace-input",
+                    str(capture),
+                    "--session-id",
+                    "s2",
+                    "--model-name",
+                    "test-model",
+                    "--framework",
+                    "sglang",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
             self.assertEqual(result["trace_input_type"], "capture_dir")
             self.assertGreaterEqual(len(result["hot_kernels"]), 2)
@@ -400,29 +422,41 @@ class KernelAgentToolTests(unittest.TestCase):
                 kernel_name="triton_unmapped_kernel",
                 source_file=f"{_FRAMEWORK_ROOT}/unmapped.py",
             )
-            run_json([
-                sys.executable, str(TRACE_TOOL),
-                "--trace-input", str(trace),
-                "--session-id", "s3",
-                "--model-name", "test-model",
-                "--framework", "sglang",
-                "--dry-run",
-            ], workspace=workspace)
+            run_json(
+                [
+                    sys.executable,
+                    str(TRACE_TOOL),
+                    "--trace-input",
+                    str(trace),
+                    "--session-id",
+                    "s3",
+                    "--model-name",
+                    "test-model",
+                    "--framework",
+                    "sglang",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
-            result = run_json([
-                sys.executable, str(OPT_TOOL),
-                "--kernel-id", "k001",
-                "--session-id", "s3",
-                "--dry-run",
-            ], workspace=workspace)
+            result = run_json(
+                [
+                    sys.executable,
+                    str(OPT_TOOL),
+                    "--kernel-id",
+                    "k001",
+                    "--session-id",
+                    "s3",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
             # GEAK is now first in the ladder.
             self.assertIn("geak", result["selected_backends"])
             self.assertEqual(result["selected_backends"][0], "geak")
             # No bench → flagged for downstream verification gates.
-            self.assertTrue(
-                result["backend_selection"]["geak_without_benchmark"]
-            )
+            self.assertTrue(result["backend_selection"]["geak_without_benchmark"])
             # E2E evidence still missing, so still NEEDS_REVIEW.
             self.assertEqual(result["proposal"]["decision"], "NEEDS_REVIEW")
             self.assertIn("E2E evidence missing", result["proposal"]["reasons"])
@@ -436,24 +470,39 @@ class KernelAgentToolTests(unittest.TestCase):
                 kernel_name="triton_unmapped_kernel",
                 source_file=f"{_FRAMEWORK_ROOT}/unmapped.py",
             )
-            run_json([
-                sys.executable, str(TRACE_TOOL),
-                "--trace-input", str(trace),
-                "--session-id", "s4",
-                "--model-name", "test-model",
-                "--framework", "sglang",
-                "--dry-run",
-            ], workspace=workspace)
+            run_json(
+                [
+                    sys.executable,
+                    str(TRACE_TOOL),
+                    "--trace-input",
+                    str(trace),
+                    "--session-id",
+                    "s4",
+                    "--model-name",
+                    "test-model",
+                    "--framework",
+                    "sglang",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
-            result = run_json([
-                sys.executable, str(OPT_TOOL),
-                "--kernel-id", "k001",
-                "--session-id", "s4",
-                "--backends", "geak",
-                "--disable-rag",
-                "--disable-xs-memory",
-                "--dry-run",
-            ], workspace=workspace)
+            result = run_json(
+                [
+                    sys.executable,
+                    str(OPT_TOOL),
+                    "--kernel-id",
+                    "k001",
+                    "--session-id",
+                    "s4",
+                    "--backends",
+                    "geak",
+                    "--disable-rag",
+                    "--disable-xs-memory",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
             self.assertEqual(result["selected_backends"], ["geak"])
             self.assertTrue(result["backend_selection"]["geak_without_benchmark"])
@@ -469,26 +518,44 @@ class KernelAgentToolTests(unittest.TestCase):
             harness = workspace / "bench.py"
             write_trace(trace)
             harness.write_text("print('bench')\n", encoding="utf-8")
-            run_json([
-                sys.executable, str(TRACE_TOOL),
-                "--trace-input", str(trace),
-                "--session-id", "s5",
-                "--model-name", "test-model",
-                "--framework", "sglang",
-                "--dry-run",
-            ], workspace=workspace)
+            run_json(
+                [
+                    sys.executable,
+                    str(TRACE_TOOL),
+                    "--trace-input",
+                    str(trace),
+                    "--session-id",
+                    "s5",
+                    "--model-name",
+                    "test-model",
+                    "--framework",
+                    "sglang",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
-            result = run_json([
-                sys.executable, str(OPT_TOOL),
-                "--kernel-id", "k001",
-                "--session-id", "s5",
-                "--test-harness-path", str(harness),
-                "--e2e-gain-pct", "1.5",
-                "--accuracy-passed", "true",
-                # Well above the 1.05x KEEP threshold (issue #442).
-                "--micro-speedup", "1.6",
-                "--dry-run",
-            ], workspace=workspace)
+            result = run_json(
+                [
+                    sys.executable,
+                    str(OPT_TOOL),
+                    "--kernel-id",
+                    "k001",
+                    "--session-id",
+                    "s5",
+                    "--test-harness-path",
+                    str(harness),
+                    "--e2e-gain-pct",
+                    "1.5",
+                    "--accuracy-passed",
+                    "true",
+                    # Well above the 1.05x KEEP threshold (issue #442).
+                    "--micro-speedup",
+                    "1.6",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
             self.assertIn("geak", result["selected_backends"])
             self.assertEqual(result["proposal"]["decision"], "KEEP")
@@ -498,12 +565,18 @@ class KernelAgentToolTests(unittest.TestCase):
     def test_missing_trace_input_fails_with_status_and_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            code, result = run_json_allow_fail([
-                sys.executable, str(TRACE_TOOL),
-                "--trace-input", str(workspace / "missing.json"),
-                "--session-id", "s6",
-                "--dry-run",
-            ], workspace=workspace)
+            code, result = run_json_allow_fail(
+                [
+                    sys.executable,
+                    str(TRACE_TOOL),
+                    "--trace-input",
+                    str(workspace / "missing.json"),
+                    "--session-id",
+                    "s6",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
             self.assertNotEqual(code, 0)
             self.assertEqual(result["status"], "failed")
@@ -515,21 +588,35 @@ class KernelAgentToolTests(unittest.TestCase):
             workspace = Path(tmp)
             trace = workspace / "vendor_trace.json"
             write_vendor_trace(trace)
-            run_json([
-                sys.executable, str(TRACE_TOOL),
-                "--trace-input", str(trace),
-                "--session-id", "s7",
-                "--model-name", "test-model",
-                "--framework", "sglang",
-                "--dry-run",
-            ], workspace=workspace)
+            run_json(
+                [
+                    sys.executable,
+                    str(TRACE_TOOL),
+                    "--trace-input",
+                    str(trace),
+                    "--session-id",
+                    "s7",
+                    "--model-name",
+                    "test-model",
+                    "--framework",
+                    "sglang",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
-            result = run_json([
-                sys.executable, str(OPT_TOOL),
-                "--kernel-id", "k001",
-                "--session-id", "s7",
-                "--dry-run",
-            ], workspace=workspace)
+            result = run_json(
+                [
+                    sys.executable,
+                    str(OPT_TOOL),
+                    "--kernel-id",
+                    "k001",
+                    "--session-id",
+                    "s7",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
             # A vendor BLAS binary (hipblasLt) carries no rewritable source,
             # so ``classify_patchability`` marks it non-routable. The
@@ -550,19 +637,31 @@ class KernelAgentToolTests(unittest.TestCase):
             workspace = Path(tmp)
             trace = workspace / "trace.json"
             write_trace(trace)
-            run_json([
-                sys.executable, str(TRACE_TOOL),
-                "--trace-input", str(trace),
-                "--session-id", "s8",
-                "--dry-run",
-            ], workspace=workspace)
+            run_json(
+                [
+                    sys.executable,
+                    str(TRACE_TOOL),
+                    "--trace-input",
+                    str(trace),
+                    "--session-id",
+                    "s8",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
-            code, result = run_json_allow_fail([
-                sys.executable, str(OPT_TOOL),
-                "--kernel-id", "missing-kernel",
-                "--session-id", "s8",
-                "--dry-run",
-            ], workspace=workspace)
+            code, result = run_json_allow_fail(
+                [
+                    sys.executable,
+                    str(OPT_TOOL),
+                    "--kernel-id",
+                    "missing-kernel",
+                    "--session-id",
+                    "s8",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
             # A hallucinated kernel_id is now a *graceful skip* rather than
             # a hard failure (commit bdeac3ce "survive hallucinated
@@ -582,20 +681,33 @@ class KernelAgentToolTests(unittest.TestCase):
             workspace = Path(tmp)
             trace = workspace / "trace.json"
             write_trace(trace)
-            run_json([
-                sys.executable, str(TRACE_TOOL),
-                "--trace-input", str(trace),
-                "--session-id", "s9",
-                "--dry-run",
-            ], workspace=workspace)
+            run_json(
+                [
+                    sys.executable,
+                    str(TRACE_TOOL),
+                    "--trace-input",
+                    str(trace),
+                    "--session-id",
+                    "s9",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
-            code, result = run_json_allow_fail([
-                sys.executable, str(OPT_TOOL),
-                "--kernel-id", "k001",
-                "--session-id", "s9",
-                "--backends", "badbackend",
-                "--dry-run",
-            ], workspace=workspace)
+            code, result = run_json_allow_fail(
+                [
+                    sys.executable,
+                    str(OPT_TOOL),
+                    "--kernel-id",
+                    "k001",
+                    "--session-id",
+                    "s9",
+                    "--backends",
+                    "badbackend",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+            )
 
             self.assertNotEqual(code, 0)
             self.assertIn("unsupported backend", result["error"])
@@ -629,11 +741,7 @@ class AuthFailureDetectionTests(unittest.TestCase):
         self.assertEqual(ko._count_auth_failures("speedup: 1.32x faster"), 0)
         # A single 401 is recoverable; below threshold.
         self.assertLess(
-            ko._count_auth_failures(
-                "WARN: HTTP/1.1 401 Unauthorized; retrying.\n"
-                "INFO retry succeeded\n"
-                "speedup: 1.21x"
-            ),
+            ko._count_auth_failures("WARN: HTTP/1.1 401 Unauthorized; retrying.\nINFO retry succeeded\nspeedup: 1.21x"),
             3,
         )
 
@@ -643,11 +751,7 @@ class AuthFailureDetectionTests(unittest.TestCase):
             import kernel_optimization as ko  # type: ignore[import-not-found]
         finally:
             sys.path.pop(0)
-        log = (
-            "Primus.00009 token not present\n"
-            "Primus.00009 token not present\n"
-            "Primus.00009 token not present\n"
-        )
+        log = "Primus.00009 token not present\nPrimus.00009 token not present\nPrimus.00009 token not present\n"
         self.assertEqual(ko._count_auth_failures(log), 3)
 
 
@@ -658,6 +762,7 @@ class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
         sys.path.insert(0, str(ROOT / "tools"))
         try:
             import kernel_optimization as ko  # type: ignore[import-not-found]
+
             return ko
         finally:
             sys.path.pop(0)
@@ -685,13 +790,7 @@ class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
     def test_upgrades_too_small_explicit_timeout(self) -> None:
         """A too-small env.timeout must be rewritten up to the harness budget."""
         ko = self._import_ko()
-        base = (
-            "model:\n  model_class: litellm\n"
-            "env:\n"
-            "  env:\n    PAGER: cat\n"
-            "  timeout: 30\n"
-            "tools:\n  rag: true\n"
-        )
+        base = "model:\n  model_class: litellm\nenv:\n  env:\n    PAGER: cat\n  timeout: 30\ntools:\n  rag: true\n"
         out = ko._ensure_yaml_env_timeout(base, timeout=2100)
         self.assertRegex(out, r"timeout:\s*2100")
         self.assertNotRegex(out, r"timeout:\s*30\b")
@@ -701,12 +800,7 @@ class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
 
     def test_appends_timeout_to_existing_env_without_one(self) -> None:
         ko = self._import_ko()
-        base = (
-            "model:\n  model_class: litellm\n"
-            "env:\n"
-            "  env:\n    PAGER: cat\n"
-            "tools:\n  rag: true\n"
-        )
+        base = "model:\n  model_class: litellm\nenv:\n  env:\n    PAGER: cat\ntools:\n  rag: true\n"
         out = ko._ensure_yaml_env_timeout(base, timeout=2100)
         self.assertRegex(out, r"timeout:\s*2100")
         self.assertEqual(out.count("\nenv:\n"), 1)
@@ -738,15 +832,16 @@ class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
 
             text = Path(override).read_text(encoding="utf-8")
             self.assertRegex(text, r"timeout:\s*3600")
+
+
 class GeakCostLimitDefaultTests(unittest.TestCase):
     """Lock in the GEAK cost-limit contract: Hyperloom passes 0.0 (unlimited) so GEAK skips its 3.0 fallback."""
 
     def setUp(self) -> None:
         import tempfile
+
         # _resolve_geak_config() needs GEAK_CONFIG pointing at a litellm stub.
-        self._cfg_file = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False
-        )
+        self._cfg_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
         self._cfg_file.write("model:\n  model_class: litellm\n")
         self._cfg_file.flush()
         self._cfg_file.close()
@@ -761,24 +856,27 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
         Path(self._cfg_file.name).unlink(missing_ok=True)
 
     # Assert the exact add_argument expression since --help doesn't show defaults.
-    _EXPECTED_DEFAULT_EXPR = (
-        'default=float(os.environ.get("HYPERLOOM_GEAK_COST_LIMIT", "0.0"))'
-    )
+    _EXPECTED_DEFAULT_EXPR = 'default=float(os.environ.get("HYPERLOOM_GEAK_COST_LIMIT", "0.0"))'
 
     def test_kernel_optimization_default_is_zero(self) -> None:
         src = OPT_TOOL.read_text(encoding="utf-8")
         self.assertIn('"--geak-cost-limit"', src)
-        self.assertIn(self._EXPECTED_DEFAULT_EXPR, src,
-                      "kernel_optimization.py --geak-cost-limit default "
-                      "must be 0.0 (matching GEAK geak.yaml `cost_limit: 0.`)")
+        self.assertIn(
+            self._EXPECTED_DEFAULT_EXPR,
+            src,
+            "kernel_optimization.py --geak-cost-limit default must be 0.0 (matching GEAK geak.yaml `cost_limit: 0.`)",
+        )
 
     def test_parallel_e2e_runner_default_is_zero(self) -> None:
         tool = ROOT / "tools" / "parallel_e2e_runner.py"
         src = tool.read_text(encoding="utf-8")
         self.assertIn('"--geak-cost-limit"', src)
-        self.assertIn(self._EXPECTED_DEFAULT_EXPR, src,
-                      "parallel_e2e_runner.py --geak-cost-limit default "
-                      "must mirror kernel_optimization.py (0.0 / env-overridable)")
+        self.assertIn(
+            self._EXPECTED_DEFAULT_EXPR,
+            src,
+            "parallel_e2e_runner.py --geak-cost-limit default "
+            "must mirror kernel_optimization.py (0.0 / env-overridable)",
+        )
 
     def test_parallel_e2e_runner_run_json_invokes_subprocess(self) -> None:
         """run_json must have its subprocess dependency imported."""
@@ -817,6 +915,7 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
         )
         # AST fallback: evaluate the default expression in a controlled namespace.
         import ast
+
         src = OPT_TOOL.read_text(encoding="utf-8")
         tree = ast.parse(src)
         default_node = None
@@ -833,8 +932,7 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
                         default_node = kw.value
                         break
                 break
-        self.assertIsNotNone(default_node,
-                             "--geak-cost-limit add_argument not found")
+        self.assertIsNotNone(default_node, "--geak-cost-limit add_argument not found")
         os.environ["HYPERLOOM_GEAK_COST_LIMIT"] = "12.5"
         try:
             value = eval(  # noqa: S307 — controlled expression from our own source
@@ -843,9 +941,9 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
             )
         finally:
             os.environ.pop("HYPERLOOM_GEAK_COST_LIMIT", None)
-        self.assertEqual(value, 12.5,
-                         "HYPERLOOM_GEAK_COST_LIMIT env var must override "
-                         f"--geak-cost-limit default; got {value!r}")
+        self.assertEqual(
+            value, 12.5, f"HYPERLOOM_GEAK_COST_LIMIT env var must override --geak-cost-limit default; got {value!r}"
+        )
 
     def _import_geak_submit(self):
         # backends/ must be on sys.path for geak_submit's bare sibling import.
@@ -853,6 +951,7 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
         sys.path.insert(0, str(backends_dir))
         try:
             import importlib
+
             if "geak_submit" in sys.modules:
                 return importlib.reload(sys.modules["geak_submit"])
             return importlib.import_module("geak_submit")
@@ -869,12 +968,13 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
             gpu_ids="0",
             cost_limit=0.0,
         )
-        self.assertIn("--cost-limit", cmd,
-                      "cost_limit=0.0 must emit --cost-limit (without it "
-                      "GEAK falls back to AgentConfig.cost_limit = 3.0)")
+        self.assertIn(
+            "--cost-limit",
+            cmd,
+            "cost_limit=0.0 must emit --cost-limit (without it GEAK falls back to AgentConfig.cost_limit = 3.0)",
+        )
         idx = cmd.index("--cost-limit")
-        self.assertEqual(cmd[idx + 1], "0.0",
-                         f"--cost-limit must carry the explicit 0.0 value: {cmd}")
+        self.assertEqual(cmd[idx + 1], "0.0", f"--cost-limit must carry the explicit 0.0 value: {cmd}")
 
     def test_geak_submit_build_cmd_omits_when_none(self) -> None:
         """``cost_limit=None`` must NOT add the flag, so GEAK uses its config-file value."""
@@ -886,8 +986,7 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
             gpu_ids="0",
             cost_limit=None,
         )
-        self.assertNotIn("--cost-limit", cmd,
-                         f"cost_limit=None must omit --cost-limit: {cmd}")
+        self.assertNotIn("--cost-limit", cmd, f"cost_limit=None must omit --cost-limit: {cmd}")
 
 
 if __name__ == "__main__":

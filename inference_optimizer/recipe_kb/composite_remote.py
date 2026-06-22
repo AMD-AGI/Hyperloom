@@ -32,6 +32,7 @@ backend degrades coverage without failing the read. Session/attempt reads are
 local-only at the dispatcher layer, so the composite delegates those to the
 first source purely for direct-use completeness.
 """
+
 from __future__ import annotations
 
 import json
@@ -53,13 +54,25 @@ _AUTHORITY_RANK = {
 
 # List-valued arbor fields that get dedup-unioned across a dedup group.
 _LIST_UNION_FIELDS = (
-    "what_worked", "what_failed", "remaining_gaps", "prs_tested",
-    "pitfalls", "lessons", "evidence_refs", "sessions",
+    "what_worked",
+    "what_failed",
+    "remaining_gaps",
+    "prs_tested",
+    "pitfalls",
+    "lessons",
+    "evidence_refs",
+    "sessions",
 )
 # Scalar/dict arbor fields back-filled onto the base when the base value is empty.
 _BACKFILL_FIELDS = (
-    "best_config", "best_throughput", "framework_version", "last_profiled",
-    "stack_fingerprint", "provenance", "created_at", "updated_at",
+    "best_config",
+    "best_throughput",
+    "framework_version",
+    "last_profiled",
+    "stack_fingerprint",
+    "provenance",
+    "created_at",
+    "updated_at",
 )
 
 # Per-source fetch floor so a low caller ``limit`` (e.g. get_recipe's limit=1)
@@ -69,7 +82,14 @@ _FETCH_FLOOR = 25
 
 def _richness(row: dict[str, Any]) -> int:
     """Count populated 'rich' fields — a tie-breaker that favours the row
-    carrying actual warm-start payload over a sparse stub."""
+    carrying actual warm-start payload over a sparse stub.
+
+    Args:
+        row: Arbor-shaped recipe row to score.
+
+    Returns:
+        The count of populated 'rich' fields on ``row``.
+    """
     score = 0
     if row.get("best_config"):
         score += 1
@@ -85,7 +105,15 @@ def _richness(row: dict[str, Any]) -> int:
 
 
 def _precedence_key(row: dict[str, Any]) -> tuple[int, float, int, float]:
-    """Higher tuple = preferred base. authority → confidence → richness → tput."""
+    """Higher tuple = preferred base. authority → confidence → richness → tput.
+
+    Args:
+        row: Arbor-shaped recipe row to rank.
+
+    Returns:
+        A precedence tuple ``(authority_rank, confidence, richness,
+        throughput)`` where a higher tuple is preferred.
+    """
     authority = str(row.get("authority") or "")
     try:
         confidence = float(row.get("confidence") or 0.0)
@@ -117,7 +145,14 @@ def _is_empty(value: Any) -> bool:
 
 
 def _dedup_preserve(items: Iterable[Any]) -> list[Any]:
-    """Order-preserving dedup of a small sequence."""
+    """Order-preserving dedup of a small sequence.
+
+    Args:
+        items: Sequence to deduplicate.
+
+    Returns:
+        The deduplicated items, preserving first-seen order.
+    """
     out: list[Any] = []
     for it in items:
         if it not in out:
@@ -135,13 +170,21 @@ def _union_lists(
     is the ordered, de-duplicated list of ``_source`` tags that contributed at
     least one element to the union (for field-level provenance).
 
+    Args:
+        rows: Rows sharing one canonical id, in precedence order.
+        field: Name of the list-valued field to union.
+
+    Returns:
+        A ``(merged_items, contributor_sources)`` tuple where
+        ``contributor_sources`` is the ordered, de-duplicated list of
+        ``_source`` tags that contributed at least one element.
     """
     out: list[Any] = []
     seen: set[str] = set()
     contributors: list[Any] = []
     for row in rows:
         src = row.get("_source")
-        for item in (row.get(field) or []):
+        for item in row.get(field) or []:
             try:
                 key = json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
             except (TypeError, ValueError):
@@ -161,6 +204,13 @@ def _merge_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
     surviving value came from — scalar fields map to the single winning/
     back-filling source, list fields to the ordered set of contributors. This
     is what lets the KB-eval layer attribute an outcome to gbrain vs cortex.
+
+    Args:
+        rows: All rows sharing one canonical id.
+
+    Returns:
+        A single merged arbor row with unioned list fields, back-filled
+        scalars, and ``_sources`` / ``_field_sources`` provenance markers.
     """
     ordered = sorted(rows, key=_precedence_key, reverse=True)
     base = dict(ordered[0])
@@ -189,9 +239,7 @@ def _merge_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
                     field_sources[field] = other["_source"]
                 break
 
-    base["_sources"] = _dedup_preserve(
-        [r.get("_source") for r in ordered if r.get("_source")]
-    )
+    base["_sources"] = _dedup_preserve([r.get("_source") for r in ordered if r.get("_source")])
     base["_field_sources"] = field_sources
     base.pop("_source", None)
     return base
@@ -214,13 +262,15 @@ class CompositeRemoteRecipeClient:
                 each source's ``_name`` or class name.
         """
         self._sources = [s for s in sources if s is not None]
-        self._names = names or [
-            getattr(s, "_name", None) or type(s).__name__ for s in self._sources
-        ]
+        self._names = names or [getattr(s, "_name", None) or type(s).__name__ for s in self._sources]
 
     @property
     def enabled(self) -> bool:
-        """Enabled iff at least one sub-remote is enabled."""
+        """Enabled iff at least one sub-remote is enabled.
+
+        Returns:
+            ``True`` when at least one sub-remote reports enabled.
+        """
         return any(getattr(s, "enabled", False) for s in self._sources)
 
     def _active(self) -> list[tuple[str, Any]]:
@@ -230,14 +280,20 @@ class CompositeRemoteRecipeClient:
             The enabled sources paired with their display names, in precedence
             order.
         """
-        return [
-            (self._names[i], s)
-            for i, s in enumerate(self._sources)
-            if getattr(s, "enabled", False)
-        ]
+        return [(self._names[i], s) for i, s in enumerate(self._sources) if getattr(s, "enabled", False)]
 
     def _fan_out_search(self, *, name: str, source: Any, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
-        """Run one source's search, tag + normalize each row. Best-effort."""
+        """Run one source's search, tag + normalize each row. Best-effort.
+
+        Args:
+            name: Display name of the sub-remote (used for tagging and logs).
+            source: The sub-remote client to query.
+            kwargs: Search keyword arguments forwarded to ``source.search``.
+
+        Returns:
+            Arbor-normalized rows tagged with their ``_source``, or an empty
+            list when the source is skipped on error.
+        """
         try:
             rows = source.search(**kwargs)
         except RemoteRecipeClientError as exc:
@@ -268,12 +324,19 @@ class CompositeRemoteRecipeClient:
         sub_kwargs = dict(kwargs)
         sub_kwargs["limit"] = per_source_limit
         grouped: dict[str, list[dict[str, Any]]] = {}
+        source_candidates: dict[str, int] = {}
         for name, source in self._active():
             rows = self._fan_out_search(name=name, source=source, kwargs=sub_kwargs)
+            source_candidates[name] = len(rows)
             for row in rows:
                 cid = row.get("canonical_id") or ""
                 grouped.setdefault(cid, []).append(row)
         merged = [_merge_group(rows) for rows in grouped.values()]
+        # Stamp per-source candidate counts on every merged row so the
+        # downstream audit/trace can attribute coverage to each path
+        # (e.g. gbrain vs cortex) without re-querying the backends.
+        for row in merged:
+            row["_source_candidates"] = dict(source_candidates)
         merged.sort(key=_precedence_key, reverse=True)
         return merged
 
@@ -293,7 +356,7 @@ class CompositeRemoteRecipeClient:
         """Search all active sources and return merged, ranked rows.
 
         Args:
-            label_match: Exact label filters (the 5-tuple identity labels).
+            label_match: Exact label filters (the 7-tuple identity labels).
             metric_filters: ``{metric: {min, max}}`` filters.
             updated_since: Lower bound on ``updated_at``.
             order_by: Ordering directive forwarded to sub-remotes.
@@ -324,7 +387,49 @@ class CompositeRemoteRecipeClient:
         canonical_id: str,
         version: int | None = None,
     ) -> dict[str, Any] | None:
-        """Exact-cid read: search every source by the 5-tuple labels, merge top."""
+        """Exact-cid read: fast-path each source's get_recipe, then merge.
+
+        Prefers per-source ``get_recipe`` (which uses slug-based direct
+        lookup on gbrain) over the expensive ``search`` scan. Falls back
+        to label-match search only when all fast-paths miss.
+        """
+        # Fast path: per-source get_recipe (slug-based, O(1) on gbrain).
+        hits: list[dict[str, Any]] = []
+        for name, source in self._active():
+            try:
+                row = source.get_recipe(canonical_id=canonical_id, version=version)
+            except (RemoteRecipeClientError, Exception) as exc:  # noqa: BLE001
+                log.debug("composite get_recipe fast-path %s failed: %s", name, exc)
+                continue
+            if row is not None and isinstance(row, dict):
+                arbor = _v2_to_arbor(row)
+                if arbor:
+                    arbor["_source"] = name
+                    hits.append(arbor)
+        if hits:
+            # Per-source candidate counts for trace provenance (gbrain vs cortex);
+            # each fast-path source yields at most one row, so a hit counts as 1.
+            source_candidates: dict[str, int] = {}
+            for h in hits:
+                src = h.get("_source")
+                if src:
+                    source_candidates[src] = source_candidates.get(src, 0) + 1
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for h in hits:
+                grouped.setdefault(h.get("canonical_id") or "", []).append(h)
+            # Always merge (even a single hit) so the returned row carries the
+            # uniform ``_sources`` / ``_field_sources`` provenance the dispatcher
+            # audit reads; stamp per-source candidate counts on top.
+            merged = [_merge_group(rows) for rows in grouped.values()]
+            merged.sort(key=_precedence_key, reverse=True)
+            for row in merged:
+                row["_source_candidates"] = dict(source_candidates)
+            for row in merged:
+                if row.get("canonical_id") == canonical_id:
+                    return row
+            return merged[0] if merged else None
+        # Slow fallback: label-match search (covers cortex kb-service which
+        # does not expose a direct get_recipe by slug).
         try:
             labels = _labels_from_canonical_id(canonical_id)
         except InvalidCanonicalIdError as exc:
@@ -354,12 +459,21 @@ class CompositeRemoteRecipeClient:
         """
         return self._merged_search(
             per_source_limit=max(int(limit), _FETCH_FLOOR),
-            kwargs={"label_match": None, "limit": limit, "metric_filters": None,
-                    "updated_since": None, "order_by": "updated_at DESC"},
+            kwargs={
+                "label_match": None,
+                "limit": limit,
+                "metric_filters": None,
+                "updated_since": None,
+                "order_by": "updated_at DESC",
+            },
         )[: int(limit)]
 
     def _first_active(self) -> Any | None:
-        """Return the first enabled sub-remote, or ``None`` if none are active."""
+        """Return the first enabled sub-remote, or ``None`` if none are active.
+
+        Returns:
+            The first enabled sub-remote, or ``None`` when none are active.
+        """
         for _name, source in self._active():
             return source
         return None
@@ -404,7 +518,11 @@ class CompositeRemoteRecipeClient:
         return src.session_summary(session_id=session_id) if src else None
 
     def health(self) -> bool:
-        """Healthy iff any active source is healthy."""
+        """Healthy iff any active source is healthy.
+
+        Returns:
+            ``True`` when at least one active source reports healthy.
+        """
         for _name, source in self._active():
             try:
                 if source.health():

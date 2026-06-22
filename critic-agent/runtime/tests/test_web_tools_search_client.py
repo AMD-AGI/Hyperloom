@@ -46,6 +46,7 @@ def _cfg(**overrides) -> WebToolsConfig:
 
 # ── WebSearchInput.from_payload ─────────────────────────────────────────
 
+
 class TestInputValidation:
     def test_rejects_short_query(self):
         with pytest.raises(ValueError, match="at least 2"):
@@ -57,11 +58,13 @@ class TestInputValidation:
 
     def test_max_results_clamped(self):
         out = WebSearchInput.from_payload(
-            {"query": "abc", "max_results": 999}, 5,
+            {"query": "abc", "max_results": 999},
+            5,
         )
         assert out.max_results == 5
         out = WebSearchInput.from_payload(
-            {"query": "abc", "max_results": 0}, 10,
+            {"query": "abc", "max_results": 0},
+            10,
         )
         assert out.max_results == 1
 
@@ -71,19 +74,22 @@ class TestInputValidation:
 
     def test_invalid_max_results_falls_back(self):
         out = WebSearchInput.from_payload(
-            {"query": "abc", "max_results": "no"}, 10,
+            {"query": "abc", "max_results": "no"},
+            10,
         )
         assert out.max_results == 5
 
     def test_site_promoted_to_allowed_domains(self):
         out = WebSearchInput.from_payload(
-            {"query": "abc", "site": "Docs.SgLang.AI"}, 10,
+            {"query": "abc", "site": "Docs.SgLang.AI"},
+            10,
         )
         assert out.allowed_domains == ("docs.sglang.ai",)
 
     def test_site_ignored_when_allowed_set(self):
         out = WebSearchInput.from_payload(
-            {"query": "abc", "site": "a.com", "allowed_domains": ["b.com"]}, 10,
+            {"query": "abc", "site": "a.com", "allowed_domains": ["b.com"]},
+            10,
         )
         assert out.allowed_domains == ("b.com",)
 
@@ -96,18 +102,21 @@ class TestInputValidation:
 
     def test_freshness_any_becomes_none(self):
         out = WebSearchInput.from_payload(
-            {"query": "abc", "freshness": "any"}, 10,
+            {"query": "abc", "freshness": "any"},
+            10,
         )
         assert out.freshness is None
 
     def test_freshness_unknown_becomes_none(self):
         out = WebSearchInput.from_payload(
-            {"query": "abc", "freshness": "decade"}, 10,
+            {"query": "abc", "freshness": "decade"},
+            10,
         )
         assert out.freshness is None
 
 
 # ── WebSearchClient.execute ─────────────────────────────────────────────
+
 
 class TestExecute:
     def test_returns_disabled_error_when_no_provider(self):
@@ -119,9 +128,11 @@ class TestExecute:
         assert client.execute({"query": "x"}).startswith("Error: query must be at least")
 
     def test_happy_path_format_and_cite_reminder(self):
-        p = _provider("t",
-                      SearchHit(title="T1", url="https://a/b", snippet="snip1"),
-                      SearchHit(title="T2", url="https://c/d", snippet=""))
+        p = _provider(
+            "t",
+            SearchHit(title="T1", url="https://a/b", snippet="snip1"),
+            SearchHit(title="T2", url="https://c/d", snippet=""),
+        )
         client = WebSearchClient(config=_cfg(), providers=(p,))
         out = client.execute({"query": "abc"})
         assert 'Web search results for query: "abc"' in out
@@ -133,7 +144,7 @@ class TestExecute:
         assert "REMINDER" in out
         # Links payload uses JSON
         line = next(line for line in out.splitlines() if line.startswith("Links:"))
-        parsed = json.loads(line[len("Links: "):])
+        parsed = json.loads(line[len("Links: ") :])
         assert parsed == [
             {"title": "T1", "url": "https://a/b"},
             {"title": "T2", "url": "https://c/d"},
@@ -149,8 +160,10 @@ class TestExecute:
     def test_fallback_chain_on_provider_error(self):
         class FailingProvider:
             name = "tavily"
+
             def search(self, query, opts):
                 raise ProviderError("503")
+
         p2 = _provider("serper", SearchHit("T", "https://x/y"))
         client = WebSearchClient(config=_cfg(), providers=(FailingProvider(), p2))
         out = client.execute({"query": "abc"})
@@ -159,12 +172,16 @@ class TestExecute:
     def test_all_providers_fail_returns_aggregated_error(self):
         class Bad1:
             name = "tavily"
+
             def search(self, q, o):
                 raise ProviderError("a")
+
         class Bad2:
             name = "serper"
+
             def search(self, q, o):
                 raise ProviderError("b")
+
         client = WebSearchClient(config=_cfg(), providers=(Bad1(), Bad2()))
         out = client.execute({"query": "abc"})
         assert out.startswith("Error: all web search providers failed")
@@ -173,7 +190,8 @@ class TestExecute:
     def test_rate_limit_blocks_extra_calls(self):
         p = _provider("t", SearchHit("T", "https://a/b"))
         client = WebSearchClient(
-            config=_cfg(search_rate_limit_per_min=1), providers=(p,),
+            config=_cfg(search_rate_limit_per_min=1),
+            providers=(p,),
         )
         out1 = client.execute({"query": "abc"})
         out2 = client.execute({"query": "abc"})
@@ -182,9 +200,7 @@ class TestExecute:
 
     def test_global_denylist_strips_hits(self):
         cfg = _cfg(search_domain_denylist=("spam.io",))
-        p = _provider("t",
-                      SearchHit("ok", "https://a.com/x"),
-                      SearchHit("bad", "https://api.spam.io/y"))
+        p = _provider("t", SearchHit("ok", "https://a.com/x"), SearchHit("bad", "https://api.spam.io/y"))
         client = WebSearchClient(config=cfg, providers=(p,))
         out = client.execute({"query": "abc"})
         assert "https://a.com/x" in out
@@ -209,9 +225,9 @@ class TestExecute:
         assert opts.allowed_domains == ("docs.sglang.ai",)
 
     def test_allowed_domain_post_filter(self):
-        p = _provider("t",
-                      SearchHit("in", "https://docs.sglang.ai/api"),
-                      SearchHit("out", "https://random.example/api"))
+        p = _provider(
+            "t", SearchHit("in", "https://docs.sglang.ai/api"), SearchHit("out", "https://random.example/api")
+        )
         client = WebSearchClient(config=_cfg(), providers=(p,))
         out = client.execute({"query": "abc", "allowed_domains": ["docs.sglang.ai"]})
         assert "docs.sglang.ai" in out
@@ -219,6 +235,7 @@ class TestExecute:
 
 
 # ── _LeakyBucket ────────────────────────────────────────────────────────
+
 
 class TestLeakyBucket:
     def test_drains_capacity_then_blocks(self):

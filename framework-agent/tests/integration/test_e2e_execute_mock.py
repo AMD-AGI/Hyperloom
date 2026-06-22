@@ -23,12 +23,12 @@ def _write_request(
     # _evaluate_candidate step. Single-quoted JSON keeps the brace
     # characters opaque to render_template's identifier regex.
     bench_cmd = (
-        "python3 -c \"import json,sys; "
+        'python3 -c "import json,sys; '
         "open(sys.argv[1],'w').write(json.dumps({'throughput': 200.0, 'completed': '1/1'}))\" "
         "{candidate_dir}/benchmark.json"
     )
     acc_cmd = (
-        "python3 -c \"import json,sys; "
+        'python3 -c "import json,sys; '
         "open(sys.argv[1],'w').write(json.dumps({'accuracy': 0.95}))\" "
         "{candidate_dir}/accuracy.json"
     )
@@ -58,9 +58,7 @@ def _write_request(
     return path
 
 
-def test_explore_execute_mock_winner_and_kb_append(
-    tmp_path: Path, fake_primus: str
-) -> None:
+def test_explore_execute_mock_winner_and_kb_append(tmp_path: Path, fake_primus: str) -> None:
     """``fa explore --execute`` picks the winner and auto-appends KB."""
     work_dir = tmp_path / "work"
     kb_root = tmp_path / "kb"

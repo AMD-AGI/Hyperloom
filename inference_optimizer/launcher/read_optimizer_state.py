@@ -5,6 +5,7 @@
 Usage:
     python inference_optimizer/launcher/read_optimizer_state.py SESSION_DIR
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,25 +27,47 @@ SUMMARY_KEYS = (
 
 
 def _load_json(path: pathlib.Path) -> dict[str, Any]:
+    """Load and parse a JSON file into a dict.
+
+    Args:
+        path: The JSON file to read.
+
+    Returns:
+        The parsed JSON object as a dict.
+    """
     return json.loads(path.read_text())
 
 
 def _format_lifecycle_event(event: dict[str, Any]) -> str:
+    """Render a single lifecycle event as a one-line human-readable summary.
+
+    Args:
+        event: A lifecycle event dict (seq, label, phase, status, optional
+            duration_s, detail, and artifacts).
+
+    Returns:
+        A formatted single-line string describing the event, including any
+        artifacts when present.
+    """
     duration = f" {event['duration_s']}s" if event.get("duration_s") is not None else ""
     detail = f" [{event['detail']}]" if event.get("detail") else ""
-    artifacts = " ".join(
-        f"{key}={value}" for key, value in (event.get("artifacts") or {}).items()
-    )
-    line = (
-        f"#{event.get('seq')} {event.get('label')} [{event.get('phase')}] "
-        f"{event.get('status')}{duration}{detail}"
-    )
+    artifacts = " ".join(f"{key}={value}" for key, value in (event.get("artifacts") or {}).items())
+    line = f"#{event.get('seq')} {event.get('label')} [{event.get('phase')}] {event.get('status')}{duration}{detail}"
     if artifacts:
         line += f" -> {artifacts}"
     return line
 
 
 def main() -> int:
+    """Print a concise optimizer state and recent lifecycle summary.
+
+    Reads ``state.json`` (and optional ``manifest.json``) from the session
+    directory and prints the summary keys, phase, and the most recent
+    lifecycle events.
+
+    Returns:
+        ``0`` on success, or ``2`` when ``state.json`` is missing.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("session_dir", help="Optimizer session directory.")
     parser.add_argument(

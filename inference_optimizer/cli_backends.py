@@ -47,20 +47,39 @@ def _build_backends(
     ``critic_agent_root``). ``robustness_choice`` ∈ {``mock``, ``agent``}:
     mock is the heartbeat-only backend; ``agent`` is
     :class:`RobustnessAgentBackend` (requires ``robustness_agent_root``).
+
+    Args:
+        claude_model: Claude model id for the orchestration / kernel backends.
+        codex_model: Codex model id for the kernel / critic backends.
+        kernel_codex: Use a Codex backend for the kernel role when ``True``.
+        critic_choice: Critic backend selector (``mock`` or ``agent``).
+        session_dir: Session directory passed to agent backends.
+        critic_agent_root: Critic-agent root, required when
+            ``critic_choice='agent'``.
+        critic_kb_mode: Knowledge-base mode for the critic agent.
+        cortex_kb_url: Optional Cortex KB URL for the critic agent.
+        robustness_choice: Robustness backend selector (``mock`` or ``agent``).
+        robustness_agent_root: Robustness-agent root, required when
+            ``robustness_choice='agent'``.
+        robustness_options: Optional ``request.options`` overrides for the
+            robustness agent.
+        no_kernel: Skip building the kernel backend when ``True``.
+
+    Returns:
+        A mapping of role name to its constructed backend.
+
+    Raises:
+        ValueError: If ``critic_choice`` / ``robustness_choice`` is invalid, or
+            an ``agent`` choice is missing its required agent root.
     """
     if critic_choice not in ("mock", "agent"):
-        raise ValueError(
-            f"_build_backends: critic_choice={critic_choice!r} not in "
-            "{'mock','agent'}"
-        )
+        raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()
     else:  # "agent"
         if critic_agent_root is None:
-            raise ValueError(
-                "_build_backends: critic_choice='agent' requires critic_agent_root"
-            )
+            raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
         # Feed the registry-derived per-action verdict policy so the
         # critic-agent runtime sees
         # ``review_constraints.action_verdict_policy[<action_name>]`` and
@@ -70,6 +89,7 @@ def _build_backends(
             from inference_optimizer.orchestrator.action_registry import (
                 ActionRegistry,
             )
+
             _reg = ActionRegistry().load()
             _policy = {a.name: a.verdict_class for a in _reg.all()}
         except Exception:  # noqa: BLE001 — degrade to empty policy
@@ -84,18 +104,12 @@ def _build_backends(
         )
 
     if robustness_choice not in ("mock", "agent"):
-        raise ValueError(
-            f"_build_backends: robustness_choice={robustness_choice!r} not in "
-            "{'mock','agent'}"
-        )
+        raise ValueError(f"_build_backends: robustness_choice={robustness_choice!r} not in {{'mock','agent'}}")
     if robustness_choice == "mock":
         robustness_backend: Any = MockRobustnessBackend()
     else:  # "agent"
         if robustness_agent_root is None:
-            raise ValueError(
-                "_build_backends: robustness_choice='agent' requires "
-                "robustness_agent_root"
-            )
+            raise ValueError("_build_backends: robustness_choice='agent' requires robustness_agent_root")
         robustness_backend = RobustnessAgentBackend(
             robustness_agent_root=robustness_agent_root,
             session_dir=session_dir,
@@ -111,10 +125,12 @@ def _build_backends(
         # ClaudeBackend.__post_init__. kernel / critic / robustness keep
         # the stateless per-tick reactor mode.
         "orchestration": ClaudeBackend(
-            model=claude_model, max_turns_default=4, conversational=True,
+            model=claude_model,
+            max_turns_default=4,
+            conversational=True,
         ),
-        "critic":        critic_backend,
-        "robustness":    robustness_backend,
+        "critic": critic_backend,
+        "robustness": robustness_backend,
     }
     if not no_kernel:
         if kernel_codex:
@@ -137,6 +153,15 @@ def _build_proposal_scorer(
     ``session_dir`` is forwarded so the scorer can append its per-model
     token usage to the full-trace ledger (component=proposal_scorer); when
     omitted the scorer simply skips trace writes.
+
+    Args:
+        args: Parsed CLI args (``no_proposal_scoring`` /
+            ``proposal_scorer_models``).
+        session_dir: Optional session directory for token-usage trace writes.
+
+    Returns:
+        A configured :class:`ProposalScorer`, or ``None`` when scoring is
+        disabled or no models resolve.
     """
     if getattr(args, "no_proposal_scoring", False):
         return None
@@ -144,9 +169,7 @@ def _build_proposal_scorer(
     if raw is None:
         models = tuple(DEFAULT_SCORER_MODELS)
     else:
-        models = tuple(
-            m for m in (s.strip() for s in str(raw).split(",")) if m
-        )
+        models = tuple(m for m in (s.strip() for s in str(raw).split(",")) if m)
     if not models:
         return None
     return ProposalScorer(models=models, session_dir=session_dir)
@@ -160,6 +183,13 @@ def _robustness_server_configured(args: argparse.Namespace) -> bool:
     ``enable_cluster_pod_metrics`` and the sandbox-local LocalProbe false
     positives are silenced. Configured = ``--robustness-server-url`` or
     ``ROBUSTNESS_SERVER_URL`` is set.
+
+    Args:
+        args: Parsed CLI args carrying ``robustness_server_url``.
+
+    Returns:
+        ``True`` when a robustness-server endpoint is configured via flag or
+        environment.
     """
     url = (getattr(args, "robustness_server_url", None) or "").strip()
     if url:
@@ -188,8 +218,21 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     ``local_server_unreachable`` symptoms. We therefore default
     ``disable_local_probe`` + ``enable_cluster_pod_metrics`` to True,
     forward a workload_uid hint, disable the 127.0.0.1:8888 auto-probe,
-    and lift the ``no_levers_found`` floor to 60 min. Single-node
-    semantics stay untouched.
+    and lift the ``no_levers_found`` floor to 60 min.
+
+    Single-node opt-in: ``--robustness-disable-server-probe`` sets
+    ``auto_probe_inference_server=False`` so the 127.0.0.1:8888 /health
+    probe is silenced (the optimizer's per-benchmark server restarts
+    otherwise trip the same false ``local_server_unreachable``), while the
+    rest of LocalProbe keeps running. All other single-node semantics stay
+    untouched.
+
+    Args:
+        args: Parsed CLI args carrying the robustness-related flags.
+
+    Returns:
+        The non-default ``request.options`` overrides derived from the flags
+        (and multi-node policy); keys the operator did not set are omitted.
     """
     options: dict[str, Any] = {}
     server_url = getattr(args, "robustness_server_url", None)
@@ -236,12 +279,25 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
         if cat_list:
             options["pod_metrics_categories"] = cat_list
 
+    # ``auto_probe_inference_server`` controls the 127.0.0.1:8888 /health
+    # auto-probe inside LocalProbe.
+    #   * Multi-node: the inference server lives in the head pod, so the probe
+    #     can never succeed and would flood the bus with false-positive
+    #     ``local_server_unreachable`` symptoms — default it OFF.
+    #   * Single-node: the optimizer restarts the inference server between
+    #     benchmarks; those restart windows trip the SAME false positive (and
+    #     can escalate to a premature skip_to_close / robustness_escalated stop).
+    #     Operators opt in via ``--robustness-disable-server-probe``. Unlike
+    #     ``--robustness-disable-local-probe`` this is surgical: only the
+    #     127.0.0.1:8888 probe is silenced; the rest of LocalProbe (gpu-leak,
+    #     gateway 401, coordinator-zombie, aiter-JIT, disk/fd) keeps running.
+    disable_server_probe = getattr(args, "robustness_disable_server_probe", None)
+    if disable_server_probe is None and multi_node:
+        disable_server_probe = True
+    if disable_server_probe is not None:
+        options["auto_probe_inference_server"] = not bool(disable_server_probe)
+
     if multi_node:
-        # The inference server runs in the head pod, so the hardcoded
-        # 127.0.0.1:8888 health probe can never succeed and would flood
-        # the bus with false-positive ``local_server_unreachable``
-        # symptoms each tick — disable the auto-probe in multi-node.
-        options["auto_probe_inference_server"] = False
         # B3 no_levers_found floor — multi-node large-model spends
         # 35-50 min on sglang cold start + baseline + profile +
         # turnaround alone before the first explore family runs, so lift

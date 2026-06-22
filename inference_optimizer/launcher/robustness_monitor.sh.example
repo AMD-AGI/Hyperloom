@@ -5,10 +5,22 @@
 #
 # Polls ``$INFERENCE_OPTIMIZER_SESSION_DIR/state.json`` every 300s. On a
 # terminal session (any ``stop_reason`` in ``STOP_REASON_VOCAB``, ``phase=CLOSE``,
-# or ``reports/final.md`` present), exits 0 without resuming. If the optimizer
-# process has disappeared from ``/proc`` *without* a terminal marker (unexpected
-# crash), re-launches the same session only via
-# ``optimize --resume --resume-from "$session_dir"`` and updates ``$PID_FILE``.
+# or ``reports/final.md`` present), exits 0 without resuming. Otherwise it only
+# re-launches the session via ``optimize --resume --resume-from "$session_dir"``
+# when the optimizer is judged dead by a ROBUST, multi-signal liveness check
+# (issue #592). The session is considered ALIVE when ANY of the following hold:
+#   * the optimizer owner pid published in ``$session_dir/runtime/optimizer.lock``
+#     is still in ``/proc`` (authoritative — survives the wrapper pid exiting);
+#   * the ``$PID_FILE`` pid is still in ``/proc`` (legacy wrapper signal);
+#   * ``state.json`` was modified within ``STATE_FRESH_SEC`` (recent heartbeat);
+#   * a non-expired lease in ``$session_dir/storage/coordinator.db`` is owned by
+#     a pid that is still in ``/proc``.
+# To kill the original cold-start race, resume is additionally gated by a
+# ``STARTUP_GRACE_SEC`` warm-up window (covers the slow ~90s serving cold-start)
+# and requires ``DEAD_CONFIRMATIONS`` consecutive dead observations before
+# firing. The optimizer itself also holds an exclusive lock on
+# ``optimizer.lock``, so even a misfired resume cannot attach a second optimizer
+# to the same session (it exits with code 3 instead of corrupting state).
 # Logs the resume invocation to ``$REPO_ROOT/optimizer_runs/resume_<ts>.log``.
 #
 # Required env (caller MUST export):
@@ -31,6 +43,18 @@
 #   LAUNCH_INFO_WAIT_SEC               60    seconds to poll for LAUNCH_INFO_FILE
 #                                            before failing (covers the monitor
 #                                            racing ahead of the optimizer write)
+#   STARTUP_GRACE_SEC                  180   warm-up window (from monitor start)
+#                                            during which a not-yet-alive session
+#                                            is NEVER resumed; covers the slow
+#                                            serving cold-start (issue #592)
+#   STATE_FRESH_SEC                    600   state.json mtime within this many
+#                                            seconds counts as a live heartbeat
+#   DEAD_CONFIRMATIONS                 2     consecutive dead observations
+#                                            required before firing a resume
+#   RECHECK_INTERVAL_SEC               30    poll interval while inside the
+#                                            grace window or confirming death
+#   POLL_INTERVAL_SEC                  300   poll interval once the session is
+#                                            confirmed alive / after a resume
 #   MAGPIE_PYTHON                      /opt/venv/bin/python
 #                                            interpreter forwarded to the
 #                                            resume launch
@@ -140,7 +164,7 @@ try:
     from inference_optimizer.orchestrator.phase_state import STOP_REASON_VOCAB
 except ImportError:
     STOP_REASON_VOCAB = frozenset({
-        "target_reached", "no_more_leverage", "time_exhausted", "max_ticks",
+        "target_reached", "global_converged", "time_exhausted", "max_ticks",
         "baseline_failed", "prelude_baseline_failed", "policy_loop",
         "prelude_policy_loop", "emergency", "signal", "unknown", "custom",
         "crash_threshold_exceeded", "user_stop_requested",
@@ -158,6 +182,116 @@ raise SystemExit(1)
 PY
 }
 
+# Tunables (validated to non-negative integers; malformed values degrade to the
+# documented default instead of crashing under ``set -u``).
+_validate_int() {
+  # $1 = value, $2 = default; echoes a base-10 integer.
+  local val="$1" def="$2"
+  if [[ "$val" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$((10#$val))"
+  else
+    printf '%s' "$def"
+  fi
+}
+STARTUP_GRACE_SEC="$(_validate_int "${STARTUP_GRACE_SEC:-180}" 180)"
+STATE_FRESH_SEC="$(_validate_int "${STATE_FRESH_SEC:-600}" 600)"
+DEAD_CONFIRMATIONS="$(_validate_int "${DEAD_CONFIRMATIONS:-2}" 2)"
+RECHECK_INTERVAL_SEC="$(_validate_int "${RECHECK_INTERVAL_SEC:-30}" 30)"
+POLL_INTERVAL_SEC="$(_validate_int "${POLL_INTERVAL_SEC:-300}" 300)"
+# At least one confirmation, else a single transient miss would resume.
+[ "$DEAD_CONFIRMATIONS" -lt 1 ] && DEAD_CONFIRMATIONS=1
+
+# Robust, multi-signal liveness probe (issue #592). Exit 0 = ALIVE (do not
+# resume), exit 1 = no live signal. ``wrapper_pid`` is the legacy $PID_FILE pid.
+is_session_alive() {
+  STATE_FRESH_SEC="$STATE_FRESH_SEC" python3 - "$session_dir" "${1:-}" <<'PY'
+import json
+import os
+import pathlib
+import sys
+import time
+
+
+def pid_alive(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    # Monitor host is Linux; /proc is the source of truth used elsewhere here.
+    return pid > 0 and os.path.isdir(f"/proc/{pid}")
+
+
+sd = pathlib.Path(sys.argv[1])
+wrapper_pid = sys.argv[2] if len(sys.argv) > 2 else ""
+
+# 1) Authoritative owner pid published by the optimizer's session lock.
+lock_path = sd / "runtime" / "optimizer.lock"
+try:
+    owner = json.loads(lock_path.read_text())
+    if pid_alive(owner.get("pid")):
+        print("owner_pid", file=sys.stderr)
+        raise SystemExit(0)
+except SystemExit:
+    raise
+except Exception:
+    pass
+
+# 2) Legacy wrapper pid from $PID_FILE.
+if pid_alive(wrapper_pid):
+    print("wrapper_pid", file=sys.stderr)
+    raise SystemExit(0)
+
+# 3) Recent state.json heartbeat (Coordinator rewrites it every tick).
+try:
+    fresh = int(os.environ.get("STATE_FRESH_SEC", "600"))
+except ValueError:
+    fresh = 600
+state_path = sd / "state.json"
+try:
+    age = time.time() - state_path.stat().st_mtime
+    if age <= fresh:
+        print(f"state_mtime_age={int(age)}s", file=sys.stderr)
+        raise SystemExit(0)
+except SystemExit:
+    raise
+except FileNotFoundError:
+    pass
+except Exception:
+    pass
+
+# 4) A non-expired lease owned by a live pid in coordinator.db.
+db_path = sd / "storage" / "coordinator.db"
+if db_path.is_file():
+    try:
+        import sqlite3
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = con.execute("SELECT pid, expires_at FROM leases").fetchall()
+        finally:
+            con.close()
+        for pid, expires_at in rows:
+            try:
+                exp = datetime.fromisoformat(expires_at)
+            except (TypeError, ValueError):
+                continue
+            if exp > now and pid_alive(pid):
+                print(f"live_lease_pid={pid}", file=sys.stderr)
+                raise SystemExit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+
+raise SystemExit(1)
+PY
+}
+
+monitor_start="$(date +%s)"
+dead_streak=0
+
 while [ "$(date +%s)" -lt "$deadline" ]; do
   pid=""
   [ -f "$PID_FILE" ] && read -r pid < "$PID_FILE" || true
@@ -167,18 +301,57 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     exit 0
   fi
 
-  if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
-    sleep 300
+  if is_session_alive "$pid"; then
+    dead_streak=0
+    sleep "$POLL_INTERVAL_SEC"
     continue
   fi
 
+  # No live signal. Never resume inside the cold-start warm-up window — a fresh
+  # launch legitimately has no owner pid / heartbeat / lease yet (issue #592).
+  if [ "$(( $(date +%s) - monitor_start ))" -lt "$STARTUP_GRACE_SEC" ]; then
+    echo "[robustness] no live signal but within startup grace (${STARTUP_GRACE_SEC}s); not resuming $(date -Is)"
+    dead_streak=0
+    sleep "$RECHECK_INTERVAL_SEC"
+    continue
+  fi
+
+  # Require consecutive dead observations so a single transient miss (slow
+  # state.json write, brief /proc race) does not trigger a spurious resume.
+  dead_streak=$(( dead_streak + 1 ))
+  if [ "$dead_streak" -lt "$DEAD_CONFIRMATIONS" ]; then
+    echo "[robustness] dead signal ${dead_streak}/${DEAD_CONFIRMATIONS}; re-checking $(date -Is)"
+    sleep "$RECHECK_INTERVAL_SEC"
+    continue
+  fi
+  dead_streak=0
+
   echo "[robustness] optimizer stopped (no terminal marker); resuming $(date -Is)"
-  resume_log="$REPO_ROOT/optimizer_runs/resume_$(date +%Y%m%d_%H%M%S).log"
+  # Resume logs land next to the pidfile (its dir is guaranteed to exist —
+  # $RUN_DIR). The old hardcoded $REPO_ROOT/optimizer_runs may not exist on a
+  # checkout whose run dir lives under $USER_DATA_PATH, which silently aborted
+  # the resume redirect and left PID_FILE pointing at a dead wrapper.
+  resume_log_dir="$(dirname "$PID_FILE")"
+  mkdir -p "$resume_log_dir"
+  resume_log="$resume_log_dir/resume_$(date +%Y%m%d_%H%M%S).log"
   MAGPIE_PYTHON="${MAGPIE_PYTHON}" setsid nohup inference_optimizer --verbose optimize \
     --resume --resume-from "$session_dir" \
     --target-gain "${TARGET_GAIN:-10}" --max-hours "${MAX_HOURS:-24}" \
     --tick-interval-sec 30 --kernel-claude \
     > "$resume_log" 2>&1 < /dev/null &
-  echo $! > "$PID_FILE"
-  sleep 300
+  # Record the REAL resumed optimizer pid, not the setsid wrapper ($!), which
+  # exits immediately and would make the next loop misfire another resume.
+  sleep 5
+  resumed_pid="$(pgrep -f 'inference_optimizer --verbose optimize --resume --resume-from '"$session_dir" | head -1)"
+  if [ -n "$resumed_pid" ]; then
+    echo "$resumed_pid" > "$PID_FILE"
+    echo "[robustness] resumed optimizer pid=$resumed_pid log=$resume_log"
+  else
+    echo "[robustness] WARN: could not resolve resumed optimizer pid; see $resume_log"
+  fi
+  # Give the just-resumed optimizer its own cold-start grace window before the
+  # next liveness check, so we never stack a second resume on top of it.
+  monitor_start="$(date +%s)"
+  dead_streak=0
+  sleep "$POLL_INTERVAL_SEC"
 done

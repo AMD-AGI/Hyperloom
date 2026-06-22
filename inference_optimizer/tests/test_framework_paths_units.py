@@ -58,9 +58,9 @@ class TestResolveSourceFileAllowlist:
         assert fp.resolve_source_file_allowlist() == fp._DEFAULT_SOURCE_ROOTS
 
     def test_merges_discovered_roots(self, monkeypatch):
-        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: (
-            "/usr/local/lib/python3.12/dist-packages/vllm/",
-        ))
+        monkeypatch.setattr(
+            fp, "_discover_installed_framework_roots", lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",)
+        )
         roots = fp.resolve_source_file_allowlist()
         assert fp._DEFAULT_SOURCE_ROOTS[0] in roots
         assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
@@ -82,7 +82,8 @@ class TestResolveSourceFileAllowlist:
 class TestFindSpecOrigin:
     def test_returns_none_when_spec_missing(self, monkeypatch):
         monkeypatch.setattr(
-            importlib.util, "find_spec",
+            importlib.util,
+            "find_spec",
             lambda name: None,
         )
         assert fp._find_spec_origin("does_not_matter") is None
@@ -113,7 +114,8 @@ class TestResolveSglangServerArgs:
         target = tmp_path / "server_args.py"
         target.write_text("# fake")
         monkeypatch.setenv(
-            "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS", str(target),
+            "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS",
+            str(target),
         )
         path, source = fp.resolve_sglang_server_args_path()
         assert path == target
@@ -122,7 +124,8 @@ class TestResolveSglangServerArgs:
     def test_explicit_env_pointing_to_missing_file(self, tmp_path, monkeypatch):
         target = tmp_path / "missing.py"
         monkeypatch.setenv(
-            "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS", str(target),
+            "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS",
+            str(target),
         )
         path, source = fp.resolve_sglang_server_args_path()
         assert path == target
@@ -130,7 +133,9 @@ class TestResolveSglangServerArgs:
 
     def test_fallback_via_find_spec(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            fp, "_DEFAULT_SGLANG_SERVER_ARGS", tmp_path / "absent.py",
+            fp,
+            "_DEFAULT_SGLANG_SERVER_ARGS",
+            tmp_path / "absent.py",
         )
         origin = tmp_path / "sglang_pkg"
         (origin / "srt").mkdir(parents=True)
@@ -143,7 +148,9 @@ class TestResolveSglangServerArgs:
 
     def test_alt_layout_when_primary_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            fp, "_DEFAULT_SGLANG_SERVER_ARGS", tmp_path / "absent.py",
+            fp,
+            "_DEFAULT_SGLANG_SERVER_ARGS",
+            tmp_path / "absent.py",
         )
         origin = tmp_path / "sglang_pkg"
         alt = origin / "python" / "sglang" / "srt" / "server_args.py"
@@ -154,7 +161,9 @@ class TestResolveSglangServerArgs:
         assert path == alt
 
     def test_default_path_returned_when_nothing_resolves(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         sentinel = tmp_path / "still_absent.py"
         monkeypatch.setattr(fp, "_DEFAULT_SGLANG_SERVER_ARGS", sentinel)
@@ -183,7 +192,9 @@ class TestResolveVllmArgUtils:
         assert path == alt
 
     def test_explicit_env_missing_file_returns_not_found_source(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         target = tmp_path / "no.py"
         monkeypatch.setenv("INFERENCE_OPTIMIZER_VLLM_ARG_UTILS", str(target))
@@ -197,7 +208,9 @@ class TestGlobInstallPackageRoots:
         base = tmp_path / "usr_local_lib" / "python3.12" / "dist-packages"
         (base / "vllm").mkdir(parents=True)
         monkeypatch.setattr(
-            fp, "_INSTALL_GLOB_PARENTS", (tmp_path / "usr_local_lib",),
+            fp,
+            "_INSTALL_GLOB_PARENTS",
+            (tmp_path / "usr_local_lib",),
         )
         roots = fp._glob_install_package_roots()
         assert any("dist-packages/vllm/" in r for r in roots)
@@ -216,16 +229,22 @@ class TestProbeFrameworkSourceRootsForEnv:
     def test_returns_existing_dirs_only(self, tmp_path, monkeypatch):
         present = tmp_path / "fake_root"
         present.mkdir()
-        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: (
-            f"{present}/",
-            f"{tmp_path / 'missing'}/",
-        ))
+        monkeypatch.setattr(
+            fp,
+            "_discover_installed_framework_roots",
+            lambda: (
+                f"{present}/",
+                f"{tmp_path / 'missing'}/",
+            ),
+        )
         monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
         result = fp.probe_framework_source_roots_for_env()
         assert result == f"{present}/"
 
     def test_includes_site_packages_when_virtual_env_set(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         venv = tmp_path / "venv"
         site = venv / "lib" / "python3.12" / "site-packages"
@@ -243,7 +262,9 @@ class TestProbeFrameworkSourceRootsForEnv:
         shared = tmp_path / "shared"
         shared.mkdir()
         monkeypatch.setattr(
-            fp, "_DEFAULT_SOURCE_ROOTS", (f"{shared}/",),
+            fp,
+            "_DEFAULT_SOURCE_ROOTS",
+            (f"{shared}/",),
         )
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: shared)
         monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
@@ -253,14 +274,12 @@ class TestProbeFrameworkSourceRootsForEnv:
 
 # atom enablement
 
+
 class TestDefaultSourceRootsIncludesAtom:
     def test_atom_root_present_in_defaults(self):
         """/app/ATOM/atom/ must be in the PolicyGate source-file allowlist."""
-        assert any(
-            "/app/ATOM/atom" in r for r in fp._DEFAULT_SOURCE_ROOTS
-        ), (
-            f"_DEFAULT_SOURCE_ROOTS missing atom entry: "
-            f"{fp._DEFAULT_SOURCE_ROOTS!r}"
+        assert any("/app/ATOM/atom" in r for r in fp._DEFAULT_SOURCE_ROOTS), (
+            f"_DEFAULT_SOURCE_ROOTS missing atom entry: {fp._DEFAULT_SOURCE_ROOTS!r}"
         )
 
     def test_atom_root_visible_in_resolve_allowlist(self):
@@ -274,7 +293,8 @@ class TestResolveAtomArgUtils:
         target = tmp_path / "arg_utils.py"
         target.write_text("# fake")
         monkeypatch.setenv(
-            "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS", str(target),
+            "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS",
+            str(target),
         )
         path, source = fp.resolve_atom_arg_utils_path()
         assert path == target
@@ -283,7 +303,8 @@ class TestResolveAtomArgUtils:
     def test_env_override_pointing_to_missing_file(self, tmp_path, monkeypatch):
         target = tmp_path / "missing.py"
         monkeypatch.setenv(
-            "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS", str(target),
+            "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS",
+            str(target),
         )
         path, source = fp.resolve_atom_arg_utils_path()
         assert path == target
@@ -297,10 +318,14 @@ class TestResolveAtomArgUtils:
         assert path == default
 
     def test_spec_fallback_resolves_model_engine_arg_utils(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         monkeypatch.setattr(
-            fp, "_DEFAULT_ATOM_ARG_UTILS", tmp_path / "absent.py",
+            fp,
+            "_DEFAULT_ATOM_ARG_UTILS",
+            tmp_path / "absent.py",
         )
         origin = tmp_path / "atom_pkg"
         au = origin / "model_engine" / "arg_utils.py"
@@ -312,7 +337,9 @@ class TestResolveAtomArgUtils:
         assert source == str(au)
 
     def test_default_path_returned_when_nothing_resolves(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         sentinel = tmp_path / "still_absent.py"
         monkeypatch.setattr(fp, "_DEFAULT_ATOM_ARG_UTILS", sentinel)
@@ -331,14 +358,17 @@ class TestProbeIncludesAtomWhenInstalled:
 
         spec_map = {"atom": origin}
         monkeypatch.setattr(
-            fp, "_find_spec_origin",
+            fp,
+            "_find_spec_origin",
             lambda name: spec_map.get(name),
         )
         result = fp.probe_framework_source_roots_for_env()
         assert f"{origin}/" in result
 
     def test_atom_picked_up_via_venv_site_packages(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         """A wheel-installed atom is picked up via the VIRTUAL_ENV ``python*/site-packages/atom`` glob."""
         venv = tmp_path / "venv"
@@ -363,15 +393,15 @@ class TestFrameworkPathsThreeFrameworksSymmetric:
         ],
     )
     def test_resolver_returns_path_str_pair(
-        self, resolver_name, tmp_path, monkeypatch,
+        self,
+        resolver_name,
+        tmp_path,
+        monkeypatch,
     ):
         env_map = {
-            "resolve_sglang_server_args_path":
-                "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS",
-            "resolve_vllm_arg_utils_path":
-                "INFERENCE_OPTIMIZER_VLLM_ARG_UTILS",
-            "resolve_atom_arg_utils_path":
-                "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS",
+            "resolve_sglang_server_args_path": "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS",
+            "resolve_vllm_arg_utils_path": "INFERENCE_OPTIMIZER_VLLM_ARG_UTILS",
+            "resolve_atom_arg_utils_path": "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS",
         }
         target = tmp_path / "fake_args.py"
         target.write_text("# stub")
@@ -386,8 +416,7 @@ class TestSummariseFrameworkRootDiscovery:
     def test_buckets_atom_ok(self):
         """The install.sh log helper reports atom=ok when an atom root appears in the discovery string."""
         out = fp.summarise_framework_root_discovery(
-            "/sgl-workspace/aiter/:/sgl-workspace/sglang/:/sgl-workspace/vllm/"
-            ":/app/ATOM/atom/"
+            "/sgl-workspace/aiter/:/sgl-workspace/sglang/:/sgl-workspace/vllm/:/app/ATOM/atom/"
         )
         assert "atom=ok" in out
         assert "sglang=ok" in out
@@ -395,9 +424,7 @@ class TestSummariseFrameworkRootDiscovery:
         assert "aiter=ok" in out
 
     def test_buckets_atom_missing_on_non_atom_box(self):
-        out = fp.summarise_framework_root_discovery(
-            "/sgl-workspace/aiter/:/sgl-workspace/sglang/:/sgl-workspace/vllm/"
-        )
+        out = fp.summarise_framework_root_discovery("/sgl-workspace/aiter/:/sgl-workspace/sglang/:/sgl-workspace/vllm/")
         assert "atom=missing" in out
         assert "sglang=ok" in out
 
@@ -410,9 +437,7 @@ class TestSummariseFrameworkRootDiscovery:
 
     def test_does_not_substring_match_unrelated_paths(self):
         """Only paths whose last directory IS ``atom`` count; a substring like ``atomic_kernel`` must not."""
-        out = fp.summarise_framework_root_discovery(
-            "/sgl-workspace/atomic_kernel/"
-        )
+        out = fp.summarise_framework_root_discovery("/sgl-workspace/atomic_kernel/")
         assert "atom=missing" in out
 
 
@@ -420,28 +445,20 @@ class TestAtomPathPresentInAllThreeLocations:
     """Pin atom-source-path entries across the three sister lists so a cleanup can't drop one."""
 
     def test_atom_present_in_default_source_roots(self):
-        assert any(
-            "/app/atom/atom" in r.lower() for r in fp._DEFAULT_SOURCE_ROOTS
-        )
+        assert any("/app/atom/atom" in r.lower() for r in fp._DEFAULT_SOURCE_ROOTS)
 
     def test_atom_present_in_reusable_source_roots(self):
         from inference_optimizer.orchestrator import (
             kernel_request_handlers as krh,
         )
-        assert any(
-            "/app/atom/atom" in r.lower() for r in krh._reusable_source_roots()
-        )
+
+        assert any("/app/atom/atom" in r.lower() for r in krh._reusable_source_roots())
 
     def test_atom_present_in_tracelens_reusable_roots(self):
         """The kernel-agent's tracelens_analysis ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
-        ka_path = (
-            Path(__file__).resolve().parents[2]
-            / "kernel-agent" / "tools" / "tracelens_analysis.py"
-        )
+        ka_path = Path(__file__).resolve().parents[2] / "kernel-agent" / "tools" / "tracelens_analysis.py"
         if not ka_path.is_file():
-            pytest.skip(
-                f"kernel-agent tracelens_analysis not on disk at {ka_path}"
-            )
+            pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
         text = ka_path.read_text(encoding="utf-8")
         assert "/app/atom/atom/" in text.lower(), (
             "kernel-agent/tools/tracelens_analysis.py _REUSABLE_SOURCE_ROOTS "
@@ -451,48 +468,38 @@ class TestAtomPathPresentInAllThreeLocations:
 
     def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
         """The orchestrator gate and kernel-agent classifier derive reusable roots from the same source, so their atom subsets must match."""
-        ka_path = (
-            Path(__file__).resolve().parents[2]
-            / "kernel-agent" / "tools" / "tracelens_analysis.py"
-        )
+        ka_path = Path(__file__).resolve().parents[2] / "kernel-agent" / "tools" / "tracelens_analysis.py"
         if not ka_path.is_file():
-            pytest.skip(
-                f"kernel-agent tracelens_analysis not on disk at {ka_path}"
-            )
+            pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
         from inference_optimizer.orchestrator import (
             kernel_request_handlers as krh,
         )
-        orch_atom = frozenset(
-            r.lower() for r in krh._reusable_source_roots()
-            if "/atom/" in r.lower()
-        )
+
+        orch_atom = frozenset(r.lower() for r in krh._reusable_source_roots() if "/atom/" in r.lower())
         # Put the tools dir on sys.path: the sister tool imports sibling kernel-agent tools.
         import importlib.util as _ilu
         import sys as _sys
+
         tools_dir = str(ka_path.parent)
         added = tools_dir not in _sys.path
         if added:
             _sys.path.insert(0, tools_dir)
         try:
             spec = _ilu.spec_from_file_location(
-                "_tracelens_atom_sync_probe", ka_path,
+                "_tracelens_atom_sync_probe",
+                ka_path,
             )
             assert spec is not None and spec.loader is not None
             mod = _ilu.module_from_spec(spec)
+            _sys.modules[spec.name] = mod
             spec.loader.exec_module(mod)
-            ka_atom = frozenset(
-                r.lower() for r in mod._reusable_roots()
-                if "/atom/" in r.lower()
-            )
+            ka_atom = frozenset(r.lower() for r in mod._reusable_roots() if "/atom/" in r.lower())
         finally:
             if added and tools_dir in _sys.path:
                 _sys.path.remove(tools_dir)
         assert orch_atom, "orchestrator reusable roots carry no atom entry"
         assert ka_atom, "tracelens reusable roots carry no atom entry"
-        assert orch_atom == ka_atom, (
-            f"atom subsets diverged — orch={sorted(orch_atom)!r} "
-            f"ka={sorted(ka_atom)!r}"
-        )
+        assert orch_atom == ka_atom, f"atom subsets diverged — orch={sorted(orch_atom)!r} ka={sorted(ka_atom)!r}"
 
 
 # Source-root resolution + prompt injection (was test_framework_source_roots.py)
@@ -546,18 +553,14 @@ def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
 
 
 # apply_kernel_patch known-target roots (was test_apply_kernel_patch_roots.py)
-_APPLY_TOOL_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "kernel-agent"
-    / "tools"
-    / "apply_kernel_patch.py"
-)
+_APPLY_TOOL_PATH = Path(__file__).resolve().parents[2] / "kernel-agent" / "tools" / "apply_kernel_patch.py"
 
 
 @pytest.fixture(scope="module")
 def apply_tool() -> types.ModuleType:
     spec = importlib.util.spec_from_file_location(
-        "_apply_kernel_patch_roots_test", _APPLY_TOOL_PATH,
+        "_apply_kernel_patch_roots_test",
+        _APPLY_TOOL_PATH,
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -567,11 +570,12 @@ def apply_tool() -> types.ModuleType:
 
 
 def test_known_target_roots_includes_dist_packages_vllm(
-    apply_tool, monkeypatch,
+    apply_tool,
+    monkeypatch,
 ) -> None:
-    monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: (
-        "/usr/local/lib/python3.12/dist-packages/vllm/",
-    ))
+    monkeypatch.setattr(
+        fp, "_discover_installed_framework_roots", lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",)
+    )
     monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", raising=False)
     apply_tool._CACHED_KNOWN_TARGET_ROOTS = None
     roots = apply_tool.known_target_roots()
@@ -579,7 +583,8 @@ def test_known_target_roots_includes_dist_packages_vllm(
 
 
 def test_detect_strategy_accepts_dist_packages_vllm_py(
-    apply_tool, monkeypatch,
+    apply_tool,
+    monkeypatch,
 ) -> None:
     target = Path(
         "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py",

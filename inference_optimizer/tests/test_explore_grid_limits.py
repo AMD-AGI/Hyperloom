@@ -28,24 +28,27 @@ def _gate(research_lane_capacity: int = 1) -> PolicyGate:
 
 
 def _specialist_variants(n: int) -> list[dict]:
-    return [
-        {"name": f"v{i}", "provenance": "specialist:serving_specialist"}
-        for i in range(n)
-    ]
+    return [{"name": f"v{i}", "provenance": "specialist:serving_specialist"} for i in range(n)]
 
 
 def _delegate(grid: list[dict]) -> Intent:
-    return Intent(type=IntentType.DELEGATE, payload={
-        "action_name": "explore",
-        "params": {"grid": grid},
-    })
+    return Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "explore",
+            "params": {"grid": grid},
+        },
+    )
 
 
 def _propose(grid: list[dict]) -> Intent:
-    return Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "explore",
-        "params": {"grid": grid},
-    })
+    return Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "explore",
+            "params": {"grid": grid},
+        },
+    )
 
 
 def _specialist_delegate(params: dict) -> Intent:
@@ -54,10 +57,13 @@ def _specialist_delegate(params: dict) -> Intent:
         "gap_canonical_id": "gap.kernel.microbench.session-test",
     }
     merged.update(params)
-    return Intent(type=IntentType.DELEGATE, payload={
-        "action_name": "specialist",
-        "params": merged,
-    })
+    return Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "specialist",
+            "params": merged,
+        },
+    )
 
 
 # Explore grids: any provenance mix is accepted (no grid-size cap)
@@ -68,39 +74,48 @@ def test_allows_many_specialist_variants():
 
 def test_allows_specialist_variants_across_domains():
     gate = _gate()
-    intent = _delegate([
-        {"name": "a", "provenance": "specialist:serving_specialist"},
-        {"name": "b", "provenance": "specialist:kernel_switch_specialist"},
-    ])
+    intent = _delegate(
+        [
+            {"name": "a", "provenance": "specialist:serving_specialist"},
+            {"name": "b", "provenance": "specialist:kernel_switch_specialist"},
+        ]
+    )
     gate.validate_intent("orchestration", intent)  # no raise
 
 
 def test_allows_multiple_dynamic_variants():
     gate = _gate()
-    intent = _delegate([
-        {"name": "a", "provenance": "dynamic"},
-        {"name": "b", "provenance": "dynamic"},
-    ])
+    intent = _delegate(
+        [
+            {"name": "a", "provenance": "dynamic"},
+            {"name": "b", "provenance": "dynamic"},
+        ]
+    )
     gate.validate_intent("orchestration", intent)  # no raise
 
 
 def test_allows_three_default_grid_variants():
     gate = _gate()
-    intent = _delegate([
-        {"name": "a", "provenance": "default_grid"},
-        {"name": "b", "provenance": "default_grid"},
-        {"name": "c", "provenance": "default_grid"},
-    ])
+    intent = _delegate(
+        [
+            {"name": "a", "provenance": "default_grid"},
+            {"name": "b", "provenance": "default_grid"},
+            {"name": "c", "provenance": "default_grid"},
+        ]
+    )
     gate.validate_intent("orchestration", intent)  # no raise
 
 
 def test_empty_grid_skips_size_check():
     """An empty/omitted grid falls through to the executor's ``empty_grid`` surfacing; PolicyGate must not preempt."""
     gate = _gate()
-    intent = Intent(type=IntentType.DELEGATE, payload={
-        "action_name": "explore",
-        "params": {},  # no grid
-    })
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "explore",
+            "params": {},  # no grid
+        },
+    )
     gate.validate_intent("orchestration", intent)  # no raise
 
 
@@ -111,10 +126,12 @@ def test_propose_allows_many_specialist_variants():
 
 def test_propose_allows_all_llm_direct_grid():
     gate = _gate()
-    intent = _propose([
-        {"name": "a", "provenance": "llm_direct"},
-        {"name": "b", "provenance": "llm_direct"},
-    ])
+    intent = _propose(
+        [
+            {"name": "a", "provenance": "llm_direct"},
+            {"name": "b", "provenance": "llm_direct"},
+        ]
+    )
     gate.validate_intent("orchestration", intent)  # no raise
 
 

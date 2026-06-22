@@ -10,8 +10,8 @@ pin:
 * default OFF -> emitter is a no-op, builds no client;
 * all gates on (with a fake SDK) -> token + conversation rows pair into one
   Generation with correctly mapped usage and input/output text;
-* session-end flush emits unpaired halves, backfills ext/*.jsonl
-  out-of-process token rows, and turns decision_trace rows into Scores;
+* session-end flush emits unpaired halves, backfills the recipe-KB /
+  specialist-intel audit spans, and turns decision_trace rows into Scores;
 * every send is best-effort: a client that raises never propagates.
 """
 
@@ -39,6 +39,7 @@ class _FakeObservation:
         self.kind = kind
         self.kwargs = kwargs
         self.ended = False
+        self.end_time = None
         self.trace_update: dict | None = None
         self.observation_scores: list[dict] = []
 
@@ -55,6 +56,7 @@ class _FakeObservation:
 
     def end(self, **kwargs):
         self.ended = True
+        self.end_time = kwargs.get("end_time")
 
 
 class _FakeClient:
@@ -120,7 +122,8 @@ def _write_manifest(session_dir: Path, **fields) -> None:
     base.update(fields)
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "manifest.json").write_text(
-        json.dumps(base), encoding="utf-8",
+        json.dumps(base),
+        encoding="utf-8",
     )
 
 
@@ -134,11 +137,17 @@ def _clear_registry():
 
 def _llm_row(**over) -> dict:
     base = {
-        "session_id": "SID", "component": "orchestration", "role": "orchestration",
-        "tick": 3, "phase": "EXPLORE", "ts": "2026-06-09T15:14:54.100000+00:00",
+        "session_id": "SID",
+        "component": "orchestration",
+        "role": "orchestration",
+        "tick": 3,
+        "phase": "EXPLORE",
+        "ts": "2026-06-09T15:14:54.100000+00:00",
         "model": "claude-opus-4-7",
-        "input_tokens": 100, "output_tokens": 40,
-        "cache_creation_input_tokens": None, "cache_read_input_tokens": 7,
+        "input_tokens": 100,
+        "output_tokens": 40,
+        "cache_creation_input_tokens": None,
+        "cache_read_input_tokens": 7,
     }
     base.update(over)
     return base
@@ -146,10 +155,15 @@ def _llm_row(**over) -> dict:
 
 def _conv_row(**over) -> dict:
     base = {
-        "session_id": "SID", "component": "orchestration", "role": "orchestration",
-        "tick": 3, "phase": "EXPLORE", "ts": "2026-06-09T15:14:54.130000+00:00",
+        "session_id": "SID",
+        "component": "orchestration",
+        "role": "orchestration",
+        "tick": 3,
+        "phase": "EXPLORE",
+        "ts": "2026-06-09T15:14:54.130000+00:00",
         "model": "claude-opus-4-7",
-        "prompt": "PROMPT TEXT", "response": "RESPONSE TEXT",
+        "prompt": "PROMPT TEXT",
+        "response": "RESPONSE TEXT",
     }
     base.update(over)
     return base
@@ -200,6 +214,138 @@ def test_all_gates_pass_enables(tmp_path, monkeypatch):
     assert em._session_label == "claw-XYZ"
 
 
+def test_enabling_seeds_default_flush_interval(tmp_path, monkeypatch):
+    # When the operator has not pinned a flush cadence, building the client
+    # tightens the SDK auto-flush interval so a killed run still lands its
+    # latest observations.
+    _enable_env(monkeypatch)
+    monkeypatch.delenv("LANGFUSE_FLUSH_INTERVAL", raising=False)
+    monkeypatch.delenv("LANGFUSE_FLUSH_AT", raising=False)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(tmp_path / "SID")
+    assert em.enabled is True
+    import os
+
+    assert os.environ["LANGFUSE_FLUSH_INTERVAL"] == "1"
+    # flush_at is intentionally left to the SDK default (no per-event HTTP).
+    assert "LANGFUSE_FLUSH_AT" not in os.environ
+
+
+def test_operator_flush_interval_is_respected(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_FLUSH_INTERVAL", "10")
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    lfe.LangfuseEmitter(tmp_path / "SID")
+    import os
+
+    assert os.environ["LANGFUSE_FLUSH_INTERVAL"] == "10"
+
+
+def test_session_start_emits_marker_with_provenance(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    monkeypatch.setenv("USER_DATA_PATH", "/weka/users/alice")
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    monkeypatch.setenv("HYPERLOOM_CUSTOM_FLAG", "on")
+    monkeypatch.setenv("MY_API_TOKEN", "super-secret-value")
+    sd = tmp_path / "SID"
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "manifest.json").write_text(
+        json.dumps(
+            {
+                "session_id": "SID",
+                "model_name": "TestModel",
+                "claw_session_id": "claw-XYZ",
+                "sandbox_user_id": "alice",
+                "code_revision": "abc1234",
+                "session_dir": str(sd),
+                "host": "node-7",
+                "image": "registry/hyperloom:tag",
+                "pid": 4242,
+                "stack_fingerprint": {"rocm": "6.2", "vllm": "0.6"},
+                "workload": {"isl": 128, "osl": 256},
+                "dependencies": {"magpie": {"path": "/weka/magpie", "commit": "deadbee"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+    em.record_session_start()
+
+    marker = client.span_named("session_start")
+    assert marker is not None
+    out = marker.kwargs.get("output") or {}
+    # The full manifest is carried verbatim.
+    assert out["claw_session_id"] == "claw-XYZ"
+    assert out["sandbox_user_id"] == "alice"
+    assert out["code_revision"] == "abc1234"
+    assert out["session_dir"] == str(sd)
+    assert out["host"] == "node-7"
+    assert out["image"] == "registry/hyperloom:tag"
+    assert out["pid"] == 4242
+    assert out["stack_fingerprint"] == {"rocm": "6.2", "vllm": "0.6"}
+    assert out["workload"] == {"isl": 128, "osl": 256}
+    assert out["dependencies"]["magpie"]["commit"] == "deadbee"
+    assert out["user_data_path"] == "/weka/users/alice"
+    # Environment snapshot is attached, with secret-looking values redacted.
+    env = out["env"]
+    assert env["HYPERLOOM_CUSTOM_FLAG"] == "on"
+    assert env["USER_DATA_PATH"] == "/weka/users/alice"
+    assert env["MY_API_TOKEN"] == "***redacted***"
+    assert env["LANGFUSE_SECRET_KEY"] == "***redacted***"
+    # Scalar correlation keys also land on the observation metadata.
+    meta = marker.kwargs.get("metadata") or {}
+    assert meta["code_revision"] == "abc1234"
+    assert meta["user_data_path"] == "/weka/users/alice"
+    # Trace is grouped on the claw session id from the first observation.
+    assert marker.trace_update is not None
+    assert marker.trace_update["session_id"] == "claw-XYZ"
+    assert client.flushed >= 1
+
+
+def test_redact_env_keeps_names_redacts_secret_values():
+    snap = lfmap.redact_env(
+        {
+            "PATH": "/usr/bin",
+            "HF_TOKEN": "hf_xxx",
+            "AWS_SECRET_ACCESS_KEY": "abc",
+            "DB_PASSWORD": "pw",
+            "PLAIN": "value",
+        }
+    )
+    assert snap["PATH"] == "/usr/bin"
+    assert snap["PLAIN"] == "value"
+    assert snap["HF_TOKEN"] == "***redacted***"
+    assert snap["AWS_SECRET_ACCESS_KEY"] == "***redacted***"
+    assert snap["DB_PASSWORD"] == "***redacted***"
+
+
+def test_session_start_is_idempotent(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd, claw_session_id="claw-XYZ")
+    em = lfe.LangfuseEmitter(sd)
+    em.record_session_start()
+    em.record_session_start()
+    assert len([s for s in client.spans if s.kwargs.get("name") == "session_start"]) == 1
+
+
+def test_session_start_noop_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+    assert em.enabled is False
+    em.record_session_start()
+    assert client.span_named("session_start") is None
+
+
 def test_trace_id_falls_back_to_internal_id_without_claw(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -247,7 +393,9 @@ def test_token_and_conversation_pair_into_one_generation(tmp_path, monkeypatch):
     assert g.kwargs["metadata"]["phase"] == "EXPLORE"
     # usage_details drops None cache_creation, keeps the rest.
     assert g.kwargs["usage_details"] == {
-        "input": 100, "output": 40, "cache_read_input": 7,
+        "input": 100,
+        "output": 40,
+        "cache_read_input": 7,
     }
     assert g.ended is True
 
@@ -292,14 +440,10 @@ def test_distinct_agents_get_distinct_spans(tmp_path, monkeypatch):
     sd = tmp_path / "SID"
     _write_manifest(sd)
     em = lfe.LangfuseEmitter(sd)
-    em.record_llm_call(_llm_row(phase="EXPLORE", component="orchestration",
-                                role="orchestration", tick=1))
-    em.record_conversation(_conv_row(phase="EXPLORE", component="orchestration",
-                                     role="orchestration", tick=1))
-    em.record_llm_call(_llm_row(phase="EXPLORE", component="kernel",
-                                role="kernel", tick=2))
-    em.record_conversation(_conv_row(phase="EXPLORE", component="kernel",
-                                     role="kernel", tick=2))
+    em.record_llm_call(_llm_row(phase="EXPLORE", component="orchestration", role="orchestration", tick=1))
+    em.record_conversation(_conv_row(phase="EXPLORE", component="orchestration", role="orchestration", tick=1))
+    em.record_llm_call(_llm_row(phase="EXPLORE", component="kernel", role="kernel", tick=2))
+    em.record_conversation(_conv_row(phase="EXPLORE", component="kernel", role="kernel", tick=2))
     agent_spans = [s for s in client.spans if s.kwargs.get("name", "").startswith("agent:")]
     names = sorted(s.kwargs["name"] for s in agent_spans)
     assert names == ["agent:kernel", "agent:orchestration"]
@@ -411,7 +555,7 @@ def test_module_record_session_breakdown_reads_file(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# flush_session: leftovers + ext shards + decision scores
+# flush_session: leftovers + audit spans + decision scores
 # ---------------------------------------------------------------------------
 def _seed_trace_dir(tmp_path: Path) -> Path:
     sd = tmp_path / "SID"
@@ -441,34 +585,30 @@ def test_flush_backfills_ext_shards(tmp_path, monkeypatch):
     sd = _seed_trace_dir(tmp_path)
     shard = sd / "reports" / "trace" / "ext" / "geak-123.jsonl"
     shard.write_text(
-        json.dumps(_llm_row(component="geak", role=None, input_tokens=500,
-                            output_tokens=60)) + "\n",
+        json.dumps(_llm_row(component="geak", role=None, input_tokens=500, output_tokens=60)) + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
     em.flush_session()
-    geak_gens = [
-        g for g in client.generations
-        if g.kwargs["metadata"]["component"] == "geak"
-    ]
+    geak_gens = [g for g in client.generations if g.kwargs["metadata"]["component"] == "geak"]
     assert len(geak_gens) == 1
     assert geak_gens[0].kwargs["usage_details"]["input"] == 500
     assert geak_gens[0].kwargs["metadata"]["has_text"] is False
 
 
 def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
-    """A second flush_session() must NOT re-scan ext shards / decision_trace
+    """A second flush_session() must NOT re-scan the leftovers / decision_trace
     and re-emit -- otherwise Langfuse gets duplicate Generations/Scores."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
     (sd / "reports" / "trace" / "ext" / "geak-1.jsonl").write_text(
-        json.dumps(_llm_row(component="geak", role=None, input_tokens=500,
-                            output_tokens=60)) + "\n",
+        json.dumps(_llm_row(component="geak", role=None, input_tokens=500, output_tokens=60)) + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row())  # unpaired token half, flushed once
 
     em.flush_session()
     gens_after_first = len(client.generations)
@@ -486,18 +626,39 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     sd = _seed_trace_dir(tmp_path)
     dtrace = sd / "reports" / "trace" / "decision_trace.jsonl"
     dtrace.write_text(
-        json.dumps({
-            "decision": {"change": "tp_sweep", "component": "kernel",
-                         "operation_kind": "kernel_opt",
-                         "outcome": "KEEP", "gain_pct": 12.5, "task_id": "k1"},
-            "phase": "KERNEL", "tick": 5, "ts": "2026-06-09T16:00:00Z",
-        }) + "\n"
-        + json.dumps({
-            "decision": {"change": "radix", "component": "grid",
-                         "operation_kind": "param", "provenance": "default_grid",
-                         "outcome": "REVERT", "gain_pct": None, "task_id": "t2"},
-            "phase": "EXPLORE", "tick": 6, "ts": "2026-06-09T16:05:00Z",
-        }) + "\n",
+        json.dumps(
+            {
+                "decision": {
+                    "change": "tp_sweep",
+                    "component": "kernel",
+                    "operation_kind": "kernel_opt",
+                    "outcome": "KEEP",
+                    "gain_pct": 12.5,
+                    "task_id": "k1",
+                },
+                "phase": "KERNEL",
+                "tick": 5,
+                "ts": "2026-06-09T16:00:00Z",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "decision": {
+                    "change": "radix",
+                    "component": "grid",
+                    "operation_kind": "param",
+                    "provenance": "default_grid",
+                    "outcome": "REVERT",
+                    "gain_pct": None,
+                    "task_id": "t2",
+                },
+                "phase": "EXPLORE",
+                "tick": 6,
+                "ts": "2026-06-09T16:05:00Z",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
@@ -528,6 +689,74 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # KB trace spans (record_kb_span + recipe-snapshot audit flush)
 # ---------------------------------------------------------------------------
+def test_flush_emits_proposal_score_calibration(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    dtrace = sd / "reports" / "trace" / "decision_trace.jsonl"
+    dtrace.write_text(
+        json.dumps({
+            "decision": {
+                "change": "tp_sweep", "component": "specialist:perf",
+                "operation_kind": "param", "outcome": "KEEP",
+                "gain_pct": 8.0, "task_id": "spec-1",
+                "variant_name": "v1",
+                "proposal_scores": [
+                    {"rater": "gpt-5.5", "score": 7.0, "reason": "ok"},
+                    {"rater": "claude", "score": 9.0, "reason": "good"},
+                ],
+            },
+            "phase": "EXPLORE", "tick": 5, "ts": "2026-06-09T16:00:00Z",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+    # Seed a specialist agent span so the decision step span has a parent.
+    em.record_llm_call(
+        _llm_row(phase="EXPLORE", component="specialist", role="specialist")
+    )
+    em.flush_session()
+    names = sorted(s["name"] for s in client.observation_scores)
+    assert "proposal_score" in names
+    pscore = [s for s in client.observation_scores
+              if s["name"] == "proposal_score"][0]
+    assert pscore["value"] == 8.0           # mean(7, 9)
+    assert pscore["data_type"] == "NUMERIC"
+    # Realized gain emitted alongside so a trace can compute calibration error.
+    assert "gain_pct" in names
+
+
+def test_flush_emits_predicted_gain_calibration(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    dtrace = sd / "reports" / "trace" / "decision_trace.jsonl"
+    dtrace.write_text(
+        json.dumps({
+            "decision": {
+                "change": "tp_sweep", "component": "specialist:perf",
+                "operation_kind": "param", "outcome": "KEEP",
+                "gain_pct": 6.0, "predicted_gain_pct": 12.5,
+                "task_id": "spec-1",
+            },
+            "phase": "EXPLORE", "tick": 5, "ts": "2026-06-09T16:00:00Z",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(
+        _llm_row(phase="EXPLORE", component="specialist", role="specialist")
+    )
+    em.flush_session()
+    by_name = {s["name"]: s for s in client.observation_scores}
+    # predicted + realized both emitted as NUMERIC on the same decision.
+    assert "predicted_gain_pct" in by_name and "gain_pct" in by_name
+    assert by_name["predicted_gain_pct"]["value"] == 12.5
+    assert by_name["gain_pct"]["value"] == 6.0
+
+
 def test_record_kb_span_disabled_is_noop(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
     em = lfe.LangfuseEmitter(tmp_path)
@@ -543,7 +772,8 @@ def test_record_kb_span_nests_under_agent(tmp_path, monkeypatch):
     _write_manifest(sd)
     em = lfe.LangfuseEmitter(sd)
     em.record_kb_span(
-        name="kb_assess:iter_2", agent="critic",
+        name="kb_assess:iter_2",
+        agent="critic",
         output={"mode": "dry_run", "verdict_count": 1},
         metadata={"kind": "kb_assess", "iter": 2},
         ts="2026-06-09T15:14:54.100000+00:00",
@@ -564,14 +794,32 @@ def test_flush_backfills_recipe_snapshot_audit(tmp_path, monkeypatch):
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
     from inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+
     audit = recipe_snapshot_audit_jsonl(sd)
     audit.parent.mkdir(parents=True, exist_ok=True)
-    audit.write_text("\n".join(json.dumps(r) for r in [
-        {"ts": "2026-06-09T15:14:54Z", "method": "get_recipe",
-         "remote": "gbrain", "resolution": "remote", "hit": True},
-        {"ts": "2026-06-09T15:14:55Z", "method": "search",
-         "remote": "cortex", "resolution": "local", "hit": False},
-    ]) + "\n", encoding="utf-8")
+    audit.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "ts": "2026-06-09T15:14:54Z",
+                    "method": "get_recipe",
+                    "remote": "gbrain",
+                    "resolution": "remote",
+                    "hit": True,
+                },
+                {
+                    "ts": "2026-06-09T15:14:55Z",
+                    "method": "search",
+                    "remote": "cortex",
+                    "resolution": "local",
+                    "hit": False,
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     em = lfe.LangfuseEmitter(sd)
     em.flush_session()
     assert client.span_named("kb:recipe_snapshot:get_recipe") is not None
@@ -588,21 +836,97 @@ def test_flush_recipe_audit_idempotent(tmp_path, monkeypatch):
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
     from inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+
     audit = recipe_snapshot_audit_jsonl(sd)
     audit.parent.mkdir(parents=True, exist_ok=True)
     audit.write_text(
-        json.dumps({"ts": "2026-06-09T15:14:54Z", "method": "get_recipe",
-                    "remote": "gbrain", "resolution": "remote", "hit": True}) + "\n",
+        json.dumps(
+            {
+                "ts": "2026-06-09T15:14:54Z",
+                "method": "get_recipe",
+                "remote": "gbrain",
+                "resolution": "remote",
+                "hit": True,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
     em.flush_session()
-    n = len([s for s in client.spans
-             if s.kwargs.get("name", "").startswith("kb:recipe_snapshot")])
+    n = len([s for s in client.spans if s.kwargs.get("name", "").startswith("kb:recipe_snapshot")])
     em.flush_session()
-    n2 = len([s for s in client.spans
-              if s.kwargs.get("name", "").startswith("kb:recipe_snapshot")])
+    n2 = len([s for s in client.spans if s.kwargs.get("name", "").startswith("kb:recipe_snapshot")])
     assert n == 1 and n2 == 1
+
+
+def test_flush_backfills_specialist_intel(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    from inference_optimizer.session_paths import specialist_intel_path
+    intel = specialist_intel_path(sd)
+    intel.parent.mkdir(parents=True, exist_ok=True)
+    intel.write_text("\n".join(json.dumps(r) for r in [
+        {"ts": "2026-06-09T15:14:54Z", "tool": "WebSearch",
+         "task_id": "t1", "turn": 1, "query": "rocm flash attn"},
+        {"ts": "2026-06-09T15:14:55Z", "tool": "mcp__cortex_kb__lookup",
+         "task_id": "t1", "turn": 1, "query": "x"},
+    ]) + "\n", encoding="utf-8")
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    assert client.span_named("intel:WebSearch") is not None
+    assert client.span_named("intel:mcp__cortex_kb__lookup") is not None
+    assert client.span_named("agent:specialist") is not None
+    persisted = lfe.read_receipt(sd)
+    assert persisted["counts"]["specialist_intel_read"] == 2
+
+
+def test_flush_backfills_forge_steps(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    from inference_optimizer.session_paths import forge_steps_path
+    steps = forge_steps_path(sd)
+    steps.parent.mkdir(parents=True, exist_ok=True)
+    steps.write_text("\n".join(json.dumps(r) for r in [
+        {"ts": "2026-06-09T15:14:54Z", "kind": "iteration", "kernel_id": "k1",
+         "iteration": 1, "decision": "KEEP", "wall_ms": 88.1},
+        {"ts": "2026-06-09T15:14:55Z", "kind": "iteration", "kernel_id": "k1",
+         "iteration": 2, "decision": "REVERT", "wall_ms": 90.0},
+        {"ts": "2026-06-09T15:14:56Z", "kind": "summary", "kernel_id": "k1",
+         "iterations": 2, "kept": 1, "termination_reason": "plateaued"},
+    ]) + "\n", encoding="utf-8")
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    assert client.span_named("forge:iter:1") is not None
+    assert client.span_named("forge:iter:2") is not None
+    assert client.span_named("forge:summary") is not None
+    assert client.span_named("agent:forge") is not None
+    persisted = lfe.read_receipt(sd)
+    assert persisted["counts"]["forge_steps_read"] == 3
+
+
+def test_generation_uses_latency_for_duration(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+    row = _llm_row()
+    row["latency_ms"] = 2000
+    em.record_llm_call(row)
+    em.flush_session()
+    gen = client.generations[0] if client.generations else None
+    assert gen is not None
+    # start = ts - latency; end = ts -> non-zero duration.
+    start = gen.kwargs.get("start_time")
+    end = getattr(gen, "end_time", None)
+    assert start is not None and end is not None
+    assert (end - start).total_seconds() == pytest.approx(2.0, abs=0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -685,24 +1009,31 @@ def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    # one ext shard (out-of-process) + one decision so flush counts move.
+    # one ext shard (out-of-process) + one unpaired token half + one decision
+    # so flush counts move.
     (sd / "reports" / "trace" / "ext" / "geak-1.jsonl").write_text(
-        json.dumps(_llm_row(component="geak", role=None)) + "\n", encoding="utf-8",
+        json.dumps(_llm_row(component="geak", role=None)) + "\n",
+        encoding="utf-8",
     )
     (sd / "reports" / "trace" / "decision_trace.jsonl").write_text(
-        json.dumps({
-            "decision": {"change": "x", "component": "kernel", "outcome": "KEEP",
-                         "gain_pct": 5.0, "task_id": "k1"},
-            "phase": "KERNEL", "tick": 1, "ts": "2026-06-09T16:00:00Z",
-        }) + "\n", encoding="utf-8",
+        json.dumps(
+            {
+                "decision": {"change": "x", "component": "kernel", "outcome": "KEEP", "gain_pct": 5.0, "task_id": "k1"},
+                "phase": "KERNEL",
+                "tick": 1,
+                "ts": "2026-06-09T16:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row())  # unpaired token half
     em.flush_session()
 
     persisted = lfe.read_receipt(sd)
     assert persisted is not None
     assert persisted["counts_final"] is True
-    assert persisted["counts"]["ext_shards_read"] == 1
     assert persisted["counts"]["generations_sent"] >= 1
     assert persisted["counts"]["scores_sent"] >= 1
 
@@ -731,8 +1062,12 @@ def test_pair_key_distinguishes_same_second_burst():
     different turns must NOT collide -- otherwise a token row pairs with the
     wrong conversation row in a burst (e.g. multi-turn specialist/critic)."""
     base = {
-        "component": "specialist", "tick": 3, "role": "assistant",
-        "task_id": "t1", "dyn_id": "d1", "ts": "2026-06-11T10:00:00.100Z",
+        "component": "specialist",
+        "tick": 3,
+        "role": "assistant",
+        "task_id": "t1",
+        "dyn_id": "d1",
+        "ts": "2026-06-11T10:00:00.100Z",
     }
     turn_a = {**base, "turn": 1}
     turn_b = {**base, "turn": 2, "ts": "2026-06-11T10:00:00.800Z"}  # same second
@@ -743,8 +1078,13 @@ def test_pair_key_matches_token_and_text_halves_of_one_call():
     """The two streams of the SAME logical call (a few ms apart) still pair:
     identical identity fields + same UTC second => equal key."""
     token = {
-        "component": "critic", "tick": 5, "role": "assistant", "turn": 2,
-        "task_id": "tk", "dyn_id": "dy", "ts": "2026-06-11T10:00:01.020Z",
+        "component": "critic",
+        "tick": 5,
+        "role": "assistant",
+        "turn": 2,
+        "task_id": "tk",
+        "dyn_id": "dy",
+        "ts": "2026-06-11T10:00:01.020Z",
     }
     text = {**token, "ts": "2026-06-11T10:00:01.450Z"}  # same second, +430ms
     assert lfmap.pair_key(token) == lfmap.pair_key(text)
@@ -755,8 +1095,12 @@ def test_pair_key_distinguishes_concurrent_models_same_second():
     in the same UTC second with identical keys except model -> must not collide
     (otherwise usage of model A pairs with the prompt/response of model B)."""
     base = {
-        "component": "proposal_scorer", "tick": None, "role": "proposal_scorer",
-        "task_id": None, "dyn_id": None, "turn": None,
+        "component": "proposal_scorer",
+        "tick": None,
+        "role": "proposal_scorer",
+        "task_id": None,
+        "dyn_id": None,
+        "turn": None,
         "ts": "2026-06-11T10:00:00.300Z",
     }
     a = {**base, "model": "qwen-32b"}
@@ -768,8 +1112,10 @@ def test_pair_key_scorer_token_and_text_pair_when_roles_match():
     """The scorer's token row and conversation row must share role+model so
     their pair_key matches (the bug: token row had role=None)."""
     token = {
-        "component": "proposal_scorer", "role": "proposal_scorer",
-        "model": "qwen-32b", "ts": "2026-06-11T10:00:00.100Z",
+        "component": "proposal_scorer",
+        "role": "proposal_scorer",
+        "model": "qwen-32b",
+        "ts": "2026-06-11T10:00:00.100Z",
     }
     text = {**token, "ts": "2026-06-11T10:00:00.900Z"}  # same second
     assert lfmap.pair_key(token) == lfmap.pair_key(text)
@@ -778,7 +1124,6 @@ def test_pair_key_scorer_token_and_text_pair_when_roles_match():
 def test_pair_key_degrades_when_turn_absent():
     """Legacy rows without turn/task_id/dyn_id still produce a stable key
     (all the new slots are None) rather than raising."""
-    row = {"component": "oob", "tick": 1, "role": None,
-           "ts": "2026-06-11T10:00:00Z"}
+    row = {"component": "oob", "tick": 1, "role": None, "ts": "2026-06-11T10:00:00Z"}
     k = lfmap.pair_key(row)
     assert lfmap.pair_key(dict(row)) == k  # stable / deterministic

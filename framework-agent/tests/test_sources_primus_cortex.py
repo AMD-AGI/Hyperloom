@@ -34,6 +34,7 @@ class _FakeResp:
 
 def _install_urlopen(monkeypatch, handler) -> None:
     """Replace urllib.request.urlopen used by primus_cortex with handler."""
+
     def fake(req, timeout):  # noqa: ARG001 - signature mirrors urlopen
         return handler(req)
 
@@ -69,13 +70,15 @@ def test_repo_slug_rejects_github_substring_in_path() -> None:
 
 def test_list_perf_prs_parses_items_list(monkeypatch) -> None:
     """list_perf_prs accepts the ``{"items": [...]}`` wrapper and trims to limit."""
-    body = json.dumps({
-        "items": [
-            {"number": 1, "title": "a", "html_url": "u1"},
-            {"number": 2, "title": "b", "html_url": "u2"},
-            {"number": 3, "title": "c", "html_url": "u3"},
-        ]
-    }).encode("utf-8")
+    body = json.dumps(
+        {
+            "items": [
+                {"number": 1, "title": "a", "html_url": "u1"},
+                {"number": 2, "title": "b", "html_url": "u2"},
+                {"number": 3, "title": "c", "html_url": "u3"},
+            ]
+        }
+    ).encode("utf-8")
     _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
     prs = pc.list_perf_prs(
         "https://github.com/sgl-project/sglang.git",
@@ -88,6 +91,7 @@ def test_list_perf_prs_parses_items_list(monkeypatch) -> None:
 
 def test_list_perf_prs_hard_fails_on_http_error(monkeypatch) -> None:
     """HTTPError from urlopen propagates as PrimusCortexError."""
+
     def handler(req):
         raise urllib.error.HTTPError(req.get_full_url(), 503, "boom", {}, io.BytesIO(b"oops"))
 
@@ -111,6 +115,7 @@ def test_list_perf_prs_hard_fails_on_bad_json(monkeypatch) -> None:
 
 def test_list_perf_prs_hard_fails_on_url_error(monkeypatch) -> None:
     """URLError (DNS / unreachable) propagates as PrimusCortexError."""
+
     def handler(req):
         raise urllib.error.URLError("dns")
 

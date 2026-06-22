@@ -18,7 +18,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from inference_optimizer.protocol.intent import (
-    Intent, IntentType,
+    Intent,
+    IntentType,
 )
 from inference_optimizer.orchestrator.policy import SPECIALIST_FROM_AGENT_PREFIX
 
@@ -27,6 +28,7 @@ from inference_optimizer.orchestrator.policy import SPECIALIST_FROM_AGENT_PREFIX
 @dataclass
 class _StubTask:
     """Task-shaped stub (only ``task_id`` and ``params`` are inspected)."""
+
     task_id: str
     kind: str = "specialist"
     params: dict[str, Any] = field(default_factory=dict)
@@ -52,13 +54,14 @@ class _StubSharedState:
         self.specialist_rounds.append(dict(entry))
 
     def bump_specialist_domain_empty_streak(
-        self, domain: str, *, empty: bool,
+        self,
+        domain: str,
+        *,
+        empty: bool,
     ) -> int:
         d = domain or "unknown"
         if empty:
-            self.specialist_domain_empty_streak[d] = (
-                self.specialist_domain_empty_streak.get(d, 0) + 1
-            )
+            self.specialist_domain_empty_streak[d] = self.specialist_domain_empty_streak.get(d, 0) + 1
         else:
             self.specialist_domain_empty_streak[d] = 0
         return self.specialist_domain_empty_streak[d]
@@ -82,6 +85,7 @@ class _StubTaskRegistry:
     async def get(self, task_id: str) -> _StubTask:
         if task_id not in self._tasks:
             from inference_optimizer.orchestrator.task_registry import TaskNotFound
+
             raise TaskNotFound(f"task {task_id} not found")
         return self._tasks[task_id]
 
@@ -110,13 +114,17 @@ def _done_payload(
     confidence: float = 0.7,
 ) -> dict[str, Any]:
     if proposals is None:
-        proposals = [] if empty else [
-            {
-                "variant_name": "max_seqs_512",
-                "extra_server_args": "--max-num-seqs 512",
-                "rationale": "moderate concurrency bump",
-            },
-        ]
+        proposals = (
+            []
+            if empty
+            else [
+                {
+                    "variant_name": "max_seqs_512",
+                    "extra_server_args": "--max-num-seqs 512",
+                    "rationale": "moderate concurrency bump",
+                },
+            ]
+        )
     return {
         "domain": domain,
         "gap_canonical_id": gap,
@@ -197,9 +205,7 @@ async def test_record_specialist_result_streak_accumulates_then_resets(coord):
             done_payload=_done_payload(empty=True, domain="comm_specialist"),
             source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-{n}",
         )
-        assert (
-            state.specialist_domain_empty_streak["comm_specialist"] == n
-        )
+        assert state.specialist_domain_empty_streak["comm_specialist"] == n
 
     task4 = _StubTask(task_id="task-4", params={})
     coord.tasks.register(task4)
@@ -315,9 +321,12 @@ async def test_handle_specialist_done_bad_source_prefix(coord):
 def test_task_id_from_specialist_source_extracts_prefix():
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
-    assert Coordinator._task_id_from_specialist_source(
-        "specialist:abc-123",
-    ) == "abc-123"
+    assert (
+        Coordinator._task_id_from_specialist_source(
+            "specialist:abc-123",
+        )
+        == "abc-123"
+    )
 
 
 def test_task_id_from_specialist_source_returns_empty_for_bad():
@@ -325,9 +334,12 @@ def test_task_id_from_specialist_source_returns_empty_for_bad():
 
     assert Coordinator._task_id_from_specialist_source("orchestration") == ""
     assert Coordinator._task_id_from_specialist_source("") == ""
-    assert Coordinator._task_id_from_specialist_source(
-        "robustness",
-    ) == ""
+    assert (
+        Coordinator._task_id_from_specialist_source(
+            "robustness",
+        )
+        == ""
+    )
 
 
 # 4. _build_specialist_round_entry — output shape
@@ -356,11 +368,20 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
     )
 
     expected_keys = {
-        "round_id", "task_id", "source", "completed_at",
-        "domain", "gap_canonical_id", "empty",
-        "proposals_total", "proposal_set",
-        "summary", "reason", "confidence",
-        "new_findings", "residual_questions",
+        "round_id",
+        "task_id",
+        "source",
+        "completed_at",
+        "domain",
+        "gap_canonical_id",
+        "empty",
+        "proposals_total",
+        "proposal_set",
+        "summary",
+        "reason",
+        "confidence",
+        "new_findings",
+        "residual_questions",
     }
     assert expected_keys.issubset(entry.keys())
     assert entry["round_id"] == "round-9"
@@ -392,7 +413,9 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     """End-to-end via the dispatcher exit hook: one specialist task lands the four bookkeeping mutations."""
     from inference_optimizer.cli import _build_specialist_executor
     from inference_optimizer.orchestrator.backends.mock_backend import (
-        MockBackend, MockTurn, ScriptedPlan,
+        MockBackend,
+        MockTurn,
+        ScriptedPlan,
     )
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.protocol.intent import IntentType
@@ -411,15 +434,23 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             },
         ],
     )
-    plan = ScriptedPlan(turns=[MockTurn(intents=[
-        Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
-    ])])
+    plan = ScriptedPlan(
+        turns=[
+            MockTurn(
+                intents=[
+                    Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
+                ]
+            )
+        ]
+    )
 
     import inference_optimizer.cli_executors as cli_mod
+
     real_claude_cls = cli_mod.ClaudeBackend
     cli_mod.ClaudeBackend = lambda **_kw: MockBackend(plan, name="spec-mock")
     try:
         import argparse
+
         spec_args = argparse.Namespace(
             claude_model="claude-3-5-sonnet-latest",
             specialist_model=None,
@@ -433,9 +464,9 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
         backends = {
             "orchestration": MockOrchBackend(idle_plan),
-            "kernel":        MockOrchBackend(idle_plan),
-            "critic":        MockOrchBackend(idle_plan),
-            "robustness":    MockOrchBackend(idle_plan),
+            "kernel": MockOrchBackend(idle_plan),
+            "critic": MockOrchBackend(idle_plan),
+            "robustness": MockOrchBackend(idle_plan),
         }
 
         session_dir = tmp_path / "session"
@@ -448,12 +479,15 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             knowledge_plane=None,
         )
         executor = _build_specialist_executor(
-            spec_args, session_dir=session_dir, knowledge_plane=None,
+            spec_args,
+            session_dir=session_dir,
+            knowledge_plane=None,
         )
         coord.sub.register_executor("specialist", executor)
 
         # Enqueue directly through TaskRegistry to test the dispatcher hook, not the upstream intent flow.
         from inference_optimizer.orchestrator.task_registry import Task
+
         task = Task(
             task_id="t-e2e-1",
             kind="specialist",
@@ -468,7 +502,8 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             requires_lanes=tuple(),
         )
         await coord.tasks.create_or_return_existing(
-            kind=task.kind, params=task.params,
+            kind=task.kind,
+            params=task.params,
             idempotency_key=task.idempotency_key,
         )
         await coord.tick(n=1)
@@ -482,13 +517,105 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     assert row["domain"] == "serving_specialist"
     assert row["proposals_total"] == 1
     assert row["empty"] is False
-    assert coord.shared_state.specialist_domain_empty_streak.get(
-        "serving_specialist", -1
-    ) == 0
+    assert coord.shared_state.specialist_domain_empty_streak.get("serving_specialist", -1) == 0
     assert coord.shared_state.last_specialist.get("domain") == "serving_specialist"
     workspace = session_dir / "runs" / "specialist"
     assert workspace.exists()
     assert any(workspace.iterdir()), "specialist workspace should be non-empty"
+
+
+# 7. Point 2 — stalled-domain hard-trigger
+@pytest.fixture
+def force_coord(tmp_path: Path):
+    """Coordinator stand-in with a real SharedState + mocked _handle_intent."""
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState()
+    c.shared_state.phase = "EXPLORE"
+    c._handle_intent = AsyncMock()  # type: ignore[method-assign]
+    return c
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
+    state = force_coord.shared_state
+    # serving_specialist (anchor=framework) idles past threshold.
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {
+            "canonical_id": "gap.framework.scheduler.s1",
+            "domain_hint": "serving_specialist",
+            "severity": "high",
+        }
+    )
+
+    await force_coord._maybe_force_stalled_domain_specialist()
+
+    force_coord._handle_intent.assert_awaited_once()
+    src, intent = force_coord._handle_intent.call_args.args
+    assert src == "orchestration"
+    params = intent.payload["params"]
+    assert params["domain"] == "serving_specialist"
+    assert params["gap_canonical_id"] == "gap.framework.scheduler.s1"
+    assert params["scope"] == "domain"
+    assert "forced-stalled-framework" in intent.payload["idempotency_key"]
+    # Cycle 0 → no cycle suffix (legacy monotonic key is byte-for-byte unchanged).
+    assert not intent.payload["idempotency_key"].endswith("-c0")
+    # Counter is zeroed up-front so it can't re-fire next tick.
+    assert state.rounds_since_last_specialist["framework"] == 0
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
+    # In a later macro-cycle the forced-specialist key must carry the cycle
+    # suffix so it does not dedup-match the prior cycle's task.
+    state = force_coord.shared_state
+    state.macro_cycle = 2
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {
+            "canonical_id": "gap.framework.scheduler.s1",
+            "domain_hint": "serving_specialist",
+            "severity": "high",
+        }
+    )
+
+    await force_coord._maybe_force_stalled_domain_specialist()
+
+    _, intent = force_coord._handle_intent.call_args.args
+    assert intent.payload["idempotency_key"].endswith("-c2")
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_domain_noop_without_pending_gap(force_coord):
+    state = force_coord.shared_state
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    # No gap in the ledger -> nothing to force even though counters are high.
+    await force_coord._maybe_force_stalled_domain_specialist()
+    force_coord._handle_intent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_domain_noop_outside_explore(force_coord):
+    state = force_coord.shared_state
+    state.phase = "KERNEL"
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {
+            "canonical_id": "gap.x",
+            "domain_hint": "serving_specialist",
+            "severity": "high",
+        }
+    )
+    await force_coord._maybe_force_stalled_domain_specialist()
+    force_coord._handle_intent.assert_not_awaited()
 
 
 # 6. Intent routing branch wired into _handle_intent
@@ -496,9 +623,9 @@ def test_handle_intent_dispatch_table_has_specialist_done_branch():
     """Gap-03 regression: the dispatch table routes SPECIALIST_DONE to ``_handle_specialist_done``."""
     import inspect
 
-    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from inference_optimizer.orchestrator.intent_router import IntentRouter
 
-    src = inspect.getsource(Coordinator._handle_intent)
+    src = inspect.getsource(IntentRouter._handle_intent)
     assert "IntentType.SPECIALIST_DONE" in src, (
         "_handle_intent must dispatch SPECIALIST_DONE (KB_gaps/Gap-03)"
     )

@@ -176,8 +176,13 @@ def _compile_like_fraction(names: list[str], sources: list[str]) -> float:
         or ``0.0`` when ``names`` is empty.
     """
     markers = (
-        "inductor", "triton", "torchinductor", "/tmp/", "generated",
-        "CompiledFunction", "autotune",
+        "inductor",
+        "triton",
+        "torchinductor",
+        "/tmp/",
+        "generated",
+        "CompiledFunction",
+        "autotune",
     )
     n = len(names)
     if not n:
@@ -255,7 +260,8 @@ async def _profile_arm(
         "success": rc == 0 and bool(traces) and bool(top),
         "top_kernel_names": names,
         "compile_like_fraction_top_k": round(
-            _compile_like_fraction(names, sources), 4,
+            _compile_like_fraction(names, sources),
+            4,
         ),
         "stderr_tail": (stderr or stdout)[-3500:],
     }
@@ -278,8 +284,7 @@ async def main_async() -> int:
     ap.add_argument(
         "--profile-config",
         type=Path,
-        default=Path(__file__).resolve().parent / "configs"
-        / "profile_sglang.yaml",
+        default=Path(__file__).resolve().parent / "configs" / "profile_sglang.yaml",
     )
     ap.add_argument("--base-extra-args", default="")
     ap.add_argument(
@@ -310,11 +315,7 @@ async def main_async() -> int:
     root.mkdir(parents=True, exist_ok=True)
 
     base = (args.base_extra_args or "").strip()
-    b_extra = (
-        f"{base} {args.arm_b_suffix}".strip()
-        if base
-        else args.arm_b_suffix.strip()
-    )
+    b_extra = f"{base} {args.arm_b_suffix}".strip() if base else args.arm_b_suffix.strip()
 
     a_res = await _profile_arm(
         name="arm_a_no_torch_compile",
@@ -345,10 +346,7 @@ async def main_async() -> int:
 
     out: dict[str, Any] = {
         "ts": datetime.now(tz=timezone.utc).isoformat(),
-        "intent": (
-            "Compare kernel hot-lists for kernel-opt targeting native vs compile-only "
-            "artifacts"
-        ),
+        "intent": ("Compare kernel hot-lists for kernel-opt targeting native vs compile-only artifacts"),
         "profile_config": str(args.profile_config),
         "base_extra_args": base,
         "arm_b_suffix": args.arm_b_suffix,

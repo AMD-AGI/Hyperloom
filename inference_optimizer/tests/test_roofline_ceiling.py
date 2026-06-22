@@ -33,9 +33,7 @@ class TestPeakFormulaAgainstPublishedNumbers:
 
     def test_itk_b200_70b_fp8_matches_cited_114_tok_s(self, monkeypatch):
         # ITK Research B200: 8e12 / 70e9 ≈ 114.28 tok/s. Inject the B200 spec for this test only.
-        monkeypatch.setitem(
-            HW_SPECS, "b200_test", {"hbm_gb": 192.0, "hbm_bw_gbps": 8000.0}
-        )
+        monkeypatch.setitem(HW_SPECS, "b200_test", {"hbm_gb": 192.0, "hbm_bw_gbps": 8000.0})
         peak = compute_theoretical_peak_output_tok_per_sec(
             gpu_type="b200_test",
             num_gpus=1,
@@ -52,9 +50,7 @@ class TestPeakFormulaAgainstPublishedNumbers:
 
     def test_itk_b200_70b_fp4_doubles_to_228_tok_s(self, monkeypatch):
         """FP8 → FP4 halves bytes/param so peak doubles, per ITK Research."""
-        monkeypatch.setitem(
-            HW_SPECS, "b200_test", {"hbm_gb": 192.0, "hbm_bw_gbps": 8000.0}
-        )
+        monkeypatch.setitem(HW_SPECS, "b200_test", {"hbm_gb": 192.0, "hbm_bw_gbps": 8000.0})
         peak_fp4 = compute_theoretical_peak_output_tok_per_sec(
             gpu_type="b200_test",
             num_gpus=1,
@@ -102,12 +98,8 @@ class TestMI300XRealistic:
             isl=128,
             osl=64,
         )
-        p1 = compute_theoretical_peak_output_tok_per_sec(
-            **kwargs, concurrency=1
-        )
-        p20 = compute_theoretical_peak_output_tok_per_sec(
-            **kwargs, concurrency=20
-        )
+        p1 = compute_theoretical_peak_output_tok_per_sec(**kwargs, concurrency=1)
+        p20 = compute_theoretical_peak_output_tok_per_sec(**kwargs, concurrency=20)
         # 20× concurrency gives >10× peak (KV term doesn't amortize, so not exactly 20×).
         assert p20 / max(p1, 1e-9) > 10.0
 
@@ -201,20 +193,26 @@ class TestResolveDtypeBytes:
 class TestComputeKVBytesPerToken:
     def test_factor_two_for_k_plus_v(self):
         # 2 (K+V) × 80 layers × 8 KV heads × 128 head_dim × 2 bytes = 327_680 bytes/token.
-        assert compute_kv_bytes_per_token(
-            num_layers=80,
-            num_kv_heads=8,
-            head_dim=128,
-            kv_dtype_bytes=2.0,
-        ) == 327_680
+        assert (
+            compute_kv_bytes_per_token(
+                num_layers=80,
+                num_kv_heads=8,
+                head_dim=128,
+                kv_dtype_bytes=2.0,
+            )
+            == 327_680
+        )
 
     def test_fp8_kv_halves_volume(self):
-        assert compute_kv_bytes_per_token(
-            num_layers=80,
-            num_kv_heads=8,
-            head_dim=128,
-            kv_dtype_bytes=1.0,
-        ) == 163_840
+        assert (
+            compute_kv_bytes_per_token(
+                num_layers=80,
+                num_kv_heads=8,
+                head_dim=128,
+                kv_dtype_bytes=1.0,
+            )
+            == 163_840
+        )
 
 
 # HF metadata extraction.
@@ -322,13 +320,15 @@ class TestLoadModelMeta:
         d = tmp_path / "m"
         d.mkdir()
         (d / "config.json").write_text(
-            json.dumps({
-                "num_hidden_layers": 12,
-                "num_key_value_heads": 4,
-                "num_attention_heads": 8,
-                "hidden_size": 1024,
-                "torch_dtype": "bfloat16",
-            })
+            json.dumps(
+                {
+                    "num_hidden_layers": 12,
+                    "num_key_value_heads": 4,
+                    "num_attention_heads": 8,
+                    "hidden_size": 1024,
+                    "torch_dtype": "bfloat16",
+                }
+            )
         )
         (d / "model-00001-of-00002.safetensors").write_bytes(b"x" * 13)
         (d / "model-00002-of-00002.safetensors").write_bytes(b"y" * 17)
@@ -343,17 +343,13 @@ class TestLoadModelMeta:
     def test_missing_safetensors_index_and_files_returns_none(self, tmp_path):
         d = tmp_path / "m"
         d.mkdir()
-        (d / "config.json").write_text(
-            json.dumps({"num_hidden_layers": 12, "torch_dtype": "bfloat16"})
-        )
+        (d / "config.json").write_text(json.dumps({"num_hidden_layers": 12, "torch_dtype": "bfloat16"}))
         assert load_model_meta(d) is None
 
     def test_safetensors_index_without_total_size_uses_file_sizes(self, tmp_path):
         d = tmp_path / "m"
         _write_synthetic_model(d, total_size=1_000_000_000)
-        (d / "model.safetensors.index.json").write_text(
-            json.dumps({"metadata": {}, "weight_map": {}})
-        )
+        (d / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}, "weight_map": {}}))
         (d / "model-00001-of-00001.safetensors").write_bytes(b"z" * 23)
 
         meta = load_model_meta(d)
@@ -364,13 +360,15 @@ class TestLoadModelMeta:
         d = tmp_path / "m"
         d.mkdir()
         (d / "config.json").write_text(
-            json.dumps({
-                "num_hidden_layers": 12,
-                "num_key_value_heads": 4,
-                "num_attention_heads": 8,
-                "hidden_size": 1024,
-                "torch_dtype": "float16",
-            })
+            json.dumps(
+                {
+                    "num_hidden_layers": 12,
+                    "num_key_value_heads": 4,
+                    "num_attention_heads": 8,
+                    "hidden_size": 1024,
+                    "torch_dtype": "float16",
+                }
+            )
         )
         (d / "pytorch_model-00001-of-00002.bin").write_bytes(b"a" * 11)
         (d / "pytorch_model-00002-of-00002.bin").write_bytes(b"b" * 19)
@@ -383,9 +381,7 @@ class TestLoadModelMeta:
     def test_missing_config_returns_none(self, tmp_path):
         d = tmp_path / "m"
         d.mkdir()
-        (d / "model.safetensors.index.json").write_text(
-            json.dumps({"metadata": {"total_size": 1_000_000_000}})
-        )
+        (d / "model.safetensors.index.json").write_text(json.dumps({"metadata": {"total_size": 1_000_000_000}}))
         assert load_model_meta(d) is None
 
     def test_nonexistent_model_path_returns_none(self, tmp_path):
@@ -397,15 +393,17 @@ class TestLoadModelMeta:
     def test_precision_hint_used_when_torch_dtype_missing(self, tmp_path):
         d = tmp_path / "m"
         d.mkdir()
-        (d / "config.json").write_text(json.dumps({
-            "num_hidden_layers": 80,
-            "num_key_value_heads": 8,
-            "num_attention_heads": 64,
-            "hidden_size": 8192,
-        }))
-        (d / "model.safetensors.index.json").write_text(
-            json.dumps({"metadata": {"total_size": 70_000_000_000}})
+        (d / "config.json").write_text(
+            json.dumps(
+                {
+                    "num_hidden_layers": 80,
+                    "num_key_value_heads": 8,
+                    "num_attention_heads": 64,
+                    "hidden_size": 8192,
+                }
+            )
         )
+        (d / "model.safetensors.index.json").write_text(json.dumps({"metadata": {"total_size": 70_000_000_000}}))
         meta = load_model_meta(d, precision_hint="fp8")
         assert meta is not None
         assert meta.weight_dtype_bytes == 1.0
@@ -466,20 +464,24 @@ class TestComputePeakFromState:
 def _write_qwen3_moe_model(model_dir: Path, *, total_size: int) -> None:
     """Lay down a Qwen3-30B-A3B-shaped MoE HF dir for ceiling tests."""
     model_dir.mkdir(parents=True, exist_ok=True)
-    (model_dir / "config.json").write_text(json.dumps({
-        "architectures": ["Qwen3MoeForCausalLM"],
-        "model_type": "qwen3_moe",
-        "num_hidden_layers": 48,
-        "num_attention_heads": 32,
-        "num_key_value_heads": 4,
-        "hidden_size": 2048,
-        "head_dim": 128,
-        "intermediate_size": 6144,
-        "moe_intermediate_size": 768,
-        "num_experts": 128,
-        "num_experts_per_tok": 8,
-        "torch_dtype": "bfloat16",
-    }))
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3MoeForCausalLM"],
+                "model_type": "qwen3_moe",
+                "num_hidden_layers": 48,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 4,
+                "hidden_size": 2048,
+                "head_dim": 128,
+                "intermediate_size": 6144,
+                "moe_intermediate_size": 768,
+                "num_experts": 128,
+                "num_experts_per_tok": 8,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
     (model_dir / "model.safetensors.index.json").write_text(
         json.dumps({"metadata": {"total_size": total_size}, "weight_map": {}})
     )
@@ -496,9 +498,7 @@ class TestMoEActiveWeightBytes:
         assert meta.weight_bytes == 61_064_245_248
         assert 0 < meta.active_weight_bytes < meta.weight_bytes
         ratio = meta.active_weight_bytes / meta.weight_bytes
-        assert 0.05 < ratio < 0.20, (
-            f"Qwen3-30B-A3B active ratio {ratio:.3f} outside expected window"
-        )
+        assert 0.05 < ratio < 0.20, f"Qwen3-30B-A3B active ratio {ratio:.3f} outside expected window"
 
     def test_dense_model_active_equals_total(self, tmp_path):
         """Dense (no num_experts) → active = total."""
@@ -531,7 +531,8 @@ class TestMoEActiveWeightBytes:
             concurrency=8,
         )
         dense_peak = compute_theoretical_peak_output_tok_per_sec(
-            weight_bytes=meta.weight_bytes, **kwargs,
+            weight_bytes=meta.weight_bytes,
+            **kwargs,
         )
         moe_peak = compute_theoretical_peak_output_tok_per_sec(
             weight_bytes=meta.weight_bytes,
@@ -539,8 +540,7 @@ class TestMoEActiveWeightBytes:
             **kwargs,
         )
         assert moe_peak > dense_peak * 2.0, (
-            f"MoE ceiling {moe_peak:.0f} should be much higher than "
-            f"dense-treated ceiling {dense_peak:.0f}"
+            f"MoE ceiling {moe_peak:.0f} should be much higher than dense-treated ceiling {dense_peak:.0f}"
         )
 
     def test_active_weight_bytes_zero_falls_back_to_weight_bytes(self):
@@ -577,19 +577,21 @@ class TestMoEActiveWeightBytes:
         model_dir = tmp_path / "m"
         model_dir.mkdir()
         # huge num_experts but tiny total_size → expert_bytes > total
-        (model_dir / "config.json").write_text(json.dumps({
-            "num_hidden_layers": 4,
-            "num_attention_heads": 32,
-            "num_key_value_heads": 4,
-            "hidden_size": 4096,
-            "moe_intermediate_size": 4096,
-            "num_experts": 256,
-            "num_experts_per_tok": 2,
-            "torch_dtype": "bfloat16",
-        }))
-        (model_dir / "model.safetensors.index.json").write_text(
-            json.dumps({"metadata": {"total_size": 100_000_000}})
+        (model_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "num_hidden_layers": 4,
+                    "num_attention_heads": 32,
+                    "num_key_value_heads": 4,
+                    "hidden_size": 4096,
+                    "moe_intermediate_size": 4096,
+                    "num_experts": 256,
+                    "num_experts_per_tok": 2,
+                    "torch_dtype": "bfloat16",
+                }
+            )
         )
+        (model_dir / "model.safetensors.index.json").write_text(json.dumps({"metadata": {"total_size": 100_000_000}}))
         meta = load_model_meta(model_dir)
         assert meta is not None
         # Safe degrade: active equals total (no inflation, no negatives).
@@ -604,6 +606,7 @@ class TestResolveEffectiveConcurrency:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
+
         state = SimpleNamespace(conc=32, last_baseline={})
         assert _resolve_effective_concurrency(state) == 32
 
@@ -611,12 +614,10 @@ class TestResolveEffectiveConcurrency:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
+
         yaml_path = tmp_path / "baseline_config.with_envs.yaml"
         yaml_path.write_text(
-            "benchmark:\n"
-            "  envs:\n"
-            "    CONC: 64\n"
-            "    ISL: 256\n",
+            "benchmark:\n  envs:\n    CONC: 64\n    ISL: 256\n",
             encoding="utf-8",
         )
         state = SimpleNamespace(
@@ -628,12 +629,14 @@ class TestResolveEffectiveConcurrency:
         assert _resolve_effective_concurrency(state) == 64
 
     def test_baseline_yaml_conc_is_authoritative_over_stale_state_conc(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         """P0 fix: the materialized baseline yaml's ``CONC`` wins over ``state.conc`` (session 095726Z: state stayed at default 8 while the run used 64)."""
         from inference_optimizer.orchestrator.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
+
         yaml_path = tmp_path / "baseline_config.with_envs.yaml"
         yaml_path.write_text(
             "benchmark:\n  envs:\n    CONC: 64\n",
@@ -651,6 +654,7 @@ class TestResolveEffectiveConcurrency:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
+
         state = SimpleNamespace(
             conc=0,
             last_baseline={
@@ -663,6 +667,7 @@ class TestResolveEffectiveConcurrency:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
+
         bad = tmp_path / "broken.yaml"
         bad.write_text("not: [valid yaml at all", encoding="utf-8")
         state = SimpleNamespace(
@@ -675,6 +680,7 @@ class TestResolveEffectiveConcurrency:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
+
         yaml_path = tmp_path / "no_conc.yaml"
         yaml_path.write_text(
             "benchmark:\n  envs:\n    ISL: 256\n",
@@ -690,6 +696,7 @@ class TestResolveEffectiveConcurrency:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
+
         state = SimpleNamespace(conc=0, last_baseline=None)
         assert _resolve_effective_concurrency(state) == 1
 
@@ -698,8 +705,10 @@ class TestResolveEffectiveConcurrency:
         _write_synthetic_model(
             tmp_path / "m",
             total_size=140_000_000_000,
-            num_layers=80, num_kv_heads=8,
-            hidden_size=8192, num_attention_heads=64,
+            num_layers=80,
+            num_kv_heads=8,
+            hidden_size=8192,
+            num_attention_heads=64,
             torch_dtype="bfloat16",
         )
         yaml_path = tmp_path / "bl.yaml"
@@ -730,33 +739,45 @@ class TestMoEBatchSaturation:
     """P1 fix: the MoE weight-read term grows with batch as activated experts saturate toward all experts (a constant active_weight_bytes over-amortizes at high batch)."""
 
     _COMMON = dict(
-        gpu_type="mi355x", num_gpus=1, weight_bytes=60_000_000_000,
-        num_layers=48, num_kv_heads=4, head_dim=128, kv_dtype_bytes=2.0,
-        isl=256, osl=256,
+        gpu_type="mi355x",
+        num_gpus=1,
+        weight_bytes=60_000_000_000,
+        num_layers=48,
+        num_kv_heads=4,
+        head_dim=128,
+        kv_dtype_bytes=2.0,
+        isl=256,
+        osl=256,
     )
 
     def test_saturates_to_dense_at_high_batch(self):
         # 128 experts top-8: activated_fraction = 1-(1-8/128)^B (coupon union) asymptotes to dense as B grows (~dense at B=512); strictly below dense at mid batch (see TestMoEUnionUpperBound).
         moe = compute_theoretical_peak_output_tok_per_sec(
-            **self._COMMON, concurrency=512,
-            num_experts=128, experts_per_tok=8,
+            **self._COMMON,
+            concurrency=512,
+            num_experts=128,
+            experts_per_tok=8,
             expert_weight_bytes=53_000_000_000,
         )
         dense = compute_theoretical_peak_output_tok_per_sec(
-            **self._COMMON, concurrency=512,  # no expert fields -> weight_bytes
+            **self._COMMON,
+            concurrency=512,  # no expert fields -> weight_bytes
         )
         assert moe == pytest.approx(dense, rel=1e-6)
 
     def test_saturation_lowers_ceiling_vs_constant_active(self):
         # Old behaviour: constant active_weight_bytes regardless of batch.
         old = compute_theoretical_peak_output_tok_per_sec(
-            **self._COMMON, concurrency=64,
+            **self._COMMON,
+            concurrency=64,
             active_weight_bytes=10_000_000_000,
         )
         # Fixed: expert union saturates at B=64 -> effective weight ~ full.
         new = compute_theoretical_peak_output_tok_per_sec(
-            **self._COMMON, concurrency=64,
-            num_experts=128, experts_per_tok=8,
+            **self._COMMON,
+            concurrency=64,
+            num_experts=128,
+            experts_per_tok=8,
             expert_weight_bytes=53_000_000_000,
         )
         # Larger effective weight -> lower ceiling -> within% rises to a sensible value.
@@ -767,12 +788,16 @@ class TestMoEBatchSaturation:
         non_expert = 60_000_000_000 - 53_000_000_000
         active = non_expert + int((8 / 128) * 53_000_000_000)
         sat = compute_theoretical_peak_output_tok_per_sec(
-            **self._COMMON, concurrency=1,
-            num_experts=128, experts_per_tok=8,
+            **self._COMMON,
+            concurrency=1,
+            num_experts=128,
+            experts_per_tok=8,
             expert_weight_bytes=53_000_000_000,
         )
         constant_active = compute_theoretical_peak_output_tok_per_sec(
-            **self._COMMON, concurrency=1, active_weight_bytes=active,
+            **self._COMMON,
+            concurrency=1,
+            active_weight_bytes=active,
         )
         assert sat == pytest.approx(constant_active, rel=1e-3)
 
@@ -790,14 +815,13 @@ class TestMoEUnionUpperBound:
     _EXPERTS_PER_TOK = 8
     _DTYPE_BYTES = 2.0
     _WEIGHT_BYTES = 61_064_245_248
-    _EXPERT_WEIGHT_BYTES = (
-        _NUM_LAYERS * _NUM_EXPERTS * 3 * _HIDDEN * _MOE_INTER * int(_DTYPE_BYTES)
-    )
+    _EXPERT_WEIGHT_BYTES = _NUM_LAYERS * _NUM_EXPERTS * 3 * _HIDDEN * _MOE_INTER * int(_DTYPE_BYTES)
     _MEASURED_CONC16_TOK_S = 1754.16  # InferenceX sweep, real measurement
 
     def _ceiling(self, concurrency: int) -> float:
         return compute_theoretical_peak_output_tok_per_sec(
-            gpu_type="mi300x", num_gpus=1,
+            gpu_type="mi300x",
+            num_gpus=1,
             weight_bytes=self._WEIGHT_BYTES,
             num_experts=self._NUM_EXPERTS,
             experts_per_tok=self._EXPERTS_PER_TOK,
@@ -806,7 +830,9 @@ class TestMoEUnionUpperBound:
             num_kv_heads=self._NUM_KV_HEADS,
             head_dim=self._HEAD_DIM,
             kv_dtype_bytes=self._DTYPE_BYTES,
-            isl=1024, osl=1024, concurrency=concurrency,
+            isl=1024,
+            osl=1024,
+            concurrency=concurrency,
         )
 
     def test_ceiling_is_upper_bound_at_mid_batch(self):
@@ -825,13 +851,16 @@ class TestMoEUnionUpperBound:
         # 100% the linear bound assumes; back it out from the ceiling and
         # check it sits strictly below the dense (all-experts) ceiling.
         dense = compute_theoretical_peak_output_tok_per_sec(
-            gpu_type="mi300x", num_gpus=1,
+            gpu_type="mi300x",
+            num_gpus=1,
             weight_bytes=self._WEIGHT_BYTES,
             num_layers=self._NUM_LAYERS,
             num_kv_heads=self._NUM_KV_HEADS,
             head_dim=self._HEAD_DIM,
             kv_dtype_bytes=self._DTYPE_BYTES,
-            isl=1024, osl=1024, concurrency=16,
+            isl=1024,
+            osl=1024,
+            concurrency=16,
         )
         # Un-saturated union → smaller effective weight → higher ceiling.
         assert self._ceiling(16) > dense
@@ -848,11 +877,7 @@ class TestHWSpecsTable:
 
     def test_bw_monotonic_across_generations(self):
         # MI300X (HBM3) < MI325X (HBM3e) < MI355X (HBM3e refresh).
-        assert (
-            HW_SPECS["mi300x"]["hbm_bw_gbps"]
-            < HW_SPECS["mi325x"]["hbm_bw_gbps"]
-            < HW_SPECS["mi355x"]["hbm_bw_gbps"]
-        )
+        assert HW_SPECS["mi300x"]["hbm_bw_gbps"] < HW_SPECS["mi325x"]["hbm_bw_gbps"] < HW_SPECS["mi355x"]["hbm_bw_gbps"]
 
     def test_peak_tflops_present_for_supported_precisions(self):
         # Every entry must carry a peak_tflops dict with at least bf16.
@@ -870,10 +895,7 @@ class TestHWSpecsTable:
 
     def test_mi325x_compute_equals_mi300x(self):
         # MI325X reuses the CDNA3 die — same matrix peak, larger HBM only.
-        assert (
-            HW_SPECS["mi300x"]["peak_tflops"]["bf16"]
-            == HW_SPECS["mi325x"]["peak_tflops"]["bf16"]
-        )
+        assert HW_SPECS["mi300x"]["peak_tflops"]["bf16"] == HW_SPECS["mi325x"]["peak_tflops"]["bf16"]
 
 
 # Two-sided roofline: T_cmp formula + RooflineBreakdown classification.
@@ -884,10 +906,7 @@ class TestResolvePeakTFLOPS:
         assert _resolve_peak_tflops("mi355x", "bf16") == 2516.6
 
     def test_alias_bfloat16_same_as_bf16(self):
-        assert (
-            _resolve_peak_tflops("mi355x", "bfloat16")
-            == _resolve_peak_tflops("mi355x", "bf16")
-        )
+        assert _resolve_peak_tflops("mi355x", "bfloat16") == _resolve_peak_tflops("mi355x", "bf16")
 
     def test_mi300x_fp8_dense(self):
         # Dense FP8 (not sparse-doubled).
@@ -911,7 +930,9 @@ class TestComputeBoundCeiling:
     def test_matches_hand_calculation_mi355x_bf16_a3b_like(self):
         # A3B: 2516.6 TFLOPS * 2 bytes / (2 * 6.7 GB) ≈ 375 600 tok/s.
         cmp = compute_compute_bound_ceiling_tok_per_sec(
-            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+            gpu_type="mi355x",
+            num_gpus=1,
+            precision_tag="bf16",
             active_weight_bytes=6_700_000_000,
             weight_bytes=61_000_000_000,
             weight_dtype_bytes=2.0,
@@ -920,9 +941,11 @@ class TestComputeBoundCeiling:
 
     def test_scales_linearly_with_num_gpus(self):
         common = dict(
-            gpu_type="mi355x", precision_tag="bf16",
+            gpu_type="mi355x",
+            precision_tag="bf16",
             active_weight_bytes=10_000_000_000,
-            weight_bytes=10_000_000_000, weight_dtype_bytes=2.0,
+            weight_bytes=10_000_000_000,
+            weight_dtype_bytes=2.0,
         )
         one = compute_compute_bound_ceiling_tok_per_sec(num_gpus=1, **common)
         eight = compute_compute_bound_ceiling_tok_per_sec(num_gpus=8, **common)
@@ -931,52 +954,82 @@ class TestComputeBoundCeiling:
     def test_dense_uses_weight_bytes_when_active_missing(self):
         # active_weight_bytes=0 must fall back to weight_bytes (dense).
         cmp_zero = compute_compute_bound_ceiling_tok_per_sec(
-            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+            gpu_type="mi355x",
+            num_gpus=1,
+            precision_tag="bf16",
             active_weight_bytes=0,
-            weight_bytes=10_000_000_000, weight_dtype_bytes=2.0,
+            weight_bytes=10_000_000_000,
+            weight_dtype_bytes=2.0,
         )
         cmp_explicit = compute_compute_bound_ceiling_tok_per_sec(
-            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+            gpu_type="mi355x",
+            num_gpus=1,
+            precision_tag="bf16",
             active_weight_bytes=10_000_000_000,
-            weight_bytes=10_000_000_000, weight_dtype_bytes=2.0,
+            weight_bytes=10_000_000_000,
+            weight_dtype_bytes=2.0,
         )
         assert cmp_zero == pytest.approx(cmp_explicit, rel=1e-9)
 
     def test_moe_uses_active_b1_not_batch_saturated(self):
         # Anti-regression: T_cmp must divide by active_weight_bytes (6.7G), not a batch-saturated 61G.
         cmp_active = compute_compute_bound_ceiling_tok_per_sec(
-            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+            gpu_type="mi355x",
+            num_gpus=1,
+            precision_tag="bf16",
             active_weight_bytes=6_700_000_000,
-            weight_bytes=61_000_000_000, weight_dtype_bytes=2.0,
+            weight_bytes=61_000_000_000,
+            weight_dtype_bytes=2.0,
         )
         cmp_full = compute_compute_bound_ceiling_tok_per_sec(
-            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+            gpu_type="mi355x",
+            num_gpus=1,
+            precision_tag="bf16",
             active_weight_bytes=61_000_000_000,
-            weight_bytes=61_000_000_000, weight_dtype_bytes=2.0,
+            weight_bytes=61_000_000_000,
+            weight_dtype_bytes=2.0,
         )
         assert cmp_active > 8 * cmp_full
 
     def test_zero_on_unknown_gpu(self):
-        assert compute_compute_bound_ceiling_tok_per_sec(
-            gpu_type="h100", num_gpus=1, precision_tag="bf16",
-            active_weight_bytes=10_000_000_000,
-            weight_bytes=10_000_000_000, weight_dtype_bytes=2.0,
-        ) == 0.0
+        assert (
+            compute_compute_bound_ceiling_tok_per_sec(
+                gpu_type="h100",
+                num_gpus=1,
+                precision_tag="bf16",
+                active_weight_bytes=10_000_000_000,
+                weight_bytes=10_000_000_000,
+                weight_dtype_bytes=2.0,
+            )
+            == 0.0
+        )
 
     def test_zero_on_unknown_precision(self):
         # MXFP4 on MI300X — not in HW_SPECS, must degrade.
-        assert compute_compute_bound_ceiling_tok_per_sec(
-            gpu_type="mi300x", num_gpus=1, precision_tag="mxfp4",
-            active_weight_bytes=10_000_000_000,
-            weight_bytes=10_000_000_000, weight_dtype_bytes=0.5,
-        ) == 0.0
+        assert (
+            compute_compute_bound_ceiling_tok_per_sec(
+                gpu_type="mi300x",
+                num_gpus=1,
+                precision_tag="mxfp4",
+                active_weight_bytes=10_000_000_000,
+                weight_bytes=10_000_000_000,
+                weight_dtype_bytes=0.5,
+            )
+            == 0.0
+        )
 
     def test_zero_on_zero_dtype_bytes(self):
-        assert compute_compute_bound_ceiling_tok_per_sec(
-            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
-            active_weight_bytes=10_000_000_000,
-            weight_bytes=10_000_000_000, weight_dtype_bytes=0.0,
-        ) == 0.0
+        assert (
+            compute_compute_bound_ceiling_tok_per_sec(
+                gpu_type="mi355x",
+                num_gpus=1,
+                precision_tag="bf16",
+                active_weight_bytes=10_000_000_000,
+                weight_bytes=10_000_000_000,
+                weight_dtype_bytes=0.0,
+            )
+            == 0.0
+        )
 
 
 class TestRooflineBreakdownClassification:
@@ -985,14 +1038,16 @@ class TestRooflineBreakdownClassification:
     def _mock_state_and_helpers(self, monkeypatch, mem_val, cmp_val):
         """Stub ``load_model_meta`` + both ceilings to control the (mem, cmp) ordering directly."""
         from inference_optimizer.orchestrator import roofline_ceiling
+
         meta = ModelMeta(
-            weight_bytes=10_000_000_000, num_layers=48, num_kv_heads=4,
-            head_dim=128, weight_dtype_bytes=2.0,
+            weight_bytes=10_000_000_000,
+            num_layers=48,
+            num_kv_heads=4,
+            head_dim=128,
+            weight_dtype_bytes=2.0,
             active_weight_bytes=5_000_000_000,
         )
-        monkeypatch.setattr(
-            roofline_ceiling, "load_model_meta", lambda *a, **kw: meta
-        )
+        monkeypatch.setattr(roofline_ceiling, "load_model_meta", lambda *a, **kw: meta)
         monkeypatch.setattr(
             roofline_ceiling,
             "compute_theoretical_peak_output_tok_per_sec",
@@ -1004,8 +1059,13 @@ class TestRooflineBreakdownClassification:
             lambda **kw: cmp_val,
         )
         return SimpleNamespace(
-            model_path="/fake", gpu_type="mi355x", tp=1,
-            precision="bf16", conc=8, isl=256, osl=256,
+            model_path="/fake",
+            gpu_type="mi355x",
+            tp=1,
+            precision="bf16",
+            conc=8,
+            isl=256,
+            osl=256,
             last_baseline={},
         )
 
@@ -1045,9 +1105,13 @@ class TestRooflineBreakdownClassification:
 
     def test_quantized_legacy_fallback_uses_activation_kv_dtype(self, monkeypatch):
         from inference_optimizer.orchestrator import roofline_ceiling
+
         meta = ModelMeta(
-            weight_bytes=10_000_000_000, num_layers=48, num_kv_heads=4,
-            head_dim=128, weight_dtype_bytes=1.0,
+            weight_bytes=10_000_000_000,
+            num_layers=48,
+            num_kv_heads=4,
+            head_dim=128,
+            weight_dtype_bytes=1.0,
             active_weight_bytes=5_000_000_000,
         )
         captured: dict[str, float] = {}
@@ -1068,8 +1132,13 @@ class TestRooflineBreakdownClassification:
             lambda **kw: 40_000.0,
         )
         state = SimpleNamespace(
-            model_path="/fake", gpu_type="mi355x", tp=1,
-            precision="fp8", conc=8, isl=256, osl=256,
+            model_path="/fake",
+            gpu_type="mi355x",
+            tp=1,
+            precision="fp8",
+            conc=8,
+            isl=256,
+            osl=256,
             last_baseline={},
         )
         br = compute_roofline_breakdown_from_state(state)
@@ -1078,7 +1147,8 @@ class TestRooflineBreakdownClassification:
         assert captured["kv_dtype_bytes"] == 2.0
 
     def test_backward_compat_compute_peak_from_state_returns_min(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         # Old API must keep returning a scalar float == breakdown.peak.
         state = self._mock_state_and_helpers(monkeypatch, 8000.0, 2000.0)
@@ -1086,9 +1156,8 @@ class TestRooflineBreakdownClassification:
 
     def test_returns_empty_breakdown_on_missing_model(self, monkeypatch):
         from inference_optimizer.orchestrator import roofline_ceiling
-        monkeypatch.setattr(
-            roofline_ceiling, "load_model_meta", lambda *a, **kw: None
-        )
+
+        monkeypatch.setattr(roofline_ceiling, "load_model_meta", lambda *a, **kw: None)
         state = SimpleNamespace(model_path="", gpu_type="mi355x", tp=1)
         br = compute_roofline_breakdown_from_state(state)
         assert br.peak_tok_per_sec == 0.0
@@ -1099,7 +1168,9 @@ class TestPhysicalInterpretation095726Z:
     """End-to-end anchor (session 095726Z, Qwen3-30B-A3B/MI355X/bf16/CONC=64): decode-stage MoE stays memory-bound so adding T_cmp doesn't change T_peak (within% ~77%)."""
 
     _A3B_META = dict(
-        gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+        gpu_type="mi355x",
+        num_gpus=1,
+        precision_tag="bf16",
         weight_bytes=61_000_000_000,
         active_weight_bytes=6_700_000_000,
         weight_dtype_bytes=2.0,
@@ -1109,13 +1180,20 @@ class TestPhysicalInterpretation095726Z:
     def test_t_cmp_is_far_above_t_mem_at_decode(self):
         cmp = compute_compute_bound_ceiling_tok_per_sec(**self._A3B_META)
         mem = compute_theoretical_peak_output_tok_per_sec(
-            gpu_type="mi355x", num_gpus=1,
+            gpu_type="mi355x",
+            num_gpus=1,
             weight_bytes=61_000_000_000,
             active_weight_bytes=6_700_000_000,
-            num_experts=128, experts_per_tok=8,
+            num_experts=128,
+            experts_per_tok=8,
             expert_weight_bytes=58_000_000_000,
-            num_layers=48, num_kv_heads=4, head_dim=128,
-            kv_dtype_bytes=2.0, isl=256, osl=256, concurrency=64,
+            num_layers=48,
+            num_kv_heads=4,
+            head_dim=128,
+            kv_dtype_bytes=2.0,
+            isl=256,
+            osl=256,
+            concurrency=64,
         )
         # T_cmp ≈ 375 612 ; T_mem ≈ 8 065 ; ratio ~ 46×.
         assert cmp / mem > 10
@@ -1125,21 +1203,28 @@ class TestPhysicalInterpretation095726Z:
         _write_synthetic_model(
             tmp_path / "a3b",
             total_size=61_000_000_000,
-            num_layers=48, num_kv_heads=4,
-            hidden_size=2048, num_attention_heads=32,
+            num_layers=48,
+            num_kv_heads=4,
+            hidden_size=2048,
+            num_attention_heads=32,
             torch_dtype="bfloat16",
-            num_experts=128, num_experts_per_tok=8,
+            num_experts=128,
+            num_experts_per_tok=8,
             moe_intermediate_size=768,
         )
         yaml_path = tmp_path / "bl.yaml"
         yaml_path.write_text(
-            "benchmark:\n  envs:\n    CONC: 64\n", encoding="utf-8",
+            "benchmark:\n  envs:\n    CONC: 64\n",
+            encoding="utf-8",
         )
         state = SimpleNamespace(
             model_path=str(tmp_path / "a3b"),
-            gpu_type="mi355x", tp=1, precision="bf16",
+            gpu_type="mi355x",
+            tp=1,
+            precision="bf16",
             conc=8,  # stale SharedState default; yaml CONC=64 wins (P0).
-            isl=256, osl=256,
+            isl=256,
+            osl=256,
             last_baseline={"extras": {"materialized_config": str(yaml_path)}},
         )
         br = compute_roofline_breakdown_from_state(state)
@@ -1162,18 +1247,16 @@ class TestDeepSeekV3ConfigAliases:
         # Identical geometry differing only in the routed-expert field name must give an identical breakdown.
         common = dict(
             total_size=26_000_000_000,
-            num_layers=26, num_kv_heads=32,
-            hidden_size=1536, num_attention_heads=32,
+            num_layers=26,
+            num_kv_heads=32,
+            hidden_size=1536,
+            num_attention_heads=32,
             torch_dtype="bfloat16",
             num_experts_per_tok=4,
             moe_intermediate_size=1280,
         )
-        _write_synthetic_model(
-            tmp_path / "qwen_alias", num_experts=64, **common
-        )
-        _write_synthetic_model(
-            tmp_path / "ds_alias", n_routed_experts=64, **common
-        )
+        _write_synthetic_model(tmp_path / "qwen_alias", num_experts=64, **common)
+        _write_synthetic_model(tmp_path / "ds_alias", n_routed_experts=64, **common)
         qwen = load_model_meta(str(tmp_path / "qwen_alias"))
         ds = load_model_meta(str(tmp_path / "ds_alias"))
         assert qwen is not None and ds is not None
@@ -1188,8 +1271,10 @@ class TestDeepSeekV3ConfigAliases:
         _write_synthetic_model(
             tmp_path / "gigachat",
             total_size=12_000_000_000,
-            num_layers=26, num_kv_heads=32,
-            hidden_size=1536, num_attention_heads=32,
+            num_layers=26,
+            num_kv_heads=32,
+            hidden_size=1536,
+            num_attention_heads=32,
             torch_dtype="bfloat16",  # HF-standard activation dtype
             dtype="bfloat16",  # DeepSeek-V3 redundancy
             quant_method="fp8",  # block-fp8 weight quant
@@ -1211,8 +1296,10 @@ class TestDeepSeekV3ConfigAliases:
         _write_synthetic_model(
             tmp_path / "fp8_model",
             total_size=12_000_000_000,
-            num_layers=4, num_kv_heads=8,
-            hidden_size=1024, num_attention_heads=16,
+            num_layers=4,
+            num_kv_heads=8,
+            hidden_size=1024,
+            num_attention_heads=16,
             torch_dtype="bfloat16",  # would yield 2.0 if read directly
             quant_method="fp8",
         )
@@ -1225,12 +1312,15 @@ class TestDeepSeekV3ConfigAliases:
         _write_synthetic_model(
             tmp_path / "ds_no_qd",
             total_size=4_000_000_000,
-            num_layers=4, num_kv_heads=4,
-            hidden_size=512, num_attention_heads=8,
+            num_layers=4,
+            num_kv_heads=4,
+            hidden_size=512,
+            num_attention_heads=8,
             torch_dtype="bfloat16",
         )
         # Strip torch_dtype manually so we exercise the dtype fallback.
         import json as _json
+
         cfg_path = tmp_path / "ds_no_qd" / "config.json"
         cfg = _json.loads(cfg_path.read_text())
         cfg.pop("torch_dtype", None)
@@ -1249,18 +1339,16 @@ class TestDeepSeekV3ConfigAliases:
         # total_size is the ~260 GB bf16-equivalent (above the routed pool) so the MoE decomposition path executes.
         common = dict(
             total_size=260_000_000_000,
-            num_layers=36, num_kv_heads=8,
-            hidden_size=2880, num_attention_heads=64,
+            num_layers=36,
+            num_kv_heads=8,
+            hidden_size=2880,
+            num_attention_heads=64,
             torch_dtype="bfloat16",
             num_experts_per_tok=4,
             moe_intermediate_size=2880,
         )
-        _write_synthetic_model(
-            tmp_path / "qwen_alias", num_experts=128, **common
-        )
-        _write_synthetic_model(
-            tmp_path / "gptoss_alias", num_local_experts=128, **common
-        )
+        _write_synthetic_model(tmp_path / "qwen_alias", num_experts=128, **common)
+        _write_synthetic_model(tmp_path / "gptoss_alias", num_local_experts=128, **common)
         qwen = load_model_meta(str(tmp_path / "qwen_alias"))
         gptoss = load_model_meta(str(tmp_path / "gptoss_alias"))
         assert qwen is not None and gptoss is not None
@@ -1276,14 +1364,16 @@ class TestDeepSeekV3ConfigAliases:
 # PerfModel bottom-up breakdown (Phase 2 / 3).
 # ---------------------------------------------------------------------------
 
+
 class TestPerfModelBreakdown:
     """Smoke tests for compute_roofline_from_perfmodel and related helpers."""
 
     def _make_meta(self) -> "ModelMeta":
         """Minimal dense Llama-style ModelMeta."""
         from inference_optimizer.orchestrator.roofline_ceiling import ModelMeta
+
         return ModelMeta(
-            weight_bytes=int(13e9),   # ~13 GB weight
+            weight_bytes=int(13e9),  # ~13 GB weight
             num_layers=32,
             num_kv_heads=8,
             head_dim=128,
@@ -1299,32 +1389,46 @@ class TestPerfModelBreakdown:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             compute_roofline_from_perfmodel,
         )
+
         meta = self._make_meta()
         result = compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="unknown_gpu_xyz",
-            concurrency=8, isl=1024, osl=512,
+            meta=meta,
+            gpu_type="unknown_gpu_xyz",
+            concurrency=8,
+            isl=1024,
+            osl=512,
         )
         assert result is None
 
     def test_returns_none_when_meta_missing_hidden(self):
         from inference_optimizer.orchestrator.roofline_ceiling import (
-            ModelMeta, compute_roofline_from_perfmodel,
+            ModelMeta,
+            compute_roofline_from_perfmodel,
         )
+
         meta = ModelMeta(
-            weight_bytes=int(13e9), num_layers=32,
-            num_kv_heads=8, head_dim=128, weight_dtype_bytes=2.0,
+            weight_bytes=int(13e9),
+            num_layers=32,
+            num_kv_heads=8,
+            head_dim=128,
+            weight_dtype_bytes=2.0,
             # hidden_size=0 -> insufficient
         )
         result = compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi300x",
-            concurrency=8, isl=1024, osl=512,
+            meta=meta,
+            gpu_type="mi300x",
+            concurrency=8,
+            isl=1024,
+            osl=512,
         )
         assert result is None
 
     def test_hw_specs_achievable_coverage(self):
         from inference_optimizer.orchestrator.roofline_ceiling import (
-            HW_SPECS_ACHIEVABLE, _resolve_achievable_tflops,
+            HW_SPECS_ACHIEVABLE,
+            _resolve_achievable_tflops,
         )
+
         for gpu in ("mi300x", "mi325x", "mi355x"):
             assert gpu in HW_SPECS_ACHIEVABLE
         # MI300X bf16 achievable must be less than vendor-quoted (708 < 1307)
@@ -1341,8 +1445,11 @@ class TestPerfModelBreakdown:
 
         meta = self._make_meta()
         result = compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi300x",
-            concurrency=16, isl=1024, osl=1024,
+            meta=meta,
+            gpu_type="mi300x",
+            concurrency=16,
+            isl=1024,
+            osl=1024,
         )
         assert result is not None
         assert isinstance(result, PerfModelBreakdown)
@@ -1369,9 +1476,15 @@ class TestPerfModelBreakdown:
             compute_roofline_breakdown_from_state_v2,
             RooflineBreakdown,
         )
+
         state = SimpleNamespace(
-            model_path="", gpu_type="mi300x", tp=1,
-            conc=8, isl=256, osl=256, precision="bf16",
+            model_path="",
+            gpu_type="mi300x",
+            tp=1,
+            conc=8,
+            isl=256,
+            osl=256,
+            precision="bf16",
             last_baseline={},
         )
         legacy, pm_bd = compute_roofline_breakdown_from_state_v2(state)
@@ -1384,6 +1497,7 @@ class TestPerfModelBreakdown:
 # PerfModel MoE formula correctness
 # ---------------------------------------------------------------------------
 
+
 class TestPerfModelMoE:
     """Verify that compute_roofline_from_perfmodel uses moe_intermediate_size
     for MoE models and gives a valid upper bound on measured throughput."""
@@ -1391,6 +1505,7 @@ class TestPerfModelMoE:
     def _make_qwen3_a3b_meta(self) -> "ModelMeta":
         """Qwen3-30B-A3B geometry: 128 experts, top-8, moe_inter=768."""
         from inference_optimizer.orchestrator.roofline_ceiling import ModelMeta
+
         return ModelMeta(
             weight_bytes=61_064_245_248,
             num_layers=48,
@@ -1414,10 +1529,14 @@ class TestPerfModelMoE:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             compute_roofline_from_perfmodel,
         )
+
         meta = self._make_qwen3_a3b_meta()
         result = compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi300x",
-            concurrency=1, isl=1024, osl=1024,
+            meta=meta,
+            gpu_type="mi300x",
+            concurrency=1,
+            isl=1024,
+            osl=1024,
         )
         assert result is not None
         # At batch=1: E_active ≈ topk = 8 (coupon formula == B=1 estimate),
@@ -1433,10 +1552,14 @@ class TestPerfModelMoE:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             compute_roofline_from_perfmodel,
         )
+
         meta = self._make_qwen3_a3b_meta()
         result = compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi300x",
-            concurrency=16, isl=1024, osl=1024,
+            meta=meta,
+            gpu_type="mi300x",
+            concurrency=16,
+            isl=1024,
+            osl=1024,
         )
         assert result is not None
         assert result.decode_tok_per_s >= 1754.16, (
@@ -1447,14 +1570,23 @@ class TestPerfModelMoE:
         """At conc=64, FusedMoE coupon formula should give a tighter (lower) ceiling
         than the B=1 per-token estimate because E_active grows toward num_experts."""
         from inference_optimizer.orchestrator.roofline_ceiling import (
-            ModelMeta, compute_roofline_from_perfmodel,
+            compute_roofline_from_perfmodel,
         )
+
         meta = self._make_qwen3_a3b_meta()
         result_1 = compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi300x", concurrency=1, isl=512, osl=512,
+            meta=meta,
+            gpu_type="mi300x",
+            concurrency=1,
+            isl=512,
+            osl=512,
         )
         result_64 = compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi300x", concurrency=64, isl=512, osl=512,
+            meta=meta,
+            gpu_type="mi300x",
+            concurrency=64,
+            isl=512,
+            osl=512,
         )
         assert result_1 is not None and result_64 is not None
         # At conc=64, more expert weights are loaded (E_active > topk),
@@ -1476,6 +1608,7 @@ class TestPerfModelTransparentReplacement:
             compute_roofline_from_perfmodel,
             load_model_meta,
         )
+
         _write_synthetic_model(
             tmp_path / "m",
             total_size=int(13e9),
@@ -1487,15 +1620,23 @@ class TestPerfModelTransparentReplacement:
         )
         state = SimpleNamespace(
             model_path=str(tmp_path / "m"),
-            gpu_type="mi300x", tp=1, precision="bf16",
-            conc=8, isl=256, osl=256,
+            gpu_type="mi300x",
+            tp=1,
+            precision="bf16",
+            conc=8,
+            isl=256,
+            osl=256,
             last_baseline={},
         )
         br = compute_roofline_breakdown_from_state(state)
         meta = load_model_meta(str(tmp_path / "m"))
         pm_bd = compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi300x", concurrency=8,
-            isl=256, osl=256, precision_tag="bf16",
+            meta=meta,
+            gpu_type="mi300x",
+            concurrency=8,
+            isl=256,
+            osl=256,
+            precision_tag="bf16",
         )
         assert pm_bd is not None
         assert br.peak_tok_per_sec == pytest.approx(pm_bd.decode_tok_per_s, rel=1e-6)
@@ -1513,29 +1654,36 @@ class TestPerfModelTransparentReplacement:
             compute_roofline_from_perfmodel,
             load_model_meta,
         )
+
         _write_qwen3_moe_model(tmp_path / "a3b", total_size=61_000_000_000)
         yaml_path = tmp_path / "bl.yaml"
         yaml_path.write_text("benchmark:\n  envs:\n    CONC: 64\n", encoding="utf-8")
         state = SimpleNamespace(
             model_path=str(tmp_path / "a3b"),
-            gpu_type="mi355x", tp=1, precision="bf16",
-            conc=8, isl=256, osl=256,
+            gpu_type="mi355x",
+            tp=1,
+            precision="bf16",
+            conc=8,
+            isl=256,
+            osl=256,
             last_baseline={"extras": {"materialized_config": str(yaml_path)}},
         )
         br = compute_roofline_breakdown_from_state(state)
         meta = load_model_meta(str(tmp_path / "a3b"))
         pm_bd = compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi355x", concurrency=64,
-            isl=256, osl=256, precision_tag="bf16",
+            meta=meta,
+            gpu_type="mi355x",
+            concurrency=64,
+            isl=256,
+            osl=256,
+            precision_tag="bf16",
         )
         assert pm_bd is not None
         assert br.peak_tok_per_sec == pytest.approx(pm_bd.decode_tok_per_s, rel=1e-6)
         assert br.mem_tok_per_sec == pytest.approx(pm_bd.decode_mem_tok_per_s, rel=1e-6)
         assert br.cmp_tok_per_sec == pytest.approx(pm_bd.decode_cmp_tok_per_s, rel=1e-6)
         # FusedMoE ceiling must remain above the measured 6244.3 tok/s
-        assert br.peak_tok_per_sec >= 6244.3, (
-            f"MoE PerfModel ceiling {br.peak_tok_per_sec:.1f} < measured 6244.3 tok/s"
-        )
+        assert br.peak_tok_per_sec >= 6244.3, f"MoE PerfModel ceiling {br.peak_tok_per_sec:.1f} < measured 6244.3 tok/s"
 
     def test_falls_back_to_legacy_for_unknown_gpu(self, tmp_path):
         """For an unknown GPU (PerfModel returns None), legacy ceiling is used."""
@@ -1543,6 +1691,7 @@ class TestPerfModelTransparentReplacement:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             compute_roofline_breakdown_from_state,
         )
+
         _write_synthetic_model(
             tmp_path / "m",
             total_size=int(13e9),
@@ -1554,8 +1703,12 @@ class TestPerfModelTransparentReplacement:
         )
         state = SimpleNamespace(
             model_path=str(tmp_path / "m"),
-            gpu_type="unknown_gpu_xyz", tp=1, precision="bf16",
-            conc=8, isl=256, osl=256,
+            gpu_type="unknown_gpu_xyz",
+            tp=1,
+            precision="bf16",
+            conc=8,
+            isl=256,
+            osl=256,
             last_baseline={},
         )
         # Legacy ceiling for unknown GPU also returns 0 (no HW spec), so just
@@ -1588,8 +1741,12 @@ class TestRuntimeDtypeResolution:
             current_best["tput"] = 1000.0
         return SimpleNamespace(
             model_path=str(tmp_path / "m"),
-            gpu_type="mi300x", tp=1, precision="fp8",
-            conc=64, isl=1024, osl=1024,
+            gpu_type="mi300x",
+            tp=1,
+            precision="fp8",
+            conc=64,
+            isl=1024,
+            osl=1024,
             last_baseline={},
             current_best=current_best,
         )
@@ -1653,15 +1810,22 @@ class TestRuntimeDtypeResolution:
         _write_synthetic_model(
             tmp_path / "m",
             total_size=16_000_000_000,
-            num_layers=48, num_kv_heads=8,
-            hidden_size=5120, num_attention_heads=40,
+            num_layers=48,
+            num_kv_heads=8,
+            hidden_size=5120,
+            num_attention_heads=40,
             torch_dtype="bfloat16",
         )
         state = SimpleNamespace(
             model_path=str(tmp_path / "m"),
-            gpu_type="mi300x", tp=1, precision="",
-            conc=64, isl=1024, osl=1024,
-            last_baseline={}, current_best={},
+            gpu_type="mi300x",
+            tp=1,
+            precision="",
+            conc=64,
+            isl=1024,
+            osl=1024,
+            last_baseline={},
+            current_best={},
         )
         meta = load_model_meta(state.model_path)
         rt = resolve_runtime_dtype(state, meta)
@@ -1673,17 +1837,25 @@ class TestRuntimeDtypeResolution:
         _write_synthetic_model(
             tmp_path / "m",
             total_size=480_000_000_000,
-            num_layers=62, num_kv_heads=8,
-            hidden_size=6144, num_attention_heads=48,
-            num_experts=256, num_experts_per_tok=8,
+            num_layers=62,
+            num_kv_heads=8,
+            hidden_size=6144,
+            num_attention_heads=48,
+            num_experts=256,
+            num_experts_per_tok=8,
             moe_intermediate_size=1536,
             quant_method="fp8",
         )
         state = SimpleNamespace(
             model_path=str(tmp_path / "m"),
-            gpu_type="mi300x", tp=4, precision="fp8",
-            conc=64, isl=1024, osl=1024,
-            last_baseline={}, current_best={},
+            gpu_type="mi300x",
+            tp=4,
+            precision="fp8",
+            conc=64,
+            isl=1024,
+            osl=1024,
+            last_baseline={},
+            current_best={},
         )
         meta = load_model_meta(state.model_path, precision_hint="fp8")
         assert meta.weight_dtype_bytes == 1.0  # quant_method already fp8
@@ -1734,6 +1906,7 @@ class TestRuntimeDtypeResolution:
         """Write a materialized baseline yaml carrying ``EXTRA_*_ARGS`` and
         return its path (the shape the executor stamps post-baseline)."""
         import yaml as _yaml  # type: ignore[reportMissingModuleSource]
+
         envs = {
             "TP": tp,
             "CONC": conc,
@@ -1759,7 +1932,9 @@ class TestRuntimeDtypeResolution:
         EXTRA_SGLANG_ARGS (current_best carries no extra_server_args), so
         dtype resolution must read it from the materialized config."""
         cfg_path = self._baseline_yaml(
-            tmp_path, "EXTRA_SGLANG_ARGS", "--quantization fp8",
+            tmp_path,
+            "EXTRA_SGLANG_ARGS",
+            "--quantization fp8",
         )
         state = self._dense_fp32_state(tmp_path, "")  # no top-level args
         state.current_best = {"action": "baseline", "tput": 100.0}
@@ -1773,7 +1948,9 @@ class TestRuntimeDtypeResolution:
     def test_baseline_yaml_args_vllm_env_key(self, tmp_path):
         # The vllm framework routes flags through EXTRA_VLLM_ARGS.
         cfg_path = self._baseline_yaml(
-            tmp_path, "EXTRA_VLLM_ARGS", "--quantization fp8",
+            tmp_path,
+            "EXTRA_VLLM_ARGS",
+            "--quantization fp8",
         )
         state = self._dense_fp32_state(tmp_path, "")
         state.current_best = {}
@@ -1786,7 +1963,9 @@ class TestRuntimeDtypeResolution:
         """An optimized current_best (real extra_server_args) takes
         precedence over the baseline yaml fallback."""
         cfg_path = self._baseline_yaml(
-            tmp_path, "EXTRA_SGLANG_ARGS", "--dtype bfloat16",
+            tmp_path,
+            "EXTRA_SGLANG_ARGS",
+            "--dtype bfloat16",
         )
         state = self._dense_fp32_state(tmp_path, "--quantization fp8")
         state.last_baseline = {"extras": {"materialized_config": cfg_path}}
@@ -1800,7 +1979,9 @@ class TestRuntimeDtypeResolution:
         """When both baseline and current_best set the same flag, the
         optimized overlay must win."""
         cfg_path = self._baseline_yaml(
-            tmp_path, "EXTRA_SGLANG_ARGS", "--dtype float16",
+            tmp_path,
+            "EXTRA_SGLANG_ARGS",
+            "--dtype float16",
         )
         state = self._dense_fp32_state(tmp_path, "--dtype bfloat16")
         state.last_baseline = {"extras": {"materialized_config": cfg_path}}
@@ -1835,7 +2016,9 @@ class TestRuntimeDtypeResolution:
     def test_optimized_extra_envs_replace_baseline_server_args(self, tmp_path):
         """extra_envs.EXTRA_*_ARGS replaces the YAML server-args env."""
         cfg_path = self._baseline_yaml(
-            tmp_path, "EXTRA_SGLANG_ARGS", "--quantization fp8",
+            tmp_path,
+            "EXTRA_SGLANG_ARGS",
+            "--quantization fp8",
         )
         state = self._dense_fp32_state(tmp_path, "")
         state.current_best = {
@@ -1939,8 +2122,10 @@ class TestArmPinnedPrecision:
         _write_synthetic_model(
             tmp_path / "m",
             total_size=140_000_000_000,
-            num_layers=80, num_kv_heads=8,
-            hidden_size=8192, num_attention_heads=64,
+            num_layers=80,
+            num_kv_heads=8,
+            hidden_size=8192,
+            num_attention_heads=64,
             torch_dtype="bfloat16",
         )
         # Baseline yaml carries NO quantization (bf16 weights).
@@ -1983,10 +2168,12 @@ class TestArmPinnedPrecision:
     def test_baseline_arm_ceiling_below_fp8_arm(self, tmp_path):
         state = self._bf16_baseline_with_fp8_best(tmp_path)
         baseline_peak = compute_roofline_breakdown_from_state(
-            state, arm="baseline",
+            state,
+            arm="baseline",
         ).peak_tok_per_sec
         best_peak = compute_roofline_breakdown_from_state(
-            state, arm="current_best",
+            state,
+            arm="current_best",
         ).peak_tok_per_sec
         # fp8 halves weight IO, so the best-arm ceiling must be higher.
         assert baseline_peak > 0
@@ -2001,15 +2188,18 @@ class TestReadBaselineServerArgs:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             read_baseline_server_args,
         )
+
         yaml_path = tmp_path / "bl.yaml"
         yaml_path.write_text(
-            _yaml.safe_dump({
-                "benchmark": {
-                    "envs": {
-                        "EXTRA_SGLANG_ARGS": "--attention-backend AITER",
+            _yaml.safe_dump(
+                {
+                    "benchmark": {
+                        "envs": {
+                            "EXTRA_SGLANG_ARGS": "--attention-backend AITER",
+                        },
                     },
-                },
-            }),
+                }
+            ),
             encoding="utf-8",
         )
         state = SimpleNamespace(
@@ -2021,10 +2211,27 @@ class TestReadBaselineServerArgs:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             read_baseline_server_args,
         )
+
         state = SimpleNamespace(
             last_baseline={"extras": {"materialized_config": "/no/such.yaml"}},
         )
         assert read_baseline_server_args(state) == ""
+
+    def test_falls_back_to_last_baseline_payload_when_yaml_missing(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            read_baseline_server_args,
+        )
+
+        state = SimpleNamespace(
+            last_baseline={
+                "extras": {"materialized_config": "/no/such.yaml"},
+                "extra_envs": {
+                    "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8_e4m3 --gpu-memory-utilization 0.85",
+                },
+            },
+        )
+
+        assert read_baseline_server_args(state) == "--kv-cache-dtype fp8_e4m3 --gpu-memory-utilization 0.85"
 
 
 class TestPreludeRooflineWarmReplayIntegration:
@@ -2036,17 +2243,20 @@ class TestPreludeRooflineWarmReplayIntegration:
 
     def _bf16_baseline_yaml(self, tmp_path) -> str:
         import yaml as _yaml  # type: ignore[reportMissingModuleSource]
+
         yaml_path = tmp_path / "baseline.yaml"
         yaml_path.write_text(
-            _yaml.safe_dump({
-                "benchmark": {
-                    "framework": "sglang",
-                    "precision": "bf16",
-                    "runner_type": "mi300x",
-                    "model": str(tmp_path / "m"),
-                    "envs": {"TP": 1, "CONC": 32, "ISL": 2048, "OSL": 512},
-                },
-            }),
+            _yaml.safe_dump(
+                {
+                    "benchmark": {
+                        "framework": "sglang",
+                        "precision": "bf16",
+                        "runner_type": "mi300x",
+                        "model": str(tmp_path / "m"),
+                        "envs": {"TP": 1, "CONC": 32, "ISL": 2048, "OSL": 512},
+                    },
+                }
+            ),
             encoding="utf-8",
         )
         return str(yaml_path)
@@ -2067,8 +2277,10 @@ class TestPreludeRooflineWarmReplayIntegration:
         _write_synthetic_model(
             tmp_path / "m",
             total_size=140_000_000_000,
-            num_layers=80, num_kv_heads=8,
-            hidden_size=8192, num_attention_heads=64,
+            num_layers=80,
+            num_kv_heads=8,
+            hidden_size=8192,
+            num_attention_heads=64,
             torch_dtype="bfloat16",
         )
         yaml_path = self._bf16_baseline_yaml(tmp_path)
@@ -2108,30 +2320,36 @@ class TestPreludeRooflineWarmReplayIntegration:
             }
 
         task = Task(
-            task_id="t-prelude-1", kind="roofline", state="running",
+            task_id="t-prelude-1",
+            kind="roofline",
+            state="running",
             params={"base_extra_args": "", "reason": "prelude_initial"},
             idempotency_key="roofline:prelude-1",
             requires_lanes=["profile_lane"],
         )
         ctx = RunnerContext(
-            task=task, lease=None, extra={"session_dir": str(tmp_path)},
+            task=task,
+            lease=None,
+            extra={"session_dir": str(tmp_path)},
         )
         executor = RooflineExecutor(shared_state=state)
-        with patch(
-            "inference_optimizer.orchestrator.action_executors."
-            "profile.profile_executor",
-            new=fake_profile,
-        ), patch(
-            "inference_optimizer.orchestrator.kernel_request_handlers."
-            "trace_analyze_handler",
-            new=fake_ta,
+        with (
+            patch(
+                "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
+                new=fake_profile,
+            ),
+            patch(
+                "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
+                new=fake_ta,
+            ),
         ):
             result = asyncio.run(executor(ctx))
         assert result["status"] == "succeeded"
         return state
 
     def test_delayed_prelude_records_baseline_not_fp8_current_best(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         state = self._run_prelude_after_fp8_promotion(tmp_path)
         assert len(state.roofline_snapshots) == 1
@@ -2146,7 +2364,8 @@ class TestPreludeRooflineWarmReplayIntegration:
         # The fp8 current_best ceiling would be strictly higher (half weight
         # IO); the recorded baseline ceiling must NOT be inflated to it.
         fp8_peak = compute_roofline_breakdown_from_state(
-            state, arm="current_best",
+            state,
+            arm="current_best",
         ).peak_tok_per_sec
         assert baseline_peak is not None and baseline_peak > 0
         assert fp8_peak > baseline_peak

@@ -65,9 +65,7 @@ def test_grid_variant_canonical_only_emits_no_warning():
         v = GridVariant(name="canonical", extra_server_args="--ok")
     assert v.extra_server_args == "--ok"
     assert not [
-        w for w in caught
-        if issubclass(w.category, DeprecationWarning)
-        and "extra_sglang_args" in str(w.message)
+        w for w in caught if issubclass(w.category, DeprecationWarning) and "extra_sglang_args" in str(w.message)
     ]
 
 
@@ -114,10 +112,14 @@ def test_shared_state_round_trip_writes_canonical_after_legacy_load(tmp_path: Pa
     """After loading and saving back a legacy state.json, only the canonical name remains."""
     state_dir = tmp_path
     state_file = state_dir / "state.json"
-    state_file.write_text(json.dumps({
-        "schema_version": 2,
-        "last_baseline": {LEGACY_KEY: "--legacy"},
-    }))
+    state_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "last_baseline": {LEGACY_KEY: "--legacy"},
+            }
+        )
+    )
     state = SharedState.load_or_init(state_dir)
     assert state.last_baseline.get(CANONICAL_KEY) == "--legacy"
     assert LEGACY_KEY not in state.last_baseline

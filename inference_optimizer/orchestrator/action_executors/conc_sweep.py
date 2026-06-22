@@ -46,18 +46,18 @@ class ConcSweepExecutor:
         session_dir_str = str(extra.get("session_dir") or "").strip()
         if not session_dir_str:
             return {
-                "status":      "failed",
+                "status": "failed",
                 "error_class": "missing_session_dir",
-                "error":       "conc_sweep: ctx.extra['session_dir'] missing",
+                "error": "conc_sweep: ctx.extra['session_dir'] missing",
             }
         session_dir = Path(session_dir_str)
         try:
             state = SharedState.load_or_init(session_dir)
         except Exception as exc:  # noqa: BLE001 — surface as failure
             return {
-                "status":      "failed",
+                "status": "failed",
                 "error_class": "shared_state_load_failed",
-                "error":       f"conc_sweep: SharedState.load_or_init failed: {exc!r}",
+                "error": f"conc_sweep: SharedState.load_or_init failed: {exc!r}",
             }
 
         params = ctx.task.params or {}
@@ -65,23 +65,16 @@ class ConcSweepExecutor:
         # list short-circuits (respects an explicit "no concs" choice).
         concs_raw = params.get("concs")
         if concs_raw is None:
-            concs: list[int] | None = (
-                list(state.conc_sweep_concs) if state.conc_sweep_concs else None
-            )
+            concs: list[int] | None = list(state.conc_sweep_concs) if state.conc_sweep_concs else None
         else:
             concs = [int(c) for c in concs_raw]
 
-        variant_timeout = int(
-            params.get("variant_timeout_sec")
-            or state.conc_sweep_variant_timeout_sec
-            or 1800
-        )
-        total_budget = int(
-            params.get("total_budget_sec", state.conc_sweep_total_budget_sec)
-        )
+        variant_timeout = int(params.get("variant_timeout_sec") or state.conc_sweep_variant_timeout_sec or 1800)
+        total_budget = int(params.get("total_budget_sec", state.conc_sweep_total_budget_sec))
 
         payload = await run_conc_sweep(
-            state, session_dir,
+            state,
+            session_dir,
             concs=concs,
             variant_timeout_sec=variant_timeout,
             total_budget_sec=total_budget,

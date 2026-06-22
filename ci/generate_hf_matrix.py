@@ -35,10 +35,14 @@ from pathlib import Path
 
 # Reuse HuggingFaceClient for the pool-then-filter logic.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from optimize_submit import HuggingFaceClient   # noqa: E402
+from optimize_submit import HuggingFaceClient  # noqa: E402
 
-DEFAULT_CRON_CANDIDATES_FILE = (
-    "ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json"
+# The schedule always sets INPUT_CANDIDATES_FILE explicitly (built from the
+# WEKAFS_CHENYI_DIR secret), so this is only the empty-env fallback. Keep the
+# personal /wekafs root out of source; allow a CRON_CANDIDATES_FILE env override.
+DEFAULT_CRON_CANDIDATES_FILE = os.environ.get(
+    "CRON_CANDIDATES_FILE",
+    "ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json",
 )
 
 
@@ -102,9 +106,7 @@ def _paginate_models(api_path: str) -> tuple[set[str], set[str]]:
             with urllib.request.urlopen(url, timeout=30) as r:
                 data = json.load(r)
         except Exception as e:
-            raise RuntimeError(
-                f"failed to query {api_path} page offset={offset}: {e}"
-            ) from e
+            raise RuntimeError(f"failed to query {api_path} page offset={offset}: {e}") from e
         rows = data.get("results") if isinstance(data, dict) else data
         if not isinstance(rows, list):
             raise RuntimeError(f"{api_path} response did not contain a results list")
@@ -160,12 +162,14 @@ def _resolve_task_models(task_ids: list[str], max_workers: int = 16) -> set[str]
         """
         try:
             with urllib.request.urlopen(
-                f"{_LB_BASE}/api/v1/tasks/{tid}", timeout=15,
+                f"{_LB_BASE}/api/v1/tasks/{tid}",
+                timeout=15,
             ) as r:
                 d = json.load(r)
         except Exception as e:
             print(
-                f"WARN: single-GET task {tid} failed: {e}", file=sys.stderr,
+                f"WARN: single-GET task {tid} failed: {e}",
+                file=sys.stderr,
             )
             return None
         if isinstance(d, dict) and isinstance(d.get("model"), str):
@@ -282,13 +286,11 @@ def _active_workflow_slugs() -> set[str]:
 
     for status in ("queued", "in_progress"):
         try:
-            runs = _get(
-                f"https://api.github.com/repos/{repo}/actions/runs"
-                f"?status={status}&per_page=30"
-            ).get("workflow_runs", [])
+            runs = _get(f"https://api.github.com/repos/{repo}/actions/runs?status={status}&per_page=30").get(
+                "workflow_runs", []
+            )
         except Exception as e:
-            print(f"WARN: failed to list {status} workflow runs: {e}",
-                  file=sys.stderr)
+            print(f"WARN: failed to list {status} workflow runs: {e}", file=sys.stderr)
             continue
         for run in runs:
             if str(run.get("id")) == str(run_id):
@@ -301,8 +303,7 @@ def _active_workflow_slugs() -> set[str]:
             try:
                 jobs = _get(jobs_url + "?per_page=100").get("jobs", [])
             except Exception as e:
-                print(f"WARN: failed to list jobs for run {run.get('id')}: {e}",
-                      file=sys.stderr)
+                print(f"WARN: failed to list jobs for run {run.get('id')}: {e}", file=sys.stderr)
                 continue
             for job in jobs:
                 name = str(job.get("name") or "")
@@ -363,14 +364,18 @@ def _filter_entries_by_explicit_models(
     Historically INPUT_MODELS returned bare repo strings and therefore lost
     framework / precision / tp / conc from candidates JSON. For manual reruns
     of a small subset from a fixed pool, keep the candidate dicts intact.
+
+    Args:
+        entries: Candidate entries (dicts and/or repo id strings).
+        explicit_repos: Repo ids requested via ``INPUT_MODELS``.
+
+    Returns:
+        The matching candidate entries in ``explicit_repos`` order; all
+        ``entries`` when ``explicit_repos`` is empty.
     """
     if not explicit_repos:
         return entries
-    by_repo: dict[str, dict | str] = {
-        _entry_repo(entry).lower(): entry
-        for entry in entries
-        if _entry_repo(entry)
-    }
+    by_repo: dict[str, dict | str] = {_entry_repo(entry).lower(): entry for entry in entries if _entry_repo(entry)}
     out: list[dict | str] = []
     missing: list[str] = []
     for repo in explicit_repos:
@@ -381,8 +386,7 @@ def _filter_entries_by_explicit_models(
         out.append(entry)
     if missing:
         print(
-            "WARNING: INPUT_MODELS requested repo(s) not present in "
-            f"candidates file: {', '.join(missing)}",
+            f"WARNING: INPUT_MODELS requested repo(s) not present in candidates file: {', '.join(missing)}",
             file=sys.stderr,
         )
     return out
@@ -404,12 +408,10 @@ def _apply_exclusions_to_entries(entries: list[dict | str]) -> list[dict | str]:
     excluded_slugs: set[str] = set()
     if _truthy(os.environ.get("INPUT_EXCLUDE_LEADERBOARD")):
         excluded_models = _leaderboard_models()
-        print(f"leaderboard exclusion: {len(excluded_models)} models",
-              file=sys.stderr)
+        print(f"leaderboard exclusion: {len(excluded_models)} models", file=sys.stderr)
     if _truthy(os.environ.get("INPUT_EXCLUDE_ACTIVE_WORKFLOWS")):
         excluded_slugs = _active_workflow_slugs()
-        print(f"active workflow exclusion: {len(excluded_slugs)} slugs",
-              file=sys.stderr)
+        print(f"active workflow exclusion: {len(excluded_slugs)} slugs", file=sys.stderr)
     if not excluded_models and not excluded_slugs:
         return entries
     out: list[dict | str] = []
@@ -420,8 +422,7 @@ def _apply_exclusions_to_entries(entries: list[dict | str]) -> list[dict | str]:
             skipped += 1
             continue
         out.append(entry)
-    print(f"exclusions skipped {skipped}; returning {len(out)} repos",
-          file=sys.stderr)
+    print(f"exclusions skipped {skipped}; returning {len(out)} repos", file=sys.stderr)
     return out
 
 
@@ -442,12 +443,18 @@ def _load_candidate_entries(cands_path: Path) -> list[dict]:
 
     BATCH_SIZE unset/0 returns all candidates. Slice order follows the JSON
     (HF download rank) for deterministic batch dispatch.
+
+    Args:
+        cands_path: Path to the candidates JSON file.
+
+    Returns:
+        The candidate dicts (each annotated with ``pool_id`` / ``pool_index``),
+        or ``[]`` when the file cannot be read.
     """
     try:
         data = json.loads(cands_path.read_text(encoding="utf-8"))
     except Exception as e:
-        print(f"failed to read candidates file {cands_path}: {e}",
-              file=sys.stderr)
+        print(f"failed to read candidates file {cands_path}: {e}", file=sys.stderr)
         return []
     cands = data.get("candidates") or []
     out: list[dict] = []
@@ -498,21 +505,30 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
 
 # UTC hours at which the schedule cron fires (keep in sync with the
 # ``schedule: cron`` expression at the top of optimize-submit.yml).
-_CRON_FIRE_HOURS_UTC = (4, 12, 20)
+# 2026-06-15: dropped to twice a day (UTC 04:00 / 16:00 = Beijing 12:00 / 00:00).
+_CRON_FIRE_HOURS_UTC = (4, 16)
 
 # Anchor fire: the first scheduled run at/after this instant maps to batch 0.
 # The rotation pool is ordered not-run-first, so batch 0 hits the not-yet-run
 # head. Merge the candidate-pool change before this fire so the very next cron
 # starts at batch 0; bump this if the merge slips to a later fire.
-_CRON_ANCHOR_UTC = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+# 2026-06-15: re-anchored to the next 16:00 UTC fire so the freshly front-loaded
+# 449 >12B multimodal NOT-run models are swept starting at batch 0.
+_CRON_ANCHOR_UTC = datetime(2026, 6, 15, 16, 0, tzinfo=timezone.utc)
 
 
 def _cron_fire_counter(now_utc: datetime) -> int:
     """Map a UTC instant to a strictly increasing scheduled-fire counter.
 
-    Each scheduled cron fire (UTC 4/12/20) advances the counter by exactly one,
+    Each scheduled cron fire (UTC 4/16) advances the counter by exactly one,
     so consecutive cron runs step through batch 0, 1, 2, ... in order (unlike a
-    half-day slot, which collapsed the 12:00 and 20:00 fires onto one index).
+    half-day slot, which would collapse multiple fires onto one index).
+
+    Args:
+        now_utc: The UTC instant to map.
+
+    Returns:
+        A strictly increasing per-fire counter for ``now_utc``.
     """
     idx = bisect.bisect_right(_CRON_FIRE_HOURS_UTC, now_utc.hour) - 1
     if idx < 0:
@@ -525,7 +541,7 @@ def _cron_fire_counter(now_utc: datetime) -> int:
 
 
 def _cron_batch_index(pool_size: int, batch_size: int) -> int:
-    """Sequential production-pool rotation for the thrice-daily cron.
+    """Sequential production-pool rotation for the twice-daily cron.
 
     Each scheduled fire advances the batch index by one (0, 1, 2, ... wrapping
     at the batch count), so the cron marches the whole pool in order and then
@@ -537,6 +553,13 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
     instead of wrapping to the pool tail: a negative ``steps % batches`` would
     otherwise land on the last batch, silently skipping the not-run backlog the
     anchor is meant to drain first.
+
+    Args:
+        pool_size: Total number of candidate entries.
+        batch_size: Entries per batch.
+
+    Returns:
+        The 0-based batch index for the current scheduled fire.
     """
     batches = max((pool_size + batch_size - 1) // batch_size, 1)
     now_raw = (os.environ.get("INPUT_CRON_NOW") or "").strip()
@@ -586,8 +609,7 @@ def _slice_entries(entries: list[dict | str]) -> list[dict | str]:
     except ValueError:
         batch_size = 0
     if batch_size <= 0:
-        print(f"candidates: returning all {all_count} repos "
-              f"(BATCH_SIZE unset)", file=sys.stderr)
+        print(f"candidates: returning all {all_count} repos (BATCH_SIZE unset)", file=sys.stderr)
         return entries
 
     batch_index = _resolve_batch_index(all_count, batch_size)
@@ -596,14 +618,15 @@ def _slice_entries(entries: list[dict | str]) -> list[dict | str]:
     sliced = entries[start:end]
     is_schedule = os.environ.get("GITHUB_EVENT_NAME") == "schedule"
     if len(sliced) < batch_size and start and entries and not is_schedule:
-        sliced = sliced + entries[:batch_size - len(sliced)]
+        sliced = sliced + entries[: batch_size - len(sliced)]
     for item in sliced:
         if isinstance(item, dict):
             item["_selected_batch_index"] = batch_index
             item["_selected_batch_size"] = batch_size
-    print(f"candidates: batch_index={batch_index} size={batch_size} "
-          f"→ {len(sliced)} of {all_count} ({start}:{end})",
-          file=sys.stderr)
+    print(
+        f"candidates: batch_index={batch_index} size={batch_size} → {len(sliced)} of {all_count} ({start}:{end})",
+        file=sys.stderr,
+    )
     return sliced
 
 
@@ -660,8 +683,7 @@ def _slice_entries_with_active_refill(
             item["_selected_batch_index"] = batch_index
             item["_selected_batch_size"] = batch_size
     print(
-        f"active-refill slice: index={batch_index} start={start} "
-        f"selected={len(selected)} skipped_active={skipped}",
+        f"active-refill slice: index={batch_index} start={start} selected={len(selected)} skipped_active={skipped}",
         file=sys.stderr,
     )
     return selected
@@ -689,8 +711,7 @@ def _all_from_candidates(cands_path: Path) -> list[str]:
         list[str]: Every candidate repo id, for exclusion-first selection.
     """
     all_repos = [_entry_repo(e) for e in _load_candidate_entries(cands_path)]
-    print(f"candidates: loaded all {len(all_repos)} repos for exclusion-first selection",
-          file=sys.stderr)
+    print(f"candidates: loaded all {len(all_repos)} repos for exclusion-first selection", file=sys.stderr)
     return all_repos
 
 
@@ -725,8 +746,7 @@ def collect_entries() -> list[dict | str]:
                     cands_path = p
                     break
         if not cands_path.exists():
-            print(f"ERROR: candidates file not found: {cands_file} "
-                  f"(tried as relative + absolute)", file=sys.stderr)
+            print(f"ERROR: candidates file not found: {cands_file} (tried as relative + absolute)", file=sys.stderr)
             return []
         entries = _load_candidate_entries(cands_path)
         if explicit_repos:
@@ -737,16 +757,11 @@ def collect_entries() -> list[dict | str]:
         if exclude_leaderboard:
             # Discovery mode only; production reruns set this false.
             excluded_models = _leaderboard_models()
-            print(f"leaderboard exclusion: {len(excluded_models)} models",
-                  file=sys.stderr)
-            entries = [
-                e for e in entries
-                if _entry_repo(e).lower() not in excluded_models
-            ]
+            print(f"leaderboard exclusion: {len(excluded_models)} models", file=sys.stderr)
+            entries = [e for e in entries if _entry_repo(e).lower() not in excluded_models]
         if exclude_active:
             excluded_slugs = _active_workflow_slugs()
-            print(f"active workflow exclusion: {len(excluded_slugs)} slugs",
-                  file=sys.stderr)
+            print(f"active workflow exclusion: {len(excluded_slugs)} slugs", file=sys.stderr)
             entries = _slice_entries_with_active_refill(entries, excluded_slugs)
             return entries
         else:
@@ -755,7 +770,11 @@ def collect_entries() -> list[dict | str]:
 
     hf_top = int(os.environ.get("INPUT_HF_TOP") or "5")
     min_params = float(os.environ.get("INPUT_MIN_PARAMS") or "7")
-    hf = HuggingFaceClient(os.environ.get("HF_TOKEN", ""))
+    hf = HuggingFaceClient(
+        os.environ.get("HF_TOKEN", ""),
+        tokens=[os.environ.get("HF_TOKEN_2", "")],
+        seed=os.environ.get("GITHUB_RUN_ID", ""),
+    )
     print(f"fetching HF top-{hf_top} (>={min_params}B)...", file=sys.stderr)
     return _apply_exclusions(hf.top_models(hf_top, min_params_b=min_params))
 
@@ -783,10 +802,21 @@ def _matrix_entry(entry: dict | str) -> dict:
     out = {"model": repo, "key": slugify(repo)}
     if isinstance(entry, dict):
         for key in (
-            "pool_id", "pool_index", "task_count", "positive_task_count",
-            "last_success_at", "framework", "precision", "gpu", "tp",
-            "conc", "gain", "task_id", "created_at",
-            "nodes", "rayjob_image",
+            "pool_id",
+            "pool_index",
+            "task_count",
+            "positive_task_count",
+            "last_success_at",
+            "framework",
+            "precision",
+            "gpu",
+            "tp",
+            "conc",
+            "gain",
+            "task_id",
+            "created_at",
+            "nodes",
+            "rayjob_image",
         ):
             if entry.get(key) is not None:
                 out[key] = entry[key]

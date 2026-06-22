@@ -331,15 +331,17 @@ class RocprofRooflineAnalyzer:
         for idx, (name, rates) in enumerate(blocks):
             ai_metrics = ai_list[idx] if idx < len(ai_list) else {}
             eff = self.compute_efficiency(rates, ai_metrics, real_hbm_peak)
-            rows.append({
-                "name": name,
-                "status": "matched",
-                "matched_kernel_name": name,
-                "bottleneck": eff["bound_type"],
-                "arithmetic_intensity": eff["ai_hbm"],
-                "recommended_actions": recommended_actions(eff["bound_type"]),
-                "rocprof_roofline": eff,
-            })
+            rows.append(
+                {
+                    "name": name,
+                    "status": "matched",
+                    "matched_kernel_name": name,
+                    "bottleneck": eff["bound_type"],
+                    "arithmetic_intensity": eff["ai_hbm"],
+                    "recommended_actions": recommended_actions(eff["bound_type"]),
+                    "rocprof_roofline": eff,
+                }
+            )
         return {
             "schema_version": 1,
             "source": "rocprof_roofline",
@@ -381,8 +383,7 @@ class RocprofRooflineAnalyzer:
         name = Path(workdir).name or "rocprof_roofline"
         kernel_filter = f" -k {shlex.quote(target_kernel)}" if target_kernel else ""
         profile_cmd = (
-            f"{shlex.quote(tool)} profile -n {name}{kernel_filter} "
-            f"--path {shlex.quote(str(self.output_path))} -- {cmd}"
+            f"{shlex.quote(tool)} profile -n {name}{kernel_filter} --path {shlex.quote(str(self.output_path))} -- {cmd}"
         )
         proc = subprocess.run(
             [profile_cmd],
@@ -424,11 +425,19 @@ def recommended_actions(bound_type: str) -> list[str]:
         types).
     """
     if bound_type == "memory":
-        return ["Improve memory coalescing/locality", "Increase arithmetic intensity", "Use LDS/cache tiling when applicable"]
+        return [
+            "Improve memory coalescing/locality",
+            "Increase arithmetic intensity",
+            "Use LDS/cache tiling when applicable",
+        ]
     if bound_type == "compute":
         return ["Tune MFMA/tile shape", "Reduce instruction overhead", "Improve occupancy if resources allow"]
     if bound_type == "latency":
-        return ["Increase parallelism/occupancy", "Reduce dependency and launch overhead", "Batch small work when possible"]
+        return [
+            "Increase parallelism/occupancy",
+            "Reduce dependency and launch overhead",
+            "Batch small work when possible",
+        ]
     return []
 
 
@@ -499,7 +508,15 @@ def _kernel_name_matches(row: dict[str, Any], target_kernel: str) -> bool:
 
 
 def _project_payload_to_row(payload: dict[str, Any], target_kernel: str = "") -> dict[str, Any]:
-    """Project the row that matches ``target_kernel`` into ``kernel_roofline.json``."""
+    """Project the matching result row into a ``kernel_roofline.json`` row.
+
+    Args:
+        payload: The rocprof roofline payload with a ``results`` list.
+        target_kernel: Kernel name to match; empty selects the first row.
+
+    Returns:
+        The projected roofline row, or a status dict when no row matches.
+    """
     rows = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(rows, list) or not rows:
         return {"status": payload.get("status", "failed") if isinstance(payload, dict) else "failed"}
@@ -523,11 +540,13 @@ def _project_payload_to_row(payload: dict[str, Any], target_kernel: str = "") ->
     else:
         first = rows[0] if isinstance(rows[0], dict) else {}
     roof = dict(first.get("rocprof_roofline") or {})
-    roof.update({
-        "status": first.get("status") or payload.get("status") or "matched",
-        "matched_kernel_name": first.get("matched_kernel_name") or first.get("name"),
-        "target_kernel": target_kernel,
-    })
+    roof.update(
+        {
+            "status": first.get("status") or payload.get("status") or "matched",
+            "matched_kernel_name": first.get("matched_kernel_name") or first.get("name"),
+            "target_kernel": target_kernel,
+        }
+    )
     return roof
 
 
@@ -537,10 +556,19 @@ def _generate_harness_for_candidate(
     out_dir: Path,
     log_fn: Any,
 ) -> tuple[str, str | None]:
-    """Best-effort harness generation for a TraceLens hot-kernel candidate.
+    """Generate a benchmark harness for a TraceLens hot-kernel candidate.
 
-    Returns ``(test_command, error)``. ``test_command`` is empty when no
-    benchmark file resolves; the caller should mark the row as skipped.
+    Best-effort: returns an empty command rather than raising when no
+    benchmark file resolves.
+
+    Args:
+        candidate: The hot-kernel candidate metadata.
+        out_dir: Directory to write the generated harness into.
+        log_fn: Logging callable for progress/diagnostics.
+
+    Returns:
+        A ``(test_command, error)`` tuple. ``test_command`` is empty when no
+        benchmark file resolves and ``error`` names the reason.
     """
     bench_files = candidate.get("benchmark_files") or []
     if not isinstance(bench_files, list) or not bench_files:
@@ -556,6 +584,7 @@ def _generate_harness_for_candidate(
     try:
         tools_dir = str(Path(__file__).resolve().parent)
         import sys
+
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
         from harness_generator import maybe_generate_harness  # noqa: WPS433
@@ -626,7 +655,17 @@ def enrich_kernel_roofline_sidecar(
       this row was considered (vs. silently ``null``).
     * Per-kernel rocprof timeout / failure marks the row ``status='failed'``
       but never aborts enrichment of remaining rows.
-    * Returns a small summary suitable for caller logging.
+
+    Args:
+        sidecar_path: Path to the ``kernel_roofline.json`` sidecar to update.
+        candidates_path: Path to the candidates JSON to read kernels from.
+        workdir: Optional working directory for profiling.
+        timeout_sec_per_kernel: Per-kernel rocprof timeout in seconds.
+        log_fn: Optional logging callable.
+
+    Returns:
+        A summary dict with ``matched``, ``skipped``, ``failed``, and ``rows``
+        counts suitable for caller logging.
     """
     sidecar_p = Path(sidecar_path).expanduser()
     cand_p = Path(candidates_path).expanduser()
@@ -698,10 +737,12 @@ def enrich_kernel_roofline_sidecar(
             }
             summary["skipped"] += 1
             continue
-        out_dir = (sidecar_p.parent.parent / "kernel-agent" / "rocprof_roofline" / kid)
+        out_dir = sidecar_p.parent.parent / "kernel-agent" / "rocprof_roofline" / kid
         out_dir.mkdir(parents=True, exist_ok=True)
         test_command, harness_err = _generate_harness_for_candidate(
-            cand, out_dir=out_dir, log_fn=lambda m: _log(f"[rocprof_enrich:{kid}] {m}"),
+            cand,
+            out_dir=out_dir,
+            log_fn=lambda m: _log(f"[rocprof_enrich:{kid}] {m}"),
         )
         if not test_command:
             row["rocprof_roofline"] = {
@@ -751,12 +792,14 @@ def enrich_kernel_roofline_sidecar(
             continue
 
         payload = analyzer.analyze_structured()
-        payload.update({
-            "status": "ok",
-            "profiling_cmd": test_command,
-            "target_kernel": target_kernel,
-            "rocprof_output_path": str(analyzer.output_path),
-        })
+        payload.update(
+            {
+                "status": "ok",
+                "profiling_cmd": test_command,
+                "target_kernel": target_kernel,
+                "rocprof_output_path": str(analyzer.output_path),
+            }
+        )
         _atomic_write_json(out_json, payload)
         out_txt.write_text(analyzer.content + "\n" + build_text_report(payload), encoding="utf-8")
 
@@ -832,12 +875,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     payload = analyzer.analyze_structured()
-    payload.update({
-        "status": "ok",
-        "profiling_cmd": args.cmd,
-        "target_kernel": args.target_kernel,
-        "rocprof_output_path": str(analyzer.output_path),
-    })
+    payload.update(
+        {
+            "status": "ok",
+            "profiling_cmd": args.cmd,
+            "target_kernel": args.target_kernel,
+            "rocprof_output_path": str(analyzer.output_path),
+        }
+    )
     out_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     out_txt.write_text(analyzer.content + "\n" + build_text_report(payload), encoding="utf-8")
     if args.raw_txt:

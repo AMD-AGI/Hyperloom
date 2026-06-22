@@ -24,13 +24,13 @@ def session_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _seed_conductor_db(
+def _seed_coordinator_db(
     session_dir: Path,
     rows: list[dict],
     *,
     schema: str = "v6",
 ) -> Path:
-    db = session_dir / "storage" / "conductor.db"
+    db = session_dir / "storage" / "coordinator.db"
     conn = sqlite3.connect(db)
     if schema == "v6":
         conn.execute(
@@ -46,8 +46,7 @@ def _seed_conductor_db(
         )
         for row in rows:
             conn.execute(
-                "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     row.get("msg_id", ""),
                     row.get("agent", ""),
@@ -64,8 +63,7 @@ def _seed_conductor_db(
         )
         for row in rows:
             conn.execute(
-                "INSERT INTO events (agent, intent_type, payload, timestamp, topic) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO events (agent, intent_type, payload, timestamp, topic) VALUES (?, ?, ?, ?, ?)",
                 (
                     row.get("agent", ""),
                     row.get("intent_type", ""),
@@ -83,9 +81,10 @@ def _seed_conductor_db(
 # Coordinator events
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_local_probe_reads_v6_events_schema(session_dir: Path):
-    _seed_conductor_db(
+    _seed_coordinator_db(
         session_dir,
         [
             {"agent": "orchestration", "topic": "heartbeat", "payload": {"x": 1}},
@@ -104,7 +103,7 @@ async def test_local_probe_reads_v6_events_schema(session_dir: Path):
 
 @pytest.mark.asyncio
 async def test_local_probe_reads_legacy_events_schema(session_dir: Path):
-    _seed_conductor_db(
+    _seed_coordinator_db(
         session_dir,
         [{"agent": "kernel", "intent_type": "alert", "topic": "alert", "timestamp": 1.0}],
         schema="legacy",
@@ -146,9 +145,7 @@ async def test_local_probe_unavailable_when_no_data(monkeypatch, tmp_path: Path)
         external_deps_enabled=False,
     )
 
-    monkeypatch.setattr(
-        "robustness_agent.sources.local_probe._sample_gpu", lambda: {}
-    )
+    monkeypatch.setattr("robustness_agent.sources.local_probe._sample_gpu", lambda: {})
     monkeypatch.setattr(
         "robustness_agent.sources.local_probe._sample_aiter_jit",
         lambda _jit_dir: {},
@@ -160,7 +157,7 @@ async def test_local_probe_unavailable_when_no_data(monkeypatch, tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_local_probe_handles_missing_conductor_db(tmp_path: Path):
+async def test_local_probe_handles_missing_coordinator_db(tmp_path: Path):
     cfg = LocalProbeConfig(
         session_dir=tmp_path,
         disk_mountpoints=(str(tmp_path),),
@@ -173,6 +170,7 @@ async def test_local_probe_handles_missing_conductor_db(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # Log tail
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_local_probe_tails_log_file(tmp_path: Path):
@@ -222,13 +220,7 @@ def test_parse_rocm_smi_csv_multi_block():
 def test_parse_rocm_smi_csv_skips_unknown_columns_and_garbage():
     from robustness_agent.sources.local_probe import _parse_rocm_smi_csv
 
-    text = (
-        "device,GPU use (%),Unknown column\n"
-        "card0,5,N/A\n"
-        "card2,??,whatever\n"
-        "\n"
-        "noheader,row\n"
-    )
+    text = "device,GPU use (%),Unknown column\ncard0,5,N/A\ncard2,??,whatever\n\nnoheader,row\n"
     gpus = _parse_rocm_smi_csv(text)
     assert [g["gpu_id"] for g in gpus] == [0]
     assert gpus[0]["util_gpu_pct"] == 5.0
@@ -246,13 +238,7 @@ async def test_local_probe_uses_rocm_smi_when_available(monkeypatch, tmp_path: P
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
-        sample = (
-            "device,GPU use (%)\n"
-            "card0,55\n"
-            "\n"
-            "device,Temperature (Sensor edge) (C)\n"
-            "card0,80.0\n"
-        )
+        sample = "device,GPU use (%)\ncard0,55\n\ndevice,Temperature (Sensor edge) (C)\ncard0,80.0\n"
 
         class _Result:
             returncode = 0
@@ -453,10 +439,8 @@ def test_tail_logs_returns_primary_when_no_extras(tmp_path):
 def test_tail_logs_picks_up_runs_glob(tmp_path):
     primary = tmp_path / "primary.log"
     _write(primary, "PRIMARY-A\n")
-    _write(tmp_path / "runs" / "backends" / "t1" / "server.log",
-           "VARIANT-1A\nVARIANT-1B\n")
-    _write(tmp_path / "runs" / "params" / "t2" / "server.log",
-           "VARIANT-2A\n")
+    _write(tmp_path / "runs" / "backends" / "t1" / "server.log", "VARIANT-1A\nVARIANT-1B\n")
+    _write(tmp_path / "runs" / "params" / "t2" / "server.log", "VARIANT-2A\n")
     out = _tail_logs(
         primary,
         tmp_path,
@@ -473,7 +457,11 @@ def test_tail_logs_dedup_when_primary_matches_glob(tmp_path):
     primary = tmp_path / "runs" / "backends" / "t1" / "server.log"
     _write(primary, "ONLY-LINE\n")
     out = _tail_logs(
-        primary, tmp_path, ("runs/*/*/server.log",), 5, max_lines=10,
+        primary,
+        tmp_path,
+        ("runs/*/*/server.log",),
+        5,
+        max_lines=10,
     )
     matches = [line for line in out if "ONLY-LINE" in line]
     assert len(matches) == 1
@@ -486,7 +474,11 @@ def test_tail_logs_cap_extras_by_mtime(tmp_path):
         _write(path, f"variant-{i}\n")
         os.utime(path, (1000.0 + i, 1000.0 + i))
     out = _tail_logs(
-        primary, tmp_path, ("runs/*/*/server.log",), 3, max_lines=10,
+        primary,
+        tmp_path,
+        ("runs/*/*/server.log",),
+        3,
+        max_lines=10,
     )
     body = "\n".join(out)
     assert "variant-4" in body
@@ -504,25 +496,25 @@ def test_tail_logs_empty_when_no_max_lines(tmp_path):
 @pytest.mark.asyncio
 async def test_local_probe_picks_up_grid_variant_logs(tmp_path):
     """End-to-end: LocalProbe sees a grid variant log under runs/."""
-    _write(tmp_path / "runs" / "backends" / "t1" / "server.log",
-           "CUDA out of memory at allocator.cc:42\n")
+    _write(tmp_path / "runs" / "backends" / "t1" / "server.log", "CUDA out of memory at allocator.cc:42\n")
     cfg = LocalProbeConfig(
         session_dir=tmp_path,
         disk_mountpoints=(),
         process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
-        decision_audit_enabled=False, preflight_enabled=False,
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
+        decision_audit_enabled=False,
+        preflight_enabled=False,
         critic_health_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
-    assert any(
-        h.get("pattern") == r"CUDA out of memory" for h in data.local_log_errors
-    )
+    assert any(h.get("pattern") == r"CUDA out of memory" for h in data.local_log_errors)
 
 
 # ===========================================================================
 # Preflight probes (manifest + kernel breakdown)
 # ===========================================================================
+
 
 @pytest.mark.asyncio
 async def test_manifest_loads_when_present(tmp_path):
@@ -536,8 +528,11 @@ async def test_manifest_loads_when_present(tmp_path):
     }
     _write_json(sd / "manifest.json", manifest)
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
         decision_audit_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
@@ -549,8 +544,11 @@ async def test_manifest_empty_when_missing(tmp_path):
     sd = tmp_path
     _write_json(sd / "results" / "ci_metrics.json", {"model": "X"})
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     assert data.local_manifest == {}
@@ -562,13 +560,14 @@ async def test_manifest_empty_on_malformed_json(tmp_path, monkeypatch):
     (sd / "manifest.json").write_text("not json at all", encoding="utf-8")
     _write_json(sd / "profiles" / "kernel_breakdown.json", [])
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
         decision_audit_enabled=False,
     )
-    monkeypatch.setattr(
-        "robustness_agent.sources.local_probe._sample_gpu", lambda: {}
-    )
+    monkeypatch.setattr("robustness_agent.sources.local_probe._sample_gpu", lambda: {})
     monkeypatch.setattr(
         "robustness_agent.sources.local_probe._sample_aiter_jit",
         lambda _d: {},
@@ -581,21 +580,19 @@ async def test_manifest_empty_on_malformed_json(tmp_path, monkeypatch):
 async def test_kernel_breakdown_aggregates_by_tier(tmp_path):
     sd = tmp_path
     rows = [
-        {"name": "triton_red_x", "gpu_pct": 12.0, "tier": "T1_TRITON",
-         "count": 100, "duration_us": 1000},
-        {"name": "triton_poi_y", "gpu_pct": 8.5, "tier": "T1_TRITON",
-         "count": 80, "duration_us": 800},
-        {"name": "mha_fwd_kernel", "gpu_pct": 30.0, "tier": "T2_AITER_CK",
-         "count": 50, "duration_us": 2000},
-        {"name": "rccl_allreduce", "gpu_pct": 20.0, "tier": "T4_COMM",
-         "count": 200, "duration_us": 500},
-        {"name": "hipblaslt_gemm", "gpu_pct": 25.0, "tier": "T5_COMPILED",
-         "count": 30, "duration_us": 1500},
+        {"name": "triton_red_x", "gpu_pct": 12.0, "tier": "T1_TRITON", "count": 100, "duration_us": 1000},
+        {"name": "triton_poi_y", "gpu_pct": 8.5, "tier": "T1_TRITON", "count": 80, "duration_us": 800},
+        {"name": "mha_fwd_kernel", "gpu_pct": 30.0, "tier": "T2_AITER_CK", "count": 50, "duration_us": 2000},
+        {"name": "rccl_allreduce", "gpu_pct": 20.0, "tier": "T4_COMM", "count": 200, "duration_us": 500},
+        {"name": "hipblaslt_gemm", "gpu_pct": 25.0, "tier": "T5_COMPILED", "count": 30, "duration_us": 1500},
     ]
     _write_json(sd / "profiles" / "kernel_breakdown.json", rows)
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
         decision_audit_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
@@ -615,8 +612,11 @@ async def test_kernel_breakdown_empty_when_missing(tmp_path):
     sd = tmp_path
     _write_json(sd / "manifest.json", {"model_name": "X"})
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
         decision_audit_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
@@ -625,19 +625,20 @@ async def test_kernel_breakdown_empty_when_missing(tmp_path):
 
 @pytest.mark.asyncio
 async def test_preflight_disabled_skips_manifest_and_breakdown(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """When ``preflight_enabled=False`` both new slots stay empty even
     when the files exist on disk."""
     sd = tmp_path
     _write_json(sd / "manifest.json", {"model_name": "X"})
-    _write_json(sd / "profiles" / "kernel_breakdown.json", [
-        {"name": "k", "gpu_pct": 50.0, "tier": "T1_TRITON",
-         "count": 1, "duration_us": 100},
-    ])
-    monkeypatch.setattr(
-        "robustness_agent.sources.local_probe._sample_gpu", lambda: {}
+    _write_json(
+        sd / "profiles" / "kernel_breakdown.json",
+        [
+            {"name": "k", "gpu_pct": 50.0, "tier": "T1_TRITON", "count": 1, "duration_us": 100},
+        ],
     )
+    monkeypatch.setattr("robustness_agent.sources.local_probe._sample_gpu", lambda: {})
     monkeypatch.setattr(
         "robustness_agent.sources.local_probe._sample_aiter_jit",
         lambda _d: {},
@@ -646,7 +647,8 @@ async def test_preflight_disabled_skips_manifest_and_breakdown(
         session_dir=sd,
         disk_mountpoints=(str(sd),),
         process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
         decision_audit_enabled=False,
         preflight_enabled=False,
     )
@@ -659,15 +661,16 @@ async def test_preflight_disabled_skips_manifest_and_breakdown(
 async def test_kernel_breakdown_unknown_tier_falls_back_to_lowered_name(tmp_path):
     sd = tmp_path
     rows = [
-        {"name": "k1", "gpu_pct": 50.0, "tier": "T6_NEW_TIER",
-         "count": 1, "duration_us": 100},
-        {"name": "k2", "gpu_pct": 50.0, "tier": "",
-         "count": 1, "duration_us": 100},
+        {"name": "k1", "gpu_pct": 50.0, "tier": "T6_NEW_TIER", "count": 1, "duration_us": 100},
+        {"name": "k2", "gpu_pct": 50.0, "tier": "", "count": 1, "duration_us": 100},
     ]
     _write_json(sd / "profiles" / "kernel_breakdown.json", rows)
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
         decision_audit_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
@@ -780,7 +783,10 @@ def test_parse_actor_suffix():
 
 def _completed(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(
-        args=["ray", "status"], returncode=returncode, stdout=stdout, stderr="",
+        args=["ray", "status"],
+        returncode=returncode,
+        stdout=stdout,
+        stderr="",
     )
 
 
@@ -790,9 +796,10 @@ def test_probe_returns_empty_when_ray_not_on_path():
 
 
 def test_probe_idle_returns_zero_pending():
-    with patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"), \
-         patch.object(local_probe.subprocess, "run",
-                      return_value=_completed(RAY_STATUS_IDLE)):
+    with (
+        patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"),
+        patch.object(local_probe.subprocess, "run", return_value=_completed(RAY_STATUS_IDLE)),
+    ):
         out = local_probe._probe_ray_head(1.0)
     assert out["healthy"] is True
     assert out["pending_tasks"] == 0
@@ -801,17 +808,19 @@ def test_probe_idle_returns_zero_pending():
 
 
 def test_probe_demand_block_counted():
-    with patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"), \
-         patch.object(local_probe.subprocess, "run",
-                      return_value=_completed(RAY_STATUS_MULTI_DEMAND)):
+    with (
+        patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"),
+        patch.object(local_probe.subprocess, "run", return_value=_completed(RAY_STATUS_MULTI_DEMAND)),
+    ):
         out = local_probe._probe_ray_head(1.0)
     assert out["pending_tasks"] == 18
 
 
 def test_probe_unhealthy_on_nonzero_exit():
-    with patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"), \
-         patch.object(local_probe.subprocess, "run",
-                      return_value=_completed("ConnectionError: ...", returncode=1)):
+    with (
+        patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"),
+        patch.object(local_probe.subprocess, "run", return_value=_completed("ConnectionError: ...", returncode=1)),
+    ):
         out = local_probe._probe_ray_head(1.0)
     assert out["healthy"] is False
     assert "exit=1" in out["reason"]
@@ -822,8 +831,10 @@ def test_probe_unhealthy_on_timeout():
     def _raise(*_a: Any, **_kw: Any) -> Any:
         raise subprocess.TimeoutExpired(cmd="ray status", timeout=1.0)
 
-    with patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"), \
-         patch.object(local_probe.subprocess, "run", side_effect=_raise):
+    with (
+        patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"),
+        patch.object(local_probe.subprocess, "run", side_effect=_raise),
+    ):
         out = local_probe._probe_ray_head(1.0)
     assert out["healthy"] is False
     assert "timed out" in out["reason"]
@@ -834,8 +845,10 @@ def test_probe_unhealthy_on_oserror():
     def _raise(*_a: Any, **_kw: Any) -> Any:
         raise FileNotFoundError("ray binary missing mid-call")
 
-    with patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"), \
-         patch.object(local_probe.subprocess, "run", side_effect=_raise):
+    with (
+        patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"),
+        patch.object(local_probe.subprocess, "run", side_effect=_raise),
+    ):
         out = local_probe._probe_ray_head(1.0)
     assert out["healthy"] is False
     assert "FileNotFoundError" in out["reason"]
@@ -848,8 +861,10 @@ def test_probe_clamps_negative_timeout():
         captured.update(kwargs)
         return _completed(RAY_STATUS_IDLE)
 
-    with patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"), \
-         patch.object(local_probe.subprocess, "run", side_effect=_capture):
+    with (
+        patch.object(local_probe.shutil, "which", return_value="/usr/bin/ray"),
+        patch.object(local_probe.subprocess, "run", side_effect=_capture),
+    ):
         local_probe._probe_ray_head(0.0)
     assert captured["timeout"] >= 0.5
 
@@ -863,6 +878,7 @@ def test_regex_never_matches_node_hash_followed_by_pending_header(suffix: str):
 # ===========================================================================
 # Decision audit (``_sample_decision_audit``)
 # ===========================================================================
+
 
 @pytest.mark.asyncio
 async def test_decision_audit_empty_when_no_session_dir():
@@ -881,14 +897,17 @@ async def test_decision_audit_scans_integrate_result_files(tmp_path):
     patch_path.write_bytes(b"diff --git a/x b/x\n")
     for i, decision in enumerate(["REVERT", "KEEP", "NEEDS_REVIEW"]):
         out = integrate_root / f"task-{i}" / "result.json"
-        _write_json(out, {
-            "kernel_id": f"k{i}",
-            "decision": decision,
-            "gain_pct": float(i),
-            "base_tput": 100.0,
-            "new_tput": 100.0 + i,
-            "patch_path": str(patch_path),
-        })
+        _write_json(
+            out,
+            {
+                "kernel_id": f"k{i}",
+                "decision": decision,
+                "gain_pct": float(i),
+                "base_tput": 100.0,
+                "new_tput": 100.0 + i,
+                "patch_path": str(patch_path),
+            },
+        )
 
     cfg = LocalProbeConfig(
         session_dir=sd,
@@ -911,15 +930,21 @@ async def test_decision_audit_scans_integrate_result_files(tmp_path):
 async def test_decision_audit_patch_size_none_when_patch_missing(tmp_path):
     sd = tmp_path
     integrate_root = sd / "runs" / "integrate" / "t1"
-    _write_json(integrate_root / "result.json", {
-        "kernel_id": "k1",
-        "decision": "KEEP",
-        "gain_pct": 5.0,
-        "patch_path": "/nonexistent/patch.diff",
-    })
+    _write_json(
+        integrate_root / "result.json",
+        {
+            "kernel_id": "k1",
+            "decision": "KEEP",
+            "gain_pct": 5.0,
+            "patch_path": "/nonexistent/patch.diff",
+        },
+    )
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     entry = data.local_decision_audit["recent_integrate"][0]
@@ -930,15 +955,24 @@ async def test_decision_audit_patch_size_none_when_patch_missing(tmp_path):
 async def test_decision_audit_loads_ci_metrics_from_results_dir(tmp_path):
     sd = tmp_path
     ci_path = sd / "results" / "ci_metrics.json"
-    _write_json(ci_path, {
-        "model": "X", "framework": "sglang", "gpu": "MI300X", "tp": 8,
-        "baseline_tok_per_gpu": 1500.0,
-        "optimized_tok_per_gpu": 1800.0,
-        "gain_pct": 20.0,
-    })
+    _write_json(
+        ci_path,
+        {
+            "model": "X",
+            "framework": "sglang",
+            "gpu": "MI300X",
+            "tp": 8,
+            "baseline_tok_per_gpu": 1500.0,
+            "optimized_tok_per_gpu": 1800.0,
+            "gain_pct": 20.0,
+        },
+    )
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     audit = data.local_decision_audit
@@ -954,8 +988,11 @@ async def test_decision_audit_prefers_final_over_inflight(tmp_path):
     _write_json(inflight, {"baseline_tput": 0.0})
     _write_json(final, {"baseline_tput": 1500.0, "model": "X"})
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     audit = data.local_decision_audit
@@ -967,8 +1004,11 @@ async def test_decision_audit_prefers_final_over_inflight(tmp_path):
 async def test_decision_audit_ci_metrics_empty_when_missing(tmp_path):
     sd = tmp_path
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
     )
     integrate_root = sd / "runs" / "integrate" / "t1"
     _write_json(integrate_root / "result.json", {"decision": "KEEP"})
@@ -981,10 +1021,7 @@ async def test_decision_audit_ci_metrics_empty_when_missing(tmp_path):
 @pytest.mark.asyncio
 async def test_decision_audit_tails_oob_attempts(tmp_path):
     sd = tmp_path
-    oob_path = (
-        sd / "kernel-agent" / "runs" / "sess-1"
-        / "optimization_attempts.jsonl"
-    )
+    oob_path = sd / "kernel-agent" / "runs" / "sess-1" / "optimization_attempts.jsonl"
     rows = [
         {
             "kernel_id": "gemm_a8w8",
@@ -1003,8 +1040,11 @@ async def test_decision_audit_tails_oob_attempts(tmp_path):
     ]
     _write_jsonl(oob_path, rows)
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     audit = data.local_decision_audit
@@ -1025,7 +1065,8 @@ async def test_decision_audit_max_integrate_caps_count(tmp_path):
         disk_mountpoints=(),
         process_patterns=(),
         decision_audit_max_integrate=5,
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     assert len(data.local_decision_audit["recent_integrate"]) == 5
@@ -1041,7 +1082,8 @@ async def test_decision_audit_disable_returns_empty(tmp_path):
         disk_mountpoints=(),
         process_patterns=(),
         decision_audit_enabled=False,
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     assert data.local_decision_audit == {}
@@ -1056,8 +1098,11 @@ async def test_decision_audit_handles_malformed_json_gracefully(tmp_path):
     good = sd / "runs" / "integrate" / "t2" / "result.json"
     _write_json(good, {"decision": "KEEP", "kernel_id": "k2"})
     cfg = LocalProbeConfig(
-        session_dir=sd, disk_mountpoints=(), process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
+        session_dir=sd,
+        disk_mountpoints=(),
+        process_patterns=(),
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     entries = data.local_decision_audit["recent_integrate"]
@@ -1068,6 +1113,7 @@ async def test_decision_audit_handles_malformed_json_gracefully(tmp_path):
 # ===========================================================================
 # State integrity + external-deps sub-probes (I + J)
 # ===========================================================================
+
 
 def test_probe_state_json_valid(tmp_path):
     state = {"baseline_tput": 100.0, "stop_reason": ""}
@@ -1265,9 +1311,7 @@ def test_probe_tracelens_cli_reports_absent(monkeypatch):
 def test_probe_tracelens_cli_reports_present(monkeypatch):
     monkeypatch.setattr(
         "robustness_agent.sources.local_probe.shutil.which",
-        lambda name: "/usr/local/bin/" + name
-        if name == "TraceLens_generate_perf_report_pytorch_inference"
-        else None,
+        lambda name: "/usr/local/bin/" + name if name == "TraceLens_generate_perf_report_pytorch_inference" else None,
     )
     out = _probe_tracelens_cli()
     assert out["any_present"] is True
@@ -1286,8 +1330,10 @@ async def test_fetch_populates_state_and_deps(tmp_path, monkeypatch):
         session_dir=tmp_path,
         disk_mountpoints=(),
         process_patterns=(),
-        ray_probe_enabled=False, fd_probe_enabled=False,
-        decision_audit_enabled=False, preflight_enabled=False,
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
+        decision_audit_enabled=False,
+        preflight_enabled=False,
         critic_health_enabled=False,
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)

@@ -66,37 +66,44 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
     # specialist exit envelope; payload validated by
     # PolicyGate R3 (``policy._validate_specialist_done``).
     IntentType.SPECIALIST_DONE: (
-        "gap_canonical_id", "domain",
-        "proposal_set", "empty", "summary",
+        "gap_canonical_id",
+        "domain",
+        "proposal_set",
+        "empty",
+        "summary",
     ),
 }
 
 
 # Intents PolicyGate restricts to ``source == "robustness"``; guarded locally
 # to fail fast, still enforced server-side by the gate.
-ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset({
-    IntentType.KILL_TASK,
-    IntentType.FORCE_DISPATCH,
-    IntentType.PRUNE_BRANCH,
-    IntentType.ESCALATE_STRATEGY_CHANGE,
-})
+ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
+    {
+        IntentType.KILL_TASK,
+        IntentType.FORCE_DISPATCH,
+        IntentType.PRUNE_BRANCH,
+        IntentType.ESCALATE_STRATEGY_CHANGE,
+    }
+)
 
 
 # Intents the robustness role may emit. Mirrors ``_ROBUSTNESS_INTENTS`` in
 # upstream agent_role.py; other roles' intents are excluded to fail fast.
-ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset({
-    IntentType.SEND_MESSAGE,
-    IntentType.ASK_QUESTION,
-    IntentType.ANSWER,
-    IntentType.ALERT,
-    IntentType.UPDATE_PERSONA,
-    IntentType.UPDATE_STATE,
-    IntentType.DELEGATE,
-    IntentType.KILL_TASK,
-    IntentType.FORCE_DISPATCH,
-    IntentType.PRUNE_BRANCH,
-    IntentType.ESCALATE_STRATEGY_CHANGE,
-})
+ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset(
+    {
+        IntentType.SEND_MESSAGE,
+        IntentType.ASK_QUESTION,
+        IntentType.ANSWER,
+        IntentType.ALERT,
+        IntentType.UPDATE_PERSONA,
+        IntentType.UPDATE_STATE,
+        IntentType.DELEGATE,
+        IntentType.KILL_TASK,
+        IntentType.FORCE_DISPATCH,
+        IntentType.PRUNE_BRANCH,
+        IntentType.ESCALATE_STRATEGY_CHANGE,
+    }
+)
 
 
 # Severities accepted by ``alert`` and ``escalate_strategy_change``.
@@ -111,100 +118,126 @@ KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 # Handle actions robustness may delegate; ``report`` is the Orchestration-owned
 # session-finalize action, allowed only as a last-resort wind-down lever (guard
 # conditions live in action-ladder ``_recommend``; here we only enforce the allowlist).
-ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset({
-    "accuracy_gate",
-    "recover",
-    "report",
-    "server_lifecycle",
-})
+ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset(
+    {
+        "accuracy_gate",
+        "recover",
+        "report",
+        "server_lifecycle",
+    }
+)
 
 
 # Core SharedState fields the robustness role must not write via
 # ``update_state``. Mirrors upstream ``policy.CORE_STATE_FIELDS``;
 # kept in lock-step by ``tests/test_role_contract.py``.
-CORE_STATE_FIELDS: frozenset[str] = frozenset({
-    "current_best",
-    "stop_reason",
-    "last_tick_exception",
-    "cumulative_gain",
-    # Coordinator-owned validated cumulative gain trio.
-    "cumulative_gain_validated",
-    "cumulative_gain_validated_ts",
-    "cumulative_gain_validated_stack_len",
-    "baseline_tput",
-    "baseline_accuracy",
-    "session_id",
-    "model_path",
-    "model_name",
-    "model_class",
-    "start_ts",
-    "max_minutes",
-    # fact-layer KEEP ledger (Coordinator-only writer).
-    "optimization_stack",
-    "gain_per_stack_entry",
-    # schema migration breadcrumb.
-    "schema_version",
-    # Cortex KB integration.
-    "cortex_session_id",
-    "cortex_session_summary",
-    "warm_start_recipe",
-    "warm_start_pitfalls",
-    "warm_start_lessons",
-    "warm_start_ts",
-    "warm_start_context",
-    # KB tag completeness.
-    "stack_fingerprint_meta",
-    "baseline_workload_extra",
-    # warm-recipe replay.
-    "warm_replay_attempted",
-    "warm_replay_outcome",
-    "warm_history_injected",
-    # phase state machine (Coordinator-only writer).
-    "phase",
-    "phase_started_ts",
-    "phase_started_unix",
-    "phase_history",
-    "phase_budget_pct",
-    # operator-facing lifecycle event log (#266); Coordinator-only writer.
-    "lifecycle",
-    # specialist sub-agent ledger.
-    "specialist_rounds",
-    "specialist_domain_empty_streak",
-    "last_specialist",
-    "research_lane_capacity",
-    "gpu_specialist_capacity",
-    # phase-machine escalation plumbing.
-    "pending_escalate_hint",
-    "last_consumed_escalate_hint",
-    "last_consumed_escalate_hint_ts",
-    "plateau_overrides",
-    # CLOSE phase sequencer flag.
-    "close_sequence_done",
-    # unified explore search ledger.
-    "explore_search",
-    # structured gaps ledger.
-    "gaps",
-    # Orchestration working-memory checkpoint (Coordinator-authored).
-    "orchestration_memory",
-    # FRAMEWORK_PR per-repo discovery budget (Coordinator-controlled).
-    "framework_pr_max_candidates",
-    # Advisory model-architecture profile (launcher / state.json owned).
-    "model_arch",
-    # Architecture-identity tags from config.json; mirrors upstream.
-    "model_architectures",
-    "model_type",
-    # Multimodal text-fallback degraded-run markers (preflight-authored);
-    # locked so an LLM update_state can't forge/clear the degraded verdict.
-    "degraded_mode",
-    "model_warnings",
-})
+CORE_STATE_FIELDS: frozenset[str] = frozenset(
+    {
+        "current_best",
+        "stop_reason",
+        "last_tick_exception",
+        "cumulative_gain",
+        # Coordinator-owned validated cumulative gain trio.
+        "cumulative_gain_validated",
+        "cumulative_gain_validated_ts",
+        "cumulative_gain_validated_stack_len",
+        "pending_integrate",
+        "resume_pending_revalidation",
+        "baseline_tput",
+        "baseline_accuracy",
+        "session_id",
+        "model_path",
+        "model_name",
+        "model_class",
+        "start_ts",
+        "max_minutes",
+        # fact-layer KEEP ledger (Coordinator-only writer).
+        "optimization_stack",
+        "gain_per_stack_entry",
+        # schema migration breadcrumb.
+        "schema_version",
+        # Cortex KB integration.
+        "cortex_session_id",
+        "cortex_session_summary",
+        "warm_start_recipe",
+        "warm_start_pitfalls",
+        "warm_start_lessons",
+        "warm_start_ts",
+        "warm_start_context",
+        # KB tag completeness.
+        "stack_fingerprint_meta",
+        "baseline_workload_extra",
+        # warm-recipe replay.
+        "warm_replay_attempted",
+        "warm_replay_outcome",
+        "warm_history_injected",
+        # phase state machine (Coordinator-only writer).
+        "phase",
+        "phase_started_ts",
+        "phase_started_unix",
+        "phase_history",
+        "phase_budget_pct",
+        # R1/R2/R7 cyclic phase-machine state (Coordinator-only writers); mirrors
+        # upstream. Locked so an LLM update_state cannot forge macro-cycle /
+        # convergence / per-cycle budget state.
+        "macro_cycle",
+        "cycle_minutes",
+        "gain_at_cycle_start",
+        "no_gain_cycle_streak",
+        "pending_bottleneck_switch",
+        "last_cycle_bottleneck",
+        "saturated_directions",
+        "bottleneck_shift",
+        "cycle_strategy_log",
+        # operator-facing lifecycle event log (#266); Coordinator-only writer.
+        "lifecycle",
+        # specialist sub-agent ledger.
+        "specialist_rounds",
+        "specialist_domain_empty_streak",
+        # per-kb_anchor coverage counters (point 1); Coordinator-only writers.
+        "rounds_since_last_specialist",
+        "rounds_since_last_keep",
+        "last_specialist",
+        "research_lane_capacity",
+        "gpu_specialist_capacity",
+        # phase-machine escalation plumbing.
+        "pending_escalate_hint",
+        "last_consumed_escalate_hint",
+        "last_consumed_escalate_hint_ts",
+        "plateau_overrides",
+        # CLOSE phase sequencer flag.
+        "close_sequence_done",
+        # unified explore search ledger.
+        "explore_search",
+        # structured gaps ledger.
+        "gaps",
+        # Orchestration working-memory checkpoint (Coordinator-authored).
+        "orchestration_memory",
+        # Bounded rollback ring of prior good orchestration_memory records
+        # (Coordinator-only writer); mirrors upstream, locked with its parent.
+        "orchestration_memory_history",
+        # FRAMEWORK_PR per-repo discovery budget (Coordinator-controlled).
+        "framework_pr_max_candidates",
+        # Advisory model-architecture profile (launcher / state.json owned).
+        "model_arch",
+        # Architecture-identity tags from config.json; mirrors upstream.
+        "model_architectures",
+        "model_type",
+        # Multimodal text-fallback degraded-run markers (preflight-authored);
+        # locked so an LLM update_state can't forge/clear the degraded verdict.
+        "degraded_mode",
+        "model_warnings",
+    }
+)
 
 
 # Robustness may only mutate these state fields directly.
-ROBUSTNESS_STATE_FIELDS: frozenset[str] = frozenset({
-    "crash_count",
-    "current_action",
-})
+ROBUSTNESS_STATE_FIELDS: frozenset[str] = frozenset(
+    {
+        "crash_count",
+        "current_action",
+    }
+)
 
 
 @dataclass
@@ -246,6 +279,7 @@ class BackendTurnResult:
 # ---------------------------------------------------------------------------
 # Intent builders
 # ---------------------------------------------------------------------------
+
 
 def build_heartbeat(body_md: str = "ok (robustness-agent)") -> Intent:
     """Default tick-end fallback when no symptom warrants an emit.
@@ -321,9 +355,7 @@ def build_alert(
         ValueError: If ``severity`` is invalid or ``summary`` is empty.
     """
     if severity not in ALERT_SEVERITIES:
-        raise ValueError(
-            f"alert severity {severity!r} not in {sorted(ALERT_SEVERITIES)!r}"
-        )
+        raise ValueError(f"alert severity {severity!r} not in {sorted(ALERT_SEVERITIES)!r}")
     if not summary:
         raise ValueError("alert summary must be non-empty")
     payload: dict[str, Any] = {"severity": severity, "summary": summary}
@@ -360,9 +392,7 @@ def build_escalate(
     if not next_action_hint:
         raise ValueError("escalate next_action_hint must be non-empty")
     if severity not in ALERT_SEVERITIES:
-        raise ValueError(
-            f"escalate severity {severity!r} not in {sorted(ALERT_SEVERITIES)!r}"
-        )
+        raise ValueError(f"escalate severity {severity!r} not in {sorted(ALERT_SEVERITIES)!r}")
     return Intent(
         type=IntentType.ESCALATE_STRATEGY_CHANGE,
         payload={
@@ -515,6 +545,7 @@ def build_update_state(changes: Mapping[str, Any]) -> Intent:
 # ---------------------------------------------------------------------------
 # Envelope serialisation (multi-cli outbox, jsonl rows)
 # ---------------------------------------------------------------------------
+
 
 def build_envelope_dict(intents: list[Intent]) -> dict[str, Any]:
     """Serialise a list of intents into a single envelope dict.

@@ -37,9 +37,15 @@ def _setup_logging() -> None:
 
 
 async def _run_reactor_mode(config: Config) -> None:
-    """Standalone reactor loop for dev / debugging; polls sources at
-    ``standalone_tick_interval_s`` and writes findings to disk. (Production
-    drives the same reactor via ``runtime.cli tick`` in a subprocess.)"""
+    """Run the standalone reactor loop for dev / debugging.
+
+    Polls sources at ``standalone_tick_interval_s`` and writes findings to
+    disk. (Production drives the same reactor via ``runtime.cli tick`` in a
+    subprocess.)
+
+    Args:
+        config: The resolved agent configuration.
+    """
     log = logging.getLogger("robustness_agent")
     bundle = build_reactor_components(config)
 
@@ -111,7 +117,7 @@ async def _async_main(argv: list[str] | None = None) -> None:
         argv (list[str] | None): Argument vector forwarded to
             :func:`_parse_args`. Defaults to ``None``.
     """
-    args = _parse_args(argv)
+    _parse_args(argv)
     config = await Config.discover()
     await _run_reactor_mode(config)
 

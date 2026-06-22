@@ -26,14 +26,12 @@ def test_caches_analysis_md_full_text(tmp_path: Path) -> None:
     """Path provided → file content cached verbatim."""
     analysis_md = tmp_path / "analysis.md"
     analysis_md.write_text(
-        "# Executive Summary\nCompute 51.6%, Idle 48.3%\n"
-        "## Top Operations\n| aten::mm | 25% |\n",
+        "# Executive Summary\nCompute 51.6%, Idle 48.3%\n## Top Operations\n| aten::mm | 25% |\n",
         encoding="utf-8",
     )
 
     state = SharedState()
-    state.record_trace_analyze(_payload(tmp_path / "trace.json"),
-                                _result_with_report(analysis_md))
+    state.record_trace_analyze(_payload(tmp_path / "trace.json"), _result_with_report(analysis_md))
 
     cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == str(analysis_md)
@@ -99,18 +97,15 @@ def test_snapshot_id_monotonically_increases(tmp_path: Path) -> None:
     analysis_md.write_text("first", encoding="utf-8")
 
     state = SharedState()
-    state.record_trace_analyze(_payload(tmp_path / "t1"),
-                                _result_with_report(analysis_md))
+    state.record_trace_analyze(_payload(tmp_path / "t1"), _result_with_report(analysis_md))
     assert state.last_trace_analyze["roofline_snapshot_id"] == 1
 
     analysis_md.write_text("second", encoding="utf-8")
-    state.record_trace_analyze(_payload(tmp_path / "t2"),
-                                _result_with_report(analysis_md))
+    state.record_trace_analyze(_payload(tmp_path / "t2"), _result_with_report(analysis_md))
     assert state.last_trace_analyze["roofline_snapshot_id"] == 2
 
     analysis_md.write_text("third", encoding="utf-8")
-    state.record_trace_analyze(_payload(tmp_path / "t3"),
-                                _result_with_report(analysis_md))
+    state.record_trace_analyze(_payload(tmp_path / "t3"), _result_with_report(analysis_md))
     assert state.last_trace_analyze["roofline_snapshot_id"] == 3
 
 
@@ -179,8 +174,7 @@ def test_existing_fields_still_populated(tmp_path: Path) -> None:
             "candidates_path": "/some/kc.json",
             "trace_report_path": str(analysis_md),
             "trace_health_warnings": [
-                {"code": "high_gpu_idle_pct", "severity": "warning",
-                 "message": "idle=48%", "idle_pct": 48.0},
+                {"code": "high_gpu_idle_pct", "severity": "warning", "message": "idle=48%", "idle_pct": 48.0},
             ],
         },
     )
@@ -206,15 +200,22 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
     analysis_md = tmp_path / "analysis.md"
     analysis_md.write_text("# hi", encoding="utf-8")
     sidecar = tmp_path / "kernel_roofline.json"
-    sidecar.write_text(json.dumps({
-        "kernels": [{
-            "kernel_id": "k1",
-            "rocprof_roofline": {
-                "before_kernel_opt": {"status": "matched", "roofline_efficiency_pct": 31.2},
-                "after_kernel_opt": {"status": "matched", "roofline_efficiency_pct": 44.0},
-            },
-        }]
-    }), encoding="utf-8")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "kernels": [
+                    {
+                        "kernel_id": "k1",
+                        "rocprof_roofline": {
+                            "before_kernel_opt": {"status": "matched", "roofline_efficiency_pct": 31.2},
+                            "after_kernel_opt": {"status": "matched", "roofline_efficiency_pct": 44.0},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
 
     state = SharedState()
     state.record_trace_analyze(
@@ -278,12 +279,12 @@ def test_skipped_kernels_projected_when_hot_empty() -> None:
     state = SharedState()
     state.record_trace_analyze(
         {"trace_input": "x"},
-        _result_with_skipped([
-            {"kernel_id": "k001", "name": "aten::mm",
-             "skip_reason": "source file not resolved", "gpu_pct": 3.3},
-            {"kernel_id": "k003", "name": "aten::mm",
-             "skip_reason": "source file not resolved", "gpu_pct": 17.1},
-        ]),
+        _result_with_skipped(
+            [
+                {"kernel_id": "k001", "name": "aten::mm", "skip_reason": "source file not resolved", "gpu_pct": 3.3},
+                {"kernel_id": "k003", "name": "aten::mm", "skip_reason": "source file not resolved", "gpu_pct": 17.1},
+            ]
+        ),
     )
     proj = state.last_trace_analyze["skipped_kernels_top"]
     # Sorted by gpu_pct desc so the heaviest operator leads.
@@ -295,8 +296,7 @@ def test_skipped_kernels_projected_when_hot_empty() -> None:
 def test_skipped_projection_truncates_to_15() -> None:
     state = SharedState()
     many = [
-        {"kernel_id": f"k{i:03d}", "name": "aten::mm",
-         "skip_reason": "source file not resolved", "gpu_pct": float(i)}
+        {"kernel_id": f"k{i:03d}", "name": "aten::mm", "skip_reason": "source file not resolved", "gpu_pct": float(i)}
         for i in range(1, 26)
     ]
     state.record_trace_analyze({"trace_input": "x"}, _result_with_skipped(many))
@@ -322,16 +322,12 @@ def test_blob_renders_skipped_when_no_routable_candidates() -> None:
         "hot_kernels_top15": [],
         "reusable_native_kernel_ids": [],
         "skipped_kernels_top": [
-            {"kernel_id": "k001", "name": "aten::mm",
-             "skip_reason": "source file not resolved", "gpu_pct": 3.3},
+            {"kernel_id": "k001", "name": "aten::mm", "skip_reason": "source file not resolved", "gpu_pct": 3.3},
         ],
         "trace_health_warnings": [],
     }
     rendered = state._format_trace_analyze_blob(blob)
-    assert (
-        "skipped_kernels_top=[k001:aten::mm:source file not resolved]"
-        in rendered
-    )
+    assert "skipped_kernels_top=[k001:aten::mm:source file not resolved]" in rendered
 
 
 def test_blob_format_stable_when_candidates_present() -> None:
@@ -342,8 +338,7 @@ def test_blob_format_stable_when_candidates_present() -> None:
         "hot_kernels_top15": [{"kernel_id": "k002", "name": "rmsnorm"}],
         "reusable_native_kernel_ids": ["k002"],
         "skipped_kernels_top": [
-            {"kernel_id": "k001", "name": "aten::mm",
-             "skip_reason": "x", "gpu_pct": 3.3},
+            {"kernel_id": "k001", "name": "aten::mm", "skip_reason": "x", "gpu_pct": 3.3},
         ],
         "trace_health_warnings": [],
     }
@@ -355,21 +350,23 @@ def test_blob_format_stable_when_candidates_present() -> None:
 
 def test_non_routable_kernel_opt_skip_rejects_canonical_id() -> None:
     state = SharedState()
-    state.record_kernel_opt({
-        "status": "skipped",
-        "decision": "REVERT",
-        "error_class": "missing_native_source",
-        "reason": "non_routable_candidate",
-        "kernel_id": "k001",
-        "requested_kernel_id": "kn001",
-        "resolved_kernel_id": "k001",
-        "kernel_name": "aten::mm",
-        "verification": {"micro_speedup": 0.0, "best_artifact_path": ""},
-        "proposal": {
+    state.record_kernel_opt(
+        {
+            "status": "skipped",
             "decision": "REVERT",
-            "reasons": ["source file not resolved"],
-        },
-    })
+            "error_class": "missing_native_source",
+            "reason": "non_routable_candidate",
+            "kernel_id": "k001",
+            "requested_kernel_id": "kn001",
+            "resolved_kernel_id": "k001",
+            "kernel_name": "aten::mm",
+            "verification": {"micro_speedup": 0.0, "best_artifact_path": ""},
+            "proposal": {
+                "decision": "REVERT",
+                "reasons": ["source file not resolved"],
+            },
+        }
+    )
 
     assert "k001" in state.rejected_kernel_ids
     entry = state.kernel_opt_attempts["k001"]

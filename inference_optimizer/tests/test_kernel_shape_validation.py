@@ -36,9 +36,13 @@ def test_empty_shape_is_rejected(tmp_path: Path):
 
 def test_non_empty_shape_passes(tmp_path: Path):
     payload = {"kernel_id": "k001", "candidate": _candidate()}
-    assert krh._validate_kernel_shape_and_paths(
-        payload, session_dir=tmp_path,
-    ) is None
+    assert (
+        krh._validate_kernel_shape_and_paths(
+            payload,
+            session_dir=tmp_path,
+        )
+        is None
+    )
 
 
 def test_untrusted_provenance_is_rejected(tmp_path: Path):
@@ -70,9 +74,13 @@ def test_existing_source_path_passes(tmp_path: Path):
         "source_file": str(src),
         "candidate": _candidate(),
     }
-    assert krh._validate_kernel_shape_and_paths(
-        payload, session_dir=tmp_path,
-    ) is None
+    assert (
+        krh._validate_kernel_shape_and_paths(
+            payload,
+            session_dir=tmp_path,
+        )
+        is None
+    )
 
 
 def test_escape_flag_allows_empty_shape(tmp_path: Path):
@@ -81,17 +89,25 @@ def test_escape_flag_allows_empty_shape(tmp_path: Path):
         "allow_empty_kernel_shape": True,
         "candidate": _candidate(shapes=[]),
     }
-    assert krh._validate_kernel_shape_and_paths(
-        payload, session_dir=tmp_path,
-    ) is None
+    assert (
+        krh._validate_kernel_shape_and_paths(
+            payload,
+            session_dir=tmp_path,
+        )
+        is None
+    )
 
 
 def test_escape_env_allows_empty_shape(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", "1")
     payload = {"kernel_id": "k001", "candidate": _candidate(shapes=[])}
-    assert krh._validate_kernel_shape_and_paths(
-        payload, session_dir=tmp_path,
-    ) is None
+    assert (
+        krh._validate_kernel_shape_and_paths(
+            payload,
+            session_dir=tmp_path,
+        )
+        is None
+    )
 
 
 def test_dry_run_bypasses_validation(tmp_path: Path):
@@ -101,9 +117,13 @@ def test_dry_run_bypasses_validation(tmp_path: Path):
         "source_file": "/does/not/exist/kernel.py",
         "candidate": _candidate(shapes=[]),
     }
-    assert krh._validate_kernel_shape_and_paths(
-        payload, session_dir=tmp_path,
-    ) is None
+    assert (
+        krh._validate_kernel_shape_and_paths(
+            payload,
+            session_dir=tmp_path,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -138,6 +158,7 @@ def test_finalize_candidates_stamps_trace_provenance():
             str(tools_dir / "tracelens_analysis.py"),
         )
         mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)
     finally:
         sys.path.remove(str(tools_dir))

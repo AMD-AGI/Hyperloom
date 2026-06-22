@@ -72,9 +72,13 @@ Do not manually pip-install SDKs, edit `~/.claude/config.json`, start Ray, or
 
 Set `$USER_DATA_PATH` to the workspace root, not the session dir. For sandboxes
 that do not persist exports across shell calls, copy
-`inference_optimizer/scripts/setup_env.sh.example` to
-`$USER_DATA_PATH/optimizer_runs/setup_env.sh`, fill in the workload block, and
-source it on each call.
+`inference_optimizer/scripts/setup_env.sh.example` to a **session-scoped** path:
+`$USER_DATA_PATH/optimizer_runs/setup_env_${CLAW_SESSION_ID:-$(date +%s)}.sh`,
+fill in the workload block, and source it on each call.
+
+**IMPORTANT**: never use a shared filename like `setup_env.sh` — concurrent
+sessions on different pods share `$USER_DATA_PATH` via WekaFS; a single file
+causes MODEL_PATH race conditions where sessions launch the wrong model.
 
 ```bash
 cd "$REPO_ROOT"
@@ -100,18 +104,28 @@ setsid nohup inference_optimizer --verbose optimize \
 echo $! > "$PID_FILE"
 ```
 
-`setsid nohup ... &` is required for runs longer than 5 minutes. After launch,
-locate the optimizer with `pgrep -af 'inference_optimizer.*optimize'`; `$!` may
-be only a wrapper PID.
+`setsid nohup ... &` is required for runs longer than 5 minutes. The `$!`
+written above is the **setsid wrapper** PID, which exits immediately — the
+robustness monitor reads `$PID_FILE` and would misfire a spurious `--resume` if
+it kept the dead wrapper PID. After launch, reconcile `$PID_FILE` to the **real**
+optimizer PID, which the CLI records as `.pid` in the launch-info JSON.
 
-Health-check after 30 seconds:
+Health-check after 30 seconds (the launch-info JSON carries the authoritative
+`.pid` and `.session_dir`; `jq` is not guaranteed on every node, so fall back to
+a tiny `python3` reader):
 
 ```bash
 sleep 30
-pid="$(cat "$PID_FILE")"
-test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
+read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 
-SESSION_DIR="$(jq -r '.session_dir // empty' "$LAUNCH_INFO_FILE" 2>/dev/null)"
+# Real optimizer PID (NOT the setsid wrapper in $!): take it from launch-info
+# and rewrite $PID_FILE so the monitor watches the right process.
+REAL_PID="$(read_json "$LAUNCH_INFO_FILE" pid)"
+[ -z "$REAL_PID" ] && REAL_PID="$(pgrep -f 'inference_optimizer .*optimize' | head -1)"
+[ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
+test -d "/proc/$REAL_PID" && echo "optimizer_alive=true pid=$REAL_PID"
+
+SESSION_DIR="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 if [ -z "$SESSION_DIR" ]; then
   echo "ERROR: no .session_dir in $LAUNCH_INFO_FILE; inspect HYPERLOOM_LAUNCH and $RUN_LOG" >&2
   return 1 2>/dev/null || exit 1
