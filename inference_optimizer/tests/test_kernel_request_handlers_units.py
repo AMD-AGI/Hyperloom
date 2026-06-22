@@ -235,6 +235,41 @@ class TestForgeGemmHelperCoverage:
         assert krh._derive_gemm_skip_reason(None) == ""
         assert krh._derive_gemm_skip_reason([]) == ""
 
+    def test_path_is_existing_file_handles_too_long(self):
+        # The production crash: an inline JSON list handed in as a "path".
+        inline = "[{'M': 64, 'N': 16384, 'K': 3072, 'dtype': 'bf16'}]" * 6
+        assert len(inline) > 255
+        assert krh._path_is_existing_file(inline) is False  # must not raise OSError(36)
+
+    def test_path_is_existing_file_true(self, tmp_path):
+        f = tmp_path / "real.csv"
+        f.write_text("M,N,K\n", encoding="utf-8")
+        assert krh._path_is_existing_file(str(f)) is True
+
+    def test_normalize_forge_shapes_json_existing_path(self, tmp_path):
+        f = tmp_path / "shapes.json"
+        f.write_text("[{\"M\":1,\"N\":2,\"K\":3}]", encoding="utf-8")
+        assert krh._normalize_forge_shapes_json(str(f), tmp_path) == str(f)
+
+    def test_normalize_forge_shapes_json_inline_string(self, tmp_path):
+        # The exact production payload shape: a Python-repr list (single quotes).
+        inline = "[{'M': 64, 'N': 16384, 'K': 3072, 'dtype': 'bf16'}]"
+        out = krh._normalize_forge_shapes_json(inline, tmp_path)
+        assert out == str(tmp_path / "forge_shapes.json")
+        data = json.loads(Path(out).read_text())
+        assert data[0]["M"] == 64
+
+    def test_normalize_forge_shapes_json_inline_list(self, tmp_path):
+        out = krh._normalize_forge_shapes_json([{"M": 1, "N": 2, "K": 3}], tmp_path)
+        assert Path(out).is_file()
+        assert json.loads(Path(out).read_text())[0]["N"] == 2
+
+    def test_normalize_forge_shapes_json_empty_and_garbage(self, tmp_path):
+        assert krh._normalize_forge_shapes_json("", tmp_path) == ""
+        assert krh._normalize_forge_shapes_json(None, tmp_path) == ""
+        # Non-JSON, non-existent path string -> unusable.
+        assert krh._normalize_forge_shapes_json("not_a_real_file.json", tmp_path) == ""
+
     def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
         state = SharedState()
         state.last_trace_analyze = ["not", "a", "dict"]
