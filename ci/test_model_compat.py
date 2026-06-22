@@ -15,6 +15,8 @@ import sys
 import urllib.error
 from pathlib import Path
 
+import pytest
+
 _CI_DIR = Path(__file__).resolve().parent
 if str(_CI_DIR) not in sys.path:
     sys.path.insert(0, str(_CI_DIR))
