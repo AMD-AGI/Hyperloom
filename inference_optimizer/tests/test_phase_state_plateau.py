@@ -29,6 +29,7 @@ from inference_optimizer.orchestrator.phase_state import (
     is_pause_specialist_hint,
     is_valid_escalate_hint,
     is_valid_stop_reason,
+    kernel_work_pending,
 )
 from inference_optimizer.orchestrator.shared_state import SharedState
 
@@ -378,6 +379,81 @@ def test_compute_next_phase_skip_to_sweep_from_explore_routes_to_kernel():
 
 def test_compute_next_phase_skip_to_sweep_from_kernel_routes_to_sweep():
     out = compute_next_phase(_skip_to_sweep_state("KERNEL"), kernel_enabled=True)
+    assert out is not None
+    target, reason, _ = out
+    assert target == PHASE_SWEEP
+    assert reason == "kernel_no_more_leverage"
+
+
+def test_kernel_skip_to_sweep_waits_for_pending_keep():
+    state = _skip_to_sweep_state("KERNEL")
+    state.has_keep_pending_integrate = True
+
+    assert kernel_work_pending(state) is True
+    assert exit_normal_kernel(state) is None
+    assert compute_next_phase(state, kernel_enabled=True) is None
+
+
+def test_kernel_skip_to_sweep_waits_for_partial_kernel_attempt():
+    state = _skip_to_sweep_state("KERNEL")
+    state.kernel_opt_attempts = {
+        "k009": {
+            "last_decision": "PARTIAL",
+            "last_status": "ok",
+            "rejected_reason": "",
+        },
+    }
+
+    assert kernel_work_pending(state) is True
+    assert exit_normal_kernel(state) is None
+    assert compute_next_phase(state, kernel_enabled=True) is None
+
+
+def test_kernel_skip_to_sweep_waits_for_untried_hot_kernel():
+    state = _skip_to_sweep_state("KERNEL")
+    state.untried_hot_reusable_kernels = lambda: ["k017"]
+
+    assert kernel_work_pending(state) is True
+    assert exit_normal_kernel(state) is None
+    assert compute_next_phase(state, kernel_enabled=True) is None
+
+
+def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
+    state = _skip_to_sweep_state("KERNEL")
+    state.kernel_opt_attempts = {
+        "k018": {
+            "attempts": 1,
+            "failure_count": 1,
+            "last_decision": "",
+            "last_status": "failed",
+            "rejected_reason": "",
+        },
+    }
+
+    assert kernel_work_pending(state) is True
+    assert exit_normal_kernel(state) is None
+    assert compute_next_phase(state, kernel_enabled=True) is None
+
+
+def test_kernel_skip_to_sweep_ignores_rejected_or_integrated_attempts():
+    state = _skip_to_sweep_state("KERNEL")
+    state.rejected_kernel_ids = ["k001"]
+    state.optimization_stack = [{"action": "integrate", "kernel_id": "k002"}]
+    state.kernel_opt_attempts = {
+        "k001": {
+            "last_decision": "REVERT",
+            "last_status": "ok",
+            "rejected_reason": "revert_decision",
+        },
+        "k002": {
+            "last_decision": "KEEP",
+            "last_status": "ok",
+            "rejected_reason": "",
+        },
+    }
+
+    assert kernel_work_pending(state) is False
+    out = compute_next_phase(state, kernel_enabled=True)
     assert out is not None
     target, reason, _ = out
     assert target == PHASE_SWEEP

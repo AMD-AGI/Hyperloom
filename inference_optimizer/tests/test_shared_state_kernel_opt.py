@@ -90,6 +90,22 @@ def test_record_kernel_opt_no_eligible_kernels_skip_is_captured(state: SharedSta
     assert state.rejected_kernel_ids == []
 
 
+def test_record_kernel_opt_real_result_clears_stale_dispatch_skip(state: SharedState):
+    """A later real kernel-opt result makes an older empty-dispatch skip stale."""
+    state.record_kernel_opt(
+        {
+            "status": "skipped",
+            "reason": "no_eligible_kernels",
+            "kernels_considered": 7,
+        }
+    )
+    assert state.last_kernel_opt_dispatch_skip["reason"] == "no_eligible_kernels"
+
+    state.record_kernel_opt(_ok_result("k001", "KEEP", 3.2, source_file="/p/a.py"))
+
+    assert state.last_kernel_opt_dispatch_skip == {}
+
+
 def test_record_kernel_opt_plain_failure_does_not_set_dispatch_skip(state: SharedState):
     """A regular failure (no no_eligible_kernels reason) leaves dispatch-skip empty."""
     state.record_kernel_opt({"status": "failed", "error": "missing 'kernel_id' in payload"})
@@ -374,11 +390,20 @@ def test_record_kernel_opt_failure_count_increments_on_status_failed(state: Shar
     assert e["last_status"] == "failed"
 
 
-def test_record_kernel_opt_one_failure_retires_kernel(state: SharedState):
-    """PR-C max_failures=1: one completed-ladder-without-KEEP retires the kernel."""
+def test_record_kernel_opt_one_failure_does_not_retire_kernel_by_default(state: SharedState):
+    """A transient backend/infra failure gets one retry before retirement."""
+    state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
+    assert "k001" not in state.rejected_kernel_ids
+    assert state.kernel_opt_attempts["k001"]["failure_count"] == 1
+    assert not state.kernel_opt_attempts["k001"].get("rejected_reason")
+
+
+def test_record_kernel_opt_second_failure_retires_kernel_by_default(state: SharedState):
+    """Two backend/infra failures retire the kernel when no KEEP appears."""
+    state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
     state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
     assert "k001" in state.rejected_kernel_ids
-    assert state.kernel_opt_attempts["k001"]["rejected_reason"].startswith("max_failures_")
+    assert state.kernel_opt_attempts["k001"]["rejected_reason"] == "max_failures_2_without_keep"
 
 
 def test_record_kernel_opt_revert_retires_immediately(state: SharedState):
@@ -390,9 +415,7 @@ def test_record_kernel_opt_revert_retires_immediately(state: SharedState):
 def test_record_kernel_opt_keep_resets_failure_count(state: SharedState):
     """A later KEEP clears the failure streak so the kernel is usable again."""
     state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
-    assert "k001" in state.rejected_kernel_ids
     # A subsequent KEEP clears the streak.
-    state.rejected_kernel_ids.remove("k001")
     state.record_kernel_opt(_ok_result("k001", "KEEP", 4.0, source_file="/p/a.py"))
     e = state.kernel_opt_attempts["k001"]
     assert e["failure_count"] == 0
@@ -400,11 +423,28 @@ def test_record_kernel_opt_keep_resets_failure_count(state: SharedState):
 
 
 def test_record_kernel_opt_max_failures_env_override(state: SharedState, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "2")
-    state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
-    assert "k001" not in state.rejected_kernel_ids
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "1")
     state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
     assert "k001" in state.rejected_kernel_ids
+
+
+def test_resolve_kernel_opt_max_failures_defaults_and_env(monkeypatch):
+    from inference_optimizer.orchestrator.shared_state import (
+        _DEFAULT_KERNEL_OPT_MAX_FAILURES,
+        resolve_kernel_opt_max_failures,
+    )
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", raising=False)
+    assert resolve_kernel_opt_max_failures() == _DEFAULT_KERNEL_OPT_MAX_FAILURES
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "4")
+    assert resolve_kernel_opt_max_failures() == 4
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "0")
+    assert resolve_kernel_opt_max_failures() == 1
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "bad")
+    assert resolve_kernel_opt_max_failures() == _DEFAULT_KERNEL_OPT_MAX_FAILURES
 
 
 # PR-C: untried_hot_reusable_kernels report gate
