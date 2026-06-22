@@ -2759,17 +2759,17 @@ def _positive_int_arg(value: str) -> int:
     return parsed
 
 
-def _parse_conc_env_default() -> int:
-    """Resolve ``$CONC`` for argparse, accepting a comma ladder as sweep input."""
-    raw = os.environ.get("CONC", "").strip()
-    if not raw:
-        return 8
-    tokens = [tok.strip() for tok in raw.split(",") if tok.strip()]
+def _parse_conc_values(raw: str, *, source: str = "CONC") -> list[int]:
+    """Parse a positive integer or comma ladder without mutating env."""
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    tokens = [tok.strip() for tok in text.split(",") if tok.strip()]
     try:
         values = [int(tok) for tok in tokens]
     except ValueError:
         print(
-            f"ERROR: CONC={raw!r} is not an integer or comma-separated integer ladder. "
+            f"ERROR: {source}={text!r} is not an integer or comma-separated integer ladder. "
             "Use --conc N for one baseline concurrency, or "
             "--conc-sweep-concs 4,16,128 for a ladder.",
             file=sys.stderr,
@@ -2777,21 +2777,31 @@ def _parse_conc_env_default() -> int:
         raise SystemExit(2)
     if not values or any(v <= 0 for v in values):
         print(
-            f"ERROR: CONC={raw!r} must contain positive integer value(s).",
+            f"ERROR: {source}={text!r} must contain positive integer value(s).",
             file=sys.stderr,
         )
         raise SystemExit(2)
+    return values
+
+
+def _parse_conc_env_default() -> int:
+    """Resolve ``$CONC`` for argparse; comma ladders use first value as baseline."""
+    values = _parse_conc_values(os.environ.get("CONC", ""), source="CONC")
+    return values[0] if values else 8
+
+
+def _parse_conc_sweep_default() -> str:
+    """Resolve the sweep ladder, defaulting a comma ``$CONC`` into the sweep."""
+    explicit = os.environ.get("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", "").strip()
+    if explicit:
+        return explicit
+    raw = os.environ.get("CONC", "").strip()
+    if not raw:
+        return "1,2,4,8,16,32,64,128"
+    values = _parse_conc_values(raw, source="CONC")
     if len(values) > 1:
-        # Preserve the user's ladder for the post-sweep action while picking a
-        # single baseline concurrency. ``max`` keeps the historical "cap"
-        # interpretation of CONC and prevents downstream int() coercions from
-        # seeing the comma string.
-        os.environ.setdefault(
-            "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS",
-            ",".join(str(v) for v in values),
-        )
-        os.environ["CONC"] = str(max(values))
-    return max(values)
+        return ",".join(str(v) for v in values)
+    return "1,2,4,8,16,32,64,128"
 
 
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
@@ -3980,8 +3990,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Magpie client concurrency cap (max in-flight requests). "
         "Resolution: --conc > $CONC env > 8. Symmetric with --tp; "
         "agent can pass `--conc N` directly from the prompt. If $CONC is "
-        "a comma ladder (e.g. 4,16,128), Hyperloom uses the max as the "
-        "baseline cap and forwards the ladder to --conc-sweep-concs.",
+        "a comma ladder (e.g. 4,16,128), Hyperloom uses the first value as "
+        "the baseline cap and forwards the ladder to --conc-sweep-concs.",
     )
     opt.add_argument(
         "--max-model-len",
@@ -4829,10 +4839,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
         type=str,
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS",
-            "1,2,4,8,16,32,64,128",
-        ),
+        default=_parse_conc_sweep_default(),
         help="Comma-separated CONC ladder for --enable-conc-sweep. Default 1,2,4,8,16,32,64,128.",
     )
     opt.add_argument(

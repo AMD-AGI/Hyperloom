@@ -61,7 +61,7 @@ framework-specific Magpie env (`EXTRA_VLLM_ARGS`, `EXTRA_SGLANG_ARGS`, or
 `EXTRA_ATOM_ARGS`) for baseline, profile, explore, and sweep. Explicit
 `--max-model-len` / `$MAX_MODEL_LEN` wins over the auto `ISL+OSL+headroom`
 calculation. A comma `$CONC` value such as `4,16,128` is treated as a sweep
-ladder: the single baseline CONC becomes the max value and the ladder is
+ladder: the single baseline CONC becomes the first value and the ladder is
 forwarded to `INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS`.
 
 ## Workload-contract reuse (baseline → explore/sweep)
