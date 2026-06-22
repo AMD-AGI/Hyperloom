@@ -909,6 +909,33 @@ def test_flush_backfills_forge_steps(tmp_path, monkeypatch):
     assert persisted["counts"]["forge_steps_read"] == 3
 
 
+def test_flush_backfills_gemm_tuning(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    from inference_optimizer.session_paths import gemm_tuning_steps_path
+    steps = gemm_tuning_steps_path(sd)
+    steps.parent.mkdir(parents=True, exist_ok=True)
+    steps.write_text("\n".join(json.dumps(r) for r in [
+        {"ts": "2026-06-09T15:14:54Z", "kind": "gemm_tuning", "engine": "forge",
+         "backend": "forge", "decision": "KEEP", "best_speedup": 1.12},
+        {"ts": "2026-06-09T15:14:56Z", "kind": "gemm_tuning", "engine": "geak",
+         "backend": "geak", "decision": "REVERT"},
+    ]) + "\n", encoding="utf-8")
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    forge_span = client.span_named("gemm_tuning:forge")
+    assert forge_span is not None
+    assert forge_span.kwargs["metadata"]["engine"] == "forge"
+    assert forge_span.kwargs["metadata"]["best_speedup"] == 1.12
+    assert client.span_named("gemm_tuning:geak") is not None
+    # Attributed to its own ``gemm_tuning`` source agent span.
+    assert client.span_named("agent:gemm_tuning") is not None
+    persisted = lfe.read_receipt(sd)
+    assert persisted["counts"]["gemm_tuning_read"] == 2
+
+
 def test_generation_uses_latency_for_duration(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
