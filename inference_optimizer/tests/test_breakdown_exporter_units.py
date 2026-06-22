@@ -212,6 +212,29 @@ class TestCollectGemmTuning:
         assert len(out["runs"]) == 1
         assert out["runs"][0]["engine"] == "geak"
 
+    def test_skip_reason_surfaced_in_run(self):
+        state = {
+            "baseline_tput": 1000.0,
+            "precision": "fp8",
+            "framework": "sglang",
+            "gemm_tuning_attempts": [
+                {
+                    "backend": "forge",
+                    "status": "skipped",
+                    "decision": "REVERT",
+                    "skip_reason": "a8w8_blockscale: needs --untuned-csv",
+                    "tuners_skipped": [
+                        {"tuner": "a8w8_blockscale", "skip_reason": "needs --untuned-csv"}
+                    ],
+                    "ts": "2026-06-21T00:00:00Z",
+                },
+            ],
+        }
+        out = col.collect_gemm_tuning(state)
+        run = out["runs"][0]
+        assert run["skip_reason"] == "a8w8_blockscale: needs --untuned-csv"
+        assert run["tuners_skipped"][0]["tuner"] == "a8w8_blockscale"
+
     def test_forge_backend_not_mislabeled_as_geak(self):
         # Forge records the tuner under ``backend`` and leaves ``engine`` unset;
         # the collector must surface ``forge`` rather than defaulting to geak.

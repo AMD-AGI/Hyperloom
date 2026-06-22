@@ -4852,6 +4852,12 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
                     continue  # best-effort int coercion; skip non-numeric knob values
         if raw.get("libtype"):
             run["libtype"] = str(raw.get("libtype"))
+        # Surface why a run skipped (e.g. dense fp8 missing GEMM shapes) so the
+        # breakdown explains the outcome instead of an opaque "skipped".
+        if raw.get("skip_reason"):
+            run["skip_reason"] = str(raw.get("skip_reason"))
+        if isinstance(raw.get("tuners_skipped"), list) and raw.get("tuners_skipped"):
+            run["tuners_skipped"] = raw["tuners_skipped"]
         if isinstance(raw.get("summary"), dict):
             run["summary"] = raw["summary"]
         if isinstance(raw.get("shapes"), list):
