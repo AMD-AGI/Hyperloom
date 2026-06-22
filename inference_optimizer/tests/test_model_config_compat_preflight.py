@@ -197,6 +197,36 @@ def test_detect_glm_moe_dsa_unrecognized_blocked(tmp_path):
     assert reason is not None and "not recognized" in reason
 
 
+def test_detect_bailing_ling_left_to_runtime_scope(tmp_path):
+    # #649 does not add Bailing filters; keep these out of the fail-fast gate.
+    for model_type, arch in (
+        ("bailing_moe", "BailingMoeV2ForCausalLM"),
+        ("bailing_hybrid", "BailingMoeV2_5ForCausalLM"),
+    ):
+        m = tmp_path / model_type
+        _write_config(
+            m,
+            model_type=model_type,
+            architectures=[arch],
+            max_position_embeddings=32768,
+        )
+        reason = cli._detect_incompatible_model_config(str(m))
+        assert reason is None
+
+
+def test_detect_ovis_next_left_to_runtime_scope(tmp_path):
+    # #649 does not add Ovis filters; keep this out of the fail-fast gate.
+    m = tmp_path / "ovis"
+    _write_config(
+        m,
+        model_type="ovis2_6_next",
+        architectures=["Ovis2_6_NextForCausalLM"],
+        max_position_embeddings=32768,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is None
+
+
 def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):
     # Mistral3 wrapper exposes text_config.model_type=ministral3; vLLM raises KeyError.
     m = tmp_path / "mistral3"
@@ -797,7 +827,8 @@ def test_preflight_blocks_and_persists(tmp_path, monkeypatch):
     assert final["stop_reason"] == "model_config_incompatible"
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_config_incompatible"
-    assert (sd / "session_breakdown.json").exists()
+    breakdown = json.loads((sd / "session_breakdown.json").read_text())
+    assert breakdown["session"]["stop_reason"] == "model_config_incompatible"
 
 
 def test_preflight_passes_for_healthy_model(tmp_path, monkeypatch):
