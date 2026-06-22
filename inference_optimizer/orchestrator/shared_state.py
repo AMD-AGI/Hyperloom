@@ -106,8 +106,28 @@ def render_model_arch_compact(arch: dict | None) -> str:
 
 # Default partial-attempt cap for run_optimization; override via env in ``record_kernel_opt`` (1 disables second chance).
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
-# Backend ladder without a KEEP retires the kernel; override via ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
-_DEFAULT_KERNEL_OPT_MAX_FAILURES = 1
+# Backend ladder infra failures can be transient; require two failed ladders
+# before retiring the kernel. Override via
+# ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
+_DEFAULT_KERNEL_OPT_MAX_FAILURES = 2
+
+
+def resolve_kernel_opt_max_failures() -> int:
+    """Resolve the infra-failure retry budget (>=1).
+
+    Shared by ``record_kernel_opt``, ``kernel_work_pending``, and batch
+    dispatch so ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` stays
+    consistent across layers.
+    """
+    env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
+    if env_f:
+        try:
+            return max(1, int(env_f))
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_KERNEL_OPT_MAX_FAILURES
+
+
 # Integration faults (environment / apply / bench crashes) are distinct from a
 # genuine gate REVERT (measured gain below threshold / accuracy regression). A
 # fault means the patch was never fairly measured, so it must not burn the
@@ -583,6 +603,11 @@ class SharedState:
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Most recent run_optimization_done so Orch doesn't re-dispatch the same kernel_id every tick.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
+    # Most recent run_optimization dispatch skipped with no eligible kernels
+    # (empty batch, no named kernel). Recorded honestly as a non-failure so the
+    # breakdown can surface it; it is otherwise invisible in sbd (the result has
+    # no backend and no kernel_id).
+    last_kernel_opt_dispatch_skip: dict[str, Any] = field(default_factory=dict)
     # Per-action audit (kernel parity): each ``last_<action>`` is the most recent attempt snapshot; ``<action>_attempts`` is a capped list.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)

@@ -168,6 +168,121 @@ class TestForgeGemmHelperCoverage:
         bad.write_text(json.dumps([123, 456]), encoding="utf-8")
         assert krh._is_forge_compatible_shapes_json(bad) is False
 
+    @staticmethod
+    def _write_aiter_csv(session_dir: Path, hash_id: str, fname: str, rows: str) -> Path:
+        cfg = session_dir / "runs" / "specialist" / hash_id / "worktree" / "aiter" / "configs"
+        cfg.mkdir(parents=True, exist_ok=True)
+        path = cfg / fname
+        path.write_text(rows, encoding="utf-8")
+        return path
+
+    def test_resolve_forge_untuned_csv_fp8_blockscale(self, tmp_path):
+        # fp8 auto -> blockscale CSV recorded by the specialist phase.
+        expected = self._write_aiter_csv(
+            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+        )
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "auto") == str(expected)
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(expected)
+
+    def test_resolve_forge_untuned_csv_per_token(self, tmp_path):
+        expected = self._write_aiter_csv(
+            tmp_path, "abc", "a8w8_untuned_gemm.csv", "M,N,K,q_dtype_w\n16,1536,7168,fp8\n"
+        )
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "per_token") == str(expected)
+
+    def test_resolve_forge_untuned_csv_skips_header_only(self, tmp_path):
+        # Header-only / empty files must not be passed as a real shape source.
+        self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n")
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == ""
+
+    def test_resolve_forge_untuned_csv_picks_newest_nonempty(self, tmp_path):
+        old = self._write_aiter_csv(
+            tmp_path, "old", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n1,2,3\n"
+        )
+        new = self._write_aiter_csv(
+            tmp_path, "new", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n4,5,6\n"
+        )
+        import os
+
+        os.utime(old, (1, 1))
+        os.utime(new, (10_000_000, 10_000_000))
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(new)
+
+    def test_resolve_forge_untuned_csv_bf16_returns_empty(self, tmp_path):
+        # bf16 dense derives shapes from config.json; no CSV needed.
+        self._write_aiter_csv(tmp_path, "abc", "bf16_untuned_gemm.csv", "M,N,K\n1,2,3\n")
+        assert krh._resolve_forge_untuned_csv(tmp_path, "bf16", "none") == ""
+
+    def test_resolve_forge_untuned_csv_no_specialist_dir(self, tmp_path):
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == ""
+
+    def test_read_forge_result_json(self, tmp_path):
+        (tmp_path / "result.json").write_text(
+            json.dumps({"status": "skipped", "tuners_skipped": [{"tuner": "a8w8"}]}),
+            encoding="utf-8",
+        )
+        out = krh._read_forge_result_json(tmp_path)
+        assert out["status"] == "skipped"
+        assert krh._read_forge_result_json(tmp_path / "missing") == {}
+
+    def test_derive_gemm_skip_reason(self):
+        skipped = [
+            {"tuner": "a8w8_blockscale", "skip_reason": "needs csv"},
+            {"tuner": "fmoe_ck", "skip_reason": ""},
+            {"tuner": "x"},
+        ]
+        assert krh._derive_gemm_skip_reason(skipped) == "a8w8_blockscale: needs csv"
+        assert krh._derive_gemm_skip_reason(None) == ""
+        assert krh._derive_gemm_skip_reason([]) == ""
+
+    def test_path_is_existing_file_handles_too_long(self):
+        # The production crash: an inline JSON list handed in as a "path".
+        inline = "[{'M': 64, 'N': 16384, 'K': 3072, 'dtype': 'bf16'}]" * 6
+        assert len(inline) > 255
+        assert krh._path_is_existing_file(inline) is False  # must not raise OSError(36)
+
+    def test_path_is_existing_file_true(self, tmp_path):
+        f = tmp_path / "real.csv"
+        f.write_text("M,N,K\n", encoding="utf-8")
+        assert krh._path_is_existing_file(str(f)) is True
+
+    def test_normalize_forge_shapes_json_existing_path(self, tmp_path):
+        f = tmp_path / "shapes.json"
+        f.write_text("[{\"M\":1,\"N\":2,\"K\":3}]", encoding="utf-8")
+        assert krh._normalize_forge_shapes_json(str(f), tmp_path) == str(f)
+
+    def test_normalize_forge_shapes_json_inline_string(self, tmp_path):
+        # The exact production payload shape: a Python-repr list (single quotes).
+        inline = "[{'M': 64, 'N': 16384, 'K': 3072, 'dtype': 'bf16'}]"
+        out = krh._normalize_forge_shapes_json(inline, tmp_path)
+        assert out == str(tmp_path / "forge_shapes.json")
+        data = json.loads(Path(out).read_text())
+        assert data[0]["M"] == 64
+
+    def test_normalize_forge_shapes_json_inline_list(self, tmp_path):
+        out = krh._normalize_forge_shapes_json([{"M": 1, "N": 2, "K": 3}], tmp_path)
+        assert Path(out).is_file()
+        assert json.loads(Path(out).read_text())[0]["N"] == 2
+
+    def test_normalize_forge_shapes_json_empty_and_garbage(self, tmp_path):
+        assert krh._normalize_forge_shapes_json("", tmp_path) == ""
+        assert krh._normalize_forge_shapes_json(None, tmp_path) == ""
+        # Non-JSON, non-existent path string -> unusable.
+        assert krh._normalize_forge_shapes_json("not_a_real_file.json", tmp_path) == ""
+
+    def test_normalize_tokens_list_and_bracketed_string(self):
+        # The production bug: tokens passed as a list or its string form.
+        assert krh._normalize_tokens([4, 8, 64]) == "4,8,64"
+        assert krh._normalize_tokens("[4, 8, 64]") == "4,8,64"
+        assert krh._normalize_tokens("[64]") == "64"
+        assert krh._normalize_tokens("4,8,64") == "4,8,64"
+
+    def test_normalize_tokens_empty_and_garbage(self):
+        assert krh._normalize_tokens(None) == ""
+        assert krh._normalize_tokens("") == ""
+        assert krh._normalize_tokens([]) == ""
+        assert krh._normalize_tokens("[abc, 16]") == "16"
+
     def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
         state = SharedState()
         state.last_trace_analyze = ["not", "a", "dict"]
@@ -224,6 +339,36 @@ class TestForgeGemmHelperCoverage:
         assert result["decision"] == "REVERT"
         assert result["status"] == "failed"
         assert result["backend"] == "forge"
+
+    @pytest.mark.asyncio
+    async def test_run_forge_gemm_tuning_tags_engine_forge(self, tmp_path, monkeypatch):
+        """Forge runs must carry ``engine='forge'`` so the breakdown attributes
+        them to the forge source instead of the ``geak`` default."""
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "skipped"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["engine"] == "forge"
 
 
 def _ensure_torch_module(monkeypatch):
@@ -720,6 +865,55 @@ class TestRunGemmTuningHandler:
         assert data["quant_type"] == "auto"
         assert data["conc"] == 256
         assert result["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
+
+    def test_handler_writes_gemm_tuning_audit_row(self, tmp_path, monkeypatch):
+        """run_gemm_tuning_handler appends a source-attribution audit row that
+        the Langfuse emitter backfills as a ``gemm_tuning:<engine>`` span."""
+        from inference_optimizer.session_paths import gemm_tuning_steps_path
+
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        state = SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=256,
+        )
+        state.save(tmp_path)
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "ok",
+                        "micro_decision": "candidate",
+                        "recommended_env": {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"},
+                        "tuners_run": [{"tuner": "fmoe_ck", "best_micro_speedup": 1.1}],
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        asyncio.run(krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path))
+
+        rows = [
+            json.loads(line)
+            for line in gemm_tuning_steps_path(tmp_path).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["kind"] == "gemm_tuning"
+        assert row["engine"] == "forge"
+        assert row["decision"] == "KEEP"
+        assert row["tuners_run"][0]["tuner"] == "fmoe_ck"
 
     def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
@@ -1251,3 +1445,103 @@ class TestAllKernelCandidates:
 
     def test_missing_path_returns_empty(self):
         assert krh._all_kernel_candidates({}) == []
+
+
+class TestBatchKernelCandidatesRetryBudget:
+    def _write_candidates(self, tmp_path: Path) -> Path:
+        cp = tmp_path / "kc.json"
+        cp.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "kernel_id": "k001",
+                            "gpu_pct": 12.0,
+                            "reusable_native_kernel": True,
+                            "source_file": "/p/moe_op.py",
+                        }
+                    ],
+                    "reusable_native_kernel_ids": ["k001"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return cp
+
+    def test_retryable_failed_kernel_remains_batch_eligible_by_default(self, tmp_path):
+        cp = self._write_candidates(tmp_path)
+        state = SharedState.load_or_init(tmp_path)
+        state.kernel_opt_attempts = {
+            "k001": {
+                "attempts": 1,
+                "attempts_per_source": {"/p/moe_op.py": 1},
+                "failure_count": 1,
+                "last_status": "failed",
+                "last_decision": "",
+                "rejected_reason": "",
+            }
+        }
+        state.save(tmp_path)
+
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+
+        assert [item["kernel_id"] for item in out] == ["k001"]
+
+    def test_exhausted_failed_kernel_is_not_batch_eligible_by_default(self, tmp_path):
+        cp = self._write_candidates(tmp_path)
+        state = SharedState.load_or_init(tmp_path)
+        state.kernel_opt_attempts = {
+            "k001": {
+                "attempts": 2,
+                "attempts_per_source": {"/p/moe_op.py": 2},
+                "failure_count": 2,
+                "last_status": "failed",
+                "last_decision": "",
+                "rejected_reason": "max_failures_2_without_keep",
+            }
+        }
+        state.rejected_kernel_ids = ["k001"]
+        state.save(tmp_path)
+
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+
+        assert out == []
+
+    def test_partial_kernel_stays_single_dispatch_by_default(self, tmp_path):
+        cp = self._write_candidates(tmp_path)
+        state = SharedState.load_or_init(tmp_path)
+        state.kernel_opt_attempts = {
+            "k001": {
+                "attempts": 1,
+                "attempts_per_source": {"/p/moe_op.py": 1},
+                "partial_count": 1,
+                "last_decision": "PARTIAL",
+                "last_status": "ok",
+                "rejected_reason": "",
+            }
+        }
+        state.save(tmp_path)
+
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+
+        assert out == []
+
+    def test_retryable_failed_kernel_respects_max_failures_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "3")
+        cp = self._write_candidates(tmp_path)
+        state = SharedState.load_or_init(tmp_path)
+        state.kernel_opt_attempts = {
+            "k001": {
+                "attempts": 2,
+                "attempts_per_source": {"/p/moe_op.py": 2},
+                "failure_count": 2,
+                "last_status": "failed",
+                "last_decision": "",
+                "rejected_reason": "",
+            }
+        }
+        state.save(tmp_path)
+
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+
+        assert [item["kernel_id"] for item in out] == ["k001"]

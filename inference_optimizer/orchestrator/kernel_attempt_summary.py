@@ -594,6 +594,10 @@ def build_kernel_optimization_summary(
         "rejection_breakdown": rejection_breakdown,
         "unattempted_reason_breakdown": unattempted_breakdown,
         "failure_reason_breakdown": failure_reason_breakdown,
+        # Honest, non-failure breadcrumb for a kernel-opt dispatch that found no
+        # eligible kernels (empty batch, no named kernel) and was skipped wholesale.
+        # Empty {} when no such skip occurred.
+        "dispatch_skip_reason": dict(getattr(state, "last_kernel_opt_dispatch_skip", {}) or {}),
         "field_glossary": FIELD_GLOSSARY,
         "by_kernel": by_kernel,
         "top_takeaways": top_takeaways,
