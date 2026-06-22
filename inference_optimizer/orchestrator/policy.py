@@ -1813,7 +1813,7 @@ class PolicyGate:
         if not needs_gpu:
             from .specialist_profile import resolve_specialist_profile
 
-            if resolve_specialist_profile(params).grants_bench_tool:
+            if resolve_specialist_profile(params).reserves_benchmark_lane:
                 needs_gpu = True
         if not needs_gpu:
             return

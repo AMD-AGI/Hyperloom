@@ -47,7 +47,7 @@ def test_bare_dispatch_defaults_to_freeform_research_cpu():
     assert prof.mode == MODE_RESEARCH
     assert prof.bench is False
     assert prof.lane == LANE_CPU
-    assert prof.grants_bench_tool is False
+    assert prof.reserves_benchmark_lane is False
 
 
 def test_anchored_dispatch_keeps_legacy_patch_gpu_default():
@@ -92,7 +92,7 @@ def test_freeform_defaults_to_research_on_cpu():
     assert prof.mode == MODE_RESEARCH
     assert prof.lane == LANE_CPU
     assert prof.is_freeform is True
-    assert prof.grants_bench_tool is False
+    assert prof.reserves_benchmark_lane is False
 
 
 def test_domains_scope_is_cross_domain():
@@ -105,21 +105,21 @@ def test_domains_scope_is_cross_domain():
 def test_bench_requires_patch_mode_truthy(truthy):
     prof = resolve_specialist_profile({"mode": "patch", "bench": truthy})
     assert prof.bench is True
-    assert prof.grants_bench_tool is True
+    assert prof.reserves_benchmark_lane is True
 
 
 @pytest.mark.parametrize("falsy", [False, "false", "0", "no", "off", 0, None])
 def test_bench_falsy_values(falsy):
     prof = resolve_specialist_profile({"mode": "patch", "bench": falsy})
     assert prof.bench is False
-    assert prof.grants_bench_tool is False
+    assert prof.reserves_benchmark_lane is False
 
 
 def test_bench_is_meaningless_for_research_mode():
     """Even an explicit ``bench=true`` is dropped when the worker can't patch."""
     prof = resolve_specialist_profile({"mode": "research", "bench": True})
     assert prof.bench is False
-    assert prof.grants_bench_tool is False
+    assert prof.reserves_benchmark_lane is False
 
 
 def test_explicit_lane_overrides_default():

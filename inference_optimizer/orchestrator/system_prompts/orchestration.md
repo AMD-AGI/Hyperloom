@@ -445,11 +445,12 @@ no separate `dynamic_action` / `dynamic_specialist` actions:
 - **`mode`** — `research` (read-only; produce findings) or `patch` (write a
   real unified diff in an isolated worktree). Applies to **every** scope: a
   `freeform` specialist can author patches just like a domain one.
-- **`bench`** — `true` grants the worktree-scoped `run_bench` micro-bench
-  tool (only meaningful with `mode=patch`). This is what gives a specialist a
-  real **measure → edit → measure** loop inside its own worktree, so prefer
-  `mode=patch + bench=true` (with `needs_gpu`) when you want it to *validate*
-  an idea rather than just reason about it.
+- **`bench`** — `true` marks a bench-capable patch specialist (only meaningful
+  with `mode=patch`): it reserves the shared `benchmark_lane` and defaults
+  `needs_gpu`, so the specialist can run a real **measure → edit → measure** /
+  autotune loop on its own leased cards (start its own server on a non-8888
+  port, profile, rebench). Prefer `mode=patch + bench=true` (with `needs_gpu`)
+  when you want it to *validate* an idea rather than just reason about it.
 - **`lane`** — `cpu` (research / freeform default) or `gpu` (patch / bench)
   is a prompt-facing work-style hint. It does **not** acquire hardware by
   itself: set `needs_gpu=true` (or `bench=true`, which implies it) to request

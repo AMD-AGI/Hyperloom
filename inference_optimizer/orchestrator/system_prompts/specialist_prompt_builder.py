@@ -643,8 +643,8 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         body.extend(_cross_domain_block(inp))
     elif inp.scope == "freeform":
         body.extend(_freeform_block(inp))
-    if inp.bench and inp.mode == "patch":
-        body.extend(_bench_block(inp))
+    if inp.allocated_gpu_ids:
+        body.extend(_gpu_autonomy_block(inp))
     if inp.auto_retry_reason.strip():
         body.extend(_auto_retry_note_block(inp))
     return body
@@ -678,46 +678,55 @@ def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
-def _bench_block(inp: SpecialistPromptInputs) -> list[str]:
-    """In-loop micro-bench mandate appended for bench-enabled specialists
-    (``mode=patch`` & ``bench=true``). Lists the whitelisted ``bench_id``s and
-    the worktree-scoped contract; the ``run_bench`` tool executes them.
+def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
+    """On-GPU autonomy block appended for GPU specialists (those with a card
+    allocation). Frames the broad capabilities the specialist has on its own
+    leased cards and surfaces the *optional* ``rebench`` helper — none of it is
+    a mandate; the Coordinator's ``integrate_patch`` E2E gate stays the single
+    authoritative measure of truth.
 
     Args:
         inp: The specialist prompt inputs.
 
     Returns:
-        The rendered micro-bench mandate lines, or ``[]`` when no benches are
-        registered.
+        The rendered on-GPU autonomy lines.
     """
-    from ..specialist_bench import BENCH_REGISTRY, MAX_BENCH_WALL_CLOCK_SEC
-
-    if not BENCH_REGISTRY:
-        return []
-    lines = [
+    cards = ", ".join(str(g) for g in inp.allocated_gpu_ids)
+    return [
         "",
-        "### In-loop micro-bench (run_bench)",
+        "### On-GPU autonomy (your leased cards)",
         "",
-        "You have the worktree-scoped ``run_bench`` tool to micro-measure the "
-        "impact of a patch BEFORE you finalize it. Each bench runs a "
-        "whitelisted probe inside your worktree, writes under "
-        "``scratch/bench/<bench_id>/`` (destroyed with the worktree), and is "
-        f"hard-capped at {int(MAX_BENCH_WALL_CLOCK_SEC)}s. Benches never start "
-        "a serving process and never write outside the worktree.",
+        f"You exclusively own GPU card(s) [{cards}] for this task. On those "
+        "cards you are free to do whatever converges on a benched win:",
+        "- Write and run arbitrary scripts — autotune harnesses, "
+        "microbenchmarks, profilers (rocprof / torch.profiler / your own "
+        "breakdown). Example pattern (not a mandate): an offline Triton "
+        "autotune that JIT-compiles candidate configs, times them with "
+        "``torch.cuda.Event``, coordinate-descends, guards accuracy, and emits "
+        "the best config.",
+        "- Start / restart a real server on your own cards (any port that is "
+        "NOT the production serving port 8888) and benchmark it however you "
+        "see fit.",
+        "- Profile freely to get a fresh trace after a change — don't rely only "
+        "on the static roofline snapshot you were handed.",
+        "- Tune the framework's config-file levers (e.g. GEMM/attention Triton "
+        "config JSONs) — a missing/untuned config is often the single biggest "
+        "lever.",
+        "- Self-check accuracy (advisory ``max_abs_err`` / gsm8k) when you want "
+        "to — the Coordinator gate stays authoritative, so this is guidance, "
+        "not a requirement.",
         "",
-        "Allowed bench_ids:",
+        "Optional helper: a ``rebench`` convenience reuses the real Magpie "
+        "serving + benchmark path on your leased cards + a non-8888 port, so "
+        "you can get numbers directly comparable to the ``integrate_patch`` "
+        "gate in one call:",
+        "    python -m inference_optimizer.orchestrator.specialist_rebench \\",
+        "        --config <magpie.yaml> --output ./scratch/rebench "
+        "[--extra-args '<server args>']",
+        "  It prints a JSON result with ``output_throughput``. It is OPTIONAL "
+        "— you may instead write your own bench/autotune script. Throughput "
+        "does NOT have to come from rebench.",
     ]
-    for spec in BENCH_REGISTRY.values():
-        lines.append(f"- ``{spec.bench_id}`` — {spec.description}")
-    lines.extend(
-        [
-            "",
-            "run_bench is advisory: the Coordinator still owns the authoritative "
-            + "E2E benchmark and the KEEP/REVERT decision. Never self-report numeric "
-            + "speedups in ``specialist_done`` based on a micro-bench.",
-        ]
-    )
-    return lines
 
 
 def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
@@ -1497,6 +1506,12 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "  workspace or worktree) of any unified-diff patch files you",
         "  authored this round. Empty list = no patches; downstream",
         "  ``integrate_patch`` action skips when empty.",
+        "- ``artifacts_written`` lists any non-diff tuned artifacts to install",
+        "  (e.g. an autotuned config JSON) as objects ``{source, target, kind,",
+        "  description}``: ``source`` is a path inside your worktree, ``target``",
+        "  is the framework-relative install path. ``integrate_patch`` backs up",
+        "  the target, installs the artifact, runs the same E2E gate, and",
+        "  restores the backup on REVERT.",
         "- ``empty=true`` is legitimate when you have no actionable proposals;",
         "  in that case ``proposal_set=[]`` and you must put the reason in",
         "  ``summary``.",
@@ -1522,9 +1537,10 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 9 (iron rules) of the specialist prompt.
 
-    Emits the immutable capability boundary (no serving-GPU control,
-    worktree-only patches, no KB writes, allowed intents, turn cap, and
-    workspace confinement).
+    Emits the immutable capability boundary (full autonomy on the
+    specialist's own leased cards with the single production-serving boundary,
+    worktree-only patch/artifact staging, no KB writes, allowed intents, turn
+    cap, and workspace confinement).
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs (source
@@ -1535,38 +1551,46 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
     """
     workspace = inp.workspace_path or "<runs/specialist/<task_id>/>"
     if inp.allocated_gpu_ids:
+        cards = ", ".join(str(g) for g in inp.allocated_gpu_ids)
         gpu_rule = [
-            "1. You have an explicit GPU specialist allocation for this task.",
-            "   You MAY run short GPU experiments or microbenchmarks on the",
-            "   allocated visible devices only. You MUST NOT launch persistent",
-            "   serving servers, run Magpie benchmark loops, restart vLLM/SGLang,",
-            "   or control the production serving process.",
+            f"1. You EXCLUSIVELY own GPU card(s) [{cards}] for this task. On",
+            "   those cards do whatever you want: edit code, build, start/stop",
+            "   your own servers (on any port that is NOT 8888), profile,",
+            "   autotune, install tuned artifacts, run real benchmark loops.",
+            "   The ONE thing you must NOT do: touch the production serving",
+            "   process, its cards, or port 8888 — co-residing on them would",
+            "   corrupt both your measurement and production. Manage only",
+            "   processes YOU started, by their own PID/PGID.",
         ]
     else:
         gpu_rule = [
-            "1. **NEVER** touch the serving GPU (no Magpie / no benchmark / no",
-            "   server restart / no vllm or sglang process control). The",
-            "   Coordinator runs benchmarks; you only propose what to try and",
-            "   optionally author patches.",
+            "1. You have no GPU allocation for this task, so do not run GPU",
+            "   benchmarks or start servers. The ONE hard boundary that always",
+            "   holds: never touch the production serving process / its cards /",
+            "   port 8888. The Coordinator runs benchmarks; you propose what to",
+            "   try and optionally author patches.",
         ]
     return [
         "## 9. IRON RULES (Inv-5.1 / Inv-5.2 / Inv-5.3)",
         "",
         *gpu_rule,
-        "2. **You MAY** write source patches, but ONLY into your own",
-        f"   worktree at ``{workspace}/`` (a git checkout branched off",
-        "   the framework HEAD just for this task). Concretely:",
-        "   - Edit files inside the worktree.",
-        "   - ``git diff > patches/NNN_<slug>.patch`` from inside the",
-        "     worktree to produce a unified-diff patch file.",
-        "   - List patch paths in ``patches_written`` in your",
-        "     ``specialist_done`` payload (relative to the worktree).",
-        "   You **MUST NEVER** ``git apply``, ``git commit``, restart a",
-        "   server, or otherwise mutate the main ``framework_source_roots``",
-        "   directly — the orchestrator's ``integrate_patch`` action is",
-        "   the single integration point that applies your patches with",
-        "   the throughput + accuracy gate. (PR-A2, Arbor-into-Hyperloom:",
-        "   Inv-5.1 updated.)",
+        "2. **You MAY** produce changes for integration, but stage them ONLY",
+        f"   inside your own worktree at ``{workspace}/`` (a git checkout",
+        "   branched off the framework HEAD just for this task). Two output",
+        "   kinds are accepted by the orchestrator's ``integrate_patch`` gate:",
+        "   - Unified-diff patches: ``git diff > patches/NNN_<slug>.patch``",
+        "     from inside the worktree; list paths in ``patches_written``.",
+        "   - Tuned non-diff artifacts (e.g. an autotuned config JSON): write",
+        "     the file under your worktree and list it in ``artifacts_written``",
+        "     as ``{source, target, kind, description}`` (``source`` relative to",
+        "     the worktree, ``target`` the framework-relative install path).",
+        "   You **MUST NEVER** ``git apply`` / ``git commit`` against or",
+        "   otherwise mutate the main ``framework_source_roots`` directly —",
+        "   the orchestrator's ``integrate_patch`` action is the single",
+        "   integration point that applies your patches/artifacts with the",
+        "   throughput + accuracy gate. (Starting/stopping YOUR OWN servers on",
+        "   YOUR OWN leased cards per rule 1 is fine; the prohibition here is",
+        "   only about mutating the shared framework tree directly.)",
         "3. **NEVER** call ``cortex-kb`` write endpoints (propose-point /",
         "   propose-edge / propose-lesson / propose-pitfall / update-recipe)",
         "   directly. The Coordinator owns KB writes (PolicyGate R4). KB",

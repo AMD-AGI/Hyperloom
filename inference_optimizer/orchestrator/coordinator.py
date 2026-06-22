@@ -447,9 +447,17 @@ class Coordinator:
         # executors get it via ctx.extra; durable backstop for per-dispatch
         # ``base_tput`` injection.
         self.sub.shared_state = self.shared_state
+        # Serving-disjoint physics invariant (GPU_optimization_plan §0/B1): the
+        # live serving process holds the first ``serving_tp`` cards, so they are
+        # carved off the specialist pool to avoid shared-card measurement
+        # corruption. ``shared_state.tp`` is restored on resume; the ``TP`` env
+        # (exported by the CLI before construction) is the fresh-start fallback.
         self.gpu_specialist_pool = SpecialistGpuPool(
             self.db,
-            gpu_ids=resolve_gpu_specialist_devices(int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0)),
+            gpu_ids=resolve_gpu_specialist_devices(
+                int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0),
+                serving_tp=self._resolve_serving_tp(),
+            ),
         )
         # Dispatcher re-scan poll: while awaiting in-flight tasks, re-scan the
         # queue at this cadence so a queued GPU task starts the moment its lane
@@ -8006,7 +8014,7 @@ class Coordinator:
         lanes, ttl = self._registry_lanes_ttl("specialist")
         from .specialist_profile import resolve_specialist_profile
 
-        if resolve_specialist_profile(retry_params).grants_bench_tool:
+        if resolve_specialist_profile(retry_params).reserves_benchmark_lane:
             lanes = list(dict.fromkeys((*lanes, "benchmark_lane")))
 
         # Stable base key across attempts: strip any prior ``-autoretryN``
@@ -8067,11 +8075,12 @@ class Coordinator:
         from .specialist_domains import normalize_dispatch_tags
         from .specialist_profile import resolve_specialist_profile
 
-        # Bench-enabled (mode=patch & bench=true) specialists run worktree
-        # micro-benchmarks, so they must hold a GPU lease: default needs_gpu so
-        # the dispatcher routes them through the gpu_specialist_pool quota +
-        # TTL throttle (operator/LLM may still override explicitly).
-        if resolve_specialist_profile(params).grants_bench_tool:
+        # Bench-capable (mode=patch & bench=true) specialists run a real
+        # serving + benchmark loop on their own cards, so they must hold a GPU
+        # lease: default needs_gpu so the dispatcher routes them through the
+        # gpu_specialist_pool quota + TTL throttle (operator/LLM may still
+        # override explicitly).
+        if resolve_specialist_profile(params).reserves_benchmark_lane:
             params.setdefault("needs_gpu", True)
 
         domain = str(params.get("domain") or "").strip()
@@ -9833,10 +9842,17 @@ class Coordinator:
                     needs_gpu=needs_gpu,
                 )
                 if needs_gpu:
+                    # B2: default ``gpu_count`` to the serving TP so a TP-coupled
+                    # comm / decode-at-scale gap is reproducible on the real
+                    # topology (1 card can't bench it). The specialist may still
+                    # ask for fewer (single-card kernel probe) via explicit
+                    # ``gpu_count`` — that wins. Falls back to 1 when serving TP
+                    # is unknown.
+                    default_gpu_count = self._resolve_serving_tp() or 1
                     try:
-                        gpu_count = int(params.get("gpu_count", 1) or 1)
+                        gpu_count = int(params.get("gpu_count", default_gpu_count) or default_gpu_count)
                     except (TypeError, ValueError):
-                        gpu_count = 1
+                        gpu_count = default_gpu_count
                     # WS2: TTL re-sourced to the WS1 wall budget (the old
                     # ``max_turns × per_turn`` ceiling became ~1000×600 once the
                     # turn cap was lifted). Iron law: the agent's wall-budget
@@ -9951,6 +9967,26 @@ class Coordinator:
         macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         budget_min = min(base_min * (macro_cycle + 1), 240.0)
         return budget_min * 60.0
+
+    def _resolve_serving_tp(self) -> int:
+        """Resolve the live serving process's TP size (cards it holds).
+
+        Used for the serving-disjoint specialist pool (B1) and as the default
+        ``gpu_count`` for TP-coupled GPU specialists (B2). Prefers the
+        resume-safe ``shared_state.tp``; falls back to the ``TP`` env the CLI
+        exports before construction. Returns ``0`` when neither is set (the
+        legacy whole-pool / single-card behaviour).
+
+        Returns:
+            int: The serving TP size, or ``0`` when unknown.
+        """
+        tp = int(getattr(self.shared_state, "tp", 0) or 0)
+        if tp > 0:
+            return tp
+        try:
+            return max(0, int(os.environ.get("TP", "0") or 0))
+        except ValueError:
+            return 0
 
     def _gpu_lease_ttl_sec(self, floor_ttl_sec: int = 0) -> int:
         """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.

@@ -3309,7 +3309,7 @@ class SharedState:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3); compact (≤5 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
+        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3); compact (≤6 lines, incl. the ``cycle`` = macro-cycle number). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -3357,6 +3357,7 @@ class SharedState:
         allowed_line = f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
         lines = [
             f"phase     : {phase}",
+            f"cycle     : {int(getattr(self, 'macro_cycle', 0) or 0)}",
             f"entered   : {self.phase_started_ts or '(unset)'}",
             budget_line,
             allowed_line,
