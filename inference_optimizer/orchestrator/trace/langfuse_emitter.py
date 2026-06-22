@@ -37,6 +37,7 @@ from typing import Any
 from ...session_paths import (
     decision_trace_path,
     forge_steps_path,
+    gemm_tuning_steps_path,
     recipe_snapshot_audit_jsonl,
     specialist_intel_path,
     trace_dir,
@@ -393,6 +394,7 @@ class LangfuseEmitter:
             "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl rows swept
             "specialist_intel_read": 0,  # specialist_intel.jsonl rows swept
             "forge_steps_read": 0,  # forge_steps.jsonl rows swept
+            "gemm_tuning_read": 0,  # gemm_tuning.jsonl rows swept
             "errors": 0,  # swallowed send failures
         }
         self._flushed = False
@@ -720,6 +722,7 @@ class LangfuseEmitter:
             self._flush_recipe_kb_audit()
             self._flush_specialist_intel()
             self._flush_forge_steps()
+            self._flush_gemm_tuning()
             self._flush_decision_scores()
             self._close_spans()
         except Exception:  # noqa: BLE001
@@ -1009,6 +1012,38 @@ class LangfuseEmitter:
             self.record_kb_span(
                 name=name, agent="forge", output=row,
                 metadata=metadata, ts=row.get("ts"),
+            )
+
+    def _flush_gemm_tuning(self) -> None:
+        """Backfill each deterministic GEMM-tuning run as a ``gemm_tuning:*`` span.
+
+        ``run_gemm_tuning_handler`` appends one row per run to
+        ``reports/trace/gemm_tuning.jsonl`` (the tuner is a subprocess with no
+        Langfuse handle, so the parent persists the audit). Each row becomes a
+        ``gemm_tuning:<engine>`` span under the ``gemm_tuning`` agent so a trace
+        attributes the forge / geak tuner as its own source, not just folds its
+        gain into the kernel total. Read out-of-band at session end (mirrors
+        :meth:`_flush_forge_steps`); idempotent via the ``flush_session`` guard.
+        """
+        for row in _load_jsonl(gemm_tuning_steps_path(self.session_dir)):
+            self._counts["gemm_tuning_read"] += 1
+            engine = str(row.get("engine") or row.get("backend") or "unknown")
+            self.record_kb_span(
+                name=f"gemm_tuning:{engine}",
+                agent="gemm_tuning",
+                output=row,
+                metadata={
+                    "kind": "gemm_tuning",
+                    "engine": engine,
+                    "backend": row.get("backend"),
+                    "decision": row.get("decision"),
+                    "micro_decision": row.get("micro_decision"),
+                    "best_speedup": row.get("best_speedup"),
+                    "precision": row.get("precision"),
+                    "framework": row.get("framework"),
+                    "tuned_file": row.get("tuned_file"),
+                },
+                ts=row.get("ts"),
             )
 
     def _flush_decision_scores(self) -> None:
