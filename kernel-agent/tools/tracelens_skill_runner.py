@@ -9,6 +9,7 @@ so the deterministic CLI/csv fallback stays isolated.
 
 from __future__ import annotations
 
+import asyncio
 import ast
 import importlib.util
 import json
@@ -23,6 +24,37 @@ from typing import Any, Callable, Iterable
 
 DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
+
+# Per-message stream-idle timeout (seconds). The in-process Claude SDK query
+# has no client-side read timeout, so a gateway that returns a partial response
+# (stop_reason=None) and then stops pushing chunks would block forever on
+# socket.read() and freeze the whole optimizer chain (Hyperloom Sandbox-hang
+# RCA). We bound the wait for EACH next SDK message (inactivity, not total) so a
+# stalled stream aborts while a legitimately long-but-progressing analysis is
+# untouched. Aligns with forge's 300s API_TIMEOUT_MS; env-overridable.
+_DEFAULT_STREAM_IDLE_TIMEOUT_SEC = 300.0
+
+
+def _resolve_stream_idle_timeout_sec() -> float:
+    """Resolve the per-message SDK stream-idle timeout in seconds.
+
+    Reads ``HYPERLOOM_TRACELENS_STREAM_IDLE_TIMEOUT_SEC`` and falls back to
+    :data:`_DEFAULT_STREAM_IDLE_TIMEOUT_SEC`; floored at 30s. A value <= 0
+    disables the idle timeout (legacy unbounded behavior).
+
+    Returns:
+        float: The idle timeout in seconds (0 disables it).
+    """
+    raw = os.environ.get("HYPERLOOM_TRACELENS_STREAM_IDLE_TIMEOUT_SEC", "").strip()
+    if not raw:
+        return _DEFAULT_STREAM_IDLE_TIMEOUT_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_STREAM_IDLE_TIMEOUT_SEC
+    if value <= 0:
+        return 0.0
+    return max(30.0, value)
 
 # Strips a ``Kernel N:`` label prefix from a kernel-name cell piece.
 _KERNEL_LABEL_RE = re.compile(r"^\s*Kernel\s+\d+\s*:\s*", re.IGNORECASE)
@@ -516,6 +548,13 @@ async def run_tracelens_skill(
         query, options_cls = _import_sdk()
         sdk_query_factory = sdk_query_factory or query
         sdk_options_cls = sdk_options_cls or options_cls
+        # Only harden the real SDK path; tests inject fakes and skip this. The
+        # SDK spawns the claude CLI, which reads these from the process env, so a
+        # stalled gateway request aborts client-side instead of hanging forever
+        # (kept in sync with backends/_llm_stability_env.py).
+        os.environ.setdefault("API_TIMEOUT_MS", "300000")
+        os.environ.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        os.environ.setdefault("DISABLE_AUTOUPDATER", "1")
 
     system_prompt = (
         "You are a TraceLens analysis runner inside Hyperloom. Execute only "
@@ -562,8 +601,39 @@ async def run_tracelens_skill(
         transcript_fh = None
         if log:
             log(f"[claude-sdk] WARNING: cannot open transcript {transcript_path}: {exc}")
+    # Drive the SDK stream manually (instead of ``async for``) so each next
+    # message is bounded by a per-message idle timeout. The in-process SDK has
+    # no client-side read timeout, so a gateway that stalls mid-stream
+    # (stop_reason=None, no further chunks) would otherwise block forever on
+    # socket.read() and freeze the whole optimizer chain. The wait is per
+    # message (inactivity), not a total budget, so long-but-progressing runs are
+    # unaffected.
+    idle_timeout = _resolve_stream_idle_timeout_sec()
+    stream = sdk_query_factory(prompt=prompt, options=options)
+    stream_iter = stream.__aiter__() if hasattr(stream, "__aiter__") else stream
     try:
-        async for message in sdk_query_factory(prompt=prompt, options=options):
+        while True:
+            try:
+                if idle_timeout > 0:
+                    message = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout)
+                else:
+                    message = await stream_iter.__anext__()
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                # No new SDK message for ``idle_timeout`` s: the gateway stream
+                # stalled mid-response. Abort and tear the generator down so its
+                # transport/subprocess does not leak as an orphan.
+                sdk_error = f"stream idle timeout: no SDK message for {idle_timeout:.0f}s (gateway stall)"
+                if log:
+                    log(f"[claude-sdk] WARNING: {sdk_error}")
+                aclose = getattr(stream_iter, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await asyncio.wait_for(aclose(), timeout=10.0)
+                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                        pass
+                break
             if transcript_fh is not None:
                 try:
                     record = _serialize_sdk_message(message, seq=transcript_seq)

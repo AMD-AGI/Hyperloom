@@ -415,6 +415,25 @@ def test_apply_fellow_env_timeout_respects_operator_override(monkeypatch):
     assert env["API_TIMEOUT_MS"] == "60000"
 
 
+def test_llm_stability_env_helper_sets_defaults():
+    """The shared kernel-side helper sets the client-side LLM timeout knobs."""
+    import _llm_stability_env
+
+    env: dict[str, str] = {}
+    _llm_stability_env.apply_llm_stability_env(env)
+    assert env["API_TIMEOUT_MS"] == "300000"
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+
+
+def test_llm_stability_env_helper_respects_override():
+    import _llm_stability_env
+
+    env = {"API_TIMEOUT_MS": "1000"}
+    _llm_stability_env.apply_llm_stability_env(env)
+    assert env["API_TIMEOUT_MS"] == "1000"
+
+
 def _capture_cli_env(tmp_path, monkeypatch, worktree_kernel):
     """Run _run_loop_via_cli with subprocess mocked, return the child env."""
     import subprocess as _sp

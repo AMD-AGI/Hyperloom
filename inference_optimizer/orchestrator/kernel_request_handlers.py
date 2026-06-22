@@ -1046,22 +1046,35 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
         A tuple of ``(returncode, stdout, stderr)``.
     """
 
-    def _run() -> subprocess.CompletedProcess[str]:
+    def _run() -> tuple[int, str, str]:
         """Run the command synchronously in a worker thread.
 
         Copies the current environment, injects the Ray GCS address when running
         in multi-node mode, and prepends the venv ``bin`` directory to ``PATH``
         before invoking the command with output capture and the timeout.
 
+        Launches the child in its own POSIX session and, on timeout, reaps the
+        WHOLE process group so a hung grandchild (the claude CLI / oob / curl
+        holding a stalled LLM streaming socket) dies with the wrapper instead of
+        being orphaned — the Sandbox-hang RCA left such grandchildren running,
+        keeping the pod alive and the GPU idle. Mirrors ``subprocess.run``'s
+        contract: captures stdout/stderr and re-raises ``TimeoutExpired``.
+
         Returns:
-            subprocess.CompletedProcess[str]: The completed process with captured
-                text stdout/stderr.
+            tuple[int, str, str]: ``(returncode, stdout, stderr)``.
+
+        Raises:
+            subprocess.TimeoutExpired: When the command exceeds ``timeout_sec``.
         """
         env = os.environ.copy()
         from .action_executors._multi_node_env import (
             is_multi_node,
             ray_gcs_address_from_state,
             dynamo_ssh_env_from_state,
+        )
+        from .action_executors._subprocess_kill import (
+            kill_my_spawned_server,
+            new_session_kwargs,
         )
 
         if is_multi_node():
@@ -1075,16 +1088,30 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
             if addr:
                 env.setdefault("RAY_ADDRESS", addr)
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        return subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_sec,
             env=env,
+            **new_session_kwargs(),
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            # Reap the whole tree, then drain whatever partial output landed.
+            kill_my_spawned_server(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            raise
+        finally:
+            # Defense in depth: never leave a descendant of this call running.
+            kill_my_spawned_server(proc)
+        return proc.returncode, stdout or "", stderr or ""
 
-    proc = await asyncio.to_thread(_run)
-    return proc.returncode, proc.stdout or "", proc.stderr or ""
+    return await asyncio.to_thread(_run)
 
 
 def _normalize_precision(value: Any) -> str:
@@ -1520,11 +1547,20 @@ async def _run_forge_gemm_tuning(
         str(input_json),
     ]
 
-    rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
-
-    result = _parse_forge_gemm_sentinel(stdout)
-    if result is None:
-        result = _shape_tool_result(rc, stdout, stderr)
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
+        result = _parse_forge_gemm_sentinel(stdout)
+        if result is None:
+            result = _shape_tool_result(rc, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        # Reaped by the process-group kill in _run_subprocess; shape a failed
+        # result instead of letting TimeoutExpired stall the coordinator tick.
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        result = {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
+        }
 
     result.setdefault("backend", "forge")
     result.setdefault("workspace", str(workspace))
@@ -1653,8 +1689,19 @@ async def _run_geak_gemm_tuning(
         str(input_json),
     ]
 
-    rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_tuning_timeout_sec(payload))
-    result = _shape_tool_result(rc, stdout, stderr)
+    _gemm_timeout = _gemm_tuning_timeout_sec(payload)
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_timeout)
+        result = _shape_tool_result(rc, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        # Reaped by the process-group kill in _run_subprocess; shape a failed
+        # result instead of letting TimeoutExpired stall the coordinator tick.
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        result = {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {_gemm_timeout}s: {cmd_repr[:1500]}",
+        }
     result.setdefault("backend", "geak")
     result.setdefault("engine", "geak")
     result.setdefault("workspace", str(workspace))
@@ -1792,9 +1839,20 @@ async def trace_analyze_handler(
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
     _disc_started = time.monotonic()
-    rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
+        result = _shape_tool_result(rc, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        # Reaped by the process-group kill in _run_subprocess (an in-process
+        # TraceLens SDK stream that stalled is now also bounded client-side);
+        # shape a failed result instead of stalling the coordinator tick.
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        result = {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
+        }
     _disc_duration_sec = round(time.monotonic() - _disc_started, 3)
-    result = _shape_tool_result(rc, stdout, stderr)
     artifacts = result.get("artifact_paths") if isinstance(result, dict) else None
     if isinstance(artifacts, dict) and artifacts.get("kernel_candidates"):
         result["candidates_path"] = artifacts["kernel_candidates"]

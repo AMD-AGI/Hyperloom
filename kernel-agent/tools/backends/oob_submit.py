@@ -16,6 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from _llm_stability_env import apply_llm_stability_env
 from ray_runtime import (
     ensure_ray_cluster,
     isolated_compile_cache_env,
@@ -314,6 +315,13 @@ def run_via_ray(
             _cdir = _os.path.join(output_dir_str, ".cache", _sub)
             _os.makedirs(_cdir, exist_ok=True)
             _os.environ[_var] = _cdir
+        # Client-side LLM-transport timeout so a stalled gateway stream raises
+        # instead of hanging the oob child forever. Inlined (not imported) to
+        # avoid Ray-worker sys.path fragility; keep in sync with the canonical
+        # _llm_stability_env.apply_llm_stability_env.
+        _os.environ.setdefault("API_TIMEOUT_MS", "300000")
+        _os.environ.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        _os.environ.setdefault("DISABLE_AUTOUPDATER", "1")
         cmd = [
             "oob",
             "run",
@@ -434,6 +442,9 @@ def run_via_cli(
     )
     # Per-attempt compile caches (see isolated_compile_cache_env).
     child_env = isolated_compile_cache_env(output_dir)
+    # Bound the claude-code transport so a stalled gateway stream raises instead
+    # of hanging the oob child forever (see _llm_stability_env).
+    apply_llm_stability_env(child_env)
     started = time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 60, env=child_env)
