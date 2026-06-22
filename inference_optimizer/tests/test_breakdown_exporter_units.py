@@ -266,3 +266,19 @@ class TestCollectGemmTuning:
         out = col.collect_gemm_tuning(state)
         assert out["runs"][0]["engine"] == "forge"
         assert out["adopted_engine"] == "forge"
+
+    def test_forge_engine_attributed_not_defaulted_to_geak(self):
+        state = {
+            "baseline_tput": 1000.0,
+            "gemm_tuning_attempts": [
+                {
+                    "engine": "forge",
+                    "status": "ok",
+                    "decision": "KEEP",
+                    "best_speedup": 1.1,
+                },
+            ],
+        }
+        out = col.collect_gemm_tuning(state)
+        assert len(out["runs"]) == 1
+        assert out["runs"][0]["engine"] == "forge"
