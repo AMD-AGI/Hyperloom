@@ -254,6 +254,7 @@
     "last_explore": {},
     "last_gemm_tuning": {},
     "last_kernel_opt": {},
+    "last_kernel_opt_dispatch_skip": {},
     "last_profile": {},
     "last_profile_args": "",
     "last_profile_status": "",

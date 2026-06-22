@@ -70,6 +70,32 @@ def test_record_kernel_opt_empty_kernel_id_noop_on_blank_state(state: SharedStat
     assert state.kernel_opt_attempts == {}
 
 
+def test_record_kernel_opt_no_eligible_kernels_skip_is_captured(state: SharedState):
+    """An empty-queue skip is stashed as a non-failure breadcrumb."""
+    state.record_kernel_opt(
+        {
+            "status": "skipped",
+            "reason": "no_eligible_kernels",
+            "kernels_considered": 7,
+            "message": "no eligible kernels to optimize (...)",
+        }
+    )
+    skip = state.last_kernel_opt_dispatch_skip
+    assert skip["reason"] == "no_eligible_kernels"
+    assert skip["kernels_considered"] == 7
+    assert skip["ts"]
+    # A non-failure skip must not pollute the per-kernel ledgers or last_kernel_opt.
+    assert state.last_kernel_opt == {}
+    assert state.kernel_opt_attempts == {}
+    assert state.rejected_kernel_ids == []
+
+
+def test_record_kernel_opt_plain_failure_does_not_set_dispatch_skip(state: SharedState):
+    """A regular failure (no no_eligible_kernels reason) leaves dispatch-skip empty."""
+    state.record_kernel_opt({"status": "failed", "error": "missing 'kernel_id' in payload"})
+    assert state.last_kernel_opt_dispatch_skip == {}
+
+
 # Invariant 2: KEEP wins; non-KEEP never overwrites a pending KEEP
 def test_record_kernel_opt_keep_survives_later_revert(state: SharedState):
     """A later REVERT on a different kernel must not displace an un-integrated KEEP."""
