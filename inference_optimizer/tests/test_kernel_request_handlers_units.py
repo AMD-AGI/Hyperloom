@@ -270,6 +270,19 @@ class TestForgeGemmHelperCoverage:
         # Non-JSON, non-existent path string -> unusable.
         assert krh._normalize_forge_shapes_json("not_a_real_file.json", tmp_path) == ""
 
+    def test_normalize_tokens_list_and_bracketed_string(self):
+        # The production bug: tokens passed as a list or its string form.
+        assert krh._normalize_tokens([4, 8, 64]) == "4,8,64"
+        assert krh._normalize_tokens("[4, 8, 64]") == "4,8,64"
+        assert krh._normalize_tokens("[64]") == "64"
+        assert krh._normalize_tokens("4,8,64") == "4,8,64"
+
+    def test_normalize_tokens_empty_and_garbage(self):
+        assert krh._normalize_tokens(None) == ""
+        assert krh._normalize_tokens("") == ""
+        assert krh._normalize_tokens([]) == ""
+        assert krh._normalize_tokens("[abc, 16]") == "16"
+
     def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
         state = SharedState()
         state.last_trace_analyze = ["not", "a", "dict"]
