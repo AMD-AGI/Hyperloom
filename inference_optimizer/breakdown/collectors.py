@@ -4598,6 +4598,7 @@ def collect_kernel_optimization_summary(
         "rejection_breakdown",
         "unattempted_reason_breakdown",
         "failure_reason_breakdown",
+        "dispatch_skip_reason",
         "field_glossary",
     ):
         val = out.get(key)
