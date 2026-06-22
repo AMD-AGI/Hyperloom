@@ -114,6 +114,24 @@ jobs:
           python-version: '3.11'
       - name: Install requests
         run: pip install --quiet requests
+      - name: Print fixed pool labels
+        env:
+          INPUT_CANDIDATES_FILE: ${{ github.event.inputs.candidates_file || 'ci/candidates/inferencex_daily_fixed.json' }}
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, os
+          f = os.environ.get("INPUT_CANDIDATES_FILE") or "ci/candidates/inferencex_daily_fixed.json"
+          d = json.load(open(f))
+          cs = d.get("candidates", [])
+          print(f"### Fixed daily pool: `{f}` — {len(cs)} models")
+          print()
+          print("| idx | is_top | precision | framework | label | repo_id |")
+          print("|----:|:------:|:----------|:----------|:------|:--------|")
+          for c in cs:
+              print(f"| {c.get('pool_index','')} | {c.get('is_top','')} | "
+                    f"{c.get('precision','')} | {c.get('framework','')} | "
+                    f"{c.get('label','')} | {c.get('repo_id','')} |")
+          PY
       - name: Generate matrix
         id: matrix
         working-directory: ci
