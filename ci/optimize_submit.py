@@ -1819,6 +1819,7 @@ def process_model(
             model_dir=os.path.join(
                 os.environ.get("CI_MODELS_DIR", "/wekafs/models"),
                 repo_id.replace("/", "-")),
+            whitelist=model_compat.load_whitelist(),
         )
         if compat:
             reason, detail = compat
