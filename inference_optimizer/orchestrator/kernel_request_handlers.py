@@ -1527,6 +1527,11 @@ async def _run_forge_gemm_tuning(
         result = _shape_tool_result(rc, stdout, stderr)
 
     result.setdefault("backend", "forge")
+    # Tag the tuning engine so the breakdown's ``collect_gemm_tuning`` attributes
+    # this run to forge instead of falling back to its ``geak`` default (the
+    # GEAK path sets ``engine`` too). Without this, forge runs recorded into
+    # ``gemm_tuning_attempts`` are mis-counted as the GEAK source.
+    result.setdefault("engine", "forge")
     result.setdefault("workspace", str(workspace))
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
@@ -1688,8 +1693,74 @@ async def run_gemm_tuning_handler(
     log.info("run_gemm_tuning: backend=%s", backend)
 
     if backend == "forge":
-        return await _run_forge_gemm_tuning(payload, session_dir=session_dir)
-    return await _run_geak_gemm_tuning(payload, session_dir=session_dir)
+        result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
+    else:
+        result = await _run_geak_gemm_tuning(payload, session_dir=session_dir)
+    # Full-trace: record this run as a gemm_tuning audit row, backfilled into the
+    # trace as a ``gemm_tuning:<engine>`` span so the deterministic tuner is
+    # attributed to its own source. Best-effort; never breaks the run.
+    _trace_gemm_tuning_run(result, session_dir=session_dir)
+    return result
+
+
+def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
+    """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run.
+
+    Mirrors :func:`_trace_kernel_attempt_steps`: distils the run result into a
+    compact source-attribution row (engine, decision, speedup, per-tuner
+    summary) and appends it to ``reports/trace/gemm_tuning.jsonl``. The Langfuse
+    emitter backfills it as a ``gemm_tuning:<engine>`` span under the
+    ``gemm_tuning`` agent. Best-effort end to end: any read/serialise/write
+    failure degrades to a debug log and is swallowed.
+
+    Args:
+        result: The GEMM-tuning handler result envelope.
+        session_dir: Session directory the audit row is appended under.
+    """
+    if not isinstance(result, dict):
+        return
+    from datetime import datetime, timezone
+
+    from ..session_paths import gemm_tuning_steps_path
+
+    engine = str(result.get("engine") or result.get("backend") or "").strip().lower() or "unknown"
+    tuners: list[dict[str, Any]] = []
+    for t in result.get("tuners_run") or []:
+        if not isinstance(t, dict):
+            continue
+        tuners.append(
+            {
+                "tuner": t.get("tuner") or t.get("name"),
+                "best_micro_speedup": t.get("best_micro_speedup"),
+                "kept": t.get("kept"),
+            }
+        )
+    row = {
+        "kind": "gemm_tuning",
+        "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        "engine": engine,
+        "backend": result.get("backend"),
+        "status": result.get("status"),
+        "decision": result.get("decision"),
+        "micro_decision": result.get("micro_decision"),
+        "best_speedup": result.get("best_speedup"),
+        "precision": result.get("precision"),
+        "framework": result.get("framework"),
+        "gpu_type": result.get("gpu_type"),
+        "tuned_file": result.get("tuned_file"),
+        "workspace": result.get("workspace"),
+        "requires_e2e_validation": result.get("requires_e2e_validation"),
+        "tuners_run": tuners,
+        "error_class": result.get("error_class"),
+    }
+    row = {k: v for k, v in row.items() if v is not None}
+    try:
+        path = gemm_tuning_steps_path(session_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError:
+        log.debug("full-trace: gemm_tuning audit append failed", exc_info=True)
 
 
 async def trace_analyze_handler(
