@@ -36,6 +36,7 @@ def _build_fixture(sd: Path) -> None:
             "sandbox_user_id": "hai.song@core42.ai",
             "created_at_utc": "2026-05-14T07:10:00+00:00",
             "session_dir": str(sd),
+            "user_data_path": "/hyperloom/users/abcd1234hash",
             "model_path": "/wekafs/models/DeepSeek-R1",
             "model_name": "DeepSeek-R1",
             "framework": "sglang",
@@ -435,6 +436,23 @@ def test_session_metadata(fixture_session: Path) -> None:
     assert s["sandbox_user_id"] == "hai.song@core42.ai"
     assert s["stop_reason"] == "target_reached"
     assert s["max_minutes"] == 180
+    # USER_DATA_PATH root carried through from the manifest so a trace-based
+    # consumer can locate the on-disk artifacts.
+    assert s["user_data_path"] == "/hyperloom/users/abcd1234hash"
+
+
+def test_session_user_data_path_env_fallback(fixture_session: Path, monkeypatch) -> None:
+    """When the manifest predates the field, the session section falls back to
+    the in-process ``USER_DATA_PATH`` env so the SBD still carries the root."""
+    import json
+
+    mpath = fixture_session / "manifest.json"
+    m = json.loads(mpath.read_text(encoding="utf-8"))
+    m.pop("user_data_path", None)
+    mpath.write_text(json.dumps(m), encoding="utf-8")
+    monkeypatch.setenv("USER_DATA_PATH", "/hyperloom/users/env_fallback")
+    s = build(fixture_session)["session"]
+    assert s["user_data_path"] == "/hyperloom/users/env_fallback"
 
 
 def test_session_meta_emitted_without_ci(fixture_session: Path) -> None:
