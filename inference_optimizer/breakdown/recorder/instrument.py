@@ -597,6 +597,9 @@ _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
+    # GEAK-e2e (PerfSkills) variant; distinct provenance from the generic geak
+    # backend but resolved the same way (its repo SHA under $GEAK_ROOT).
+    "geak_v4": {"root_env": "GEAK_ROOT", "version": "git_short"},
     "mini": {"root_env": "GEAK_ROOT", "version": "git_short"},
     "geak-gaagent": {"root_env": "GEAK_ROOT", "version": "git_short"},
     # forge (Kernel-Forge autonomous loop) is its own backend; it locates its

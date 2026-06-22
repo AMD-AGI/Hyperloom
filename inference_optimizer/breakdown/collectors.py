@@ -6370,6 +6370,94 @@ def _write_decision_trace_jsonl(
         warnings.append(f"decision_trace: failed to write {target}: {exc!r}")
 
 
+def _perfskills_accepted_kernels_from_journey(
+    result: dict[str, Any],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Derive the accepted (KEEP/integrated) kernels from ``kernel_journey.json``.
+
+    GEAK-e2e's ``result.json`` carries the aggregate win but can ship an empty
+    ``accepted_kernels`` (e.g. a recovered/intermediate flush after a budget
+    SIGTERM). The sibling ``kernel_journey.json`` still records the per-kernel
+    end-to-end outcome, so this reads it and projects each kernel whose ``e2e``
+    sub-object was integrated (or decided ``KEEP``/``ADOPTED``) into a compact
+    accepted-kernel descriptor. Best-effort: a missing/partial file yields ``[]``
+    and never raises.
+
+    Args:
+        result (dict[str, Any]): The normalized ``result.json`` (carries
+            ``kernel_journey_path`` / ``eval_dir`` used to locate the journey).
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        list[dict[str, Any]]: The accepted-kernel descriptors, or ``[]`` when the
+            journey is absent, unreadable, or holds no integrated kernel.
+    """
+    kj_path = str(result.get("kernel_journey_path") or "")
+    if not kj_path:
+        eval_dir = str(result.get("eval_dir") or "")
+        if eval_dir:
+            kj_path = str(Path(eval_dir) / "kernel_journey.json")
+    if not kj_path:
+        return []
+    try:
+        if not Path(kj_path).is_file():
+            return []
+        journey = json.loads(Path(kj_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        warnings.append(f"perfskills: kernel_journey read failed for backfill: {exc}")
+        return []
+    if not isinstance(journey, dict):
+        return []
+
+    accepted: list[dict[str, Any]] = []
+    for k in journey.get("kernels") or []:
+        if not isinstance(k, dict):
+            continue
+        e2e = k.get("e2e")
+        if not isinstance(e2e, dict):
+            continue
+        decision = str(e2e.get("decision") or "").strip().upper()
+        integrated = e2e.get("integrated") is True
+        if not (integrated or decision in ("KEEP", "ADOPTED")):
+            continue
+        kid = str(k.get("kernel_id") or "")
+        if not kid:
+            continue
+        br = k.get("backend_result") if isinstance(k.get("backend_result"), dict) else {}
+        verification = br.get("verification") if isinstance(br.get("verification"), dict) else {}
+        dispatch = k.get("dispatch") if isinstance(k.get("dispatch"), dict) else {}
+        backend = str(
+            verification.get("best_backend")
+            or (dispatch.get("backends") or [None])[0]
+            or ""
+        )
+        # The GEAK-e2e pipeline's GEAK is the distinct ``geak_v4`` variant; the
+        # raw kernel_journey.json labels it plainly ``geak``. Relabel so the
+        # backfilled attribution matches the assembled kernel_journey / versions
+        # map (which the coordinator records under ``geak_v4``).
+        if backend.lower() == "geak":
+            backend = "geak_v4"
+        accepted.append(
+            {
+                "kernel_id": kid,
+                "name": str(k.get("name") or kid),
+                "gpu_pct": _to_float(k.get("gpu_pct")),
+                "micro_speedup": _to_float(
+                    k.get("micro_speedup") or verification.get("micro_speedup")
+                ),
+                "e2e_gain_pct": _to_float(e2e.get("e2e_gain_pct")),
+                "validated": e2e.get("validated") if isinstance(e2e.get("validated"), bool) else None,
+                "decision": decision or "KEEP",
+                "backend": backend,
+                "target_file": e2e.get("target_file"),
+                "extra_server_args": str(e2e.get("extra_server_args") or ""),
+                "source": "kernel_journey_backfill",
+            }
+        )
+    return accepted
+
+
 def collect_perfskills(
     session_dir: Path,
     state: dict[str, Any],
@@ -6449,6 +6537,20 @@ def collect_perfskills(
     if not isinstance(accepted_heads, list):
         accepted_heads = []
 
+    # Back-fill per-kernel attribution when ``result.json`` shipped the aggregate
+    # win but an empty ``accepted_kernels`` (e.g. a recovered/intermediate flush
+    # after a budget SIGTERM). The sibling ``kernel_journey.json`` still records
+    # the integrated/KEEP kernels, so derive them here to keep the perfskills
+    # section's ``accepted_kernels`` / ``kernels_optimized`` consistent with the
+    # assembled ``kernel_journey``. Only fires on a successful run with an empty
+    # list; a producer-populated list is always preserved verbatim.
+    accepted_kernels_source = "result" if accepted_kernels else None
+    if not accepted_kernels and status == "ok":
+        backfilled = _perfskills_accepted_kernels_from_journey(result, warnings)
+        if backfilled:
+            accepted_kernels = backfilled
+            accepted_kernels_source = "kernel_journey_backfill"
+
     section: dict[str, Any] = {
         "engaged": True,
         "status": status,
@@ -6469,6 +6571,10 @@ def collect_perfskills(
         "output_parity": result.get("output_parity"),
         # What the optimizer actually changed (per-kernel / head / config).
         "accepted_kernels": accepted_kernels,
+        # Provenance of ``accepted_kernels``: ``result`` (producer-populated),
+        # ``kernel_journey_backfill`` (derived from the journey on an empty
+        # result list), or ``None`` (no accepted kernels at all).
+        "accepted_kernels_source": accepted_kernels_source,
         "accepted_heads": accepted_heads,
         "kernels_optimized": len(accepted_kernels),
         "accepted_config": dict(result.get("accepted_config") or {}),
