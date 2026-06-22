@@ -64,7 +64,7 @@ jobs:
       # Submit only to the hyperloom workspace.
       SUBMIT_WORKSPACES: 'core42-hyperloom'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: One-shot date guard
         id: guard
