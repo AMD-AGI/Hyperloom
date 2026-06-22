@@ -108,44 +108,123 @@ def test_flashinfer_backend():
                     "attn_implementation": "flashinfer"}) == "attn_backend"
 
 
-def test_minimax_m1_is_filtered_for_amd_rocm():
-    assert _reason({"architectures": ["MiniMaxM1ForCausalLM"],
-                    "model_type": "minimax_m1",
-                    "max_position_embeddings": 80000}) == "amd_unsupported_arch"
+# ── unsupported serving registry (config-based, GPU-independent) ────────────
 
 
-def test_bailing_ling_models_are_filtered():
-    assert _reason({"architectures": ["BailingMoeV2ForCausalLM"],
-                    "model_type": "bailing_moe",
-                    "max_position_embeddings": 32768}) == "unrecognized_arch"
-    assert _reason({"architectures": ["BailingMoeV2_5ForCausalLM"],
-                    "model_type": "bailing_hybrid",
-                    "max_position_embeddings": 262144}) == "unrecognized_arch"
+def test_unsupported_arch_glm_moe_dsa_by_model_type():
+    assert _reason({"architectures": ["GlmMoeDsaForCausalLM"],
+                    "model_type": "glm_moe_dsa",
+                    "max_position_embeddings": 131072}) == "unsupported_arch"
 
 
-def test_ovis_next_is_filtered():
-    assert _reason({"architectures": ["Ovis2_6_NextForCausalLM"],
-                    "model_type": "ovis2_6_next",
-                    "max_position_embeddings": 32768}) == "unrecognized_arch"
+def test_unsupported_arch_deepseek_v32_by_model_type():
+    assert _reason({"architectures": ["DeepseekV32ForCausalLM"],
+                    "model_type": "deepseek_v32", "max_position_embeddings": 163840,
+                    "quantization_config": {"quant_method": "fp8"}}) == "unsupported_arch"
 
 
-def test_supported_edge_families_are_not_newly_filtered():
-    # These families are intentionally left out of this CI filter update; they
-    # need separate runtime evidence before being classified as unsupported.
-    for cfg in (
-        {"architectures": ["DeepseekV32ForCausalLM"], "model_type": "deepseek_v32",
-         "max_position_embeddings": 163840},
-        {"architectures": ["DeepseekV3ForCausalLM"], "model_type": "kimi_k2",
-         "max_position_embeddings": 131072,
-         "auto_map": {"AutoConfig": "configuration_deepseek.DeepseekV3Config"}},
-        {"architectures": ["DeepseekV4ForCausalLM"], "model_type": "deepseek_v4",
-         "max_position_embeddings": 1048576},
-        {"architectures": ["GlmMoeDsaForCausalLM"], "model_type": "glm_moe_dsa",
-         "max_position_embeddings": 131072},
-        {"architectures": ["MiMoV2FlashForCausalLM"], "model_type": "mimo_v2_flash",
-         "max_position_embeddings": 131072},
-    ):
-        assert _reason(cfg) is None
+def test_unsupported_arch_matched_by_architecture_fallback():
+    # No/blank model_type -> architecture fallback still catches it.
+    assert _reason({"architectures": ["GlmMoeDsaForCausalLM"],
+                    "max_position_embeddings": 131072}) == "unsupported_arch"
+
+
+def test_unsupported_arch_is_gpu_independent():
+    # Registry rules are config-based: hit on any gpu_type and with none.
+    cfg = {"architectures": ["DeepseekV32ForCausalLM"], "model_type": "deepseek_v32",
+           "max_position_embeddings": 163840}
+    assert _reason(cfg, gpu_type="MI300X") == "unsupported_arch"
+    assert _reason(cfg, gpu_type="mi355x") == "unsupported_arch"
+    assert _reason(cfg) == "unsupported_arch"
+
+
+def test_supported_glm4_moe_and_deepseek_v3_are_kept():
+    # GLM-4.7 (glm4_moe) and DeepSeek-V3 (deepseek_v3) must NOT match the
+    # unsupported-registry rule.
+    assert _reason({"architectures": ["Glm4MoeForCausalLM"], "model_type": "glm4_moe",
+                    "max_position_embeddings": 131072}) is None
+    assert _reason({"architectures": ["DeepseekV3ForCausalLM"], "model_type": "deepseek_v3",
+                    "max_position_embeddings": 163840}) is None
+
+
+def test_deepseek_v4_flash_registry_is_kept():
+    # V4-Flash shares DeepseekV4ForCausalLM with the full V4 but is supported;
+    # the registry rule must not list deepseek_v4 (full V4 is name-filtered on
+    # MI300X instead).
+    assert _reason({"architectures": ["DeepseekV4ForCausalLM"], "model_type": "deepseek_v4",
+                    "max_position_embeddings": 163840,
+                    "quantization_config": {"quant_method": "fp8"}}) is None
+
+
+# ── MI300X gpu-specific rules (gpu_type=MI300X only) ────────────────────────
+
+
+_BASE_CFG = {"architectures": ["LlamaForCausalLM"], "max_position_embeddings": 8192}
+
+
+def _fp4_cfg(tag, *, field="quant_method"):
+    cfg = dict(_BASE_CFG)
+    cfg["quantization_config"] = {field: tag}
+    return cfg
+
+
+@pytest.mark.parametrize("tag", ["mxfp4", "MXFP4", "nvfp4"])
+def test_fp4_unsupported_on_mi300x(tag):
+    assert _reason(_fp4_cfg(tag), gpu_type="MI300X") == "fp4_unsupported"
+
+
+@pytest.mark.parametrize("gpu", ["mi355x", "MI355X", "mi325x"])
+def test_fp4_kept_on_non_mi300x(gpu):
+    assert _reason(_fp4_cfg("mxfp4"), gpu_type=gpu) is None
+
+
+def test_fp4_kept_without_gpu_type():
+    # Backward-compatible default: no gpu_type -> gpu rules disabled.
+    assert _reason(_fp4_cfg("mxfp4")) is None
+
+
+def test_fp8_kept_on_mi300x():
+    assert _reason(_fp4_cfg("fp8"), gpu_type="MI300X") is None
+
+
+@pytest.mark.parametrize("repo", [
+    "deepseek-ai/DeepSeek-V4",
+    "deepseek-ai/DeepSeek-V4-0501",
+    "deepseek-ai/DeepSeek-V4.1",
+    "zai-org/GLM-5",
+    "zai-org/GLM-5.1",
+    "zai-org/GLM5-Air",
+])
+def test_unsupported_model_on_mi300x(repo):
+    assert _reason(_BASE_CFG, repo=repo, gpu_type="MI300X") == "mi300x_unsupported_model"
+
+
+@pytest.mark.parametrize("repo", [
+    "deepseek-ai/DeepSeek-V4-Flash",   # explicitly exempt
+    "deepseek-ai/DeepSeek-V3.2",
+    "deepseek-ai/DeepSeek-Prover-V2-671B",
+    "zai-org/GLM-4.7-FP8",             # GLM-4.7 must not match GLM-5
+    "zai-org/GLM-512B",                # digit-guard: GLM-51x is not GLM-5
+    "meta-llama/Llama-3.1-8B-Instruct",
+])
+def test_model_kept_on_mi300x(repo):
+    assert _reason(_BASE_CFG, repo=repo, gpu_type="MI300X") is None
+
+
+def test_unsupported_model_kept_on_non_mi300x():
+    # DeepSeek-V4 / GLM-5 run fine on MI355X; rule is MI300X-only.
+    assert _reason(_BASE_CFG, repo="deepseek-ai/DeepSeek-V4", gpu_type="mi355x") is None
+    assert _reason(_BASE_CFG, repo="zai-org/GLM-5", gpu_type="mi355x") is None
+
+
+def test_unsupported_model_kept_without_gpu_type():
+    assert _reason(_BASE_CFG, repo="deepseek-ai/DeepSeek-V4") is None
+
+
+def test_v4_flash_exempt_even_without_whitelist():
+    # The allow-regex protects V4-Flash on any path, not just the whitelist.
+    assert model_compat.mi300x_blocked_model("deepseek-ai/DeepSeek-V4-Flash") == ""
+    assert model_compat.mi300x_blocked_model("deepseek-ai/DeepSeek-V4") == "DeepSeek-V4"
 
 
 def test_normal_model_is_kept():
