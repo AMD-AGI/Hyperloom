@@ -6432,6 +6432,12 @@ def _perfskills_accepted_kernels_from_journey(
             or (dispatch.get("backends") or [None])[0]
             or ""
         )
+        # The GEAK-e2e pipeline's GEAK is the distinct ``geak_v4`` variant; the
+        # raw kernel_journey.json labels it plainly ``geak``. Relabel so the
+        # backfilled attribution matches the assembled kernel_journey / versions
+        # map (which the coordinator records under ``geak_v4``).
+        if backend.lower() == "geak":
+            backend = "geak_v4"
         accepted.append(
             {
                 "kernel_id": kid,

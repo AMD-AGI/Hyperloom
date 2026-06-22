@@ -147,6 +147,69 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
 )
 _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome")
 
+# The GEAK used by the GEAK-e2e (PerfSkills) whole-pipeline optimizer is a
+# distinct variant from the kernel-agent's generic per-kernel ``geak`` backend.
+# Its kernel_journey.json labels everything plainly ``geak`` (versions key,
+# dispatch backends, attempt backend, verification.best_backend), which would
+# collide with — and be indistinguishable from — the generic ``geak`` lane in
+# ``session_breakdown.json`` (the ``versions`` map is keyed by tool name, last
+# write wins). We relabel it to ``geak_v4`` on the way into the breakdown so SBD
+# and trace keep the two provenances separate. The raw interface file is left
+# untouched.
+PERFSKILLS_GEAK_BACKEND: str = "geak_v4"
+
+
+def _relabel_perfskills_geak_journey(journey: dict[str, Any]) -> None:
+    """Relabel the PerfSkills GEAK-e2e ``geak`` provenance to ``geak_v4`` in place.
+
+    Rewrites every ``geak`` token the GEAK-e2e ``kernel_journey.json`` carries
+    (the ``versions`` key, each kernel's ``dispatch.backends`` and
+    ``backend_result`` attempt/verification backends, and the discovery
+    ``recommended_backends``) to :data:`PERFSKILLS_GEAK_BACKEND`, so the
+    assembled breakdown never conflates it with the kernel-agent's generic
+    ``geak`` lane. Best-effort and structure-preserving: unknown shapes are
+    skipped, non-``geak`` tokens are left untouched.
+
+    Args:
+        journey (dict[str, Any]): the parsed GEAK-e2e ``kernel_journey.json``
+            (mutated in place).
+    """
+    def _swap(name: Any) -> Any:
+        return PERFSKILLS_GEAK_BACKEND if str(name or "").lower() == "geak" else name
+
+    def _swap_list(values: Any) -> list[Any]:
+        return [_swap(v) for v in values] if isinstance(values, list) else values
+
+    # Top-level ``versions`` map: re-key geak -> geak_v4 and fix its ``tool``.
+    versions = journey.get("versions")
+    if isinstance(versions, dict) and "geak" in versions:
+        meta = versions.pop("geak")
+        if isinstance(meta, dict):
+            meta["tool"] = PERFSKILLS_GEAK_BACKEND
+        versions[PERFSKILLS_GEAK_BACKEND] = meta
+
+    for run in journey.get("discovery_runs") or []:
+        if not isinstance(run, dict):
+            continue
+        for hk in run.get("hot_kernels") or []:
+            if isinstance(hk, dict) and "recommended_backends" in hk:
+                hk["recommended_backends"] = _swap_list(hk.get("recommended_backends"))
+
+    for k in journey.get("kernels") or []:
+        if not isinstance(k, dict):
+            continue
+        disp = k.get("dispatch")
+        if isinstance(disp, dict) and "backends" in disp:
+            disp["backends"] = _swap_list(disp.get("backends"))
+        br = k.get("backend_result")
+        if isinstance(br, dict):
+            for att in br.get("attempts") or []:
+                if isinstance(att, dict) and "backend" in att:
+                    att["backend"] = _swap(att.get("backend"))
+            verification = br.get("verification")
+            if isinstance(verification, dict) and "best_backend" in verification:
+                verification["best_backend"] = _swap(verification.get("best_backend"))
+
 
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
     """Return ``d[k]`` for the first ``k`` in ``keys`` present + non-None.
@@ -3988,6 +4051,12 @@ class Coordinator:
         if not isinstance(journey, dict):
             return
 
+        # The GEAK-e2e pipeline's GEAK is a distinct variant ("geak_v4") from
+        # the kernel-agent's generic ``geak`` backend. Relabel it before replay
+        # so SBD/trace (versions map, kernel_journey backend lanes) never
+        # conflate the two provenances. See ``_relabel_perfskills_geak_journey``.
+        _relabel_perfskills_geak_journey(journey)
+
         from ..breakdown.recorder import instrument
 
         sdir = self.session_dir
@@ -3995,8 +4064,9 @@ class Coordinator:
         # Stage 1: replay GEAK-e2e's discovery substream (schema §3) so the
         # assembler backfills each kernel's discovery-sourced fields
         # (name/gpu_pct/bound_type/source_file). GEAK-e2e profiles via rocprofv3,
-        # not tracelens, so the route is ``bypass``; ``tool="geak"`` keeps the
-        # version provenance under geak instead of minting an empty bypass entry.
+        # not tracelens, so the route is ``bypass``; ``tool=geak_v4`` keeps the
+        # version provenance under the GEAK-e2e variant instead of minting an
+        # empty bypass entry (and apart from the generic ``geak`` lane).
         for run in (journey.get("discovery_runs") or []):
             if not isinstance(run, dict):
                 continue
@@ -4007,7 +4077,7 @@ class Coordinator:
                     status=str(run.get("status") or "success"),
                     hot_kernels=list(run.get("hot_kernels") or []),
                     scan=run.get("scan") if isinstance(run.get("scan"), dict) else None,
-                    tool="geak",
+                    tool=PERFSKILLS_GEAK_BACKEND,
                 )
             except Exception:  # noqa: BLE001
                 log.debug("perfskills kernel_journey discovery replay failed",

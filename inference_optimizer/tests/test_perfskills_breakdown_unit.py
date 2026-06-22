@@ -166,7 +166,8 @@ def test_collect_perfskills_backfills_accepted_kernels_from_journey(tmp_path: Pa
     only = out["accepted_kernels"][0]
     assert only["kernel_id"] == "fused_moe_kernel_gptq_awq"
     assert only["decision"] == "KEEP"
-    assert only["backend"] == "geak"
+    # The GEAK-e2e GEAK is relabeled to the distinct geak_v4 variant.
+    assert only["backend"] == "geak_v4"
     assert only["e2e_gain_pct"] == 16.049
     assert only["micro_speedup"] == 1.5902
     assert only["source"] == "kernel_journey_backfill"
