@@ -1422,6 +1422,85 @@ def _resolve_forge_shapes(state, session_dir: Path) -> str:
     return ""
 
 
+# Map the resolved (precision, quant_type) to the aiter untuned-GEMM CSV that
+# the specialist phase already records under each worktree. fp8 "auto" resolves
+# to blockscale to match forge's own _resolve_quant_type default.
+_FORGE_UNTUNED_CSV_BY_QUANT: dict[str, str] = {
+    "auto": "a8w8_blockscale_untuned_gemm.csv",
+    "blockscale": "a8w8_blockscale_untuned_gemm.csv",
+    "per_token": "a8w8_untuned_gemm.csv",
+    "per_tensor": "a8w8_untuned_gemm.csv",
+    "bpreshuffle": "a8w8_bpreshuffle_untuned_gemm.csv",
+    "fp4": "a4w4_blockscale_untuned_gemm.csv",
+    "mxfp4": "a4w4_blockscale_untuned_gemm.csv",
+}
+
+
+def _csv_has_data_rows(path: Path) -> bool:
+    """Return True when ``path`` is a CSV carrying at least one data row.
+
+    The aiter recorder leaves header-only or empty files for quant types the
+    server never exercised; those must not be passed to forge as a real shape
+    source.
+    """
+    try:
+        with path.open(encoding="utf-8", errors="replace") as f:
+            header = f.readline()
+            if "M" not in header.upper():
+                return False
+            for line in f:
+                if line.strip():
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: str) -> str:
+    """Find an aiter untuned-GEMM CSV recorded by the specialist phase.
+
+    Dense fp8/fp4 forge tuners (a8w8*/a4w4*) skip themselves unless real GEMM
+    shapes are supplied. Hyperloom's specialist runs already write these shapes
+    to ``runs/specialist/<hash>/worktree/aiter/configs/*_untuned_gemm.csv`` in
+    forge's ``M,N,K`` format, but the orchestrator never wired them in -- so the
+    overwhelming majority of fp8 sglang sessions were skipped. This resolver
+    picks the newest non-empty CSV matching the resolved quant type.
+
+    Returns the CSV path, or "" when none is available (bf16 derives shapes from
+    config.json and needs no CSV).
+    """
+    precision = (precision or "").strip().lower()
+    quant_type = (quant_type or "").strip().lower()
+
+    fname = _FORGE_UNTUNED_CSV_BY_QUANT.get(quant_type)
+    if fname is None:
+        if precision == "fp8":
+            fname = "a8w8_blockscale_untuned_gemm.csv"
+        elif precision in ("fp4", "mxfp4"):
+            fname = "a4w4_blockscale_untuned_gemm.csv"
+        else:
+            return ""
+
+    specialist_dir = session_dir / "runs" / "specialist"
+    if not specialist_dir.is_dir():
+        return ""
+
+    best: Path | None = None
+    best_mtime = -1.0
+    for csv_path in specialist_dir.glob(f"*/worktree/aiter/configs/{fname}"):
+        if not _csv_has_data_rows(csv_path):
+            continue
+        try:
+            mtime = csv_path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best = csv_path
+
+    return str(best) if best is not None else ""
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -1484,6 +1563,13 @@ async def _run_forge_gemm_tuning(
     if not shapes_json:
         shapes_json = _resolve_forge_shapes(state, session_dir)
 
+    # Dense fp8/fp4 tuners need real GEMM shapes. When TraceLens exposes no
+    # shapes JSON, fall back to the aiter untuned-GEMM CSVs the specialist phase
+    # already recorded; without this the dense tuner skips itself.
+    untuned_csv = str(payload.get("untuned_csv") or "").strip()
+    if not untuned_csv and not shapes_json:
+        untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type)
+
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     input_payload = {
@@ -1502,7 +1588,7 @@ async def _run_forge_gemm_tuning(
         "global_timeout": timeout,
         "skip_gpu_check": True,
         "tokens": tokens,
-        "untuned_csv": str(payload.get("untuned_csv") or ""),
+        "untuned_csv": untuned_csv,
         "shapes_json": shapes_json,
         "tunableop_input": str(payload.get("tunableop_input") or ""),
         "kernel_signature_log": kernel_sig_log,
@@ -1527,6 +1613,9 @@ async def _run_forge_gemm_tuning(
         result = _shape_tool_result(rc, stdout, stderr)
 
     result.setdefault("backend", "forge")
+    # Stamp the engine label too: the breakdown's gemm_tuning collector keys off
+    # ``engine`` and would otherwise default the forge lane to ``geak``.
+    result.setdefault("engine", "forge")
     result.setdefault("workspace", str(workspace))
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
