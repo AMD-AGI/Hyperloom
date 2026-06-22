@@ -1888,6 +1888,37 @@ async def trace_analyze_handler(
     return result
 
 
+def _exists_with_retry(
+    path: str | Path,
+    *,
+    attempts: int = 5,
+    delay_sec: float = 0.5,
+) -> bool:
+    """Check ``path`` existence, retrying briefly to absorb storage latency.
+
+    On shared/network filesystems (e.g. wekafs) a file that was just written can
+    take a moment to become visible to another client, so a single
+    :meth:`Path.exists` immediately after the write may spuriously report
+    missing. Retry a handful of times with a short pause before giving up.
+
+    Args:
+        path: Filesystem path to check.
+        attempts: Total number of existence checks to perform (>= 1).
+        delay_sec: Seconds to sleep between checks.
+
+    Returns:
+        ``True`` as soon as the path is visible, else ``False`` after all
+        attempts are exhausted.
+    """
+    target = Path(path)
+    for attempt in range(max(1, attempts)):
+        if target.exists():
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_sec)
+    return False
+
+
 def _validate_trace_analyze_inputs(
     payload: dict,
     *,
@@ -1904,7 +1935,7 @@ def _validate_trace_analyze_inputs(
         else ``None``.
     """
     candidates_path = str(payload.get("candidates_path") or "").strip()
-    if candidates_path and not Path(candidates_path).exists():
+    if candidates_path and not _exists_with_retry(candidates_path):
         return {
             "status": "failed",
             "error_class": "missing_candidates_artifact",
