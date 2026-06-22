@@ -303,7 +303,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 20,
+      "pool_index": 19,
       "label": "DeepSeek-V3",
       "repo_id": "deepseek-ai/DeepSeek-V3",
       "framework": "sglang",
@@ -317,7 +317,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 21,
+      "pool_index": 20,
       "label": "DeepSeek-V3-0324",
       "repo_id": "deepseek-ai/DeepSeek-V3-0324",
       "framework": "sglang",
@@ -331,7 +331,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 22,
+      "pool_index": 21,
       "label": "DeepSeek-V3.1",
       "repo_id": "deepseek-ai/DeepSeek-V3.1",
       "framework": "sglang",
@@ -345,7 +345,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 23,
+      "pool_index": 22,
       "label": "DeepSeek-V3.1-Terminus",
       "repo_id": "deepseek-ai/DeepSeek-V3.1-Terminus",
       "framework": "sglang",
@@ -359,7 +359,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 24,
+      "pool_index": 23,
       "label": "DeepSeek-Prover-V2-671B",
       "repo_id": "deepseek-ai/DeepSeek-Prover-V2-671B",
       "framework": "sglang",
@@ -373,7 +373,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 25,
+      "pool_index": 24,
       "label": "Ling-2.6-1T",
       "repo_id": "inclusionAI/Ling-2.6-1T",
       "framework": "sglang",
@@ -387,7 +387,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 26,
+      "pool_index": 25,
       "label": "Qwen3-Coder-480B-A35B-Instruct",
       "repo_id": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
       "framework": "vllm",
@@ -401,7 +401,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 27,
+      "pool_index": 26,
       "label": "MiniMax-M1-80k",
       "repo_id": "MiniMaxAI/MiniMax-M1-80k",
       "framework": "sglang",
@@ -415,7 +415,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 28,
+      "pool_index": 27,
       "label": "DeepSeek-V4-Pro",
       "repo_id": "deepseek-ai/DeepSeek-V4-Pro",
       "framework": "sglang",
@@ -429,7 +429,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 29,
+      "pool_index": 28,
       "label": "Trinity-Large-Thinking",
       "repo_id": "arcee-ai/Trinity-Large-Thinking",
       "framework": "vllm",
@@ -443,7 +443,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 30,
+      "pool_index": 29,
       "label": "GLM-5.1-FP8",
       "repo_id": "zai-org/GLM-5.1-FP8",
       "framework": "sglang",
@@ -457,7 +457,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 31,
+      "pool_index": 30,
       "label": "cogito-671b-v2.1-FP8",
       "repo_id": "deepcogito/cogito-671b-v2.1-FP8",
       "framework": "sglang",
