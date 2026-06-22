@@ -1237,6 +1237,40 @@ def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
         return None
 
 
+def _read_forge_result_json(workspace: Path) -> dict[str, Any]:
+    """Read forge's on-disk ``result.json`` from the tuning workspace.
+
+    forge always writes the full report (including ``tuners_skipped``) to
+    ``<output_dir>/result.json``, even when the stdout sentinel omits some
+    fields. Returns ``{}`` when missing or unparseable.
+    """
+    try:
+        path = workspace / "result.json"
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(data, dict):
+                return data
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return {}
+
+
+def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
+    """Join forge per-tuner skip reasons into one concise human-readable string."""
+    if not isinstance(tuners_skipped, list):
+        return ""
+    parts: list[str] = []
+    for entry in tuners_skipped:
+        if not isinstance(entry, dict):
+            continue
+        reason = str(entry.get("skip_reason") or "").strip()
+        if not reason:
+            continue
+        tuner = str(entry.get("tuner") or "").strip()
+        parts.append(f"{tuner}: {reason}" if tuner else reason)
+    return "; ".join(parts)
+
+
 def _forge_gemm_tune_available() -> bool:
     """Check if forge-gemm-tune CLI is importable or on PATH."""
     if shutil.which("forge-gemm-tune"):
@@ -1620,6 +1654,19 @@ async def _run_forge_gemm_tuning(
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
     result.setdefault("model_path", model_path)
+
+    # Surface why forge skipped: forge records per-tuner skip reasons in its
+    # on-disk result.json, but the stdout sentinel can omit them, leaving the
+    # session state with an unexplained "skipped". Merge from disk and derive a
+    # concise top-level skip_reason so state + breakdown show the cause.
+    if not result.get("tuners_skipped"):
+        disk_skipped = _read_forge_result_json(workspace).get("tuners_skipped")
+        if disk_skipped:
+            result["tuners_skipped"] = disk_skipped
+    if not result.get("skip_reason"):
+        reason = _derive_gemm_skip_reason(result.get("tuners_skipped"))
+        if reason:
+            result["skip_reason"] = reason
 
     # Bridge forge schema → coordinator-consumable schema:
     # forge returns micro_decision="candidate" with recommended_env;
