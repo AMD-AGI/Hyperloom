@@ -350,8 +350,8 @@ def test_preflight_blocks_gemma3(tmp_path, monkeypatch):
     assert "text-generation" in detail.lower()
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "unsupported_model_arch"
-    breakdown = sd / "session_breakdown.json"
-    assert breakdown.exists()
+    breakdown = json.loads((sd / "session_breakdown.json").read_text())
+    assert breakdown["session"]["stop_reason"] == "unsupported_model_arch"
 
 
 def test_preflight_blocks_unknown_arch(tmp_path, monkeypatch):
