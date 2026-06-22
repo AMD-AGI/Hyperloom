@@ -1237,6 +1237,40 @@ def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
         return None
 
 
+def _read_forge_result_json(workspace: Path) -> dict[str, Any]:
+    """Read forge's on-disk ``result.json`` from the tuning workspace.
+
+    forge always writes the full report (including ``tuners_skipped``) to
+    ``<output_dir>/result.json``, even when the stdout sentinel omits some
+    fields. Returns ``{}`` when missing or unparseable.
+    """
+    try:
+        path = workspace / "result.json"
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(data, dict):
+                return data
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return {}
+
+
+def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
+    """Join forge per-tuner skip reasons into one concise human-readable string."""
+    if not isinstance(tuners_skipped, list):
+        return ""
+    parts: list[str] = []
+    for entry in tuners_skipped:
+        if not isinstance(entry, dict):
+            continue
+        reason = str(entry.get("skip_reason") or "").strip()
+        if not reason:
+            continue
+        tuner = str(entry.get("tuner") or "").strip()
+        parts.append(f"{tuner}: {reason}" if tuner else reason)
+    return "; ".join(parts)
+
+
 def _forge_gemm_tune_available() -> bool:
     """Check if forge-gemm-tune CLI is importable or on PATH."""
     if shutil.which("forge-gemm-tune"):
@@ -1422,6 +1456,178 @@ def _resolve_forge_shapes(state, session_dir: Path) -> str:
     return ""
 
 
+# Map the resolved (precision, quant_type) to the aiter untuned-GEMM CSV that
+# the specialist phase already records under each worktree. fp8 "auto" resolves
+# to blockscale to match forge's own _resolve_quant_type default.
+_FORGE_UNTUNED_CSV_BY_QUANT: dict[str, str] = {
+    "auto": "a8w8_blockscale_untuned_gemm.csv",
+    "blockscale": "a8w8_blockscale_untuned_gemm.csv",
+    "per_token": "a8w8_untuned_gemm.csv",
+    "per_tensor": "a8w8_untuned_gemm.csv",
+    "bpreshuffle": "a8w8_bpreshuffle_untuned_gemm.csv",
+    "fp4": "a4w4_blockscale_untuned_gemm.csv",
+    "mxfp4": "a4w4_blockscale_untuned_gemm.csv",
+}
+
+
+def _csv_has_data_rows(path: Path) -> bool:
+    """Return True when ``path`` is a CSV carrying at least one data row.
+
+    The aiter recorder leaves header-only or empty files for quant types the
+    server never exercised; those must not be passed to forge as a real shape
+    source.
+    """
+    try:
+        with path.open(encoding="utf-8", errors="replace") as f:
+            header = f.readline()
+            if "M" not in header.upper():
+                return False
+            for line in f:
+                if line.strip():
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: str) -> str:
+    """Find an aiter untuned-GEMM CSV recorded by the specialist phase.
+
+    Dense fp8/fp4 forge tuners (a8w8*/a4w4*) skip themselves unless real GEMM
+    shapes are supplied. Hyperloom's specialist runs already write these shapes
+    to ``runs/specialist/<hash>/worktree/aiter/configs/*_untuned_gemm.csv`` in
+    forge's ``M,N,K`` format, but the orchestrator never wired them in -- so the
+    overwhelming majority of fp8 sglang sessions were skipped. This resolver
+    picks the newest non-empty CSV matching the resolved quant type.
+
+    Returns the CSV path, or "" when none is available (bf16 derives shapes from
+    config.json and needs no CSV).
+    """
+    precision = (precision or "").strip().lower()
+    quant_type = (quant_type or "").strip().lower()
+
+    fname = _FORGE_UNTUNED_CSV_BY_QUANT.get(quant_type)
+    if fname is None:
+        if precision == "fp8":
+            fname = "a8w8_blockscale_untuned_gemm.csv"
+        elif precision in ("fp4", "mxfp4"):
+            fname = "a4w4_blockscale_untuned_gemm.csv"
+        else:
+            return ""
+
+    specialist_dir = session_dir / "runs" / "specialist"
+    if not specialist_dir.is_dir():
+        return ""
+
+    best: Path | None = None
+    best_mtime = -1.0
+    for csv_path in specialist_dir.glob(f"*/worktree/aiter/configs/{fname}"):
+        if not _csv_has_data_rows(csv_path):
+            continue
+        try:
+            mtime = csv_path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best = csv_path
+
+    return str(best) if best is not None else ""
+
+
+def _path_is_existing_file(value: str) -> bool:
+    """Safe ``Path.is_file()`` that never raises on an over-long pathname.
+
+    A caller can hand us inline JSON content instead of a path. ``Path(...)``
+    accepts any string, but ``is_file()`` raises ``OSError(ENAMETOOLONG)`` when
+    a path component exceeds the filesystem limit, which previously crashed the
+    forge dense tuner instantly. Treat that (and any OSError) as "not a file".
+    """
+    try:
+        return Path(value).is_file()
+    except OSError:
+        return False
+
+
+def _normalize_tokens(value: Any) -> str:
+    """Return a clean comma-separated token string for forge's ``--tokens``.
+
+    forge parses ``--tokens`` as ``int(t) for t in value.split(",")``. A caller
+    that passes a list (or its string form ``"[4, 8, 64]"``) makes forge choke
+    with ``Invalid --tokens value: invalid literal for int(): '[64]'``. Accept
+    lists and bracketed strings; emit a bare comma-separated list.
+    """
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (list, tuple)):
+        items = value
+    else:
+        text = str(value).strip().strip("[](){}")
+        if not text:
+            return ""
+        items = [p for p in text.split(",")]
+    out: list[str] = []
+    for it in items:
+        s = str(it).strip().strip("'\"")
+        if not s:
+            continue
+        try:
+            out.append(str(int(float(s))))
+        except (TypeError, ValueError):
+            continue
+    return ",".join(out)
+
+
+def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
+    """Return a usable shapes-JSON *file path*, materializing inline content.
+
+    The orchestration layer sometimes passes the GEMM shapes as inline JSON
+    (a list/dict, or its string form) in ``shapes_json`` instead of a file
+    path. forge treats ``shapes_json`` strictly as a path and crashes with
+    ``OSError(ENAMETOOLONG)`` on the long pseudo-path. Normalize here:
+
+    - existing file path -> returned unchanged
+    - list/dict, or a string that parses as JSON -> written to
+      ``<workspace>/forge_shapes.json`` and that path returned
+    - anything else (empty / unparseable / non-existent path) -> ""
+    """
+    if value in (None, ""):
+        return ""
+
+    # Already-parsed inline content.
+    if isinstance(value, (list, dict)):
+        parsed: Any = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return ""
+        # A real, existing path wins.
+        if _path_is_existing_file(text):
+            return text
+        # Inline JSON content (possibly Python-repr with single quotes).
+        if text[0] in "[{":
+            try:
+                parsed = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                try:
+                    import ast
+
+                    parsed = ast.literal_eval(text)
+                except (ValueError, SyntaxError):
+                    return ""
+        else:
+            # Non-JSON string that is not an existing file: unusable.
+            return ""
+
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        out = workspace / "forge_shapes.json"
+        out.write_text(json.dumps(parsed), encoding="utf-8")
+        return str(out)
+    except (OSError, TypeError, ValueError):
+        return ""
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -1467,7 +1673,7 @@ async def _run_forge_gemm_tuning(
     gpu_type = str(
         payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x"
     ).strip().lower()
-    tokens = str(payload.get("tokens") or "").strip()
+    tokens = _normalize_tokens(payload.get("tokens"))
     # Default mp = all visible GPUs (server is stopped during tuning).
     from .policy import detect_gpu_count
 
@@ -1479,10 +1685,22 @@ async def _run_forge_gemm_tuning(
     if not kernel_sig_log:
         kernel_sig_log = _resolve_forge_server_log(state, session_dir)
 
-    # Resolve TraceLens shapes if available
-    shapes_json = str(payload.get("shapes_json") or "").strip()
+    # Resolve TraceLens shapes if available. Normalize first: callers sometimes
+    # pass inline JSON content instead of a path, which makes forge crash with
+    # OSError(ENAMETOOLONG); materialize it to a real file (or drop it).
+    shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
     if not shapes_json:
         shapes_json = _resolve_forge_shapes(state, session_dir)
+
+    # Dense fp8/fp4 tuners need real GEMM shapes. When TraceLens exposes no
+    # shapes JSON, fall back to the aiter untuned-GEMM CSVs the specialist phase
+    # already recorded; without this the dense tuner skips itself.
+    untuned_csv = str(payload.get("untuned_csv") or "").strip()
+    if untuned_csv and not _path_is_existing_file(untuned_csv):
+        # Guard against inline content / stale paths handed in as untuned_csv.
+        untuned_csv = ""
+    if not untuned_csv and not shapes_json:
+        untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type)
 
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
@@ -1502,7 +1720,7 @@ async def _run_forge_gemm_tuning(
         "global_timeout": timeout,
         "skip_gpu_check": True,
         "tokens": tokens,
-        "untuned_csv": str(payload.get("untuned_csv") or ""),
+        "untuned_csv": untuned_csv,
         "shapes_json": shapes_json,
         "tunableop_input": str(payload.get("tunableop_input") or ""),
         "kernel_signature_log": kernel_sig_log,
@@ -1536,6 +1754,19 @@ async def _run_forge_gemm_tuning(
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
     result.setdefault("model_path", model_path)
+
+    # Surface why forge skipped: forge records per-tuner skip reasons in its
+    # on-disk result.json, but the stdout sentinel can omit them, leaving the
+    # session state with an unexplained "skipped". Merge from disk and derive a
+    # concise top-level skip_reason so state + breakdown show the cause.
+    if not result.get("tuners_skipped"):
+        disk_skipped = _read_forge_result_json(workspace).get("tuners_skipped")
+        if disk_skipped:
+            result["tuners_skipped"] = disk_skipped
+    if not result.get("skip_reason"):
+        reason = _derive_gemm_skip_reason(result.get("tuners_skipped"))
+        if reason:
+            result["skip_reason"] = reason
 
     # Bridge forge schema → coordinator-consumable schema:
     # forge returns micro_decision="candidate" with recommended_env;
