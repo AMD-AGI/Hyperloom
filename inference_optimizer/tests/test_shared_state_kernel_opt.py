@@ -374,11 +374,20 @@ def test_record_kernel_opt_failure_count_increments_on_status_failed(state: Shar
     assert e["last_status"] == "failed"
 
 
-def test_record_kernel_opt_one_failure_retires_kernel(state: SharedState):
-    """PR-C max_failures=1: one completed-ladder-without-KEEP retires the kernel."""
+def test_record_kernel_opt_one_failure_does_not_retire_kernel_by_default(state: SharedState):
+    """A transient backend/infra failure gets one retry before retirement."""
+    state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
+    assert "k001" not in state.rejected_kernel_ids
+    assert state.kernel_opt_attempts["k001"]["failure_count"] == 1
+    assert not state.kernel_opt_attempts["k001"].get("rejected_reason")
+
+
+def test_record_kernel_opt_second_failure_retires_kernel_by_default(state: SharedState):
+    """Two backend/infra failures retire the kernel when no KEEP appears."""
+    state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
     state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
     assert "k001" in state.rejected_kernel_ids
-    assert state.kernel_opt_attempts["k001"]["rejected_reason"].startswith("max_failures_")
+    assert state.kernel_opt_attempts["k001"]["rejected_reason"] == "max_failures_2_without_keep"
 
 
 def test_record_kernel_opt_revert_retires_immediately(state: SharedState):
@@ -390,9 +399,7 @@ def test_record_kernel_opt_revert_retires_immediately(state: SharedState):
 def test_record_kernel_opt_keep_resets_failure_count(state: SharedState):
     """A later KEEP clears the failure streak so the kernel is usable again."""
     state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
-    assert "k001" in state.rejected_kernel_ids
     # A subsequent KEEP clears the streak.
-    state.rejected_kernel_ids.remove("k001")
     state.record_kernel_opt(_ok_result("k001", "KEEP", 4.0, source_file="/p/a.py"))
     e = state.kernel_opt_attempts["k001"]
     assert e["failure_count"] == 0
@@ -400,9 +407,7 @@ def test_record_kernel_opt_keep_resets_failure_count(state: SharedState):
 
 
 def test_record_kernel_opt_max_failures_env_override(state: SharedState, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "2")
-    state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
-    assert "k001" not in state.rejected_kernel_ids
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "1")
     state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
     assert "k001" in state.rejected_kernel_ids
 

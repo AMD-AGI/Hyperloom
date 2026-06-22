@@ -106,8 +106,10 @@ def render_model_arch_compact(arch: dict | None) -> str:
 
 # Default partial-attempt cap for run_optimization; override via env in ``record_kernel_opt`` (1 disables second chance).
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
-# Backend ladder without a KEEP retires the kernel; override via ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
-_DEFAULT_KERNEL_OPT_MAX_FAILURES = 1
+# Backend ladder infra failures can be transient; require two failed ladders
+# before retiring the kernel. Override via
+# ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
+_DEFAULT_KERNEL_OPT_MAX_FAILURES = 2
 # Integration faults (environment / apply / bench crashes) are distinct from a
 # genuine gate REVERT (measured gain below threshold / accuracy regression). A
 # fault means the patch was never fairly measured, so it must not burn the

@@ -409,6 +409,15 @@ def test_kernel_skip_to_sweep_waits_for_partial_kernel_attempt():
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 
+def test_kernel_skip_to_sweep_waits_for_untried_hot_kernel():
+    state = _skip_to_sweep_state("KERNEL")
+    state.untried_hot_reusable_kernels = lambda: ["k017"]
+
+    assert kernel_work_pending(state) is True
+    assert exit_normal_kernel(state) is None
+    assert compute_next_phase(state, kernel_enabled=True) is None
+
+
 def test_kernel_skip_to_sweep_ignores_rejected_or_integrated_attempts():
     state = _skip_to_sweep_state("KERNEL")
     state.rejected_kernel_ids = ["k001"]

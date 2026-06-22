@@ -1401,11 +1401,19 @@ def kernel_work_pending(state: Any) -> bool:
 
     This guards the non-terminal ``skip_to_sweep`` handoff: a plateau hint should
     not end KERNEL while a KEEP still needs integrate, or while a kernel-agent
-    attempt is only partially recorded. Hard time/budget exits are still handled
-    by :func:`exit_normal_kernel`.
+    attempt is only partially recorded, or while trace analysis still exposes
+    hot reusable kernels that have not received a kernel_opt attempt. Hard
+    time/budget exits are still handled by :func:`exit_normal_kernel`.
     """
     try:
         if bool(getattr(state, "has_keep_pending_integrate", False)):
+            return True
+    except Exception:
+        pass
+
+    try:
+        untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
+        if callable(untried_hot) and bool(untried_hot()):
             return True
     except Exception:
         pass

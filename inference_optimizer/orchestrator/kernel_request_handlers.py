@@ -4574,7 +4574,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             # Malformed env override → keep the default partial-attempt cap.
             pass
 
-    # One backend ladder without a KEEP retires the kernel by default; raise threshold for flaky backends.
+    # Backend ladder failures are often transient infra/backend faults; real
+    # REVERT still retires immediately below, but infra failures get a retry.
     max_failures = _DEFAULT_KERNEL_OPT_MAX_FAILURES
     env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
     if env_f:
