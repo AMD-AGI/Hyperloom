@@ -1888,6 +1888,37 @@ async def trace_analyze_handler(
     return result
 
 
+def _exists_with_retry(
+    path: str | Path,
+    *,
+    attempts: int = 5,
+    delay_sec: float = 0.5,
+) -> bool:
+    """Check ``path`` existence, retrying briefly to absorb storage latency.
+
+    On shared/network filesystems (e.g. wekafs) a file that was just written can
+    take a moment to become visible to another client, so a single
+    :meth:`Path.exists` immediately after the write may spuriously report
+    missing. Retry a handful of times with a short pause before giving up.
+
+    Args:
+        path: Filesystem path to check.
+        attempts: Total number of existence checks to perform (>= 1).
+        delay_sec: Seconds to sleep between checks.
+
+    Returns:
+        ``True`` as soon as the path is visible, else ``False`` after all
+        attempts are exhausted.
+    """
+    target = Path(path)
+    for attempt in range(max(1, attempts)):
+        if target.exists():
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_sec)
+    return False
+
+
 def _validate_trace_analyze_inputs(
     payload: dict,
     *,
@@ -1904,7 +1935,7 @@ def _validate_trace_analyze_inputs(
         else ``None``.
     """
     candidates_path = str(payload.get("candidates_path") or "").strip()
-    if candidates_path and not Path(candidates_path).exists():
+    if candidates_path and not _exists_with_retry(candidates_path):
         return {
             "status": "failed",
             "error_class": "missing_candidates_artifact",
@@ -1983,6 +2014,25 @@ async def run_optimization_handler(
             )
             if canon:
                 single_payload["kernel_id"] = canon
+            elif not _names_specific_kernel(single_payload):
+                # Empty eligible queue and the request named no specific target
+                # (e.g. the post-GEMM auto pass dispatches a batch with no id).
+                # All candidates are already tried/rejected, below the size
+                # cutoff, or not reusable. Finish cleanly instead of falling
+                # into the single-kernel path, which would surface
+                # "missing 'kernel_id'" and mis-report an empty work queue as a
+                # GEAK failure. A "skipped" status (no error_class / REVERT
+                # decision) is not counted as a failure by the breakdown
+                # recorder.
+                return {
+                    "status": "skipped",
+                    "reason": "no_eligible_kernels",
+                    "kernels_considered": len(_all_kernel_candidates(payload)),
+                    "message": (
+                        "no eligible kernels to optimize (all candidates already "
+                        "tried/rejected, below the size cutoff, or not reusable)"
+                    ),
+                }
         single_payload["_single_kernel"] = True
         return await _run_optimization_single(single_payload, session_dir=session_dir)
     return await _run_optimization_batch(
@@ -2247,6 +2297,29 @@ def _resolve_candidate_id(
         if _normalize_kernel_id(str(cand.get("kernel_id") or "")) == target:
             return str(cand.get("kernel_id") or "")
     return ""
+
+
+def _names_specific_kernel(payload: dict) -> bool:
+    """Return ``True`` when the payload targets one specific kernel/source.
+
+    A specific target is an explicit ``kernel_id``, a ``source_file`` to
+    optimize, or an inline ``candidate`` dict. The post-GEMM auto pass dispatches
+    a batch with none of these, which is the empty-work-queue case that should be
+    skipped cleanly rather than routed into the single-kernel path.
+
+    Args:
+        payload: The run_optimization request payload.
+
+    Returns:
+        ``True`` if the request names a specific kernel/source, else ``False``.
+    """
+    if str(payload.get("kernel_id") or "").strip():
+        return True
+    if str(payload.get("source_file") or "").strip():
+        return True
+    if isinstance(payload.get("candidate"), dict):
+        return True
+    return False
 
 
 def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
@@ -4247,6 +4320,23 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
 
     if not isinstance(result, dict):
         return
+    # Capture an empty-queue skip (no eligible kernels, no named kernel) as a
+    # non-failure breadcrumb. The result carries no kernel_id, so the per-kernel
+    # bookkeeping below early-returns and the skip is otherwise invisible in the
+    # breakdown (no backend, no kernel_id). Stash it so the summary can surface
+    # it honestly.
+    if (
+        str(result.get("status") or "").lower() == "skipped"
+        and str(result.get("reason") or "") == "no_eligible_kernels"
+    ):
+        from .shared_state import _now_iso
+
+        state.last_kernel_opt_dispatch_skip = {
+            "reason": "no_eligible_kernels",
+            "kernels_considered": int(result.get("kernels_considered") or 0),
+            "message": str(result.get("message") or ""),
+            "ts": _now_iso(),
+        }
     # Author-time breakdown capture: record geak/oob invocations (incl.
     # backend + pre-dispatch failures) before the metadata-less early
     # return so no failed attempt becomes invisible in the geak/oob view.
