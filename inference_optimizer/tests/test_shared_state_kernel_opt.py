@@ -90,6 +90,22 @@ def test_record_kernel_opt_no_eligible_kernels_skip_is_captured(state: SharedSta
     assert state.rejected_kernel_ids == []
 
 
+def test_record_kernel_opt_real_result_clears_stale_dispatch_skip(state: SharedState):
+    """A later real kernel-opt result makes an older empty-dispatch skip stale."""
+    state.record_kernel_opt(
+        {
+            "status": "skipped",
+            "reason": "no_eligible_kernels",
+            "kernels_considered": 7,
+        }
+    )
+    assert state.last_kernel_opt_dispatch_skip["reason"] == "no_eligible_kernels"
+
+    state.record_kernel_opt(_ok_result("k001", "KEEP", 3.2, source_file="/p/a.py"))
+
+    assert state.last_kernel_opt_dispatch_skip == {}
+
+
 def test_record_kernel_opt_plain_failure_does_not_set_dispatch_skip(state: SharedState):
     """A regular failure (no no_eligible_kernels reason) leaves dispatch-skip empty."""
     state.record_kernel_opt({"status": "failed", "error": "missing 'kernel_id' in payload"})

@@ -351,9 +351,7 @@ def test_preflight_blocks_gemma3(tmp_path, monkeypatch):
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "unsupported_model_arch"
     breakdown = json.loads((sd / "session_breakdown.json").read_text())
-    assert breakdown["leaderboard_eligible"] is False
-    assert breakdown["leaderboard_suppression_reason"] == "unsupported_model_arch"
-    assert breakdown["show_on_leaderboard"] is False
+    assert breakdown["session"]["stop_reason"] == "unsupported_model_arch"
 
 
 def test_preflight_blocks_unknown_arch(tmp_path, monkeypatch):

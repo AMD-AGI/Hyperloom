@@ -24,40 +24,6 @@ log = logging.getLogger(__name__)
 EXPORTER_VERSION = "session-breakdown-1.0.0"
 BREAKDOWN_FILENAME = "session_breakdown.json"
 
-_LEADERBOARD_SUPPRESSED_STOP_REASONS: frozenset[str] = frozenset(
-    {
-        "model_config_incompatible",
-        "model_context_window_too_small",
-        "unsupported_model_arch",
-        "baseline_failed",
-        "prelude_baseline_failed",
-        "baseline_arg_error",
-    }
-)
-
-
-def _leaderboard_suppression_reason(session: dict[str, Any], final: dict[str, Any]) -> str | None:
-    """Return a reason when this breakdown must not be shown on leaderboards.
-
-    Pulse / sbd-ingester is the final authority for ``show_on_leaderboard``,
-    but fail-fast breakdowns should carry an explicit producer-side eligibility
-    hint so invalid model/config rows cannot be mistaken for valid zero-gain
-    measurements downstream.
-    """
-    session_section = session or {}
-    final_section = final or {}
-    candidates = (
-        session_section.get("stop_reason"),
-        final_section.get("stop_reason"),
-        session_section.get("status"),
-        final_section.get("status"),
-    )
-    for candidate in candidates:
-        reason = str(candidate or "").strip()
-        if reason in _LEADERBOARD_SUPPRESSED_STOP_REASONS:
-            return reason
-    return None
-
 
 def _phase_event_key(ev: dict[str, Any]) -> tuple[str, str, str]:
     """Dedupe key matching :func:`collectors.collect_phase_timeline`.
@@ -567,14 +533,11 @@ def build(
         telemetry.get("profile_report_paths") or [],
         [p.get("benchmark_report_path") for p in (sweep.get("all_variants") or []) if p.get("benchmark_report_path")],
     )
-    leaderboard_suppression_reason = _leaderboard_suppression_reason(session_section, final)
 
     breakdown = {
         "schema_version": schema_version,
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
-        "leaderboard_eligible": leaderboard_suppression_reason is None,
-        "leaderboard_suppression_reason": leaderboard_suppression_reason,
         "session": session_section,
         # §1b enrichment; always present from the exporter (no longer CI-only).
         "session_meta": session_meta,
@@ -644,8 +607,6 @@ def build(
         "warnings": warnings,
         "source_files": source_files,
     }
-    if leaderboard_suppression_reason is not None:
-        breakdown["show_on_leaderboard"] = False
     return breakdown
 
 

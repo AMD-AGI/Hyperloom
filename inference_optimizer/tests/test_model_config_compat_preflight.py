@@ -828,9 +828,7 @@ def test_preflight_blocks_and_persists(tmp_path, monkeypatch):
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_config_incompatible"
     breakdown = json.loads((sd / "session_breakdown.json").read_text())
-    assert breakdown["leaderboard_eligible"] is False
-    assert breakdown["leaderboard_suppression_reason"] == "model_config_incompatible"
-    assert breakdown["show_on_leaderboard"] is False
+    assert breakdown["session"]["stop_reason"] == "model_config_incompatible"
 
 
 def test_preflight_passes_for_healthy_model(tmp_path, monkeypatch):

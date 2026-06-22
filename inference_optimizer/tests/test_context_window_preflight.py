@@ -90,9 +90,7 @@ def test_preflight_fails_for_2048_model(tmp_path, monkeypatch):
     assert state["stop_reason"] == "model_context_window_too_small"
     # PR-review-1: fail-fast must emit session_breakdown.json itself (it exits before coordinator.run's try/finally).
     breakdown = json.loads((sd / "session_breakdown.json").read_text(encoding="utf-8"))
-    assert breakdown["leaderboard_eligible"] is False
-    assert breakdown["leaderboard_suppression_reason"] == "model_context_window_too_small"
-    assert breakdown["show_on_leaderboard"] is False
+    assert breakdown["session"]["stop_reason"] == "model_context_window_too_small"
 
 
 def test_preflight_passes_for_4096_model(tmp_path, monkeypatch):

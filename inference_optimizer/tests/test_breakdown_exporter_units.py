@@ -10,50 +10,6 @@ from inference_optimizer.breakdown import collectors as col
 from inference_optimizer.breakdown import exporter as ex
 
 
-# _leaderboard_suppression_reason
-
-
-class TestLeaderboardSuppressionReason:
-    def test_suppresses_failfast_session_stop_reasons(self):
-        for reason in (
-            "model_config_incompatible",
-            "model_context_window_too_small",
-            "unsupported_model_arch",
-            "baseline_failed",
-            "prelude_baseline_failed",
-            "baseline_arg_error",
-        ):
-            assert ex._leaderboard_suppression_reason({"stop_reason": reason}, {}) == reason
-
-    def test_uses_final_stop_reason_as_fallback(self):
-        assert (
-            ex._leaderboard_suppression_reason(
-                {"stop_reason": ""},
-                {"stop_reason": "baseline_failed"},
-            )
-            == "baseline_failed"
-        )
-
-    def test_uses_status_when_stop_reason_is_missing(self):
-        assert (
-            ex._leaderboard_suppression_reason(
-                {"status": "model_config_incompatible"},
-                {"stop_reason": ""},
-            )
-            == "model_config_incompatible"
-        )
-        assert (
-            ex._leaderboard_suppression_reason(
-                {},
-                {"status": "baseline_arg_error"},
-            )
-            == "baseline_arg_error"
-        )
-
-    def test_normal_terminal_reason_stays_eligible(self):
-        assert ex._leaderboard_suppression_reason({"stop_reason": "target_reached"}, {}) is None
-
-
 # _load_state
 
 

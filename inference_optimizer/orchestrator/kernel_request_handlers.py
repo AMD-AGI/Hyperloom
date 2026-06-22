@@ -4422,10 +4422,11 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     # bookkeeping below early-returns and the skip is otherwise invisible in the
     # breakdown (no backend, no kernel_id). Stash it so the summary can surface
     # it honestly.
-    if (
+    is_no_eligible_dispatch_skip = (
         str(result.get("status") or "").lower() == "skipped"
         and str(result.get("reason") or "") == "no_eligible_kernels"
-    ):
+    )
+    if is_no_eligible_dispatch_skip:
         from .shared_state import _now_iso
 
         state.last_kernel_opt_dispatch_skip = {
@@ -4434,6 +4435,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "message": str(result.get("message") or ""),
             "ts": _now_iso(),
         }
+    elif str(result.get("kernel_id") or ""):
+        state.last_kernel_opt_dispatch_skip = {}
     # Author-time breakdown capture: record geak/oob invocations (incl.
     # backend + pre-dispatch failures) before the metadata-less early
     # return so no failed attempt becomes invisible in the geak/oob view.
