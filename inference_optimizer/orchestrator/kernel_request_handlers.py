@@ -1745,8 +1745,10 @@ async def _run_forge_gemm_tuning(
         result = _shape_tool_result(rc, stdout, stderr)
 
     result.setdefault("backend", "forge")
-    # Stamp the engine label too: the breakdown's gemm_tuning collector keys off
-    # ``engine`` and would otherwise default the forge lane to ``geak``.
+    # Tag the tuning engine so the breakdown's ``collect_gemm_tuning`` attributes
+    # this run to forge instead of falling back to its ``geak`` default (the
+    # GEAK path sets ``engine`` too). Without this, forge runs recorded into
+    # ``gemm_tuning_attempts`` are mis-counted as the GEAK source.
     result.setdefault("engine", "forge")
     result.setdefault("workspace", str(workspace))
     result.setdefault("precision", precision)
@@ -1922,8 +1924,74 @@ async def run_gemm_tuning_handler(
     log.info("run_gemm_tuning: backend=%s", backend)
 
     if backend == "forge":
-        return await _run_forge_gemm_tuning(payload, session_dir=session_dir)
-    return await _run_geak_gemm_tuning(payload, session_dir=session_dir)
+        result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
+    else:
+        result = await _run_geak_gemm_tuning(payload, session_dir=session_dir)
+    # Full-trace: record this run as a gemm_tuning audit row, backfilled into the
+    # trace as a ``gemm_tuning:<engine>`` span so the deterministic tuner is
+    # attributed to its own source. Best-effort; never breaks the run.
+    _trace_gemm_tuning_run(result, session_dir=session_dir)
+    return result
+
+
+def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
+    """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run.
+
+    Mirrors :func:`_trace_kernel_attempt_steps`: distils the run result into a
+    compact source-attribution row (engine, decision, speedup, per-tuner
+    summary) and appends it to ``reports/trace/gemm_tuning.jsonl``. The Langfuse
+    emitter backfills it as a ``gemm_tuning:<engine>`` span under the
+    ``gemm_tuning`` agent. Best-effort end to end: any read/serialise/write
+    failure degrades to a debug log and is swallowed.
+
+    Args:
+        result: The GEMM-tuning handler result envelope.
+        session_dir: Session directory the audit row is appended under.
+    """
+    if not isinstance(result, dict):
+        return
+    from datetime import datetime, timezone
+
+    from ..session_paths import gemm_tuning_steps_path
+
+    engine = str(result.get("engine") or result.get("backend") or "").strip().lower() or "unknown"
+    tuners: list[dict[str, Any]] = []
+    for t in result.get("tuners_run") or []:
+        if not isinstance(t, dict):
+            continue
+        tuners.append(
+            {
+                "tuner": t.get("tuner") or t.get("name"),
+                "best_micro_speedup": t.get("best_micro_speedup"),
+                "kept": t.get("kept"),
+            }
+        )
+    row = {
+        "kind": "gemm_tuning",
+        "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        "engine": engine,
+        "backend": result.get("backend"),
+        "status": result.get("status"),
+        "decision": result.get("decision"),
+        "micro_decision": result.get("micro_decision"),
+        "best_speedup": result.get("best_speedup"),
+        "precision": result.get("precision"),
+        "framework": result.get("framework"),
+        "gpu_type": result.get("gpu_type"),
+        "tuned_file": result.get("tuned_file"),
+        "workspace": result.get("workspace"),
+        "requires_e2e_validation": result.get("requires_e2e_validation"),
+        "tuners_run": tuners,
+        "error_class": result.get("error_class"),
+    }
+    row = {k: v for k, v in row.items() if v is not None}
+    try:
+        path = gemm_tuning_steps_path(session_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError:
+        log.debug("full-trace: gemm_tuning audit append failed", exc_info=True)
 
 
 async def trace_analyze_handler(
@@ -2122,6 +2190,37 @@ async def trace_analyze_handler(
     return result
 
 
+def _exists_with_retry(
+    path: str | Path,
+    *,
+    attempts: int = 5,
+    delay_sec: float = 0.5,
+) -> bool:
+    """Check ``path`` existence, retrying briefly to absorb storage latency.
+
+    On shared/network filesystems (e.g. wekafs) a file that was just written can
+    take a moment to become visible to another client, so a single
+    :meth:`Path.exists` immediately after the write may spuriously report
+    missing. Retry a handful of times with a short pause before giving up.
+
+    Args:
+        path: Filesystem path to check.
+        attempts: Total number of existence checks to perform (>= 1).
+        delay_sec: Seconds to sleep between checks.
+
+    Returns:
+        ``True`` as soon as the path is visible, else ``False`` after all
+        attempts are exhausted.
+    """
+    target = Path(path)
+    for attempt in range(max(1, attempts)):
+        if target.exists():
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_sec)
+    return False
+
+
 def _validate_trace_analyze_inputs(
     payload: dict,
     *,
@@ -2138,7 +2237,7 @@ def _validate_trace_analyze_inputs(
         else ``None``.
     """
     candidates_path = str(payload.get("candidates_path") or "").strip()
-    if candidates_path and not Path(candidates_path).exists():
+    if candidates_path and not _exists_with_retry(candidates_path):
         return {
             "status": "failed",
             "error_class": "missing_candidates_artifact",
@@ -2217,6 +2316,25 @@ async def run_optimization_handler(
             )
             if canon:
                 single_payload["kernel_id"] = canon
+            elif not _names_specific_kernel(single_payload):
+                # Empty eligible queue and the request named no specific target
+                # (e.g. the post-GEMM auto pass dispatches a batch with no id).
+                # All candidates are already tried/rejected, below the size
+                # cutoff, or not reusable. Finish cleanly instead of falling
+                # into the single-kernel path, which would surface
+                # "missing 'kernel_id'" and mis-report an empty work queue as a
+                # GEAK failure. A "skipped" status (no error_class / REVERT
+                # decision) is not counted as a failure by the breakdown
+                # recorder.
+                return {
+                    "status": "skipped",
+                    "reason": "no_eligible_kernels",
+                    "kernels_considered": len(_all_kernel_candidates(payload)),
+                    "message": (
+                        "no eligible kernels to optimize (all candidates already "
+                        "tried/rejected, below the size cutoff, or not reusable)"
+                    ),
+                }
         single_payload["_single_kernel"] = True
         return await _run_optimization_single(single_payload, session_dir=session_dir)
     return await _run_optimization_batch(
@@ -2481,6 +2599,29 @@ def _resolve_candidate_id(
         if _normalize_kernel_id(str(cand.get("kernel_id") or "")) == target:
             return str(cand.get("kernel_id") or "")
     return ""
+
+
+def _names_specific_kernel(payload: dict) -> bool:
+    """Return ``True`` when the payload targets one specific kernel/source.
+
+    A specific target is an explicit ``kernel_id``, a ``source_file`` to
+    optimize, or an inline ``candidate`` dict. The post-GEMM auto pass dispatches
+    a batch with none of these, which is the empty-work-queue case that should be
+    skipped cleanly rather than routed into the single-kernel path.
+
+    Args:
+        payload: The run_optimization request payload.
+
+    Returns:
+        ``True`` if the request names a specific kernel/source, else ``False``.
+    """
+    if str(payload.get("kernel_id") or "").strip():
+        return True
+    if str(payload.get("source_file") or "").strip():
+        return True
+    if isinstance(payload.get("candidate"), dict):
+        return True
+    return False
 
 
 def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
@@ -4481,6 +4622,23 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
 
     if not isinstance(result, dict):
         return
+    # Capture an empty-queue skip (no eligible kernels, no named kernel) as a
+    # non-failure breadcrumb. The result carries no kernel_id, so the per-kernel
+    # bookkeeping below early-returns and the skip is otherwise invisible in the
+    # breakdown (no backend, no kernel_id). Stash it so the summary can surface
+    # it honestly.
+    if (
+        str(result.get("status") or "").lower() == "skipped"
+        and str(result.get("reason") or "") == "no_eligible_kernels"
+    ):
+        from .shared_state import _now_iso
+
+        state.last_kernel_opt_dispatch_skip = {
+            "reason": "no_eligible_kernels",
+            "kernels_considered": int(result.get("kernels_considered") or 0),
+            "message": str(result.get("message") or ""),
+            "ts": _now_iso(),
+        }
     # Author-time breakdown capture: record geak/oob invocations (incl.
     # backend + pre-dispatch failures) before the metadata-less early
     # return so no failed attempt becomes invisible in the geak/oob view.
