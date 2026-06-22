@@ -1549,6 +1549,35 @@ def _path_is_existing_file(value: str) -> bool:
         return False
 
 
+def _normalize_tokens(value: Any) -> str:
+    """Return a clean comma-separated token string for forge's ``--tokens``.
+
+    forge parses ``--tokens`` as ``int(t) for t in value.split(",")``. A caller
+    that passes a list (or its string form ``"[4, 8, 64]"``) makes forge choke
+    with ``Invalid --tokens value: invalid literal for int(): '[64]'``. Accept
+    lists and bracketed strings; emit a bare comma-separated list.
+    """
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (list, tuple)):
+        items = value
+    else:
+        text = str(value).strip().strip("[](){}")
+        if not text:
+            return ""
+        items = [p for p in text.split(",")]
+    out: list[str] = []
+    for it in items:
+        s = str(it).strip().strip("'\"")
+        if not s:
+            continue
+        try:
+            out.append(str(int(float(s))))
+        except (TypeError, ValueError):
+            continue
+    return ",".join(out)
+
+
 def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
     """Return a usable shapes-JSON *file path*, materializing inline content.
 
@@ -1644,7 +1673,7 @@ async def _run_forge_gemm_tuning(
     gpu_type = str(
         payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x"
     ).strip().lower()
-    tokens = str(payload.get("tokens") or "").strip()
+    tokens = _normalize_tokens(payload.get("tokens"))
     # Default mp = all visible GPUs (server is stopped during tuning).
     from .policy import detect_gpu_count
 
