@@ -197,6 +197,38 @@ def test_detect_glm_moe_dsa_unrecognized_blocked(tmp_path):
     assert reason is not None and "not recognized" in reason
 
 
+def test_detect_bailing_ling_unrecognized_blocked(tmp_path):
+    # inclusionAI Ling-1T / Ling-2.6 Bailing configs are not registered in the
+    # current serving stack, so fail before useful baseline work.
+    for model_type, arch in (
+        ("bailing_moe", "BailingMoeV2ForCausalLM"),
+        ("bailing_hybrid", "BailingMoeV2_5ForCausalLM"),
+    ):
+        m = tmp_path / model_type
+        _write_config(
+            m,
+            model_type=model_type,
+            architectures=[arch],
+            max_position_embeddings=32768,
+        )
+        reason = cli._detect_incompatible_model_config(str(m))
+        assert reason is not None and "not recognized" in reason
+
+
+def test_detect_ovis_next_unrecognized_blocked(tmp_path):
+    # AIDC-AI/Ovis2.6-80B-A3B uses a custom architecture unsupported by the
+    # current text-generation serving path.
+    m = tmp_path / "ovis"
+    _write_config(
+        m,
+        model_type="ovis2_6_next",
+        architectures=["Ovis2_6_NextForCausalLM"],
+        max_position_embeddings=32768,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "not recognized" in reason
+
+
 def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):
     # Mistral3 wrapper exposes text_config.model_type=ministral3; vLLM raises KeyError.
     m = tmp_path / "mistral3"

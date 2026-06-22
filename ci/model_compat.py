@@ -58,6 +58,20 @@ VISION_MT = {"llava", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "internvl", "mllama"
              "got_ocr2", "phi3_v", "phi4mm", "gemma3", "llama4", "mistral3",
              "ernie4_5_vl_moe"}
 
+AMD_UNSUPPORTED_MODEL_TYPES = {"minimax_m1"}
+AMD_UNSUPPORTED_ARCHES = {"minimaxm1forcausallm"}
+
+UNRECOGNIZED_MODEL_TYPES = {
+    "bailing_hybrid",
+    "bailing_moe",
+    "ovis2_6_next",
+}
+UNRECOGNIZED_ARCHES = {
+    "bailingmoev2_5forcausallm",
+    "bailingmoev2forcausallm",
+    "ovis2_6_nextforcausallm",
+}
+
 _TOKENIZER_FILES = {"tokenizer.json", "tokenizer.model", "vocab.json",
                     "spiece.model", "tokenizer.model.v3", "merges.txt"}
 
@@ -120,7 +134,19 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None):
             or "vision_tower" in blob):
         return ("multimodal", f"arch={arch or mt}")
 
-    # 2) short context (<= 2048)
+    arch_l = arch.lower()
+
+    # 2) AMD/ROCm-unsupported architectures with confirmed hardware resource
+    #    requirements unavailable on MI300X.
+    if mt in AMD_UNSUPPORTED_MODEL_TYPES or arch_l in AMD_UNSUPPORTED_ARCHES:
+        return ("amd_unsupported_arch", f"arch={arch or mt}")
+
+    # 3) schema/model types that current Transformers/sglang ModelConfig does
+    #    not recognize, causing deterministic engine-init validation failures.
+    if mt in UNRECOGNIZED_MODEL_TYPES or arch_l in UNRECOGNIZED_ARCHES:
+        return ("unrecognized_arch", f"arch={arch or mt}")
+
+    # 4) short context (<= 2048)
     mpe = config.get("max_position_embeddings")
     if mpe is None:
         tc = config.get("text_config")
@@ -131,30 +157,30 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None):
     except (TypeError, ValueError):
         pass
 
-    # 3) Phi3 longrope
-    if ("phi3" in mt or "phi3" in arch.lower()) and \
+    # 5) Phi3 longrope
+    if ("phi3" in mt or "phi3" in arch_l) and \
             str(rope.get("type", rope.get("rope_type", ""))).lower() == "longrope":
         return ("phi3_longrope", "Phi3 longrope validation")
 
-    # 4) dual chunk attention (NVIDIA sm90+)
+    # 6) dual chunk attention (NVIDIA sm90+)
     if config.get("dual_chunk_attention_config"):
         return ("dual_chunk_attention", "needs NVIDIA sm90+")
 
-    # 5) Gemma2 config compatibility
+    # 7) Gemma2 config compatibility
     if mt == "gemma2" or arch == "Gemma2ForCausalLM":
         return ("gemma2", "Gemma2 config compat")
 
-    # 6) NVIDIA ModelOpt FP8 (no ROCm loader)
+    # 8) NVIDIA ModelOpt FP8 (no ROCm loader)
     if str(qc.get("quant_method", "")).lower() == "modelopt" or "modelopt" in blob:
         return ("modelopt_fp8", "NVIDIA ModelOpt quant, no ROCm loader")
 
-    # 7) unsupported attention backend (FlashInfer)
+    # 9) unsupported attention backend (FlashInfer)
     attn = str(config.get("attn_implementation",
                           config.get("_attn_implementation", ""))).lower()
     if attn == "flashinfer" or "flashinfer" in blob:
         return ("attn_backend", "requires flashinfer (not on ROCm)")
 
-    # 8) missing tokenizer (only when weights are present locally)
+    # 10) missing tokenizer (only when weights are present locally)
     if model_dir and has_weights(model_dir) and not has_tokenizer(model_dir):
         return ("missing_tokenizer", "weights present but no tokenizer files")
 

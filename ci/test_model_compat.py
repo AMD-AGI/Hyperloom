@@ -108,6 +108,46 @@ def test_flashinfer_backend():
                     "attn_implementation": "flashinfer"}) == "attn_backend"
 
 
+def test_minimax_m1_is_filtered_for_amd_rocm():
+    assert _reason({"architectures": ["MiniMaxM1ForCausalLM"],
+                    "model_type": "minimax_m1",
+                    "max_position_embeddings": 80000}) == "amd_unsupported_arch"
+
+
+def test_bailing_ling_models_are_filtered():
+    assert _reason({"architectures": ["BailingMoeV2ForCausalLM"],
+                    "model_type": "bailing_moe",
+                    "max_position_embeddings": 32768}) == "unrecognized_arch"
+    assert _reason({"architectures": ["BailingMoeV2_5ForCausalLM"],
+                    "model_type": "bailing_hybrid",
+                    "max_position_embeddings": 262144}) == "unrecognized_arch"
+
+
+def test_ovis_next_is_filtered():
+    assert _reason({"architectures": ["Ovis2_6_NextForCausalLM"],
+                    "model_type": "ovis2_6_next",
+                    "max_position_embeddings": 32768}) == "unrecognized_arch"
+
+
+def test_supported_edge_families_are_not_newly_filtered():
+    # These families are intentionally left out of this CI filter update; they
+    # need separate runtime evidence before being classified as unsupported.
+    for cfg in (
+        {"architectures": ["DeepseekV32ForCausalLM"], "model_type": "deepseek_v32",
+         "max_position_embeddings": 163840},
+        {"architectures": ["DeepseekV3ForCausalLM"], "model_type": "kimi_k2",
+         "max_position_embeddings": 131072,
+         "auto_map": {"AutoConfig": "configuration_deepseek.DeepseekV3Config"}},
+        {"architectures": ["DeepseekV4ForCausalLM"], "model_type": "deepseek_v4",
+         "max_position_embeddings": 1048576},
+        {"architectures": ["GlmMoeDsaForCausalLM"], "model_type": "glm_moe_dsa",
+         "max_position_embeddings": 131072},
+        {"architectures": ["MiMoV2FlashForCausalLM"], "model_type": "mimo_v2_flash",
+         "max_position_embeddings": 131072},
+    ):
+        assert _reason(cfg) is None
+
+
 def test_normal_model_is_kept():
     assert _reason({"architectures": ["MistralForCausalLM"], "model_type": "mistral",
                     "max_position_embeddings": 32768}) is None
