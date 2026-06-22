@@ -930,8 +930,6 @@ class IntegratePatchExecutor:
                 "ttft_ms": getattr(r, "ttft_ms", None),
                 "itl_ms": getattr(r, "itl_ms", None),
                 "result_dir": str(getattr(r, "result_dir", "")),
-                # Magpie writes artifacts (including generated images) into the
-                # variant workspace; the image-diff gate reads from here.
                 "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
                 "nonfatal_warnings": list(
@@ -941,7 +939,7 @@ class IntegratePatchExecutor:
 
         # Accuracy gate runs only on a succeeded bench; the framework's
         # accuracy_gate capability picks lm-eval vs image-diff. ``None`` =>
-        # gate skipped (KEEP unaffected).
+        # gate skipped (KEEP gate skips the accuracy check).
         accuracy_pass: bool | None = None
         if bench.get("status") == "succeeded":
             framework = (

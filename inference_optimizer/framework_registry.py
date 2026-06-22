@@ -2,7 +2,6 @@
 
 """Framework capability registry — single source of truth for what a given
 inference framework *is*, so the optimizer loop can gate actions on capabilities
-rather than hardcoding ``if framework == ...`` across the codebase.
 
 A capability descriptor answers:
   - ``serving``        "online" (server + client load) vs "offline" (CLI batch)
@@ -82,9 +81,7 @@ class FrameworkCapabilities:
         return "conc" in self.search_knobs
 
 
-# Slug returned for an unset/unknown framework. Hyperloom is LLM-first: when
-# nothing is specified, behave as the historical text-serving default so the
-# diffusion additions never perturb an LLM (or framework-less) code path.
+# Slug returned for an unset/unknown framework.
 _DEFAULT_FRAMEWORK: Final[str] = "sglang"
 
 
@@ -120,9 +117,6 @@ _REGISTRY: Final[dict[str, FrameworkCapabilities]] = {
         accuracy_gate="lm_eval",
         search_knobs=("server_params", "conc"),
     ),
-    # xDiT — offline diffusion. No server, no concurrency, no parameter search:
-    # driven by a verbatim run command, ranked on per-image latency, and gated
-    # on image diff.
     "xdit": FrameworkCapabilities(
         name="xdit",
         serving="offline",
@@ -146,15 +140,7 @@ def is_supported(framework: str) -> bool:
 
 
 def get_capabilities(framework: str) -> FrameworkCapabilities:
-    """Return capabilities for ``framework``.
-
-    An unset or unrecognized framework falls back to the LLM default
-    (:data:`_DEFAULT_FRAMEWORK`) rather than raising. Real runs always carry a
-    validated framework (the CLI defaults it to sglang and rejects unknown
-    values), so this fallback only matters for framework-less call paths and
-    tests — and defaulting them to the historical LLM behavior is exactly what
-    keeps the diffusion changes non-intrusive.
-    """
+    """Return capabilities for ``framework``.  """
     return _REGISTRY.get(_slug(framework), _REGISTRY[_DEFAULT_FRAMEWORK])
 
 

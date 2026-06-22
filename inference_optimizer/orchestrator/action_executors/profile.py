@@ -388,8 +388,6 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
         workspace / "torch_trace",
         workspace / "capture_traces",
         workspace.parent / "capture_traces",
-        # Some frameworks write their trace files directly into the workspace
-        # root rather than a torch_trace/ subdir.
         workspace,
     ]
 

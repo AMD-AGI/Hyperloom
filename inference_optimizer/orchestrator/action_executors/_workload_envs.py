@@ -170,9 +170,7 @@ def materialize_config_with_envs(
     # ── Command-launched frameworks ───────────────────────────────────────
     # Frameworks with launch="run_cmd" have no server, no ISL/OSL/CONC/TP, and
     # no InferenceX — they run $RUN_CMD directly. Emit a minimal Magpie config
-    # carrying framework + run_cmd and return early, bypassing the entire LLM
-    # serving env block below. Server-launched frameworks fall through to the
-    # normal path.
+    # carrying framework + run_cmd and return early
     framework = str(
         bench.get("framework") or os.environ.get("FRAMEWORK", "")
     ).strip().lower()

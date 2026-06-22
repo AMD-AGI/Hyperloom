@@ -4825,20 +4825,15 @@ def _build_parser() -> argparse.ArgumentParser:
              "supported. NOTE: --framework atom is single-node-only "
              "(``--nodes>=2`` fails fast); profile / roofline, "
              "kernel-agent, and framework-agent are all enabled on atom. "
-             "The auto-tighten guard only enforces ``--nodes 1``. "
-             "--framework xdit is a command-launched diffusion run: no server, "
-             "no concurrency/param sweep; supply the run command via "
-             "--run-cmd.",
+             "The auto-tighten guard only enforces ``--nodes 1``. ",
     )
     opt.add_argument(
         "--run-cmd", type=str, default=os.environ.get("RUN_CMD", "") or None,
-        help="Verbatim run command for command-launched frameworks (e.g. "
-             "xdit). Required for those frameworks; ignored for server-launched "
+        help="Verbatim run command for command-launched frameworks. "
+             "Required for those frameworks; ignored for server-launched "
              "ones. Hyperloom runs this command as-is for baseline/validate, "
              "pinning the output directory to the session workspace (and adding "
-             "--profile for the profiling pass). Example: --run-cmd 'xdit "
-             "--model /models/flux --ulysses_degree 2 --num_inference_steps 50 "
-             "--prompt \"a cat\"'.",
+             "--profile for the profiling pass). ",
     )
     opt.add_argument(
         "--nodes", type=int,
