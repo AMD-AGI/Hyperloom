@@ -38,13 +38,6 @@ from ._grid_runner import (
     inject_sglang_watchdog_timeout,
     server_args_env_name,
 )
-
-_MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:[=\s]+)\S+")
-
-
-def _remove_moe_runner_backend_arg(args: str) -> str:
-    """Remove any existing SGLang MoE runner backend flag from an args string."""
-    return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
 from ._server_patcher import (
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
@@ -52,6 +45,13 @@ from ._server_patcher import (
 from ...model_config_utils import _load_model_config_dict, _model_is_gemma2
 
 log = logging.getLogger(__name__)
+
+_MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:[=\s]+)\S+")
+
+
+def _remove_moe_runner_backend_arg(args: str) -> str:
+    """Remove any existing SGLang MoE runner backend flag from an args string."""
+    return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
 
 # Warn once per process when the accuracy gate is disabled.
 _RUN_EVAL_DISABLED_WARN_EMITTED = False
@@ -144,7 +144,7 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
             "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS",
             ",".join(str(v) for v in values),
         )
-        return max(values)
+        return values[0]
     value = int(text)
     if value <= 0:
         raise ValueError(f"{env_key}={raw!r} must be positive")
@@ -397,6 +397,10 @@ def materialize_config_with_envs(
             else:
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
             if not tracelens_patch_ok:
+                envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
+                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = (
+                    "tracelens_runtime_patch_unavailable"
+                )
                 log.warning(
                     "TraceLens runtime patch unavailable for framework=%s; "
                     "profile will omit annotation-only flags and roofline "
