@@ -168,6 +168,54 @@ class TestForgeGemmHelperCoverage:
         bad.write_text(json.dumps([123, 456]), encoding="utf-8")
         assert krh._is_forge_compatible_shapes_json(bad) is False
 
+    @staticmethod
+    def _write_aiter_csv(session_dir: Path, hash_id: str, fname: str, rows: str) -> Path:
+        cfg = session_dir / "runs" / "specialist" / hash_id / "worktree" / "aiter" / "configs"
+        cfg.mkdir(parents=True, exist_ok=True)
+        path = cfg / fname
+        path.write_text(rows, encoding="utf-8")
+        return path
+
+    def test_resolve_forge_untuned_csv_fp8_blockscale(self, tmp_path):
+        # fp8 auto -> blockscale CSV recorded by the specialist phase.
+        expected = self._write_aiter_csv(
+            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+        )
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "auto") == str(expected)
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(expected)
+
+    def test_resolve_forge_untuned_csv_per_token(self, tmp_path):
+        expected = self._write_aiter_csv(
+            tmp_path, "abc", "a8w8_untuned_gemm.csv", "M,N,K,q_dtype_w\n16,1536,7168,fp8\n"
+        )
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "per_token") == str(expected)
+
+    def test_resolve_forge_untuned_csv_skips_header_only(self, tmp_path):
+        # Header-only / empty files must not be passed as a real shape source.
+        self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n")
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == ""
+
+    def test_resolve_forge_untuned_csv_picks_newest_nonempty(self, tmp_path):
+        old = self._write_aiter_csv(
+            tmp_path, "old", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n1,2,3\n"
+        )
+        new = self._write_aiter_csv(
+            tmp_path, "new", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n4,5,6\n"
+        )
+        import os
+
+        os.utime(old, (1, 1))
+        os.utime(new, (10_000_000, 10_000_000))
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(new)
+
+    def test_resolve_forge_untuned_csv_bf16_returns_empty(self, tmp_path):
+        # bf16 dense derives shapes from config.json; no CSV needed.
+        self._write_aiter_csv(tmp_path, "abc", "bf16_untuned_gemm.csv", "M,N,K\n1,2,3\n")
+        assert krh._resolve_forge_untuned_csv(tmp_path, "bf16", "none") == ""
+
+    def test_resolve_forge_untuned_csv_no_specialist_dir(self, tmp_path):
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == ""
+
     def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
         state = SharedState()
         state.last_trace_analyze = ["not", "a", "dict"]
