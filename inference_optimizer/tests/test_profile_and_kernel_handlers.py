@@ -636,6 +636,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
 def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     tmp_path,
     monkeypatch,
+    caplog,
 ):
     """Patcher False ⇒ EXTRA_VLLM_ARGS keeps only the §1 safe set (else unpatched vLLM crashes on unknown JSON key)."""
     import yaml
@@ -643,11 +644,16 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    caplog.set_level("WARNING")
     out = _materialize_config_with_envs(src, tmp_path)
-    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    extra = envs["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 5888" in extra, extra
     assert "capture_torch_profiler_dir" not in extra, extra
     assert "detailed_trace_annotation" not in extra, extra
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
+    assert envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
+    assert "TraceLens runtime patch unavailable" in caplog.text
 
 
 def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
