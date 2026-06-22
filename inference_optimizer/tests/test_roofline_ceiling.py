@@ -2217,6 +2217,22 @@ class TestReadBaselineServerArgs:
         )
         assert read_baseline_server_args(state) == ""
 
+    def test_falls_back_to_last_baseline_payload_when_yaml_missing(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            read_baseline_server_args,
+        )
+
+        state = SimpleNamespace(
+            last_baseline={
+                "extras": {"materialized_config": "/no/such.yaml"},
+                "extra_envs": {
+                    "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8_e4m3 --gpu-memory-utilization 0.85",
+                },
+            },
+        )
+
+        assert read_baseline_server_args(state) == "--kv-cache-dtype fp8_e4m3 --gpu-memory-utilization 0.85"
+
 
 class TestPreludeRooflineWarmReplayIntegration:
     """End-to-end-ish: a delayed PRELUDE roofline running AFTER warm-replay has
