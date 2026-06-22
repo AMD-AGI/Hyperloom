@@ -1072,20 +1072,21 @@ def _build_kernel_contract_block(candidate: dict[str, Any]) -> str:
         lines.append(
             f"- This is a COLLECTIVE ({c.get('collective_op')}). The shapes above are the\n"
             f"  per-rank tensor. Correctness reference MUST be `{c.get('reference')}` "
-            f"(reduce_op={c.get('reduce_op','sum')}, world_size={c.get('world_size','?')})\n"
+            f"(reduce_op={c.get('reduce_op', 'sum')}, world_size={c.get('world_size', '?')})\n"
             "  computed independently -- NEVER `return run_kernel(inputs)` (a self-compare is\n"
             "  a tautology). Initialize the process group and shard inputs per rank.\n"
-            f"- NOTE: {c.get('e2e_note','')}\n"
+            f"- NOTE: {c.get('e2e_note', '')}\n"
         )
     elif kind == "attention":
         extra = ", ".join(
-            f"{k}={c[k]}" for k in ("head_dim", "num_heads", "num_kv_heads", "kv_layout", "seqlen_regime")
+            f"{k}={c[k]}"
+            for k in ("head_dim", "num_heads", "num_kv_heads", "kv_layout", "seqlen_regime")
             if c.get(k) is not None
         )
         lines.append(
             f"- This is ATTENTION (causal={c.get('causal', True)}). Correctness reference MUST be\n"
             f"  `{c.get('reference')}` with is_causal={c.get('causal', True)} -- NEVER a self-compare.\n"
-            f"- Serving contract: {extra}. Benchmark the '{c.get('seqlen_regime','mixed')}' regime\n"
+            f"- Serving contract: {extra}. Benchmark the '{c.get('seqlen_regime', 'mixed')}' regime\n"
             "  (decode=seqlen 1 per step vs prefill=full); do not mix regimes in one config.\n"
         )
     else:
@@ -1772,10 +1773,7 @@ def build_prompt(
     # kernel symbol so the rewrite targets the right __global__ in a multi-kernel file.
     device_symbol_block = ""
     device_kernel_name = str(candidate.get("device_kernel_name", "") or "").strip()
-    if (
-        candidate.get("source_resolution_method") == "op_to_source"
-        and device_kernel_name
-    ):
+    if candidate.get("source_resolution_method") == "op_to_source" and device_kernel_name:
         device_symbol_block = (
             "\n>>> DEVICE KERNEL FOCUS <<<\n"
             f"This op (`{kernel_name}`) dispatches to the device kernel symbol:\n"
@@ -2764,7 +2762,9 @@ def _apply_geak_env_overrides(
             (None for vars that were previously unset).
     """
     keys = (
-        "GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE",
+        "GEAK_CONFIG",
+        "GEAK_USE_KNOWLEDGE_BASE",
+        "GEAK_SAVE_TO_KNOWLEDGE_BASE",
         "GEAK_RAW_ARG_SPEC_JSON",
     )
     previous = {key: os.environ.get(key) for key in keys}
@@ -2948,7 +2948,8 @@ def invoke_backend(
     # stayed an 11-config sweep + self-ref). MoE/other kernels are unaffected.
     _contract = candidate.get("kernel_contract")
     _has_contract = (
-        isinstance(_contract, dict) and _contract.get("kind") in ("collective", "attention")
+        isinstance(_contract, dict)
+        and _contract.get("kind") in ("collective", "attention")
         and bool(candidate.get("shapes") or candidate.get("kernel_shapes"))
     )
     if not common_test_command and not _has_contract:
@@ -3042,8 +3043,33 @@ def invoke_backend(
             final_report = out_dir / "final_report.json"
             if final_report.is_file():
                 result["geak_final_report"] = str(final_report)
+                # Primary salvage: final_report.json already carries the verified
+                # best speedup + patch (best_speedup / best_patch / best_task).
+                # Read it directly — one small file — so a real win survives even
+                # when the results/ rglob below is SIGKILLed mid-scan on a huge
+                # worktree (the round-2 timeout that lost a verified 4.33x).
+                try:
+                    _fr = json.loads(final_report.read_text(encoding="utf-8"))
+                    _fr_sp = float(_fr.get("best_speedup_verified") or _fr.get("best_speedup") or 0.0)
+                    if _fr_sp > 0:
+                        result["geak_per_task_best_speedup"] = _fr_sp
+                        if _fr.get("best_task"):
+                            result["geak_per_task_best_task"] = str(_fr["best_task"])
+                        _fr_patch = str(_fr.get("best_patch") or "")
+                        if _fr_patch:
+                            result["geak_per_task_best_patch"] = _fr_patch
+                            _fr_wt = _geak_best_worktree(_fr_patch)
+                            if _fr_wt:
+                                result["geak_per_task_best_worktree"] = str(_fr_wt)
+                except Exception:
+                    pass
             results_dir = out_dir / "results"
-            if results_dir.is_dir():
+            # The results/ rglobs walk the per-round worktrees, which can hold
+            # 100k+ JIT/cache files — on a SIGTERM'd run the scan itself can be
+            # SIGKILLed before it returns. Skip it entirely when final_report.json
+            # already gave us the verified best speedup + patch above; only fall
+            # back to scanning when that primary salvage was absent.
+            if results_dir.is_dir() and not result.get("geak_per_task_best_speedup"):
                 # Any *.patch under results/ is evidence of partial work.
                 patches = sorted(results_dir.rglob("*.patch"))
                 if patches:
@@ -4187,14 +4213,17 @@ def main() -> int:
         default=60.0,
         help="Per-attempt wall-clock budget for claude/codex OOB backends. GEAK uses --geak-budget-min.",
     )
-    # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 130 min.
-    _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
+    # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 180 min (3h).
+    # 180 matches GEAK's OWN full-mode budget (config budgets.full.total_s=10800s);
+    # the prior 130 killed GEAK ~50 min before its own deadline, mid round-2, and
+    # the on-disk partial wins were lost. No new knob: GEAK_RUN_MODE is the switch.
+    _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 180.0
     parser.add_argument(
         "--geak-budget-min",
         type=float,
         default=_geak_budget_default,
         help="Per-attempt wall-clock budget for GEAK only "
-        "(default tracks $GEAK_RUN_MODE: full -> 130, "
+        "(default tracks $GEAK_RUN_MODE: full -> 180, "
         "quick -> 70; both aligned with yaml "
         "run.budgets.<mode>.total_s + finalize_grace + "
         "kill_buffer + safety so the prompt-quoted "
