@@ -2463,22 +2463,25 @@ def _batch_kernel_candidates(
     rejected_kernel_ids: set[str] = set()
     attempts_by_kid: dict[str, dict] = {}
     in_flight: set[str] = set()
-    max_attempts = 1
+    from .shared_state import (
+        _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+        _DEFAULT_KERNEL_OPT_MAX_FAILURES,
+    )
+
+    max_attempts = _DEFAULT_KERNEL_OPT_MAX_FAILURES
     try:
         max_attempts = max(
             1,
             int(
                 os.environ.get(
                     "INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_ATTEMPTS",
-                    "1",
+                    str(_DEFAULT_KERNEL_OPT_MAX_FAILURES),
                 )
             ),
         )
     except (TypeError, ValueError):
-        max_attempts = 1
+        max_attempts = _DEFAULT_KERNEL_OPT_MAX_FAILURES
     # min_gpu_pct must mirror SharedState.untried_hot_reusable_kernels' 3.0 default so the two layers agree and tiny kernels don't eat ladder wall-clock.
-    from .shared_state import _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
-
     try:
         min_gpu_pct = float(
             os.environ.get(

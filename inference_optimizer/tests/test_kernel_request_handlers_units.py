@@ -1330,3 +1330,66 @@ class TestAllKernelCandidates:
 
     def test_missing_path_returns_empty(self):
         assert krh._all_kernel_candidates({}) == []
+
+
+class TestBatchKernelCandidatesRetryBudget:
+    def _write_candidates(self, tmp_path: Path) -> Path:
+        cp = tmp_path / "kc.json"
+        cp.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "kernel_id": "k001",
+                            "gpu_pct": 12.0,
+                            "reusable_native_kernel": True,
+                            "source_file": "/p/moe_op.py",
+                        }
+                    ],
+                    "reusable_native_kernel_ids": ["k001"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return cp
+
+    def test_retryable_failed_kernel_remains_batch_eligible_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_ATTEMPTS", raising=False)
+        cp = self._write_candidates(tmp_path)
+        state = SharedState.load_or_init(tmp_path)
+        state.kernel_opt_attempts = {
+            "k001": {
+                "attempts": 1,
+                "attempts_per_source": {"/p/moe_op.py": 1},
+                "failure_count": 1,
+                "last_status": "failed",
+                "last_decision": "",
+                "rejected_reason": "",
+            }
+        }
+        state.save(tmp_path)
+
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+
+        assert [item["kernel_id"] for item in out] == ["k001"]
+
+    def test_exhausted_failed_kernel_is_not_batch_eligible_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_ATTEMPTS", raising=False)
+        cp = self._write_candidates(tmp_path)
+        state = SharedState.load_or_init(tmp_path)
+        state.kernel_opt_attempts = {
+            "k001": {
+                "attempts": 2,
+                "attempts_per_source": {"/p/moe_op.py": 2},
+                "failure_count": 2,
+                "last_status": "failed",
+                "last_decision": "",
+                "rejected_reason": "max_failures_2_without_keep",
+            }
+        }
+        state.rejected_kernel_ids = ["k001"]
+        state.save(tmp_path)
+
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+
+        assert out == []

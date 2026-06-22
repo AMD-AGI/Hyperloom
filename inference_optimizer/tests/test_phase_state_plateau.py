@@ -418,6 +418,23 @@ def test_kernel_skip_to_sweep_waits_for_untried_hot_kernel():
     assert compute_next_phase(state, kernel_enabled=True) is None
 
 
+def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
+    state = _skip_to_sweep_state("KERNEL")
+    state.kernel_opt_attempts = {
+        "k018": {
+            "attempts": 1,
+            "failure_count": 1,
+            "last_decision": "",
+            "last_status": "failed",
+            "rejected_reason": "",
+        },
+    }
+
+    assert kernel_work_pending(state) is True
+    assert exit_normal_kernel(state) is None
+    assert compute_next_phase(state, kernel_enabled=True) is None
+
+
 def test_kernel_skip_to_sweep_ignores_rejected_or_integrated_attempts():
     state = _skip_to_sweep_state("KERNEL")
     state.rejected_kernel_ids = ["k001"]

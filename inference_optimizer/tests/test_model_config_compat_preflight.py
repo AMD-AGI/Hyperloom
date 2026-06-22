@@ -197,9 +197,8 @@ def test_detect_glm_moe_dsa_unrecognized_blocked(tmp_path):
     assert reason is not None and "not recognized" in reason
 
 
-def test_detect_bailing_ling_unrecognized_blocked(tmp_path):
-    # inclusionAI Ling-1T / Ling-2.6 Bailing configs are not registered in the
-    # current serving stack, so fail before useful baseline work.
+def test_detect_bailing_ling_left_to_runtime_scope(tmp_path):
+    # #649 does not add Bailing filters; keep these out of the fail-fast gate.
     for model_type, arch in (
         ("bailing_moe", "BailingMoeV2ForCausalLM"),
         ("bailing_hybrid", "BailingMoeV2_5ForCausalLM"),
@@ -212,12 +211,11 @@ def test_detect_bailing_ling_unrecognized_blocked(tmp_path):
             max_position_embeddings=32768,
         )
         reason = cli._detect_incompatible_model_config(str(m))
-        assert reason is not None and "not recognized" in reason
+        assert reason is None
 
 
-def test_detect_ovis_next_unrecognized_blocked(tmp_path):
-    # AIDC-AI/Ovis2.6-80B-A3B uses a custom architecture unsupported by the
-    # current text-generation serving path.
+def test_detect_ovis_next_left_to_runtime_scope(tmp_path):
+    # #649 does not add Ovis filters; keep this out of the fail-fast gate.
     m = tmp_path / "ovis"
     _write_config(
         m,
@@ -226,7 +224,7 @@ def test_detect_ovis_next_unrecognized_blocked(tmp_path):
         max_position_embeddings=32768,
     )
     reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None and "not recognized" in reason
+    assert reason is None
 
 
 def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):

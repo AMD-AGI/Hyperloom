@@ -259,9 +259,6 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # "model type `X` but Transformers does not recognize this architecture"
 # → ValidationError in engine init regardless of GPU vendor. Matched
 # case-insensitively against model_type and architectures.
-# bailing_moe / bailing_hybrid: inclusionAI Ling-1T/Ling-2.6-1T Bailing
-# configs are not registered by the serving stack and fail before useful
-# baseline work.
 # glm4_moe_lite: confirmed from zai-org-GLM-4.7-Flash server.log.
 # mimo_v2_flash: confirmed from XiaomiMiMo-MiMo-V2-Flash server.log ("model of
 # type mimo_v2_flash to instantiate a model of type ." + Unknown attention
@@ -271,17 +268,12 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # glm_moe_dsa: confirmed from zai-org-GLM-5.1 server.log ("model type
 # `glm_moe_dsa` but Transformers does not recognize this architecture" →
 # ModelConfig ValidationError in engine init).
-# ovis2_6_next: AIDC-AI/Ovis2.6-80B-A3B custom architecture is not supported by
-# the current text-generation serving path and reaches baseline_failed.
 _UNRECOGNIZED_MODEL_TYPES = frozenset({
-    "bailing_hybrid", "bailing_moe", "deepseek_v4", "glm4_moe_lite",
-    "mimo_v2_flash", "glm_moe_dsa", "ovis2_6_next",
+    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash", "glm_moe_dsa",
 })
 _UNRECOGNIZED_ARCHITECTURES = frozenset({
-    "bailingmoev2_5forcausallm", "bailingmoev2forcausallm",
     "deepseekv4forcausallm", "glm4moeliteforcausallm",
     "mimov2flashforcausallm", "glmmoedsaforcausallm",
-    "ovis2_6_nextforcausallm",
 })
 # ministral3 only fails inside a Mistral3 multimodal wrapper (Surpem-Supertron2
 # server.log: vLLM registry raises KeyError('ministral3') for text_config.

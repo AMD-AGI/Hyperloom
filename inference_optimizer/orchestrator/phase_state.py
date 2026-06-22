@@ -1396,6 +1396,18 @@ def warm_replay_in_flight(state: Any) -> bool:
     return str(outcome.get("status") or "").strip() == "in_flight"
 
 
+def _kernel_opt_max_failures() -> int:
+    """Resolve the kernel infra-failure retry budget.
+
+    Mirrors ``SharedState``'s default without importing it here, keeping these
+    phase helpers pure and avoiding circular imports during module load.
+    """
+    try:
+        return max(1, int(os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "2")))
+    except (TypeError, ValueError):
+        return 2
+
+
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain.
 
@@ -1442,7 +1454,15 @@ def kernel_work_pending(state: Any) -> bool:
         rejected_reason = str(attempt.get("rejected_reason") or "").strip()
         if decision == "KEEP":
             return True
-        if decision == "REVERT" or rejected_reason or status == "failed":
+        if decision == "REVERT" or rejected_reason:
+            continue
+        if status == "failed":
+            try:
+                failure_count = int(attempt.get("failure_count") or 0)
+            except (TypeError, ValueError):
+                failure_count = 0
+            if 0 < failure_count < _kernel_opt_max_failures():
+                return True
             continue
         if decision in ("", "PARTIAL", "NEEDS_REVIEW"):
             return True
