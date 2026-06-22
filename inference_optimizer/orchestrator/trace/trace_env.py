@@ -24,6 +24,18 @@ ENV_LANGFUSE_HOST = "LANGFUSE_HOST"
 ENV_LANGFUSE_PUBLIC_KEY = "LANGFUSE_PUBLIC_KEY"
 ENV_LANGFUSE_SECRET_KEY = "LANGFUSE_SECRET_KEY"
 
+# SDK batch-flush cadence (official langfuse SDK variable names). The SDK
+# background thread already auto-flushes, but its stock 5s interval means a
+# session that is hard-killed before ``cli.finally`` loses up to the last 5s of
+# observations. Hyperloom sessions run for hours and can be preempted, so we
+# tighten the interval to 1s by default: whatever is in the queue lands within
+# ~1s, and the last observation that made it to Langfuse marks where the run
+# died. ``flush_at`` is left at the SDK default (512) so steady-state traffic
+# still batches normally and we do not issue one HTTP request per observation.
+ENV_LANGFUSE_FLUSH_INTERVAL = "LANGFUSE_FLUSH_INTERVAL"
+ENV_LANGFUSE_FLUSH_AT = "LANGFUSE_FLUSH_AT"
+_DEFAULT_FLUSH_INTERVAL = "1"
+
 _TRUE_TOKENS: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 _FALSE_TOKENS: frozenset[str] = frozenset({"0", "false", "no", "off"})
 
@@ -87,11 +99,25 @@ def langfuse_credentials_complete() -> bool:
     return len(langfuse_credentials()) == 3
 
 
+def apply_flush_defaults() -> None:
+    """Seed the SDK's auto-flush cadence before the client is built.
+
+    Must run before the first ``get_client()`` call, since the langfuse SDK
+    reads ``LANGFUSE_FLUSH_INTERVAL`` / ``LANGFUSE_FLUSH_AT`` only when it lazily
+    constructs the singleton client. Uses ``setdefault`` so an operator-supplied
+    value always wins; we only supply a tighter default when nothing is set.
+    """
+    os.environ.setdefault(ENV_LANGFUSE_FLUSH_INTERVAL, _DEFAULT_FLUSH_INTERVAL)
+
+
 __all__ = [
     "ENV_LANGFUSE_ENABLE",
+    "ENV_LANGFUSE_FLUSH_AT",
+    "ENV_LANGFUSE_FLUSH_INTERVAL",
     "ENV_LANGFUSE_HOST",
     "ENV_LANGFUSE_PUBLIC_KEY",
     "ENV_LANGFUSE_SECRET_KEY",
+    "apply_flush_defaults",
     "env_flag",
     "langfuse_credentials",
     "langfuse_credentials_complete",
