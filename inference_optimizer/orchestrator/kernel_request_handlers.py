@@ -1535,6 +1535,70 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
     return str(best) if best is not None else ""
 
 
+def _path_is_existing_file(value: str) -> bool:
+    """Safe ``Path.is_file()`` that never raises on an over-long pathname.
+
+    A caller can hand us inline JSON content instead of a path. ``Path(...)``
+    accepts any string, but ``is_file()`` raises ``OSError(ENAMETOOLONG)`` when
+    a path component exceeds the filesystem limit, which previously crashed the
+    forge dense tuner instantly. Treat that (and any OSError) as "not a file".
+    """
+    try:
+        return Path(value).is_file()
+    except OSError:
+        return False
+
+
+def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
+    """Return a usable shapes-JSON *file path*, materializing inline content.
+
+    The orchestration layer sometimes passes the GEMM shapes as inline JSON
+    (a list/dict, or its string form) in ``shapes_json`` instead of a file
+    path. forge treats ``shapes_json`` strictly as a path and crashes with
+    ``OSError(ENAMETOOLONG)`` on the long pseudo-path. Normalize here:
+
+    - existing file path -> returned unchanged
+    - list/dict, or a string that parses as JSON -> written to
+      ``<workspace>/forge_shapes.json`` and that path returned
+    - anything else (empty / unparseable / non-existent path) -> ""
+    """
+    if value in (None, ""):
+        return ""
+
+    # Already-parsed inline content.
+    if isinstance(value, (list, dict)):
+        parsed: Any = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return ""
+        # A real, existing path wins.
+        if _path_is_existing_file(text):
+            return text
+        # Inline JSON content (possibly Python-repr with single quotes).
+        if text[0] in "[{":
+            try:
+                parsed = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                try:
+                    import ast
+
+                    parsed = ast.literal_eval(text)
+                except (ValueError, SyntaxError):
+                    return ""
+        else:
+            # Non-JSON string that is not an existing file: unusable.
+            return ""
+
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        out = workspace / "forge_shapes.json"
+        out.write_text(json.dumps(parsed), encoding="utf-8")
+        return str(out)
+    except (OSError, TypeError, ValueError):
+        return ""
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -1592,8 +1656,10 @@ async def _run_forge_gemm_tuning(
     if not kernel_sig_log:
         kernel_sig_log = _resolve_forge_server_log(state, session_dir)
 
-    # Resolve TraceLens shapes if available
-    shapes_json = str(payload.get("shapes_json") or "").strip()
+    # Resolve TraceLens shapes if available. Normalize first: callers sometimes
+    # pass inline JSON content instead of a path, which makes forge crash with
+    # OSError(ENAMETOOLONG); materialize it to a real file (or drop it).
+    shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
     if not shapes_json:
         shapes_json = _resolve_forge_shapes(state, session_dir)
 
@@ -1601,6 +1667,9 @@ async def _run_forge_gemm_tuning(
     # shapes JSON, fall back to the aiter untuned-GEMM CSVs the specialist phase
     # already recorded; without this the dense tuner skips itself.
     untuned_csv = str(payload.get("untuned_csv") or "").strip()
+    if untuned_csv and not _path_is_existing_file(untuned_csv):
+        # Guard against inline content / stale paths handed in as untuned_csv.
+        untuned_csv = ""
     if not untuned_csv and not shapes_json:
         untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type)
 
