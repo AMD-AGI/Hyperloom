@@ -4740,6 +4740,18 @@ def _normalize_optimization_stack_entry(
     return out
 
 
+def _resolve_gemm_engine(record: dict[str, Any]) -> str:
+    """Resolve the GEMM-tuning engine label for a run/stack record.
+
+    The forge lane records its tuner under ``backend`` (e.g. ``forge``) and
+    leaves ``engine`` unset, while the legacy GEAK path sets ``engine``
+    directly. Reading only ``engine`` therefore mislabeled every forge run as
+    ``geak``. Prefer ``engine``, then ``backend``, then fall back to ``geak``
+    for older records that carry neither.
+    """
+    return str(record.get("engine") or record.get("backend") or "geak")
+
+
 def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
     """Build the top-level ``gemm_tuning`` section from session state; never raises.
 
@@ -4782,7 +4794,7 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
             adopted_gain[tf] = {
                 "gain_pct": _to_float(item.get("gain_pct")),
                 "validated": idx < validated_len,
-                "engine": str(item.get("engine") or "geak"),
+                "engine": _resolve_gemm_engine(item),
             }
 
     baseline_tput = _to_float(state.get("baseline_tput"))
@@ -4798,7 +4810,7 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
     for raw in attempts:
         if not isinstance(raw, dict):
             continue
-        engine = str(raw.get("engine") or "geak")
+        engine = _resolve_gemm_engine(raw)
         speedup = _to_float(raw.get("best_speedup"))
         gain_pct: float | None = None
         tuned_tput: float | None = None
