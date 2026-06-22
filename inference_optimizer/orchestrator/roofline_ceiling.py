@@ -258,8 +258,9 @@ def _read_baseline_yaml_server_args(state: Any) -> str:
     The baseline ``current_best`` snapshot carries no ``extra_server_args``
     (the flags live only in ``benchmark.envs.EXTRA_*_ARGS`` of the on-disk
     yaml), so a baseline-only run with ``--quantization fp8`` in the yaml
-    would otherwise be invisible to dtype resolution. Returns ``""`` when
-    the file / fields are unreadable.
+    would otherwise be invisible to dtype resolution. If the materialized YAML
+    is unreadable, fall back to ``last_baseline`` payload/env args so prelude
+    profiling does not silently drop operator server flags.
 
     Args:
         state: Shared run state carrying ``last_baseline`` provenance.
@@ -267,7 +268,10 @@ def _read_baseline_yaml_server_args(state: Any) -> str:
     Returns:
         The assembled baseline server args, or ``""`` when unreadable.
     """
-    return _server_args_from_envs(_benchmark_envs(_read_baseline_yaml_benchmark(state)))
+    yaml_args = _server_args_from_envs(_benchmark_envs(_read_baseline_yaml_benchmark(state)))
+    if yaml_args:
+        return yaml_args
+    return _server_args_from(getattr(state, "last_baseline", None))
 
 
 def _server_args_env_override(entry: Any) -> str:
