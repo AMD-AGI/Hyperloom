@@ -2420,6 +2420,40 @@ def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
     return out
 
 
+# PR-C default: one backend-ladder dispatch per kernel/source unless an infra
+# failure still has retry budget (see ``_kernel_dispatch_attempt_cap``).
+_DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS = 1
+
+
+def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) -> int:
+    """Return the batch-eligibility attempt cap for one kernel attempt record.
+
+    Non-infra attempts (PARTIAL, legacy resume rows, etc.) keep the PR-C
+    single-dispatch contract. Only a retryable backend infra failure widens the
+    cap to ``max_failures`` so dispatch, ``record_kernel_opt``, and
+    ``kernel_work_pending`` agree on the same budget.
+    """
+    if not isinstance(entry, dict):
+        return _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
+    try:
+        failure_count = int(entry.get("failure_count") or 0)
+    except (TypeError, ValueError):
+        failure_count = 0
+    if failure_count <= 0:
+        return _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
+    last_decision = str(entry.get("last_decision") or "").strip()
+    last_status = str(entry.get("last_status") or "").lower()
+    rejected_reason = str(entry.get("rejected_reason") or "").strip()
+    if (
+        failure_count < max_failures
+        and last_decision == ""
+        and last_status in {"failed", "error", "timeout"}
+        and not rejected_reason
+    ):
+        return max_failures
+    return _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
+
+
 def _batch_kernel_candidates(
     payload: dict,
     *,
@@ -2465,22 +2499,10 @@ def _batch_kernel_candidates(
     in_flight: set[str] = set()
     from .shared_state import (
         _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
-        _DEFAULT_KERNEL_OPT_MAX_FAILURES,
+        resolve_kernel_opt_max_failures,
     )
 
-    max_attempts = _DEFAULT_KERNEL_OPT_MAX_FAILURES
-    try:
-        max_attempts = max(
-            1,
-            int(
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_ATTEMPTS",
-                    str(_DEFAULT_KERNEL_OPT_MAX_FAILURES),
-                )
-            ),
-        )
-    except (TypeError, ValueError):
-        max_attempts = _DEFAULT_KERNEL_OPT_MAX_FAILURES
+    max_failures = resolve_kernel_opt_max_failures()
     # min_gpu_pct must mirror SharedState.untried_hot_reusable_kernels' 3.0 default so the two layers agree and tiny kernels don't eat ladder wall-clock.
     try:
         min_gpu_pct = float(
@@ -2520,12 +2542,13 @@ def _batch_kernel_candidates(
         if kid in in_flight:
             return False
         entry = attempts_by_kid.get(kid) or {}
+        attempt_cap = _kernel_dispatch_attempt_cap(entry, max_failures=max_failures)
         if current_source:
             per_source = entry.get("attempts_per_source")
             if isinstance(per_source, dict):
                 src_attempts = int(per_source.get(current_source, 0))
-                return src_attempts < max_attempts
-        if int(entry.get("attempts", 0)) >= max_attempts:
+                return src_attempts < attempt_cap
+        if int(entry.get("attempts", 0)) >= attempt_cap:
             return False
         return True
 
@@ -4387,9 +4410,9 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             envelope; non-dicts and empty ``kernel_id`` are no-ops.
     """
     from .shared_state import (
-        _DEFAULT_KERNEL_OPT_MAX_FAILURES,
         _DEFAULT_KERNEL_OPT_MAX_PARTIAL,
         _now_iso,
+        resolve_kernel_opt_max_failures,
     )
 
     if not isinstance(result, dict):
@@ -4579,14 +4602,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
 
     # Backend ladder failures are often transient infra/backend faults; real
     # REVERT still retires immediately below, but infra failures get a retry.
-    max_failures = _DEFAULT_KERNEL_OPT_MAX_FAILURES
-    env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
-    if env_f:
-        try:
-            max_failures = max(1, int(env_f))
-        except (TypeError, ValueError):
-            # Malformed env override → keep the default failure cap.
-            pass
+    max_failures = resolve_kernel_opt_max_failures()
 
     should_reject = (
         decision == "REVERT"

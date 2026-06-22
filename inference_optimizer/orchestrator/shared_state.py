@@ -110,6 +110,24 @@ _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
 # before retiring the kernel. Override via
 # ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
 _DEFAULT_KERNEL_OPT_MAX_FAILURES = 2
+
+
+def resolve_kernel_opt_max_failures() -> int:
+    """Resolve the infra-failure retry budget (>=1).
+
+    Shared by ``record_kernel_opt``, ``kernel_work_pending``, and batch
+    dispatch so ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` stays
+    consistent across layers.
+    """
+    env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
+    if env_f:
+        try:
+            return max(1, int(env_f))
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_KERNEL_OPT_MAX_FAILURES
+
+
 # Integration faults (environment / apply / bench crashes) are distinct from a
 # genuine gate REVERT (measured gain below threshold / accuracy regression). A
 # fault means the patch was never fairly measured, so it must not burn the

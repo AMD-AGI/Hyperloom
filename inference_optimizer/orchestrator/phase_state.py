@@ -1397,15 +1397,10 @@ def warm_replay_in_flight(state: Any) -> bool:
 
 
 def _kernel_opt_max_failures() -> int:
-    """Resolve the kernel infra-failure retry budget.
+    """Resolve the kernel infra-failure retry budget (lazy import)."""
+    from .shared_state import resolve_kernel_opt_max_failures
 
-    Mirrors ``SharedState``'s default without importing it here, keeping these
-    phase helpers pure and avoiding circular imports during module load.
-    """
-    try:
-        return max(1, int(os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "2")))
-    except (TypeError, ValueError):
-        return 2
+    return resolve_kernel_opt_max_failures()
 
 
 def kernel_work_pending(state: Any) -> bool:

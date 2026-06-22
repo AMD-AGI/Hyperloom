@@ -412,6 +412,25 @@ def test_record_kernel_opt_max_failures_env_override(state: SharedState, monkeyp
     assert "k001" in state.rejected_kernel_ids
 
 
+def test_resolve_kernel_opt_max_failures_defaults_and_env(monkeypatch):
+    from inference_optimizer.orchestrator.shared_state import (
+        _DEFAULT_KERNEL_OPT_MAX_FAILURES,
+        resolve_kernel_opt_max_failures,
+    )
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", raising=False)
+    assert resolve_kernel_opt_max_failures() == _DEFAULT_KERNEL_OPT_MAX_FAILURES
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "4")
+    assert resolve_kernel_opt_max_failures() == 4
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "0")
+    assert resolve_kernel_opt_max_failures() == 1
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "bad")
+    assert resolve_kernel_opt_max_failures() == _DEFAULT_KERNEL_OPT_MAX_FAILURES
+
+
 # PR-C: untried_hot_reusable_kernels report gate
 def _set_trace(state: SharedState, *, hot_kernels, task_groups=None):
     state.last_trace_analyze = {

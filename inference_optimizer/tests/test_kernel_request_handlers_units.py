@@ -1353,8 +1353,7 @@ class TestBatchKernelCandidatesRetryBudget:
         )
         return cp
 
-    def test_retryable_failed_kernel_remains_batch_eligible_by_default(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_ATTEMPTS", raising=False)
+    def test_retryable_failed_kernel_remains_batch_eligible_by_default(self, tmp_path):
         cp = self._write_candidates(tmp_path)
         state = SharedState.load_or_init(tmp_path)
         state.kernel_opt_attempts = {
@@ -1373,8 +1372,7 @@ class TestBatchKernelCandidatesRetryBudget:
 
         assert [item["kernel_id"] for item in out] == ["k001"]
 
-    def test_exhausted_failed_kernel_is_not_batch_eligible_by_default(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_ATTEMPTS", raising=False)
+    def test_exhausted_failed_kernel_is_not_batch_eligible_by_default(self, tmp_path):
         cp = self._write_candidates(tmp_path)
         state = SharedState.load_or_init(tmp_path)
         state.kernel_opt_attempts = {
@@ -1393,3 +1391,42 @@ class TestBatchKernelCandidatesRetryBudget:
         out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
 
         assert out == []
+
+    def test_partial_kernel_stays_single_dispatch_by_default(self, tmp_path):
+        cp = self._write_candidates(tmp_path)
+        state = SharedState.load_or_init(tmp_path)
+        state.kernel_opt_attempts = {
+            "k001": {
+                "attempts": 1,
+                "attempts_per_source": {"/p/moe_op.py": 1},
+                "partial_count": 1,
+                "last_decision": "PARTIAL",
+                "last_status": "ok",
+                "rejected_reason": "",
+            }
+        }
+        state.save(tmp_path)
+
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+
+        assert out == []
+
+    def test_retryable_failed_kernel_respects_max_failures_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "3")
+        cp = self._write_candidates(tmp_path)
+        state = SharedState.load_or_init(tmp_path)
+        state.kernel_opt_attempts = {
+            "k001": {
+                "attempts": 2,
+                "attempts_per_source": {"/p/moe_op.py": 2},
+                "failure_count": 2,
+                "last_status": "failed",
+                "last_decision": "",
+                "rejected_reason": "",
+            }
+        }
+        state.save(tmp_path)
+
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+
+        assert [item["kernel_id"] for item in out] == ["k001"]
