@@ -59,7 +59,7 @@ jobs:
       # Count-filler runs go to the hyperloom workspace only.
       SUBMIT_WORKSPACES: 'core42-hyperloom'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Resolve count-filler batch
         id: batch
