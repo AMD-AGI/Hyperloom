@@ -121,7 +121,10 @@ def main(argv):
              if argv else DEFAULT_POOLS)
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # Phase 1: local config rules -> tentative keep set per pool.
+    # Phase 1: local config rules -> tentative keep set per pool. Repos in the
+    # curated daily-fixed whitelist are exempt from ALL filtering (kept as-is,
+    # no config rule, no gated check).
+    whitelist = model_compat.load_whitelist()
     pools_local = {}
     keep_repos = []
     for pname, ppath in pools.items():
@@ -130,8 +133,8 @@ def main(argv):
         local_keep, local_filt = [], []
         for c in cands:
             repo = c.get("repo_id")
-            if not repo:
-                local_keep.append((c, None))
+            if not repo or repo in whitelist:
+                local_keep.append((c, None))  # exempt: keep, skip gated lookup
                 continue
             r = classify_local(repo)
             if r:
