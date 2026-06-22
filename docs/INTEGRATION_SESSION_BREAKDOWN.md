@@ -67,6 +67,8 @@ The `exporter_version` field carries the producing Hyperloom version
   "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
   "exporter_version": "0.6.0",
+  "leaderboard_eligible": true,
+  "leaderboard_suppression_reason": null,
 
   "session":            { /* §3  SessionMeta */ },
   "workload":           { /* §4  Workload */ },
@@ -93,6 +95,29 @@ All sections use the `total=False` TypedDict convention — every field
 is optional. Consumers should expect partial documents when a session
 ended early (`baseline_failed`, `time_exhausted` before kernel-opt
 started, …).
+
+### Leaderboard suppression hints
+
+The producer emits `leaderboard_eligible` and
+`leaderboard_suppression_reason` as top-level eligibility hints for
+leaderboard consumers. Terminal fail-fast rows such as incompatible model
+configs, unsupported model architectures, context-window preflight failures,
+and baseline bootstrap failures are not valid zero-gain measurements. For
+those rows, the exporter sets:
+
+```json
+{
+  "leaderboard_eligible": false,
+  "leaderboard_suppression_reason": "model_config_incompatible",
+  "show_on_leaderboard": false
+}
+```
+
+Downstream ingesters MUST honor `show_on_leaderboard: false` or
+`leaderboard_eligible: false` as a hard hide signal before applying their own
+quality gates. Successful or otherwise undecided rows omit
+`show_on_leaderboard` so the ingester remains the final authority for normal
+ranking decisions.
 
 ---
 

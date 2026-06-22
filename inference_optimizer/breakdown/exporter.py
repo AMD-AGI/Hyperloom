@@ -27,8 +27,10 @@ BREAKDOWN_FILENAME = "session_breakdown.json"
 _LEADERBOARD_SUPPRESSED_STOP_REASONS: frozenset[str] = frozenset(
     {
         "model_config_incompatible",
+        "model_context_window_too_small",
         "unsupported_model_arch",
         "baseline_failed",
+        "prelude_baseline_failed",
         "baseline_arg_error",
     }
 )
@@ -42,9 +44,9 @@ def _leaderboard_suppression_reason(session: dict[str, Any], final: dict[str, An
     hint so invalid model/config rows cannot be mistaken for valid zero-gain
     measurements downstream.
     """
-    stop_reason = str((session or {}).get("stop_reason") or "").strip()
-    status = str((final or {}).get("status") or "").strip()
-    for reason in (stop_reason, status):
+    session_stop_reason = str((session or {}).get("stop_reason") or "").strip()
+    final_stop_reason = str((final or {}).get("stop_reason") or "").strip()
+    for reason in (session_stop_reason, final_stop_reason):
         if reason in _LEADERBOARD_SUPPRESSED_STOP_REASONS:
             return reason
     return None
