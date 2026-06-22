@@ -211,3 +211,35 @@ class TestCollectGemmTuning:
         out = col.collect_gemm_tuning(state)
         assert len(out["runs"]) == 1
         assert out["runs"][0]["engine"] == "geak"
+
+    def test_forge_backend_not_mislabeled_as_geak(self):
+        # Forge records the tuner under ``backend`` and leaves ``engine`` unset;
+        # the collector must surface ``forge`` rather than defaulting to geak.
+        state = {
+            "baseline_tput": 1000.0,
+            "precision": "bf16",
+            "framework": "sglang",
+            "cumulative_gain_validated_stack_len": 1,
+            "gemm_tuning_attempts": [
+                {
+                    "backend": "forge",
+                    "status": "complete",
+                    "decision": "KEEP",
+                    "best_speedup": 1.2,
+                    "tuned_file": "AITER_CONFIG_GEMM_BF16",
+                    "ts": "2026-06-21T00:00:00Z",
+                },
+            ],
+            "optimization_stack": [
+                {
+                    "action": "gemm_tuning",
+                    "backend": "forge",
+                    "tuned_file": "AITER_CONFIG_GEMM_BF16",
+                    "gain_pct": 5.5,
+                    "tput": 1055.0,
+                },
+            ],
+        }
+        out = col.collect_gemm_tuning(state)
+        assert out["runs"][0]["engine"] == "forge"
+        assert out["adopted_engine"] == "forge"
