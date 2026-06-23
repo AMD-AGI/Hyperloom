@@ -2550,5 +2550,69 @@
         "patchable": true
       }
     }
+  },
+  "sglang::inplace_fused_experts": {
+    "kind": "composite",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(87): inplace_fused_experts"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "fused_moe_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
+        "kernel_source_line": "702",
+        "kernel_kind": "triton",
+        "patchable": true
+      }
+    }
+  },
+  "inplace_fused_experts": {
+    "kind": "composite",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(87): inplace_fused_experts"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "fused_moe_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
+        "kernel_source_line": "702",
+        "kernel_kind": "triton",
+        "patchable": true
+      }
+    }
+  },
+  "sglang::outplace_fused_experts": {
+    "kind": "composite",
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "fused_moe_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
+        "kernel_source_line": "702",
+        "kernel_kind": "triton",
+        "patchable": true
+      }
+    },
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(149): outplace_fused_experts"
+    ]
+  },
+  "outplace_fused_experts": {
+    "kind": "composite",
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "fused_moe_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
+        "kernel_source_line": "702",
+        "kernel_kind": "triton",
+        "patchable": true
+      }
+    },
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(149): outplace_fused_experts"
+    ]
   }
 }
