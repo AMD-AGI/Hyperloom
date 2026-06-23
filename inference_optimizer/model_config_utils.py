@@ -179,20 +179,26 @@ def _to_int(val: object) -> int | None:
 
 
 def _merge_config_scopes(data: dict) -> dict:
-    """Flatten a nested text-tower config over the top level (nested wins).
+    """Flatten nested text-tower config(s) over the top level (nested wins).
 
     Multimodal wrappers describe the benchmarkable decoder under
-    ``text_config`` / ``llm_config`` / ``language_config``; merge the first
-    present scope so structural fields resolve from there.
+    ``text_config`` / ``llm_config`` / ``language_config``. Merge every present
+    scope in priority order so a stub high-priority scope is backfilled by a
+    fuller lower-priority one (a field already set by a higher scope is kept).
     """
     merged = dict(data)
+    seen: set[str] = set()
     for scope_key in _TEXT_SCOPE_KEYS:
         nested = data.get(scope_key)
-        if isinstance(nested, dict):
-            for k, v in nested.items():
-                if v not in (None, ""):
-                    merged[k] = v
-            break
+        if not isinstance(nested, dict):
+            continue
+        for k, v in nested.items():
+            if v in (None, ""):
+                continue
+            if k in seen:
+                continue
+            merged[k] = v
+            seen.add(k)
     return merged
 
 
@@ -221,7 +227,7 @@ def _derive_quantization(cfg: dict) -> str:
     return ""
 
 
-def _derive_model_family(model_type: str, architectures: list[str], model_path: str) -> str:
+def _derive_model_family(model_type: str, model_path: str) -> str:
     """Infer the base model family with generation (e.g. qwen3, deepseek_v3).
 
     Collapses same-generation structural variants (moe / next / vl / text)
@@ -311,7 +317,7 @@ def summarize_model_config(model_path: str) -> dict:
     if arches:
         out["architectures"] = arches
 
-    family = _derive_model_family(model_type, arches, model_path)
+    family = _derive_model_family(model_type, model_path)
     if family:
         out["model_family"] = family
 

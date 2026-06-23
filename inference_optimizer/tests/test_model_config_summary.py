@@ -204,6 +204,59 @@ def test_summary_llm_config_nesting(tmp_path: Path) -> None:
     assert out["num_experts"] == 128
 
 
+def test_summary_stub_high_priority_scope_backfilled_by_lower(tmp_path: Path) -> None:
+    # text_config is a stub (only model_type); the real decoder lives in
+    # llm_config. Fields absent from the stub must be backfilled from llm_config.
+    m = _write_config(
+        tmp_path / "m",
+        {
+            "model_type": "wrapper",
+            "text_config": {"model_type": "qwen2"},
+            "llm_config": {
+                "num_attention_heads": 64,
+                "num_key_value_heads": 8,
+                "num_hidden_layers": 48,
+                "hidden_size": 8192,
+            },
+        },
+    )
+    out = summarize_model_config(str(m))
+    # Higher-priority text_config wins where present (model_type),
+    # lower-priority llm_config backfills the missing structural fields.
+    assert out["num_attention_heads"] == 64
+    assert out["num_hidden_layers"] == 48
+    assert out["hidden_size"] == 8192
+    assert out["attention_type"] == "GQA"
+
+
+def test_summary_round_trips_through_state_json(tmp_path: Path) -> None:
+    # E2E: model_info computed at launch must survive save -> load on state.json.
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    m = _write_config(
+        tmp_path / "Qwen3-8B",
+        {
+            "model_type": "qwen3",
+            "architectures": ["Qwen3ForCausalLM"],
+            "hidden_size": 4096,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "num_hidden_layers": 36,
+        },
+    )
+    info = summarize_model_config(str(m))
+    assert info  # non-empty for a real config
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    SharedState(session_id="s1", model_path=str(m), model_info=info).save(session_dir)
+
+    reloaded = SharedState.load_or_init(session_dir)
+    assert reloaded.model_info == info
+    assert reloaded.model_info["model_family"] == "qwen3"
+    assert reloaded.model_info["attention_type"] == "GQA"
+
+
 @pytest.mark.parametrize(
     "model_type,name,expected_family",
     [

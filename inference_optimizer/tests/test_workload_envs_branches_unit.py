@@ -197,6 +197,38 @@ def test_vllm_ep_preserves_profile_args(monkeypatch, tmp_path):
     assert "--enable-expert-parallel" in args
 
 
+def test_vllm_ep_does_not_duplicate_existing_flag(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("EP", "8")
+    src = _write(
+        tmp_path / "cfg.yaml",
+        framework="vllm",
+        envs={"EXTRA_VLLM_ARGS": "--enable-expert-parallel"},
+    )
+
+    bench = _materialize(src, tmp_path / "out")
+
+    args = bench["envs"]["EXTRA_VLLM_ARGS"]
+    assert args.count("--enable-expert-parallel") == 1
+
+
+@pytest.mark.parametrize(
+    "server_args, framework, ep, expected",
+    [
+        ("--foo", "vllm", 8, "--foo --enable-expert-parallel"),
+        ("--foo", "vllm", 1, "--foo"),
+        ("--foo", "sglang", 8, "--foo"),
+        ("--foo", "vllm", "bad", "--foo"),
+        ("--foo", "vllm", None, "--foo"),
+        ("--enable-expert-parallel", "vllm", 8, "--enable-expert-parallel"),
+        ("", "vllm", 8, "--enable-expert-parallel"),
+    ],
+)
+def test_inject_vllm_expert_parallel_unit(server_args, framework, ep, expected):
+    assert we.inject_vllm_expert_parallel(server_args, framework, ep) == expected
+
+
 # ---- per-model work-around: mimo-v2 ---------------------------------------
 def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
