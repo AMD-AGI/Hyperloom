@@ -24,6 +24,40 @@ log = logging.getLogger(__name__)
 EXPORTER_VERSION = "session-breakdown-1.0.0"
 BREAKDOWN_FILENAME = "session_breakdown.json"
 
+_LEADERBOARD_SUPPRESSED_STOP_REASONS = frozenset(
+    {
+        "baseline_arg_error",
+        "baseline_failed",
+        "claw_lifecycle_incomplete",
+        "incomplete_after_progress",
+        "missing_breakdown_after_claw_activity",
+        "model_config_incompatible",
+        "model_context_window_too_small",
+        "prelude_baseline_failed",
+        "sandbox_start_failed",
+        "unsupported_model_arch",
+    },
+)
+
+
+def _leaderboard_suppression(session: dict[str, Any], final: dict[str, Any]) -> tuple[bool, str | None]:
+    """Return leaderboard eligibility derived from terminal run status.
+
+    Fail-fast and baseline-failed sessions can carry ``gain=0`` simply because
+    no valid optimization comparison existed. Mark them explicitly so downstream
+    importers do not treat them as leaderboard zero-gain results.
+    """
+    candidates = (
+        session.get("stop_reason") if isinstance(session, dict) else None,
+        final.get("stop_reason") if isinstance(final, dict) else None,
+        final.get("status") if isinstance(final, dict) else None,
+    )
+    for value in candidates:
+        reason = str(value or "").strip()
+        if reason in _LEADERBOARD_SUPPRESSED_STOP_REASONS:
+            return False, reason
+    return True, None
+
 
 def _phase_event_key(ev: dict[str, Any]) -> tuple[str, str, str]:
     """Dedupe key matching :func:`collectors.collect_phase_timeline`.
@@ -533,11 +567,15 @@ def build(
         telemetry.get("profile_report_paths") or [],
         [p.get("benchmark_report_path") for p in (sweep.get("all_variants") or []) if p.get("benchmark_report_path")],
     )
+    leaderboard_eligible, leaderboard_suppression_reason = _leaderboard_suppression(session_section, final)
 
     breakdown = {
         "schema_version": schema_version,
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
+        "leaderboard_eligible": leaderboard_eligible,
+        "leaderboard_suppression_reason": leaderboard_suppression_reason,
+        "show_on_leaderboard": leaderboard_eligible,
         "session": session_section,
         # §1b enrichment; always present from the exporter (no longer CI-only).
         "session_meta": session_meta,
