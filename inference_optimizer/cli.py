@@ -3082,6 +3082,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             if val:
                 os.environ[env_name] = str(val)
                 print(f"  re-exported {env_name:<14s}: {val}")
+        # Profile-scoped OSL: an explicit --profile-osl on this resume wins;
+        # otherwise re-export the value persisted from the original run so the
+        # profile phase doesn't silently revert to its default (and re-trigger
+        # the oversized-trace / EngineCore-timeout failure this guards against).
+        _resume_profile_osl = getattr(args, "profile_osl", None) or getattr(state, "profile_osl", 0)
+        if _resume_profile_osl:
+            os.environ["PROFILE_OSL"] = str(int(_resume_profile_osl))
+            state.profile_osl = int(_resume_profile_osl)
+            print(f"  re-exported PROFILE_OSL   : {int(_resume_profile_osl)}")
         if state.precision:
             os.environ["PRECISION"] = state.precision
             print(f"  re-exported PRECISION     : {state.precision}")
@@ -4097,10 +4106,12 @@ def _build_parser() -> argparse.ArgumentParser:
             else None
         ),
         help=(
-            "Profiling-phase output sequence length (issue #571). When set, it "
-            "overrides --osl for the roofline/profile server ONLY, so its "
-            "torch-profiler trace stays serializable; baseline/optimize phases "
-            "still run at --osl. Default $PROFILE_OSL or unset (reuse --osl)."
+            "Profiling-phase output sequence length. When set, it overrides "
+            "--osl for the roofline/profile server ONLY, so its torch-profiler "
+            "trace stays serializable; baseline/optimize phases still run at "
+            "--osl. Default $PROFILE_OSL; when unset the profile phase uses "
+            "min(--osl, 1024) and is auto-lowered further if needed to keep the "
+            "capture window within the serialization cap."
         ),
     )
     opt.add_argument(

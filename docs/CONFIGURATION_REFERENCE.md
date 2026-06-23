@@ -79,7 +79,7 @@ read them when invoked standalone.
 | `CONC`            | `8`         | Benchmark concurrency.                                               |
 | `ISL`             | `256`       | Input sequence length.                                               |
 | `OSL`             | `256`       | Output sequence length.                                              |
-| `PROFILE_OSL`     | unset (reuse `OSL`) | Profiling-phase output sequence length (set by `--profile-osl`). When set, overrides `OSL` for the roofline/profile server **only** so its torch-profiler trace stays serializable; baseline/optimize phases still run at `OSL`. |
+| `PROFILE_OSL`     | unset → `min(OSL, 1024)` | Profiling-phase output sequence length (set by `--profile-osl`). Overrides `OSL` for the roofline/profile server **only** so its torch-profiler trace stays serializable; baseline/optimize phases still run at `OSL`. When unset, the profile phase uses `min(OSL, 1024)` and is auto-lowered further if needed to keep the capture window within the serialization cap. |
 | `MAX_MODEL_LEN`   | `8192`      | Server-side max sequence length.                                     |
 | `PRECISION`       | `bf16`      | Model precision (`bf16`, `fp8`, `mxfp4`, ...).                       |
 | `RANDOM_RANGE_RATIO` | unset    | Optional Magpie random-range jitter.                                 |
