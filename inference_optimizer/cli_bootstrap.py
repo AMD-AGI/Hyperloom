@@ -212,6 +212,8 @@ def _seed_shared_state(
         conc=_int_env_or_arg("conc", "CONC"),
         isl=_int_env_or_arg("isl", "ISL"),
         osl=_int_env_or_arg("osl", "OSL"),
+        # Persist the explicit profile OSL so a fresh-shell resume keeps it.
+        profile_osl=_int_env_or_arg("profile_osl", "PROFILE_OSL"),
         max_model_len=_int_env_or_arg("max_model_len", "MAX_MODEL_LEN"),
         kernel_enabled=not getattr(args, "no_kernel", False),
         continue_kernel_after_gemm=bool(
