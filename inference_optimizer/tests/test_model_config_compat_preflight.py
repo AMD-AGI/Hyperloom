@@ -103,6 +103,39 @@ def test_detect_with_tokenizer_ok(tmp_path):
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
+def test_detect_mistral_tokenizer_json_without_common_files_blocks(tmp_path):
+    m = tmp_path / "mistral_json_only"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="mistral",
+        architectures=["MistralForCausalLM"],
+        max_position_embeddings=32768,
+    )
+    (m / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    reason = cli._detect_incompatible_model_config(str(m))
+
+    assert reason is not None
+    assert "MistralCommonBackend" in reason
+    assert "No tokenizer file found" in reason
+
+
+def test_detect_mistral_tokenizer_model_file_ok(tmp_path):
+    m = tmp_path / "mistral_tokenizer_model"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="mistral",
+        architectures=["MistralForCausalLM"],
+        max_position_embeddings=32768,
+    )
+    (m / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
+
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
 def test_detect_missing_tokenizer_but_auto_map_ok(tmp_path):
     # A custom AutoTokenizer in auto_map can supply the tokenizer at load time.
     m = tmp_path / "auto_tok"

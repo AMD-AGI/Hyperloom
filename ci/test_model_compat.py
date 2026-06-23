@@ -146,6 +146,12 @@ def test_unsupported_arch_matched_by_architecture_fallback():
                     "max_position_embeddings": 131072}) == "unsupported_arch"
 
 
+def test_unsupported_arch_qrwkv6_hybrid_is_filtered():
+    assert _reason({"architectures": ["RWKV6Qwen2ForCausalLM"],
+                    "model_type": "rwkv6qwen2",
+                    "max_position_embeddings": 131072}) == "unsupported_arch"
+
+
 def test_unsupported_arch_is_gpu_independent():
     # Registry rules are config-based: hit on any gpu_type and with none.
     cfg = {"architectures": ["DeepseekV32ForCausalLM"], "model_type": "deepseek_v32",
