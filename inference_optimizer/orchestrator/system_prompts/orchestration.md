@@ -176,7 +176,8 @@ grid-runner entry):
     the GPU specialist pool is enabled at whole-machine capacity by default,
     so you can hand a specialist the cards to *measure*, not just reason.
     When a gap is best settled by running on the GPU — a kernel/config probe,
-    a MoE autotune sweep (`benchmark_moe.py` or your own harness), a
+    a source-discovered autotune (prefer framework tuner/config entrypoints;
+    fallback to a small harness around framework primitives), a
     communication-collective timing that needs several cards — dispatch
     `delegate{action_name='specialist', params={needs_gpu: true,
     gpu_count: N, ...}}` with `gpu_count` 1..(whole machine). Pick `gpu_count`

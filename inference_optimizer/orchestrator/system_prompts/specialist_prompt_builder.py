@@ -698,20 +698,24 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         "",
         f"You exclusively own GPU card(s) [{cards}] for this task. On those "
         "cards you are free to do whatever converges on a benched win:",
+        "- For kernel/config autotune, search the installed framework/source "
+        "first for maintained benchmark/tuning entrypoints, config lookup "
+        "paths, and nearby config families; prefer those.",
+        "- If the built-in path is missing or incomplete, write a small "
+        "source-derived harness around the framework primitive/config override "
+        "API. Use warmups, true-default/current/candidate baselines, "
+        "median/min-of-reps, and an accuracy guard.",
         "- Write and run arbitrary scripts — autotune harnesses, "
         "microbenchmarks, profilers (rocprof / torch.profiler / your own "
-        "breakdown). Example pattern (not a mandate): an offline Triton "
-        "autotune that JIT-compiles candidate configs, times them with "
-        "``torch.cuda.Event``, coordinate-descends, guards accuracy, and emits "
-        "the best config.",
+        "breakdown).",
         "- Start / restart a real server on your own cards (any port that is "
         "NOT the production serving port 8888) and benchmark it however you "
         "see fit.",
         "- Profile freely to get a fresh trace after a change — don't rely only "
         "on the static roofline snapshot you were handed.",
-        "- Tune the framework's config-file levers (e.g. GEMM/attention Triton "
-        "config JSONs) — a missing/untuned config is often the single biggest "
-        "lever.",
+        "- Tune the framework's config-file levers (e.g. MoE/GEMM/attention "
+        "Triton config JSONs) — a missing/untuned config is often the single "
+        "biggest lever.",
         "- Self-check accuracy (advisory ``max_abs_err`` / gsm8k) when you want "
         "to — the Coordinator gate stays authoritative, so this is guidance, "
         "not a requirement.",
