@@ -3763,6 +3763,37 @@ class Coordinator:
 
         from .kernel_request_handlers import _kernel_agent_tool_path
 
+        def _read_perfskills_result(path: Path) -> dict[str, Any]:
+            if not path.is_file():
+                return {}
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return {}
+
+        def _promote_recovered_result(
+            result: dict[str, Any],
+            *,
+            recovered_from: str,
+            runner_timeout_s: int | None = None,
+        ) -> None:
+            state.perfskills_result = result
+            self._promote_perfskills_result(result)
+            self._record_perfskills_kernel_journey(result)
+            evidence = {
+                "status": result.get("status"),
+                "throughput_speedup": result.get("throughput_speedup"),
+                "final_throughput_tok_s": result.get("final_throughput_tok_s"),
+                "eval_dir": result.get("eval_dir"),
+                "report_path": result.get("report_path"),
+                "recovered_from": recovered_from,
+            }
+            if runner_timeout_s is not None:
+                evidence["runner_timeout_s"] = runner_timeout_s
+            self._record_phase_entry_evidence(perfskills=evidence)
+            state.save(self.session_dir)
+            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+
         def _finish_skip(result: dict[str, Any]) -> None:
             """Record a (failed/skipped) PerfSkills outcome + wind down to SWEEP.
 
@@ -3779,6 +3810,24 @@ class Coordinator:
             })
             state.save(self.session_dir)
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+
+        # Crash-recovery: a validated result.json written before the coordinator
+        # crashed (handback never reached state.save) must be promoted on resume.
+        # Guard with ``_perfskills_win_already_recorded`` so a prior cycle's
+        # result.json (``perfskills/`` is a fixed path) does not short-circuit a
+        # fresh KERNEL entry in a later macro-cycle.
+        result_path = out_dir / "result.json"
+        recovered = _read_perfskills_result(result_path)
+        if (
+            recovered.get("status") == "ok"
+            and not self._perfskills_win_already_recorded()
+        ):
+            log.info(
+                "PerfSkills result.json exists but state has no recorded win "
+                "(crash before handback); promoting recovered result."
+            )
+            _promote_recovered_result(recovered, recovered_from="existing_result_json")
+            return
 
         try:
             runner = _kernel_agent_tool_path("backends/perfskills_runner.py")
@@ -3860,31 +3909,15 @@ class Coordinator:
             # The graceful SIGTERM gives run_e2e a window to flush result.json
             # (recover-from-disk). If it landed a real win, keep it instead of
             # discarding the whole KERNEL phase as a timeout.
-            flushed = out_dir / "result.json"
-            recovered: dict[str, Any] = {}
-            if flushed.is_file():
-                try:
-                    recovered = json.loads(flushed.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    recovered = {}
+            recovered = _read_perfskills_result(result_path)
             if recovered.get("status") == "ok":
                 log.info("PerfSkills flushed an OK result.json under SIGTERM "
                          "grace; promoting the recovered win despite the cap.")
-                state.perfskills_result = recovered
-                self._promote_perfskills_result(recovered)
-                self._record_perfskills_kernel_journey(recovered)
-                self._record_phase_entry_evidence(perfskills={
-                    "status": recovered.get("status"),
-                    "throughput_speedup": recovered.get("throughput_speedup"),
-                    "final_throughput_tok_s": recovered.get("final_throughput_tok_s"),
-                    "eval_dir": recovered.get("eval_dir"),
-                    "report_path": recovered.get("report_path"),
-                    "runner_timeout_s": runner_timeout,
-                    "flushed_under_sigterm": True,
-                })
-                state.save(self.session_dir)
-                state.set_pending_escalate_hint(
-                    _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+                _promote_recovered_result(
+                    recovered,
+                    recovered_from="sigterm_flushed_result_json",
+                    runner_timeout_s=runner_timeout,
+                )
                 return
             _finish_skip({
                 "status": "error",
@@ -3902,12 +3935,7 @@ class Coordinator:
             return
 
         result: dict[str, Any] = {}
-        result_path = out_dir / "result.json"
-        if result_path.is_file():
-            try:
-                result = json.loads(result_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                result = {}
+        result = _read_perfskills_result(result_path)
         if not result:
             _finish_skip({
                 "status": "error",
@@ -3945,6 +3973,19 @@ class Coordinator:
         ))
         # KERNEL is a one-shot under PerfSkills: wind down to SWEEP.
         state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+
+    def _perfskills_win_already_recorded(self) -> bool:
+        """Whether a PerfSkills e2e win is already in this session's state.
+
+        Used to gate crash-recovery from an existing ``result.json`` so a prior
+        cycle's win (``perfskills/`` is a fixed path) is not re-promoted on a
+        later KERNEL entry. Mirrors the ``optimization_stack`` dedup in
+        ``_promote_perfskills_result``.
+        """
+        return any(
+            isinstance(item, dict) and item.get("action") == "perfskills_e2e"
+            for item in (self.shared_state.optimization_stack or [])
+        )
 
     def _promote_perfskills_result(self, result: dict[str, Any]) -> None:
         """Fold a PerfSkills e2e win into current_best + the validated gain ledger.
