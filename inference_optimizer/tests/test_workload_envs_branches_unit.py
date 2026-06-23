@@ -18,6 +18,7 @@ from inference_optimizer.orchestrator.action_executors import _workload_envs as 
 def _clear_env(monkeypatch):
     for k in (
         "TP",
+        "EP",
         "ISL",
         "OSL",
         "CONC",
@@ -151,6 +152,81 @@ def test_server_args_merge_existing(monkeypatch, tmp_path):
     merged = bench["envs"]["EXTRA_SGLANG_ARGS"]
     assert "mem-fraction-static" in merged
     assert "chunked-prefill-size" in merged
+
+
+def test_vllm_ep_injects_expert_parallel(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("EP", "8")
+    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"EXTRA_VLLM_ARGS": "--trust-remote-code"})
+
+    bench = _materialize(src, tmp_path / "out")
+
+    args = bench["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--trust-remote-code" in args
+    assert "--enable-expert-parallel" in args
+
+
+def test_vllm_ep_one_does_not_inject_expert_parallel(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("EP", "1")
+    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"EXTRA_VLLM_ARGS": "--trust-remote-code"})
+
+    bench = _materialize(src, tmp_path / "out")
+
+    args = bench["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--trust-remote-code" in args
+    assert "--enable-expert-parallel" not in args
+
+
+def test_vllm_ep_preserves_profile_args(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("EP", "8")
+    src = _write(
+        tmp_path / "cfg.yaml",
+        framework="vllm",
+        envs={"EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True"},
+    )
+
+    bench = _materialize(src, tmp_path / "out")
+
+    args = bench["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.ignore_frontend True" in args
+    assert "--enable-expert-parallel" in args
+
+
+def test_vllm_ep_does_not_duplicate_existing_flag(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("EP", "8")
+    src = _write(
+        tmp_path / "cfg.yaml",
+        framework="vllm",
+        envs={"EXTRA_VLLM_ARGS": "--enable-expert-parallel"},
+    )
+
+    bench = _materialize(src, tmp_path / "out")
+
+    args = bench["envs"]["EXTRA_VLLM_ARGS"]
+    assert args.count("--enable-expert-parallel") == 1
+
+
+@pytest.mark.parametrize(
+    "server_args, framework, ep, expected",
+    [
+        ("--foo", "vllm", 8, "--foo --enable-expert-parallel"),
+        ("--foo", "vllm", 1, "--foo"),
+        ("--foo", "sglang", 8, "--foo"),
+        ("--foo", "vllm", "bad", "--foo"),
+        ("--foo", "vllm", None, "--foo"),
+        ("--enable-expert-parallel", "vllm", 8, "--enable-expert-parallel"),
+        ("", "vllm", 8, "--enable-expert-parallel"),
+    ],
+)
+def test_inject_vllm_expert_parallel_unit(server_args, framework, ep, expected):
+    assert we.inject_vllm_expert_parallel(server_args, framework, ep) == expected
 
 
 # ---- per-model work-around: mimo-v2 ---------------------------------------
