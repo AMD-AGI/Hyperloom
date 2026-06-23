@@ -102,6 +102,7 @@ from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
 )
 from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     _model_is_gemma2,
+    summarize_model_config,
 )
 from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _default_target_summary,
@@ -3060,6 +3061,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if state.model_path:
             os.environ["MODEL_PATH"] = state.model_path
             print(f"  re-exported MODEL_PATH: {state.model_path}")
+            # Backfill model_info for sessions created before the field existed
+            # (or whose config was unreadable at launch); fail-soft to {}.
+            if not state.model_info:
+                state.model_info = summarize_model_config(state.model_path)
+                if state.model_info:
+                    state.save(session_dir)
+                    print("  backfilled model_info (from config.json)")
         if state.framework:
             os.environ["FRAMEWORK"] = state.framework
             print(f"  re-exported FRAMEWORK : {state.framework}")
@@ -3073,6 +3081,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Re-export workload metadata from SharedState so resume sees the same workload contract (not YAML defaults).
         for state_attr, env_name in (
             ("tp", "TP"),
+            # ``ep`` mirrors EP so single-node vLLM MoE resume still injects
+            # --enable-expert-parallel (#569); lost EP would silently drop it.
+            ("ep", "EP"),
             ("conc", "CONC"),
             ("isl", "ISL"),
             ("osl", "OSL"),
