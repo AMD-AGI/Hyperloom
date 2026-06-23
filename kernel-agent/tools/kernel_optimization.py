@@ -3061,8 +3061,16 @@ def invoke_backend(
                             _fr_wt = _geak_best_worktree(_fr_patch)
                             if _fr_wt:
                                 result["geak_per_task_best_worktree"] = str(_fr_wt)
-                except Exception:
-                    pass
+                except (ValueError, OSError, TypeError) as exc:
+                    # Non-fatal: final_report.json salvage is best-effort. Fall
+                    # through to the results/ rglob below, but record why the
+                    # fast-path parse failed so a silent miss is debuggable.
+                    if log_path is not None:
+                        append_log(
+                            log_path,
+                            f"[geak] final_report salvage parse failed "
+                            f"({type(exc).__name__}: {exc}); falling back to results/ scan",
+                        )
             results_dir = out_dir / "results"
             # The results/ rglobs walk the per-round worktrees, which can hold
             # 100k+ JIT/cache files — on a SIGTERM'd run the scan itself can be
@@ -3087,7 +3095,9 @@ def invoke_backend(
                         try:
                             d = json.loads(bj.read_text(encoding="utf-8"))
                             sp = float(d.get("best_patch_speedup") or 0.0)
-                        except Exception:
+                        except (ValueError, OSError, TypeError):
+                            # Skip an unreadable/corrupt per-task best_results.json;
+                            # other tasks' files may still carry a valid speedup.
                             continue
                         if sp > best_speedup:
                             best_speedup = sp
