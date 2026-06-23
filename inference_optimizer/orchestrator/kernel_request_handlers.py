@@ -128,12 +128,12 @@ def _reusable_source_roots() -> tuple[str, ...]:
 
 
 _APPLY_TOOL_MODULE: Any | None = None
-# Default ladder: forge first, then geak. claude/codex/cursor are NOT in the
-# default anymore — they only run when explicitly requested via
-# KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS (or payload backend_order).
-# They remain in `allowed` (see _backend_order) so env-opt-in still works.
-# Cursor is additionally key-gated (dropped when CURSOR_API_KEY is unset).
-_DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak")
+# Default ladder: forge first, then geak, then the OOB backends (claude,
+# codex, cursor). Cursor is key-gated and dropped from the auto-derived ladder
+# when CURSOR_API_KEY is unset (see _backend_order). An explicit
+# KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS (or payload backend_order)
+# still overrides this default as-is.
+_DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak", "claude", "codex", "cursor")
 # Soft cap on concurrent kernel-backend coroutines (legacy MI300X 8-GPU fallback; pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_OOB_BUDGET_MINUTES = 60.0

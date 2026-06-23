@@ -101,7 +101,7 @@ with prefix `crsr_...`:
 
 | Variable                | Default                  | Description                                                                                                                                                                       |
 |-------------------------|--------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `CURSOR_API_KEY`        | unset                    | Cursor SDK key. **Never** inherited from `SAFE_API_KEY`. `cursor` is not in the default `forge,geak` ladder; include it explicitly in `KERNEL_OPT_BACKEND_ORDER` when you want to use it. |
+| `CURSOR_API_KEY`        | unset                    | Cursor SDK key. **Never** inherited from `SAFE_API_KEY`. `cursor` is the tail of the default `forge,geak,claude,codex,cursor` ladder but is auto-dropped when this key is unset; set it to keep `cursor` in the ladder. |
 | `CURSOR_DEFAULT_MODEL`  | `claude-opus-4-7`        | Override the default Cursor model id.                                                                                                                                              |
 
 The selection notes carry `cursor_key_present: bool` for observability.
@@ -188,9 +188,9 @@ convenience for persistence between shells.
 The exported (shell) value wins. `.env` only fills missing keys.
 
 **Q: I don't have a Cursor account. Will optimization still work?**
-Yes. The default kernel-opt ladder is `forge,geak`. `cursor` and other OOB
-backends (`claude`, `codex`) are used only when you explicitly include them in
-`KERNEL_OPT_BACKEND_ORDER`; `cursor` still requires `CURSOR_API_KEY`.
+Yes. The default kernel-opt ladder is `forge,geak,claude,codex,cursor`
+(Forge-GEAK-OOB), but `cursor` is auto-dropped from it when `CURSOR_API_KEY` is
+unset, so the run proceeds with `forge,geak,claude,codex`.
 
 **Q: Where do `GEAK_API_KEY` / `ANTHROPIC_API_KEY` come from?**
 They are derived from `SAFE_API_KEY` by `kernel-agent/scripts/install.sh`
