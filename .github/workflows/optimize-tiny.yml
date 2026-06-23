@@ -46,7 +46,7 @@ concurrency:
 
 jobs:
   dispatch-submit:
-    name: Dispatch 256-model count-filler submit
+    name: Dispatch 240-model count-filler submit
     runs-on: hyperloom-mh826
     timeout-minutes: 10
     env:
@@ -55,7 +55,7 @@ jobs:
       # hyperloom runners RO-mount /wekafs).
       CANDIDATES_FILE: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
       CANDIDATES_PATH: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
-      BATCH_SIZE: '256'
+      BATCH_SIZE: '240'
       # Count-filler runs go to the hyperloom workspace only.
       SUBMIT_WORKSPACES: 'core42-hyperloom'
     steps:
@@ -111,7 +111,7 @@ jobs:
 
           echo "Dispatching optimize-submit.yml on ref=${ref}"
           echo "Count-filler pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
-          echo "Batch size: ${BATCH_SIZE}; max_parallel=256; submit_workspaces=${SUBMIT_WORKSPACES}"
+          echo "Batch size: ${BATCH_SIZE}; max_parallel=240; submit_workspaces=${SUBMIT_WORKSPACES}"
 
           payload=$(python3 - <<'PY'
           import json
@@ -126,7 +126,7 @@ jobs:
                   "batch_size": os.environ["BATCH_SIZE"],
                   "exclude_leaderboard": "false",
                   "exclude_active_workflows": "true",
-                  "max_parallel": "256",
+                  "max_parallel": "240",
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
                   "task_timeout_min": "420",
                   "max_hours": "6",
