@@ -4417,6 +4417,7 @@ class Coordinator:
             total_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
             state.cumulative_gain = round(total_gain, 3)
             state.cumulative_gain_validated = round(total_gain, 3)
+            state.cumulative_gain_validated_ts = stack_entry["ts"]
             state.cumulative_gain_validated_stack_len = len(state.optimization_stack)
             state.current_best = {
                 "action": "warm_replay",
