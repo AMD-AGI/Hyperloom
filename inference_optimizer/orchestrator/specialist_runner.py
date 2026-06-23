@@ -25,7 +25,6 @@ from typing import Any
 from ..session_paths import runs_dir, specialist_intel_path
 from .backends.base import BackendError
 from ..protocol.intent import Intent, IntentType
-from .specialist_bench import BENCH_TOOL_ENABLED, TOOL_RUN_BENCH
 from .trace.conversation_trace import ConversationRecord, append_conversation
 from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .specialist_domains import (
@@ -359,32 +358,24 @@ class SpecialistRunner:
     def _resolve_tools(
         self,
         task_allowed_tools: list[str] | tuple[str, ...] | None = None,
-        *,
-        grant_bench: bool = False,
     ) -> tuple[str, ...]:
         """Return the per-task tool whitelist.
 
         Strips ``mcp__pr_monitor__*`` when PR Monitor is disabled (and
         ``mcp__cortex_kb__*`` when Cortex disabled); honors a narrower
-        ``Task.allowed_tools``; grants the worktree-scoped ``run_bench`` tool
-        only to bench-enabled specialists (``grant_bench`` and the bench tool
-        globally enabled); enforces :data:`SPECIALIST_TOOL_DENYLIST` last.
+        ``Task.allowed_tools``; enforces :data:`SPECIALIST_TOOL_DENYLIST` last.
+
+        GPU specialists run their real serving / benchmark / autotune loops via
+        the broad ``Bash``/``Write``/``Edit`` grant on their leased cards (the
+        retired ``run_bench`` micro-bench tool is no longer granted).
 
         Args:
             task_allowed_tools: Narrower per-task tool whitelist override.
-            grant_bench: When True (and bench globally enabled), grant the
-                worktree-scoped ``run_bench`` tool.
 
         Returns:
             The resolved per-task tool whitelist.
         """
         tools = list(task_allowed_tools) if task_allowed_tools else list(self.default_tools)
-        # run_bench is granted only to bench-enabled (mode=patch & bench=true)
-        # specialists, and never via the operator-narrowed allowlist.
-        if grant_bench and BENCH_TOOL_ENABLED and TOOL_RUN_BENCH not in tools:
-            tools.append(TOOL_RUN_BENCH)
-        elif not grant_bench:
-            tools = [t for t in tools if t != TOOL_RUN_BENCH]
         plane = self.knowledge_plane
         if plane is not None:
             try:
@@ -455,6 +446,15 @@ class SpecialistRunner:
         """
         params = ctx.task.params or {}
         domain_key = str(params.get("domain") or "").strip()
+        # B3: a tag-only dispatch ("just give it a topic/domain", e.g.
+        # ``tags=['systems']`` with no explicit ``domain``) must still resolve.
+        # ``normalize_dispatch_tags`` reads ``params.tags`` (falling back to the
+        # ``domain`` alias), so back-fill ``domain_key`` from the first resolved
+        # tag before the catalogue lookup instead of dying as ``unknown_domain``.
+        if not domain_key:
+            resolved_tags = normalize_dispatch_tags(params)
+            if resolved_tags:
+                domain_key = resolved_tags[0]
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         max_turns = int(params.get("max_turns") or self.default_max_turns)
         # B7: resolve by anchor first then key (``domain_for_tag``) so a dispatch
@@ -599,7 +599,6 @@ class SpecialistRunner:
             notes=notes,
             resolved_tools=self._resolve_tools(
                 getattr(ctx.task, "allowed_tools", None),
-                grant_bench=profile.grants_bench_tool,
             ),
         )
 
