@@ -88,7 +88,7 @@ DEFAULT_PROXY = "harbor.core42.example-internal-host.invalid/proxy"
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
-DEFAULT_MAX_HOURS = 12.0
+DEFAULT_MAX_HOURS = 6.0
 DEFAULT_TARGET_GAIN = 500.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16
@@ -4078,7 +4078,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-hours",
         type=float,
         default=float(os.environ.get("SAFE_OPTIMIZE_MAX_HOURS", DEFAULT_MAX_HOURS)),
-        help="Max hours passed to the Hyperloom optimizer prompt (default: 12).",
+        help="Max hours passed to the Hyperloom optimizer prompt (default: 6).",
     )
     parser.add_argument(
         "--target-gain",
@@ -4160,7 +4160,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Local directory where per-task artifacts land (default: ./task-artifacts)",
     )
     parser.add_argument(
-        "--task-timeout-min", type=int, default=720, help="Per-task wait timeout in minutes (default: 720 = 12h)"
+        "--task-timeout-min", type=int, default=420, help="Per-task wait timeout in minutes (default: 420 = 7h)"
     )
     parser.add_argument(
         "--poll-interval-s", type=int, default=60, help="How often to poll task status, seconds (default: 60)"
