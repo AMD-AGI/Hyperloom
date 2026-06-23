@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from inference_optimizer.model_config_utils import summarize_model_config
 
 
@@ -155,3 +157,111 @@ def test_summary_nested_text_config(tmp_path: Path) -> None:
     assert out["attention_type"] == "GQA"
     assert out["hidden_size"] == 8192
     assert out["num_hidden_layers"] == 80
+
+
+def test_summary_malformed_numeric_is_fail_soft(tmp_path: Path) -> None:
+    # Non-integer/garbage numeric fields must not crash; bad fields are skipped.
+    m = _write_config(
+        tmp_path / "m",
+        {
+            "model_type": "llama",
+            "num_attention_heads": "thirty-two",
+            "num_key_value_heads": 8,
+            "hidden_size": "4096",
+            "num_hidden_layers": None,
+            "vocab_size": 1.5,
+            "max_position_embeddings": "8k",
+        },
+    )
+    out = summarize_model_config(str(m))
+    assert out["model_type"] == "llama"
+    assert out["num_key_value_heads"] == 8
+    # bad scalars skipped, never raise:
+    assert "num_attention_heads" not in out
+    assert "max_position_embeddings" not in out
+
+
+def test_summary_llm_config_nesting(tmp_path: Path) -> None:
+    # InternVL/Ovis put the text tower under llm_config, not text_config.
+    m = _write_config(
+        tmp_path / "m",
+        {
+            "model_type": "internvl_chat",
+            "architectures": ["InternVLChatModel"],
+            "llm_config": {
+                "num_attention_heads": 64,
+                "num_key_value_heads": 8,
+                "num_hidden_layers": 48,
+                "num_experts": 128,
+                "num_experts_per_tok": 8,
+            },
+        },
+    )
+    out = summarize_model_config(str(m))
+    assert out["attention_type"] == "GQA"
+    assert out["num_hidden_layers"] == 48
+    assert out["is_moe"] is True
+    assert out["num_experts"] == 128
+
+
+@pytest.mark.parametrize(
+    "model_type,name,expected_family",
+    [
+        ("rwkv6qwen2", "RWKV6-Qwen2", "qwen2"),
+        ("llava_qwen2", "llava-qwen2", "qwen2"),
+        ("hybrid_qwen3", "Hybrid-Qwen3", "qwen3"),
+    ],
+)
+def test_model_family_derived_base(tmp_path: Path, model_type, name, expected_family) -> None:
+    m = _write_config(
+        tmp_path / name.replace("/", "_"),
+        {"model_type": model_type, "num_attention_heads": 8, "num_key_value_heads": 8},
+    )
+    out = summarize_model_config(str(m))
+    assert out.get("model_family", "") == expected_family
+
+
+@pytest.mark.parametrize(
+    "model_type,arches,name,expected_family",
+    [
+        # Qwen: generation collapses moe/next/vl/5 variants.
+        ("qwen3", [], "Qwen-Qwen3-8B", "qwen3"),
+        ("qwen3_moe", [], "Qwen-Qwen3-235B-A22B", "qwen3"),
+        ("qwen3_next", [], "Qwen3-Next-80B", "qwen3"),
+        ("qwen3_vl_moe", [], "Qwen3-VL-235B", "qwen3"),
+        ("qwen3_5_moe", [], "Qwen3.5", "qwen3"),
+        ("qwen2", [], "Qwen2.5-7B", "qwen2"),
+        ("qwen2_5_vl", [], "Qwen2.5-VL", "qwen2"),
+        # DeepSeek: keep major version.
+        ("deepseek_v3", [], "DeepSeek-V3", "deepseek_v3"),
+        ("deepseek_v2", [], "DeepSeek-V2", "deepseek_v2"),
+        ("deepseek_v32", [], "DeepSeek-V3.2", "deepseek_v3"),
+        # Gemma generations.
+        ("gemma4", [], "Gemma-4", "gemma4"),
+        ("gemma3_text", [], "Gemma-3", "gemma3"),
+        ("gemma2", [], "Gemma-2", "gemma2"),
+        # Mistral vs Mixtral kept distinct.
+        ("mixtral", [], "Mixtral-8x7B", "mixtral"),
+        ("mistral3", [], "Mistral-3", "mistral"),
+        # Llama generation from name when model_type is bare 'llama'.
+        ("llama", ["LlamaForCausalLM"], "Llama-3.1-8B-Instruct", "llama3"),
+        ("llama", ["LlamaForCausalLM"], "Llama-2-7b", "llama2"),
+        ("llama4", [], "Llama-4", "llama4"),
+        # Others use family prefix.
+        ("glm4_moe", [], "GLM-4.6", "glm4"),
+        ("phi3", [], "Phi-3-mini", "phi3"),
+        ("minimax_m2", [], "MiniMax-M2", "minimax"),
+        ("nemotron_h", [], "Nemotron-3", "nemotron"),
+        ("internvl_chat", [], "InternVL3_5", "internvl"),
+        ("", [], "random-unknown-model", ""),
+    ],
+)
+def test_model_family(tmp_path: Path, model_type, arches, name, expected_family) -> None:
+    payload: dict = {"num_attention_heads": 8, "num_key_value_heads": 8}
+    if model_type:
+        payload["model_type"] = model_type
+    if arches:
+        payload["architectures"] = arches
+    # The model dir name carries the name hint (path basename drives llama gen).
+    out = summarize_model_config(str(_write_config(tmp_path / name.replace("/", "_"), payload)))
+    assert out.get("model_family", "") == expected_family
