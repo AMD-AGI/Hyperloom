@@ -2,8 +2,9 @@
 
 """SQLite-backed GPU pool for specialist sub-agents.
 
-Separate from the serving lanes: only constrains specialists that request
-``needs_gpu=true`` for short GPU experiments or microbenchmarks.
+Separate from the serving lanes: constrains specialists that request
+``needs_gpu=true`` for wall-budgeted on-GPU work (servers on non-8888 ports,
+profiling, autotune, and real benchmark loops on their leased cards).
 """
 
 from __future__ import annotations

@@ -227,9 +227,12 @@ brief:
   `delegate{action_name='specialist', params={needs_gpu: true, gpu_count: ...}}`
   without any extra flag. Pass `--gpu-specialist-capacity N` (or
   `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) to clamp the pool, and `0`
-  (either form) to disable GPU specialists entirely. They are limited to short
-  GPU experiments / microbenchmarks and must not start serving servers or
-  Magpie loops.
+  (either form) to disable GPU specialists entirely. When enabled, GPU
+  specialists serialize against serving through `gpu_research_lane` and
+  exclusively own their leased cards: they may start/stop their own servers
+  (any port that is not the production serving port 8888), profile, autotune,
+  and run real benchmark loops. The one invariant is that they must not touch
+  the production serving process, its cards, or port 8888.
 - **IR-6 HARD force-exit**: EXPLORE exits the moment wall-clock remaining
   < `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase
   budget < `--explore-force-exit-budget-pct` (default 20%). Non-negotiable

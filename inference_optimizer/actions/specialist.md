@@ -83,7 +83,7 @@ measure → edit → measure loop on its own cards inside its worktree.
 | `gap_layer`          | string   | no       | Layer label (`kernel` / `framework` / `communication` / …). |
 | `gap_evidence`       | object   | no       | Profile path + numeric metrics forwarded into the prompt. |
 | `max_turns`          | int      | no       | Optional turn cap (default 1000, hard ceiling 1000; `0` means unbounded). Depth is primarily bounded by the wall-clock budget. |
-| `needs_gpu`          | bool     | no       | Request the specialist GPU pool for a wall-budgeted GPU experiment / microbenchmark. Default false. |
+| `needs_gpu`          | bool     | no       | Request the specialist GPU pool for wall-budgeted on-GPU work (servers on a non-8888 port, profiling, autotune, benchmark loops). Default false. |
 | `gpu_count`          | int      | no       | Number of GPUs to allocate when `needs_gpu=true` (default = serving TP so a TP-coupled gap is reproducible; set explicitly to override, e.g. 1 for a single-card kernel probe). |
 
 ## EMIT format

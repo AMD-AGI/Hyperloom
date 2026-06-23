@@ -185,9 +185,11 @@ grid-runner entry):
     MUST get `gpu_count >= TP` — prefer omitting `gpu_count` so it defaults to
     the serving TP. It is
     denied with `specialist_gpu_pool_disabled` only if the session was
-    explicitly launched with a zero GPU specialist pool. GPU specialists must
-    not launch persistent vLLM/SGLang servers, run Magpie benchmark loops, or
-    control the production serving process.
+    explicitly launched with a zero GPU specialist pool. On their leased cards
+    GPU specialists may start/stop their own servers (any port that is NOT the
+    production serving port 8888), profile, autotune, and run real benchmark
+    loops; the one hard boundary is the production serving process, its cards,
+    or port 8888.
 
     **GPU specialists serialize against serving (`gpu_research_lane`).** A
     `needs_gpu` specialist holds the same physical cards the serving stack
