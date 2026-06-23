@@ -88,7 +88,7 @@ jobs:
           else:
               # 4 runs/day -> one of 4 six-hour slots; advance each day so the
               # whole pool is swept over ~ceil(batches/4) days.
-              epoch = datetime(2026, 6, 15, tzinfo=timezone.utc)
+              epoch = datetime(2026, 6, 23, tzinfo=timezone.utc)
               now = datetime.now(timezone.utc)
               days = max((now.date() - epoch.date()).days, 0)
               slot = days * 4 + (now.hour // 6)
