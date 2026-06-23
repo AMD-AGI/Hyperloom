@@ -1705,6 +1705,37 @@ class SubmissionRecord:
     artifact_sources: list[dict] = field(default_factory=list)
 
 
+_LEADERBOARD_SUPPRESSED_STOP_REASONS = frozenset(
+    {
+        "baseline_arg_error",
+        "baseline_failed",
+        "claw_lifecycle_incomplete",
+        "incomplete_after_progress",
+        "missing_breakdown_after_claw_activity",
+        "model_config_incompatible",
+        "model_context_window_too_small",
+        "prelude_baseline_failed",
+        "sandbox_start_failed",
+        "unsupported_model_arch",
+    },
+)
+
+
+def _leaderboard_flags_for_stop_reason(stop_reason: str) -> dict:
+    reason = str(stop_reason or "").strip()
+    if reason in _LEADERBOARD_SUPPRESSED_STOP_REASONS:
+        return {
+            "leaderboard_eligible": False,
+            "leaderboard_suppression_reason": reason,
+            "show_on_leaderboard": False,
+        }
+    return {
+        "leaderboard_eligible": True,
+        "leaderboard_suppression_reason": None,
+        "show_on_leaderboard": True,
+    }
+
+
 # ── Per-model flow ──────────────────────────────────────────────────────────────
 
 
@@ -2153,6 +2184,7 @@ def _write_ci_emergency_artifacts(
         "ci_emergency_artifact": True,
         "ci_emergency_reason": detail,
         "source_session_dir": source_display,
+        **_leaderboard_flags_for_stop_reason(stop_reason),
         "session": {
             "session_id": state.get("session_id") or source.name,
             "claw_session_id": rec.claw_session_id,
@@ -2332,6 +2364,7 @@ def _write_claw_emergency_artifacts(rec: SubmissionRecord, task_dir: Path) -> in
         "ci_emergency_artifact": True,
         "ci_emergency_reason": detail,
         "source_claw_artifact": source_claw_artifact,
+        **_leaderboard_flags_for_stop_reason(stop_reason),
         "session": {
             "session_id": summary.get("session_id") or rec.claw_session_id,
             "claw_session_id": rec.claw_session_id or summary.get("session_id"),
