@@ -258,11 +258,36 @@ def load_mapping() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _remap_aiter_meta(path: str) -> str:
+    """Remap a JSON ``…/aiter_meta/csrc/`` source path to the LIVE aiter csrc root.
+
+    The op_to_source.json is built in the python3.12 image where aiter ships as the
+    ``aiter_meta`` package (``/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/…``).
+    On a serve box where aiter lives elsewhere (e.g. python3.10 + ``/sgl-workspace/aiter``),
+    those paths don't exist, so HL's ``Path.exists()`` patchable gate drops EVERY CK/aiter
+    kernel (ck_moe, moe_sorting, topk_softmax, quant, …). Rewrite the build-time
+    ``aiter_meta/csrc/`` prefix to the runtime aiter csrc root reported by the installed
+    package (:func:`_aiter_csrc_root`). No-op when the live root is unknown or the path
+    isn't an aiter_meta path, so it's safe on the original python3.12 layout too.
+    """
+    if not path or "aiter_meta/csrc/" not in path:
+        return path
+    live = _aiter_csrc_root()  # e.g. "/sgl-workspace/aiter/csrc/"
+    if not live:
+        return path
+    idx = path.find("aiter_meta/csrc/")
+    tail = path[idx + len("aiter_meta/csrc/"):]
+    remapped = live.rstrip("/") + "/" + tail
+    # Only adopt the remap if it actually resolves on disk; else keep original.
+    return remapped if os.path.exists(remapped) else path
+
+
 def _absolutize_source(path: str) -> str:
     """Best-effort absolutize a kernel source path (JSON is pre-absolutized; defensive)."""
     if not path:
         return path
-    return path if path.startswith("/") else _PY_DIST_ROOT + path
+    abs_path = path if path.startswith("/") else _PY_DIST_ROOT + path
+    return _remap_aiter_meta(abs_path)
 
 
 def _is_editable_source(path: str | None, kernel_kind: str | None) -> bool:
@@ -346,7 +371,7 @@ class OpResolver:
         if kind == "dispatch":
             return self._dispatch(op_name, entry, framework, device_kernel_name)
         if kind == "composite":
-            return self._composite(op_name, entry, framework)
+            return self._composite(op_name, entry, framework, device_kernel_name)
         return self._single(op_name, entry, framework)
 
     @staticmethod
@@ -488,9 +513,45 @@ class OpResolver:
         )
 
     def _composite(
-        self, op_name: str, entry: dict[str, Any], framework: str | None,
+        self,
+        op_name: str,
+        entry: dict[str, Any],
+        framework: str | None,
+        device_kernel_name: str | None = None,
     ) -> OpResolution:
-        """Resolve a ``composite`` entry into a fan-out over its editable kernels."""
+        """Resolve a ``composite`` entry into a fan-out over its editable kernels.
+
+        A ``composite`` profiler label aggregates several device kernels that fire
+        under one CPU op (e.g. the Triton fused-MoE label covers the MoE GEMM plus
+        co-firing quant/align helpers). When the trace reports the *dominant* device
+        kernel name for this op, narrow to the single editable source whose symbol
+        matches it (the same disambiguation ``dispatch`` uses via
+        :meth:`_kernel_matches`) instead of fanning out to every co-kernel source.
+        This keeps the hot kernel as the optimization target rather than splitting
+        ``duration_us`` evenly across minor helpers and sending GEAK at the wrong file.
+        Falls back to the full fan-out (``_select_source_meta``) only when no device
+        name is given or none of the composite's editable kernels match it -- so
+        behavior is unchanged for composites without a trace device symbol.
+        """
+        name = (device_kernel_name or "").strip()
+        if name:
+            fw = (framework or "").strip().lower()
+            containers = (
+                [entry.get("sglang"), entry.get("vllm")]
+                if fw == "sglang"
+                else [entry.get("vllm"), entry.get("sglang")]
+            )
+            for container in containers:
+                for kname, info in (container or {}).items():
+                    if not isinstance(info, dict) or not self._kernel_matches(name, kname):
+                        continue
+                    path = info.get("kernel_source_path")
+                    if info.get("patchable") and _is_editable_source(path, info.get("kernel_kind")):
+                        return OpResolution(
+                            op_name=op_name, kind="composite", status=_ROUTABLE_STATUS,
+                            patchable=True, framework=framework,
+                            sources=[_absolutize_source(str(path))], matched_route=kname,
+                        )
         meta = self._select_source_meta(entry, framework)
         fanout = [
             OpResolution(
@@ -2978,6 +3039,49 @@ def resolve_shapes_from_csv_for_op(
     )
 
 
+def resolve_raw_arg_spec_from_csv(
+    perf_report_csv_dir: Path | str | None,
+    op_name: str,
+) -> dict[str, str] | None:
+    """Return the matched ``ops_unique_args.csv`` row's raw arg columns verbatim.
+
+    Unlike :func:`resolve_shapes_from_csv_for_op` (which drops scalar/empty
+    operands), this preserves the full ordered argument metadata exactly as the
+    trace recorded it — ``Input Dims`` / ``Input type`` / ``Concrete Inputs`` —
+    so the GEAK harness builder can reconstruct the real call signature
+    (tensors + scalar args in order) instead of inferring it from tensor shapes
+    alone. No parsing, no reshaping: the strings are forwarded as-is.
+
+    Args:
+        perf_report_csv_dir: Directory containing ``ops_unique_args.csv``.
+        op_name: Exact TraceLens op name to match (case-insensitive).
+
+    Returns:
+        ``{"input_dims", "input_type", "concrete_inputs"}`` from the first
+        matching row, or ``None`` when unavailable.
+    """
+    target = str(op_name or "").strip().lower()
+    if not target or not perf_report_csv_dir:
+        return None
+    csv_path = Path(perf_report_csv_dir) / "ops_unique_args.csv"
+    if not csv_path.is_file():
+        return None
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if str(row.get("name") or "").strip().lower() != target:
+                    continue
+                spec = {
+                    "input_dims": str(row.get("Input Dims") or "").strip(),
+                    "input_type": str(row.get("Input type") or "").strip(),
+                    "concrete_inputs": str(row.get("Concrete Inputs") or "").strip(),
+                }
+                return spec if any(spec.values()) else None
+    except (OSError, csv.Error):
+        return None
+    return None
+
+
 def _is_fused_moe_candidate(item: dict[str, Any]) -> bool:
     """Detect the Triton fused-MoE expert-kernel candidate.
 
@@ -3558,6 +3662,13 @@ def _finalize_candidates(
         # Mark trace-extracted shapes so the dispatch-time validator can tell their provenance.
         if item.get("shapes"):
             item.setdefault("shape_provenance", "torch_trace")
+        # Forward the full ordered arg metadata (tensors + scalars, verbatim) so
+        # GEAK's harness builder can reconstruct the exact call signature. Purely
+        # additive: shapes/input_shapes are unchanged.
+        if not item.get("raw_arg_spec"):
+            raw_spec = resolve_raw_arg_spec_from_csv(perf_report_csv_dir, str(item.get("name") or ""))
+            if raw_spec:
+                item["raw_arg_spec"] = raw_spec
         item["kernel_id"] = f"k{idx:03d}"
         if not item.get("gpu_pct"):
             item["gpu_pct"] = round(item["duration_us"] / sum_dur * 100.0, 3)
@@ -4995,6 +5106,85 @@ def enrich_candidates_with_runtime_metadata(
                 flags.setdefault(key, value)
         flags.setdefault("is_multigpu", bool(item.get("is_multigpu")))
         flags.setdefault("num_gpus_recommended", item.get("num_gpus_recommended"))
+        # Kernel-class CONTRACT enrichment so GEAK's harness is faithful for
+        # non-MoE kernels too (collectives need a real distributed reference;
+        # attention needs causal/kv layout). Without these the harness can pass
+        # a tautological or wrong-regime correctness check and a "win" won't
+        # transfer to E2E. Derived from the kernel name + model config.
+        _enrich_kernel_contract(item, model_params)
+
+
+def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] | None) -> None:
+    """Populate per-kernel-class contract fields used to build a faithful harness.
+
+    - Collectives (all_reduce / all_gather / reduce_scatter / ...): record
+      ``collective_op`` + ``world_size``/``tp_size`` (from model_params) so the
+      harness can use ``torch.distributed.<op>`` as a real reference instead of
+      a self-compare, and so a reviewer knows the kernel is comm-bound.
+    - Attention (mha / flash / paged): record ``causal`` (decode/prefill attn
+      is causal), ``kv_layout``, ``head_dim``/``num_heads`` from model_params,
+      and the ``seqlen_regime`` so the harness benchmarks the served regime.
+    These are advisory metadata; absent fields are simply not set.
+    """
+    name = str(item.get("name") or "").lower()
+    mp = model_params or {}
+    contract = item.get("kernel_contract")
+    if not isinstance(contract, dict):
+        contract = {}
+    # --- collectives ---
+    _COLL = (("all_reduce", "allreduce"), ("all_gather", "allgather"),
+             ("reduce_scatter", "reducescatter"), ("all_to_all", "alltoall"),
+             ("broadcast",), ("reduce",))
+    _OPMAP = {"all_reduce": "all_reduce", "allreduce": "all_reduce",
+              "all_gather": "all_gather", "allgather": "all_gather",
+              "reduce_scatter": "reduce_scatter", "reducescatter": "reduce_scatter",
+              "all_to_all": "all_to_all", "alltoall": "all_to_all",
+              "broadcast": "broadcast", "reduce": "reduce"}
+    if bool(item.get("is_multigpu")) or any(tag in name for grp in _COLL for tag in grp):
+        op = next((_OPMAP[t] for grp in _COLL for t in grp if t in name), "all_reduce")
+        contract["kind"] = "collective"
+        contract["collective_op"] = op
+        ws = mp.get("WORLD_SIZE") or mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE") \
+            or item.get("num_gpus_recommended")
+        if ws:
+            contract["world_size"] = int(ws)
+        if mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE"):
+            contract["tp_size"] = int(mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE"))
+        contract.setdefault("reduce_op", "sum")
+        contract["reference"] = f"torch.distributed.{op}"
+        contract["e2e_note"] = ("comm-bound collective: a 1-GPU GEAK slot cannot "
+                                "reproduce inter-GPU traffic; needs KERNEL_AGENT_NUM_GPUS>=world_size")
+    # --- attention ---
+    elif any(t in name for t in ("mha", "flash", "attn", "attention", "paged")):
+        contract["kind"] = "attention"
+        contract["causal"] = True  # autoregressive serving attention is causal
+        for src, dst in (("HEAD_SIZE", "head_dim"), ("NUM_ATTENTION_HEADS", "num_heads"),
+                         ("NUM_KEY_VALUE_HEADS", "num_kv_heads")):
+            if mp.get(src) is not None:
+                contract[dst] = mp.get(src)
+        contract.setdefault("kv_layout", "unknown")  # to be confirmed from trace; flag for reviewer
+        contract["seqlen_regime"] = "prefill" if "prefill" in name else (
+            "decode" if "decode" in name else "mixed")
+        contract["reference"] = "torch.nn.functional.scaled_dot_product_attention"
+    # E2E-TRANSFER honesty flag: warn when a kernel-level win is unlikely to move
+    # serving E2E so neither the pipeline nor a reviewer over-trusts a micro-speedup.
+    #  - sealed-ASM launchers: asm_*.cu dispatches a prebuilt .co HSACO; only the
+    #    host-side launcher is editable, so wins are tiny (observed E2E #1: 1.09x
+    #    kernel -> 1.0008x E2E).
+    #  - collectives on a 1-GPU GEAK slot: cannot reproduce inter-GPU traffic.
+    src = str(item.get("source_file") or "").lower()
+    reasons = []
+    if "/py_itfs_cu/asm_" in src or (os.path.basename(src).startswith("asm_") and src.endswith(".cu")):
+        reasons.append("sealed-ASM launcher (.co binary not editable; only host launcher)")
+    if contract.get("kind") == "collective":
+        reasons.append("comm-bound collective (needs multi-GPU GEAK slot to reproduce E2E traffic)")
+    if reasons:
+        item["e2e_transferable"] = False
+        item["e2e_transfer_note"] = "; ".join(reasons)
+    else:
+        item.setdefault("e2e_transferable", True)
+    if contract:
+        item["kernel_contract"] = contract
 
 
 def build_task_groups(
