@@ -273,7 +273,7 @@
     "max_model_len": 0,
     "model_arch": {},
     "model_architectures": [],
-    "model_class": "moe_mla",
+    "model_class": "dense",
     "model_name": "",
     "model_path": "<volatile>",
     "model_type": "",
