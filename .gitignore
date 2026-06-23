@@ -86,3 +86,5 @@ main_enhance.md
 # runtime) — keep only the small InferenceX daily set tracked in git.
 ci/candidates/*.json
 !ci/candidates/inferencex_daily_fixed.json
+GPU_optimization_plan.md
+GPU_optimization.md

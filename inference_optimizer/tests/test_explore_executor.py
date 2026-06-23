@@ -658,8 +658,11 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
 
 
 @pytest.mark.asyncio
-async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path):
+async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path, monkeypatch):
     """A variant whose fingerprint already lives in explore_search.tested lands in ``skipped_dup``, not re-benched."""
+    # Legacy single-decision path: dedup is orthogonal to warm-decision; the
+    # warm-decision 3-round flow is covered by its own dedicated test below.
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -726,6 +729,122 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
     assert len(bench_calls) == 1
     # v_fresh KEEP'd (900 vs 800 = +12.5%).
     assert {w["name"] for w in out["winners"]} == {"v_fresh"}
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_warm_decision_runs_three_rounds_on_keep(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """Q4-a: warm-decision KEEP path runs warmup + decision + stack_rebench (3 Magpie runs)."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1")
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-warm"
+
+    bench_calls: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        bench_calls.append(str(slot))
+        _fake_workspace(slot, tput=920.0)  # +15% vs 800 — KEEP and stable
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "warm_keep",
+                    "extra_args": "--warm-flag",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 30,
+            "baseline_runtime_sec": 10.0,
+            "baseline_warm_runtime_sec": 5.0,
+            "explore_overtime_kill_ratio": 1.20,
+        },
+        idempotency_key="ex-warm",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    # warmup (discarded) + decision + stack_rebench == 3 Magpie runs.
+    assert len(bench_calls) == 3, bench_calls
+    # Exactly one run went through the discarded warmup slot.
+    assert sum("warmup_round" in c for c in bench_calls) == 1
+    assert sum("stack_rebench" in c for c in bench_calls) == 1
+    assert {w["name"] for w in out["winners"]} == {"warm_keep"}
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """Q4-a: a failed warmup round records the variant FAILED(reason=warmup_failed), no decision run."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1")
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-warmfail"
+
+    calls: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        calls.append(str(slot))
+        # Warmup boot fails (nonzero) — no workspace written.
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "warmfail",
+                    "extra_args": "--warmfail-flag",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 30,
+        },
+        idempotency_key="ex-warmfail",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    # Only the warmup round ran; no decision round after the failure.
+    assert len(calls) == 1, calls
+    assert out["winners"] == []
+    fp = canonical_fingerprint("--warmfail-flag", {})
+    te = out["explore_search_update"]["tested"][fp]
+    assert te["outcome"] == "FAILED"
+    assert te["reason"] == "warmup_failed"
 
 
 @pytest.mark.asyncio
@@ -828,8 +947,12 @@ def test_stack_stable_floor_arithmetic_at_new_default():
 async def test_explore_executor_killed_overtime_no_tput_no_keep(
     sub_agent_runner,
     tmp_path,
+    monkeypatch,
 ):
     """Fix E (Q3c): a fired soft deadline records KILLED_OVERTIME (no tput, no KEEP/REVERT, stack unchanged)."""
+    # Legacy single-decision path: this exercises the cold-anchor soft deadline
+    # (==11.0). The warm-decision anchor is covered by its own test below.
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)

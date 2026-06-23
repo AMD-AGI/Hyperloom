@@ -1,6 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the specialist micro-bench surface + worktree git helpers."""
+"""Unit tests for the specialist worktree git helpers.
+
+The legacy ``run_bench`` micro-bench surface has been removed (GPU specialists
+now run real serving / benchmark / autotune loops on their own leased cards),
+so only the worktree git helpers remain here.
+"""
 
 from __future__ import annotations
 
@@ -40,51 +45,6 @@ def test_error_and_ok():
     assert e == {"ok": False, "reason": "bad", "x": 1}
     assert sb._ok() == {"ok": True}
     assert sb._ok({"a": 2}) == {"ok": True, "a": 2}
-
-
-# ---- run_bench ----
-
-
-async def test_run_bench_disabled(monkeypatch):
-    monkeypatch.setattr(sb, "BENCH_TOOL_ENABLED", False)
-    out = await sb.run_bench("kernel_gemm_timing", worktree=Path("/tmp"), call_id="c1")
-    assert out["reason"] == "bench_tool_disabled"
-
-
-async def test_run_bench_unknown_id(tmp_path):
-    out = await sb.run_bench("nope", worktree=tmp_path, call_id="c1")
-    assert out["reason"] == "unknown_bench_id"
-    assert "kernel_gemm_timing" in out["allowed"]
-
-
-async def test_run_bench_script_missing(tmp_path):
-    out = await sb.run_bench(
-        "kernel_gemm_timing",
-        worktree=tmp_path,
-        call_id="c1",
-        bench_dir_root=tmp_path / "empty",
-    )
-    assert out["reason"] == "bench_script_missing"
-
-
-async def test_run_bench_success(tmp_path):
-    bench_root = tmp_path / "benches"
-    bench_root.mkdir()
-    (bench_root / "kernel_gemm_timing.sh").write_text(
-        "#!/usr/bin/env bash\necho hello-bench\n",
-        encoding="utf-8",
-    )
-    out = await sb.run_bench(
-        "kernel_gemm_timing",
-        worktree=tmp_path,
-        call_id="c1",
-        bench_dir_root=bench_root,
-        params={"k": "v"},
-    )
-    assert out["ok"] is True
-    assert out["exit_code"] == 0
-    assert "hello-bench" in out["stdout_tail"]
-    assert Path(out["output_dir"]).is_dir()
 
 
 # ---- apply_patch_in_worktree ----

@@ -80,10 +80,14 @@ class SpecialistProfile:
         return self.scope == SCOPE_DOMAINS
 
     @property
-    def grants_bench_tool(self) -> bool:
-        """True iff this dispatch may use the in-loop ``run_bench`` tool. Only
-        patch-authoring specialists with ``bench=True`` qualify (bench has no
-        meaning for read-only research).
+    def reserves_benchmark_lane(self) -> bool:
+        """True iff this dispatch should contend for the ``benchmark_lane``.
+
+        Bench-capable patch specialists (``mode=patch & bench=True``) run their
+        own serving + benchmark loop on their leased cards, so they reserve the
+        shared ``benchmark_lane`` to avoid oversubscribing benchmark resources.
+        (The retired ``run_bench`` micro-bench tool used to gate on this same
+        predicate; the lane reservation is the part that still matters.)
 
         Returns:
             ``True`` when the profile is patch-mode with ``bench=True``.
