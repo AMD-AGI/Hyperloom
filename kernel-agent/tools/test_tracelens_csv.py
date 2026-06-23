@@ -1225,6 +1225,72 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "Task" in captured["options"]["allowed_tools"]
 
 
+def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch):
+    """Sandbox-hang RCA: a gateway stream that goes silent mid-response must
+    abort on the per-message idle timeout instead of blocking forever on
+    socket.read(). The runner records the idle-timeout error and, since
+    analysis.md was already written, still returns it as the report."""
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    # Drive the idle timeout fast (the resolver floors real values at 30s).
+    monkeypatch.setattr(tlr, "_resolve_stream_idle_timeout_sec", lambda: 0.5)
+
+    async def _stalling_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# partial report\n", encoding="utf-8")
+        # One chunk arrives, then the stream goes silent (partial response,
+        # stop_reason=None) — emulate by sleeping far past the idle timeout.
+        yield _Message(content=[_TextBlock("chunk-1")])
+        await asyncio.sleep(60)
+        yield _Message(content=[_TextBlock("never-reached")])
+
+    started = asyncio.run(_run_and_time(tlr, _stalling_query, _FakeOptions, tmp_path, output_dir))
+    res, elapsed = started
+
+    # Aborted quickly (well under the 60s stall), not hung.
+    assert elapsed < 30.0
+    assert res.report_path.exists()
+    sdk_error = res.artifact_paths.get("tracelens_agent_sdk_error", "")
+    assert "idle timeout" in sdk_error
+
+
+async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
+    import time as _time
+
+    t0 = _time.monotonic()
+    res = await tlr_mod.run_tracelens_skill(
+        skill_path=tmp_path / "skill.md",
+        trace_path=tmp_path / "trace.json.gz",
+        output_dir=output_dir,
+        tracelens_root=tmp_path,
+        tracelens_internal_root=tmp_path / "TraceLens-internal",
+        platform="MI300X",
+        framework="sglang",
+        analysis_mode="default",
+        capture_folder=None,
+        budget_minutes=1,
+        sdk_query_factory=query,
+        sdk_options_cls=options_cls,
+    )
+    return res, _time.monotonic() - t0
+
+
 def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
     """#266: the SDK runner must persist a full stream-JSON transcript
     (text + tool_use/tool_result blocks) next to ``analysis.md`` so an
