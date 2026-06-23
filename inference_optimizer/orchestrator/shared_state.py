@@ -499,7 +499,12 @@ class SharedState:
     # Structured warm-replay outcome for reports/prompts (status reproduced|drift|failed|skipped, etc.).
     warm_replay_outcome: dict = field(default_factory=dict)
     # Baseline Magpie runtime (s, success path); ExploreExecutor derives overtime-kill deadline. Zero => no-op.
+    # This is the COLD (warmup-round) full boot+bench wall-clock — the hard-cap anchor.
     baseline_runtime_sec: float = 0.0
+    # Baseline WARM measure-round wall-clock (client-only, no boot). Q4: anchors the explore
+    # decision-round overtime kill so it is post-startup apples-to-apples with the warm variant
+    # measurement. Zero => fall back to baseline_runtime_sec (cold anchor).
+    baseline_warm_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
     # Reference launch recipe (from --reference-script or auto-discovery): lowest-priority
     # base server args/envs seeding every baseline. Fact-layer => persisted + restored on resume.
@@ -591,8 +596,8 @@ class SharedState:
     framework_pr_authoring_enabled: bool = True
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``. Absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposal).
     enable_roofline: bool = True
-    # ExploreExecutor per-variant overtime kill multiplier; >0 and baseline_runtime_sec>0 kills past baseline_runtime_sec*ratio (outcome='KILLED_OVERTIME'). Stack-rebench exempt. Default +10%.
-    explore_overtime_kill_ratio: float = 1.10
+    # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM measure time when warm-decision is active, else the cold baseline. Warmup + stack-rebench exempt. Default +20%.
+    explore_overtime_kill_ratio: float = 1.20
     # ExploreExecutor per-variant hard timeout override; 0 => auto-derive from baseline_runtime_sec*(kill_ratio+safety_margin).
     explore_variant_timeout_sec_override: int = 0
     # Headroom added to kill_ratio for auto-derived hard cap (default 0.5); no effect when override > 0.
@@ -2385,6 +2390,12 @@ class SharedState:
             "best_for_each_conc": result.get("best_for_each_conc") or {},
             "pareto_front": result.get("pareto_front") or [],
             "workspace": result.get("workspace", ""),
+            # Watermark of validated gain at the moment this sweep ran, so a later
+            # SWEEP entry (cyclic reloop) can skip a redundant full sweep when no
+            # validated improvement landed since (see Coordinator._on_enter_sweep).
+            "cumulative_gain_validated_at_record": float(
+                getattr(self, "cumulative_gain_validated", 0.0) or 0.0
+            ),
         }
 
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
@@ -3334,7 +3345,7 @@ class SharedState:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3); compact (≤5 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
+        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3); compact (≤6 lines, incl. the ``cycle`` = macro-cycle number). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -3382,6 +3393,7 @@ class SharedState:
         allowed_line = f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
         lines = [
             f"phase     : {phase}",
+            f"cycle     : {int(getattr(self, 'macro_cycle', 0) or 0)}",
             f"entered   : {self.phase_started_ts or '(unset)'}",
             budget_line,
             allowed_line,
