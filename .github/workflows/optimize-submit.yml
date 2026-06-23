@@ -97,13 +97,12 @@ on:
         required: false
         default: '600'
       submit_workspaces:
-        # Comma-separated round-robin pool. Default spreads the batch across
-        # hyperloom + sandbox instead of sending every task to sandbox. Set
-        # empty explicitly only when you want to fall back to the single
-        # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret.
-        description: 'Round-robin submit workspaces (comma-separated). Default uses hyperloom+sandbox.'
+        # Comma-separated round-robin pool. Default submits only to
+        # core42-hyperloom. Set empty explicitly only when you want to fall back
+        # to the single SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret.
+        description: 'Round-robin submit workspaces (comma-separated). Default uses core42-hyperloom only.'
         required: false
-        default: 'core42-hyperloom,core42-sandbox'
+        default: 'core42-hyperloom'
       isl:
         description: 'Input sequence length'
         required: false
@@ -240,7 +239,7 @@ jobs:
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
@@ -273,7 +272,7 @@ jobs:
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         working-directory: ci
@@ -325,9 +324,8 @@ jobs:
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
-          # Schedule sends the whole 200-model batch to core42-hyperloom ONLY,
-          # leaving core42-sandbox dedicated to the count-filler (optimize-tiny).
-          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom' || github.event.inputs.submit_workspaces || 'core42-hyperloom,core42-sandbox' }}
+          # All tasks go to core42-hyperloom only (both schedule and dispatch).
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom' || github.event.inputs.submit_workspaces || 'core42-hyperloom' }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
@@ -950,7 +948,7 @@ jobs:
     runs-on: hyperloom-4hhzn
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         # No setup-python on the self-hosted runner — it has system python3

@@ -109,7 +109,15 @@ class BenchmarkAnalyzer:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 start = node.lineno - 1
                 end = node.end_lineno or node.lineno
-                import_lines.append("\n".join(self.lines[start:end]))
+                block = "\n".join(self.lines[start:end])
+                # ast.walk also yields imports nested inside functions / classes /
+                # try blocks, which keep their source indentation. Emitted verbatim
+                # at the harness module top level they raise "unexpected indent" and
+                # break static_check (the whole harness is then unusable). Dedent
+                # each block so a function-local ``    import math`` becomes a valid
+                # top-level ``import math``; module-level imports (no indent) are
+                # unchanged.
+                import_lines.append(textwrap.dedent(block))
         return import_lines
 
     def get_decorated_functions(self) -> dict[str, FuncInfo]:
@@ -1153,10 +1161,18 @@ def _try_generate_aiter_harness(
     imports = analyzer.get_imports()
     if not any("aiter" in imp for imp in imports):
         return None
-    bench_fns = [fi for fi in decorated.values() if fi.decorator == "benchmark"]
+    # Recognize both aiter perf decorators. Many aiter op_tests time the op with
+    # @perftest rather than @benchmark (e.g. test_batch_prefill.py), so matching
+    # only @benchmark misses them and forces the weaker generic path. A bare
+    # passthrough wrapper (e.g. @perftest def profile_func(target_func, *args,
+    # **kwargs)) carries no mappable shape params and is filtered by the kwargs
+    # guard below, so widening to @perftest only adds real benchmark fns.
+    bench_fns = [fi for fi in decorated.values()
+                 if fi.decorator in ("benchmark", "perftest")]
     if not bench_fns:
         return None
-    # Pick the first @benchmark fn that times an op (run_perftest / aiter.<op>).
+    # Pick the first perf fn that actually times an op (run_perftest / aiter.<op>);
+    # this also skips passthrough wrappers whose body just forwards to target_func.
     test_fn = next(
         (fi for fi in bench_fns
          if "run_perftest" in fi.source or "aiter." in fi.source),

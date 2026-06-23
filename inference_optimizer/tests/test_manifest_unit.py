@@ -337,6 +337,28 @@ def test_build_manifest_with_args(monkeypatch):
     assert m["warm_replay_enabled"] is False
 
 
+def test_build_manifest_snapshots_user_data_path_from_env(monkeypatch, tmp_path):
+    monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
+    monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
+    monkeypatch.setattr(mf, "_detect_image", lambda: None)
+    monkeypatch.setattr(mf, "_detect_stack_fingerprint", lambda: {})
+    monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, str(tmp_path / "ud"))
+    m = mf.build_manifest(tmp_path / "ud" / "sess")
+    assert m["user_data_path"] == str(tmp_path / "ud")
+
+
+def test_build_manifest_user_data_path_falls_back_to_workspace_root(monkeypatch):
+    monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
+    monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
+    monkeypatch.setattr(mf, "_detect_image", lambda: None)
+    monkeypatch.setattr(mf, "_detect_stack_fingerprint", lambda: {})
+    monkeypatch.delenv(mf._paths.ENV_USER_DATA_PATH, raising=False)
+    m = mf.build_manifest(Path("/tmp/sd"))
+    # Unset env -> resolved workspace_root() default (never empty).
+    assert m["user_data_path"] == str(mf._paths.workspace_root())
+    assert m["user_data_path"]
+
+
 def test_write_and_load_manifest_roundtrip(monkeypatch, tmp_path):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", lambda: {})

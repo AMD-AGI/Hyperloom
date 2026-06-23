@@ -254,7 +254,7 @@ def test_local_setup_deps_root_stays_pod_local_under_session_dir(tmp_path: Path)
     assert str(expected_deps / "Primus-Claw") in result.stdout
     assert str(expected_deps / "TraceLens") in result.stdout
     assert str(expected_deps / "TraceLens-internal") not in result.stdout
-    assert "dee7fa3182b1ee0d2085a364a2542d8f49acc0f6" in result.stdout
+    assert "35bbb6380cf69a2655ee28260b02b5f2dc481744" in result.stdout
 
 
 def test_local_setup_explicit_deps_root_overrides_pod_local(tmp_path: Path) -> None:
