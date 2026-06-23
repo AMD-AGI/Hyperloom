@@ -446,6 +446,10 @@ class SharedState:
     conc: int = 0
     isl: int = 0
     osl: int = 0
+    # Profile-phase output length (from --profile-osl). 0 = unset (profile
+    # defaults to min(osl, 1024)). Persisted so a fresh-shell resume keeps the
+    # operator's explicit profile OSL instead of reverting to the default.
+    profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
     # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK_PR route to KERNEL (or SWEEP).
