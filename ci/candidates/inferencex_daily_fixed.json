@@ -205,7 +205,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 17,
+      "pool_index": 12,
       "label": "DeepSeek-V3",
       "repo_id": "deepseek-ai/DeepSeek-V3",
       "framework": "sglang",
@@ -219,7 +219,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 18,
+      "pool_index": 13,
       "label": "DeepSeek-V3-0324",
       "repo_id": "deepseek-ai/DeepSeek-V3-0324",
       "framework": "sglang",
@@ -233,7 +233,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 19,
+      "pool_index": 14,
       "label": "DeepSeek-V3.1",
       "repo_id": "deepseek-ai/DeepSeek-V3.1",
       "framework": "sglang",
@@ -247,7 +247,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 21,
+      "pool_index": 15,
       "label": "DeepSeek-Prover-V2-671B",
       "repo_id": "deepseek-ai/DeepSeek-Prover-V2-671B",
       "framework": "sglang",
@@ -261,7 +261,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 22,
+      "pool_index": 16,
       "label": "Ling-2.6-1T",
       "repo_id": "inclusionAI/Ling-2.6-1T",
       "framework": "sglang",
@@ -275,7 +275,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 23,
+      "pool_index": 17,
       "label": "Qwen3-Coder-480B-A35B-Instruct",
       "repo_id": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
       "framework": "vllm",
@@ -289,7 +289,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 27,
+      "pool_index": 18,
       "label": "Kimi-K2-Instruct",
       "repo_id": "moonshotai/Kimi-K2-Instruct",
       "framework": "sglang",
@@ -303,7 +303,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 28,
+      "pool_index": 19,
       "label": "Kimi-K2-Instruct-0905",
       "repo_id": "moonshotai/Kimi-K2-Instruct-0905",
       "framework": "sglang",
@@ -317,7 +317,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 29,
+      "pool_index": 20,
       "label": "MiMo-V2-Flash",
       "repo_id": "XiaomiMiMo/MiMo-V2-Flash",
       "framework": "sglang",
@@ -331,7 +331,7 @@
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 30,
+      "pool_index": 21,
       "label": "Ring-1T",
       "repo_id": "inclusionAI/Ring-1T",
       "framework": "sglang",
