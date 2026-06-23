@@ -491,6 +491,8 @@ class TestAtomPathPresentInAllThreeLocations:
             )
             assert spec is not None and spec.loader is not None
             mod = _ilu.module_from_spec(spec)
+            # Register before exec so self-referential dataclass annotations
+            # (OpResolution.fanout: list["OpResolution"]) resolve under py3.10.
             _sys.modules[spec.name] = mod
             spec.loader.exec_module(mod)
             ka_atom = frozenset(r.lower() for r in mod._reusable_roots() if "/atom/" in r.lower())
