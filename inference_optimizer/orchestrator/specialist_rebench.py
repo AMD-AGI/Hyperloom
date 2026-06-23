@@ -160,7 +160,10 @@ async def run_specialist_rebench(
 
     variant = GridVariant(
         name="specialist-rebench",
-        extra_server_args=(base_extra_args or "").strip(),
+        # ``run_grid`` merges base_extra_args ahead of each variant's args.
+        # Keep the identity variant empty so helper-provided server flags are
+        # injected exactly once.
+        extra_server_args="",
         extra_envs=dict(extra_envs or {}),
         note="specialist_rebench",
     )

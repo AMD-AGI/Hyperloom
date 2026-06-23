@@ -61,8 +61,10 @@ async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
         error="",
         nonfatal_warnings=["w1"],
     )
+    seen: dict = {}
 
     async def _fake_run_grid(**kwargs):
+        seen.update(kwargs)
         return [fake]
 
     monkeypatch.setattr(sr, "default_baseline_config", lambda: str(tmp_path / "base.yaml"))
@@ -83,6 +85,8 @@ async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
     assert res["port"] == 12321
     assert res["gpu_ids"] == "4,5,6,7"
     assert "w1" in res["warnings"]
+    assert seen["base_extra_args"] == "--kv-cache-dtype fp8_e4m3"
+    assert seen["grid"][0].extra_server_args == ""
 
 
 @pytest.mark.asyncio

@@ -364,11 +364,12 @@ def test_single_domain_scope_rejects_multiple_tags(gate, orchestration_role):
 # GPU request is governed by the same ceiling for *every* scope — freeform is
 # not a hole around the GPU-pool accounting.
 # --------------------------------------------------------------------------- #
-def _gate_with_gpu_capacity(capacity: int) -> PolicyGate:
+def _gate_with_gpu_capacity(capacity: int, *, tp: int = 0) -> PolicyGate:
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState()
     state.gpu_specialist_capacity = capacity
+    state.tp = tp
     return PolicyGate(role_registry=default_role_registry(), shared_state=state)
 
 
@@ -475,6 +476,49 @@ def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role
             ),
         )
     assert exc.value.rule == "specialist_gpu_pool_disabled"
+
+
+def test_bench_specialist_policy_uses_effective_tp_and_carved_pool(orchestration_role, monkeypatch):
+    """Policy must reject a bench specialist that dispatch would floor to TP
+    but could never lease after serving-disjoint carving."""
+    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP"):
+        monkeypatch.delenv(name, raising=False)
+    gate = _gate_with_gpu_capacity(4, tp=4)
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch(
+                {
+                    "scope": "freeform",
+                    "task_description": "start a TP-sharded server and rebench a patch",
+                    "mode": "patch",
+                    "bench": True,
+                    "gpu_count": 1,
+                }
+            ),
+        )
+    assert exc.value.rule == "specialist_gpu_request_exceeds_capacity"
+    assert "effective gpu_count=4" in str(exc.value)
+    assert "pool size=0" in str(exc.value)
+
+
+def test_bench_specialist_omitted_gpu_count_allows_sufficient_carved_pool(orchestration_role, monkeypatch):
+    """Omitting gpu_count defaults to serving TP and is valid when enough
+    serving-disjoint specialist cards remain."""
+    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP"):
+        monkeypatch.delenv(name, raising=False)
+    gate = _gate_with_gpu_capacity(8, tp=4)
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch(
+            {
+                "scope": "freeform",
+                "task_description": "start a TP-sharded server and rebench a patch",
+                "mode": "patch",
+                "bench": True,
+            }
+        ),
+    )
 
 
 def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
