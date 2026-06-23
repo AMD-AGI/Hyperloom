@@ -273,6 +273,7 @@
     "model_arch": {},
     "model_architectures": [],
     "model_class": "dense",
+    "model_info": {},
     "model_name": "",
     "model_path": "<volatile>",
     "model_type": "",
