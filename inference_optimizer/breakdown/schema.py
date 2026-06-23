@@ -1909,12 +1909,6 @@ class SessionBreakdown(TypedDict, total=False):
         schema_version (str): Schema version string (see ``SCHEMA_VERSION``).
         exported_at_utc (str): ISO UTC timestamp the file was exported.
         exporter_version (str): Version of the exporter that produced the file.
-        leaderboard_eligible (bool): Whether the run represents a valid
-            leaderboard candidate. Fail-fast and baseline-failed runs are false.
-        leaderboard_suppression_reason (str | None): Terminal reason that made
-            the run ineligible, if any.
-        show_on_leaderboard (bool): Downstream-compatible display flag mirroring
-            ``leaderboard_eligible``.
         session (SessionMeta): Session identity, timing, and host context.
         workload (Workload): Model/framework/serving configuration.
         baseline (Baseline): Pre-optimization reference performance.
@@ -1952,9 +1946,6 @@ class SessionBreakdown(TypedDict, total=False):
     schema_version: str
     exported_at_utc: str
     exporter_version: str
-    leaderboard_eligible: bool
-    leaderboard_suppression_reason: str | None
-    show_on_leaderboard: bool
 
     session: SessionMeta
     workload: Workload
