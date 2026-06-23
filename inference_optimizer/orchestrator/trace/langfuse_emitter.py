@@ -37,6 +37,7 @@ from typing import Any
 from ...session_paths import (
     decision_trace_path,
     forge_steps_path,
+    gemm_tuning_steps_path,
     recipe_snapshot_audit_jsonl,
     specialist_intel_path,
     trace_dir,
@@ -47,6 +48,7 @@ from .trace_env import (
     ENV_LANGFUSE_HOST,
     ENV_LANGFUSE_PUBLIC_KEY,
     ENV_LANGFUSE_SECRET_KEY,
+    apply_flush_defaults,
     langfuse_credentials,
     langfuse_credentials_complete,
     langfuse_live_enabled,
@@ -383,6 +385,7 @@ class LangfuseEmitter:
             "generations_paired": 0,  # of which had both token + text halves
             "generations_text_only": 0,
             "generations_token_only": 0,
+            "session_start_recorded": 0,  # 1 once the startup marker was sent
             "scores_sent": 0,  # decision Scores created (span + trace)
             "spans_opened": 0,  # phase + agent spans created
             "ext_shards_read": 0,  # out-of-process ext/*.jsonl files swept
@@ -391,6 +394,7 @@ class LangfuseEmitter:
             "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl rows swept
             "specialist_intel_read": 0,  # specialist_intel.jsonl rows swept
             "forge_steps_read": 0,  # forge_steps.jsonl rows swept
+            "gemm_tuning_read": 0,  # gemm_tuning.jsonl rows swept
             "errors": 0,  # swallowed send failures
         }
         self._flushed = False
@@ -431,6 +435,10 @@ class LangfuseEmitter:
             )
             return False
         try:
+            # Tighten the SDK auto-flush cadence before the singleton is built
+            # so a session killed before cli.finally still lands its latest
+            # observations (marking where the run died).
+            apply_flush_defaults()
             creds = langfuse_credentials()
             self._client = get_client()
             log.info(
@@ -714,6 +722,7 @@ class LangfuseEmitter:
             self._flush_recipe_kb_audit()
             self._flush_specialist_intel()
             self._flush_forge_steps()
+            self._flush_gemm_tuning()
             self._flush_decision_scores()
             self._close_spans()
         except Exception:  # noqa: BLE001
@@ -726,6 +735,73 @@ class LangfuseEmitter:
                 self._counts["errors"] += 1
                 log.debug("langfuse: client.flush failed", exc_info=True)
             self._flushed = True
+            self._write_receipt()
+
+    def record_session_start(self) -> None:
+        """Emit a one-shot ``session_start`` marker the moment a session begins.
+
+        Attached directly to the session's ``trace_id`` (independent of the
+        lazy root span and of any LLM traffic), so a run that aborts in
+        pre-flight or is killed before producing a breakdown still leaves a
+        Langfuse trace tying the WekaFS user dir + session dir to its
+        ``code_revision`` and dependency commits. Idempotent (cross-process via
+        the persisted receipt) and best-effort (never raises).
+        """
+        if not self._enabled:
+            return
+        if self._counts.get("session_start_recorded"):
+            return
+        # Cross-process guard mirrors record_session_breakdown: a prior process
+        # (original run or a `recover-session`) may have already marked start.
+        persisted = read_receipt(self.session_dir) or {}
+        if (persisted.get("counts") or {}).get("session_start_recorded"):
+            self._counts["session_start_recorded"] = 1
+            return
+        import os
+
+        payload = lfmap.session_start_payload(
+            self._manifest,
+            user_data_path=(os.environ.get("USER_DATA_PATH") or "").strip() or None,
+            env=os.environ,
+        )
+        try:
+            obs = _start_obs(
+                self._client,
+                name="session_start",
+                as_type="span",
+                trace_context={"trace_id": self._trace_id},
+                input=None,
+                output=payload,
+                metadata={
+                    "claw_session_id": payload.get("claw_session_id"),
+                    "sandbox_user_id": payload.get("sandbox_user_id"),
+                    "code_revision": payload.get("code_revision"),
+                    "session_dir": payload.get("session_dir"),
+                    "user_data_path": payload.get("user_data_path"),
+                    "host": payload.get("host"),
+                    "image": payload.get("image"),
+                },
+            )
+            # Stamp trace name/session_id so the trace is grouped and visible
+            # from the very first observation, even with no LLM calls.
+            _set_trace_attrs(
+                obs,
+                name=self._trace_name(),
+                session_id=self._session_label,
+                metadata=lfmap.trace_metadata(self._manifest),
+            )
+            _end_obs(obs, None)
+            self._counts["session_start_recorded"] = 1
+        except Exception:  # noqa: BLE001
+            self._counts["errors"] += 1
+            log.debug("langfuse: record_session_start failed", exc_info=True)
+        finally:
+            try:
+                self._client.flush()
+            except Exception:  # noqa: BLE001
+                self._counts["errors"] += 1
+                log.debug("langfuse: flush after session_start failed", exc_info=True)
+            # Persist the flag so a later process (recovery) skips re-emitting.
             self._write_receipt()
 
     def record_session_breakdown(self, breakdown: dict[str, Any]) -> None:
@@ -936,6 +1012,38 @@ class LangfuseEmitter:
             self.record_kb_span(
                 name=name, agent="forge", output=row,
                 metadata=metadata, ts=row.get("ts"),
+            )
+
+    def _flush_gemm_tuning(self) -> None:
+        """Backfill each deterministic GEMM-tuning run as a ``gemm_tuning:*`` span.
+
+        ``run_gemm_tuning_handler`` appends one row per run to
+        ``reports/trace/gemm_tuning.jsonl`` (the tuner is a subprocess with no
+        Langfuse handle, so the parent persists the audit). Each row becomes a
+        ``gemm_tuning:<engine>`` span under the ``gemm_tuning`` agent so a trace
+        attributes the forge / geak tuner as its own source, not just folds its
+        gain into the kernel total. Read out-of-band at session end (mirrors
+        :meth:`_flush_forge_steps`); idempotent via the ``flush_session`` guard.
+        """
+        for row in _load_jsonl(gemm_tuning_steps_path(self.session_dir)):
+            self._counts["gemm_tuning_read"] += 1
+            engine = str(row.get("engine") or row.get("backend") or "unknown")
+            self.record_kb_span(
+                name=f"gemm_tuning:{engine}",
+                agent="gemm_tuning",
+                output=row,
+                metadata={
+                    "kind": "gemm_tuning",
+                    "engine": engine,
+                    "backend": row.get("backend"),
+                    "decision": row.get("decision"),
+                    "micro_decision": row.get("micro_decision"),
+                    "best_speedup": row.get("best_speedup"),
+                    "precision": row.get("precision"),
+                    "framework": row.get("framework"),
+                    "tuned_file": row.get("tuned_file"),
+                },
+                ts=row.get("ts"),
             )
 
     def _flush_decision_scores(self) -> None:
@@ -1186,6 +1294,19 @@ def get_emitter(session_dir: Path) -> LangfuseEmitter:
             emitter = LangfuseEmitter(Path(session_dir))
             _REGISTRY[key] = emitter
         return emitter
+
+
+def record_session_start(session_dir: Path) -> None:
+    """Module-level convenience: emit the startup marker for ``session_dir``.
+
+    Call once right after ``manifest.json`` is written, before any heavy
+    bring-up / pre-flight, so the session's Langfuse trace exists from the
+    start. No-op when live push is disabled; best-effort (never raises).
+
+    Args:
+        session_dir: Session directory whose startup marker is emitted.
+    """
+    get_emitter(session_dir).record_session_start()
 
 
 def flush_session(session_dir: Path) -> None:
