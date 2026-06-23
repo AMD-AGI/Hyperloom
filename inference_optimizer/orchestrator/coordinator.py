@@ -53,6 +53,8 @@ _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
 from . import phase_state as _phase_state
 from .optimization_journal import (
+    KIND_GEMM_TUNING,
+    OUTCOME_KEEP,
     Journal,
     JournalEntry,
     classify_change_kind,
@@ -3528,6 +3530,65 @@ class Coordinator:
             self._promote_gemm_tuning_keep(result)
         self.shared_state.save(self.session_dir)
 
+    def _journal_gemm_tuning_keep(
+        self,
+        entry: dict[str, Any],
+        *,
+        task_id: str = "",
+    ) -> None:
+        """Mirror an adopted GEMM-tuning stack entry as an optimization_journal KEEP row.
+
+        GEMM-tuning adoptions previously landed only in ``optimization_stack``
+        / ``roofline_progress.trajectory`` and never as a ``phase_timeline``
+        event. As a result the run's serving throughput was invisible to the
+        timeline (and to downstream throughput-attempt series that read the
+        flat phase_timeline). Emitting a KEEP journal row — carrying the
+        end-to-end ``throughput_after`` plus the originating ``task_id`` for
+        token attribution — closes that gap so the GEMM tuning point shows up
+        alongside every other attempt. Best-effort: journaling failures never
+        abort the run.
+
+        Args:
+            entry: The ``optimization_stack`` entry just appended for this
+                GEMM-tuning adoption (carries variant_name / tput / gain_pct /
+                backend / tuned_file / ts).
+            task_id: Originating task id used to join per-step token spend.
+        """
+        try:
+            journal = self._ensure_journal()
+            variant_name = str(entry.get("variant_name") or "gemm_tuning")
+            backend = str(entry.get("backend") or "").strip().lower()
+            try:
+                tput = float(entry["tput"]) if entry.get("tput") is not None else None
+            except (TypeError, ValueError):
+                tput = None
+            try:
+                gain_pct = float(entry["gain_pct"]) if entry.get("gain_pct") is not None else None
+            except (TypeError, ValueError):
+                gain_pct = None
+            metrics: dict[str, Any] = {}
+            if entry.get("tuned_file"):
+                metrics["tuned_file"] = str(entry.get("tuned_file"))
+            journal.append_entry(
+                JournalEntry(
+                    phase=self._journal_entry_phase(),
+                    iter=int(self.shared_state.tick or 0),
+                    kind=KIND_GEMM_TUNING,
+                    change=variant_name,
+                    outcome=OUTCOME_KEEP,
+                    gain_pct=gain_pct,
+                    throughput_after=tput,
+                    task_id=str(task_id or ""),
+                    variant_name=variant_name,
+                    ts=str(entry.get("ts") or ""),
+                    provenance=f"gemm_tuning:{backend}" if backend else "gemm_tuning",
+                    tick=int(self.shared_state.tick or 0),
+                    metrics=metrics,
+                )
+            )
+        except Exception:  # noqa: BLE001 — journaling is best-effort
+            log.exception("gemm_tuning journal append failed")
+
     def _promote_gemm_tuning_keep(self, result: dict[str, Any]) -> None:
         """Promote a successful GEMM tuning run into the main gain ledger.
 
@@ -3613,6 +3674,9 @@ class Coordinator:
                 variant_name=variant_name,
                 new_tput=tuned_tput,
                 ts=ts,
+            )
+            self._journal_gemm_tuning_keep(
+                entry, task_id=str(result.get("task_id") or ""),
             )
         self.shared_state.current_best = {
             "action": "gemm_tuning",
@@ -3757,6 +3821,9 @@ class Coordinator:
                     variant_name=f"forge_{tuner_name}",
                     new_tput=new_tput,
                     ts=ts,
+                )
+                self._journal_gemm_tuning_keep(
+                    entry, task_id=f"gemm_tune_e2e_{tuner_name}",
                 )
             else:
                 reverted.append({**cand, "reason": f"decision={decision}, gain={gain_pct:.2f}%"})
