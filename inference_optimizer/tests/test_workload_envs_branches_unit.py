@@ -31,6 +31,8 @@ def _clear_env(monkeypatch):
         "INFERENCEX_PATH",
         "HYPERLOOM_PROFILE_MAX_ITERS",
         "HYPERLOOM_PROFILE_DELAY_ITERS",
+        "HYPERLOOM_PROFILE_MAX_STEPS_CAP",
+        "PROFILE_OSL",
         "INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT",
         "INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP",
     ):
@@ -235,3 +237,79 @@ def test_profile_sglang_bad_extra_body(monkeypatch, tmp_path):
     bench = _materialize(src, tmp_path / "out")
     body = bench["envs"]["PROFILE_EXTRA_BODY"]
     assert "start_step" in body and "num_steps" in body
+
+
+# ---- profile capture cap + profile-scoped OSL (issue #571 / #570) ---------
+def _profile_num_steps(bench) -> int:
+    """Captured-step count the sglang profile path writes into PROFILE_EXTRA_BODY."""
+    import json
+
+    return int(json.loads(bench["envs"]["PROFILE_EXTRA_BODY"])["num_steps"])
+
+
+def test_profile_default_caps_steps_and_osl(monkeypatch, tmp_path):
+    # No PROFILE_OSL: capture is capped at the default 128 and the profile OSL
+    # defaults to min(served OSL, 1024) without touching the served value.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("OSL", "8192")
+    monkeypatch.setenv("CONC", "64")
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["OSL"] == 1024  # min(8192, 1024)
+    assert _profile_num_steps(bench) == 128  # default cap
+
+
+def test_profile_explicit_profile_osl_honored(monkeypatch, tmp_path):
+    # --profile-osl / PROFILE_OSL overrides the profile OSL verbatim.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("OSL", "8192")
+    monkeypatch.setenv("CONC", "64")
+    monkeypatch.setenv("PROFILE_OSL", "512")
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["OSL"] == 512
+    assert _profile_num_steps(bench) == 128
+
+
+def test_profile_steps_cap_env_override(monkeypatch, tmp_path):
+    # Operators can raise the serialization cap.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("OSL", "1024")
+    monkeypatch.setenv("CONC", "64")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "256")
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    bench = _materialize(src, tmp_path / "out")
+    assert _profile_num_steps(bench) == 256
+
+
+def test_profile_high_osl_low_conc_auto_lowers_osl(monkeypatch, tmp_path, caplog):
+    # Low CONC pushes the steady-state floor above the cap at OSL=1024, so the
+    # auto path lowers the profile OSL until the floor fits the 128-step cap.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("OSL", "8192")
+    monkeypatch.setenv("CONC", "4")
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    with caplog.at_level("WARNING"):
+        bench = _materialize(src, tmp_path / "out")
+    # fitted = int(128 * 2 * 4 / (1 + 1)) = 512; floor(512, conc=4) = 128 <= 128.
+    assert bench["envs"]["OSL"] == 512
+    assert _profile_num_steps(bench) == 128
+    assert any("lowering profile OSL" in r.message for r in caplog.records)
+
+
+def test_profile_manual_max_iters_below_floor_warns(monkeypatch, tmp_path, caplog):
+    # An explicit too-small capture is honored but warned about (steady-state).
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("OSL", "1024")
+    monkeypatch.setenv("CONC", "8")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "8")
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    with caplog.at_level("WARNING"):
+        bench = _materialize(src, tmp_path / "out")
+    assert _profile_num_steps(bench) == 8  # honored verbatim
+    assert any("below the steady-state floor" in r.message for r in caplog.records)
