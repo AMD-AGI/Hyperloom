@@ -126,10 +126,15 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
-# Pin GEAK to the v3.2.1 release, which carries the GEMM tuning entrypoint
-# used by kernel-agent/tools/gemm_tuning.py (minisweagent.run.gemm_tuning).
-# Operators can override with GEAK_REF=<tag|branch|sha>.
-GEAK_REF="${GEAK_REF:-v3.2.1}"
+# Pin GEAK to the v3.2.2 release (commit d3f94cbe, cut from the
+# chore/subagent-docs-upstream-resource branch / PR #290). It carries the
+# GEMM tuning entrypoint used by kernel-agent/tools/gemm_tuning.py
+# (minisweagent.run.gemm_tuning) plus the upstreamed subagent docs/resources.
+# A tag is a permanent ref: it stays reachable regardless of how PR #290 is
+# merged to main (merge/squash/rebase) or whether the source branch is later
+# deleted, unlike a branch-HEAD SHA. Operators can override with
+# GEAK_REF=<tag|branch|sha>; bump to the next patch tag if the branch advances.
+GEAK_REF="${GEAK_REF:-v3.2.2}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
