@@ -1249,13 +1249,42 @@ _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
 )
 
 
+def _launcher_frame_from_dict(obj: dict) -> str | None:
+    """Pull the first ``<path>(<line>): <func>`` frame out of a TraceLens launcher dict.
+
+    Newer TraceLens reports emit ``launcher_path`` as a traversal dict
+    ``{'entry_point': '<frame>', 'wrappers': "[<frame>, ...]", ...}`` instead of a
+    bare frame string. Prefer ``entry_point``; fall back to the first parseable
+    ``wrappers`` frame. Returns ``None`` when no frame matches the launcher shape.
+    """
+    if not isinstance(obj, dict):
+        return None
+    entry = obj.get("entry_point")
+    if isinstance(entry, str) and _LAUNCHER_PATH_RE.match(entry.strip()):
+        return entry.strip()
+    wrappers = obj.get("wrappers")
+    if isinstance(wrappers, str):
+        try:
+            wrappers = ast.literal_eval(wrappers)
+        except (ValueError, SyntaxError):
+            wrappers = []
+    if isinstance(wrappers, (list, tuple)):
+        for frame in wrappers:
+            if isinstance(frame, str) and _LAUNCHER_PATH_RE.match(frame.strip()):
+                return frame.strip()
+    return None
+
+
 def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]:
     """Parse a TraceLens kernel-path into its components.
 
     Accepts ``<path>(<line>): <func>``, ``<path>#L<line>``, or a bare path.
+    Also accepts the newer TraceLens launcher *dict* (or its stringified repr)
+    ``{'entry_point': '<frame>', 'wrappers': "[...]"}``, from which the first
+    real source frame is extracted before parsing.
 
     Args:
-        kernel_path: The kernel-path string to parse.
+        kernel_path: The kernel-path string (or launcher dict) to parse.
 
     Returns:
         A ``(path, line, function_name)`` tuple; placeholders and empty input
@@ -1263,6 +1292,26 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
     """
     if not kernel_path:
         return "", None, None
+    # TraceLens may hand us the launcher as a dict (or a stringified dict) whose
+    # real frame lives under entry_point/wrappers; reduce it to that frame first.
+    # sglang launcher_paths are plain strings or placeholders (never dicts), so
+    # this branch is inert for sglang and only rescues the newer vLLM dict shape.
+    if isinstance(kernel_path, dict):
+        frame = _launcher_frame_from_dict(kernel_path)
+        if not frame:
+            return "", None, None
+        kernel_path = frame
+    elif isinstance(kernel_path, str):
+        stripped = kernel_path.strip()
+        if stripped.startswith("{") and stripped.endswith("}") and "entry_point" in stripped:
+            try:
+                parsed_obj = ast.literal_eval(stripped)
+            except (ValueError, SyntaxError):
+                parsed_obj = None
+            frame = _launcher_frame_from_dict(parsed_obj) if isinstance(parsed_obj, dict) else None
+            if not frame:
+                return "", None, None
+            kernel_path = frame
     text = kernel_path.strip()
     if text.lower() in _LAUNCHER_PATH_PLACEHOLDERS:
         return "", None, None
