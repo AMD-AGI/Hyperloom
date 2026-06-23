@@ -17,8 +17,8 @@ name: SaFE Optimize Submit
 #                                    register, so download is overlapped
 #                                    with the rest of the batch (no serial
 #                                    prewarm stage that blocks optimize).
-#                                    schedule forces max_parallel=200 so the
-#                                    whole 200-model batch dispatches at once
+#                                    schedule forces max_parallel=240 so the
+#                                    whole 240-model batch dispatches at once
 #                                    (dispatch default stays 60).
 #   3. summarize  (hyperloom-4hhzn) — aggregate per-task artifacts into a
 #                                    ranked ci_summary.{md,json} (sorted by
@@ -34,9 +34,9 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Rolling downloads>100 pool: 200 models TWICE a day, firing at UTC
+  # Rolling downloads>100 pool: 240 models TWICE a day, firing at UTC
   # 04:00 / 16:00 (Beijing 12:00 / 00:00). Each fire submits the
-  # NEXT sequential 200-model slice of the rotate pool, now hosted off-repo at
+  # NEXT sequential 240-model slice of the rotate pool, now hosted off-repo at
   # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate.json
   # (a date-less symlink that always points at the latest filtered pool;
   # ordered not-run first; the 449 >12B multimodal models are front-loaded),
@@ -82,9 +82,9 @@ on:
         required: false
         default: '7'
       max_parallel:
-        description: 'Max parallel optimize jobs (dispatch default 60; schedule forces 200 to match the 200-model batch).'
+        description: 'Max parallel optimize jobs (default 240; schedule also uses 240).'
         required: false
-        default: '60'
+        default: '240'
       submit_jitter_sec:
         # Anti-thundering-herd. When the whole matrix fans out at once, every
         # job hits SaFE register/submit (Claw-session creation) in the same
@@ -97,13 +97,12 @@ on:
         required: false
         default: '600'
       submit_workspaces:
-        # Comma-separated round-robin pool. Default spreads the batch across
-        # hyperloom + sandbox instead of sending every task to sandbox. Set
-        # empty explicitly only when you want to fall back to the single
-        # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret.
-        description: 'Round-robin submit workspaces (comma-separated). Default uses hyperloom+sandbox.'
+        # Comma-separated round-robin pool. Default submits only to
+        # core42-hyperloom. Set empty explicitly only when you want to fall back
+        # to the single SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret.
+        description: 'Round-robin submit workspaces (comma-separated). Default uses core42-hyperloom only.'
         required: false
-        default: 'core42-hyperloom,core42-sandbox'
+        default: 'core42-hyperloom'
       isl:
         description: 'Input sequence length'
         required: false
@@ -227,7 +226,7 @@ jobs:
       # order then repeating. Anchored so the first fire at/after the anchor is
       # batch 0 (= not-run head, since the pool is ordered not-run-first).
       INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '' || github.event.inputs.batch_index }}
-      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '200' || github.event.inputs.batch_size }}
+      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '240' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
       # Schedule does NOT exclude leaderboard-known models, and does NOT exclude
@@ -240,7 +239,7 @@ jobs:
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
@@ -261,7 +260,7 @@ jobs:
     timeout-minutes: 780
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(github.event_name == 'schedule' && '200' || github.event.inputs.max_parallel || '60') }}
+      max-parallel: ${{ fromJson(github.event_name == 'schedule' && '240' || github.event.inputs.max_parallel || '240') }}
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
       CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
@@ -273,7 +272,7 @@ jobs:
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         working-directory: ci
@@ -325,9 +324,8 @@ jobs:
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
-          # Schedule sends the whole 200-model batch to core42-hyperloom ONLY,
-          # leaving core42-sandbox dedicated to the count-filler (optimize-tiny).
-          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom' || github.event.inputs.submit_workspaces || 'core42-hyperloom,core42-sandbox' }}
+          # All tasks go to core42-hyperloom only (both schedule and dispatch).
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom' || github.event.inputs.submit_workspaces || 'core42-hyperloom' }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
@@ -950,7 +948,7 @@ jobs:
     runs-on: hyperloom-4hhzn
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         # No setup-python on the self-hosted runner — it has system python3
