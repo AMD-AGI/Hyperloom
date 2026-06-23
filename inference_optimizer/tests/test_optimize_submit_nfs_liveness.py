@@ -196,6 +196,9 @@ def test_nfs_fallback_synthesizes_breakdown_for_state_only_session(tmp_path, mon
     data = json.loads(breakdown.read_text(encoding="utf-8"))
     assert data["ci_emergency_artifact"] is True
     assert data["session"]["stop_reason"] == "incomplete_after_progress"
+    assert data["leaderboard_eligible"] is False
+    assert data["leaderboard_suppression_reason"] == "incomplete_after_progress"
+    assert data["show_on_leaderboard"] is False
     assert data["final"]["cumulative_gain_pct_validated"] == 0.0
 
     opt._mark_record_delivery(rec)
@@ -219,6 +222,9 @@ def test_ci_emergency_artifacts_classify_bf16_abort_marker(tmp_path):
     assert added == 3
     data = json.loads((task_dir / "session_breakdown.json").read_text(encoding="utf-8"))
     assert data["session"]["stop_reason"] == "model_config_incompatible"
+    assert data["leaderboard_eligible"] is False
+    assert data["leaderboard_suppression_reason"] == "model_config_incompatible"
+    assert data["show_on_leaderboard"] is False
     assert "BF16" in data["ci_emergency_reason"]
 
 
@@ -271,6 +277,9 @@ def test_claw_emergency_artifacts_classify_sandbox_poll_timeout(tmp_path):
     assert data["session"]["stop_reason"] == "sandbox_start_failed"
     assert data["session"]["failure_reason"] == "sandbox_poll_timeout"
     assert data["session"]["turns"] == 0
+    assert data["leaderboard_eligible"] is False
+    assert data["leaderboard_suppression_reason"] == "sandbox_start_failed"
+    assert data["show_on_leaderboard"] is False
     assert data["final"]["cumulative_gain_pct_validated"] == 0.0
     opt._mark_record_delivery(rec)
     assert rec.ci_success is True
@@ -323,3 +332,6 @@ def test_claw_emergency_artifacts_classify_missing_breakdown_after_activity(tmp_
     assert data["session"]["stop_reason"] == "missing_breakdown_after_claw_activity"
     assert data["session"]["failure_reason"] == "from_inflight_checkpoint"
     assert data["session"]["turns"] == 105
+    assert data["leaderboard_eligible"] is False
+    assert data["leaderboard_suppression_reason"] == "missing_breakdown_after_claw_activity"
+    assert data["show_on_leaderboard"] is False
