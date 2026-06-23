@@ -1063,6 +1063,42 @@ def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
     )
 
 
+def _detect_mistral_common_tokenizer_gap(model_path: str, data: dict) -> str | None:
+    """Return a reason for Mistral checkpoints missing Mistral tokenizer files.
+
+    Some Mistral fine-tunes ship ``tokenizer.json`` but omit the files that
+    Transformers' MistralCommonBackend accepts. SGLang then fails during server
+    init with ``ValueError: No tokenizer file found`` even though the generic
+    missing-tokenizer check sees a tokenizer artifact.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {str(a or "").strip() for a in _config_architectures(data)}
+    if model_type != "mistral" and "MistralForCausalLM" not in arches:
+        return None
+
+    auto_map = data.get("auto_map")
+    if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
+        return None
+
+    mdir = Path(model_path)
+    if not (mdir / "tokenizer.json").is_file():
+        return None
+    mistral_files = (
+        "tokenizer.model",
+        "tokenizer.model.v3",
+        "tekken.json",
+        "tokenizer_config.json",
+    )
+    if any((mdir / f).is_file() for f in mistral_files):
+        return None
+    return (
+        "Mistral checkpoint ships tokenizer.json but none of the tokenizer "
+        "metadata/files accepted by Transformers MistralCommonBackend "
+        f"({', '.join(mistral_files)}); sglang server init fails with "
+        "\"No tokenizer file found\"."
+    )
+
+
 def _detect_incompatible_model_config(
     model_path: str, gpu_type: str | None = None,
 ) -> str | None:
@@ -1170,6 +1206,9 @@ def _detect_incompatible_model_config(
     tokenizer_reason = _detect_missing_tokenizer_files(model_path, data)
     if tokenizer_reason is not None:
         return tokenizer_reason
+    mistral_tokenizer_reason = _detect_mistral_common_tokenizer_gap(model_path, data)
+    if mistral_tokenizer_reason is not None:
+        return mistral_tokenizer_reason
     # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
     # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
     auto_map = data.get("auto_map")

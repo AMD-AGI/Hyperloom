@@ -43,6 +43,7 @@ class _StubSharedState:
     gain_per_stack_entry: list = field(default_factory=list)
     cumulative_gain: float = 0.0
     cumulative_gain_validated: float = 0.0
+    cumulative_gain_validated_ts: str = ""
     cumulative_gain_validated_stack_len: int = 0
     current_best: dict = field(default_factory=dict)
     tick: int = 0
@@ -409,6 +410,7 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert coord.shared_state.gain_per_stack_entry == [23.0]
     assert coord.shared_state.cumulative_gain == 23.0
     assert coord.shared_state.cumulative_gain_validated == 23.0
+    assert coord.shared_state.cumulative_gain_validated_ts
     assert coord.shared_state.cumulative_gain_validated_stack_len == 1
     assert coord.shared_state.current_best["action"] == "warm_replay"
     assert coord.shared_state.current_best["tput"] == 738.0
