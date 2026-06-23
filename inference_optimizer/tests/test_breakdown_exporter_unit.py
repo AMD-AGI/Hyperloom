@@ -89,10 +89,27 @@ def test_json_default_typeerror():
 def test_build_empty_session(tmp_path):
     out = ex.build(tmp_path)
     assert out["exporter_version"] == ex.EXPORTER_VERSION
+    assert out["leaderboard_eligible"] is True
+    assert out["leaderboard_suppression_reason"] is None
+    assert out["show_on_leaderboard"] is True
     assert "warnings" in out
     assert "session" in out
     # Missing state/manifest produce warnings.
     assert any("missing" in w for w in out["warnings"])
+
+
+def test_build_suppresses_fail_fast_leaderboard_rows(tmp_path):
+    (tmp_path / "state.json").write_text(
+        json.dumps({"session_id": "s", "stop_reason": "model_config_incompatible"}),
+        encoding="utf-8",
+    )
+
+    out = ex.build(tmp_path)
+
+    assert out["session"]["stop_reason"] == "model_config_incompatible"
+    assert out["leaderboard_eligible"] is False
+    assert out["leaderboard_suppression_reason"] == "model_config_incompatible"
+    assert out["show_on_leaderboard"] is False
 
 
 def test_build_include_transcripts_via_env(tmp_path, monkeypatch):
