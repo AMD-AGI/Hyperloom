@@ -46,7 +46,7 @@ concurrency:
 
 jobs:
   dispatch-submit:
-    name: Dispatch 240-model count-filler submit
+    name: Dispatch 256-model count-filler submit
     runs-on: hyperloom-mh826
     timeout-minutes: 10
     env:
@@ -55,7 +55,7 @@ jobs:
       # hyperloom runners RO-mount /wekafs).
       CANDIDATES_FILE: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
       CANDIDATES_PATH: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
-      BATCH_SIZE: '240'
+      BATCH_SIZE: '256'
       # Count-filler runs go to the hyperloom workspace only.
       SUBMIT_WORKSPACES: 'core42-hyperloom'
     steps:
