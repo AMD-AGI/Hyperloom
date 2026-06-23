@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from inference_optimizer.breakdown import collectors
 from inference_optimizer.breakdown.collectors import collect_perfskills
 from inference_optimizer.orchestrator.action_executors._perfskills_sweep import (
@@ -25,6 +27,7 @@ from inference_optimizer.orchestrator.action_executors._perfskills_sweep import 
     _read_json,
     _serving_gpus,
     _write_benchmark_report,
+    sweep_via_perfskills,
 )
 
 
@@ -376,3 +379,113 @@ def test_pareto_front_drops_dominated_points() -> None:
     front = _pareto_front(entries)
     tputs = sorted(e["output_throughput"] for e in front)
     assert tputs == [100.0, 150.0]
+
+
+@pytest.mark.asyncio
+async def test_sweep_via_perfskills_reuses_script_and_records_variants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bench = tmp_path / "bench_e2e.sh"
+    bench.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+out = Path(os.environ["OUT_DIR"])
+if os.environ["CONC"] == "2":
+    raise SystemExit(3)
+summary = {
+    "output_throughput_tok_s_median": 321.0,
+    "ttft_ms_median": 12.0,
+    "tpot_ms_median": 4.0,
+    "e2el_ms_median": 99.0,
+}
+(out / "bench_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+env_keys = [
+    "BACKEND", "MODEL", "TP", "GPU", "ISL", "OSL", "CONC", "REPEATS",
+    "OVERLAY_PYTHONPATH", "EXTRA_SERVER_ARGS", "EXTRA_ENV", "BENCH_CLIENT",
+    "RANDOM_RANGE_RATIO", "NUM_WARMUPS", "SEED", "BENCH_TRUST_REMOTE_CODE",
+]
+(out / "env.json").write_text(
+    json.dumps({k: os.environ.get(k) for k in env_keys}, sort_keys=True),
+    encoding="utf-8",
+)
+PY
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MODEL_PATH", "/models/kimi")
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    monkeypatch.setenv("TP", "2")
+
+    result = await sweep_via_perfskills(
+        result={
+            "status": "ok",
+            "bench_script": str(bench),
+            "final_overlay": "/tmp/overlay",
+            "bench_client": "inferencex",
+            "accepted_config": {
+                "flags": "--trust-remote-code --max-num-batched-tokens 16384",
+                "env": "OPT_MOE_CONFIG=/tmp/moe.json",
+            },
+            "bench_protocol": {
+                "random_range_ratio": 0.5,
+                "num_warmups": 2,
+                "seed": 1234,
+            },
+        },
+        conc_values=[1, 2],
+        isl_osl_configs=["8192:1024"],
+        output_root=tmp_path / "sweep",
+        variant_timeout_sec=30,
+        repeats=2,
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["grid_size"] == 2
+    assert result["source"] == "perfskills"
+    assert result["best_for_each_conc"]["1"]["output_throughput"] == 321.0
+    assert result["sweep_grid"][1]["status"] == "failed"
+    assert result["sweep_grid"][1]["error"] == "no throughput"
+
+    ok_dir = tmp_path / "sweep" / "variant_0_conc1_isl8192_osl1024"
+    env = json.loads((ok_dir / "env.json").read_text(encoding="utf-8"))
+    assert env["BACKEND"] == "vllm"
+    assert env["MODEL"] == "/models/kimi"
+    assert env["TP"] == "2"
+    assert env["GPU"] == "0,1"
+    assert env["REPEATS"] == "2"
+    assert env["BENCH_CLIENT"] == "inferencex"
+    assert env["RANDOM_RANGE_RATIO"] == "0.5"
+    assert env["NUM_WARMUPS"] == "2"
+    assert env["SEED"] == "1234"
+    assert env["BENCH_TRUST_REMOTE_CODE"] == "1"
+    assert env["OVERLAY_PYTHONPATH"] == "/tmp/overlay"
+    assert env["EXTRA_ENV"] == "OPT_MOE_CONFIG=/tmp/moe.json"
+
+    ok_report = json.loads((ok_dir / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert ok_report["success"] is True
+    assert ok_report["output_throughput_tok_s"] == 321.0
+
+    fail_report = json.loads(
+        (tmp_path / "sweep" / "variant_1_conc2_isl8192_osl1024" / "benchmark_report.json")
+        .read_text(encoding="utf-8")
+    )
+    assert fail_report["success"] is False
+    assert fail_report["source"] == "perfskills"
+
+
+@pytest.mark.asyncio
+async def test_sweep_via_perfskills_requires_existing_bench_script(tmp_path: Path) -> None:
+    result = await sweep_via_perfskills(
+        result={"status": "ok", "bench_script": str(tmp_path / "missing.sh")},
+        conc_values=[1],
+        isl_osl_configs=["8:8"],
+        output_root=tmp_path / "sweep",
+        variant_timeout_sec=1,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "missing_bench_script"
