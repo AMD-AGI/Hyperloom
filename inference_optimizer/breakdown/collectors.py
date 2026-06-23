@@ -862,6 +862,15 @@ def collect_session(
         "code_revision": str(manifest.get("code_revision") or ""),
         "pid": int(manifest.get("pid") or 0),
         "session_dir": str(session_dir),
+        # USER_DATA_PATH root (the operator-chosen workspace base; session_dir
+        # nests under it in per_model_ts layout). Snapshotted in the manifest at
+        # session start; env is the in-process fallback for older manifests.
+        "user_data_path": str(
+            manifest.get("user_data_path")
+            or state.get("user_data_path")
+            or os.environ.get("USER_DATA_PATH")
+            or ""
+        ),
         "tick_count": int(state.get("tick") or 0),
     }
 
@@ -4598,6 +4607,7 @@ def collect_kernel_optimization_summary(
         "rejection_breakdown",
         "unattempted_reason_breakdown",
         "failure_reason_breakdown",
+        "dispatch_skip_reason",
         "field_glossary",
     ):
         val = out.get(key)
@@ -4740,6 +4750,18 @@ def _normalize_optimization_stack_entry(
     return out
 
 
+def _resolve_gemm_engine(record: dict[str, Any]) -> str:
+    """Resolve the GEMM-tuning engine label for a run/stack record.
+
+    The forge lane records its tuner under ``backend`` (e.g. ``forge``) and
+    leaves ``engine`` unset, while the legacy GEAK path sets ``engine``
+    directly. Reading only ``engine`` therefore mislabeled every forge run as
+    ``geak``. Prefer ``engine``, then ``backend``, then fall back to ``geak``
+    for older records that carry neither.
+    """
+    return str(record.get("engine") or record.get("backend") or "geak")
+
+
 def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
     """Build the top-level ``gemm_tuning`` section from session state; never raises.
 
@@ -4782,7 +4804,7 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
             adopted_gain[tf] = {
                 "gain_pct": _to_float(item.get("gain_pct")),
                 "validated": idx < validated_len,
-                "engine": str(item.get("engine") or "geak"),
+                "engine": _resolve_gemm_engine(item),
             }
 
     baseline_tput = _to_float(state.get("baseline_tput"))
@@ -4798,7 +4820,7 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
     for raw in attempts:
         if not isinstance(raw, dict):
             continue
-        engine = str(raw.get("engine") or "geak")
+        engine = _resolve_gemm_engine(raw)
         speedup = _to_float(raw.get("best_speedup"))
         gain_pct: float | None = None
         tuned_tput: float | None = None
@@ -4840,6 +4862,12 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
                     continue  # best-effort int coercion; skip non-numeric knob values
         if raw.get("libtype"):
             run["libtype"] = str(raw.get("libtype"))
+        # Surface why a run skipped (e.g. dense fp8 missing GEMM shapes) so the
+        # breakdown explains the outcome instead of an opaque "skipped".
+        if raw.get("skip_reason"):
+            run["skip_reason"] = str(raw.get("skip_reason"))
+        if isinstance(raw.get("tuners_skipped"), list) and raw.get("tuners_skipped"):
+            run["tuners_skipped"] = raw["tuners_skipped"]
         if isinstance(raw.get("summary"), dict):
             run["summary"] = raw["summary"]
         if isinstance(raw.get("shapes"), list):

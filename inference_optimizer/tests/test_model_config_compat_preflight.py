@@ -197,6 +197,36 @@ def test_detect_glm_moe_dsa_unrecognized_blocked(tmp_path):
     assert reason is not None and "not recognized" in reason
 
 
+def test_detect_bailing_ling_left_to_runtime_scope(tmp_path):
+    # #649 does not add Bailing filters; keep these out of the fail-fast gate.
+    for model_type, arch in (
+        ("bailing_moe", "BailingMoeV2ForCausalLM"),
+        ("bailing_hybrid", "BailingMoeV2_5ForCausalLM"),
+    ):
+        m = tmp_path / model_type
+        _write_config(
+            m,
+            model_type=model_type,
+            architectures=[arch],
+            max_position_embeddings=32768,
+        )
+        reason = cli._detect_incompatible_model_config(str(m))
+        assert reason is None
+
+
+def test_detect_ovis_next_left_to_runtime_scope(tmp_path):
+    # #649 does not add Ovis filters; keep this out of the fail-fast gate.
+    m = tmp_path / "ovis"
+    _write_config(
+        m,
+        model_type="ovis2_6_next",
+        architectures=["Ovis2_6_NextForCausalLM"],
+        max_position_embeddings=32768,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is None
+
+
 def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):
     # Mistral3 wrapper exposes text_config.model_type=ministral3; vLLM raises KeyError.
     m = tmp_path / "mistral3"
@@ -797,7 +827,8 @@ def test_preflight_blocks_and_persists(tmp_path, monkeypatch):
     assert final["stop_reason"] == "model_config_incompatible"
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_config_incompatible"
-    assert (sd / "session_breakdown.json").exists()
+    breakdown = json.loads((sd / "session_breakdown.json").read_text())
+    assert breakdown["session"]["stop_reason"] == "model_config_incompatible"
 
 
 def test_preflight_passes_for_healthy_model(tmp_path, monkeypatch):
@@ -974,6 +1005,107 @@ def test_gguf_with_pytorch_model_bin_not_blocked(tmp_path):
     (m / "model.gguf").write_text("dummy", encoding="utf-8")
     (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
     assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+# ---------------------------------------------------------------------------
+# Langfuse parity on fail-fast — the pre-flight gates exit before
+# coordinator.run()'s finally (the normal Langfuse flush point), so each must
+# push the breakdown to Langfuse itself or early-aborted sessions land on disk
+# (collector) but never in Langfuse.
+# ---------------------------------------------------------------------------
+def _spy_langfuse_emit(monkeypatch) -> dict[str, list]:
+    calls: dict[str, list] = {"flush": [], "patch": [], "record": []}
+    from inference_optimizer import breakdown as bd
+    from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+
+    monkeypatch.setattr(
+        lfe, "flush_session", lambda sd: calls["flush"].append(Path(sd))
+    )
+    monkeypatch.setattr(
+        bd, "patch_breakdown_langfuse", lambda sd: calls["patch"].append(Path(sd))
+    )
+    monkeypatch.setattr(
+        lfe,
+        "record_session_breakdown",
+        lambda sd, *a, **k: calls["record"].append(Path(sd)),
+    )
+    return calls
+
+
+def test_model_config_fail_fast_emits_to_langfuse(tmp_path, monkeypatch):
+    model = tmp_path / "bad_lf"
+    _write_config(model, model_type="x", rope_scaling={"factor": 2.0})
+    sd = tmp_path / "session_lf"
+    _seed_state(sd, monkeypatch)
+    calls = _spy_langfuse_emit(monkeypatch)
+
+    assert cli._preflight_model_config_compat(_args(str(model)), sd) is True
+    # written to disk AND pushed to Langfuse in flush -> patch -> record order.
+    assert (sd / "session_breakdown.json").exists()
+    assert calls["flush"] == [sd]
+    assert calls["patch"] == [sd]
+    assert calls["record"] == [sd]
+
+
+def test_unsupported_model_fail_fast_emits_to_langfuse(tmp_path, monkeypatch):
+    model = tmp_path / "vlm_lf"
+    _write_config(
+        model,
+        model_type="llava",
+        architectures=["LlavaForConditionalGeneration"],
+        max_position_embeddings=4096,
+    )
+    sd = tmp_path / "session_vlm_lf"
+    _seed_state(sd, monkeypatch)
+    calls = _spy_langfuse_emit(monkeypatch)
+
+    assert cli._preflight_unsupported_model_arch(_args(str(model)), sd) is True
+    assert calls["record"] == [sd]
+
+
+def test_context_window_fail_fast_emits_to_langfuse(tmp_path, monkeypatch):
+    model = tmp_path / "ctx_lf"
+    _write_config(model, model_type="llama", max_position_embeddings=128)
+    sd = tmp_path / "session_ctx_lf"
+    _seed_state(sd, monkeypatch)
+    calls = _spy_langfuse_emit(monkeypatch)
+
+    # ISL+OSL (1024+1024) + headroom >> 128 -> fail fast.
+    assert cli._preflight_context_window(_args(str(model)), sd) is True
+    assert calls["record"] == [sd]
+
+
+def test_emit_to_langfuse_is_best_effort(tmp_path, monkeypatch):
+    # A Langfuse outage must never turn a clean fail-fast into a crash, nor
+    # mask the persisted stop reason.
+    model = tmp_path / "bad_raise"
+    _write_config(model, model_type="x", rope_scaling={"factor": 2.0})
+    sd = tmp_path / "session_raise"
+    _seed_state(sd, monkeypatch)
+
+    from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+
+    def _boom(*a, **k):
+        raise RuntimeError("langfuse down")
+
+    monkeypatch.setattr(lfe, "flush_session", _boom)
+
+    assert cli._preflight_model_config_compat(_args(str(model)), sd) is True
+    state = json.loads((sd / "state.json").read_text())
+    assert state["stop_reason"] == "model_config_incompatible"
+
+
+def test_healthy_model_does_not_emit_to_langfuse(tmp_path, monkeypatch):
+    # A passing pre-flight must not touch Langfuse — the normal end-of-session
+    # path owns that for runs that actually start.
+    model = tmp_path / "good_lf"
+    _write_config(model, model_type="llama", max_position_embeddings=8192)
+    sd = tmp_path / "session_good_lf"
+    _seed_state(sd, monkeypatch)
+    calls = _spy_langfuse_emit(monkeypatch)
+
+    assert cli._preflight_model_config_compat(_args(str(model)), sd) is False
+    assert calls["record"] == []
 
 
 def test_declared_standard_quant_with_scales_index_not_blocked(tmp_path):

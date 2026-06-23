@@ -142,6 +142,13 @@ class OpResolution:
     fanout: list["OpResolution"] = field(default_factory=list)
     resolution_method: str = "op_to_source"
     target_index: int = 0
+    # Per-source curated metadata (aligned with ``sources``): the JSON
+    # ``kernel_kind`` (``aiter_ck`` / ``aiter_asm`` / ``triton`` / ...) and the
+    # optional ``prebuilt_binary`` (a hand-written ``.co`` the ``.cu`` dispatcher
+    # loads). Routing reads these to send ASM compute-cores to skip and CK
+    # templates to the ck-fellow instead of the generic hip-fellow.
+    kernel_kinds: list[str] = field(default_factory=list)
+    prebuilt_binaries: list[str] = field(default_factory=list)
 
     @property
     def primary_source(self) -> str:
@@ -149,6 +156,20 @@ class OpResolution:
         if 0 <= self.target_index < len(self.sources):
             return self.sources[self.target_index]
         return self.sources[0] if self.sources else ""
+
+    @property
+    def primary_kernel_kind(self) -> str:
+        """The curated ``kernel_kind`` for :attr:`primary_source` (or ``""``)."""
+        if 0 <= self.target_index < len(self.kernel_kinds):
+            return self.kernel_kinds[self.target_index]
+        return self.kernel_kinds[0] if self.kernel_kinds else ""
+
+    @property
+    def primary_prebuilt_binary(self) -> str:
+        """The curated ``prebuilt_binary`` for :attr:`primary_source` (or ``""``)."""
+        if 0 <= self.target_index < len(self.prebuilt_binaries):
+            return self.prebuilt_binaries[self.target_index]
+        return self.prebuilt_binaries[0] if self.prebuilt_binaries else ""
 
     @property
     def is_routable(self) -> bool:
@@ -205,6 +226,16 @@ class OpResolution:
         if launcher and launcher != self.primary_source:
             item["launcher_source_file"] = launcher
             item["source_promoted_from_launcher"] = True
+        # Curated routing metadata for the optimization backends: kernel_kind
+        # distinguishes editable CK templates (aiter_ck) from non-editable
+        # prebuilt assembly compute-cores (aiter_asm), and prebuilt_binary names
+        # the .co the .cu dispatcher loads (present only for the asm path).
+        kk = self.primary_kernel_kind
+        if kk:
+            item["kernel_kind"] = kk
+        pb = self.primary_prebuilt_binary
+        if pb:
+            item["prebuilt_binary"] = pb
         self.stamp_onto(item)
 
 
@@ -344,9 +375,16 @@ class OpResolver:
         return self._single(op_name, entry, framework)
 
     @staticmethod
-    def _container_sources(container: dict[str, Any] | None) -> list[str]:
-        """Editable, patchable source paths for one container (dedup, order-preserving)."""
-        out: list[str] = []
+    def _container_source_meta(
+        container: dict[str, Any] | None,
+    ) -> list[tuple[str, str, str]]:
+        """Editable patchable ``(abs_path, kernel_kind, prebuilt_binary)`` for one container.
+
+        Dedups by path (first occurrence wins, order-preserving) so the per-source
+        ``kernel_kind`` / ``prebuilt_binary`` stay aligned with the path list.
+        """
+        out: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
         for info in (container or {}).values():
             if not isinstance(info, dict) or not info.get("patchable"):
                 continue
@@ -354,12 +392,25 @@ class OpResolver:
             if not _is_editable_source(path, info.get("kernel_kind")):
                 continue
             abs_path = _absolutize_source(str(path))
-            if abs_path not in out:
-                out.append(abs_path)
+            if abs_path in seen:
+                continue
+            seen.add(abs_path)
+            out.append((
+                abs_path,
+                str(info.get("kernel_kind") or ""),
+                str(info.get("prebuilt_binary") or ""),
+            ))
         return out
 
-    def _select_sources(self, entry: dict[str, Any], framework: str | None) -> list[str]:
-        """Pick the editable source list, routing to the installed container.
+    @classmethod
+    def _container_sources(cls, container: dict[str, Any] | None) -> list[str]:
+        """Editable, patchable source paths for one container (dedup, order-preserving)."""
+        return [m[0] for m in cls._container_source_meta(container)]
+
+    def _select_source_meta(
+        self, entry: dict[str, Any], framework: str | None,
+    ) -> list[tuple[str, str, str]]:
+        """Pick the editable ``(path, kernel_kind, prebuilt_binary)`` list per container.
 
         When both containers carry editable sources, prefer whichever is present
         on disk; otherwise honor the ``framework`` hint (only ``vllm``/``sglang``
@@ -371,12 +422,12 @@ class OpResolver:
             except OSError:
                 return False
 
-        sgl = self._container_sources(entry.get("sglang"))
-        vll = self._container_sources(entry.get("vllm"))
+        sgl = self._container_source_meta(entry.get("sglang"))
+        vll = self._container_source_meta(entry.get("vllm"))
         if not (sgl or vll):
             return []
-        sgl_present = any(present(p) for p in sgl)
-        vll_present = any(present(p) for p in vll)
+        sgl_present = any(present(m[0]) for m in sgl)
+        vll_present = any(present(m[0]) for m in vll)
         if sgl_present and not vll_present:
             return sgl
         if vll_present and not sgl_present:
@@ -388,15 +439,22 @@ class OpResolver:
             return sgl
         return sgl or vll
 
+    def _select_sources(self, entry: dict[str, Any], framework: str | None) -> list[str]:
+        """Pick the editable source paths, routing to the installed container."""
+        return [m[0] for m in self._select_source_meta(entry, framework)]
+
     def _single(
         self, op_name: str, entry: dict[str, Any], framework: str | None,
     ) -> OpResolution:
         """Resolve a ``single`` entry to its editable source(s)."""
-        sources = self._select_sources(entry, framework)
+        meta = self._select_source_meta(entry, framework)
+        sources = [m[0] for m in meta]
         if sources:
             return OpResolution(
                 op_name=op_name, kind="single", status=_ROUTABLE_STATUS,
                 patchable=True, framework=framework, sources=sources,
+                kernel_kinds=[m[1] for m in meta],
+                prebuilt_binaries=[m[2] for m in meta],
             )
         return OpResolution(
             op_name=op_name, kind="single", status="non_rewritable",
@@ -441,6 +499,8 @@ class OpResolver:
                             op_name=op_name, kind="dispatch", status=_ROUTABLE_STATUS,
                             patchable=True, framework=framework,
                             sources=[_absolutize_source(str(path))], matched_route=kname,
+                            kernel_kinds=[str(info.get("kernel_kind") or "")],
+                            prebuilt_binaries=[str(info.get("prebuilt_binary") or "")],
                         )
                     return OpResolution(
                         op_name=op_name, kind="dispatch", status="non_rewritable",
@@ -469,9 +529,9 @@ class OpResolver:
         :meth:`_kernel_matches`) instead of fanning out to every co-kernel source.
         This keeps the hot kernel as the optimization target rather than splitting
         ``duration_us`` evenly across minor helpers and sending GEAK at the wrong file.
-        Falls back to the full fan-out only when no device name is given or none of
-        the composite's editable kernels match it -- so behavior is unchanged for
-        composites without a trace device symbol.
+        Falls back to the full fan-out (``_select_source_meta``) only when no device
+        name is given or none of the composite's editable kernels match it -- so
+        behavior is unchanged for composites without a trace device symbol.
         """
         name = (device_kernel_name or "").strip()
         if name:
@@ -492,13 +552,14 @@ class OpResolver:
                             patchable=True, framework=framework,
                             sources=[_absolutize_source(str(path))], matched_route=kname,
                         )
-        sources = self._select_sources(entry, framework)
+        meta = self._select_source_meta(entry, framework)
         fanout = [
             OpResolution(
                 op_name=op_name, kind="composite", status=_ROUTABLE_STATUS,
                 patchable=True, framework=framework, sources=[src],
+                kernel_kinds=[kind_], prebuilt_binaries=[pb],
             )
-            for src in sources
+            for src, kind_, pb in meta
         ]
         return OpResolution(
             op_name=op_name,
@@ -1616,6 +1677,19 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     if candidate.get("source_resolution_method") == "op_to_source":
         patchable = candidate.get("op_to_source_patchable")
         if patchable is True and source_file:
+            # aiter_asm compute-cores are hand-written assembly: the curated .cu
+            # is only a dispatcher that loads a prebuilt .co (no .s source is
+            # shipped), so the GPU compute core is not editable from source. An
+            # LLM/GEAK rewrite of the dispatcher cannot change the math and
+            # historically just burns the budget failing correctness. There is no
+            # aiter attention/asm deterministic tuner either, so skip with a clear
+            # reason and let the optimizer spend the budget on rewritable kernels.
+            if str(candidate.get("kernel_kind") or "").strip().lower() == "aiter_asm":
+                return False, (
+                    "op_to_source: aiter_asm prebuilt assembly compute-core "
+                    "(.co loaded by the .cu dispatcher; no editable .s source) "
+                    "-- not rewritable, no deterministic tuner available"
+                )
             return True, ""
         if patchable is False:
             reason = (
@@ -2245,24 +2319,29 @@ _KNOWN_HARNESS_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
 )
 
 
-def _known_harness_files(name: str, source_file: str) -> list[Path]:
+def _known_harness_files(name: str, source_file: str, *, require_exists: bool = True) -> list[Path]:
     """Return curated benchmark/test harnesses matching a kernel.
 
     Looks up :data:`_KNOWN_HARNESS_HINTS` by marker substrings found in the
-    kernel name / source path and returns the hinted harnesses that exist.
+    kernel name / source path. By default it returns only hinted harnesses that
+    exist on disk; callers without a repo root can request the curated hint list
+    itself so tests and downstream prompts remain stable in minimal containers
+    where ``/sgl-workspace`` is absent.
 
     Args:
         name (str): Kernel symbol/name.
         source_file (str): Resolved source-file path (may be empty).
+        require_exists (bool): When True, only paths present on disk are
+            returned. When False, matching curated hints are returned as-is.
 
     Returns:
-        list[Path]: Existing curated harness files, possibly empty.
+        list[Path]: Curated harness files, possibly empty.
     """
     blob = f"{name} {source_file}".lower()
     out: list[Path] = []
     for markers, paths in _KNOWN_HARNESS_HINTS:
         if any(marker in blob for marker in markers):
-            out.extend(Path(p) for p in paths if Path(p).exists())
+            out.extend(Path(p) for p in paths if (not require_exists or Path(p).exists()))
     return out
 
 
@@ -2296,9 +2375,10 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
     Returns:
         Up to ten matching harness paths, with multi-GPU tests demoted.
     """
-    known = _known_harness_files(name, source_file)
     if not repo_root:
+        known = _known_harness_files(name, source_file, require_exists=False)
         return [str(p) for p in known[:10]]
+    known = _known_harness_files(name, source_file)
     keywords = _candidate_keywords(name)
     # Add the source stem (and no-underscore variant) for repos that name tests differently.
     if source_file:
