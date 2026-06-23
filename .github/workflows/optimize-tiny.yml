@@ -46,7 +46,7 @@ concurrency:
 
 jobs:
   dispatch-submit:
-    name: Dispatch 200-model count-filler submit
+    name: Dispatch 240-model count-filler submit
     runs-on: hyperloom-mh826
     timeout-minutes: 10
     env:
@@ -59,7 +59,7 @@ jobs:
       # Count-filler runs go to the hyperloom workspace only.
       SUBMIT_WORKSPACES: 'core42-hyperloom'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Resolve count-filler batch
         id: batch
@@ -88,7 +88,7 @@ jobs:
           else:
               # 4 runs/day -> one of 4 six-hour slots; advance each day so the
               # whole pool is swept over ~ceil(batches/4) days.
-              epoch = datetime(2026, 6, 15, tzinfo=timezone.utc)
+              epoch = datetime(2026, 6, 23, tzinfo=timezone.utc)
               now = datetime.now(timezone.utc)
               days = max((now.date() - epoch.date()).days, 0)
               slot = days * 4 + (now.hour // 6)
@@ -111,7 +111,7 @@ jobs:
 
           echo "Dispatching optimize-submit.yml on ref=${ref}"
           echo "Count-filler pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
-          echo "Batch size: ${BATCH_SIZE}; max_parallel=${BATCH_SIZE}; submit_workspaces=${SUBMIT_WORKSPACES}"
+          echo "Batch size: ${BATCH_SIZE}; max_parallel=240; submit_workspaces=${SUBMIT_WORKSPACES}"
 
           payload=$(python3 - <<'PY'
           import json
@@ -126,7 +126,7 @@ jobs:
                   "batch_size": os.environ["BATCH_SIZE"],
                   "exclude_leaderboard": "false",
                   "exclude_active_workflows": "true",
-                  "max_parallel": "200",
+                  "max_parallel": "240",
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
                   "task_timeout_min": "420",
                   "max_hours": "6",
