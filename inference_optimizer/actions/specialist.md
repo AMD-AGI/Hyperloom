@@ -57,17 +57,20 @@ LLM should dispatch specialists as the **primary** entry into a round:
 The Coordinator routes each delegate to the TaskRegistry; SpecialistRunner
 pulls them off the `research_lane` and runs them in parallel up to the
 lane capacity. By default specialists are CPU/research subprocesses. For
-short GPU experiments or microbenchmarks, set `needs_gpu=true` and
-`gpu_count=N`; the Coordinator allocates visible devices from the separate
-specialist GPU pool and injects GPU visibility env vars into the subprocess.
-GPU specialists must not launch persistent serving servers or Magpie loops.
+GPU experiments, autotuning, profiling, or a real serving + benchmark loop,
+set `needs_gpu=true` and `gpu_count=N`; the Coordinator allocates serving-
+disjoint visible devices from the separate specialist GPU pool and injects GPU
+visibility env vars into the subprocess. On its own leased cards a GPU
+specialist is free to write/run scripts, profile, autotune, and start/restart
+its own servers (on any port that is NOT the production serving port 8888); the
+only hard boundary is the production serving process / its cards / port 8888.
 
 GPU requests are governed identically for **every** scope: a `scope=freeform`
 dispatch that sets `needs_gpu` clears the same `gpu_specialist_ceiling`
 checks (`specialist_gpu_pool_disabled` / `specialist_gpu_request_exceeds_capacity`)
 as a domain-anchored one — freeform is not a GPU loophole. Pair
-`mode=patch + bench=true + needs_gpu` to give a freeform specialist an in-loop
-`run_bench` measure → edit → measure loop inside its worktree.
+`mode=patch + bench=true + needs_gpu` to give a freeform specialist a real
+measure → edit → measure loop on its own cards inside its worktree.
 
 ## Inputs (task.params)
 
@@ -80,8 +83,8 @@ as a domain-anchored one — freeform is not a GPU loophole. Pair
 | `gap_layer`          | string   | no       | Layer label (`kernel` / `framework` / `communication` / …). |
 | `gap_evidence`       | object   | no       | Profile path + numeric metrics forwarded into the prompt. |
 | `max_turns`          | int      | no       | Optional turn cap (default 1000, hard ceiling 1000; `0` means unbounded). Depth is primarily bounded by the wall-clock budget. |
-| `needs_gpu`          | bool     | no       | Request the specialist GPU pool for a wall-budgeted GPU experiment / microbenchmark. Default false. |
-| `gpu_count`          | int      | no       | Number of GPUs to allocate when `needs_gpu=true` (default 1). |
+| `needs_gpu`          | bool     | no       | Request the specialist GPU pool for wall-budgeted on-GPU work (servers on a non-8888 port, profiling, autotune, benchmark loops). Default false. |
+| `gpu_count`          | int      | no       | Number of GPUs to allocate when `needs_gpu=true` (default = serving TP so a TP-coupled gap is reproducible; set explicitly to override, e.g. 1 for a single-card kernel probe). |
 
 ## EMIT format
 
@@ -119,7 +122,9 @@ Each specialist subprocess sees:
 * A tool whitelist including `Read / Grep / Glob / Bash / Edit / Write
   / MultiEdit / TodoWrite / WebSearch / WebFetch / Task` and the relevant
   MCP servers, scoped to the worktree directory (`--add-dir <worktree>`).
-  `run_bench` is added only when the dispatch sets `mode=patch & bench=true`.
+  GPU specialists run their measure → edit → measure / autotune loops via the
+  broad `Bash`/`Write`/`Edit` grant on their leased cards (the legacy capped
+  `run_bench` micro-bench tool has been retired).
   `Task` is limited to `subagent_type="hyperloom-leaf"`: leaves inherit the
   parent specialist's visible devices and their tool set omits `Task`, so
   fan-out is single-layer and stays within the parent's lane/GPU lease.
@@ -140,7 +145,7 @@ Each specialist subprocess sees:
   "gap_canonical_id": "<echoed back verbatim>",
   "domain":           "<echoed back verbatim>",
   "proposal_set": [
-    { "name": "...", "extra_args": "...", "extra_envs": {...}, "rationale": "..." },
+    { "name": "...", "extra_args": "...", "extra_envs": {...}, "rationale": "...", "atomic": false },
     ...
   ],
   "patches_written": ["patches/001_cuda_graph_fix.patch"],   // PR-A2+: optional
@@ -169,3 +174,15 @@ not write source patches, Orchestration uses the proposals as the grid
 for the next `delegate{action_name='explore', params={grid: [...]}}`
 round. Each variant inherits `provenance='specialist:<domain>'` for
 audit; the canonical explore ledger dedups by content fingerprint.
+
+**`atomic` (do-not-split) flag.** A specialist sets `"atomic": true` on a
+proposal whose `extra_args` / `extra_envs` are a **coupled set that only
+works together** — e.g. enabling MTP/speculative decoding REQUIRES a paired
+`--gpu-memory-utilization` reduction to leave headroom for the draft model,
+so the two flags must be benched as one variant. When `atomic` is true,
+Orchestration MUST dispatch that proposal **verbatim as a single explore
+variant** — do NOT decompose its flags into separate variants, drop any of
+them, or re-derive your own version with only part of the coupling. Splitting
+an atomic proposal silently defeats the specialist's fix (each half fails or
+shows no gain on its own). Non-atomic proposals may still be curated, merged,
+or reordered as usual.
