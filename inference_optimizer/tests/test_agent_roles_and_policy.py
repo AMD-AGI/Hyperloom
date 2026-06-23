@@ -192,9 +192,9 @@ def test_gate_orchestration_propose_kernel_owned_rejected():
         assert exc.value.rule == "kernel_owned_by_kernel_agent", action
 
 
-def test_gate_run_gemm_tuning_request_rejected_for_non_fp8():
-    """fp8-only gating still fires on the REQUEST channel (the legitimate path
-    for kernel-owned GEMM tuning) for a non-fp8 session."""
+def test_gate_run_gemm_tuning_request_rejected_for_non_fp8_geak(monkeypatch):
+    """GEAK GEMM tuning remains FP8-only on the REQUEST channel."""
+    monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
     state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     with pytest.raises(PolicyDenied) as exc:
@@ -208,8 +208,22 @@ def test_gate_run_gemm_tuning_request_rejected_for_non_fp8():
     assert exc.value.rule == "fp8_only_action"
 
 
-def test_gate_run_gemm_tuning_request_allowed_for_fp8():
+def test_gate_run_gemm_tuning_request_allowed_for_fp8(monkeypatch):
+    monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
     state = SharedState(phase="KERNEL", precision="fp8", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    gate.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.REQUEST,
+            payload={"target_agent": "kernel", "kind": "run_gemm_tuning", "params": {}},
+        ),
+    )
+
+
+def test_gate_run_gemm_tuning_request_allowed_for_bf16_forge(monkeypatch):
+    monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+    state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     gate.validate_intent(
         "orchestration",
