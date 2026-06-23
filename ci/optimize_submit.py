@@ -79,7 +79,7 @@ DEFAULT_API_URL = "https://core42.primus-safe.amd.com"
 DEFAULT_REGISTER_WORKSPACE = "core42-hyperloom"
 DEFAULT_SUBMIT_WORKSPACE = "core42-sandbox"
 DEFAULT_VOLUME = "/wekafs"
-DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
+DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/sync"
 # core42 is MI300X; override the Claw prompt-builder's wrong MI355X default so
 # the prompt and TP policy use the right arch. Tool source paths are
 # deliberately NOT pinned: install.sh clones writable per-session copies, and
@@ -297,10 +297,10 @@ SGLANG_ARCHS: set[str] = {
     "GPTBigCodeForCausalLM",
     "FalconForCausalLM",
     "ChatGLMModel",
-    # New architectures natively supported by sglang v0.5.11 (transformers 5.x)
+    # New architectures natively supported by sglang v0.5.12 (transformers 5.x)
     # in the current sandbox image. Without these, detect_framework falls back
-    # to vLLM and the old proxy/vllm/vllm-openai-rocm:v0.19.0 image (transformers
-    # <5) crashes at baseline ("does not recognize this architecture" /
+    # to vLLM and the older vllm-openai-rocm image (transformers <5) crashes at
+    # baseline ("does not recognize this architecture" /
     # "TokenizersBackend does not exist"). Verified against the failing models'
     # config.architectures.
     "Gemma4ForConditionalGeneration",            # gemma-4 (dense + A4B MoE)
@@ -360,25 +360,19 @@ def _default_sglang_image() -> str:
     """Return the default SGLang server image.
 
     Returns:
-        The pinned ``profilerfix`` SGLang image whose patched
-        libamdhip64/libroctracer let rocprofiler capture kernels under
-        ``HipGraphLaunch`` (issue #352).
+        The pinned SGLang server image, pulled via the harbor registry prefix
+        (``$HARBOR_PREFIX``).
     """
-    # profilerfix: patched libamdhip64/libroctracer so rocprofiler captures
-    # kernels under HipGraphLaunch (issue #352). Pre-profilerfix image (revert):
-    # lmsysorg/sglang:v0.5.11-rocm720-mi30x
-    return "primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
+    return f"{_proxy()}/sglang:v0.5.12-rocm720-mi30x"
 
 
 def _default_vllm_image() -> str:
     """Return the default vLLM server image.
 
     Returns:
-        The proxy-qualified vLLM image (v0.19.0, one minor ahead of the
-        InferenceX baseline to avoid v0.20 breakage).
+        The harbor-prefixed (``$HARBOR_PREFIX``) vLLM server image.
     """
-    # v0.19.0: one minor ahead of InferenceX baseline v0.17.0, avoiding v0.20 breakage.
-    return f"{_proxy()}/vllm/vllm-openai-rocm:v0.19.0"
+    return f"{_proxy()}/vllm/vllm-openai-rocm:v0.21.0"
 
 
 # ── HuggingFace client ──────────────────────────────────────────────────────────
@@ -760,13 +754,14 @@ def detect_concurrency(tp: int, framework: str) -> int:
 def _sglang_image_for(repo_id: str = "") -> str:
     """Pick the sglang image, honoring per-model baseline-arch needs.
 
-    Default is the profilerfix image. MiMo-V2.x is the exception: the undated
-    v0.5.11 profilerfix base does NOT register ``MiMoV2ForCausalLM`` (the
-    server dies at model-loader registration, three baseline attempts in a
-    row -> ``baseline_failed``), so it needs the image that carries the dated
-    20260508 sglang arch. That image is profilerfix's two patched ROCm libs
-    (libamdhip64/libroctracer, issue #352) layered onto the dated 20260508
-    build, so rocprofiler kernel capture under HipGraphLaunch still works.
+    Default is the standard sglang image (:func:`_default_sglang_image`).
+    MiMo-V2.x is the exception: the v0.5.11 profilerfix base does NOT register
+    ``MiMoV2ForCausalLM`` (the server dies at model-loader registration, three
+    baseline attempts in a row -> ``baseline_failed``), so it needs the image
+    that carries the dated 20260508 sglang arch. That image is profilerfix's two
+    patched ROCm libs (libamdhip64/libroctracer, issue #352) layered onto the
+    dated 20260508 build, so rocprofiler kernel capture under HipGraphLaunch
+    still works.
     Must be paired with ``--attention-backend triton`` (injected in
     ``_workload_envs.materialize_config_with_envs``) to dodge the aiter
     attention CUDA-graph-capture SIGABRT. Matched on the repo basename so it

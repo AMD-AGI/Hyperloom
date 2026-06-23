@@ -151,7 +151,7 @@ def synthesize_entry_from_ci_config(model_cfg: dict) -> dict:
 
     Required fields in ``model_cfg``:
       - ``model_hf``           HF repo (e.g., ``zai-org/GLM-5``)
-      - ``image``              container image tag (e.g., ``primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix``)
+      - ``image``              container image tag (e.g., ``harbor.core42.primus-safe.amd.com/sync/sglang:v0.5.12-rocm720-mi30x``)
       - ``framework``          ``sglang`` or ``vllm``
       - ``precision``          ``fp8`` / ``fp4`` / ``bf16``
       - ``conc``               concurrency cap
