@@ -77,6 +77,34 @@ def test_degraded_mode_section_empty():
     assert rp._format_degraded_mode_section({}) == []
 
 
+def test_format_md_shows_validated_gain_when_timestamp_missing():
+    md = rp._format_md(
+        {
+            "session_id": "s1",
+            "model_name": "m",
+            "model_path": "/models/m",
+            "stop_reason": "conc_sweep_done",
+            "max_minutes": 360,
+            "report_generated_at": "2026-06-23T00:00:00+00:00",
+            "baseline_tput": 100.0,
+            "current_best": {"action": "warm_replay", "tput": 136.146},
+            "cumulative_gain": 36.146,
+            "cumulative_gain_validated": 36.146,
+            "cumulative_gain_validated_ts": "",
+            "cumulative_gain_validated_stack_len": 1,
+            "optimization_stack_len": 1,
+            "crash_count": 0,
+            "pruned_families": [],
+            "event_counts_by_topic": {},
+            "highlights": [],
+        }
+    )
+
+    assert "cumulative_gain_val : `36.15%`" in md
+    assert "ts=<missing>" in md
+    assert "never validated" not in md
+
+
 # ---- _extract_executive_summary ----
 def test_extract_exec_summary_no_path():
     assert "no analysis.md" in rp._extract_executive_summary("")
