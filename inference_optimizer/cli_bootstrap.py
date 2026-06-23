@@ -22,6 +22,7 @@ from .orchestrator.shared_state import SharedState
 from .paths import _SESSION_SKELETON, workspace_root as _workspace_root_resolve
 from .session_paths import agent_prompt_snapshot
 from .cli_model_gate import _load_model_arch, _load_model_config_tags
+from .model_config_utils import summarize_model_config
 
 log = logging.getLogger(__name__)
 
@@ -196,6 +197,8 @@ def _seed_shared_state(
         # Architecture-identity tags from config.json stamped into recipe-snapshot extras (fine-tune carries base identity).
         model_architectures=_cfg_tags.get("architectures", []),
         model_type=_cfg_tags.get("model_type", ""),
+        # config.json structural summary (attention_type / heads / MoE / quant); persisted for downstream collectors.
+        model_info=summarize_model_config(str(args.model)),
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env so downstream prompts see real values (else TP defaults to 1).
