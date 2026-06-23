@@ -1,0 +1,174 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Unit coverage for the optional GPU-specialist rebench helper.
+
+``run_grid`` / Magpie are mocked, so these exercise the pure logic — port
+resolution + 8888 refusal, leased-card reporting, env-pair parsing, the
+success / failed-status / no-result / exception result shapes, and the CLI
+``main`` (success, failure rc, and the explicit-8888 reject path) — without a
+GPU or a real server.
+"""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from inference_optimizer.orchestrator import specialist_rebench as sr
+
+
+def test_pick_free_port_never_production() -> None:
+    port = sr._pick_free_port()
+    assert isinstance(port, int)
+    assert port != sr.PRODUCTION_SERVING_PORT
+
+
+def test_resolve_port_auto_explicit_and_reject_8888() -> None:
+    assert sr._resolve_port(None) != sr.PRODUCTION_SERVING_PORT
+    assert sr._resolve_port(0) != sr.PRODUCTION_SERVING_PORT
+    assert sr._resolve_port(12345) == 12345
+    with pytest.raises(ValueError):
+        sr._resolve_port(sr.PRODUCTION_SERVING_PORT)
+
+
+def test_current_leased_cards_precedence(monkeypatch) -> None:
+    for var in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        monkeypatch.delenv(var, raising=False)
+    assert sr._current_leased_cards() == ""
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "4,5")
+    assert sr._current_leased_cards() == "4,5"
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "6,7")  # ROCR wins over HIP
+    assert sr._current_leased_cards() == "6,7"
+
+
+def test_parse_env_pairs() -> None:
+    assert sr._parse_env_pairs(None) == {}
+    assert sr._parse_env_pairs(
+        ["A=1", "B=x=y", "malformed", "=nope", "  C =3"]
+    ) == {"A": "1", "B": "x=y", "C": "3"}
+
+
+@pytest.mark.asyncio
+async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
+    fake = SimpleNamespace(
+        status="succeeded",
+        output_throughput=1234.5,
+        ttft_ms=10.0,
+        itl_ms=2.0,
+        workspace=str(tmp_path / "ws"),
+        error="",
+        nonfatal_warnings=["w1"],
+    )
+    seen: dict = {}
+
+    async def _fake_run_grid(**kwargs):
+        seen.update(kwargs)
+        return [fake]
+
+    monkeypatch.setattr(sr, "default_baseline_config", lambda: str(tmp_path / "base.yaml"))
+    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "mat.yaml")
+    monkeypatch.setattr(sr, "run_grid", _fake_run_grid)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+
+    res = await sr.run_specialist_rebench(
+        config_path=None,
+        output_dir=str(tmp_path / "out"),
+        base_extra_args="--kv-cache-dtype fp8_e4m3",
+        extra_envs={"E": "1"},
+        port=12321,
+    )
+    assert res["ok"] is True
+    assert res["status"] == "succeeded"
+    assert res["output_throughput"] == 1234.5
+    assert res["port"] == 12321
+    assert res["gpu_ids"] == "4,5,6,7"
+    assert "w1" in res["warnings"]
+    assert seen["base_extra_args"] == "--kv-cache-dtype fp8_e4m3"
+    assert seen["grid"][0].extra_server_args == ""
+
+
+@pytest.mark.asyncio
+async def test_run_specialist_rebench_failed_status(tmp_path, monkeypatch) -> None:
+    fake = SimpleNamespace(
+        status="failed",
+        output_throughput=None,
+        workspace="",
+        error="boom",
+        nonfatal_warnings=[],
+    )
+
+    async def _fake_run_grid(**kwargs):
+        return [fake]
+
+    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "mat.yaml")
+    monkeypatch.setattr(sr, "run_grid", _fake_run_grid)
+
+    res = await sr.run_specialist_rebench(
+        config_path=str(tmp_path / "c.yaml"),
+        output_dir=str(tmp_path / "o"),
+    )
+    assert res["ok"] is False
+    assert any("rebench_failed" in w for w in res["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_run_specialist_rebench_no_result(tmp_path, monkeypatch) -> None:
+    async def _fake_run_grid(**kwargs):
+        return []
+
+    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "m.yaml")
+    monkeypatch.setattr(sr, "run_grid", _fake_run_grid)
+
+    res = await sr.run_specialist_rebench(
+        config_path=str(tmp_path / "c.yaml"),
+        output_dir=str(tmp_path / "o"),
+    )
+    assert res["ok"] is False
+    assert "no result" in res["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_specialist_rebench_exception_surfaced(tmp_path, monkeypatch) -> None:
+    async def _boom(**kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "m.yaml")
+    monkeypatch.setattr(sr, "run_grid", _boom)
+
+    res = await sr.run_specialist_rebench(
+        config_path=str(tmp_path / "c.yaml"),
+        output_dir=str(tmp_path / "o"),
+    )
+    assert res["ok"] is False
+    assert "kaboom" in res["error"]
+
+
+def test_main_success_prints_json(tmp_path, monkeypatch, capsys) -> None:
+    async def _fake(**kwargs):
+        return {"ok": True, "output_throughput": 5.0}
+
+    monkeypatch.setattr(sr, "run_specialist_rebench", _fake)
+    rc = sr.main(["--output", str(tmp_path / "o")])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is True
+
+
+def test_main_failure_return_code(tmp_path, monkeypatch, capsys) -> None:
+    async def _fake(**kwargs):
+        return {"ok": False, "error": "x"}
+
+    monkeypatch.setattr(sr, "run_specialist_rebench", _fake)
+    rc = sr.main(
+        ["--output", str(tmp_path / "o"), "--env", "A=1", "--extra-args=--foo bar"]
+    )
+    assert rc == 1
+
+
+def test_main_rejects_explicit_8888(tmp_path, capsys) -> None:
+    rc = sr.main(["--output", str(tmp_path / "o"), "--port", "8888"])
+    assert rc == 1
+    out = json.loads(capsys.readouterr().out)
+    assert "8888" in out["error"]
