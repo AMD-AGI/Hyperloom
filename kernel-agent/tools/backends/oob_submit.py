@@ -16,6 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from _llm_stability_env import apply_llm_stability_env
 from ray_runtime import (
     ensure_ray_cluster,
     isolated_compile_cache_env,
@@ -314,6 +315,11 @@ def run_via_ray(
             _cdir = _os.path.join(output_dir_str, ".cache", _sub)
             _os.makedirs(_cdir, exist_ok=True)
             _os.environ[_var] = _cdir
+        # Cut non-essential claude-code traffic that can block in headless
+        # containers. Do not set API_TIMEOUT_MS by default: external clients may
+        # treat it as a total request timeout and kill a legitimate long stream.
+        _os.environ.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        _os.environ.setdefault("DISABLE_AUTOUPDATER", "1")
         cmd = [
             "oob",
             "run",
@@ -434,6 +440,10 @@ def run_via_cli(
     )
     # Per-attempt compile caches (see isolated_compile_cache_env).
     child_env = isolated_compile_cache_env(output_dir)
+    # Apply low-risk claude-code stability knobs. API_TIMEOUT_MS remains opt-in
+    # so long streaming requests are not killed by an external total-timeout
+    # interpretation.
+    apply_llm_stability_env(child_env)
     started = time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 60, env=child_env)
