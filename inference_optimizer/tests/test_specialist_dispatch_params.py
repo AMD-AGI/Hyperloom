@@ -373,7 +373,9 @@ def _gate_with_gpu_capacity(capacity: int, *, tp: int = 0) -> PolicyGate:
     return PolicyGate(role_registry=default_role_registry(), shared_state=state)
 
 
-def test_freeform_gpu_request_clears_ceiling(orchestration_role):
+def test_freeform_gpu_request_clears_ceiling(orchestration_role, monkeypatch):
+    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP"):
+        monkeypatch.delenv(name, raising=False)
     gate = _gate_with_gpu_capacity(2)
     gate._validate_specialist_dispatch(
         orchestration_role,
