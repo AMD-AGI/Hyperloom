@@ -152,6 +152,17 @@ def test_unsupported_arch_qrwkv6_hybrid_is_filtered():
                     "max_position_embeddings": 131072}) == "unsupported_arch"
 
 
+def test_unsupported_arch_qrwkv6_hybrid_matched_by_model_type():
+    assert _reason({"model_type": "rwkv6qwen2",
+                    "max_position_embeddings": 131072}) == "unsupported_arch"
+
+
+def test_unsupported_arch_qrwkv6_hybrid_matched_by_text_config_model_type():
+    assert _reason({"model_type": "wrapper",
+                    "text_config": {"model_type": "rwkv6qwen2"},
+                    "max_position_embeddings": 131072}) == "unsupported_arch"
+
+
 def test_unsupported_arch_is_gpu_independent():
     # Registry rules are config-based: hit on any gpu_type and with none.
     cfg = {"architectures": ["DeepseekV32ForCausalLM"], "model_type": "deepseek_v32",
