@@ -160,6 +160,113 @@ def _config_has_model_identity(data: dict) -> bool:
     return False
 
 
+_MLA_KEYS = ("kv_lora_rank", "qk_rope_head_dim", "qk_nope_head_dim", "q_lora_rank")
+_MOE_EXPERT_KEYS = ("num_experts", "n_routed_experts", "num_local_experts")
+
+
+def _merge_config_scopes(data: dict) -> dict:
+    """Flatten nested ``text_config`` over the top level (nested wins for shape fields).
+
+    Multimodal wrappers describe the benchmarkable decoder under
+    ``text_config``; merge so structural fields resolve from there.
+    """
+    merged = dict(data)
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        for k, v in nested.items():
+            if v not in (None, ""):
+                merged[k] = v
+    return merged
+
+
+def _derive_attention_type(cfg: dict) -> str:
+    """Infer attention variant (MLA/MQA/GQA/MHA) from head/lora config fields."""
+    if any(cfg.get(k) for k in _MLA_KEYS):
+        return "MLA"
+    heads = int(cfg.get("num_attention_heads") or 0)
+    kv = cfg.get("num_key_value_heads")
+    kv = int(kv if kv is not None else heads or 0)
+    if heads <= 0 or kv <= 0:
+        return ""
+    if kv == 1:
+        return "MQA"
+    if kv < heads:
+        return "GQA"
+    return "MHA"
+
+
+def _derive_quantization(cfg: dict) -> str:
+    """Return the weight quant method (e.g. ``fp8``) or '' when unquantized."""
+    qc = cfg.get("quantization_config")
+    if isinstance(qc, dict):
+        return str(qc.get("quant_method") or "").strip()
+    return ""
+
+
+def summarize_model_config(model_path: str) -> dict:
+    """Best-effort structured summary of a model's ``config.json`` ({} on failure).
+
+    Reads core shape/quant fields plus inferred ``attention_type`` and
+    ``is_moe`` so session state can carry model basics without a framework.
+    """
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return {}
+    cfg = _merge_config_scopes(data)
+    out: dict = {}
+
+    model_type = str(data.get("model_type") or cfg.get("model_type") or "").strip()
+    if model_type:
+        out["model_type"] = model_type
+    arches = _config_architectures(data) or _config_architectures(cfg)
+    if arches:
+        out["architectures"] = arches
+
+    heads = int(cfg.get("num_attention_heads") or 0)
+    kv_raw = cfg.get("num_key_value_heads")
+    kv = int(kv_raw if kv_raw is not None else heads or 0)
+    head_dim = cfg.get("head_dim")
+    hidden = cfg.get("hidden_size")
+    if not head_dim and hidden and heads:
+        head_dim = int(hidden) // int(heads)
+
+    attn = _derive_attention_type(cfg)
+    if attn:
+        out["attention_type"] = attn
+    if heads:
+        out["num_attention_heads"] = heads
+    if kv:
+        out["num_key_value_heads"] = kv
+    if head_dim:
+        out["head_dim"] = int(head_dim)
+
+    for key in ("hidden_size", "intermediate_size", "num_hidden_layers", "vocab_size", "max_position_embeddings"):
+        val = cfg.get(key)
+        if val not in (None, ""):
+            out[key] = int(val)
+
+    num_experts = 0
+    for k in _MOE_EXPERT_KEYS:
+        if cfg.get(k):
+            num_experts = int(cfg.get(k) or 0)
+            break
+    experts_per_tok = int(cfg.get("num_experts_per_tok") or 0)
+    out["is_moe"] = num_experts > 0
+    if num_experts > 0:
+        out["num_experts"] = num_experts
+    if experts_per_tok > 0:
+        out["num_experts_per_tok"] = experts_per_tok
+
+    quant = _derive_quantization(cfg)
+    if quant:
+        out["quantization"] = quant
+    for key in ("torch_dtype", "kv_cache_dtype"):
+        val = str(cfg.get(key) or "").strip()
+        if val:
+            out[key] = val
+    return out
+
+
 def _model_is_gemma2(model_path: str) -> bool:
     """Best-effort detect a Gemma2 model from config.json (top level or text_config).
 
