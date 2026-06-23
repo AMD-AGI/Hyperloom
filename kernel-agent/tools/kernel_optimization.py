@@ -1029,7 +1029,63 @@ def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
         f"- args: {rendered}\n"
         "Correctness golden: the ORIGINAL kernel's output on these shapes "
         "(baseline / `fn=` injection); do not hand-derive a reference from scratch.\n"
+        + _build_kernel_contract_block(candidate)
     )
+
+
+def _build_kernel_contract_block(candidate: dict[str, Any]) -> str:
+    """Render the kernel-class CONTRACT (collective / attention) into the prompt.
+
+    TraceLens enrichment (``_enrich_kernel_contract``) attaches a
+    ``kernel_contract`` dict for non-MoE kernel classes that need extra info to
+    build a FAITHFUL harness (a real reference + correct execution model).
+    Surfacing it here makes the harness-generator's rule-1 USER TASK CONTEXT
+    authoritative for these kernels too, not just MoE. Returns "" when absent so
+    the prompt stays byte-identical for kernels without a contract.
+    """
+    c = candidate.get("kernel_contract")
+    if not isinstance(c, dict) or not c:
+        return ""
+    kind = c.get("kind", "")
+    # Lead with the literal ``USER TASK CONTEXT`` marker: the GEAK harness-generator
+    # subagent's shape-source priority rule-1 keys on exactly this header to use the
+    # supplied shapes/reference VERBATIM and write ``user_task:production``. Without
+    # it, when a benchmark file was discovered the subagent hits rule-2 and inherits
+    # that file's synthetic sweep + self-ref (observed for qr_all_reduce). This makes
+    # the contract authoritative over the discovered file for non-MoE kernels too.
+    rendered = _format_shapes_for_case(candidate.get("shapes") or candidate.get("kernel_shapes"))
+    lines = [
+        "\n## USER TASK CONTEXT (authoritative — overrides any discovered benchmark/test file)\n",
+        "Build the harness to EXACTLY this contract. Use these shapes verbatim (do NOT\n",
+        "sweep/scale them, do NOT read shapes from a discovered benchmark file), build the\n",
+        "stated reference, and write `user_task:production` to harness_shapes_source.txt.\n",
+    ]
+    if rendered:
+        lines.append(f"- Exact serving shapes: {rendered}\n")
+    if kind == "collective":
+        lines.append(
+            f"- This is a COLLECTIVE ({c.get('collective_op')}). The shapes above are the\n"
+            f"  per-rank tensor. Correctness reference MUST be `{c.get('reference')}` "
+            f"(reduce_op={c.get('reduce_op', 'sum')}, world_size={c.get('world_size', '?')})\n"
+            "  computed independently -- NEVER `return run_kernel(inputs)` (a self-compare is\n"
+            "  a tautology). Initialize the process group and shard inputs per rank.\n"
+            f"- NOTE: {c.get('e2e_note', '')}\n"
+        )
+    elif kind == "attention":
+        extra = ", ".join(
+            f"{k}={c[k]}"
+            for k in ("head_dim", "num_heads", "num_kv_heads", "kv_layout", "seqlen_regime")
+            if c.get(k) is not None
+        )
+        lines.append(
+            f"- This is ATTENTION (causal={c.get('causal', True)}). Correctness reference MUST be\n"
+            f"  `{c.get('reference')}` with is_causal={c.get('causal', True)} -- NEVER a self-compare.\n"
+            f"- Serving contract: {extra}. Benchmark the '{c.get('seqlen_regime', 'mixed')}' regime\n"
+            "  (decode=seqlen 1 per step vs prefill=full); do not mix regimes in one config.\n"
+        )
+    else:
+        return ""
+    return "".join(lines)
 
 
 def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
@@ -1126,7 +1182,11 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
             f"flops_per_byte={flops_per_byte if flops_per_byte is not None else '-'}; "
             f"efficiency={efficiency}; bound={bound}"
         )
-    return "\n".join(lines)
+    # Also surface the kernel-class contract on the task_group path (the
+    # captured-shapes fallback above isn't reached when a task_group exists), so
+    # collectives/attention get their authoritative reference + execution-model
+    # contract regardless of which branch rendered the cases.
+    return "\n".join(lines) + _build_kernel_contract_block(candidate)
 
 
 # PR-B §3: ordered optimization directions keyed by bound type so the first lever
@@ -1707,10 +1767,7 @@ def build_prompt(
     # kernel symbol so the rewrite targets the right __global__ in a multi-kernel file.
     device_symbol_block = ""
     device_kernel_name = str(candidate.get("device_kernel_name", "") or "").strip()
-    if (
-        candidate.get("source_resolution_method") == "op_to_source"
-        and device_kernel_name
-    ):
+    if candidate.get("source_resolution_method") == "op_to_source" and device_kernel_name:
         device_symbol_block = (
             "\n>>> DEVICE KERNEL FOCUS <<<\n"
             f"This op (`{kernel_name}`) dispatches to the device kernel symbol:\n"
@@ -2678,22 +2735,32 @@ def _update_kernel_roofline_sidecar(
 def _apply_geak_env_overrides(
     args: argparse.Namespace,
     prompt_file: Path,
+    candidate: dict[str, Any] | None = None,
 ) -> dict[str, str | None]:
     """Temporarily tune GEAK env for this attempt; caller must restore.
 
-    Sets ``GEAK_CONFIG`` (and disables the knowledge base when requested)
-    for the duration of one attempt, returning the prior values so the
-    caller can restore them via :func:`_restore_env`.
+    Sets ``GEAK_CONFIG`` (and disables the knowledge base when requested) for the
+    duration of one attempt, returning the prior values so the caller can restore
+    them via :func:`_restore_env`. When ``candidate`` carries the trace-captured
+    argument signature, also exports ``GEAK_RAW_ARG_SPEC_JSON`` so GEAK's harness
+    builder can reconstruct the exact call (tensors + scalar args, in order).
+    Additive: unset when the candidate lacks it.
 
     Args:
         args (argparse.Namespace): Parsed CLI args (e.g. ``disable_xs_memory``).
         prompt_file (Path): Prompt file used to derive any per-run config.
+        candidate (dict | None): The hot-kernel candidate (with raw_arg_spec).
 
     Returns:
         dict[str, str | None]: The previous values of the mutated env vars
             (None for vars that were previously unset).
     """
-    keys = ("GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE")
+    keys = (
+        "GEAK_CONFIG",
+        "GEAK_USE_KNOWLEDGE_BASE",
+        "GEAK_SAVE_TO_KNOWLEDGE_BASE",
+        "GEAK_RAW_ARG_SPEC_JSON",
+    )
     previous = {key: os.environ.get(key) for key in keys}
     config = _geak_config_for_run(args, prompt_file)
     if config:
@@ -2701,6 +2768,14 @@ def _apply_geak_env_overrides(
     if getattr(args, "disable_xs_memory", False):
         os.environ["GEAK_USE_KNOWLEDGE_BASE"] = "0"
         os.environ["GEAK_SAVE_TO_KNOWLEDGE_BASE"] = "0"
+    # Full ordered arg metadata (tensors + scalars, verbatim from the trace) so
+    # GEAK can reconstruct the exact call signature.
+    raw_arg_spec = candidate.get("raw_arg_spec") if isinstance(candidate, dict) else None
+    if raw_arg_spec:
+        try:
+            os.environ["GEAK_RAW_ARG_SPEC_JSON"] = json.dumps(raw_arg_spec)
+        except (TypeError, ValueError):
+            os.environ.pop("GEAK_RAW_ARG_SPEC_JSON", None)
     return previous
 
 
@@ -2857,7 +2932,21 @@ def invoke_backend(
     # OOB backends don't accept --test-command but we still want the rocprof
     # snapshot, so we compute it here unconditionally.
     common_test_command = getattr(args, "test_command", "").strip()
-    if not common_test_command:
+    # When TraceLens attached an authoritative kernel_contract (collective /
+    # attention) AND we have the exact traced shapes, do NOT hand GEAK a
+    # discovered benchmark file: the harness-generator subagent would prefer that
+    # file (shape-source rule-2) and inherit its synthetic sweep + self-ref,
+    # overriding our USER TASK CONTEXT. Letting GEAK build from the prompt is the
+    # path that produced a faithful harness (verified: mha with no bench file got
+    # a single traced-shape config + user_task:production; qr WITH a bench file
+    # stayed an 11-config sweep + self-ref). MoE/other kernels are unaffected.
+    _contract = candidate.get("kernel_contract")
+    _has_contract = (
+        isinstance(_contract, dict)
+        and _contract.get("kind") in ("collective", "attention")
+        and bool(candidate.get("shapes") or candidate.get("kernel_shapes"))
+    )
+    if not common_test_command and not _has_contract:
         common_test_command = _render_geak_test_command(
             kernel_name=cand_name,
             bench_files=bench_files,
@@ -2917,7 +3006,7 @@ def invoke_backend(
                             if _dst.exists() and _dst.resolve() == Path(_w).resolve():
                                 continue
                             _shutil.copy2(_w, _dst)
-            previous_env = _apply_geak_env_overrides(args, prompt_file)
+            previous_env = _apply_geak_env_overrides(args, prompt_file, candidate)
             try:
                 result = geak.submit(
                     prompt_file=prompt_file,
@@ -2948,8 +3037,41 @@ def invoke_backend(
             final_report = out_dir / "final_report.json"
             if final_report.is_file():
                 result["geak_final_report"] = str(final_report)
+                # Primary salvage: final_report.json already carries the verified
+                # best speedup + patch (best_speedup / best_patch / best_task).
+                # Read it directly — one small file — so a real win survives even
+                # when the results/ rglob below is SIGKILLed mid-scan on a huge
+                # worktree (the round-2 timeout that lost a verified 4.33x).
+                try:
+                    _fr = json.loads(final_report.read_text(encoding="utf-8"))
+                    _fr_sp = float(_fr.get("best_speedup_verified") or _fr.get("best_speedup") or 0.0)
+                    if _fr_sp > 0:
+                        result["geak_per_task_best_speedup"] = _fr_sp
+                        if _fr.get("best_task"):
+                            result["geak_per_task_best_task"] = str(_fr["best_task"])
+                        _fr_patch = str(_fr.get("best_patch") or "")
+                        if _fr_patch:
+                            result["geak_per_task_best_patch"] = _fr_patch
+                            _fr_wt = _geak_best_worktree(_fr_patch)
+                            if _fr_wt:
+                                result["geak_per_task_best_worktree"] = str(_fr_wt)
+                except (ValueError, OSError, TypeError) as exc:
+                    # Non-fatal: final_report.json salvage is best-effort. Fall
+                    # through to the results/ rglob below, but record why the
+                    # fast-path parse failed so a silent miss is debuggable.
+                    if log_path is not None:
+                        append_log(
+                            log_path,
+                            f"[geak] final_report salvage parse failed "
+                            f"({type(exc).__name__}: {exc}); falling back to results/ scan",
+                        )
             results_dir = out_dir / "results"
-            if results_dir.is_dir():
+            # The results/ rglobs walk the per-round worktrees, which can hold
+            # 100k+ JIT/cache files — on a SIGTERM'd run the scan itself can be
+            # SIGKILLed before it returns. Skip it entirely when final_report.json
+            # already gave us the verified best speedup + patch above; only fall
+            # back to scanning when that primary salvage was absent.
+            if results_dir.is_dir() and not result.get("geak_per_task_best_speedup"):
                 # Any *.patch under results/ is evidence of partial work.
                 patches = sorted(results_dir.rglob("*.patch"))
                 if patches:
@@ -2967,7 +3089,9 @@ def invoke_backend(
                         try:
                             d = json.loads(bj.read_text(encoding="utf-8"))
                             sp = float(d.get("best_patch_speedup") or 0.0)
-                        except Exception:
+                        except (ValueError, OSError, TypeError):
+                            # Skip an unreadable/corrupt per-task best_results.json;
+                            # other tasks' files may still carry a valid speedup.
                             continue
                         if sp > best_speedup:
                             best_speedup = sp
@@ -4093,14 +4217,17 @@ def main() -> int:
         default=60.0,
         help="Per-attempt wall-clock budget for claude/codex OOB backends. GEAK uses --geak-budget-min.",
     )
-    # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 130 min.
-    _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
+    # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 180 min (3h).
+    # 180 matches GEAK's OWN full-mode budget (config budgets.full.total_s=10800s);
+    # the prior 130 killed GEAK ~50 min before its own deadline, mid round-2, and
+    # the on-disk partial wins were lost. No new knob: GEAK_RUN_MODE is the switch.
+    _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 180.0
     parser.add_argument(
         "--geak-budget-min",
         type=float,
         default=_geak_budget_default,
         help="Per-attempt wall-clock budget for GEAK only "
-        "(default tracks $GEAK_RUN_MODE: full -> 130, "
+        "(default tracks $GEAK_RUN_MODE: full -> 180, "
         "quick -> 70; both aligned with yaml "
         "run.budgets.<mode>.total_s + finalize_grace + "
         "kill_buffer + safety so the prompt-quoted "

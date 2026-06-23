@@ -96,6 +96,13 @@ def _build_cmd(
     """
     cmd = [_find_geak_bin(), "-t", str(prompt_file), "--yolo", "--output", str(output_dir), "--gpu-ids", gpu_ids]
     cmd.extend(["--config", str(_resolve_geak_config())])
+    # GEAK's --target defaults to "wall" and that default has precedence over
+    # $GEAK_SCORE_TARGET (mini.py: ``scoring_target or env or "wall"``), so the env
+    # alone never switches scoring. Pass it explicitly when set so kernel_ms scoring
+    # is deterministic across the Ray boundary.
+    _score_target = os.environ.get("GEAK_SCORE_TARGET", "").strip().lower()
+    if _score_target in {"wall", "kernel"}:
+        cmd.extend(["--target", _score_target])
     if kernel_path:
         cmd.extend(["--kernel-path", kernel_path])
     if kernel_repo:
@@ -244,6 +251,11 @@ def run_via_ray(
                 "cmd": cmd,
             }
         cmd.extend(["--config", str(geak_config_path)])
+        # GEAK's --target default ("wall") outranks $GEAK_SCORE_TARGET; pass it
+        # explicitly so kernel_ms scoring survives the Ray boundary (see _build_cmd).
+        _score_target = _os.environ.get("GEAK_SCORE_TARGET", "").strip().lower()
+        if _score_target in {"wall", "kernel"}:
+            cmd.extend(["--target", _score_target])
         if kernel_path:
             cmd.extend(["--kernel-path", kernel_path])
         if kernel_repo:
