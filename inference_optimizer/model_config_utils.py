@@ -233,6 +233,8 @@ def _derive_model_family(model_type: str, model_path: str) -> str:
     Collapses same-generation structural variants (moe / next / vl / text)
     into the generation key. Bare ``llama`` derives its generation from the
     path; unknown types fall back to a family prefix. Returns '' when unknown.
+    Callers pass the merged (nested-wins) model_type so wrappers already
+    resolve to the underlying decoder.
     """
     mt = str(model_type or "").strip().lower()
     name = Path(model_path or "").name.lower()
@@ -310,7 +312,9 @@ def summarize_model_config(model_path: str) -> dict:
     cfg = _merge_config_scopes(data)
     out: dict = {}
 
-    model_type = str(data.get("model_type") or cfg.get("model_type") or "").strip()
+    # Prefer the merged (nested text-tower wins) model_type so multimodal
+    # wrappers report the real decoder rather than the wrapper shell.
+    model_type = str(cfg.get("model_type") or data.get("model_type") or "").strip()
     if model_type:
         out["model_type"] = model_type
     arches = _config_architectures(data) or _config_architectures(cfg)

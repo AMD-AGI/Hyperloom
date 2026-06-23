@@ -221,12 +221,45 @@ def test_summary_stub_high_priority_scope_backfilled_by_lower(tmp_path: Path) ->
         },
     )
     out = summarize_model_config(str(m))
-    # Higher-priority text_config wins where present (model_type),
-    # lower-priority llm_config backfills the missing structural fields.
+    # Nested text_config wins for model_type/family; llm_config backfills the
+    # structural fields the stub text_config omits.
+    assert out["model_type"] == "qwen2"
+    assert out["model_family"] == "qwen2"
     assert out["num_attention_heads"] == 64
     assert out["num_hidden_layers"] == 48
     assert out["hidden_size"] == 8192
     assert out["attention_type"] == "GQA"
+
+
+def test_wrapper_model_type_reports_nested_decoder(tmp_path: Path) -> None:
+    # An unrecognized top-level wrapper must report the nested decoder for both
+    # model_type and model_family so collectors group by the real LLM.
+    m = _write_config(
+        tmp_path / "wrapper-model",
+        {
+            "model_type": "wrapper",
+            "text_config": {
+                "model_type": "qwen2",
+                "num_attention_heads": 64,
+                "num_key_value_heads": 8,
+            },
+        },
+    )
+    out = summarize_model_config(str(m))
+    assert out["model_type"] == "qwen2"
+    assert out["model_family"] == "qwen2"
+
+
+def test_qwen3_vl_resolves_to_qwen3_family(tmp_path: Path) -> None:
+    # Real Qwen3-VL nests model_type=qwen3_vl_text; merged model_type carries
+    # that internal name but the family still collapses to qwen3.
+    m = _write_config(
+        tmp_path / "qwen3-vl",
+        {"model_type": "qwen3_vl", "text_config": {"model_type": "qwen3_vl_text"}},
+    )
+    out = summarize_model_config(str(m))
+    assert out["model_type"] == "qwen3_vl_text"
+    assert out["model_family"] == "qwen3"
 
 
 def test_summary_round_trips_through_state_json(tmp_path: Path) -> None:
