@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .framework_paths import resolve_source_file_allowlist
+from .gpu_pool import resolve_gpu_specialist_devices
 from ..protocol.intent import Intent, IntentType
 from ..protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
@@ -233,6 +234,38 @@ def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
         return max(0, int(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "0") or "0"))
     except ValueError:
         return 0
+
+
+def _serving_tp_for_policy(shared_state: Any | None = None) -> int:
+    """Resolve serving TP for policy-time specialist GPU validation.
+
+    Mirrors ``Coordinator._resolve_serving_tp`` so PolicyGate rejects requests
+    that the dispatcher would later materialize into an unschedulable GPU lease.
+    """
+    if shared_state is not None:
+        try:
+            tp = int(getattr(shared_state, "tp", 0) or 0)
+        except (TypeError, ValueError):
+            tp = 0
+        if tp > 0:
+            return tp
+    try:
+        return max(0, int(os.environ.get("TP", "0") or 0))
+    except ValueError:
+        return 0
+
+
+def _effective_gpu_specialist_pool_size(shared_state: Any | None = None) -> int:
+    """Actual policy-time GPU specialist pool size after serving carve."""
+    ceiling = gpu_specialist_ceiling(shared_state)
+    if ceiling <= 0:
+        return 0
+    return len(
+        resolve_gpu_specialist_devices(
+            ceiling,
+            serving_tp=_serving_tp_for_policy(shared_state),
+        ),
+    )
 
 
 # Ceiling snapshot at import for callers needing a plain int; recomputed lazily by :func:`research_lane_ceiling`.
@@ -1813,11 +1846,15 @@ class PolicyGate:
         if not needs_gpu:
             from .specialist_profile import resolve_specialist_profile
 
-            if resolve_specialist_profile(params).grants_bench_tool:
+            if resolve_specialist_profile(params).reserves_benchmark_lane:
                 needs_gpu = True
         if not needs_gpu:
             return
-        gpu_count_raw = params.get("gpu_count", 1)
+        serving_tp = _serving_tp_for_policy(self.shared_state)
+        default_gpu_count = serving_tp or 1
+        gpu_count_raw = params.get("gpu_count", default_gpu_count)
+        if gpu_count_raw is None or (isinstance(gpu_count_raw, str) and not gpu_count_raw.strip()):
+            gpu_count_raw = default_gpu_count
         try:
             gpu_count = int(gpu_count_raw)
         except (TypeError, ValueError) as exc:
@@ -1841,11 +1878,24 @@ class PolicyGate:
                     "before dispatching GPU specialists."
                 ),
             )
-        if gpu_count > ceiling:
+        from .specialist_profile import resolve_specialist_profile
+
+        if resolve_specialist_profile(params).reserves_benchmark_lane and serving_tp > 0 and gpu_count < serving_tp:
+            gpu_count = serving_tp
+        effective_pool_size = _effective_gpu_specialist_pool_size(self.shared_state)
+        if gpu_count > effective_pool_size:
             raise PolicyDenied(
-                f"delegate{{action='specialist'}}: gpu_count={gpu_count} exceeds GPU specialist capacity={ceiling}",
+                "delegate{action='specialist'}: "
+                f"effective gpu_count={gpu_count} exceeds serving-disjoint "
+                f"GPU specialist pool size={effective_pool_size} "
+                f"(configured capacity={ceiling}, serving_tp={serving_tp})",
                 rule="specialist_gpu_request_exceeds_capacity",
-                hint=("Lower params.gpu_count or start a session with a larger GPU specialist pool."),
+                hint=(
+                    "Lower params.gpu_count for non-bench probes, omit it for "
+                    "bench specialists only when the specialist pool has at "
+                    "least serving TP free cards, or start a session with a "
+                    "larger/disjoint GPU specialist pool."
+                ),
             )
 
     def _autofill_gap_from_ledger(
