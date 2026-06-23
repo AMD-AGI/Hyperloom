@@ -87,14 +87,20 @@ params_schema:
   needs_gpu:
     type: boolean
     description: |
-      Optional, default false. Set true for wall-budgeted GPU experiments or
-      microbenchmarks. GPU specialists receive isolated visible-device env
-      vars from the Coordinator-managed GPU specialist pool and serialize
-      against serving via ``gpu_research_lane``. They must not launch
-      persistent serving servers or run Magpie benchmark loops.
+      Optional, default false. Set true for wall-budgeted GPU work. GPU
+      specialists receive isolated visible-device env vars from the
+      Coordinator-managed GPU specialist pool (carved disjoint from the live
+      serving cards) and serialize against serving via ``gpu_research_lane``.
+      On their leased cards they may start/stop their own servers (any port
+      that is not the production serving port 8888), profile, autotune, and
+      run real benchmark loops; the one invariant is that they must not touch
+      the production serving process, its cards, or port 8888.
   gpu_count:
     type: integer
     description: |
-      Optional, default 1 when ``needs_gpu`` is true. Number of GPUs requested
-      from the specialist GPU pool. PolicyGate rejects non-positive values or
+      Optional. Number of GPUs requested from the specialist GPU pool. When
+      ``needs_gpu`` is true and ``gpu_count`` is unset, the Coordinator
+      defaults it to the live serving TP so a TP-coupled gap is reproducible
+      on the real topology; an explicit value still wins (e.g. fewer cards for
+      a single-card kernel probe). PolicyGate rejects non-positive values or
       requests above the configured GPU specialist ceiling.
