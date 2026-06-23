@@ -10,7 +10,12 @@ import os
 import pytest
 import yaml
 
-from inference_optimizer.cli import _export_workload_envs_for_optimize
+from inference_optimizer.cli import (
+    _export_workload_envs_for_optimize,
+    _parse_conc_env_default,
+    _parse_conc_sweep_default,
+    _resolve_run_max_model_len,
+)
 from inference_optimizer.orchestrator.action_executors._workload_envs import (
     FrameworkScriptMismatchError,
     materialize_config_with_envs,
@@ -27,6 +32,11 @@ def _write_yaml(path, framework, benchmark_script=None):
     bench = {"framework": framework, "model": "/m", "envs": {}}
     if benchmark_script:
         bench["benchmark_script"] = benchmark_script
+    path.write_text(yaml.safe_dump({"benchmark": bench}), encoding="utf-8")
+
+
+def _write_yaml_with_envs(path, framework, envs):
+    bench = {"framework": framework, "model": "/m", "envs": dict(envs)}
     path.write_text(yaml.safe_dump({"benchmark": bench}), encoding="utf-8")
 
 
@@ -104,3 +114,100 @@ def test_multi_node_always_exports_workload_envs(monkeypatch):
     assert os.environ["TP"] == "8"
     assert os.environ["CONC"] == "32"
     assert os.environ["EP"] == "2"
+
+
+def test_operator_server_args_env_routes_to_vllm_args(tmp_path, monkeypatch):
+    """#573: one server-args injection point must reach vLLM YAML materialization."""
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_SERVER_ARGS",
+        "--gpu-memory-utilization 0.85 --kv-cache-dtype fp8_e4m3",
+    )
+    src = tmp_path / "cfg.yaml"
+    _write_yaml(src, "vllm")
+
+    out = materialize_config_with_envs(src, tmp_path / "out")
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+
+    assert "EXTRA_VLLM_ARGS" in envs
+    assert "--gpu-memory-utilization 0.85" in envs["EXTRA_VLLM_ARGS"]
+    assert "--kv-cache-dtype fp8_e4m3" in envs["EXTRA_VLLM_ARGS"]
+
+
+def test_operator_server_args_dedup_vllm_single_value_flags(tmp_path, monkeypatch):
+    """Operator flags should override YAML defaults without duplicate vLLM keys."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "--gpu-memory-utilization 0.85")
+    src = tmp_path / "cfg.yaml"
+    _write_yaml_with_envs(
+        src,
+        "vllm",
+        {"EXTRA_VLLM_ARGS": "--gpu-memory-utilization 0.95 --trust-remote-code"},
+    )
+
+    out = materialize_config_with_envs(src, tmp_path / "out")
+    args = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+
+    assert args.count("--gpu-memory-utilization") == 1
+    assert "--gpu-memory-utilization 0.85" in args
+    assert "--trust-remote-code" in args
+
+
+def test_conc_env_ladder_materializes_as_single_baseline_and_sweep_ladder(
+    tmp_path,
+    monkeypatch,
+):
+    """#573: CONC=4,16,128 is recognized as a ladder, not crashed by int()."""
+    monkeypatch.setenv("CONC", "4,16,128")
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", raising=False)
+    src = tmp_path / "cfg.yaml"
+    _write_yaml(src, "vllm")
+
+    out = materialize_config_with_envs(src, tmp_path / "out")
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+
+    assert envs["CONC"] == 4
+    assert os.environ["INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS"] == "4,16,128"
+
+
+def test_conc_env_ladder_parser_default_exports_sweep_ladder(monkeypatch):
+    monkeypatch.setenv("CONC", "4,16,128")
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", raising=False)
+
+    assert _parse_conc_env_default() == 4
+    assert os.environ["CONC"] == "4,16,128"
+
+
+def test_conc_env_ladder_parser_default_feeds_sweep_without_env_mutation(monkeypatch):
+    monkeypatch.setenv("CONC", "4,16,128")
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", raising=False)
+
+    assert _parse_conc_sweep_default() == "4,16,128"
+    assert os.environ["CONC"] == "4,16,128"
+
+
+def test_explicit_max_model_len_wins_over_auto(tmp_path, monkeypatch):
+    """#573: explicit --max-model-len / $MAX_MODEL_LEN must not be recomputed."""
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"max_position_embeddings": 4096}', encoding="utf-8")
+    monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
+
+    value, source = _resolve_run_max_model_len(
+        _ns(model=str(model), isl=1024, osl=1024, max_model_len=200000),
+    )
+
+    assert value == 200000
+    assert source == "--max-model-len"
+
+
+def test_env_max_model_len_wins_over_auto(tmp_path, monkeypatch):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"max_position_embeddings": 4096}', encoding="utf-8")
+    monkeypatch.setenv("MAX_MODEL_LEN", "200000")
+
+    value, source = _resolve_run_max_model_len(
+        _ns(model=str(model), isl=1024, osl=1024, max_model_len=None),
+    )
+
+    assert value == 200000
+    assert source == "$MAX_MODEL_LEN"

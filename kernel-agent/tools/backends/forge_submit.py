@@ -574,6 +574,12 @@ def main():
             print(f"wall_ms: {{m.group(1)}}")
         else:
             us = re.findall(r"avg:\\s*([0-9.]+)\\s*us/iter", out)
+            if not us:
+                # aiter test_common perftest also logs "<label> avg: <N> us"
+                # (no "/iter" suffix) and "us: <N>" — match those too so aiter
+                # op_tests yield a baseline instead of None.
+                us = (re.findall(r"avg:\\s*([0-9.]+)\\s*us\\b", out)
+                      or re.findall(r"\\bus:\\s*([0-9.]+)", out))
             if us:
                 # min across measured shapes = the kernel's best timing.
                 print(f"wall_ms: {{min(float(u) for u in us) / 1000.0:.6f}}")
@@ -595,13 +601,23 @@ def main():
     # "no metric found" -> the iteration fails (never a fabricated pass).
     snr = re.search(r"snr\\s*[:=]\\s*([-0-9.]+)\\s*db", low)
     m = re.search(r"allclose\\s*[:=]\\s*(true|false)", low)
-    if any(k in low for k in ("mismatch", "not close", "correctness failed", "validation failed")):
+    # aiter test_common.checkAllclose logs "[checkAllclose ... passed~]" on
+    # success and "... failed!" on mismatch — neither emits a Forge-contract
+    # "allclose:" line, so translate it explicitly (root cause of attention/
+    # aiter kernels reporting NO CORRECTNESS METRIC and failing Stage 1).
+    aiter_pass = ("checkallclose" in low and "passed" in low and "failed" not in low)
+    aiter_fail = ("checkallclose" in low and "failed" in low)
+    if any(k in low for k in ("mismatch", "not close", "correctness failed", "validation failed")) or aiter_fail:
         print("allclose: False")
     elif m:
         print(f"allclose: {{'True' if m.group(1) == 'true' else 'False'}}")
     elif snr:
         print(f"SNR: {{snr.group(1)}} dB")
-    elif any(k in low for k in ("correctness passed", "all tests passed", "test passed", "ok")):
+    elif aiter_pass:
+        print("allclose: True")
+    elif any(k in low for k in ("correctness passed", "all tests passed", "test passed")):
+        # NOTE: bare "ok" was removed here — it false-matched on substrings like
+        # "tokens", "block", etc. and fabricated passes. Require explicit phrases.
         print("allclose: True")
     else:
         # No correctness signal at all -> do NOT fabricate a pass.
@@ -1390,16 +1406,20 @@ def _apply_fellow_env(env: dict) -> None:
             env["PATH"] = bindir + os.pathsep + cur_path if cur_path else bindir
     # The AMD SaFE proxy presents an internal/self-signed cert; without skipping
     # TLS the Node CLI handshake fails and the streaming query() hangs.
+    base_url = str(env.get("ANTHROPIC_BASE_URL") or "").strip()
+    if base_url.endswith("/llm-gateway"):
+        env["ANTHROPIC_BASE_URL"] = base_url[: -len("/llm-gateway")] + "/api/v1/llm-proxy"
     env.setdefault("ANTHROPIC_SKIP_TLS_VERIFY", "true")
     env.setdefault("NODE_TLS_REJECT_UNAUTHORIZED", "0")
     # Fellow-hung mitigation (RCA root cause 4): a streaming request to the SaFE
     # proxy can stall with no first token / no keepalive; without a client-side
     # timeout the SDK awaits until the outer 900s kill. Bound the claude CLI's
     # own request timeout and cut non-essential traffic / autoupdate that can
-    # also block in headless containers. setdefault keeps operator overrides.
-    env.setdefault("API_TIMEOUT_MS", "300000")
-    env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-    env.setdefault("DISABLE_AUTOUPDATER", "1")
+    # also block in headless containers. Shared with oob/specialist/tracelens so
+    # every claude-CLI/SDK child gets the same read-timeout protection.
+    from _llm_stability_env import apply_llm_stability_env
+
+    apply_llm_stability_env(env)
     # GBrain knowledge integration: forward gbrain credentials so the Forge
     # loop's program.md generator can inject cross-KB knowledge from the
     # unified kernel brain (KernelForge + GEAK + PTAO). The forge-loop child
@@ -1411,6 +1431,19 @@ def _apply_fellow_env(env: dict) -> None:
         env.setdefault("KERNELFORGE_GBRAIN_ENABLED", "true")
         env.setdefault("GBRAIN_BASE_URL", _gbrain_url)
         env.setdefault("GBRAIN_TOKEN", _gbrain_token)
+    else:
+        # Observability (F1): gbrain kernel KB stays disabled whenever either
+        # GBRAIN_BASE_URL or GBRAIN_TOKEN is absent — most commonly because a
+        # local-only / --degraded-kb setup_env.sh `unset` them as a
+        # belt-and-suspenders. Without this line the forge loop silently runs
+        # with NO cross-KB kernel knowledge, which is easy to miss. Surface it
+        # so operators can tell whether forge had gbrain available.
+        import sys as _sys
+        _sys.stderr.write(
+            "[forge_submit] gbrain KB disabled (forge runs without cross-KB "
+            f"knowledge): GBRAIN_BASE_URL={'set' if _gbrain_url else 'MISSING'} "
+            f"GBRAIN_TOKEN={'set' if _gbrain_token else 'MISSING'}\n"
+        )
 
     # Auth fallback: if no ANTHROPIC_API_KEY is exported, seed it from the claude
     # CLI's validated config.json primaryApiKey so the streaming transport
@@ -1424,6 +1457,27 @@ def _apply_fellow_env(env: dict) -> None:
                 env["ANTHROPIC_API_KEY"] = _key
         except Exception:  # noqa: S110
             pass  # best-effort: missing/unreadable config is not fatal
+
+
+def _driver_is_compile_only(driver_path: str) -> bool:
+    """True when the driver only compile-checks (emits no real correctness/timing).
+
+    The auto-generated HIP/CK compile-only driver verifies ``hipcc -c`` succeeds
+    and prints ``compile_only: True`` plus a synthesized ``wall_ms`` derived from
+    object-file size -- neither is a real correctness or performance signal.
+    Driving a KEEP decision off it produces fake successes/failures, so callers
+    use this to skip forge for such kernels.
+
+    Match ONLY the definite ``compile_only: True`` sentinel the compile-only
+    template emits -- a looser substring (e.g. ``"compile-only"``) would also
+    match a real harness that merely mentions the word in a comment/docstring and
+    silently skip a kernel that has valid correctness+timing.
+    """
+    try:
+        txt = Path(driver_path).read_text(errors="replace")
+    except OSError:
+        return False
+    return "compile_only: True" in txt
 
 
 def _baseline_correctness_ok(driver: str, workspace: str, gpu_target: str,
@@ -1465,9 +1519,13 @@ def _baseline_correctness_ok(driver: str, workspace: str, gpu_target: str,
     negative = any(k in out for k in (
         "correctness failed", "allclose: false", "error:", "traceback",
         "no metric in harness output", "keyerror", "correctness: failed"))
+    # NOTE: a compile-only driver (correctness UNVERIFIED + synthesized wall_ms)
+    # is NOT a positive baseline signal -- driving a KEEP decision off a kernel
+    # that was never numerically validated produces fake successes. Those drivers
+    # are filtered separately (see _driver_is_compile_only) and never reach here
+    # as a pass.
     positive = ("snr:" in out) or any(k in out for k in (
-        "allclose: true", "all correctness checks passed", "correctness passed",
-        "compile_only: true"))
+        "allclose: true", "all correctness checks passed", "correctness passed"))
     if proc.returncode == 0 and positive and not negative:
         return True, "baseline correctness ok"
     return False, f"baseline correctness not confirmed (rc={proc.returncode})"
@@ -1666,9 +1724,26 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
     if (source_type or "").strip().lower() in ("", "unknown") and \
             str(source_file).lower().endswith((".cu", ".cuh", ".hip")):
         source_type = "hip_cpp"
+    # Curated kernel_kind (from op_to_source) refines the fellow choice: an aiter
+    # CK attention/gemm .cu (e.g. mha_batch_prefill) arrives as hip_cpp by
+    # extension, but its real impl is a Composable-Kernel template the ck-fellow
+    # knows how to tune (tile/warp/pipeline/LDS), not generic HIP. aiter_asm is a
+    # prebuilt assembly compute-core the agent cannot rewrite -> skip cleanly.
+    kernel_kind = str((candidate or {}).get("kernel_kind") or "").strip().lower()
+    if kernel_kind == "aiter_asm":
+        return _normalized(
+            2, "",
+            "forge: aiter_asm prebuilt assembly compute-core (.co) is not "
+            "editable from source; skipping (no rewritable kernel, no tuner)",
+            time.time() - started)
     fellow = _fellow_for_source_type(source_type)
-    log.info("forge dispatch: source_file=%s source_type=%s fellow=%s op=%s",
-             source_file, source_type, fellow, (candidate or {}).get("operation", ""))
+    if kernel_kind == "aiter_ck" and fellow in ("hip-fellow", None):
+        ck_fellow = _fellow_for_source_type("ck")
+        if ck_fellow is not None:
+            fellow = ck_fellow
+    log.info("forge dispatch: source_file=%s source_type=%s kernel_kind=%s fellow=%s op=%s",
+             source_file, source_type, kernel_kind or "-", fellow,
+             (candidate or {}).get("operation", ""))
     if fellow is None:
         return _normalized(2, "", f"forge stage-1 supports triton only; got source_type={source_type}",
                            time.time() - started)
@@ -1749,6 +1824,29 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
                         f"({gate_detail}); not spinning the agent on an "
                         "unverifiable harness",
                         time.time() - started)
+        # Compile-only drivers cannot produce a real correctness/timing signal,
+        # so any KEEP they yield is based on synthesized metrics. Skip forge for
+        # such kernels (they fall through to the next ladder backend / are
+        # reported non-optimizable) unless explicitly allowed via
+        # FORGE_ALLOW_COMPILE_ONLY=1. This removes the structural "fake success /
+        # fake failure" on compiled attention where no real harness exists.
+        if (os.environ.get("FORGE_ALLOW_COMPILE_ONLY", "0").strip().lower()
+                not in ("1", "true", "yes") and _driver_is_compile_only(driver)):
+            # Observability: this is a deliberate global default-behavior change
+            # (compile-only kernels used to "attempt" forge), so log the skip so
+            # session stats / RCA can see why forge attempt counts dropped.
+            log.warning(
+                "forge skipped (compile-only, no real harness): source_file=%s "
+                "source_type=%s kernel_kind=%s op=%s -- falling through to next "
+                "backend (set FORGE_ALLOW_COMPILE_ONLY=1 to override)",
+                source_file, source_type, kernel_kind or "-",
+                (candidate or {}).get("operation", ""))
+            return _normalized(
+                2, "",
+                "forge skipped: only a compile-only driver is available (no real "
+                "correctness/timing harness); not driving a KEEP decision off "
+                "synthesized metrics (set FORGE_ALLOW_COMPILE_ONLY=1 to override)",
+                time.time() - started)
         # GPU_TARGET is passed to Kernel-Forge's MCP server tools (build/bench/pmc)
         # via the forge-loop child env (_run_loop_via_cli sets env["GPU_TARGET"]),
         # so it is NOT written to the parent os.environ -- that would leak to the
@@ -1758,6 +1856,21 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         experiments_dir = output_dir / "forge_experiments"
         experiments_dir.mkdir(parents=True, exist_ok=True)
         max_iters = int(os.environ.get("FORGE_MAX_ITERS", "8"))
+        # F3 (kernel-priority budgeting): compiled/ASM fellows (aiter / ck / hip
+        # / hipblaslt / flydsl) optimize a precompiled kernel whose compute core
+        # the agent cannot rewrite — it can only tweak host-side params (e.g.
+        # partition size), so their KEEP rate is structurally low (~2% vs the
+        # triton-fellow's much higher rate) with a micro-speedup ceiling ~1.6x.
+        # Cap their iteration budget so forge doesn't burn the full budget
+        # reverting on a kernel it cannot meaningfully change; triton-fellow
+        # (rewritable source, high yield) keeps the full budget. Configurable
+        # via FORGE_COMPILED_MAX_ITERS; set it >= FORGE_MAX_ITERS to disable.
+        if fellow != "triton-fellow":
+            _compiled_cap = int(os.environ.get("FORGE_COMPILED_MAX_ITERS", "3"))
+            if _compiled_cap < max_iters:
+                log.info("forge: capping compiled/ASM fellow %s iters %d -> %d "
+                         "(low-yield kernel, see F3)", fellow, max_iters, _compiled_cap)
+                max_iters = _compiled_cap
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
         # Run the loop in an isolated, hard-killable subprocess (like GEAK) so a

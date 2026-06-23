@@ -87,22 +87,15 @@ def _backends_args(backends=""):
     return argparse.Namespace(backends=backends, benchmark_file="", test_harness_path="")
 
 
-def test_choose_backends_appends_geak_fallback_for_forge_only(monkeypatch):
-    # RCA root cause A: forge-only must not run without a geak safety net.
-    monkeypatch.delenv("FORGE_DISABLE_GEAK_FALLBACK", raising=False)
+def test_choose_backends_respects_forge_only_order(monkeypatch):
+    # KERNEL_OPT_BACKEND_ORDER / --backends is authoritative: forge means
+    # strict forge-only, no hidden GEAK fallback.
     selected, notes = ko.choose_backends(_backends_args("forge"), {})
-    assert selected == ["forge", "geak"]
-    assert notes.get("geak_fallback_appended") is True
-
-
-def test_choose_backends_geak_fallback_opt_out(monkeypatch):
-    monkeypatch.setenv("FORGE_DISABLE_GEAK_FALLBACK", "1")
-    selected, _ = ko.choose_backends(_backends_args("forge"), {})
     assert selected == ["forge"]
+    assert "geak_fallback_appended" not in notes
 
 
 def test_choose_backends_no_double_geak(monkeypatch):
-    monkeypatch.delenv("FORGE_DISABLE_GEAK_FALLBACK", raising=False)
     selected, _ = ko.choose_backends(_backends_args("forge,geak"), {})
     assert selected == ["forge", "geak"]
 
@@ -178,8 +171,8 @@ def test_submit_rederives_aiter_cu_source_type(tmp_path, monkeypatch):
     assert "supports triton only" not in (res.get("stderr_tail") or "")
 
 
-def test_submit_skips_non_triton(tmp_path):
-    """Stage 1 supports triton only; other source_types return a clean skip, no GPU work."""
+def test_submit_skips_untracked_source(tmp_path):
+    """Untracked source files return a clean skip before any live-tree work."""
     res = forge_submit.submit(
         source_file=str(tmp_path / "k.cpp"),
         prompt_file=tmp_path / "p.txt",
@@ -189,7 +182,7 @@ def test_submit_skips_non_triton(tmp_path):
         candidate={},
     )
     assert res["returncode"] == 2
-    assert "triton only" in res["stderr_tail"]
+    assert "kernel_repo is not a clean git checkout" in res["stderr_tail"]
 
 
 def test_autogen_driver_selection():
@@ -397,9 +390,10 @@ def test_report_informational_timing_not_kept_does_not_trigger_keep(tmp_path):
     assert ko._extract_correctness_from_report(report) is False
 
 
-def test_apply_fellow_env_claude_path_and_timeout(tmp_path, monkeypatch):
+def test_apply_fellow_env_claude_path_and_stability_flags(tmp_path, monkeypatch):
     """G3+G4: child env gets FORGE_CLAUDE_BIN + claude dir on PATH, plus the
-    fellow-hung mitigations (API_TIMEOUT_MS / disable flags)."""
+    low-risk fellow stability flags. API_TIMEOUT_MS is opt-in because external
+    clients may treat it as a total request timeout."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     claude = bindir / "claude"
@@ -410,16 +404,43 @@ def test_apply_fellow_env_claude_path_and_timeout(tmp_path, monkeypatch):
     forge_submit._apply_fellow_env(env)
     assert env["FORGE_CLAUDE_BIN"] == str(claude)
     assert str(bindir) in env["PATH"].split(os.pathsep)
-    assert env["API_TIMEOUT_MS"] == "300000"
+    assert "API_TIMEOUT_MS" not in env
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert env["DISABLE_AUTOUPDATER"] == "1"
 
 
 def test_apply_fellow_env_timeout_respects_operator_override(monkeypatch):
-    """setdefault must not clobber an operator-set API_TIMEOUT_MS."""
+    """Existing operator-set API_TIMEOUT_MS must pass through untouched."""
     env = {"API_TIMEOUT_MS": "60000"}
     forge_submit._apply_fellow_env(env)
     assert env["API_TIMEOUT_MS"] == "60000"
+
+
+def test_llm_stability_env_helper_sets_defaults():
+    """The shared kernel-side helper sets only low-risk defaults."""
+    import _llm_stability_env
+
+    env: dict[str, str] = {}
+    _llm_stability_env.apply_llm_stability_env(env)
+    assert "API_TIMEOUT_MS" not in env
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+
+
+def test_llm_stability_env_helper_respects_override():
+    import _llm_stability_env
+
+    env = {"API_TIMEOUT_MS": "1000"}
+    _llm_stability_env.apply_llm_stability_env(env)
+    assert env["API_TIMEOUT_MS"] == "1000"
+
+
+def test_llm_stability_env_helper_can_opt_in_to_api_timeout():
+    import _llm_stability_env
+
+    env: dict[str, str] = {}
+    _llm_stability_env.apply_llm_stability_env(env, api_timeout_ms="120000")
+    assert env["API_TIMEOUT_MS"] == "120000"
 
 
 def _capture_cli_env(tmp_path, monkeypatch, worktree_kernel):
