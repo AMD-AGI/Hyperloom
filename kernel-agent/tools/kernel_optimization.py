@@ -3802,6 +3802,81 @@ def _candidate_artifact_paths(
     return deduped
 
 
+def _reconstruct_source_from_patch(
+    patch_path: Path,
+    target_file: str,
+    output_path: Path,
+) -> str:
+    """Reconstruct a complete source file by applying a unified diff.
+
+    A backend's best artifact is frequently a unified ``.patch``/``.diff``
+    (a diff, not a complete file). When no full-source artifact is found, the
+    original kernel at ``target_file`` plus the patch deterministically
+    reconstruct the optimized source — the same apply that deployment uses, so
+    the reconstructed file matches what would actually run. Tries ``git apply``
+    across the usual strip levels, then falls back to ``patch``.
+
+    Args:
+        patch_path (Path): Unified diff produced by the backend.
+        target_file (str): Original (pre-patch) kernel source path.
+        output_path (Path): Where the reconstructed source is written.
+
+    Returns:
+        str: The string path of the reconstructed source, or empty string when
+            the original is missing or the patch does not apply cleanly.
+    """
+    original = Path(target_file)
+    if not patch_path.is_file() or not original.is_file():
+        return ""
+    try:
+        original_text = original.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for strip in ("1", "0", "2"):
+        work = output_path.with_suffix(output_path.suffix + ".work")
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            work.write_text(original_text, encoding="utf-8")
+        except OSError:
+            return ""
+        applied = False
+        # git apply (preferred: honours rename/strip semantics), then patch.
+        try:
+            rc = subprocess.run(
+                ["git", "apply", f"-p{strip}", "--unsafe-paths",
+                 f"--directory={work.parent}", str(patch_path)],
+                capture_output=True, text=True, cwd=work.parent, check=False,
+            )
+            applied = rc.returncode == 0 and work.is_file()
+        except (OSError, ValueError):
+            applied = False
+        if not applied:
+            try:
+                with patch_path.open(encoding="utf-8", errors="replace") as pf:
+                    rc = subprocess.run(
+                        ["patch", f"-p{strip}", "--force", "--no-backup-if-mismatch",
+                         str(work)],
+                        stdin=pf, capture_output=True, text=True, check=False,
+                    )
+                applied = rc.returncode == 0
+            except (OSError, ValueError):
+                applied = False
+        if applied:
+            try:
+                patched_text = work.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                patched_text = ""
+            work.unlink(missing_ok=True)
+            if patched_text and patched_text != original_text and _source_text_looks_complete(
+                patched_text, output_path.suffix.lower()
+            ):
+                output_path.write_text(patched_text, encoding="utf-8")
+                return str(output_path)
+        else:
+            work.unlink(missing_ok=True)
+    return ""
+
+
 def _select_source_artifact(
     attempt: dict[str, Any],
     *,
@@ -3856,6 +3931,22 @@ def _select_source_artifact(
         )
         if extracted:
             return extracted, "extracted_code_block", ""
+
+    # Final fallback: a backend's best artifact is often a unified diff with no
+    # complete-source counterpart (and a diff can't be scraped as a full file).
+    # The original kernel + the patch reconstruct the optimized source
+    # deterministically — universal across backends/strategies/suffixes and
+    # independent of worktree/optimized_versions layout.
+    for path in candidates:
+        if path.suffix.lower() not in {".patch", ".diff"}:
+            continue
+        reconstructed = _reconstruct_source_from_patch(
+            path,
+            target_file,
+            extraction_root / f"{attempt.get('attempt_id', 'attempt')}_patched{target_suffix}",
+        )
+        if reconstructed:
+            return reconstructed, "reconstructed_from_patch", ""
 
     tried = ", ".join(str(p) for p in candidates[:6])
     return "", "missing", f"no complete {target_suffix} source artifact found; tried: {tried}"

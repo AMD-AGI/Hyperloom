@@ -801,7 +801,7 @@ def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
 
 
 def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
-    """Patch wins over stdout log; a diff has no fenced block so we return `missing` rather than promoting the log (`_candidate_artifact_paths` precedence)."""
+    """Patch wins over stdout log; with no readable original to apply against, a bare diff yields `missing` rather than promoting the marker-noise log (`_candidate_artifact_paths` precedence)."""
     patch_path = tmp_path / "patch_1.patch"
     patch_path.write_text(
         "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -1,1 +1,1 @@\n-old\n+new\n",
@@ -832,6 +832,61 @@ def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
     # Crucial: the marker-noise log is NOT silently promoted to source_file (the pre-fix bug).
     assert source == "missing"
     assert artifact_path == ""
+
+
+def test_patch_only_winner_reconstructs_full_source(tmp_path):
+    """A backend whose best artifact is a unified diff (no full-source .py, no
+    fenced block) must reconstruct the complete optimized source by applying the
+    patch to the original kernel — not defer with artifact_source='missing'.
+
+    Reproduces the DeepSeek-R1 fp8-MoE case: GEAK's winning ``asm-kernel-rewrite``
+    emitted only ``patch_0.patch`` under a ``<task-label>/`` dir (so the
+    ``parallel_<M>`` worktree mapping missed it) and a diff has no fenced block to
+    scrape, leaving the verified +8.4% kernel unverifiable. The patch + original
+    reconstruct the optimized file deterministically.
+    """
+    original = tmp_path / "fused_moe.py"
+    original.write_text(
+        "import triton\n\n\ndef helper():\n    return 1\n\n\ndef kernel():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    # Unified diff that adds a cache helper (mirrors the asm-rewrite shape).
+    patch_path = tmp_path / "asm-kernel-rewrite" / "patch_0.patch"
+    patch_path.parent.mkdir(parents=True)
+    patch_path.write_text(
+        "--- a/fused_moe.py\n"
+        "+++ b/fused_moe.py\n"
+        "@@ -1,5 +1,8 @@\n"
+        " import triton\n"
+        " \n"
+        " \n"
+        "+_CACHE = {}\n"
+        "+\n"
+        "+\n"
+        " def helper():\n"
+        "     return 1\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed",
+        "attempt_id": "geak-asm",
+        "backend": "geak",
+        "backend_paths": {"geak_per_task_best_patch": str(patch_path)},
+    }
+
+    artifact_path, source, error = ko._select_source_artifact(
+        attempt,
+        target_file=str(original),
+        run_dir=tmp_path,
+    )
+
+    assert source == "reconstructed_from_patch", error
+    assert artifact_path
+    text = Path(artifact_path).read_text(encoding="utf-8")
+    # Reconstruction = original + patch (complete file, not a diff).
+    assert "_CACHE = {}" in text
+    assert "def kernel():" in text  # untouched original content preserved
+    assert "@@" not in text  # not a diff
 
 
 # Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must keep matching both legacy `_optimized.<suffix>` and new `_stdout.log` names (kernel-agent/SKILL.md § Per-attempt stdout file naming).
