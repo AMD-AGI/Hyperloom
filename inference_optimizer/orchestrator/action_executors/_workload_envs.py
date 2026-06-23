@@ -60,6 +60,26 @@ _RUN_EVAL_DISABLED_WARN_EMITTED = False
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
 
+def inject_vllm_expert_parallel(
+    server_args: str | None,
+    framework: Any,
+    ep: Any,
+) -> str:
+    """Append vLLM expert-parallel flag when EP is enabled."""
+    args = str(server_args or "").strip()
+    if "vllm" not in str(framework or "").lower():
+        return args
+    try:
+        ep_int = int(ep if ep not in (None, "") else 1)
+    except (TypeError, ValueError):
+        return args
+    if ep_int <= 1:
+        return args
+    if re.search(r"(?:^|\s)--enable-expert-parallel(?:\s|$)", args):
+        return args
+    return f"{args} --enable-expert-parallel".strip()
+
+
 class FrameworkScriptMismatchError(ValueError):
     """Raised when benchmark_script targets a different framework than the run.
 
@@ -678,6 +698,11 @@ def materialize_config_with_envs(
         bench.get("framework"),
         bench.get("model"),
         gpu_type=gpu_type or bench.get("runner_type"),
+    )
+    resolved_server_args = inject_vllm_expert_parallel(
+        resolved_server_args,
+        bench.get("framework"),
+        os.environ.get("EP", "").strip() or envs.get("EP"),
     )
     # 5. vLLM/atom argparse dedup (#520): the YAML EXTRA_VLLM_ARGS base and a
     #    sweep/kernel variant can each inject --attention-backend, and

@@ -18,6 +18,7 @@ from inference_optimizer.orchestrator.action_executors import _workload_envs as 
 def _clear_env(monkeypatch):
     for k in (
         "TP",
+        "EP",
         "ISL",
         "OSL",
         "CONC",
@@ -151,6 +152,49 @@ def test_server_args_merge_existing(monkeypatch, tmp_path):
     merged = bench["envs"]["EXTRA_SGLANG_ARGS"]
     assert "mem-fraction-static" in merged
     assert "chunked-prefill-size" in merged
+
+
+def test_vllm_ep_injects_expert_parallel(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("EP", "8")
+    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"EXTRA_VLLM_ARGS": "--trust-remote-code"})
+
+    bench = _materialize(src, tmp_path / "out")
+
+    args = bench["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--trust-remote-code" in args
+    assert "--enable-expert-parallel" in args
+
+
+def test_vllm_ep_one_does_not_inject_expert_parallel(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("EP", "1")
+    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"EXTRA_VLLM_ARGS": "--trust-remote-code"})
+
+    bench = _materialize(src, tmp_path / "out")
+
+    args = bench["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--trust-remote-code" in args
+    assert "--enable-expert-parallel" not in args
+
+
+def test_vllm_ep_preserves_profile_args(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("EP", "8")
+    src = _write(
+        tmp_path / "cfg.yaml",
+        framework="vllm",
+        envs={"EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True"},
+    )
+
+    bench = _materialize(src, tmp_path / "out")
+
+    args = bench["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.ignore_frontend True" in args
+    assert "--enable-expert-parallel" in args
 
 
 # ---- per-model work-around: mimo-v2 ---------------------------------------
