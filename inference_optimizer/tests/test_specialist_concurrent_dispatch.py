@@ -17,6 +17,7 @@ async def _build_coord_with_capacity(
     *,
     capacity: int,
     gpu_specialist_capacity: int = 0,
+    monkeypatch=None,
 ):
     """Build a minimal Coordinator with the requested research_lane capacity."""
     from inference_optimizer.orchestrator.agent_role import default_role_registry
@@ -27,6 +28,23 @@ async def _build_coord_with_capacity(
     )
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.shared_state import SharedState
+
+    # Hermetic GPU-pool resolution: the Coordinator bakes the specialist GPU pool
+    # at construction from gpu_specialist_capacity carved by the serving TP and
+    # the visible-device masks. A stray ``TP`` / ROCR/HIP/CUDA env (e.g. an
+    # optimization shell that exported the workload) would otherwise carve the
+    # tiny test pool to empty and starve the dispatch. Clear them so these tests
+    # resolve a deterministic ``[0..capacity-1]`` pool regardless of the host env.
+    if monkeypatch is not None:
+        for _var in (
+            "TP",
+            "ROCR_VISIBLE_DEVICES",
+            "HIP_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+            "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY",
+            "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES",
+        ):
+            monkeypatch.delenv(_var, raising=False)
 
     # SharedState pre-write so Coordinator picks the capacity at construction.
     state = SharedState(session_id=f"concurrent-{capacity}")
@@ -210,6 +228,7 @@ async def test_dispatcher_capacity_one_serialises(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_free(
     tmp_path: Path,
+    monkeypatch,
 ):
     """GPU-specialist pool capacity 1 caps GPU concurrency at 1 even when the
     research_lane has headroom; both tasks drain serially, reusing GPU id 0.
@@ -218,6 +237,7 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
         tmp_path,
         capacity=2,
         gpu_specialist_capacity=1,
+        monkeypatch=monkeypatch,
     )
     probe = _ConcurrencyProbe(sleep_seconds=0.1)
     coord.sub.register_executor("specialist", probe)
@@ -263,6 +283,7 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
         tmp_path,
         capacity=1,
         gpu_specialist_capacity=1,
+        monkeypatch=monkeypatch,
     )
     coord.shared_state.macro_cycle = 0
     probe = _ConcurrencyProbe(sleep_seconds=0.01)

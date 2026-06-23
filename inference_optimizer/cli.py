@@ -102,6 +102,7 @@ from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
 )
 from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     _model_is_gemma2,
+    summarize_model_config,
 )
 from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _default_target_summary,
@@ -3060,6 +3061,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if state.model_path:
             os.environ["MODEL_PATH"] = state.model_path
             print(f"  re-exported MODEL_PATH: {state.model_path}")
+            # Backfill model_info for sessions created before the field existed
+            # (or whose config was unreadable at launch); fail-soft to {}.
+            if not state.model_info:
+                state.model_info = summarize_model_config(state.model_path)
+                if state.model_info:
+                    state.save(session_dir)
+                    print("  backfilled model_info (from config.json)")
         if state.framework:
             os.environ["FRAMEWORK"] = state.framework
             print(f"  re-exported FRAMEWORK : {state.framework}")
@@ -3073,6 +3081,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Re-export workload metadata from SharedState so resume sees the same workload contract (not YAML defaults).
         for state_attr, env_name in (
             ("tp", "TP"),
+            # ``ep`` mirrors EP so single-node vLLM MoE resume still injects
+            # --enable-expert-parallel (#569); lost EP would silently drop it.
+            ("ep", "EP"),
             ("conc", "CONC"),
             ("isl", "ISL"),
             ("osl", "OSL"),
@@ -4875,7 +4886,10 @@ def _build_parser() -> argparse.ArgumentParser:
         )
 
     # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio).
-    # Default 1.10: kill a single-variant run once wall-clock exceeds baseline by +10% (outcome=KILLED_OVERTIME).
+    # Default 1.20: kill the decision (warm) run once its post-startup wall-clock exceeds the
+    # baseline warm measure time by +20% (outcome=KILLED_OVERTIME). Q4: the decision round now
+    # reuses a pre-warmed server (client-only), so the anchor is the baseline WARM measure time
+    # and one-time cold-boot / aiter recompile no longer trips the kill.
     # 0 disables (legacy variant_timeout_sec hard cap still applies); overtime kills skip stack rebench.
     def _env_float_or(default: float, env_var: str) -> float:
         """Resolve a float CLI default from an environment variable.
@@ -4918,7 +4932,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="explore_overtime_kill_ratio",
         type=float,
         default=_env_float_or(
-            1.10,
+            1.20,
             "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO",
         ),
         help="Per-variant explore overtime kill: each single-variant "
