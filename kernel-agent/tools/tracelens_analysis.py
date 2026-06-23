@@ -2258,24 +2258,29 @@ _KNOWN_HARNESS_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
 )
 
 
-def _known_harness_files(name: str, source_file: str) -> list[Path]:
+def _known_harness_files(name: str, source_file: str, *, require_exists: bool = True) -> list[Path]:
     """Return curated benchmark/test harnesses matching a kernel.
 
     Looks up :data:`_KNOWN_HARNESS_HINTS` by marker substrings found in the
-    kernel name / source path and returns the hinted harnesses that exist.
+    kernel name / source path. By default it returns only hinted harnesses that
+    exist on disk; callers without a repo root can request the curated hint list
+    itself so tests and downstream prompts remain stable in minimal containers
+    where ``/sgl-workspace`` is absent.
 
     Args:
         name (str): Kernel symbol/name.
         source_file (str): Resolved source-file path (may be empty).
+        require_exists (bool): When True, only paths present on disk are
+            returned. When False, matching curated hints are returned as-is.
 
     Returns:
-        list[Path]: Existing curated harness files, possibly empty.
+        list[Path]: Curated harness files, possibly empty.
     """
     blob = f"{name} {source_file}".lower()
     out: list[Path] = []
     for markers, paths in _KNOWN_HARNESS_HINTS:
         if any(marker in blob for marker in markers):
-            out.extend(Path(p) for p in paths if Path(p).exists())
+            out.extend(Path(p) for p in paths if (not require_exists or Path(p).exists()))
     return out
 
 
@@ -2309,9 +2314,10 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
     Returns:
         Up to ten matching harness paths, with multi-GPU tests demoted.
     """
-    known = _known_harness_files(name, source_file)
     if not repo_root:
+        known = _known_harness_files(name, source_file, require_exists=False)
         return [str(p) for p in known[:10]]
+    known = _known_harness_files(name, source_file)
     keywords = _candidate_keywords(name)
     # Add the source stem (and no-underscore variant) for repos that name tests differently.
     if source_file:
