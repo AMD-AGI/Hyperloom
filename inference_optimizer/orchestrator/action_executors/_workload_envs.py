@@ -348,6 +348,17 @@ def materialize_config_with_envs(
             r_val = float(envs.get("RANDOM_RANGE_RATIO", 1.0))
         except (TypeError, ValueError):
             r_val = 1.0
+        # Profile-scoped OSL control (issue #571): the profile/roofline phase
+        # may run a lighter OSL than the served workload so its torch-profiler
+        # trace stays serializable (#570). When PROFILE_OSL is set it overrides
+        # the profile server's OSL (and feeds the steady-state window math
+        # below); when unset this is byte-for-byte the previous behavior (the
+        # profile reuses the global OSL). Scoped to is_profile so baseline /
+        # optimize configs are never affected.
+        _profile_osl_raw = os.environ.get("PROFILE_OSL", "").strip()
+        if _profile_osl_raw.isdigit() and int(_profile_osl_raw) > 0:
+            osl_val = int(_profile_osl_raw)
+            envs["OSL"] = osl_val
         safe_conc = max(conc_val, 1)
         safe_osl = max(osl_val, 1)
         max_iters = min(1024, max(256, (osl_val * 16) // safe_conc))

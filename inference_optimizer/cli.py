@@ -3269,6 +3269,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["MAX_MODEL_LEN"] = str(max_model_len)
         os.environ["ISL"] = str(args.isl)
         os.environ["OSL"] = str(args.osl)
+        # Profile-scoped OSL (issue #571): exported only when explicitly set, so
+        # the profile/roofline materializer can decouple its OSL from the served
+        # workload. Unset leaves the profile phase on the global --osl.
+        if getattr(args, "profile_osl", None) is not None:
+            os.environ["PROFILE_OSL"] = str(args.profile_osl)
         os.environ["PRECISION"] = args.precision
         # Mirror resolved framework_version into env (explicit > auto-detect > unset; see _resolve_framework_version).
         _fw_version_for_env = (getattr(args, "framework_version", None) or "").strip() or (
@@ -4082,6 +4087,22 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Input sequence length (default $ISL or 256)")
     opt.add_argument("--osl", type=int, default=int(os.environ.get("OSL", "256")),
                       help="Output sequence length (default $OSL or 256)")
+    opt.add_argument(
+        "--profile-osl",
+        dest="profile_osl",
+        type=int,
+        default=(
+            int(os.environ["PROFILE_OSL"])
+            if os.environ.get("PROFILE_OSL", "").strip().isdigit()
+            else None
+        ),
+        help=(
+            "Profiling-phase output sequence length (issue #571). When set, it "
+            "overrides --osl for the roofline/profile server ONLY, so its "
+            "torch-profiler trace stays serializable; baseline/optimize phases "
+            "still run at --osl. Default $PROFILE_OSL or unset (reuse --osl)."
+        ),
+    )
     opt.add_argument(
         "--reference-script",
         dest="reference_script",
