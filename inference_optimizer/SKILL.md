@@ -50,7 +50,7 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
 │   ├── kernel-agent.env.sh
 │   ├── geak-config/local.yaml
 │   ├── Magpie/
-│   └── source-mirrors/{Primus-Claw,OOB,InferenceX,TraceLens[,TraceLens-internal]}/
+│   └── source-mirrors/{KernelForge,OOB,InferenceX,TraceLens[,TraceLens-internal]}/
 │       # TraceLens public is required; TraceLens-internal is optional and only
 │       # present when TRACELENS_INTERNAL_ROOT is set (open-source-only otherwise)
 ├── logs/                                 # workspace-shared launcher stdout
