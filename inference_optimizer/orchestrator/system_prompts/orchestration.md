@@ -179,7 +179,11 @@ grid-runner entry):
     a MoE autotune sweep (`benchmark_moe.py` or your own harness), a
     communication-collective timing that needs several cards — dispatch
     `delegate{action_name='specialist', params={needs_gpu: true,
-    gpu_count: N, ...}}` with `gpu_count` 1..(whole machine), your call. It is
+    gpu_count: N, ...}}` with `gpu_count` 1..(whole machine). Pick `gpu_count`
+    by the work: a single-card kernel/config microbench can use `1`, but any
+    specialist that runs a real TP-sharded serving benchmark (`bench=true`)
+    MUST get `gpu_count >= TP` — prefer omitting `gpu_count` so it defaults to
+    the serving TP. It is
     denied with `specialist_gpu_pool_disabled` only if the session was
     explicitly launched with a zero GPU specialist pool. GPU specialists must
     not launch persistent vLLM/SGLang servers, run Magpie benchmark loops, or
@@ -217,7 +221,22 @@ grid-runner entry):
     and there is no per-round grid-size cap: specialist variants fan out up
     to the available `research_lane` / GPU pool leases (the `research_lane`
     scales with the `2 × visible GPU count` ceiling). Prefer the strongest
-    evidence-backed variants. Each variant in the grid is benchmarked
+    evidence-backed variants.
+
+    **Honor `atomic` (do-not-split) proposals.** When a
+    `specialist_done.proposal_set` entry has `"atomic": true`, its
+    `extra_args` / `extra_envs` are a **coupled set that only works
+    together** (e.g. MTP/speculative decoding REQUIRES a paired
+    `--gpu-memory-utilization` reduction so the draft model has headroom).
+    You MUST dispatch that proposal **verbatim as one explore variant** —
+    keep every flag together, do NOT split it into separate variants, drop
+    any flag, or re-author your own partial version. Splitting an atomic
+    proposal silently defeats the fix: each half fails (OOM) or shows no
+    gain on its own, which is exactly how a known-good lever gets falsely
+    written off. Non-atomic proposals may still be curated, merged, deduped,
+    or reordered with your global context as usual.
+
+    Each variant in the grid is benchmarked
     directly and judged by the KEEP threshold — there is no per-variant
     Critic pre-review between the delegate and the executor.
 
@@ -451,6 +470,13 @@ no separate `dynamic_action` / `dynamic_specialist` actions:
   autotune loop on its own leased cards (start its own server on a non-8888
   port, profile, rebench). Prefer `mode=patch + bench=true` (with `needs_gpu`)
   when you want it to *validate* an idea rather than just reason about it.
+  **GPU-count rule: a `bench=true` (or any specialist that must run a real
+  end-to-end serving benchmark) MUST get `gpu_count >= TP` — a TP-sharded
+  model cannot even load on fewer cards.** The safest move is to **omit
+  `gpu_count`** so it defaults to the serving TP; the Coordinator additionally
+  floors a `bench=true` request up to TP. Reserve `gpu_count: 1` strictly for
+  pure single-card microbench / profiling / source-analysis specialists
+  (`bench=false`) that never start a serving server.
 - **`lane`** — `cpu` (research / freeform default) or `gpu` (patch / bench)
   is a prompt-facing work-style hint. It does **not** acquire hardware by
   itself: set `needs_gpu=true` (or `bench=true`, which implies it) to request
@@ -527,14 +553,17 @@ emit_intent({
   payload: {action_name: "specialist", params: {
     scope: "freeform",
     task_description: "Tune the decode attention kernel for our shapes; micro-bench each variant and keep the fastest.",
-    mode: "patch", bench: true, lane: "gpu", needs_gpu: true, gpu_count: 1
+    mode: "patch", bench: true, lane: "gpu", needs_gpu: true
   }}
 })
 ```
 (GPU pool is on by default at whole-machine capacity; `needs_gpu` clears the
 same ceiling as any other scope and serializes against serving via
 `gpu_research_lane`. Send this opportunistically in the idle research window
-to use cards for free.)
+to use cards for free. Note: `gpu_count` is omitted above so it defaults to
+the serving TP — a `bench=true` specialist needs `gpu_count >= TP` to start a
+real server; only set `gpu_count: 1` for a pure single-card microbench that
+does not start serving.)
 
 **Free-form recon wave (`scope=freeform` + `tasks:[...]`) — fan out N at once:**
 ```

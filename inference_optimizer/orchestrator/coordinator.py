@@ -5112,6 +5112,40 @@ class Coordinator:
         # Always attempt stack validation for positive NEEDS_REVIEW kernels,
         # regardless of whether there were pending KEEPs to drain.
         await self._maybe_validate_positive_needs_review_stack()
+        # Q3: skip the full workload sweep (+ chained conc_sweep) on a cyclic
+        # reloop when no validated gain has landed since the last completed
+        # sweep. A sweep is discovery-only and re-measuring the same
+        # current_best across macro-cycles burns hours of GPU time without
+        # advancing the objective. The first sweep (no prior ``last_sweep``)
+        # always runs; the phase still advances via the existing
+        # ``exit_normal_sweep`` (stale conc_sweep_done / budget) so skipping
+        # never stalls SWEEP. Opt out with
+        # INFERENCE_OPTIMIZER_SWEEP_SKIP_WHEN_NO_GAIN=0.
+        if os.environ.get(
+            "INFERENCE_OPTIMIZER_SWEEP_SKIP_WHEN_NO_GAIN", "1"
+        ).strip().lower() not in {"0", "false", "no", "off"}:
+            _last_sweep = getattr(state, "last_sweep", None)
+            prev_sweep = _last_sweep if isinstance(_last_sweep, dict) else {}
+            prev_validated = prev_sweep.get("cumulative_gain_validated_at_record")
+            cur_validated = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+            if (
+                prev_sweep
+                and isinstance(prev_validated, (int, float))
+                and cur_validated <= float(prev_validated) + 1e-6
+            ):
+                log.info(
+                    "SWEEP entry (from=%s): skipping auto-sweep + conc_sweep — no "
+                    "validated gain since last sweep (validated=%.4f%% unchanged "
+                    "since %s); phase will advance via existing exit gate.",
+                    from_phase or "<unknown>",
+                    cur_validated,
+                    prev_sweep.get("ts") or "(unknown)",
+                )
+                self._record_phase_entry_evidence(
+                    auto_sweep_skipped="no_validated_gain_since_last_sweep",
+                    auto_sweep_skipped_validated_gain=cur_validated,
+                )
+                return
         try:
             task = await self._enqueue_internal_sweep_task(
                 reason="phase_entry",
@@ -7589,6 +7623,10 @@ class Coordinator:
         br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
+        # Q4: warm measure-round anchor for the decision-round overtime kill.
+        bwr = float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0)
+        if bwr > 0:
+            params.setdefault("baseline_warm_runtime_sec", bwr)
         kill_ratio = float(
             getattr(
                 self.shared_state,
@@ -9853,6 +9891,31 @@ class Coordinator:
                         gpu_count = int(params.get("gpu_count", default_gpu_count) or default_gpu_count)
                     except (TypeError, ValueError):
                         gpu_count = default_gpu_count
+                    # Q4: a bench / E2E-capable specialist (``bench=true``) starts
+                    # a real TP-sharded server on its leased cards, which is
+                    # impossible with fewer than the serving TP. Floor gpu_count
+                    # up to TP so an explicit ``gpu_count=1`` from the prompt
+                    # cannot strand a bench specialist on a single card. Pure
+                    # microbench / profiling specialists set ``bench=false`` and
+                    # keep their explicit (possibly single-card) count.
+                    bench_raw = params.get("bench", False)
+                    bench = (
+                        bench_raw.strip().lower() in ("1", "true", "yes", "on")
+                        if isinstance(bench_raw, str)
+                        else bool(bench_raw)
+                    )
+                    serving_tp = self._resolve_serving_tp() or 0
+                    if bench and serving_tp > 0 and gpu_count < serving_tp:
+                        log.info(
+                            "specialist %s: bench=true with gpu_count=%d < serving "
+                            "TP=%d; flooring gpu_count to TP (a bench specialist "
+                            "starts a real TP-sharded server and cannot run on "
+                            "fewer cards).",
+                            task.task_id,
+                            gpu_count,
+                            serving_tp,
+                        )
+                        gpu_count = serving_tp
                     # WS2: TTL re-sourced to the WS1 wall budget (the old
                     # ``max_turns × per_turn`` ceiling became ~1000×600 once the
                     # turn cap was lifted). Iron law: the agent's wall-budget
@@ -10678,6 +10741,14 @@ class Coordinator:
             runtime_sec_raw = result.get("subprocess_runtime_sec")
             if isinstance(runtime_sec_raw, (int, float)) and runtime_sec_raw > 0:
                 self.shared_state.baseline_runtime_sec = float(runtime_sec_raw)
+                changed = True
+            # Q4: promote the WARM measure-round wall-clock (client-only, no
+            # boot) as the anchor for the explore decision-round overtime kill.
+            # Present only on the double-run baseline path; absent on the
+            # single-round path (then explore falls back to the cold anchor).
+            warm_runtime_raw = result.get("measure_round_runtime_sec")
+            if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
+                self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
                 changed = True
             # current_best.tput is the comparison ANCHOR every explore /
             # sweep variant is judged against (the Coordinator injects it

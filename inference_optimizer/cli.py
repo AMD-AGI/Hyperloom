@@ -4794,7 +4794,10 @@ def _build_parser() -> argparse.ArgumentParser:
         )
 
     # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio).
-    # Default 1.10: kill a single-variant run once wall-clock exceeds baseline by +10% (outcome=KILLED_OVERTIME).
+    # Default 1.20: kill the decision (warm) run once its post-startup wall-clock exceeds the
+    # baseline warm measure time by +20% (outcome=KILLED_OVERTIME). Q4: the decision round now
+    # reuses a pre-warmed server (client-only), so the anchor is the baseline WARM measure time
+    # and one-time cold-boot / aiter recompile no longer trips the kill.
     # 0 disables (legacy variant_timeout_sec hard cap still applies); overtime kills skip stack rebench.
     def _env_float_or(default: float, env_var: str) -> float:
         """Resolve a float CLI default from an environment variable.
@@ -4837,7 +4840,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="explore_overtime_kill_ratio",
         type=float,
         default=_env_float_or(
-            1.10,
+            1.20,
             "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO",
         ),
         help="Per-variant explore overtime kill: each single-variant "

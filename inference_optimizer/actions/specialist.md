@@ -145,7 +145,7 @@ Each specialist subprocess sees:
   "gap_canonical_id": "<echoed back verbatim>",
   "domain":           "<echoed back verbatim>",
   "proposal_set": [
-    { "name": "...", "extra_args": "...", "extra_envs": {...}, "rationale": "..." },
+    { "name": "...", "extra_args": "...", "extra_envs": {...}, "rationale": "...", "atomic": false },
     ...
   ],
   "patches_written": ["patches/001_cuda_graph_fix.patch"],   // PR-A2+: optional
@@ -174,3 +174,15 @@ not write source patches, Orchestration uses the proposals as the grid
 for the next `delegate{action_name='explore', params={grid: [...]}}`
 round. Each variant inherits `provenance='specialist:<domain>'` for
 audit; the canonical explore ledger dedups by content fingerprint.
+
+**`atomic` (do-not-split) flag.** A specialist sets `"atomic": true` on a
+proposal whose `extra_args` / `extra_envs` are a **coupled set that only
+works together** — e.g. enabling MTP/speculative decoding REQUIRES a paired
+`--gpu-memory-utilization` reduction to leave headroom for the draft model,
+so the two flags must be benched as one variant. When `atomic` is true,
+Orchestration MUST dispatch that proposal **verbatim as a single explore
+variant** — do NOT decompose its flags into separate variants, drop any of
+them, or re-derive your own version with only part of the coupling. Splitting
+an atomic proposal silently defeats the specialist's fix (each half fails or
+shows no gain on its own). Non-atomic proposals may still be curated, merged,
+or reordered as usual.

@@ -819,10 +819,6 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- gpu_type: {_NONE_PLACEHOLDER}")
     if inp.allocated_gpu_ids:
         rows.append("- allocated specialist GPU ids: " + ", ".join(str(g) for g in inp.allocated_gpu_ids))
-        rows.append(
-            "- GPU specialist scope: short experiments / microbenchmarks only; "
-            "do not launch a persistent serving server or Magpie benchmark loop."
-        )
     if inp.tp > 0:
         rows.append(f"- TP: {inp.tp}")
     else:
@@ -1467,6 +1463,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                             "extra_args": "--example-flag value",
                             "extra_envs": {"EXAMPLE_ENV": "1"},
                             "reason": "why this might help the gap",
+                            "atomic": False,
                             "kb_evidence": [],
                             "pr_evidence": [],
                             "source_evidence": [],
@@ -1488,6 +1485,18 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "Field contract:",
         "",
         "- ``proposal_set`` items reuse the §3.4 explore variant schema.",
+        (
+            "- ``atomic`` (bool, default false): set ``true`` when this "
+            "proposal's ``extra_args`` / ``extra_envs`` are a **coupled set "
+            "that only works together** and MUST be benched as one variant "
+            "(e.g. enabling MTP/speculative decoding REQUIRES a paired "
+            "``--gpu-memory-utilization`` reduction so the draft model has "
+            "headroom — split them and each half OOMs or shows no gain). "
+            "Orchestration is instructed to dispatch an ``atomic`` proposal "
+            "verbatim, without splitting, dropping, or re-deriving its flags. "
+            "Put every co-required flag in THIS one entry; do not scatter a "
+            "coupling across several proposals."
+        ),
         (
             f"- ``proposal_set`` MUST contain AT MOST **{inp.max_proposals}** "
             "entries. You are a curator, not a brainstormer: rank candidates "
