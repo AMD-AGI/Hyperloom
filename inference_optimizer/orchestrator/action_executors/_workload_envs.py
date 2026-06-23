@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -44,6 +45,13 @@ from ._server_patcher import (
 from ...model_config_utils import _load_model_config_dict, _model_is_gemma2
 
 log = logging.getLogger(__name__)
+
+_MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:[=\s]+)\S+")
+
+
+def _remove_moe_runner_backend_arg(args: str) -> str:
+    """Remove any existing SGLang MoE runner backend flag from an args string."""
+    return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
 
 # Warn once per process when the accuracy gate is disabled.
 _RUN_EVAL_DISABLED_WARN_EMITTED = False
@@ -125,6 +133,24 @@ def _tracelens_patch_enabled() -> bool:
     return os.environ.get("HYPERLOOM_ENABLE_PATCH", "1").strip() != "0"
 
 
+def _coerce_workload_int_env(env_key: str, raw: str) -> int:
+    """Coerce workload env values, accepting ``CONC`` comma ladders."""
+    text = str(raw or "").strip()
+    if env_key == "CONC" and "," in text:
+        values = [int(tok.strip()) for tok in text.split(",") if tok.strip()]
+        if not values or any(v <= 0 for v in values):
+            raise ValueError(f"{env_key}={raw!r} must contain positive integers")
+        os.environ.setdefault(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS",
+            ",".join(str(v) for v in values),
+        )
+        return values[0]
+    value = int(text)
+    if value <= 0:
+        raise ValueError(f"{env_key}={raw!r} must be positive")
+    return value
+
+
 def default_baseline_config() -> Path:
     """Resolve the shipped Magpie YAML based on ``$FRAMEWORK`` env.
 
@@ -194,6 +220,14 @@ def materialize_config_with_envs(
             different known framework than the run's framework.
     """
     server_args = (extra_server_args or "").strip()
+    operator_server_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
+    if operator_server_args:
+        if server_args:
+            from ._grid_runner import merge_server_args
+
+            server_args = merge_server_args(operator_server_args, server_args)
+        else:
+            server_args = operator_server_args
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
@@ -244,7 +278,7 @@ def materialize_config_with_envs(
     ):
         val = os.environ.get(env_key, "").strip()
         if val:
-            envs[env_key] = int(val)
+            envs[env_key] = _coerce_workload_int_env(env_key, val)
     # RANDOM_RANGE_RATIO is a float feeding the steady-state formulas below; do
     # NOT coerce to int or fractional ratios collapse the prefill estimate.
     r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
@@ -296,9 +330,9 @@ def materialize_config_with_envs(
             )
         envs["ROCR_VISIBLE_DEVICES"] = derived
 
-    isl_val = int(os.environ.get("ISL") or envs.get("ISL") or 256)
-    osl_val = int(os.environ.get("OSL") or envs.get("OSL") or 256)
-    conc_val = int(os.environ.get("CONC") or envs.get("CONC") or 8)
+    isl_val = int(envs.get("ISL") or 256)
+    osl_val = int(envs.get("OSL") or 256)
+    conc_val = int(envs.get("CONC") or 8)
 
     # Steady-state window for profiling configs (detected by PROFILE env or
     # ``profiler.torch_profiler.enabled``). Formulas match the TraceLens
@@ -356,11 +390,23 @@ def materialize_config_with_envs(
         # Default-on (HYPERLOOM_ENABLE_PATCH=0 disables); skip for atom (native
         # profiler, no patch set).
         tracelens_patch_ok = False
-        if _tracelens_patch_enabled() and not is_atom:
+        patch_attempted = _tracelens_patch_enabled() and not is_atom
+        if patch_attempted:
             if "vllm" in fw:
                 tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
             else:
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
+            if not tracelens_patch_ok:
+                envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
+                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = (
+                    "tracelens_runtime_patch_unavailable"
+                )
+                log.warning(
+                    "TraceLens runtime patch unavailable for framework=%s; "
+                    "profile will omit annotation-only flags and roofline "
+                    "analysis may be degraded.",
+                    fw or "<unset>",
+                )
         if is_atom:
             # atom's profiler records the entire bench-client run (no internal
             # window); its profile window lives only in Magpie's atom_mi*x.sh
@@ -484,6 +530,11 @@ def materialize_config_with_envs(
 
         framework_env = server_args_env_name(bench.get("framework"))
         existing = str(envs.get(framework_env, "")).strip()
+        if framework_env == "EXTRA_SGLANG_ARGS" and "--moe-runner-backend" in str(server_args):
+            # For MoE backend exploration/tuning, the candidate value must
+            # replace the baseline's injected default (usually triton) rather
+            # than relying on duplicate last-wins flags.
+            existing = _remove_moe_runner_backend_arg(existing)
         if existing:
             envs[framework_env] = merge_server_args(existing, server_args)
         else:
