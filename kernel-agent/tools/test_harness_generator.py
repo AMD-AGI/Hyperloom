@@ -66,6 +66,57 @@ def test_get_imports():
     assert any("import torch" in i for i in imports)
 
 
+def test_get_imports_dedents_function_local():
+    """Regression: ast.walk yields imports nested inside functions with their
+    source indentation; emitted verbatim at the harness module top they raise
+    'unexpected indent'. get_imports must dedent them to valid top-level imports.
+    """
+    import ast as _ast
+
+    src = (
+        "import torch\n"
+        "def f():\n"
+        "    import math\n"
+        "    return math.pi\n"
+    )
+    a = hg.BenchmarkAnalyzer(src)
+    imports = a.get_imports()
+    assert "import math" in imports, imports
+    # Joined imports must form valid top-level Python (no IndentationError).
+    _ast.parse("\n".join(imports))
+
+
+def test_aiter_harness_recognizes_perftest(tmp_path):
+    """Regression: aiter op_tests that time the op with @perftest (not
+    @benchmark) must be picked up by the aiter idiom path and emit a valid
+    harness (previously they fell through to the weaker generic path)."""
+    import ast as _ast
+
+    src = (
+        "import torch\n"
+        "import aiter\n"
+        "from aiter.test_common import perftest, run_perftest\n"
+        "@perftest\n"
+        "def bench_op(m, n, k, dtype):\n"
+        "    x = torch.randn(m, k, dtype=dtype)\n"
+        "    return run_perftest(aiter.gemm, x)\n"
+    )
+    bench = tmp_path / "test_op.py"
+    bench.write_text(src, encoding="utf-8")
+    a = hg.BenchmarkAnalyzer(src)
+    out = hg._try_generate_aiter_harness(
+        analyzer=a,
+        decorated=a.get_decorated_functions(),
+        candidate={"input_shapes": {"M": 64, "N": 64, "K": 64}, "precision": "bf16"},
+        source_file=str(bench),
+        benchmark_path=bench,
+        out_dir=tmp_path,
+        log=lambda _m: None,
+    )
+    assert out is not None
+    _ast.parse(Path(out.harness_path).read_text(encoding="utf-8"))
+
+
 def test_get_decorated_functions():
     a = hg.BenchmarkAnalyzer(BENCH_SRC)
     dec = a.get_decorated_functions()

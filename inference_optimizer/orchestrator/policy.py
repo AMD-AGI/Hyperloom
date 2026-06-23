@@ -112,12 +112,10 @@ class PolicyDenied(RuntimeError):
         self.hint = hint
 
 
-FP8_ONLY_ACTIONS: frozenset[str] = frozenset(
-    {
-        "gemm_tuning",
-        "run_gemm_tuning",
-    }
-)
+_GEMM_TUNING_ACTIONS: frozenset[str] = frozenset({"gemm_tuning", "run_gemm_tuning"})
+
+# Legacy constant kept for backward compat; dynamic check in _validate_fp8_only_action.
+FP8_ONLY_ACTIONS: frozenset[str] = _GEMM_TUNING_ACTIONS
 
 
 # Per-action delegate source allowlist (action_name → source roles); unlisted actions fall through to the general delegate rules.
@@ -1269,7 +1267,11 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject GEMM tuning for non-FP8 sessions (it drives FP8 block-scale GEMM dispatch; the handler repeats the check).
+        """Reject GEMM tuning for non-FP8 sessions when using GEAK backend.
+
+        When GEMM_TUNING_BACKEND=forge (or KERNEL_OPT_BACKEND_ORDER starts
+        with forge), the FP8 gate is lifted since forge-gemm-tune supports
+        bf16/fp4/vLLM natively and handles eligibility internally.
 
         Args:
             action_name (str): the action name being checked.
@@ -1277,11 +1279,16 @@ class PolicyGate:
                 error hint.
 
         Raises:
-            PolicyDenied: when an FP8-only action is requested but the session
-                precision is not ``fp8``.
+            PolicyDenied: when a GEAK-only GEMM tuning action is requested but
+                the session precision is not ``fp8``.
         """
-        if not action_name or action_name not in FP8_ONLY_ACTIONS:
+        if not action_name or action_name not in _GEMM_TUNING_ACTIONS:
             return
+        # Dynamically check if forge backend lifts the FP8 gate.
+        from .kernel_request_handlers import _resolve_gemm_tuning_backend
+
+        if _resolve_gemm_tuning_backend({}) == "forge":
+            return  # forge handles eligibility internally; no FP8 gate.
         state = self.shared_state
         if state is None:
             return
@@ -1294,8 +1301,8 @@ class PolicyGate:
             hint=(
                 f"intent_kind={intent_kind!r}: GEAK GEMM tuning only applies "
                 "to FP8 block-scale workloads. Set PRECISION=fp8 / "
-                "--precision fp8, or skip gemm_tuning and continue with "
-                "non-FP8 actions."
+                "--precision fp8, or use GEMM_TUNING_BACKEND=forge for "
+                "broader precision support."
             ),
         )
 

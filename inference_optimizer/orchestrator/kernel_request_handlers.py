@@ -19,7 +19,9 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -1044,22 +1046,35 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
         A tuple of ``(returncode, stdout, stderr)``.
     """
 
-    def _run() -> subprocess.CompletedProcess[str]:
+    def _run() -> tuple[int, str, str]:
         """Run the command synchronously in a worker thread.
 
         Copies the current environment, injects the Ray GCS address when running
         in multi-node mode, and prepends the venv ``bin`` directory to ``PATH``
         before invoking the command with output capture and the timeout.
 
+        Launches the child in its own POSIX session and, on timeout, reaps the
+        WHOLE process group so a hung grandchild (the claude CLI / oob / curl
+        holding a stalled LLM streaming socket) dies with the wrapper instead of
+        being orphaned — the Sandbox-hang RCA left such grandchildren running,
+        keeping the pod alive and the GPU idle. Mirrors ``subprocess.run``'s
+        contract: captures stdout/stderr and re-raises ``TimeoutExpired``.
+
         Returns:
-            subprocess.CompletedProcess[str]: The completed process with captured
-                text stdout/stderr.
+            tuple[int, str, str]: ``(returncode, stdout, stderr)``.
+
+        Raises:
+            subprocess.TimeoutExpired: When the command exceeds ``timeout_sec``.
         """
         env = os.environ.copy()
         from .action_executors._multi_node_env import (
             is_multi_node,
             ray_gcs_address_from_state,
             dynamo_ssh_env_from_state,
+        )
+        from .action_executors._subprocess_kill import (
+            kill_my_spawned_server,
+            new_session_kwargs,
         )
 
         if is_multi_node():
@@ -1073,16 +1088,32 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
             if addr:
                 env.setdefault("RAY_ADDRESS", addr)
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        return subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_sec,
             env=env,
+            **new_session_kwargs(),
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            # Reap the whole tree, then drain whatever partial output landed.
+            kill_my_spawned_server(proc)
+            try:
+                proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                # The process group was already signalled; do not block cleanup
+                # waiting for a wedged child to flush pipes.
+                pass
+            raise
+        finally:
+            # Defense in depth: never leave a descendant of this call running.
+            kill_my_spawned_server(proc)
+        return proc.returncode, stdout or "", stderr or ""
 
-    proc = await asyncio.to_thread(_run)
-    return proc.returncode, proc.stdout or "", proc.stderr or ""
+    return await asyncio.to_thread(_run)
 
 
 def _normalize_precision(value: Any) -> str:
@@ -1202,20 +1233,613 @@ exec {shlex.quote(runner)}
     return path
 
 
-async def run_gemm_tuning_handler(
+def _resolve_gemm_tuning_backend(payload: dict) -> str:
+    """Resolve GEMM tuning backend: forge or geak.
+
+    Precedence:
+    1. payload['gemm_tuning_backend']
+    2. GEMM_TUNING_BACKEND env var
+    3. Default: 'forge'
+    """
+    raw = str(
+        payload.get("gemm_tuning_backend")
+        or os.environ.get("GEMM_TUNING_BACKEND")
+        or ""
+    ).strip().lower()
+    if raw in ("forge", "geak"):
+        return raw
+    return "forge"
+
+
+def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
+    """Parse FORGE_GEMM_TUNE_RESULT_BEGIN/END sentinel block from stdout."""
+    m = re.search(
+        r"FORGE_GEMM_TUNE_RESULT_BEGIN\s*\n(.*?)\nFORGE_GEMM_TUNE_RESULT_END",
+        stdout,
+        re.DOTALL,
+    )
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _read_forge_result_json(workspace: Path) -> dict[str, Any]:
+    """Read forge's on-disk ``result.json`` from the tuning workspace.
+
+    forge always writes the full report (including ``tuners_skipped``) to
+    ``<output_dir>/result.json``, even when the stdout sentinel omits some
+    fields. Returns ``{}`` when missing or unparseable.
+    """
+    try:
+        path = workspace / "result.json"
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(data, dict):
+                return data
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return {}
+
+
+def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
+    """Join forge per-tuner skip reasons into one concise human-readable string."""
+    if not isinstance(tuners_skipped, list):
+        return ""
+    parts: list[str] = []
+    for entry in tuners_skipped:
+        if not isinstance(entry, dict):
+            continue
+        reason = str(entry.get("skip_reason") or "").strip()
+        if not reason:
+            continue
+        tuner = str(entry.get("tuner") or "").strip()
+        parts.append(f"{tuner}: {reason}" if tuner else reason)
+    return "; ".join(parts)
+
+
+def _forge_gemm_tune_available() -> bool:
+    """Check if forge-gemm-tune CLI is importable or on PATH."""
+    if shutil.which("forge-gemm-tune"):
+        return True
+    try:
+        spec = importlib.util.find_spec("forge_gemm_tune")
+        return spec is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
+
+
+def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
+    """Resolve the actual runtime precision and quant_type for forge tuning.
+
+    Priority:
+    1. Explicit payload override
+    2. --quantization from current_best server args (actual runtime)
+    3. state.precision (session-level, may be stale)
+    4. Default: bf16
+
+    Returns (precision, quant_type) tuple.
+    """
+    from .roofline_ceiling import _parse_server_arg, resolve_runtime_workload
+
+    # Explicit override from payload
+    if payload.get("precision"):
+        precision = _normalize_precision(payload["precision"])
+        quant_type = str(payload.get("quant_type") or "auto").strip()
+        return precision, quant_type
+
+    # Resolve from actual server args (baseline yaml + current_best overlay).
+    current_best = getattr(state, "current_best", None) or {}
+    try:
+        server_args = resolve_runtime_workload(state, arm="current_best").server_args
+    except Exception:  # noqa: BLE001 - best-effort fallback for partial state/test doubles
+        server_args = ""
+        if isinstance(current_best, dict):
+            server_args = str(current_best.get("extra_server_args") or "")
+    # Check all env sources for per-token signal: current_best.extra_envs,
+    # reference_envs, and baseline yaml envs.
+    extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
+    ref_envs = dict(getattr(state, "reference_envs", None) or {})
+    per_token_signal = (
+        _truthy_env_value(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
+        or _truthy_env_value(ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
+    )
+
+    quantization_arg = _parse_server_arg(server_args, "--quantization").lower()
+
+    if quantization_arg == "fp8":
+        precision = "fp8"
+        # Only explicit per-token env should route to per_token.
+        # Otherwise keep auto so forge can inspect kernel_signature_log
+        # for QuantType.per_Token / blockscale detection.
+        if per_token_signal:
+            quant_type = "per_token"
+        else:
+            quant_type = "auto"
+        return precision, quant_type
+
+    if quantization_arg in ("fp4", "mxfp4"):
+        return quantization_arg, "fp4"
+
+    # Fall back to session precision
+    precision = _normalize_precision(state.precision)
+    if not precision:
+        precision = "bf16"
+    quant_type = str(payload.get("quant_type") or "auto").strip()
+    return precision, quant_type
+
+
+def _truthy_env_value(value: Any) -> bool:
+    """Return True for common env truthy values."""
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_forge_server_log(state, session_dir: Path) -> str:
+    """Find the server log matching the current runtime configuration.
+
+    Priority: current_best workspace (matches the resolved server args)
+    → baseline workspace → most recent server.log under runs/.
+    """
+    # 1. current_best workspace — matches the runtime args we resolved precision from.
+    current_best = getattr(state, "current_best", None) or {}
+    if isinstance(current_best, dict):
+        cb_workspace = str(current_best.get("workspace") or "").strip()
+        if cb_workspace:
+            log_path = Path(cb_workspace) / "server.log"
+            if log_path.is_file():
+                return str(log_path)
+
+    # 2. Baseline workspace — the initial server run.
+    last_baseline = getattr(state, "last_baseline", None) or {}
+    if isinstance(last_baseline, dict):
+        bl_workspace = last_baseline.get("workspace") or ""
+        if bl_workspace:
+            log_path = Path(bl_workspace) / "server.log"
+            if log_path.is_file():
+                return str(log_path)
+
+    # 3. Fallback: check known run subdirs (bounded, not recursive glob).
+    runs_dir = session_dir / "runs"
+    if runs_dir.is_dir():
+        best: Path | None = None
+        best_mtime: float = 0.0
+        for sub in ("baseline", "explore", "gemm_tuning"):
+            sub_dir = runs_dir / sub
+            if not sub_dir.is_dir():
+                continue
+            for log in sub_dir.glob("*/server.log"):
+                try:
+                    mt = log.stat().st_mtime
+                except OSError:
+                    continue
+                if mt > best_mtime:
+                    best_mtime = mt
+                    best = log
+        if best is not None:
+            return str(best)
+
+    return ""
+
+
+def _is_forge_compatible_shapes_json(path: Path) -> bool:
+    """Validate that a shapes JSON file matches forge's expected format.
+
+    Forge expects: [{"M": int, "N": int, "K": int}, ...]
+    or {"shapes": [{"M": int, "N": int, "K": int}, ...]}
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            data = data.get("shapes", [])
+        if not isinstance(data, list) or not data:
+            return False
+        sample = data[0]
+        if not isinstance(sample, dict):
+            return False
+        # Must have M/N/K keys (case-insensitive check)
+        keys = {k.upper() for k in sample}
+        return {"M", "N", "K"}.issubset(keys)
+    except (json.JSONDecodeError, OSError, TypeError):
+        return False
+
+
+def _resolve_forge_shapes(state, session_dir: Path) -> str:
+    """Find TraceLens shapes JSON if available and in forge-compatible format.
+
+    Forge dense tuners expect: [{"M": int, "N": int, "K": int}, ...]
+    Only passes files that match this schema; incompatible formats are
+    silently skipped so forge falls back to config.json shape derivation.
+    """
+    last_trace = getattr(state, "last_trace_analyze", None) or {}
+    if not isinstance(last_trace, dict):
+        return ""
+
+    candidates: list[str] = []
+
+    # Prefer explicit artifact fields when newer TraceLens versions expose them.
+    for key in ("shapes_json", "shapes_path"):
+        raw = str(last_trace.get(key) or "").strip()
+        if raw:
+            candidates.append(raw)
+    artifact_paths = last_trace.get("artifact_paths")
+    if isinstance(artifact_paths, dict):
+        for key in ("shapes_json", "shapes", "gemm_shapes_json"):
+            raw = str(artifact_paths.get(key) or "").strip()
+            if raw:
+                candidates.append(raw)
+    # Fallback: check beside candidates_path.
+    candidates_path_str = last_trace.get("candidates_path") or ""
+    if candidates_path_str:
+        cand_file = Path(candidates_path_str)
+        if cand_file.is_file():
+            shapes_file = cand_file.parent / "shapes.json"
+            candidates.append(str(shapes_file))
+
+    for candidate in candidates:
+        p = Path(candidate)
+        if p.is_file() and _is_forge_compatible_shapes_json(p):
+            return str(p)
+
+    return ""
+
+
+# Map the resolved (precision, quant_type) to the aiter untuned-GEMM CSV that
+# the specialist phase already records under each worktree. fp8 "auto" resolves
+# to blockscale to match forge's own _resolve_quant_type default.
+_FORGE_UNTUNED_CSV_BY_QUANT: dict[str, str] = {
+    "auto": "a8w8_blockscale_untuned_gemm.csv",
+    "blockscale": "a8w8_blockscale_untuned_gemm.csv",
+    "per_token": "a8w8_untuned_gemm.csv",
+    "per_tensor": "a8w8_untuned_gemm.csv",
+    "bpreshuffle": "a8w8_bpreshuffle_untuned_gemm.csv",
+    "fp4": "a4w4_blockscale_untuned_gemm.csv",
+    "mxfp4": "a4w4_blockscale_untuned_gemm.csv",
+}
+
+
+def _csv_has_data_rows(path: Path) -> bool:
+    """Return True when ``path`` is a CSV carrying at least one data row.
+
+    The aiter recorder leaves header-only or empty files for quant types the
+    server never exercised; those must not be passed to forge as a real shape
+    source.
+    """
+    try:
+        with path.open(encoding="utf-8", errors="replace") as f:
+            header = f.readline()
+            if "M" not in header.upper():
+                return False
+            for line in f:
+                if line.strip():
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: str) -> str:
+    """Find an aiter untuned-GEMM CSV recorded by the specialist phase.
+
+    Dense fp8/fp4 forge tuners (a8w8*/a4w4*) skip themselves unless real GEMM
+    shapes are supplied. Hyperloom's specialist runs already write these shapes
+    to ``runs/specialist/<hash>/worktree/aiter/configs/*_untuned_gemm.csv`` in
+    forge's ``M,N,K`` format, but the orchestrator never wired them in -- so the
+    overwhelming majority of fp8 sglang sessions were skipped. This resolver
+    picks the newest non-empty CSV matching the resolved quant type.
+
+    Returns the CSV path, or "" when none is available (bf16 derives shapes from
+    config.json and needs no CSV).
+    """
+    precision = (precision or "").strip().lower()
+    quant_type = (quant_type or "").strip().lower()
+
+    fname = _FORGE_UNTUNED_CSV_BY_QUANT.get(quant_type)
+    if fname is None:
+        if precision == "fp8":
+            fname = "a8w8_blockscale_untuned_gemm.csv"
+        elif precision in ("fp4", "mxfp4"):
+            fname = "a4w4_blockscale_untuned_gemm.csv"
+        else:
+            return ""
+
+    specialist_dir = session_dir / "runs" / "specialist"
+    if not specialist_dir.is_dir():
+        return ""
+
+    best: Path | None = None
+    best_mtime = -1.0
+    for csv_path in specialist_dir.glob(f"*/worktree/aiter/configs/{fname}"):
+        if not _csv_has_data_rows(csv_path):
+            continue
+        try:
+            mtime = csv_path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best = csv_path
+
+    return str(best) if best is not None else ""
+
+
+def _path_is_existing_file(value: str) -> bool:
+    """Safe ``Path.is_file()`` that never raises on an over-long pathname.
+
+    A caller can hand us inline JSON content instead of a path. ``Path(...)``
+    accepts any string, but ``is_file()`` raises ``OSError(ENAMETOOLONG)`` when
+    a path component exceeds the filesystem limit, which previously crashed the
+    forge dense tuner instantly. Treat that (and any OSError) as "not a file".
+    """
+    try:
+        return Path(value).is_file()
+    except OSError:
+        return False
+
+
+def _normalize_tokens(value: Any) -> str:
+    """Return a clean comma-separated token string for forge's ``--tokens``.
+
+    forge parses ``--tokens`` as ``int(t) for t in value.split(",")``. A caller
+    that passes a list (or its string form ``"[4, 8, 64]"``) makes forge choke
+    with ``Invalid --tokens value: invalid literal for int(): '[64]'``. Accept
+    lists and bracketed strings; emit a bare comma-separated list.
+    """
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (list, tuple)):
+        items = value
+    else:
+        text = str(value).strip().strip("[](){}")
+        if not text:
+            return ""
+        items = [p for p in text.split(",")]
+    out: list[str] = []
+    for it in items:
+        s = str(it).strip().strip("'\"")
+        if not s:
+            continue
+        try:
+            out.append(str(int(float(s))))
+        except (TypeError, ValueError):
+            continue
+    return ",".join(out)
+
+
+def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
+    """Return a usable shapes-JSON *file path*, materializing inline content.
+
+    The orchestration layer sometimes passes the GEMM shapes as inline JSON
+    (a list/dict, or its string form) in ``shapes_json`` instead of a file
+    path. forge treats ``shapes_json`` strictly as a path and crashes with
+    ``OSError(ENAMETOOLONG)`` on the long pseudo-path. Normalize here:
+
+    - existing file path -> returned unchanged
+    - list/dict, or a string that parses as JSON -> written to
+      ``<workspace>/forge_shapes.json`` and that path returned
+    - anything else (empty / unparseable / non-existent path) -> ""
+    """
+    if value in (None, ""):
+        return ""
+
+    # Already-parsed inline content.
+    if isinstance(value, (list, dict)):
+        parsed: Any = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return ""
+        # A real, existing path wins.
+        if _path_is_existing_file(text):
+            return text
+        # Inline JSON content (possibly Python-repr with single quotes).
+        if text[0] in "[{":
+            try:
+                parsed = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                try:
+                    import ast
+
+                    parsed = ast.literal_eval(text)
+                except (ValueError, SyntaxError):
+                    return ""
+        else:
+            # Non-JSON string that is not an existing file: unusable.
+            return ""
+
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        out = workspace / "forge_shapes.json"
+        out.write_text(json.dumps(parsed), encoding="utf-8")
+        return str(out)
+    except (OSError, TypeError, ValueError):
+        return ""
+
+
+async def _run_forge_gemm_tuning(
     payload: dict,
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Run GEAK's FP8 block-scale GEMM tuning workflow (separate from ``run_optimization``; tunes GEMM dispatch before source-level rewrites).
+    """Deterministic GEMM tuning via forge-gemm-tune CLI.
 
-    Args:
-        payload: The GEMM-tuning request payload.
-        session_dir: Session directory for workspace and state.
-
-    Returns:
-        A ``HandlerResult`` describing the tuning outcome.
+    Supports bf16/fp8/fp4 + sglang/vllm. Only micro-benchmarks;
+    returns recommended_env for Hyperloom E2E validation.
     """
+    from .shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+
+    if not _forge_gemm_tune_available():
+        forge_path = os.environ.get("FORGE_GEMM_TUNE_PATH", "")
+        return {
+            "status": "failed",
+            "error_class": "forge_gemm_tune_not_found",
+            "error": (
+                "forge-gemm-tune CLI not found. Install via "
+                "'pip install -e <path>/forge_gemm_tune' or set FORGE_GEMM_TUNE_PATH."
+                f" (checked: FORGE_GEMM_TUNE_PATH={forge_path!r})"
+            ),
+            "backend": "forge",
+        }
+
+    # Resolve precision from actual runtime (not just session-level state)
+    precision, quant_type = _resolve_forge_precision_and_quant(state, payload)
+    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
+
+    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    model_path = str(
+        payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or ""
+    ).strip()
+    if not model_path:
+        return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
+
+    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
+    conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64)
+    gpu_type = str(
+        payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x"
+    ).strip().lower()
+    tokens = _normalize_tokens(payload.get("tokens"))
+    # Default mp = all visible GPUs (server is stopped during tuning).
+    from .policy import detect_gpu_count
+
+    detected_gpus = detect_gpu_count() or tp
+    mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)
+
+    # Resolve server log for 1-stage ASM detection
+    kernel_sig_log = str(payload.get("kernel_signature_log") or "").strip()
+    if not kernel_sig_log:
+        kernel_sig_log = _resolve_forge_server_log(state, session_dir)
+
+    # Resolve TraceLens shapes if available. Normalize first: callers sometimes
+    # pass inline JSON content instead of a path, which makes forge crash with
+    # OSError(ENAMETOOLONG); materialize it to a real file (or drop it).
+    shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
+    if not shapes_json:
+        shapes_json = _resolve_forge_shapes(state, session_dir)
+
+    # Dense fp8/fp4 tuners need real GEMM shapes. When TraceLens exposes no
+    # shapes JSON, fall back to the aiter untuned-GEMM CSVs the specialist phase
+    # already recorded; without this the dense tuner skips itself.
+    untuned_csv = str(payload.get("untuned_csv") or "").strip()
+    if untuned_csv and not _path_is_existing_file(untuned_csv):
+        # Guard against inline content / stale paths handed in as untuned_csv.
+        untuned_csv = ""
+    if not untuned_csv and not shapes_json:
+        untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type)
+
+    timeout = _gemm_tuning_timeout_sec(payload)
+    session_max_min = float(getattr(state, "max_minutes", 0) or 0)
+    input_payload = {
+        "model_path": model_path,
+        "framework": framework,
+        "precision": precision,
+        "quant_type": quant_type,
+        "gpu_type": gpu_type,
+        "tp": tp,
+        "conc": conc,
+        "mp": mp,
+        "output_dir": str(workspace),
+        "timeout": timeout,
+        # Global timeout ensures the whole session (all tuners combined) stays
+        # within the budget. Forge skips lower-priority tuners if time runs out.
+        "global_timeout": timeout,
+        "skip_gpu_check": True,
+        "tokens": tokens,
+        "untuned_csv": untuned_csv,
+        "shapes_json": shapes_json,
+        "tunableop_input": str(payload.get("tunableop_input") or ""),
+        "kernel_signature_log": kernel_sig_log,
+        "tuner": str(payload.get("tuner") or ""),
+        # Thorough mode: exhaustive search when session budget allows (>= 24h)
+        # and enough GPUs are available (>= 4) to parallelize the sweep.
+        "thorough": bool(session_max_min >= 1440 and mp >= 4),
+    }
+    input_json = workspace / "forge_gemm_tuning_input.json"
+    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
+    cmd = [
+        "python3",
+        str(_kernel_agent_tool_path("forge_gemm_tuning.py")),
+        "--input-json",
+        str(input_json),
+    ]
+
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
+        result = _parse_forge_gemm_sentinel(stdout)
+        if result is None:
+            result = _shape_tool_result(rc, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        # Reaped by the process-group kill in _run_subprocess; shape a failed
+        # result instead of letting TimeoutExpired stall the coordinator tick.
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        result = {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
+        }
+
+    result.setdefault("backend", "forge")
+    # Tag the tuning engine so the breakdown's ``collect_gemm_tuning`` attributes
+    # this run to forge instead of falling back to its ``geak`` default (the
+    # GEAK path sets ``engine`` too). Without this, forge runs recorded into
+    # ``gemm_tuning_attempts`` are mis-counted as the GEAK source.
+    result.setdefault("engine", "forge")
+    result.setdefault("workspace", str(workspace))
+    result.setdefault("precision", precision)
+    result.setdefault("framework", framework)
+    result.setdefault("model_path", model_path)
+
+    # Surface why forge skipped: forge records per-tuner skip reasons in its
+    # on-disk result.json, but the stdout sentinel can omit them, leaving the
+    # session state with an unexplained "skipped". Merge from disk and derive a
+    # concise top-level skip_reason so state + breakdown show the cause.
+    if not result.get("tuners_skipped"):
+        disk_skipped = _read_forge_result_json(workspace).get("tuners_skipped")
+        if disk_skipped:
+            result["tuners_skipped"] = disk_skipped
+    if not result.get("skip_reason"):
+        reason = _derive_gemm_skip_reason(result.get("tuners_skipped"))
+        if reason:
+            result["skip_reason"] = reason
+
+    # Bridge forge schema → coordinator-consumable schema:
+    # forge returns micro_decision="candidate" with recommended_env;
+    # translate to decision="KEEP" + extra_envs for the promote path.
+    micro = str(result.get("micro_decision") or "").strip().lower()
+    if micro == "candidate" and result.get("recommended_env"):
+        result.setdefault("decision", "KEEP")
+        result.setdefault("extra_envs", dict(result["recommended_env"]))
+        # Derive best_speedup from tuners_run if not already set.
+        if "best_speedup" not in result:
+            best = 1.0
+            for t in result.get("tuners_run") or []:
+                if isinstance(t, dict):
+                    sp = float(t.get("best_micro_speedup") or 1.0)
+                    if sp > best:
+                        best = sp
+            if best > 1.0:
+                result["best_speedup"] = best
+        # Flag that E2E validation is still needed (micro-only).
+        result.setdefault("requires_e2e_validation", True)
+    elif micro in ("no_improvement", "skipped"):
+        result.setdefault("decision", "REVERT")
+    elif micro == "failed":
+        result.setdefault("decision", "REVERT")
+        result.setdefault("status", "failed")
+
+    return result
+
+
+async def _run_geak_gemm_tuning(
+    payload: dict,
+    *,
+    session_dir: Path,
+) -> HandlerResult:
+    """Legacy GEAK FP8 block-scale GEMM tuning (sglang-only)."""
     from .shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -1303,11 +1927,20 @@ async def run_gemm_tuning_handler(
         str(input_json),
     ]
 
-    rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_tuning_timeout_sec(payload))
-    result = _shape_tool_result(rc, stdout, stderr)
-    # Tuning engine provenance: this handler drives GEAK's FP8 tuner. A future
-    # forge-backed tuner sets engine="forge" from its own handler; downstream
-    # consumers split tuning stats by this label without restructuring.
+    _gemm_timeout = _gemm_tuning_timeout_sec(payload)
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_timeout)
+        result = _shape_tool_result(rc, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        # Reaped by the process-group kill in _run_subprocess; shape a failed
+        # result instead of letting TimeoutExpired stall the coordinator tick.
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        result = {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {_gemm_timeout}s: {cmd_repr[:1500]}",
+        }
+    result.setdefault("backend", "geak")
     result.setdefault("engine", "geak")
     result.setdefault("workspace", str(workspace))
     result.setdefault("precision", precision)
@@ -1315,6 +1948,99 @@ async def run_gemm_tuning_handler(
     result.setdefault("model_path", model_path)
     result.setdefault("benchmark_script", benchmark_script)
     return result
+
+
+async def run_gemm_tuning_handler(
+    payload: dict,
+    *,
+    session_dir: Path,
+) -> HandlerResult:
+    """Run GEMM tuning via forge-gemm-tune (deterministic) or GEAK (legacy).
+
+    Backend selection:
+    1. payload['gemm_tuning_backend']
+    2. GEMM_TUNING_BACKEND env var
+    3. Default: 'forge'
+
+    Args:
+        payload: The GEMM-tuning request payload.
+        session_dir: Session directory for workspace and state.
+
+    Returns:
+        A ``HandlerResult`` describing the tuning outcome.
+    """
+    backend = _resolve_gemm_tuning_backend(payload)
+    log.info("run_gemm_tuning: backend=%s", backend)
+
+    if backend == "forge":
+        result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
+    else:
+        result = await _run_geak_gemm_tuning(payload, session_dir=session_dir)
+    # Full-trace: record this run as a gemm_tuning audit row, backfilled into the
+    # trace as a ``gemm_tuning:<engine>`` span so the deterministic tuner is
+    # attributed to its own source. Best-effort; never breaks the run.
+    _trace_gemm_tuning_run(result, session_dir=session_dir)
+    return result
+
+
+def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
+    """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run.
+
+    Mirrors :func:`_trace_kernel_attempt_steps`: distils the run result into a
+    compact source-attribution row (engine, decision, speedup, per-tuner
+    summary) and appends it to ``reports/trace/gemm_tuning.jsonl``. The Langfuse
+    emitter backfills it as a ``gemm_tuning:<engine>`` span under the
+    ``gemm_tuning`` agent. Best-effort end to end: any read/serialise/write
+    failure degrades to a debug log and is swallowed.
+
+    Args:
+        result: The GEMM-tuning handler result envelope.
+        session_dir: Session directory the audit row is appended under.
+    """
+    if not isinstance(result, dict):
+        return
+    from datetime import datetime, timezone
+
+    from ..session_paths import gemm_tuning_steps_path
+
+    engine = str(result.get("engine") or result.get("backend") or "").strip().lower() or "unknown"
+    tuners: list[dict[str, Any]] = []
+    for t in result.get("tuners_run") or []:
+        if not isinstance(t, dict):
+            continue
+        tuners.append(
+            {
+                "tuner": t.get("tuner") or t.get("name"),
+                "best_micro_speedup": t.get("best_micro_speedup"),
+                "kept": t.get("kept"),
+            }
+        )
+    row = {
+        "kind": "gemm_tuning",
+        "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        "engine": engine,
+        "backend": result.get("backend"),
+        "status": result.get("status"),
+        "decision": result.get("decision"),
+        "micro_decision": result.get("micro_decision"),
+        "best_speedup": result.get("best_speedup"),
+        "precision": result.get("precision"),
+        "framework": result.get("framework"),
+        "gpu_type": result.get("gpu_type"),
+        "tuned_file": result.get("tuned_file"),
+        "workspace": result.get("workspace"),
+        "requires_e2e_validation": result.get("requires_e2e_validation"),
+        "tuners_run": tuners,
+        "error_class": result.get("error_class"),
+    }
+    row = {k: v for k, v in row.items() if v is not None}
+    try:
+        path = gemm_tuning_steps_path(session_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError:
+        log.debug("full-trace: gemm_tuning audit append failed", exc_info=True)
 
 
 async def trace_analyze_handler(
@@ -1417,9 +2143,20 @@ async def trace_analyze_handler(
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
     _disc_started = time.monotonic()
-    rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
+        result = _shape_tool_result(rc, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        # Reaped by the process-group kill in _run_subprocess (an in-process
+        # TraceLens SDK stream that stalled is now also bounded client-side);
+        # shape a failed result instead of stalling the coordinator tick.
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        result = {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
+        }
     _disc_duration_sec = round(time.monotonic() - _disc_started, 3)
-    result = _shape_tool_result(rc, stdout, stderr)
     artifacts = result.get("artifact_paths") if isinstance(result, dict) else None
     if isinstance(artifacts, dict) and artifacts.get("kernel_candidates"):
         result["candidates_path"] = artifacts["kernel_candidates"]
@@ -1513,6 +2250,37 @@ async def trace_analyze_handler(
     return result
 
 
+def _exists_with_retry(
+    path: str | Path,
+    *,
+    attempts: int = 5,
+    delay_sec: float = 0.5,
+) -> bool:
+    """Check ``path`` existence, retrying briefly to absorb storage latency.
+
+    On shared/network filesystems (e.g. wekafs) a file that was just written can
+    take a moment to become visible to another client, so a single
+    :meth:`Path.exists` immediately after the write may spuriously report
+    missing. Retry a handful of times with a short pause before giving up.
+
+    Args:
+        path: Filesystem path to check.
+        attempts: Total number of existence checks to perform (>= 1).
+        delay_sec: Seconds to sleep between checks.
+
+    Returns:
+        ``True`` as soon as the path is visible, else ``False`` after all
+        attempts are exhausted.
+    """
+    target = Path(path)
+    for attempt in range(max(1, attempts)):
+        if target.exists():
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_sec)
+    return False
+
+
 def _validate_trace_analyze_inputs(
     payload: dict,
     *,
@@ -1529,7 +2297,7 @@ def _validate_trace_analyze_inputs(
         else ``None``.
     """
     candidates_path = str(payload.get("candidates_path") or "").strip()
-    if candidates_path and not Path(candidates_path).exists():
+    if candidates_path and not _exists_with_retry(candidates_path):
         return {
             "status": "failed",
             "error_class": "missing_candidates_artifact",
@@ -1608,6 +2376,25 @@ async def run_optimization_handler(
             )
             if canon:
                 single_payload["kernel_id"] = canon
+            elif not _names_specific_kernel(single_payload):
+                # Empty eligible queue and the request named no specific target
+                # (e.g. the post-GEMM auto pass dispatches a batch with no id).
+                # All candidates are already tried/rejected, below the size
+                # cutoff, or not reusable. Finish cleanly instead of falling
+                # into the single-kernel path, which would surface
+                # "missing 'kernel_id'" and mis-report an empty work queue as a
+                # GEAK failure. A "skipped" status (no error_class / REVERT
+                # decision) is not counted as a failure by the breakdown
+                # recorder.
+                return {
+                    "status": "skipped",
+                    "reason": "no_eligible_kernels",
+                    "kernels_considered": len(_all_kernel_candidates(payload)),
+                    "message": (
+                        "no eligible kernels to optimize (all candidates already "
+                        "tried/rejected, below the size cutoff, or not reusable)"
+                    ),
+                }
         single_payload["_single_kernel"] = True
         return await _run_optimization_single(single_payload, session_dir=session_dir)
     return await _run_optimization_batch(
@@ -1874,6 +2661,29 @@ def _resolve_candidate_id(
     return ""
 
 
+def _names_specific_kernel(payload: dict) -> bool:
+    """Return ``True`` when the payload targets one specific kernel/source.
+
+    A specific target is an explicit ``kernel_id``, a ``source_file`` to
+    optimize, or an inline ``candidate`` dict. The post-GEMM auto pass dispatches
+    a batch with none of these, which is the empty-work-queue case that should be
+    skipped cleanly rather than routed into the single-kernel path.
+
+    Args:
+        payload: The run_optimization request payload.
+
+    Returns:
+        ``True`` if the request names a specific kernel/source, else ``False``.
+    """
+    if str(payload.get("kernel_id") or "").strip():
+        return True
+    if str(payload.get("source_file") or "").strip():
+        return True
+    if isinstance(payload.get("candidate"), dict):
+        return True
+    return False
+
+
 def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
     """Load every candidate (``hot_kernels`` ∪ ``skipped_kernels``) so id canonicalization resolves even when hot_kernels is empty.
 
@@ -1899,6 +2709,40 @@ def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
         if isinstance(value, list):
             out.extend(item for item in value if isinstance(item, dict))
     return out
+
+
+# PR-C default: one backend-ladder dispatch per kernel/source unless an infra
+# failure still has retry budget (see ``_kernel_dispatch_attempt_cap``).
+_DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS = 1
+
+
+def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) -> int:
+    """Return the batch-eligibility attempt cap for one kernel attempt record.
+
+    Non-infra attempts (PARTIAL, legacy resume rows, etc.) keep the PR-C
+    single-dispatch contract. Only a retryable backend infra failure widens the
+    cap to ``max_failures`` so dispatch, ``record_kernel_opt``, and
+    ``kernel_work_pending`` agree on the same budget.
+    """
+    if not isinstance(entry, dict):
+        return _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
+    try:
+        failure_count = int(entry.get("failure_count") or 0)
+    except (TypeError, ValueError):
+        failure_count = 0
+    if failure_count <= 0:
+        return _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
+    last_decision = str(entry.get("last_decision") or "").strip()
+    last_status = str(entry.get("last_status") or "").lower()
+    rejected_reason = str(entry.get("rejected_reason") or "").strip()
+    if (
+        failure_count < max_failures
+        and last_decision == ""
+        and last_status in {"failed", "error", "timeout"}
+        and not rejected_reason
+    ):
+        return max_failures
+    return _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
 
 
 def _batch_kernel_candidates(
@@ -1944,22 +2788,13 @@ def _batch_kernel_candidates(
     rejected_kernel_ids: set[str] = set()
     attempts_by_kid: dict[str, dict] = {}
     in_flight: set[str] = set()
-    max_attempts = 1
-    try:
-        max_attempts = max(
-            1,
-            int(
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_ATTEMPTS",
-                    "1",
-                )
-            ),
-        )
-    except (TypeError, ValueError):
-        max_attempts = 1
-    # min_gpu_pct must mirror SharedState.untried_hot_reusable_kernels' 3.0 default so the two layers agree and tiny kernels don't eat ladder wall-clock.
-    from .shared_state import _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+    from .shared_state import (
+        _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+        resolve_kernel_opt_max_failures,
+    )
 
+    max_failures = resolve_kernel_opt_max_failures()
+    # min_gpu_pct must mirror SharedState.untried_hot_reusable_kernels' 3.0 default so the two layers agree and tiny kernels don't eat ladder wall-clock.
     try:
         min_gpu_pct = float(
             os.environ.get(
@@ -1998,12 +2833,13 @@ def _batch_kernel_candidates(
         if kid in in_flight:
             return False
         entry = attempts_by_kid.get(kid) or {}
+        attempt_cap = _kernel_dispatch_attempt_cap(entry, max_failures=max_failures)
         if current_source:
             per_source = entry.get("attempts_per_source")
             if isinstance(per_source, dict):
                 src_attempts = int(per_source.get(current_source, 0))
-                return src_attempts < max_attempts
-        if int(entry.get("attempts", 0)) >= max_attempts:
+                return src_attempts < attempt_cap
+        if int(entry.get("attempts", 0)) >= attempt_cap:
             return False
         return True
 
@@ -3236,12 +4072,20 @@ async def integrate_handler(
             "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
         }
 
-    payload, missing_inputs = _resolve_integrate_payload(
-        payload,
-        session_dir=session_dir,
+    # Route through the compat helper so a legacy ``extra_sglang_args`` envelope still resolves.
+    from ..compat.payload_aliases import read_extra_server_args
+
+    env_only_validation = (
+        str(payload.get("source") or "").strip() in {"forge_gemm_tuning", "gemm_tuning"}
+        and (bool(payload.get("extra_envs")) or bool(read_extra_server_args(payload).strip()))
     )
-    if missing_inputs is not None:
-        return missing_inputs
+    if not env_only_validation:
+        payload, missing_inputs = _resolve_integrate_payload(
+            payload,
+            session_dir=session_dir,
+        )
+        if missing_inputs is not None:
+            return missing_inputs
 
     patch_path = payload.get("patch_path")
     kernel_id = payload.get("kernel_id")
@@ -3250,6 +4094,12 @@ async def integrate_handler(
         session_dir=session_dir,
         kernel_id=kernel_id,
     )
+    if apply_result.get("status") == "skipped" and env_only_validation:
+        apply_result = {
+            "status": "ok",
+            "reason": "env_only_validation",
+            "kernel_id": kernel_id,
+        }
     log.info("integrate_handler: apply_result=%s", apply_result)
     if apply_result.get("status") == "failed":
         # Apply crash: the patch was never measured. Stamp a fault error_class
@@ -3277,9 +4127,6 @@ async def integrate_handler(
         }
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
-    # Route through the compat helper so a legacy ``extra_sglang_args`` envelope still resolves.
-    from ..compat.payload_aliases import read_extra_server_args
-
     extra_args = read_extra_server_args(payload).strip()
 
     # Wrap BaselineExecutor in a Task/RunnerContext; extra_server_args goes via task params (forward compat).
@@ -3297,6 +4144,7 @@ async def integrate_handler(
             "output_dir": str(workspace),
             "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
             "extra_server_args": extra_args,
+            "extra_envs": dict(payload.get("extra_envs") or {}),
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )
@@ -3853,13 +4701,33 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             envelope; non-dicts and empty ``kernel_id`` are no-ops.
     """
     from .shared_state import (
-        _DEFAULT_KERNEL_OPT_MAX_FAILURES,
         _DEFAULT_KERNEL_OPT_MAX_PARTIAL,
         _now_iso,
+        resolve_kernel_opt_max_failures,
     )
 
     if not isinstance(result, dict):
         return
+    # Capture an empty-queue skip (no eligible kernels, no named kernel) as a
+    # non-failure breadcrumb. The result carries no kernel_id, so the per-kernel
+    # bookkeeping below early-returns and the skip is otherwise invisible in the
+    # breakdown (no backend, no kernel_id). Stash it so the summary can surface
+    # it honestly.
+    is_no_eligible_dispatch_skip = (
+        str(result.get("status") or "").lower() == "skipped"
+        and str(result.get("reason") or "") == "no_eligible_kernels"
+    )
+    if is_no_eligible_dispatch_skip:
+        from .shared_state import _now_iso
+
+        state.last_kernel_opt_dispatch_skip = {
+            "reason": "no_eligible_kernels",
+            "kernels_considered": int(result.get("kernels_considered") or 0),
+            "message": str(result.get("message") or ""),
+            "ts": _now_iso(),
+        }
+    elif str(result.get("kernel_id") or ""):
+        state.last_kernel_opt_dispatch_skip = {}
     # Author-time breakdown capture: record geak/oob invocations (incl.
     # backend + pre-dispatch failures) before the metadata-less early
     # return so no failed attempt becomes invisible in the geak/oob view.
@@ -4026,15 +4894,9 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             # Malformed env override → keep the default partial-attempt cap.
             pass
 
-    # One backend ladder without a KEEP retires the kernel by default; raise threshold for flaky backends.
-    max_failures = _DEFAULT_KERNEL_OPT_MAX_FAILURES
-    env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
-    if env_f:
-        try:
-            max_failures = max(1, int(env_f))
-        except (TypeError, ValueError):
-            # Malformed env override → keep the default failure cap.
-            pass
+    # Backend ladder failures are often transient infra/backend faults; real
+    # REVERT still retires immediately below, but infra failures get a retry.
+    max_failures = resolve_kernel_opt_max_failures()
 
     should_reject = (
         decision == "REVERT"
