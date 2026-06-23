@@ -132,6 +132,7 @@ _UNSUPPORTED_REGISTRY_BY_MT = {
 _UNSUPPORTED_REGISTRY_BY_ARCH = {
     "GlmMoeDsaForCausalLM":   "GLM glm_moe_dsa registry not supported on AMD/ROCm",
     "DeepseekV32ForCausalLM": "DeepSeek V3.2 (deepseek_v32) missing AMD runtime path",
+    "RWKV6Qwen2ForCausalLM":  "RWKV6/Qwen2 hybrid architecture is not supported by sglang/vLLM",
 }
 
 
