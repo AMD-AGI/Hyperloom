@@ -124,6 +124,7 @@ def mi300x_blocked_model(repo):
 _UNSUPPORTED_REGISTRY_BY_MT = {
     "glm_moe_dsa":  "GLM glm_moe_dsa registry not supported on AMD/ROCm",
     "deepseek_v32": "DeepSeek V3.2 (deepseek_v32) missing AMD runtime path",
+    "rwkv6qwen2":   "RWKV6/Qwen2 hybrid architecture is not supported by sglang/vLLM",
     # Qwen3.6 MoE: this model_type appears as text_config.model_type; the new
     # arch is not in the vLLM/Transformers registry, so the baseline server
     # fails to start.
@@ -132,6 +133,7 @@ _UNSUPPORTED_REGISTRY_BY_MT = {
 _UNSUPPORTED_REGISTRY_BY_ARCH = {
     "GlmMoeDsaForCausalLM":   "GLM glm_moe_dsa registry not supported on AMD/ROCm",
     "DeepseekV32ForCausalLM": "DeepSeek V3.2 (deepseek_v32) missing AMD runtime path",
+    "RWKV6Qwen2ForCausalLM":  "RWKV6/Qwen2 hybrid architecture is not supported by sglang/vLLM",
 }
 
 
