@@ -450,6 +450,11 @@ def _format_md(summary: dict[str, Any]) -> str:
         lines.append(
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts={val_ts}){stale}"
         )
+    elif val_gain or val_len:
+        stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
+        lines.append(
+            f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts=<missing>){stale}"
+        )
     else:
         lines.append("- cumulative_gain_val : `0.00%` ⚠ never validated — no full-stack rebench ran in this session")
     if cb.get("ttft_mean_ms") is not None:
