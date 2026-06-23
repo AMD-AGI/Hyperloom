@@ -313,3 +313,33 @@ def test_profile_manual_max_iters_below_floor_warns(monkeypatch, tmp_path, caplo
         bench = _materialize(src, tmp_path / "out")
     assert _profile_num_steps(bench) == 8  # honored verbatim
     assert any("below the steady-state floor" in r.message for r in caplog.records)
+
+
+def test_profile_explicit_osl_over_cap_warns_not_lowered(monkeypatch, tmp_path, caplog):
+    # Explicit PROFILE_OSL whose steady floor exceeds the cap is honored as-is
+    # (operator choice), but a warning is emitted.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("OSL", "1024")
+    monkeypatch.setenv("CONC", "4")
+    monkeypatch.setenv("PROFILE_OSL", "8192")
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    with caplog.at_level("WARNING"):
+        bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["OSL"] == 8192  # not auto-lowered
+    assert _profile_num_steps(bench) == 128
+    assert any("above the profile cap" in r.message for r in caplog.records)
+
+
+def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog):
+    # An explicit too-large capture is honored but warned about (serialization).
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("OSL", "256")
+    monkeypatch.setenv("CONC", "64")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "2000")
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    with caplog.at_level("WARNING"):
+        bench = _materialize(src, tmp_path / "out")
+    assert _profile_num_steps(bench) == 2000  # honored verbatim
+    assert any("exceeds the serialization-safe cap" in r.message for r in caplog.records)

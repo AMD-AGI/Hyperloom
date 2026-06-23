@@ -317,6 +317,7 @@
     "policy_denial_streak": {},
     "precision": "",
     "profile_attempts": [],
+    "profile_osl": 0,
     "pruned_families": [],
     "recipe_sediment_enabled": true,
     "reference_envs": {},
