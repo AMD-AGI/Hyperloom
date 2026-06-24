@@ -136,7 +136,32 @@ GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 # deleted, unlike a branch-HEAD SHA. Operators can override with
 # GEAK_REF=<tag|branch|sha>; bump to the next patch tag if the branch advances.
 GEAK_REF="${GEAK_REF:-v3.2.2}"
-OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
+# e2e whole-pipeline optimizer (formerly the standalone PerfSkills repo). Its
+# code has MIGRATED INTO GEAK on the GEAK_v4 branch (interface/run_e2e.py +
+# e2e_workflow/). Hyperloom calls interface/run_e2e.py at the KERNEL phase when
+# KERNEL_OPT_BACKEND_ORDER=perfskills. This is a SECOND GEAK checkout pinned to the
+# e2e branch, kept SEPARATE from the single-kernel GEAK checkout above. The
+# PERFSKILLS_* names are retained as the stable handle for this optimizer;
+# operators override repo/ref/root with PERFSKILLS_REPO / PERFSKILLS_REF /
+# PERFSKILLS_ROOT.
+PERFSKILLS_REPO="${PERFSKILLS_REPO:-${GEAK_REPO}}"
+PERFSKILLS_ROOT="${PERFSKILLS_ROOT:-${_open_source_root}/GEAK-e2e}"
+PERFSKILLS_REF="${PERFSKILLS_REF:-GEAK_v4}"
+PERFSKILLS_E2E_RUNNER="${PERFSKILLS_E2E_RUNNER:-${PERFSKILLS_ROOT}/interface/run_e2e.py}"
+# --- OOB source resolution (BEGIN: kept in sync with test_oob_src_default) ---
+# OOB now ships inside the KernelForge checkout ($FORGE_PATH/OOB), so derive
+# the OOB source from the forge path instead of requiring a separate OOB path
+# to be injected by the caller (the legacy DEFAULT_OOB_PATH env). An explicit
+# OOB_SRC is still honoured as an operator override. Honour the same forge-root
+# aliases as the forge backend (kernel-agent/tools/backends/forge_submit.py),
+# and fall back to the legacy bundle layout only when no forge path is provided.
+_forge_root="${FORGE_PATH:-${KERNEL_FORGE_ROOT:-${KERNEL_FORGE_PATH:-}}}"
+if [ -n "${_forge_root}" ]; then
+  OOB_SRC="${OOB_SRC:-${_forge_root%/}/OOB}"
+else
+  OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
+fi
+# --- OOB source resolution (END) ---
 OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
@@ -145,7 +170,7 @@ GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Anthropic /v1/messages transformer.  Without this, GEAK gets
 # Primus.00009 / NotFound on the same key+URL that works through
 # /chat/completions.
-GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-8}"
 case "${GEAK_MODEL_NAME_RAW}" in
   openai/*|anthropic/*|gpt-*|o1-*|o3-*|o4-*)
     GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"
@@ -244,6 +269,15 @@ CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh
 # not differentiate, just install everything".
 CHECK_ONLY=0
 DRY_RUN=0
+# The PerfSkills/GEAK-e2e optimizer is OPT-IN: it is only used at runtime when a
+# session sets ``KERNEL_OPT_BACKEND_ORDER=perfskills``. The default runtime
+# optimizer is ``native``, so installing the second GEAK-e2e checkout (extra clone + network
+# + claude-agent-sdk pip) unconditionally would tax every native-only user. Gate
+# it behind ``--with-perfskills`` / ``INSTALL_PERFSKILLS=1``; default off.
+case "${INSTALL_PERFSKILLS:-0}" in
+  1|true|TRUE|yes|YES|on|ON) INSTALL_PERFSKILLS=1 ;;
+  *) INSTALL_PERFSKILLS=0 ;;
+esac
 
 usage() {
   cat <<'EOF'
@@ -258,12 +292,16 @@ Always installs:
 Options:
   --check-only       Verify current environment, do not install
   --dry-run          Print actions without running installs
+  --with-perfskills  Also install the PerfSkills/GEAK-e2e optimizer checkout
+                     (only needed for KERNEL_OPT_BACKEND_ORDER=perfskills runs).
   -h, --help         Show this help
 
 Environment (optional):
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
                                         Set 0 to skip — useful for claude-only kernel-opt or CPU-only
                                         sandboxes where BGE-large embedding takes ~1.5h.
+  INSTALL_PERFSKILLS=1                  Install the PerfSkills/GEAK-e2e optimizer checkout (default 0).
+                                        Equivalent to --with-perfskills. Default native users skip it.
 EOF
 }
 
@@ -271,6 +309,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
+    --with-perfskills) INSTALL_PERFSKILLS=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[kernel-agent] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -1301,6 +1340,8 @@ write_env_file() {
       echo "export HYPERLOOM_GEAK_ROOT='${HYPERLOOM_ROOT}/geak'"
       echo "export PYTHONPATH='${HYPERLOOM_ROOT}/geak/src:${PYTHONPATH:-}'"
     fi
+    [ -n "${PERFSKILLS_ROOT}" ] && echo "export PERFSKILLS_ROOT='${PERFSKILLS_ROOT}'"
+    [ -n "${PERFSKILLS_E2E_RUNNER}" ] && echo "export PERFSKILLS_E2E_RUNNER='${PERFSKILLS_E2E_RUNNER}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_ROOT}" ] && echo "export GEAK_ROOT='${GEAK_ROOT}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
@@ -1326,6 +1367,48 @@ write_env_file() {
   } > "$env_file"
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
+}
+
+# Clone the e2e optimizer (GEAK@GEAK_v4, formerly PerfSkills) the same way
+# ensure_geak does: SHA pins use a shallow fetch-checkout; tags/branches use
+# git clone --branch. It is NOT pip-installed (it's a JS workflow dir invoked
+# via the Claude Code Workflow tool); we only need the checkout + the
+# claude_agent_sdk that its interface/run_e2e.py uses.
+ensure_perfskills() {
+  log "ensuring e2e optimizer (GEAK@${PERFSKILLS_REF}, formerly PerfSkills)"
+  if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+    mkdir -p "${PERFSKILLS_ROOT}"
+  fi
+  if [ ! -d "${PERFSKILLS_ROOT}/.git" ]; then
+    if [[ "$PERFSKILLS_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      run git init -q "${PERFSKILLS_ROOT}"
+      run git -C "${PERFSKILLS_ROOT}" remote add origin "$PERFSKILLS_REPO"
+      run git -C "${PERFSKILLS_ROOT}" fetch --depth 1 origin "$PERFSKILLS_REF"
+      run git -C "${PERFSKILLS_ROOT}" checkout -q FETCH_HEAD
+    else
+      run git clone --depth 1 --branch "$PERFSKILLS_REF" "$PERFSKILLS_REPO" "${PERFSKILLS_ROOT}"
+    fi
+  else
+    log "e2e optimizer checkout already present: ${PERFSKILLS_ROOT}"
+    if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+      # Keep an existing checkout aligned with the requested PERFSKILLS_REF,
+      # mirroring ensure_geak: without this a ref bump (branch/tag/SHA) leaves
+      # the runtime pinned to the stale GEAK_v4 code it first cloned.
+      run git -C "${PERFSKILLS_ROOT}" fetch --depth 1 origin "$PERFSKILLS_REF"
+      run git -C "${PERFSKILLS_ROOT}" checkout -q --force FETCH_HEAD
+    fi
+  fi
+  if [ "$CHECK_ONLY" -eq 0 ]; then
+    # interface/run_e2e.py prefers the python SDK (falls back to `claude -p`).
+    _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
+    run python3 -m pip install ${_PIP_FLAGS} claude-agent-sdk anyio || \
+      warn "claude-agent-sdk install failed; run_e2e.py will fall back to the claude CLI"
+    if [ ! -f "${PERFSKILLS_E2E_RUNNER}" ]; then
+      warn "e2e runner not found at ${PERFSKILLS_E2E_RUNNER} (interface/ missing — is the checkout on the GEAK_v4 branch?)"
+    fi
+  else
+    log "check-only: skipping e2e optimizer sdk installation"
+  fi
 }
 
 report_status() {
@@ -1420,6 +1503,14 @@ main() {
 
   # Always install everything; ensure_oob also calls ensure_llm_auth_files.
   ensure_geak
+  # PerfSkills/GEAK-e2e is opt-in (see INSTALL_PERFSKILLS / --with-perfskills):
+  # the default runtime optimizer is native, so native-only users skip the
+  # extra GEAK-e2e clone + claude-agent-sdk pip.
+  if [ "$INSTALL_PERFSKILLS" -eq 1 ]; then
+    ensure_perfskills
+  else
+    log "skipping PerfSkills/GEAK-e2e optimizer install (default native; pass --with-perfskills or INSTALL_PERFSKILLS=1 to enable)"
+  fi
   ensure_rag_index
   ensure_oob
   write_env_file

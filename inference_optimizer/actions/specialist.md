@@ -9,14 +9,16 @@ same tag set, and the framework source roots under `INFERENCEX_PATH`.
 It then emits exactly one `specialist_done` intent on exit (Inv-5.3 single
 exit protocol).
 
-Specialists are the Hyperloom-native counterpart of Arbor's specialist
-agents. Unlike the deterministic Python executors (`baseline` / `explore`
+The specialist is the runtime implementation of the Domain Specialists in
+the Arbor paper (arXiv:2606.12563) — "Arbor" being the research name for
+this orchestration, so a specialist here *is* an Arbor Domain Specialist.
+Unlike the deterministic Python executors (`baseline` / `explore`
 / …) the specialist is *LLM-driven*: SpecialistRunner spawns a fresh
 Claude subprocess with the per-tag prompt context, an isolated
 `runs/specialist/<task_id>/worktree/` (a `git worktree` rooted at
 `INFERENCEX_PATH`), and a tight tool whitelist.
 
-## Inv-5.1 update (Arbor-into-Hyperloom plan, PR-A1)
+## Inv-5.1 update (specialist-as-patch-author, PR-A1)
 
 Prior to this plan specialists were "research-only" — they could emit
 `proposal_set` entries that fed the next `explore` grid but could not
