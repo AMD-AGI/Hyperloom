@@ -127,6 +127,116 @@ class TestPromoteGemmTuningKeep:
         assert len(coord.shared_state.optimization_stack) == 1
 
 
+class TestPromoteInjectsCkBlockscaleEnv:
+    """PR2: an fp8 block-scale a8w8 tuner KEEP on sglang+fp8 also activates the
+    CK backend switch by injecting ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M=256``
+    (attributed to gemm_tuning). It must NOT fire for MoE / bf16 / other tuner
+    envs, and must never clobber an operator-set value."""
+
+    def test_injects_for_fp8_blockscale_sglang_keep(self, tmp_path):
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            framework="sglang",
+            precision="fp8",
+        )
+        coord._promote_gemm_tuning_keep(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.2,
+                "backend": "geak",
+                "tuned_file": "/tuned/gemm.csv",
+            }
+        )
+        envs = coord.shared_state.current_best["extra_envs"]
+        assert envs["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"] == "/tuned/gemm.csv"
+        assert envs["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"] == "256"
+        # Flows into the stacked entry too (shared extra_envs object).
+        stack_envs = coord.shared_state.optimization_stack[0]["extra_envs"]
+        assert stack_envs["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"] == "256"
+
+    def test_does_not_inject_for_moe_forge_tuner(self, tmp_path):
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            framework="sglang",
+            precision="fp8",
+        )
+        coord._promote_gemm_tuning_keep(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.2,
+                "backend": "forge",
+                "extra_envs": {"AITER_CONFIG_FMOE": "/fmoe.json"},
+            }
+        )
+        envs = coord.shared_state.current_best["extra_envs"]
+        assert "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" not in envs
+
+    def test_does_not_inject_for_bf16_precision(self, tmp_path):
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            framework="sglang",
+            precision="bf16",
+        )
+        coord._promote_gemm_tuning_keep(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.2,
+                "backend": "geak",
+                "tuned_file": "/tuned/gemm.csv",
+            }
+        )
+        envs = coord.shared_state.current_best["extra_envs"]
+        assert "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE" in envs
+        assert "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" not in envs
+
+    def test_does_not_inject_for_non_sglang_framework(self, tmp_path):
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            framework="vllm",
+            precision="fp8",
+        )
+        coord._promote_gemm_tuning_keep(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.2,
+                "backend": "geak",
+                "tuned_file": "/tuned/gemm.csv",
+            }
+        )
+        envs = coord.shared_state.current_best["extra_envs"]
+        assert "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" not in envs
+
+    def test_respects_preset_value_setdefault(self, tmp_path):
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            framework="sglang",
+            precision="fp8",
+        )
+        coord._promote_gemm_tuning_keep(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.2,
+                "backend": "forge",
+                "extra_envs": {
+                    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tuned/gemm.csv",
+                    "SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "512",
+                },
+            }
+        )
+        envs = coord.shared_state.current_best["extra_envs"]
+        assert envs["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"] == "512"
+
+
 class TestHandleGemmTuningResult:
     @pytest.mark.asyncio
     async def test_forge_requires_e2e_routes_to_validator(self, tmp_path):
