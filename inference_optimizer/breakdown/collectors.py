@@ -958,6 +958,32 @@ def collect_workload(
     }
 
 
+# §2b Model basics
+def collect_model_info(
+    state: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Collect the §2b ``model_info`` section (state.model_info passthrough).
+
+    The summary is computed once at launch (``cli_bootstrap`` →
+    ``summarize_model_config``) and persisted on ``state.model_info``, so the
+    breakdown just mirrors it verbatim. Returns ``{}`` when the field is absent
+    (sessions whose state predates it) or empty (non-transformers models such
+    as diffusion checkpoints, where the config.json could not be parsed); the
+    frontend treats an empty object as "model info unavailable".
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (unused here but kept for a
+            uniform collector signature).
+
+    Returns:
+        dict[str, Any]: The model_info object, or ``{}`` when unavailable.
+    """
+    info = state.get("model_info")
+    return dict(info) if isinstance(info, dict) else {}
+
+
 # §3 Baseline
 def collect_baseline(
     session_dir: Path,
@@ -6643,4 +6669,5 @@ __all__ = [
     "collect_telemetry",
     "collect_token_usage",
     "collect_workload",
+    "collect_model_info",
 ]
