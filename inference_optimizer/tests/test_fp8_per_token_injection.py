@@ -15,6 +15,7 @@ the pure config-detection layer and the ``materialize_config_with_envs`` layer.
 from __future__ import annotations
 
 import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,50 @@ def _write_model_config(dir_path: Path, config: dict) -> str:
     return str(dir_path)
 
 
+def _write_safetensors(path: Path, tensors: dict[str, list[int]]) -> None:
+    """Write a minimal valid ``.safetensors`` file (header + zeroed data).
+
+    ``tensors`` maps tensor name -> shape. Only the header (which carries the
+    shape the gate inspects) needs to be correct; payload bytes are zeros.
+    """
+    header: dict[str, object] = {}
+    blob = b""
+    offset = 0
+    for name, shape in tensors.items():
+        numel = 1
+        for dim in shape:
+            numel *= dim
+        nbytes = numel * 4  # F32 scales
+        header[name] = {
+            "dtype": "F32",
+            "shape": shape,
+            "data_offsets": [offset, offset + nbytes],
+        }
+        blob += b"\x00" * nbytes
+        offset += nbytes
+    header_bytes = json.dumps(header).encode("utf-8")
+    with path.open("wb") as fh:
+        fh.write(struct.pack("<Q", len(header_bytes)))
+        fh.write(header_bytes)
+        fh.write(blob)
+
+
+def _write_fp8_weights(dir_path: Path, *, per_channel: bool) -> None:
+    """Drop a safetensors shard carrying a representative ``weight_scale`` tensor.
+
+    Per-channel -> shape ``[out_features, 1]`` (numel > 1); per-tensor -> scalar
+    ``[]`` (numel == 1).
+    """
+    shape = [16, 1] if per_channel else []
+    _write_safetensors(
+        dir_path / "model.safetensors",
+        {
+            "model.layers.0.mlp.down_proj.weight": [16, 16],
+            "model.layers.0.mlp.down_proj.weight_scale": shape,
+        },
+    )
+
+
 def _fp8_quant_config(**overrides) -> dict:
     """A standard HF FP8 quantization_config (per-channel/per-token dynamic)."""
     qc = {"quant_method": "fp8", "activation_scheme": "dynamic", "fmt": "e4m3"}
@@ -68,7 +113,7 @@ def _fp8_quant_config(**overrides) -> dict:
 @pytest.fixture
 def fp8_dynamic_model(tmp_path) -> str:
     """Dense FP8 checkpoint with per-channel weight + per-token dynamic act."""
-    return _write_model_config(
+    path = _write_model_config(
         tmp_path / "org-fp8-dynamic",
         {
             "architectures": ["LlamaForCausalLM"],
@@ -76,6 +121,8 @@ def fp8_dynamic_model(tmp_path) -> str:
             "quantization_config": _fp8_quant_config(),
         },
     )
+    _write_fp8_weights(Path(path), per_channel=True)
+    return path
 
 
 # ── pure config-detection layer ────────────────────────────────────────────
@@ -89,7 +136,30 @@ def test_detect_true_when_activation_scheme_absent(tmp_path):
         tmp_path / "m",
         {"quantization_config": {"quant_method": "fp8", "fmt": "e4m3"}},
     )
+    _write_fp8_weights(Path(path), per_channel=True)
     assert _fp8_is_per_channel_per_token(path) is True
+
+
+def test_detect_false_for_per_tensor_weight(tmp_path):
+    # e2e repro: a per-tensor weight checkpoint already serves from the fast
+    # fused per-tensor torch._scaled_mm path; forcing per-channel bpreshuffle CK
+    # regressed it ~6% on MI300X. The gate must decline despite fp8 + dynamic.
+    path = _write_model_config(
+        tmp_path / "per-tensor",
+        {"quantization_config": _fp8_quant_config()},
+    )
+    _write_fp8_weights(Path(path), per_channel=False)
+    assert _fp8_is_per_channel_per_token(path) is False
+
+
+def test_detect_false_when_weight_granularity_undeterminable(tmp_path):
+    # fp8 + dynamic config but no safetensors to confirm per-channel weights:
+    # default-safe -> decline rather than risk the per-tensor regression.
+    path = _write_model_config(
+        tmp_path / "no-weights",
+        {"quantization_config": _fp8_quant_config()},
+    )
+    assert _fp8_is_per_channel_per_token(path) is False
 
 
 def test_detect_false_for_static_activation(tmp_path):
@@ -217,6 +287,18 @@ def test_materialize_noop_for_static_fp8(tmp_path):
         tmp_path / "static",
         {"quantization_config": _fp8_quant_config(activation_scheme="static")},
     )
+    envs = _materialize_envs(tmp_path, model=model)
+    assert _ENV not in envs
+
+
+def test_materialize_noop_for_per_tensor_weight(tmp_path):
+    # Production-choke-point guard for the e2e-confirmed ~6% regression: a
+    # per-tensor fp8 + dynamic checkpoint must NOT get the env materialized.
+    model = _write_model_config(
+        tmp_path / "per-tensor",
+        {"quantization_config": _fp8_quant_config()},
+    )
+    _write_fp8_weights(Path(model), per_channel=False)
     envs = _materialize_envs(tmp_path, model=model)
     assert _ENV not in envs
 
