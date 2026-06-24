@@ -111,6 +111,7 @@ from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _parse_iso_unix,
     _resolve_roofline_watermark_ratio,
     effective_closing_grace_sec,
+    format_exc_brief,
 )
 
 
@@ -7229,7 +7230,7 @@ class Coordinator:
             await self._record_observation(
                 "coordinator",
                 "observation",
-                {"kind": "reactor_exception", "agent": agent_name, "error": f"{type(exc).__name__}: {str(exc)[:500]}"},
+                {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
             )
             self._record_coordinator_exception(
                 stage="reactor_pass",

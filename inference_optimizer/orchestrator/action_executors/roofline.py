@@ -22,27 +22,22 @@ Design constraints (§4/§6):
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .._time import now_iso
 from ..sub_agent_runner import RunnerContext
 
 log = logging.getLogger(__name__)
 
 _PROFILE_MAX_ATTEMPTS = 3
 
-
-def _now_iso() -> str:
-    """Return the current UTC time as a second-precision ISO-8601 string.
-
-    Returns:
-        str: The current UTC timestamp formatted with ``timespec="seconds"``.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+# seconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = functools.partial(now_iso, "seconds")
 
 
 # Auto-recover from TraceLens steady_state_chunk_* failures: when

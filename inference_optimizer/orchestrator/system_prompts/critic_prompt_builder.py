@@ -13,7 +13,11 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from ..action_registry import ActionMetadata, ActionRegistry
-from .prompt_builder import KERNEL_OWNED_ACTIONS, _filter_actions
+from .prompt_builder import (
+    KERNEL_OWNED_ACTIONS,
+    _resolve_prompt_prelude,
+    join_sections,
+)
 
 
 # ``accuracy_risk`` above this bar flips the default verdict from ``approve``
@@ -30,24 +34,6 @@ _FAMILY_ORDER: tuple[str, ...] = (
     "creative",
     "resilience",
 )
-
-
-def _read_rules_fragment(path: Path | None) -> str:
-    """Read the ``critic.md`` rules fragment, tolerating absence.
-
-    Args:
-        path (Path | None): Path to the rules fragment, or ``None`` to skip.
-
-    Returns:
-        str: The stripped fragment text, or an empty string when the path is
-        ``None`` or unreadable.
-    """
-    if path is None:
-        return ""
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
 
 
 def _section_mission() -> list[str]:
@@ -109,9 +95,8 @@ def _section_phase_review_contract() -> list[str]:
         The rendered phase-review-contract lines.
     """
     from ..phase_state import (
-        PHASE_NAMES,
         is_phase_interleave_enabled,
-        llm_proposable_actions_for_with_interleave,
+        render_phase_proposable_bullets,
     )
 
     interleave = is_phase_interleave_enabled()
@@ -122,14 +107,7 @@ def _section_phase_review_contract() -> list[str]:
         "EXPLORE / KERNEL / SWEEP / CLOSE). Phase-proposable action sets:",
         "",
     ]
-    for phase in PHASE_NAMES:
-        proposable = sorted(
-            llm_proposable_actions_for_with_interleave(
-                phase,
-                interleave=interleave,
-            )
-        )
-        lines.append(f"- **{phase}**: {', '.join(proposable)}")
+    lines.extend(render_phase_proposable_bullets(interleave=interleave))
     lines.extend(
         [
             "",
@@ -353,11 +331,13 @@ def build_critic_prompt(
     Returns:
         The composed Critic system prompt string.
     """
-    actions = _filter_actions(action_registry, enabled_actions)
-    if kernel_enabled is None:
-        kernel_enabled = any(a.name in KERNEL_OWNED_ACTIONS for a in actions)
-    framework_norm = (framework or "sglang").strip().lower() or "sglang"
-    rules_md = _read_rules_fragment(rules_fragment_path)
+    actions, kernel_enabled, framework_norm, rules_md = _resolve_prompt_prelude(
+        action_registry,
+        enabled_actions,
+        framework,
+        kernel_enabled,
+        rules_fragment_path,
+    )
 
     sections: list[list[str]] = [
         _section_mission(),
@@ -375,8 +355,7 @@ def build_critic_prompt(
     sections.append(_section_rules(rules_md))
     sections.append(_section_output_protocol())
 
-    parts = ["\n".join(sect) for sect in sections]
-    return "\n\n".join(parts).rstrip() + "\n"
+    return join_sections(sections)
 
 
 __all__ = [

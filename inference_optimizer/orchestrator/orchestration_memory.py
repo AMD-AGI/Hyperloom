@@ -8,11 +8,13 @@ Coordinator owns the IO.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
+
+from ._time import now_iso
 
 
 # Default checkpoint cadence. A checkpoint fires when ANY trigger crosses its
@@ -60,13 +62,8 @@ def context_window_for_model(model: str) -> int:
 _MEMORY_LIST_KEYS: tuple[str, ...] = ("hypotheses", "tried_and_why", "pending")
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a second-resolution ISO-8601 string.
-
-    Returns:
-        The current UTC time formatted as a second-resolution ISO-8601 string.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+# seconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = functools.partial(now_iso, "seconds")
 
 
 @dataclass

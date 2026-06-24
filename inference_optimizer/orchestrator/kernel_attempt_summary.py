@@ -194,7 +194,9 @@ def _backend_results_dir(session_dir: Path, session_id: str) -> Path | None:
     Returns:
         The results directory path, or ``None`` when none is found.
     """
-    runs_root = Path(session_dir) / "kernel-agent" / "runs"
+    from ..session_paths import kernel_agent_runs_root
+
+    runs_root = kernel_agent_runs_root(Path(session_dir))
     if not runs_root.is_dir():
         return None
     for key in (session_dir.name, str(session_id or "").strip()):

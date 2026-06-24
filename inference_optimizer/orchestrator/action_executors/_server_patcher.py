@@ -21,16 +21,16 @@ revert path).
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 import re
 import shutil
 import subprocess
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Callable, Sequence
+
+from ._file_lock import best_effort_file_lock
 
 log = logging.getLogger(__name__)
 
@@ -616,7 +616,7 @@ def _ensure_patched(plan: _PatchPlan) -> bool:
     """
     if _is_patched(plan):
         return True
-    with _file_lock(_LOCK_PATH):
+    with best_effort_file_lock(_LOCK_PATH, label="_server_patcher"):
         if _is_patched(plan):
             return True
         return _apply_atomic(plan)
@@ -651,37 +651,6 @@ def _is_patched(plan: _PatchPlan) -> bool:
         return True
     except OSError:
         return False
-
-
-@contextmanager
-def _file_lock(path: str) -> Iterator[None]:
-    """Best-effort cross-process exclusion; proceeds unsynchronized if ``/tmp``
-    is read-only (the second patcher re-checks the sentinel and short-circuits).
-
-    Args:
-        path: Filesystem path of the lock file to acquire exclusively.
-
-    Yields:
-        Control while the exclusive lock is held; the lock is released on exit.
-    """
-    try:
-        fp = open(path, "w")
-    except OSError as e:
-        log.warning(
-            "_server_patcher: cannot open lock %s (%s); proceeding without exclusion",
-            path,
-            e,
-        )
-        yield
-        return
-    try:
-        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
-        finally:
-            fp.close()
 
 
 def _apply_atomic(plan: _PatchPlan) -> bool:
@@ -900,6 +869,68 @@ def _rollback_applied(
 _FUZZ = 2
 
 
+def _run_patch(
+    patch_bin: str,
+    patch_file: Path,
+    cwd: Path,
+    *extra_flags: str,
+    strip: int = 1,
+    spawn_log: Callable[..., None],
+    log_stderr: bool = False,
+    reverse_label: str = "",
+) -> bool:
+    """Run ``patch -p<strip> --fuzz=2 <extra_flags>`` with ``patch_file`` on stdin.
+
+    Shared core of the three ``patch(1)`` wrappers. ``extra_flags`` are appended
+    verbatim after ``-p<strip> --fuzz=2`` so each caller reproduces its exact
+    arg order. ``spawn_log`` (a ``log.warning`` / ``log.debug`` bound method) is
+    used for the spawn-failure line, with ``reverse_label`` filling the ``%s``
+    descriptor after ``patch``. When ``log_stderr`` is set, a non-zero return
+    code is reported at debug level with a truncated stderr tail.
+
+    Args:
+        patch_bin: Path to the ``patch`` executable.
+        patch_file: The patch file fed to ``patch`` on stdin.
+        cwd: Working directory the patch is run relative to.
+        *extra_flags: Flags appended after ``-p<strip> --fuzz=2``.
+        strip: The ``-p<N>`` strip count.
+        spawn_log: Logger method used for the spawn-failure line.
+        log_stderr: When True, debug-log a non-zero return code + stderr tail.
+        reverse_label: ``%s`` descriptor inserted after ``patch`` in the logs.
+
+    Returns:
+        True iff the command exits with return code 0.
+    """
+    try:
+        with patch_file.open("rb") as fh:
+            result = subprocess.run(
+                (patch_bin, f"-p{strip}", f"--fuzz={_FUZZ}", *extra_flags),
+                cwd=str(cwd),
+                stdin=fh,
+                capture_output=True,
+                timeout=_GIT_TIMEOUT_SEC,
+            )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        spawn_log(
+            "_server_patcher: patch%s in %s failed to spawn (%s)",
+            reverse_label,
+            cwd,
+            e,
+        )
+        return False
+    if result.returncode != 0:
+        if log_stderr:
+            err = result.stderr.decode("utf-8", errors="replace")[:500] if result.stderr else ""
+            log.debug(
+                "_server_patcher: patch%s rc=%d stderr=%r",
+                reverse_label,
+                result.returncode,
+                err,
+            )
+        return False
+    return True
+
+
 def _patch_dry_run(
     patch_bin: str,
     patch_file: Path,
@@ -921,23 +952,16 @@ def _patch_dry_run(
     Returns:
         True iff the dry-run exits with return code 0.
     """
-    try:
-        with patch_file.open("rb") as fh:
-            result = subprocess.run(
-                (patch_bin, f"-p{strip}", f"--fuzz={_FUZZ}", "--dry-run", "--silent"),
-                cwd=str(cwd),
-                stdin=fh,
-                capture_output=True,
-                timeout=_GIT_TIMEOUT_SEC,
-            )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        log.warning(
-            "_server_patcher: patch --dry-run in %s failed to spawn (%s)",
-            cwd,
-            e,
-        )
-        return False
-    return result.returncode == 0
+    return _run_patch(
+        patch_bin,
+        patch_file,
+        cwd,
+        "--dry-run",
+        "--silent",
+        strip=strip,
+        spawn_log=log.warning,
+        reverse_label=" --dry-run",
+    )
 
 
 def _patch_reverse_dry_run(
@@ -961,23 +985,17 @@ def _patch_reverse_dry_run(
     Returns:
         True iff the reverse dry-run exits with return code 0.
     """
-    try:
-        with patch_file.open("rb") as fh:
-            result = subprocess.run(
-                (patch_bin, f"-p{strip}", f"--fuzz={_FUZZ}", "-R", "--dry-run", "--silent"),
-                cwd=str(cwd),
-                stdin=fh,
-                capture_output=True,
-                timeout=_GIT_TIMEOUT_SEC,
-            )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        log.debug(
-            "_server_patcher: patch -R --dry-run in %s failed to spawn (%s)",
-            cwd,
-            e,
-        )
-        return False
-    return result.returncode == 0
+    return _run_patch(
+        patch_bin,
+        patch_file,
+        cwd,
+        "-R",
+        "--dry-run",
+        "--silent",
+        strip=strip,
+        spawn_log=log.debug,
+        reverse_label=" -R --dry-run",
+    )
 
 
 def _patch_apply(
@@ -1001,36 +1019,17 @@ def _patch_apply(
     Returns:
         bool: ``True`` iff the apply exits with return code 0.
     """
-    args = [patch_bin, f"-p{strip}", f"--fuzz={_FUZZ}", "--silent"]
-    if reverse:
-        args.append("--reverse")
-    try:
-        with patch_file.open("rb") as fh:
-            result = subprocess.run(
-                args,
-                cwd=str(cwd),
-                stdin=fh,
-                capture_output=True,
-                timeout=_GIT_TIMEOUT_SEC,
-            )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        log.warning(
-            "_server_patcher: patch%s in %s failed to spawn (%s)",
-            " --reverse" if reverse else "",
-            cwd,
-            e,
-        )
-        return False
-    if result.returncode != 0:
-        err = result.stderr.decode("utf-8", errors="replace")[:500] if result.stderr else ""
-        log.debug(
-            "_server_patcher: patch%s rc=%d stderr=%r",
-            " --reverse" if reverse else "",
-            result.returncode,
-            err,
-        )
-        return False
-    return True
+    flags = ("--reverse", "--silent") if reverse else ("--silent",)
+    return _run_patch(
+        patch_bin,
+        patch_file,
+        cwd,
+        *flags,
+        strip=strip,
+        spawn_log=log.warning,
+        log_stderr=True,
+        reverse_label=" --reverse" if reverse else "",
+    )
 
 
 def _git(git: str, args: Sequence[str], cwd: Path) -> bool:

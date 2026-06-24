@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 
 from ..storage.connection import SqliteConnection
 from ..storage.schema import DEFAULT_LANE_CAPACITIES
+from ._time import now_iso
 
 
 log = logging.getLogger(__name__)
@@ -73,13 +74,8 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
 }
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO string.
-
-    Returns:
-        str: ``datetime.now(UTC)`` formatted with microsecond resolution.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 def _expand_lanes(lanes: list[str]) -> list[str]:

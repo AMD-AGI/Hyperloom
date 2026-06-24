@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..session_paths import runs_dir, specialist_intel_path
+from ._time import now_iso
 from .backends.base import BackendError
 from ..protocol.intent import Intent, IntentType
 from .trace.conversation_trace import ConversationRecord, append_conversation
@@ -124,13 +125,8 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
 SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO 8601 string.
-
-    Returns:
-        str: The current UTC timestamp formatted with microsecond precision.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 def _safe_redact(s: str) -> str:

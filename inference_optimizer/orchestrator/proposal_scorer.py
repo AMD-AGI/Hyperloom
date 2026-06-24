@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .backends.base import parse_call_timeout_env
+from .coordinator_helpers import format_exc_brief
 from .trace.conversation_trace import ConversationRecord, append_conversation
 from .trace.llm_trace import LLMCallRecord, append_llm_call
 
@@ -498,7 +499,7 @@ class ProposalScorer:
         errors: dict[str, str] = {}
         for model, res in zip(self.models, results):
             if isinstance(res, BaseException):
-                errors[model] = f"{type(res).__name__}: {str(res)[:200]}"
+                errors[model] = format_exc_brief(res, limit=200)
                 log.warning(
                     "ProposalScorer: model=%s failed: %r",
                     model,

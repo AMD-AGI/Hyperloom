@@ -17,6 +17,23 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+def format_exc_brief(exc: BaseException, limit: int | None = None) -> str:
+    """Render an exception as ``"TypeName: message"``, optionally truncated.
+
+    Args:
+        exc: The exception (or any ``BaseException``) to format.
+        limit: When set, truncate the message to this many characters.
+
+    Returns:
+        ``f"{type(exc).__name__}: {str(exc)[:limit]}"`` (no truncation when
+        ``limit`` is ``None``).
+    """
+    msg = str(exc)
+    if limit is not None:
+        msg = msg[:limit]
+    return f"{type(exc).__name__}: {msg}"
+
+
 def _infer_model_class_from_config(model_path: str) -> str:
     """Infer a deterministic model_class from local model metadata.
 

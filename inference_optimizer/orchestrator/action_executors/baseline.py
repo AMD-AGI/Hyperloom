@@ -23,9 +23,8 @@ import shutil
 import subprocess
 import tempfile
 import time
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import yaml
 
@@ -33,6 +32,7 @@ from ...compat.payload_aliases import read_extra_server_args
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
+from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
     AITER_JIT_PROBE_PATHS,
     COLD_START_KERNEL_THRESHOLD,
@@ -388,51 +388,6 @@ def _is_network_fs(path: str) -> bool:
     return _path_fstype(path).lower() in _NETWORK_FS_TYPES
 
 
-@contextmanager
-def _mirror_lock(lock_path: str) -> Iterator[None]:
-    """Best-effort cross-process exclusive lock around the InferenceX mirror
-    copy+swap (#523).
-
-    Two tasks (or two sandbox processes) that resolve the SAME network-mount
-    source to the same hash-keyed ``dest`` would otherwise ``rmtree`` /
-    ``os.replace`` the mirror under each other — corrupting a tree another
-    run's server may be ``cd``-ed into. Serializing the swap makes the loser
-    wait for the winner and then overwrite a consistent tree. Degrades to no
-    exclusion when ``fcntl`` is unavailable (non-Linux) or the lock file
-    cannot be opened — the unique staging dir still prevents torn copies.
-
-    Args:
-        lock_path: Path to the lock file used for cross-process exclusion.
-
-    Yields:
-        None: Control is yielded to the caller while the lock is held (or
-        immediately, when no exclusion could be acquired).
-    """
-    try:
-        import fcntl
-    except ImportError:
-        yield
-        return
-    try:
-        fp = open(lock_path, "w")
-    except OSError as exc:
-        log.warning(
-            "baseline_executor: cannot open InferenceX mirror lock %s (%s); proceeding without cross-process exclusion",
-            lock_path,
-            exc,
-        )
-        yield
-        return
-    try:
-        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
-        finally:
-            fp.close()
-
-
 def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     """Mirror an InferenceX checkout onto stable local disk.
 
@@ -511,7 +466,7 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     lock_path = str(local_root / f".{dest.name}.lock")
     staging: Path | None = None
     try:
-        with _mirror_lock(lock_path):
+        with best_effort_file_lock(lock_path, label="baseline_executor: InferenceX mirror lock"):
             staging = Path(tempfile.mkdtemp(dir=str(local_root)))
             staged_ix = staging / "InferenceX"
             # Copy the tree fresh; re-copy every run because the per-task

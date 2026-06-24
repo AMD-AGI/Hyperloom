@@ -37,15 +37,17 @@ Result schema (returned to the bus):
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from .._time import now_iso
 from ...session_paths import runs_dir
+from ..gain_math import gain_pct
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
@@ -90,13 +92,8 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 DEFAULT_STACK_STABLE_PCT = 0.5
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as an ISO 8601 string.
-
-    Returns:
-        str: The current UTC timestamp in ISO 8601 format.
-    """
-    return datetime.now(timezone.utc).isoformat()
+# bare ``isoformat()`` (auto timespec) + ``+00:00`` (canonical helper; kept importable).
+_now_iso = functools.partial(now_iso, "auto")
 
 
 def _initial_explore_search_state() -> dict[str, Any]:
@@ -342,6 +339,9 @@ def _default_grid_for_framework(
 def _gain_pct(tput: float | None, base_tput: float) -> float | None:
     """Compute the percentage throughput gain over a baseline.
 
+    Thin alias for :func:`gain_math.gain_pct` (the canonical None-on-non-positive
+    contract), kept as a module-private name so existing call sites are unchanged.
+
     Args:
         tput (float | None): The variant's throughput.
         base_tput (float): The baseline throughput to compare against.
@@ -350,9 +350,7 @@ def _gain_pct(tput: float | None, base_tput: float) -> float | None:
         float | None: The gain as a percentage, or ``None`` when either
         input is non-positive or ``tput`` is not numeric.
     """
-    if not isinstance(tput, (int, float)) or tput <= 0 or base_tput <= 0:
-        return None
-    return (float(tput) - base_tput) / base_tput * 100.0
+    return gain_pct(tput, base_tput)
 
 
 # Auto-derived per-variant hard timeout: rather than a universal constant

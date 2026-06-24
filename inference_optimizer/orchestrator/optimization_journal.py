@@ -10,13 +10,15 @@ incrementally (atomic tmp + ``os.replace``) so a mid-session crash leaves a usab
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from ._time import now_iso
 
 
 log = logging.getLogger(__name__)
@@ -337,20 +339,8 @@ class Journal:
 
 
 # helpers
-def _now_iso() -> str:
-    """ISO-8601 UTC timestamp (seconds precision) used for entry ``ts``.
-
-    Returns:
-        str: The current UTC timestamp with a ``Z`` suffix.
-    """
-    return (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace(
-            "+00:00",
-            "Z",
-        )
-    )
+# seconds + ``Z`` suffix (canonical helper; kept importable for callers).
+_now_iso = functools.partial(now_iso, "seconds", z_suffix=True)
 
 
 def _variant_args(variant: dict[str, Any]) -> str:

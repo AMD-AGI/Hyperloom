@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 
 from ..recipe_kb import RecipeKB, recipe_canonical_id
 from ..recipe_snapshot_constants import detect_framework_version
+from ..session_paths import cortex_lessons_json, cortex_pitfalls_json, cortex_warm_json
 
 
 log = logging.getLogger(__name__)
@@ -774,7 +775,7 @@ def run_t0_anchor(
         sort_keys=True,
     )
     try:
-        warm_path = sd / "runtime" / "cortex" / ".kb_warm.json"
+        warm_path = cortex_warm_json(sd)
         warm_path.parent.mkdir(parents=True, exist_ok=True)
         warm_path.write_text(
             json.dumps(
@@ -833,7 +834,7 @@ def run_t0_anchor(
     pitfalls_list: list[dict[str, Any]] = list(warm_point.get("pitfalls") or [])
     lessons_list: list[dict[str, Any]] = list(warm_point.get("lessons") or [])
     try:
-        pit_path = sd / "runtime" / "cortex" / ".kb_pitfalls.json"
+        pit_path = cortex_pitfalls_json(sd)
         pit_path.parent.mkdir(parents=True, exist_ok=True)
         pit_path.write_text(
             json.dumps(
@@ -852,7 +853,7 @@ def run_t0_anchor(
     except OSError as exc:
         log.warning("warm_start_pitfalls snapshot write failed: %s", exc)
     try:
-        les_path = sd / "runtime" / "cortex" / ".kb_lessons.json"
+        les_path = cortex_lessons_json(sd)
         les_path.parent.mkdir(parents=True, exist_ok=True)
         les_path.write_text(
             json.dumps(

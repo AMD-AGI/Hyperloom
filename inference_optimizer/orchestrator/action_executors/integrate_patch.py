@@ -64,19 +64,21 @@ Outputs (dict, returned to the bus as ``delegated_result.result``)::
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
 import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ...session_paths import runs_dir
+from .._time import now_iso
 from ..framework_paths import resolve_source_file_allowlist
 from ..specialist_patch_safety import patch_file_targets, patch_targets_missing
 from ._accuracy_gate import accuracy_passed, parse_eval_results
+from ._git import _run_git_cp
 from ._grid_runner import (
     GridVariant,
     VariantResult,
@@ -101,15 +103,8 @@ DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIME
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as an ISO 8601 string.
-
-    Returns:
-        str: The current UTC timestamp in ISO 8601 format.
-    """
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat()
+# Bare ``isoformat()`` (auto timespec): microseconds only when non-zero.
+_now_iso = functools.partial(now_iso, "auto")
 
 
 def _root_contains_patch_targets(root: Path, patch_paths: list[Path]) -> bool:
@@ -204,22 +199,15 @@ def _run_git_apply(
     Returns:
         A ``(ok, stderr)`` tuple; ``ok`` is True on a zero return code.
     """
-    cmd = ["git", "-C", str(framework_root), "apply", f"-p{p_level}"]
+    args = ["-C", str(framework_root), "apply", f"-p{p_level}"]
     if three_way:
-        cmd.append("-3")
+        args.append("-3")
     if check_only:
-        cmd.append("--check")
-    cmd.append(str(patch_path))
-    try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, f"git apply spawn failed: {exc!r}"
+        args.append("--check")
+    args.append(str(patch_path))
+    cp = _run_git_cp(args, timeout=120.0)
+    if cp is None:
+        return False, "git apply spawn failed"
     return cp.returncode == 0, cp.stderr.strip()
 
 
@@ -346,47 +334,20 @@ def _git_apply_reverse(
         succeeds.
     """
     for lvl in _P_LEVELS:
-        check = [
-            "git",
-            "-C",
-            str(framework_root),
-            "apply",
-            "-R",
-            f"-p{lvl}",
-            "--check",
-            str(patch_path),
-        ]
-        try:
-            cp = subprocess.run(
-                check,
-                capture_output=True,
-                text=True,
-                timeout=120.0,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            return False, f"git apply -R spawn failed: {exc!r}"
+        cp = _run_git_cp(
+            ["-C", str(framework_root), "apply", "-R", f"-p{lvl}", "--check", str(patch_path)],
+            timeout=120.0,
+        )
+        if cp is None:
+            return False, "git apply -R spawn failed"
         if cp.returncode != 0:
             continue
-        real = [
-            "git",
-            "-C",
-            str(framework_root),
-            "apply",
-            "-R",
-            f"-p{lvl}",
-            str(patch_path),
-        ]
-        try:
-            cp2 = subprocess.run(
-                real,
-                capture_output=True,
-                text=True,
-                timeout=120.0,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            return False, f"git apply -R spawn failed: {exc!r}"
+        cp2 = _run_git_cp(
+            ["-C", str(framework_root), "apply", "-R", f"-p{lvl}", str(patch_path)],
+            timeout=120.0,
+        )
+        if cp2 is None:
+            return False, "git apply -R spawn failed"
         if cp2.returncode == 0:
             return True, ""
         return False, cp2.stderr.strip()
@@ -395,23 +356,11 @@ def _git_apply_reverse(
 
 def _find_hyperloom_auto_stash(framework_root: Path) -> str:
     """Return the newest Hyperloom auto-stash ref, or ``""`` if absent."""
-    cmd = [
-        "git",
-        "-C",
-        str(framework_root),
-        "stash",
-        "list",
-        "--format=%gd:%gs",
-    ]
-    try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    cp = _run_git_cp(
+        ["-C", str(framework_root), "stash", "list", "--format=%gd:%gs"],
+        timeout=30.0,
+    )
+    if cp is None:
         return ""
     if cp.returncode != 0:
         return ""
@@ -438,17 +387,9 @@ def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
         - ``"failed"`` — tree is dirty but stash command failed; callers
           MUST NOT proceed with destructive operations.
     """
-    status_cmd = ["git", "-C", str(framework_root), "status", "--porcelain"]
-    try:
-        cp = subprocess.run(
-            status_cmd,
-            capture_output=True,
-            text=True,
-            timeout=30.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return "failed", f"git status check failed: {exc!r}"
+    cp = _run_git_cp(["-C", str(framework_root), "status", "--porcelain"], timeout=30.0)
+    if cp is None:
+        return "failed", "git status check failed"
     if cp.returncode != 0:
         # Non-git directory (rc=128 "not a git repository") or other git
         # status errors: treat as clean — no git-managed changes to protect.
@@ -461,21 +402,12 @@ def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
         return "clean", ""
     if not cp.stdout.strip():
         return "clean", ""
-    stash_cmd = [
-        "git", "-C", str(framework_root),
-        "stash", "push", "-u",
-        "-m", _HYPERLOOM_AUTO_STASH_MSG,
-    ]
-    try:
-        cp2 = subprocess.run(
-            stash_cmd,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return "failed", f"git stash push failed: {exc!r}"
+    cp2 = _run_git_cp(
+        ["-C", str(framework_root), "stash", "push", "-u", "-m", _HYPERLOOM_AUTO_STASH_MSG],
+        timeout=60.0,
+    )
+    if cp2 is None:
+        return "failed", "git stash push failed"
     if cp2.returncode == 0:
         stash_ref = _find_hyperloom_auto_stash(framework_root) or "stash@{0}"
         log.info(
@@ -498,17 +430,9 @@ def _git_restore_stash_if_needed(
     ref = stash_ref or _find_hyperloom_auto_stash(framework_root)
     if not ref:
         return "auto-stash ref not found; user changes remain in git stash"
-    cmd = ["git", "-C", str(framework_root), "stash", "pop", "--index", ref]
-    try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return f"git stash pop failed: {exc!r}; user changes remain in {ref}"
+    cp = _run_git_cp(["-C", str(framework_root), "stash", "pop", "--index", ref], timeout=120.0)
+    if cp is None:
+        return f"git stash pop failed; user changes remain in {ref}"
     if cp.returncode == 0:
         log.info("integrate_patch: restored user changes from %s", ref)
         return ""
@@ -548,30 +472,14 @@ def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
         tuple[bool, str]: ``(ok, stderr)`` where ``ok`` is ``True`` on
         return code 0.
     """
-    cmd = ["git", "-C", str(framework_root), "checkout", "--", "."]
-    try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, f"git checkout spawn failed: {exc!r}"
+    cp = _run_git_cp(["-C", str(framework_root), "checkout", "--", "."], timeout=60.0)
+    if cp is None:
+        return False, "git checkout spawn failed"
     if cp.returncode != 0:
         return False, cp.stderr.strip()
-    clean_cmd = ["git", "-C", str(framework_root), "clean", "-fd"]
-    try:
-        cp2 = subprocess.run(
-            clean_cmd,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, f"git clean spawn failed: {exc!r}"
+    cp2 = _run_git_cp(["-C", str(framework_root), "clean", "-fd"], timeout=60.0)
+    if cp2 is None:
+        return False, "git clean spawn failed"
     return cp2.returncode == 0, cp2.stderr.strip()
 
 
@@ -720,39 +628,31 @@ def _git_commit_kept(
     """
     if not paths:
         return True, "no patch-touched paths to commit"
-    add = ["git", "-C", str(framework_root), "add", "-A", "--", *paths]
-    commit = [
-        "git",
-        "-C",
-        str(framework_root),
-        "-c",
-        "user.email=hyperloom@local",
-        "-c",
-        "user.name=Hyperloom",
-        "commit",
-        "-q",
-        "-m",
-        message,
-    ]
-    try:
-        cp_add = subprocess.run(
-            add,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-        if cp_add.returncode != 0:
-            return False, f"git add failed: {cp_add.stderr.strip()}"
-        cp = subprocess.run(
-            commit,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, f"git commit spawn failed: {exc!r}"
+    cp_add = _run_git_cp(
+        ["-C", str(framework_root), "add", "-A", "--", *paths],
+        timeout=60.0,
+    )
+    if cp_add is None:
+        return False, "git commit spawn failed"
+    if cp_add.returncode != 0:
+        return False, f"git add failed: {cp_add.stderr.strip()}"
+    cp = _run_git_cp(
+        [
+            "-C",
+            str(framework_root),
+            "-c",
+            "user.email=hyperloom@local",
+            "-c",
+            "user.name=Hyperloom",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+        timeout=60.0,
+    )
+    if cp is None:
+        return False, "git commit spawn failed"
     if cp.returncode == 0:
         return True, ""
     # "nothing to commit" is a benign no-op, not an error.
@@ -1103,7 +1003,7 @@ class IntegratePatchExecutor:
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or extra.get("state")
         # Specialist workspace conventionally at runs/specialist/<id>/.
-        specialist_workspace = self.session_dir / "runs" / "specialist" / specialist_task_id
+        specialist_workspace = runs_dir(self.session_dir, "specialist", specialist_task_id)
         if not specialist_workspace.is_dir():
             return {
                 "status": "failed",

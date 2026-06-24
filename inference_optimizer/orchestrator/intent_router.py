@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..protocol.intent import Intent, IntentType
+from .coordinator_helpers import format_exc_brief
 from .message_bus import Message
 from .policy import PolicyDenied
 from .task_registry import Task
@@ -134,7 +135,7 @@ class IntentRouter:
                         "kind": "handle_intent_exception",
                         "agent": source,
                         "intent_type": intent.type.value,
-                        "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                        "error": format_exc_brief(exc, limit=500),
                     },
                 )
             except Exception:  # noqa: BLE001

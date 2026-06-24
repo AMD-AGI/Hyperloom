@@ -1068,10 +1068,7 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
             ray_gcs_address_from_state,
             dynamo_ssh_env_from_state,
         )
-        from .action_executors._subprocess_kill import (
-            kill_my_spawned_server,
-            new_session_kwargs,
-        )
+        from .action_executors._subprocess_kill import run_with_session_kill
 
         if is_multi_node():
             # Dynamo backend: route GEAK GPU work to a pod over SSH (no Ray).
@@ -1084,30 +1081,12 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
             if addr:
                 env.setdefault("RAY_ADDRESS", addr)
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            **new_session_kwargs(),
-        )
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout_sec)
-        except subprocess.TimeoutExpired:
-            # Reap the whole tree, then drain whatever partial output landed.
-            kill_my_spawned_server(proc)
-            try:
-                proc.communicate(timeout=30)
-            except subprocess.TimeoutExpired:
-                # The process group was already signalled; do not block cleanup
-                # waiting for a wedged child to flush pipes.
-                pass
-            raise
-        finally:
-            # Defense in depth: never leave a descendant of this call running.
-            kill_my_spawned_server(proc)
-        return proc.returncode, stdout or "", stderr or ""
+        # run_with_session_kill launches the child in its own POSIX session and
+        # reaps the whole descendant tree on every exit path (incl. on timeout,
+        # where it re-raises TimeoutExpired) — the same contract this wrapper
+        # used to hand-roll with Popen + kill_my_spawned_server.
+        cp = run_with_session_kill(cmd, env=env, timeout=timeout_sec, text=True)
+        return cp.returncode, cp.stdout or "", cp.stderr or ""
 
     return await asyncio.to_thread(_run)
 
@@ -1540,7 +1519,9 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
         else:
             return ""
 
-    specialist_dir = session_dir / "runs" / "specialist"
+    from ..session_paths import runs_root
+
+    specialist_dir = runs_root(session_dir) / "specialist"
     if not specialist_dir.is_dir():
         return ""
 
@@ -2590,9 +2571,11 @@ def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
     Returns:
         The set of kernel ids currently in flight.
     """
+    from ..session_paths import kernel_agent_runs_dir
+
     in_flight: set[str] = set()
     sid = session_dir.name
-    status_dir = session_dir / "kernel-agent" / "runs" / sid / "status" / "kernel_optimization"
+    status_dir = kernel_agent_runs_dir(session_dir, sid) / "status" / "kernel_optimization"
     if not status_dir.is_dir():
         return in_flight
     for p in status_dir.glob("ko-*.json"):
@@ -3955,7 +3938,9 @@ async def _run_after_kernel_opt_rocprof(
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec + 30)
     except Exception as exc:
         log.warning("integrate: after_kernel_opt rocprof subprocess error: %s", exc)
-        reason = f"{type(exc).__name__}: {exc}"
+        from .coordinator_helpers import format_exc_brief
+
+        reason = format_exc_brief(exc)
         _record_after_kernel_opt_rocprof_status(
             session_dir=session_dir,
             kernel_id=kernel_id,
@@ -4319,8 +4304,10 @@ async def integrate_handler(
             }
 
     new_tput = float(bench_result.get("output_throughput") or 0.0)
+    from .gain_math import gain_pct_or_zero, incremental_gain_pct
+
     # base_tput > 0 already guaranteed by the early guard above.
-    gain_pct = (new_tput - base_tput) / base_tput * 100.0
+    gain_pct = gain_pct_or_zero(new_tput, base_tput)
     stack_positive_keep = False
     stack_incremental_gain_pct: float | None = None
     try:
@@ -4330,7 +4317,7 @@ async def integrate_handler(
         current_best = state.current_best or {}
         current_best_tput = float(current_best.get("tput") or 0.0)
         if current_best_tput > 0:
-            stack_incremental_gain_pct = (new_tput - current_best_tput) / current_best_tput * 100.0
+            stack_incremental_gain_pct = incremental_gain_pct(new_tput, current_best_tput)
         stack_positive_keep = (
             bool(state.optimization_stack)
             and str(current_best.get("action") or "") == "integrate"

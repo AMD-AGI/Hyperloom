@@ -46,21 +46,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ._time import now_iso
+
 log = logging.getLogger(__name__)
 
 # Upper bound on retained crash timestamps (trailing-window rate needs only the
 # recent tail; older entries age out of any sane emergency window anyway).
 _CRASH_TIMESTAMP_CAP: int = 200
 
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO 8601 string.
+
+def _first_positive_tput(d: Any) -> float:
+    """Return the first positive ``tput``/``output_throughput`` from a dict.
+
+    Args:
+        d: A metrics dict (non-dicts are treated as empty).
 
     Returns:
-        str: The current UTC timestamp formatted via ``datetime.isoformat``
-            with ``timespec="microseconds"`` (e.g. ``"2026-06-02T18:29:00.123456+00:00"``).
+        The first of ``tput`` then ``output_throughput`` that is a positive
+        number, as a float; ``0.0`` when neither is present/positive.
     """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    src = d if isinstance(d, dict) else {}
+    for key in ("tput", "output_throughput"):
+        val = src.get(key)
+        if isinstance(val, (int, float)) and val > 0:
+            return float(val)
+    return 0.0
 
 
 # Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
@@ -1783,12 +1796,7 @@ class SharedState:
         """
         if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
             return float(self.baseline_tput)
-        last_bl = self.last_baseline if isinstance(self.last_baseline, dict) else {}
-        for key in ("tput", "output_throughput"):
-            val = last_bl.get(key)
-            if isinstance(val, (int, float)) and val > 0:
-                return float(val)
-        return 0.0
+        return _first_positive_tput(self.last_baseline)
 
     def _resolve_current_best_achieved_tput(self) -> float:
         """Optimized-arm throughput for a current_best roofline snapshot.
@@ -1801,12 +1809,7 @@ class SharedState:
             float: The resolved current_best throughput, or ``0.0`` when none
                 is available.
         """
-        cb = self.current_best if isinstance(self.current_best, dict) else {}
-        for key in ("tput", "output_throughput"):
-            val = cb.get(key)
-            if isinstance(val, (int, float)) and val > 0:
-                return float(val)
-        return 0.0
+        return _first_positive_tput(self.current_best)
 
     def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
         """Compute a standalone baseline-arm roofline ceiling and cache it.
@@ -1821,14 +1824,12 @@ class SharedState:
         try:
             from .roofline_ceiling import (
                 RooflineBreakdown,
-                apply_runtime_dtype,
                 compute_roofline_breakdown_from_state,
-                compute_roofline_from_perfmodel,
-                load_model_meta,
-                resolve_runtime_dtype,
-                resolve_runtime_workload,
             )
-            from .roofline_snapshot import build_roofline_snapshot
+            from .roofline_snapshot import (
+                attach_perfmodel_breakdown,
+                build_roofline_snapshot,
+            )
         except Exception:  # noqa: BLE001 — import guard, best-effort
             return {}
 
@@ -1860,64 +1861,7 @@ class SharedState:
         ceiling["ceiling_arm"] = "baseline"
 
         # Per-op PerfModel breakdown + provenance (mirrors record_trace_analyze).
-        try:
-            runtime = resolve_runtime_workload(self, arm="baseline")
-            meta = load_model_meta(
-                runtime.model_path,
-                precision_hint=runtime.precision,
-            )
-            if meta is not None:
-                rt = resolve_runtime_dtype(self, meta, arm="baseline")
-                meta = apply_runtime_dtype(meta, rt)
-                pm_bd = compute_roofline_from_perfmodel(
-                    meta=meta,
-                    gpu_type=runtime.gpu_type,
-                    concurrency=runtime.concurrency,
-                    isl=runtime.isl,
-                    osl=runtime.osl,
-                    num_gpus=runtime.tp,
-                    precision_tag=rt.compute_precision_tag
-                    or runtime.precision
-                    or "bf16",
-                )
-                ceiling["roofline_provenance"] = {
-                    "formula": "perfmodel" if pm_bd is not None else "legacy",
-                    "runtime_weight_dtype": rt.weight_dtype_tag,
-                    "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
-                    "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
-                    "quantization": rt.quantization,
-                    "dtype_source": rt.source,
-                    "effective_concurrency": runtime.concurrency,
-                    "runtime_tp": runtime.tp,
-                    "runtime_isl": runtime.isl,
-                    "runtime_osl": runtime.osl,
-                    "runtime_precision": runtime.precision,
-                    "runtime_framework": runtime.framework,
-                }
-                if pm_bd is not None:
-                    ceiling["perfmodel_breakdown"] = {
-                        "decode_tok_per_s": pm_bd.decode_tok_per_s,
-                        "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
-                        "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
-                        "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
-                        "bound_kind": pm_bd.bound_kind,
-                        "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
-                        "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
-                        "ops": [
-                            {
-                                "name": op.name,
-                                "flops": op.flops,
-                                "bytes_moved": op.bytes_moved,
-                                "ai": op.ai,
-                                "time_s": op.time_s,
-                                "bound": op.bound,
-                                "pct_time": op.pct_time,
-                            }
-                            for op in pm_bd.ops
-                        ],
-                    }
-        except Exception:  # noqa: BLE001 — PerfModel serialization is best-effort
-            pass
+        attach_perfmodel_breakdown(ceiling, self, arm="baseline")
 
         self.baseline_roofline_ceiling = ceiling
         return ceiling
@@ -2090,14 +2034,15 @@ class SharedState:
 
         # Append compact history for report-side Roofline Comparison; best-effort, parse errors degrade to None.
         try:
-            from .roofline_snapshot import build_roofline_snapshot
+            from .roofline_snapshot import (
+                attach_perfmodel_breakdown,
+                build_roofline_snapshot,
+            )
 
             # Stamp decode-roofline ceiling (session constant) + measured tput (current_best.tput else baseline_tput).
             from .roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
-                compute_roofline_from_perfmodel,
-                load_model_meta,
             )
 
             # Resolve which arm this snapshot measures FIRST so the ceiling's
@@ -2155,76 +2100,7 @@ class SharedState:
                 bound_kind=breakdown.bound_kind,
             )
             # Per-op PerfModel breakdown for dashboard visualization.
-            try:
-                from .roofline_ceiling import resolve_runtime_workload
-
-                runtime = resolve_runtime_workload(self, arm=snapshot_arm)
-                meta = load_model_meta(
-                    runtime.model_path,
-                    precision_hint=runtime.precision,
-                )
-                if meta is not None:
-                    from .roofline_ceiling import (
-                        apply_runtime_dtype,
-                        resolve_runtime_dtype,
-                    )
-
-                    eff_conc = runtime.concurrency
-                    # Use the dtype the run actually read (e.g. fp8 over a
-                    # float32 checkpoint), not the on-disk torch_dtype; pinned
-                    # to this snapshot's arm so baseline keeps baseline dtype.
-                    rt = resolve_runtime_dtype(self, meta, arm=snapshot_arm)
-                    meta = apply_runtime_dtype(meta, rt)
-                    pm_bd = compute_roofline_from_perfmodel(
-                        meta=meta,
-                        gpu_type=runtime.gpu_type,
-                        concurrency=eff_conc,
-                        isl=runtime.isl,
-                        osl=runtime.osl,
-                        num_gpus=runtime.tp,
-                        precision_tag=rt.compute_precision_tag or runtime.precision or "bf16",
-                    )
-                    # Tag the formula by what actually produced the ceiling:
-                    # ``perfmodel`` only when the bottom-up model succeeded,
-                    # else ``legacy`` (fallback aggregate in the breakdown).
-                    history_entry["roofline_provenance"] = {
-                        "formula": "perfmodel" if pm_bd is not None else "legacy",
-                        "runtime_weight_dtype": rt.weight_dtype_tag,
-                        "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
-                        "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
-                        "quantization": rt.quantization,
-                        "dtype_source": rt.source,
-                        "effective_concurrency": eff_conc,
-                        "runtime_tp": runtime.tp,
-                        "runtime_isl": runtime.isl,
-                        "runtime_osl": runtime.osl,
-                        "runtime_precision": runtime.precision,
-                        "runtime_framework": runtime.framework,
-                    }
-                    if pm_bd is not None:
-                        history_entry["perfmodel_breakdown"] = {
-                            "decode_tok_per_s": pm_bd.decode_tok_per_s,
-                            "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
-                            "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
-                            "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
-                            "bound_kind": pm_bd.bound_kind,
-                            "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
-                            "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
-                            "ops": [
-                                {
-                                    "name": op.name,
-                                    "flops": op.flops,
-                                    "bytes_moved": op.bytes_moved,
-                                    "ai": op.ai,
-                                    "time_s": op.time_s,
-                                    "bound": op.bound,
-                                    "pct_time": op.pct_time,
-                                }
-                                for op in pm_bd.ops
-                            ],
-                        }
-            except Exception:  # noqa: BLE001 — PerfModel serialization is best-effort
-                pass
+            attach_perfmodel_breakdown(history_entry, self, arm=snapshot_arm)
             history_entry["trace_input"] = str(trace_input)
             history_entry["macro_cycle"] = int(getattr(self, "macro_cycle", 0) or 0)
             history_entry["analysis_md_path"] = str(analysis_md_path)
@@ -3148,13 +3024,11 @@ class SharedState:
             tput = float(new_tput or 0.0)
         except (TypeError, ValueError):
             tput = 0.0
-        gain_pct: float | None
-        if base > 0 and tput > 0:
-            gain_pct = (tput - base) / base * 100.0
-        else:
-            gain_pct = None
-        self.gain_per_stack_entry.append(gain_pct)
-        return gain_pct
+        from .gain_math import gain_pct
+
+        entry_gain_pct = gain_pct(tput, base)
+        self.gain_per_stack_entry.append(entry_gain_pct)
+        return entry_gain_pct
 
     def seed_stack_from_current_best(self) -> None:
         """Backfill stack for old sessions that only had current_best."""

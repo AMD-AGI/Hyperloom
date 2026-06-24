@@ -30,10 +30,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass, fields
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .._time import now_iso
 from ...session_paths import conversations_path
 from .llm_trace import VALID_COMPONENTS
 
@@ -110,13 +110,8 @@ def redact_secrets(text: str) -> str:
     return out
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO string.
-
-    Returns:
-        ISO 8601 timestamp in UTC.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 def _coerce_optional_str(value: Any) -> str | None:

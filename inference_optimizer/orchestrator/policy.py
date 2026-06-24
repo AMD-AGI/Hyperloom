@@ -9,7 +9,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .framework_paths import resolve_source_file_allowlist
 from .gpu_pool import resolve_gpu_specialist_devices
@@ -1480,32 +1480,17 @@ class PolicyGate:
             PolicyDenied: when the SWEEP phase already carries an auto-enqueued
                 sweep task and no bypass flag is set.
         """
-        params = payload.get("params") or {}
-        if isinstance(params, dict) and params.get("bypass_sweep_singleton"):
-            return
-        ss = getattr(self, "shared_state", None)
-        if ss is None:
-            return
-        history = getattr(ss, "phase_history", None) or []
-        if not history:
-            return
-        latest = history[-1]
-        if not isinstance(latest, dict):
-            return
-        if str(latest.get("to_phase") or "").strip() != PHASE_SWEEP:
-            return
-        evidence = latest.get("evidence")
-        if not isinstance(evidence, dict):
-            return
-        auto_id = str(evidence.get("auto_sweep_task_id") or "").strip()
-        if not auto_id:
-            return
-        raise PolicyDenied(
-            f"sweep: SWEEP phase already has an auto-enqueued sweep "
-            f"task (auto_sweep_task_id={auto_id!r}); concurrent "
-            f"sweep proposals would race for the same GPUs and "
-            f"port and crash both vllm engines on init.",
+        self._validate_sweep_family_singleton(
+            payload,
+            bypass_key="bypass_sweep_singleton",
+            evidence_key="auto_sweep_task_id",
             rule="sweep_phase_singleton",
+            message_fn=lambda auto_id: (
+                f"sweep: SWEEP phase already has an auto-enqueued sweep "
+                f"task (auto_sweep_task_id={auto_id!r}); concurrent "
+                f"sweep proposals would race for the same GPUs and "
+                f"port and crash both vllm engines on init."
+            ),
             hint=(
                 "The Coordinator's SWEEP-entry hook already covers "
                 "the SKILL.md default grid plus the Cortex "
@@ -1539,8 +1524,58 @@ class PolicyGate:
             PolicyDenied: when the SWEEP phase already carries an auto-enqueued
                 conc_sweep task and no bypass flag is set.
         """
+        self._validate_sweep_family_singleton(
+            payload,
+            bypass_key="bypass_conc_sweep_singleton",
+            evidence_key="auto_conc_sweep_task_id",
+            rule="conc_sweep_phase_singleton",
+            message_fn=lambda auto_id: (
+                f"conc_sweep: SWEEP phase already has an auto-enqueued "
+                f"conc_sweep task (auto_conc_sweep_task_id={auto_id!r}); "
+                f"duplicate runs reproduce the same baseline + current_best "
+                f"comparison and add no new data while burning 30-150 min "
+                f"of GPU time."
+            ),
+            hint=(
+                "Coordinator's post-sweep hook already dispatched "
+                "conc_sweep — wait for SWEEP→CLOSE. If you need a "
+                "second run for debug, set "
+                f"params.bypass_conc_sweep_singleton=True on the "
+                f"{intent_kind} payload (recorded on the audit trail)."
+            ),
+        )
+
+    def _validate_sweep_family_singleton(
+        self,
+        payload: dict[str, Any],
+        *,
+        bypass_key: str,
+        evidence_key: str,
+        rule: str,
+        message_fn: Callable[[str], str],
+        hint: str,
+    ) -> None:
+        """Shared SWEEP-phase singleton guard for the sweep / conc_sweep family.
+
+        Walks the latest ``phase_history`` entry and denies when the SWEEP phase
+        already carries an auto-enqueued task under *evidence_key* (unless the
+        per-family *bypass_key* is set on ``params``).
+
+        Args:
+            payload: The intent payload (``params.<bypass_key>`` opts out).
+            bypass_key: ``params`` flag that bypasses this guard.
+            evidence_key: ``phase_history[-1].evidence`` key holding the
+                auto-enqueued task id.
+            rule: PolicyDenied rule id raised on conflict.
+            message_fn: Builds the deny message from the resolved auto-task id.
+            hint: PolicyDenied remediation hint.
+
+        Raises:
+            PolicyDenied: when the SWEEP phase already carries the auto-enqueued
+                task and no bypass flag is set.
+        """
         params = payload.get("params") or {}
-        if isinstance(params, dict) and params.get("bypass_conc_sweep_singleton"):
+        if isinstance(params, dict) and params.get(bypass_key):
             return
         ss = getattr(self, "shared_state", None)
         if ss is None:
@@ -1556,24 +1591,10 @@ class PolicyGate:
         evidence = latest.get("evidence")
         if not isinstance(evidence, dict):
             return
-        auto_id = str(evidence.get("auto_conc_sweep_task_id") or "").strip()
+        auto_id = str(evidence.get(evidence_key) or "").strip()
         if not auto_id:
             return
-        raise PolicyDenied(
-            f"conc_sweep: SWEEP phase already has an auto-enqueued "
-            f"conc_sweep task (auto_conc_sweep_task_id={auto_id!r}); "
-            f"duplicate runs reproduce the same baseline + current_best "
-            f"comparison and add no new data while burning 30-150 min "
-            f"of GPU time.",
-            rule="conc_sweep_phase_singleton",
-            hint=(
-                "Coordinator's post-sweep hook already dispatched "
-                "conc_sweep — wait for SWEEP→CLOSE. If you need a "
-                "second run for debug, set "
-                f"params.bypass_conc_sweep_singleton=True on the "
-                f"{intent_kind} payload (recorded on the audit trail)."
-            ),
-        )
+        raise PolicyDenied(message_fn(auto_id), rule=rule, hint=hint)
 
     def _validate_integrate_patch_critic_gate(
         self,

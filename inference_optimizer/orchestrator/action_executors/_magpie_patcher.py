@@ -30,7 +30,6 @@ on a real failure while still warning-and-continuing on a benign no-op.
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 import tempfile
@@ -38,6 +37,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
+
+from ._file_lock import best_effort_file_lock
+from ._patch_sentinel import file_contains_sentinel
 
 log = logging.getLogger(__name__)
 
@@ -193,8 +195,8 @@ def _resolve_sglang_mi300x_script_path(
 def _file_lock(lock_path: str) -> Iterator[None]:
     """Best-effort cross-process mutex via ``fcntl.flock``.
 
-    Falls through without exclusion if the lock file can't be opened; the
-    atomic-replace still guarantees no torn writes (idempotent).
+    Thin delegator to :func:`best_effort_file_lock` preserved for tests / call
+    sites that import ``_file_lock`` from this module.
 
     Args:
         lock_path: Filesystem path of the lock file to acquire exclusively.
@@ -202,24 +204,8 @@ def _file_lock(lock_path: str) -> Iterator[None]:
     Yields:
         Control while the exclusive lock is held; the lock is released on exit.
     """
-    try:
-        fp = open(lock_path, "w")  # noqa: SIM115 — kept open across yield
-    except OSError as e:
-        log.warning(
-            "_magpie_patcher: cannot open lock file %s (%s); proceeding without exclusion",
-            lock_path,
-            e,
-        )
+    with best_effort_file_lock(lock_path, label="_magpie_patcher"):
         yield
-        return
-    try:
-        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
-        finally:
-            fp.close()
 
 
 def _is_patched(src: Path) -> bool:
@@ -232,11 +218,7 @@ def _is_patched(src: Path) -> bool:
         bool: True iff the Hyperloom patch sentinel is present (and False on
             any read error).
     """
-    try:
-        return _PATCH_SENTINEL in src.read_text(encoding="utf-8")
-    except OSError as e:
-        log.warning("_magpie_patcher: cannot read %s: %s", src, e)
-        return False
+    return file_contains_sentinel(src, _PATCH_SENTINEL, log, "_magpie_patcher")
 
 
 def _extract_prepare_region(text: str) -> str:
@@ -291,6 +273,67 @@ def _upstream_is_already_atomic(text: str) -> bool:
     return _ATOMIC_MKSTEMP in region and _ATOMIC_REPLACE in region
 
 
+def atomic_write_text(
+    src: Path,
+    content: str,
+    *,
+    tmp_prefix: str,
+    log_prefix: str,
+) -> bool:
+    """Write ``content`` to ``src`` via temp-file + atomic rename.
+
+    ``tempfile.mkstemp`` into ``src.parent`` -> ``os.fdopen`` write ->
+    ``os.chmod`` to ``src``'s mode -> ``os.replace`` so a crash mid-write
+    cannot leave a corrupt file. On any ``OSError`` the temp file is unlinked
+    best-effort and ``False`` is returned. Lives in this module so the
+    module-global ``tempfile`` / ``os`` names (which tests monkeypatch) still
+    intercept; ``_inferencex_patcher`` imports it.
+
+    Args:
+        src: The file to (atomically) overwrite.
+        content: The new file contents.
+        tmp_prefix: Prefix for the staged temp file.
+        log_prefix: Caller-identifying prefix used in the warning/debug logs.
+
+    Returns:
+        ``True`` when the bytes were written and renamed into place, ``False``
+        when any IO step failed.
+    """
+    tmp_dir = src.parent
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=tmp_prefix,
+            dir=str(tmp_dir),
+        )
+    except OSError as e:
+        log.warning(
+            "%s: cannot create temp file in %s: %s",
+            log_prefix,
+            tmp_dir,
+            e,
+        )
+        return False
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.chmod(tmp_name, src.stat().st_mode)
+        os.replace(tmp_name, src)
+    except OSError as e:
+        log.warning("%s: cannot write %s: %s", log_prefix, src, e)
+        try:
+            os.unlink(tmp_name)
+        except OSError as cleanup_err:
+            log.debug(
+                "%s: best-effort cleanup failed for temp file %s: %s",
+                log_prefix,
+                tmp_name,
+                cleanup_err,
+            )
+        return False
+    return True
+
+
 def _apply_patch_atomic_reason(src: Path) -> str:
     """Rewrite ``src`` via temp-file + atomic rename so a crash mid-write
     cannot leave a corrupt ``benchmarker.py``, returning a classified reason.
@@ -339,35 +382,12 @@ def _apply_patch_atomic_reason(src: Path) -> str:
     if patched == original:
         return _ATOMIC_REASON_UNRECOGNIZED_SHAPE
 
-    tmp_dir = src.parent
-    try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".benchmarker.py.hyperloom_",
-            dir=str(tmp_dir),
-        )
-    except OSError as e:
-        log.warning(
-            "_magpie_patcher: cannot create temp file in %s: %s",
-            tmp_dir,
-            e,
-        )
-        return _ATOMIC_REASON_IO_ERROR
-
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(patched)
-        os.chmod(tmp_name, src.stat().st_mode)
-        os.replace(tmp_name, src)
-    except OSError as e:
-        log.warning("_magpie_patcher: cannot write %s: %s", src, e)
-        try:
-            os.unlink(tmp_name)
-        except OSError as cleanup_err:
-            log.debug(
-                "_magpie_patcher: best-effort cleanup failed for temp file %s: %s",
-                tmp_name,
-                cleanup_err,
-            )
+    if not atomic_write_text(
+        src,
+        patched,
+        tmp_prefix=".benchmarker.py.hyperloom_",
+        log_prefix="_magpie_patcher",
+    ):
         return _ATOMIC_REASON_IO_ERROR
 
     log.info(
@@ -400,11 +420,7 @@ def _is_remote_trust_patched(src: Path) -> bool:
         True iff the remote-trust sentinel is present, False on a miss or read
         error.
     """
-    try:
-        return _REMOTE_TRUST_SENTINEL in src.read_text(encoding="utf-8")
-    except OSError as e:
-        log.warning("_magpie_patcher: cannot read %s: %s", src, e)
-        return False
+    return file_contains_sentinel(src, _REMOTE_TRUST_SENTINEL, log, "_magpie_patcher")
 
 
 def _apply_remote_trust_patch_atomic(src: Path) -> bool:
@@ -439,35 +455,12 @@ def _apply_remote_trust_patch_atomic(src: Path) -> bool:
         _REMOTE_DIRECT_PATCHED_BLOCK,
         1,
     )
-    tmp_dir = src.parent
-    try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".sglang_mi300x.sh.hyperloom_",
-            dir=str(tmp_dir),
-        )
-    except OSError as e:
-        log.warning(
-            "_magpie_patcher: cannot create temp file in %s: %s",
-            tmp_dir,
-            e,
-        )
-        return False
-
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(patched)
-        os.chmod(tmp_name, src.stat().st_mode)
-        os.replace(tmp_name, src)
-    except OSError as e:
-        log.warning("_magpie_patcher: cannot write %s: %s", src, e)
-        try:
-            os.unlink(tmp_name)
-        except OSError as cleanup_err:
-            log.debug(
-                "_magpie_patcher: best-effort cleanup failed for temp file %s: %s",
-                tmp_name,
-                cleanup_err,
-            )
+    if not atomic_write_text(
+        src,
+        patched,
+        tmp_prefix=".sglang_mi300x.sh.hyperloom_",
+        log_prefix="_magpie_patcher",
+    ):
         return False
 
     log.info(

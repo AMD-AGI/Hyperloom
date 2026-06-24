@@ -1018,6 +1018,34 @@ class RooflineBreakdown:
 _EMPTY_BREAKDOWN = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
 
 
+def select_peak_and_bound(t_mem: float, t_cmp: float) -> tuple[float, str]:
+    """Pick the dominant (lower) ceiling and its label from the memory- and
+    compute-bound projections.
+
+    Mirrors the tie-break used by both the legacy roofline breakdown and the
+    per-concurrency conc-sweep ceiling: both non-positive ⇒ ``(0.0, "unknown")``;
+    only one positive ⇒ that one; else the smaller wins (compute on a tie-break
+    toward equality going to memory).
+
+    Args:
+        t_mem: Memory-bound throughput ceiling (tok/s); ``<=0`` means unknown.
+        t_cmp: Compute-bound throughput ceiling (tok/s); ``<=0`` means unknown.
+
+    Returns:
+        ``(peak_tok_per_sec, bound_kind)`` with ``bound_kind`` ∈
+        {``"memory"``, ``"compute"``, ``"unknown"``}.
+    """
+    if t_mem <= 0 and t_cmp <= 0:
+        return 0.0, "unknown"
+    if t_cmp <= 0:
+        return t_mem, "memory"
+    if t_mem <= 0:
+        return t_cmp, "compute"
+    if t_cmp < t_mem:
+        return t_cmp, "compute"
+    return t_mem, "memory"
+
+
 def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
     """Return the per-element byte size for activation/KV tensors.
 
@@ -1088,15 +1116,10 @@ def compute_roofline_breakdown_from_state(
     )
     if mem <= 0 and cmp <= 0:
         return _EMPTY_BREAKDOWN
-    if cmp <= 0:
-        # T_cmp unknown (precision not in HW_SPECS); degrade to T_mem ceiling, memory-bound.
-        legacy = RooflineBreakdown(mem, 0.0, mem, "memory")
-    elif mem <= 0:
-        legacy = RooflineBreakdown(0.0, cmp, cmp, "compute")
-    elif cmp < mem:
-        legacy = RooflineBreakdown(mem, cmp, cmp, "compute")
-    else:
-        legacy = RooflineBreakdown(mem, cmp, mem, "memory")
+    # cmp/mem are >=0 (the ceiling helpers return 0.0 on unknown), so storing the
+    # raw values matches the prior explicit 0.0-clamp of the unknown component.
+    peak, bound_kind = select_peak_and_bound(mem, cmp)
+    legacy = RooflineBreakdown(mem, cmp, peak, bound_kind)
 
     # Prefer the bottom-up PerfModel peak (MoE FFN uses the coupon expert-activation count, tight at every batch); legacy is the fallback.
     try:

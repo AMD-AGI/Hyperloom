@@ -31,10 +31,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, fields
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .._time import now_iso
 from ...session_paths import llm_calls_path
 
 log = logging.getLogger(__name__)
@@ -91,13 +91,8 @@ class LLMTraceRowError(ValueError):
     """Raised when an LLM-call row violates the closed schema."""
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO string.
-
-    Returns:
-        ISO 8601 timestamp in UTC.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 @dataclass

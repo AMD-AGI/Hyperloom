@@ -24,6 +24,7 @@ import logging
 import os
 from pathlib import Path
 
+from ..coordinator_helpers import format_exc_brief
 from ._multi_node_env import _read_state, is_multi_node
 
 
@@ -812,18 +813,18 @@ async def _wait_for_server_health_async(
                                             last_err = f"completion_probe_http={cresp.status_code}"
                                     except Exception as cexc:  # noqa: BLE001
                                         consecutive_completion_ok = 0
-                                        last_err = f"completion_probe {type(cexc).__name__}: {str(cexc)[:80]}"
+                                        last_err = f"completion_probe {format_exc_brief(cexc, limit=80)}"
                             else:
                                 last_err = f"models_empty (health_ok_at={health_ok_at}s)"
                                 consecutive_completion_ok = 0
                         else:
                             last_err = f"models_http_status={mresp.status_code}"
                     except Exception as mexc:  # noqa: BLE001
-                        last_err = f"models_probe {type(mexc).__name__}: {str(mexc)[:80]}"
+                        last_err = f"models_probe {format_exc_brief(mexc, limit=80)}"
                 else:
                     last_err = f"http_status={resp.status_code}"
             except Exception as exc:  # noqa: BLE001
-                last_err = f"{type(exc).__name__}: {str(exc)[:120]}"
+                last_err = format_exc_brief(exc, limit=120)
             if elapsed > timeout_s:
                 raise ServerRestartFailed(
                     f"server /health did not return 200 within {timeout_s}s (url={health_url}, last_err={last_err})"

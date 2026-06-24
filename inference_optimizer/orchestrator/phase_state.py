@@ -261,6 +261,39 @@ def llm_proposable_actions_for_with_interleave(
     return base
 
 
+def render_phase_proposable_bullets(
+    *,
+    interleave: bool,
+    explore_enabled: bool = True,
+    disabled_suffix: dict[str, str] | None = None,
+) -> list[str]:
+    """Render per-phase LLM-proposable action bullets (shared by the prompt builders).
+
+    Args:
+        interleave (bool): Whether phase interleave is enabled.
+        explore_enabled (bool): When False, strip ``explore`` from the KERNEL
+            interleave extras (only consulted when ``interleave`` is True).
+        disabled_suffix (dict[str, str] | None): Optional ``phase -> flag`` map;
+            a present flag annotates that phase as ``(DISABLED: <flag> — phase
+            skipped)``.
+
+    Returns:
+        list[str]: One markdown bullet per phase in :data:`PHASE_NAMES`.
+    """
+    suffix = disabled_suffix or {}
+    out: list[str] = []
+    for phase in PHASE_NAMES:
+        proposable = sorted(
+            llm_proposable_actions_for_with_interleave(phase, interleave=interleave, explore_enabled=explore_enabled)
+        )
+        flag = suffix.get(phase)
+        if flag:
+            out.append(f"- **{phase}**: {', '.join(proposable)} (DISABLED: {flag} — phase skipped)")
+        else:
+            out.append(f"- **{phase}**: {', '.join(proposable)}")
+    return out
+
+
 def is_action_llm_proposable_in_phase_with_interleave(
     action_name: str,
     phase: str,

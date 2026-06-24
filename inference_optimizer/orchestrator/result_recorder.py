@@ -49,6 +49,19 @@ from .task_registry import Task
 log = __import__("logging").getLogger(__name__)
 
 
+def _coerce_metric(value: Any) -> float | None:
+    """Best-effort float coercion of a metric value.
+
+    Returns ``None`` when *value* is ``None`` or not float-coercible (matching
+    the inline ``float(x) if x is not None else None`` guards this helper
+    replaces in the fact-recording paths).
+    """
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 class ResultRecorder:
     """Synthesizes result records and journal facts on behalf of a Coordinator."""
 
@@ -339,16 +352,8 @@ class ResultRecorder:
                 pitfall/REVERT).
         """
         journal = self._ensure_journal()
-        gain_raw = result_dict.get("gain_pct")
-        try:
-            gain_pct = float(gain_raw) if gain_raw is not None else None
-        except (TypeError, ValueError):
-            gain_pct = None
-        tput_raw = result_dict.get("output_throughput")
-        try:
-            throughput_after = float(tput_raw) if tput_raw is not None else None
-        except (TypeError, ValueError):
-            throughput_after = None
+        gain_pct = _coerce_metric(result_dict.get("gain_pct"))
+        throughput_after = _coerce_metric(result_dict.get("output_throughput"))
         kind = classify_change_kind(task.kind, None)
         change = summarize_change(task.kind, None, result_dict)
         if kept:
@@ -475,16 +480,10 @@ class ResultRecorder:
             outcome = OUTCOME_NO_PROMOTE
         variant_name = str(variant_outcome.get("variant_name") or "")
         metrics = variant_outcome.get("metrics") or {}
-        gain_raw = metrics.get("gain_pct") if isinstance(metrics, dict) else None
-        try:
-            gain_pct = float(gain_raw) if gain_raw is not None else None
-        except (TypeError, ValueError):
-            gain_pct = None
-        tput_raw = metrics.get("output_throughput") if isinstance(metrics, dict) else None
-        try:
-            throughput_after = float(tput_raw) if tput_raw is not None else None
-        except (TypeError, ValueError):
-            throughput_after = None
+        gain_pct = _coerce_metric(metrics.get("gain_pct") if isinstance(metrics, dict) else None)
+        throughput_after = _coerce_metric(
+            metrics.get("output_throughput") if isinstance(metrics, dict) else None
+        )
         variant_attrs = variant_outcome.get("variant") or {}
         kind = classify_change_kind(
             task.kind, variant_attrs if isinstance(variant_attrs, dict) else None,

@@ -32,6 +32,7 @@ from .roofline_ceiling import (
     compute_compute_bound_ceiling_tok_per_sec,
     compute_theoretical_peak_output_tok_per_sec,
     load_model_meta,
+    select_peak_and_bound,
 )
 from .shared_state import SharedState
 
@@ -344,21 +345,9 @@ def _build_roofline_ceiling(
             concurrency=c,
         )
         # Resolve T_peak / binding (mirrors compute_roofline_breakdown_from_state).
-        if t_mem <= 0 and t_cmp <= 0:
-            bound_kind = "unknown"
-            t_peak = 0.0
-        elif t_cmp <= 0:
-            bound_kind = "memory"
-            t_peak = t_mem
-        elif t_mem <= 0:
-            bound_kind = "compute"
-            t_peak = t_cmp
-        elif t_cmp < t_mem:
-            bound_kind = "compute"
-            t_peak = t_cmp
-        else:
-            bound_kind = "memory"
-            t_peak = t_mem
+        t_peak, bound_kind = select_peak_and_bound(t_mem, t_cmp)
+        # Local import avoids a module-level conc_sweep -> roofline_snapshot cycle.
+        from .roofline_snapshot import within_roofline_pct
 
         def _mbu_pct(measured: Any) -> float | None:
             """Express a measured throughput as a percent of peak.
@@ -372,9 +361,7 @@ def _build_roofline_ceiling(
             """
             if not isinstance(measured, (int, float)) or measured <= 0:
                 return None
-            if t_peak <= 0:
-                return None
-            return round((float(measured) / t_peak) * 100.0, 2)
+            return within_roofline_pct(peak=float(t_peak), achieved=float(measured))
 
         bt = (by_conc_b.get(c) or {}).get("output_throughput")
         ot = (by_conc_o.get(c) or {}).get("output_throughput")

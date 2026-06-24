@@ -7,10 +7,10 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
 from ..storage.connection import SqliteConnection
+from ._time import now_iso
 
 
 TOPIC_ALLOWLIST = frozenset({
@@ -43,13 +43,8 @@ TOPIC_ALLOWLIST = frozenset({
 })
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO 8601 string.
-
-    Returns:
-        str: The current UTC timestamp.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 @dataclass

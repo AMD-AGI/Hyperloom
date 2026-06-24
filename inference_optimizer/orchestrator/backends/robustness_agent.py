@@ -16,8 +16,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -27,6 +25,8 @@ from ...protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
+from ...session_paths import allocate_turn_workdir
+from ._runtime_bridge import invoke_runtime_cli
 from .base import BackendError, BackendTurnResult
 from .critic_agent import RuntimeCall, RuntimeCaller
 
@@ -54,39 +54,12 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
     """
     if call.phase != "tick":
         raise BackendError(f"RobustnessAgentBackend: unsupported runtime phase {call.phase!r} (expected 'tick')")
-    cmd = [
-        sys.executable,
-        "-m",
-        "robustness_agent.runtime.cli",
-        "tick",
-        "--request",
-        str(call.request_path),
-        "--out",
-        str(call.out_path),
-    ]
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(call.cwd),
-            env=call.env,
-            capture_output=True,
-            text=True,
-            timeout=ROBUSTNESS_AGENT_RUNTIME_TIMEOUT_SEC,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise BackendError(
-            f"robustness-agent runtime.cli tick timed out after "
-            f"{ROBUSTNESS_AGENT_RUNTIME_TIMEOUT_SEC}s (cwd={call.cwd})"
-        ) from exc
-    except FileNotFoundError as exc:
-        raise BackendError(
-            f"robustness-agent runtime.cli tick could not start (python={sys.executable!r}, cwd={call.cwd}): {exc}"
-        ) from exc
-
-    if proc.returncode != 0:
-        raise BackendError(
-            f"robustness-agent runtime.cli tick exited rc={proc.returncode}: stderr={proc.stderr.strip()[:500]!r}"
-        )
+    invoke_runtime_cli(
+        call,
+        module="robustness_agent.runtime.cli",
+        agent_label="robustness-agent",
+        timeout_sec=ROBUSTNESS_AGENT_RUNTIME_TIMEOUT_SEC,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +167,12 @@ class RobustnessAgentBackend:
         turn_idx = self._turn_idx
         self._turn_idx += 1
 
-        workdir = self._allocate_workdir(turn_idx)
+        workdir = allocate_turn_workdir(
+            self.session_dir,
+            "robustness-workdir",
+            turn_idx,
+            keep=ROBUSTNESS_AGENT_WORKDIR_KEEP_COUNT,
+        )
         request_path = workdir / "request.json"
         emit_path = workdir / "emit.json"
 
@@ -313,57 +291,6 @@ class RobustnessAgentBackend:
         if usage.get("model"):
             metadata["model"] = usage.get("model")
 
-    def _allocate_workdir(self, turn_idx: int) -> Path:
-        """Create and return a per-turn workdir, pruning stale ones first.
-
-        Args:
-            turn_idx (int): Zero-based index of the current turn, used as the
-                zero-padded subdirectory name.
-
-        Returns:
-            Path: The created ``<session>/robustness-workdir/<turn>/`` directory.
-        """
-        root = self.session_dir / "robustness-workdir"
-        root.mkdir(parents=True, exist_ok=True)
-        self._prune_old_workdirs(root, keep=ROBUSTNESS_AGENT_WORKDIR_KEEP_COUNT)
-        wd = root / f"{turn_idx:06d}"
-        wd.mkdir(parents=True, exist_ok=True)
-        return wd
-
-    @staticmethod
-    def _prune_old_workdirs(root: Path, *, keep: int) -> None:
-        """Remove all but the ``keep`` most recent ``<turn>/`` subdirs.
-
-        Best-effort: directory-listing and removal errors are swallowed so a
-        cleanup hiccup never fails a turn.
-
-        Args:
-            root (Path): The ``robustness-workdir`` parent directory to prune.
-            keep (int): Number of most recent turn subdirectories to retain.
-        """
-        try:
-            entries = sorted(
-                (p for p in root.iterdir() if p.is_dir()),
-                key=lambda p: p.name,
-            )
-        except OSError:
-            return
-        if len(entries) <= keep:
-            return
-        for stale in entries[: len(entries) - keep]:
-            try:
-                for child in stale.rglob("*"):
-                    if child.is_file():
-                        child.unlink(missing_ok=True)
-                for child in sorted(stale.rglob("*"), key=lambda p: -len(p.parts)):
-                    if child.is_dir():
-                        try:
-                            child.rmdir()
-                        except OSError:
-                            pass
-                stale.rmdir()
-            except OSError:
-                continue
 
     def _build_runtime_env(self) -> dict[str, str]:
         """Build subprocess env with ``<root>/src`` prepended to PYTHONPATH

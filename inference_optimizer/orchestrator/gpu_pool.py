@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ..storage.connection import SqliteConnection
+from ._time import now_iso
 
 
 DEFAULT_GPU_LEASE_TTL_SEC = 1800
@@ -27,14 +28,8 @@ DEFAULT_GPU_LEASE_TTL_SEC = 1800
 GPU_LEASE_TTL_GRACE = 0.1
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond ISO-8601 string.
-
-    Returns:
-        The current UTC time formatted as a microsecond-precision ISO-8601
-        string.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 def _parse_gpu_list(raw: str) -> list[int]:
