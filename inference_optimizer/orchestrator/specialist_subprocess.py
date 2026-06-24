@@ -362,6 +362,13 @@ class SpecialistSubprocessDispatcher:
 
         # Compose the env (pass through parent so API keys propagate).
         env = os.environ.copy()
+        # Bound the spawned claude CLI's own request transport so a stalled
+        # gateway stream (partial response, stop_reason=None, then no further
+        # chunks) raises client-side instead of hanging forever on socket
+        # read() and freezing the whole optimizer chain (Sandbox-hang RCA).
+        from ._llm_stability_env import apply_llm_stability_env
+
+        apply_llm_stability_env(env)
         if gpu_ids:
             visible = ",".join(str(g) for g in gpu_ids)
             env["HIP_VISIBLE_DEVICES"] = visible

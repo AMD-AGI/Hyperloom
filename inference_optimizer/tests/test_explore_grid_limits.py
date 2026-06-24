@@ -146,7 +146,9 @@ def test_gpu_specialist_denied_when_pool_disabled():
     assert exc.value.rule == "specialist_gpu_pool_disabled"
 
 
-def test_gpu_specialist_allowed_within_capacity():
+def test_gpu_specialist_allowed_within_capacity(monkeypatch):
+    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP"):
+        monkeypatch.delenv(name, raising=False)
     s = SharedState()
     s.phase = "EXPLORE"
     s.gpu_specialist_capacity = 2
