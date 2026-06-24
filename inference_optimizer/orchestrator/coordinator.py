@@ -8975,12 +8975,84 @@ class Coordinator:
 
         # (Legacy framework_pr_scout pre-fetch removed — PR discovery lives in the FRAMEWORK_PR phase pump.)
 
+        # SUBSTRATE EVIDENCE — directional lever priors for this focus from the
+        # cortex KB ``/v2/reasoning/levers`` endpoint (the forward counterpart
+        # to the Critic's ``/assess``). Advisory only; gated on CORTEX_KB_URL,
+        # cached per focus, fail-soft.
+        if "substrate_levers" not in params:
+            digest = self._warm_substrate_levers(params)
+            if digest:
+                params["substrate_levers"] = digest
+
         # proposal_set cap into params so SpecialistRunner reads it; setdefault lets a delegate shrink it.
         from inference_optimizer.orchestrator.policy import (
             DEFAULT_SPECIALIST_MAX_PROPOSALS,
         )
 
         params.setdefault("max_proposals", DEFAULT_SPECIALIST_MAX_PROPOSALS)
+
+    def _substrate_focus(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Map SharedState + params to the ``/v2/reasoning/levers`` focus.
+
+        Mirrors the Critic's ``_assess_focus`` so both ends reason over the same
+        subject. Drops empty/``unknown`` dimensions.
+
+        Args:
+            params: The specialist task params (carries the warmed framework).
+
+        Returns:
+            dict[str, Any]: A focus dict with non-empty known dimensions.
+        """
+        state = self.shared_state
+        candidate = {
+            "model": getattr(state, "model_name", "") or "",
+            "hardware": params.get("gpu_type") or getattr(state, "gpu_type", "") or "",
+            "framework": params.get("framework") or getattr(state, "framework", "") or "",
+            "framework_version": params.get("framework_version") or "",
+            "precision": params.get("precision") or getattr(state, "precision", "") or "",
+        }
+        return {k: v for k, v in candidate.items() if v not in (None, "", "unknown")}
+
+    def _warm_substrate_levers(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Fetch the substrate's directional lever digest for this focus.
+
+        Best-effort: returns ``{}`` when no cortex KB is configured, the focus
+        lacks a model, or the call fails. Cached per focus on the Coordinator so
+        repeated specialist dispatches in a session hit the network once.
+
+        Args:
+            params: The specialist task params (read-only here).
+
+        Returns:
+            dict[str, Any]: The decoded digest, or ``{}`` on miss/error.
+        """
+        focus = self._substrate_focus(params)
+        if not focus.get("model"):
+            return {}
+
+        cache: dict[str, dict[str, Any]] = getattr(self, "_substrate_levers_cache", None)
+        if cache is None:
+            cache = {}
+            self._substrate_levers_cache = cache
+        key = json.dumps(focus, sort_keys=True)
+        if key in cache:
+            return cache[key]
+
+        digest: dict[str, Any] = {}
+        try:
+            from .substrate_levers_client import SubstrateLeversClient
+
+            client = SubstrateLeversClient.from_env()
+            if client is not None:
+                got = client.recommend(focus=focus)
+                if isinstance(got, dict):
+                    digest = got
+        except Exception as exc:  # noqa: BLE001 — advisory, never a gate
+            log.warning("specialist warmup: substrate levers fetch failed: %r", exc)
+            digest = {}
+
+        cache[key] = digest
+        return digest
 
     @staticmethod
     def _pr_summary_to_dict(pr: Any) -> dict[str, Any]:
