@@ -67,7 +67,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -850,6 +852,140 @@ def _resolve_patch_paths(
     return out
 
 
+@dataclass
+class _ArtifactSpec:
+    """One resolved non-diff tuned artifact to install at integration.
+
+    Attributes:
+        source: Absolute path to the artifact file inside the specialist
+            workspace / worktree (sandbox-validated).
+        target: Absolute install path inside an allowlisted framework root
+            (sandbox-validated; no escape).
+        rel_target: The framework-relative target as authored by the
+            specialist (for reporting).
+        kind: Free-form artifact kind label (e.g. ``config_json``).
+        description: Free-form human description.
+    """
+
+    source: Path
+    target: Path
+    rel_target: str
+    kind: str = ""
+    description: str = ""
+
+
+def _resolve_artifact_target(rel_target: str) -> Path | None:
+    """Resolve a framework-relative artifact target to an absolute path.
+
+    Picks the allowlisted framework root whose tree already contains the
+    target's parent directory (so a ``vllm/...`` config lands under the vllm
+    root); else the first existing root. The resolved path must stay within
+    the chosen root (no ``..`` escape).
+
+    Args:
+        rel_target: The framework-relative install path authored by the
+            specialist.
+
+    Returns:
+        The absolute target path, or ``None`` when nothing resolves safely.
+    """
+    rel = (rel_target or "").strip()
+    if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
+        return None
+    roots = [Path(r).resolve() for r in resolve_source_file_allowlist()]
+    roots = [r for r in roots if r.is_dir()]
+    if not roots:
+        return None
+    # Prefer a root whose tree already holds the target's parent dir.
+    for root in roots:
+        cand = (root / rel).resolve()
+        if not _is_within(cand, root):
+            continue
+        if cand.parent.is_dir():
+            return cand
+    # Fall back to the first root that keeps the path contained.
+    for root in roots:
+        cand = (root / rel).resolve()
+        if _is_within(cand, root):
+            return cand
+    return None
+
+
+def _resolve_artifact_specs(
+    *,
+    specialist_workspace: Path,
+    explicit_artifacts: list[dict[str, Any]] | None,
+    done_payload: dict[str, Any] | None,
+) -> tuple[list[_ArtifactSpec], list[dict[str, str]]]:
+    """Resolve non-diff tuned artifacts to install (B6 / §3.5 contract).
+
+    Order: ``params.artifacts`` → ``specialist_done.artifacts_written``. Each
+    entry is ``{source, target, kind, description}``: ``source`` is resolved
+    inside the specialist workspace/worktree (sandbox) and ``target`` is
+    resolved inside an allowlisted framework root. Malformed / out-of-sandbox
+    entries are dropped and reported.
+
+    Args:
+        specialist_workspace: The specialist task workspace.
+        explicit_artifacts: ``params.artifacts`` override list, or ``None``.
+        done_payload: The parsed ``specialist_done.json`` payload, or ``None``.
+
+    Returns:
+        A ``(specs, errors)`` tuple: resolved specs, plus per-entry error
+        records (``{artifact, error}``) for entries that could not be resolved.
+    """
+    raw: list[Any] = []
+    if explicit_artifacts:
+        raw = list(explicit_artifacts)
+    elif done_payload and isinstance(done_payload.get("artifacts_written"), list):
+        raw = list(done_payload["artifacts_written"])
+
+    allowed_roots = [
+        (specialist_workspace / "worktree").resolve(),
+        specialist_workspace.resolve(),
+    ]
+    specs: list[_ArtifactSpec] = []
+    errors: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            errors.append({"artifact": str(entry), "error": "not_a_mapping"})
+            continue
+        src_rel = str(entry.get("source") or "").strip()
+        tgt_rel = str(entry.get("target") or "").strip()
+        if not src_rel or not tgt_rel:
+            errors.append({"artifact": json.dumps(entry), "error": "missing_source_or_target"})
+            continue
+        # Resolve source inside the workspace / worktree sandbox.
+        src = Path(src_rel)
+        if not src.is_absolute():
+            for base in (specialist_workspace / "worktree", specialist_workspace):
+                cand = base / src_rel
+                if cand.exists():
+                    src = cand
+                    break
+        if not src.exists() or not src.resolve().is_file():
+            errors.append({"artifact": src_rel, "error": "source_not_found"})
+            continue
+        src_resolved = src.resolve()
+        if not any(_is_within(src_resolved, root) for root in allowed_roots):
+            errors.append({"artifact": src_rel, "error": "source_outside_workspace"})
+            continue
+        target = _resolve_artifact_target(tgt_rel)
+        if target is None:
+            errors.append({"artifact": tgt_rel, "error": "target_unresolved_or_escapes_root"})
+            continue
+        specs.append(
+            _ArtifactSpec(
+                source=src_resolved,
+                target=target,
+                rel_target=tgt_rel,
+                kind=str(entry.get("kind") or "").strip(),
+                description=str(entry.get("description") or "").strip(),
+            )
+        )
+    return specs, errors
+
+
 def _read_done_payload(workspace: Path) -> dict[str, Any] | None:
     """Read and parse ``specialist_done.json`` from a workspace.
 
@@ -993,14 +1129,28 @@ class IntegratePatchExecutor:
             if isinstance(cc, dict):
                 config_changes = {str(k): str(v) for k, v in cc.items()}
 
-        if not patch_paths and not config_changes:
+        # §3.5: non-diff tuned artifacts (e.g. an autotuned config JSON) are a
+        # first-class integrable output alongside unified diffs + config_changes.
+        explicit_artifacts = params.get("artifacts")
+        artifact_specs, artifact_resolve_errors = _resolve_artifact_specs(
+            specialist_workspace=specialist_workspace,
+            explicit_artifacts=(list(explicit_artifacts) if isinstance(explicit_artifacts, list) else None),
+            done_payload=done_payload,
+        )
+
+        if not patch_paths and not config_changes and not artifact_specs:
             return {
                 "status": "no_patches",
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
                 "config_changes_applied": {},
-                "reason": ("neither patches nor config_changes were supplied / discoverable for this specialist task"),
+                "artifacts_applied": [],
+                "artifact_errors": artifact_resolve_errors,
+                "reason": (
+                    "neither patches, config_changes, nor installable artifacts "
+                    "were supplied / discoverable for this specialist task"
+                ),
             }
 
         framework_root = _resolve_framework_root(
@@ -1067,6 +1217,10 @@ class IntegratePatchExecutor:
                     "specialist_task_id": specialist_task_id,
                     "task_id": str(getattr(ctx.task, "task_id", "") or ""),
                     "patches": [str(p) for p in patch_paths],
+                    "artifacts": [
+                        {"target": str(s.target), "rel_target": s.rel_target}
+                        for s in artifact_specs
+                    ],
                     "config_changes": dict(config_changes),
                     "framework_source_root": str(framework_root or ""),
                     "workspace": str(output_root),
@@ -1100,6 +1254,7 @@ class IntegratePatchExecutor:
 
         # Stage 1: apply patches (best-effort with -3 fallback).
         applied: list[Path] = []
+        applied_artifacts: list[dict[str, Any]] = []
         apply_errors: list[dict[str, str]] = []
         for patch in patch_paths:
             ok, err = _git_apply(framework_root, patch, three_way=False)
@@ -1135,6 +1290,35 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
+        # Stage 1b: install non-diff tuned artifacts (after patches, before
+        # config_changes). On any artifact error, roll back artifacts + patches
+        # and surface a clean apply_failed (not an opaque git_apply_failed).
+        if artifact_specs:
+            applied_artifacts, artifact_apply_errors = self._apply_artifacts(
+                artifact_specs,
+                backup_root=output_root / "artifact_backups",
+            )
+            if artifact_apply_errors:
+                self._revert_artifacts(applied_artifacts)
+                reverted = self._revert_patches(framework_root, applied)
+                await self._maybe_write_framework_pr_kb_record(
+                    done_payload=done_payload,
+                    outcome="rejected_apply_fail",
+                    tps_delta_pct=0.0,
+                    extra=extra,
+                )
+                return {
+                    "status": "apply_failed",
+                    "error_class": "artifact_install_failed",
+                    "error": artifact_resolve_errors + artifact_apply_errors,
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "artifacts_applied": [],
+                    "config_changes_applied": {},
+                    "workspace": str(output_root),
+                }
+
         # Stage 2: layer config_changes onto the launch env (via the
         # variant's ``extra_envs`` knob).
         config_changes_applied = dict(config_changes)
@@ -1151,12 +1335,14 @@ class IntegratePatchExecutor:
             except AttributeError:
                 recorded = ""
             if recorded and recorded.lower() == "reject":
+                artifacts_reverted = self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
                 return _with_stash_restore(framework_root, stash_state, stash_note, {
                     "status": "rejected_by_critic",
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
+                    "artifacts_reverted": artifacts_reverted,
                     "config_changes_applied": {},
                     "reason": (
                         f"Critic verdict 'reject' recorded for specialist "
@@ -1174,6 +1360,7 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [str(p) for p in applied],
                 "patches_reverted": [],
+                "artifacts_applied": applied_artifacts,
                 "config_changes_applied": config_changes_applied,
                 "reason": "apply_only=True; benchmark skipped",
                 "workspace": str(output_root),
@@ -1188,6 +1375,7 @@ class IntegratePatchExecutor:
                 specialist_task_id=specialist_task_id,
             )
         except FrameworkScriptMismatchError as exc:
+            artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "reverted",
@@ -1196,11 +1384,13 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [str(p) for p in reverted],
+                "artifacts_reverted": artifacts_reverted,
                 "config_changes_applied": {},
                 "reason": str(exc),
                 "workspace": str(output_root),
             })
         except Exception as exc:  # noqa: BLE001
+            self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "reverted",
@@ -1215,7 +1405,21 @@ class IntegratePatchExecutor:
             })
 
         # Stage 5: KEEP / REVERT decision.
+        # B4: the Coordinator seeds ``base_tput`` per-dispatch, but a direct
+        # invocation (resume path / test / external caller) may bypass that and
+        # leave it 0.0, which would make ``delta_pct`` None and auto-REVERT a
+        # genuinely valid patch. Fall back to the live ``SharedState`` anchor
+        # (current_best.tput else baseline_tput) so the gate still measures.
         base_tput = float(params.get("base_tput") or 0.0)
+        if base_tput <= 0 and shared_state is not None:
+            cb = getattr(shared_state, "current_best", None)
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                base_tput = float(cb_tput)
+            else:
+                ss_base = getattr(shared_state, "baseline_tput", 0.0)
+                if isinstance(ss_base, (int, float)) and ss_base > 0:
+                    base_tput = float(ss_base)
         keep_threshold_pct = float(
             params.get("keep_threshold_pct", self.keep_threshold_pct),
         )
@@ -1231,6 +1435,7 @@ class IntegratePatchExecutor:
         )
 
         if not gate_pass:
+            artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             reasons: list[str] = []
             if delta_pct is None:
@@ -1250,6 +1455,7 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [str(p) for p in reverted],
+                "artifacts_reverted": artifacts_reverted,
                 "config_changes_applied": {},
                 "output_throughput": new_tput,
                 "delta_pct": delta_pct,
@@ -1272,6 +1478,7 @@ class IntegratePatchExecutor:
                 base_tput=base_tput,
             )
             if not confirm["stable"] or confirm["accuracy_pass"] is False:
+                artifacts_reverted = self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
                 reasons = []
                 if not confirm["stable"]:
@@ -1291,6 +1498,7 @@ class IntegratePatchExecutor:
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
+                    "artifacts_reverted": artifacts_reverted,
                     "config_changes_applied": {},
                     "output_throughput": new_tput,
                     "delta_pct": delta_pct,
@@ -1339,6 +1547,7 @@ class IntegratePatchExecutor:
             "specialist_task_id": specialist_task_id,
             "patches_applied": [str(p) for p in applied],
             "patches_reverted": [],
+            "artifacts_applied": applied_artifacts,
             "config_changes_applied": config_changes_applied,
             "output_throughput": new_tput,
             "delta_pct": delta_pct,
@@ -1483,6 +1692,78 @@ class IntegratePatchExecutor:
                     err2,
                 )
                 break
+        return reverted
+
+    def _apply_artifacts(
+        self,
+        specs: list[_ArtifactSpec],
+        *,
+        backup_root: Path,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        """Install non-diff tuned artifacts, backing up any clobbered targets.
+
+        Each artifact's existing target is backed up under ``backup_root`` (or
+        recorded as newly-created) so :meth:`_revert_artifacts` can restore the
+        framework tree exactly. Applied artifacts are returned in order so a
+        revert can undo them in reverse.
+
+        Args:
+            specs: The resolved artifact specs to install.
+            backup_root: Directory under which clobbered targets are saved.
+
+        Returns:
+            A ``(applied, errors)`` tuple: per-artifact apply records (with the
+            backup bookkeeping) and per-artifact error records.
+        """
+        applied: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        backup_root.mkdir(parents=True, exist_ok=True)
+        for idx, spec in enumerate(specs):
+            try:
+                spec.target.parent.mkdir(parents=True, exist_ok=True)
+                existed = spec.target.exists()
+                backup_path: str | None = None
+                if existed:
+                    backup_path = str(backup_root / f"{idx:03d}_{spec.target.name}.bak")
+                    shutil.copy2(spec.target, backup_path)
+                shutil.copy2(spec.source, spec.target)
+                applied.append(
+                    {
+                        "target": str(spec.target),
+                        "rel_target": spec.rel_target,
+                        "kind": spec.kind,
+                        "existed": existed,
+                        "backup": backup_path,
+                    }
+                )
+            except OSError as exc:
+                errors.append({"artifact": spec.rel_target, "error": repr(exc)})
+        return applied, errors
+
+    @staticmethod
+    def _revert_artifacts(applied: list[dict[str, Any]]) -> list[str]:
+        """Undo installed artifacts (restore backups / delete created files).
+
+        Args:
+            applied: The apply records returned by :meth:`_apply_artifacts`.
+
+        Returns:
+            The framework-relative targets actually reverted.
+        """
+        reverted: list[str] = []
+        for rec in reversed(applied):
+            target = Path(str(rec.get("target") or ""))
+            if not target.name:
+                continue
+            try:
+                if rec.get("existed") and rec.get("backup"):
+                    shutil.copy2(str(rec["backup"]), target)
+                elif not rec.get("existed"):
+                    if target.exists():
+                        target.unlink()
+                reverted.append(str(rec.get("rel_target") or target))
+            except OSError as exc:  # noqa: BLE001 — best-effort restore
+                log.warning("integrate_patch: failed to revert artifact %s: %r", target, exc)
         return reverted
 
     async def _bench_patch(

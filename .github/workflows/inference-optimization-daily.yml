@@ -111,7 +111,7 @@ jobs:
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
@@ -161,11 +161,11 @@ jobs:
       max-parallel: 16
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
-      # This daily CI authenticates to SaFE with its OWN key (secret KEY_XF),
+      # This daily CI authenticates to SaFE with its OWN key (secret CLAW_DAILY_KEY),
       # kept separate from the shared CLAW_API_KEY used by other workflows.
       # optimize_submit.py reads the CLAW_API_KEY env var, so we just point it
       # at KEY_XF here (no script change needed).
-      CLAW_API_KEY:                     ${{ secrets.KEY_XF }}
+      CLAW_API_KEY:                     ${{ secrets.CLAW_DAILY_KEY }}
       SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
       HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
       HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
@@ -174,7 +174,7 @@ jobs:
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         working-directory: ci
@@ -376,7 +376,7 @@ jobs:
     env:
       WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: pip install --quiet requests pyyaml

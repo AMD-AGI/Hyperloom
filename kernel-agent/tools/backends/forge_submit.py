@@ -1417,10 +1417,11 @@ def _apply_fellow_env(env: dict) -> None:
     # proxy can stall with no first token / no keepalive; without a client-side
     # timeout the SDK awaits until the outer 900s kill. Bound the claude CLI's
     # own request timeout and cut non-essential traffic / autoupdate that can
-    # also block in headless containers. setdefault keeps operator overrides.
-    env.setdefault("API_TIMEOUT_MS", "300000")
-    env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-    env.setdefault("DISABLE_AUTOUPDATER", "1")
+    # also block in headless containers. Shared with oob/specialist/tracelens so
+    # every claude-CLI/SDK child gets the same read-timeout protection.
+    from _llm_stability_env import apply_llm_stability_env
+
+    apply_llm_stability_env(env)
     # GBrain knowledge integration: forward gbrain credentials so the Forge
     # loop's program.md generator can inject cross-KB knowledge from the
     # unified kernel brain (KernelForge + GEAK + PTAO). The forge-loop child

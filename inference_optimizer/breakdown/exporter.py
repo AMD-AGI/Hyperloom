@@ -546,7 +546,7 @@ def build(
         [p.get("benchmark_report_path") for p in (sweep.get("all_variants") or []) if p.get("benchmark_report_path")],
     )
 
-    return {
+    breakdown = {
         "schema_version": schema_version,
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
@@ -622,6 +622,7 @@ def build(
         "warnings": warnings,
         "source_files": source_files,
     }
+    return breakdown
 
 
 def _load_assembled(

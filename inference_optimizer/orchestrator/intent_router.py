@@ -393,7 +393,7 @@ class IntentRouter:
             # alone conflicts with nothing).
             if action_name == "specialist":
                 from .specialist_profile import resolve_specialist_profile
-                if resolve_specialist_profile(params).grants_bench_tool:
+                if resolve_specialist_profile(params).reserves_benchmark_lane:
                     lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
                 # WS2: any GPU-holding specialist (not just bench-enabled) must
                 # serialize against serving via gpu_research_lane, else its

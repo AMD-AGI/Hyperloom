@@ -117,73 +117,6 @@ def test_aiter_harness_recognizes_perftest(tmp_path):
     _ast.parse(Path(out.harness_path).read_text(encoding="utf-8"))
 
 
-def test_aiter_harness_maps_tracelens_list_shapes(tmp_path):
-    """AITer idiom generation must understand production TraceLens list shapes."""
-    import ast as _ast
-
-    src = (
-        "import torch\n"
-        "import aiter\n"
-        "from aiter.test_common import perftest, run_perftest\n"
-        "@perftest\n"
-        "def bench_op(m, n, k, dtype):\n"
-        "    x = torch.randn(m, k, dtype=dtype)\n"
-        "    return run_perftest(aiter.gemm, x)\n"
-    )
-    bench = tmp_path / "test_list_shape_op.py"
-    bench.write_text(src, encoding="utf-8")
-    a = hg.BenchmarkAnalyzer(src)
-    out = hg._try_generate_aiter_harness(
-        analyzer=a,
-        decorated=a.get_decorated_functions(),
-        candidate={
-            "input_shapes": [
-                {"call_num": 1, "shape": "(32, 32) bf16"},
-                {"call_num": 9, "shape": "(64, 128, 256) bf16"},
-            ],
-            "precision": "bf16",
-        },
-        source_file=str(bench),
-        benchmark_path=bench,
-        out_dir=tmp_path,
-        log=lambda _m: None,
-    )
-    assert out is not None
-    code = Path(out.harness_path).read_text(encoding="utf-8")
-    _ast.parse(code)
-    assert "'m': 64" in code
-    assert "'n': 128" in code
-    assert "'k': 256" in code
-
-
-def test_aiter_harness_rejects_incomplete_shape_kwargs(tmp_path):
-    """Do not emit dtype-only/partial calls when required m/n/k values are absent."""
-    src = (
-        "import torch\n"
-        "import aiter\n"
-        "from aiter.test_common import perftest, run_perftest\n"
-        "@perftest\n"
-        "def bench_op(m, n, k, dtype):\n"
-        "    x = torch.randn(m, k, dtype=dtype)\n"
-        "    return run_perftest(aiter.gemm, x)\n"
-    )
-    bench = tmp_path / "test_bad_shape_op.py"
-    bench.write_text(src, encoding="utf-8")
-    a = hg.BenchmarkAnalyzer(src)
-    logs: list[str] = []
-    out = hg._try_generate_aiter_harness(
-        analyzer=a,
-        decorated=a.get_decorated_functions(),
-        candidate={"input_shapes": [{"call_num": 5, "shape": "(64, 128) bf16"}]},
-        source_file=str(bench),
-        benchmark_path=bench,
-        out_dir=tmp_path,
-        log=logs.append,
-    )
-    assert out is None
-    assert any("missing values" in msg for msg in logs)
-
-
 def test_get_decorated_functions():
     a = hg.BenchmarkAnalyzer(BENCH_SRC)
     dec = a.get_decorated_functions()
@@ -540,6 +473,51 @@ def _inject_fake_validate(monkeypatch, *, harness_ok, bench_ok, force_file=False
         monkeypatch.setitem(sys.modules, "validate_harness", mod)
     if force_file:
         monkeypatch.setattr(hg.Path, "is_file", lambda self: True)
+
+
+# --- traced-shape pinning (faithful harness shapes from the candidate) ---
+
+
+def test_parse_traced_operand_dims_list_of_dict():
+    """TraceLens list form: [{'shape': '(a,b) dt<br>(c,d,e) dt<br>...'}]."""
+    cand = {
+        "input_shapes": [
+            {"shape": "(64,2048) bf16<br>(128,1536,2048) bf16<br>(128,2048,768) bf16<br>(4600,) int"}
+        ]
+    }
+    dims = hg._parse_traced_operand_dims(cand)
+    assert dims[0] == (64, 2048)
+    assert dims[1] == (128, 1536, 2048)
+    assert dims[2] == (128, 2048, 768)
+    assert (4600,) in dims
+
+
+def test_parse_traced_operand_dims_plain_string():
+    cand = {"shapes": ["(32,5120) bf16<br>(5120,) bf16"]}
+    dims = hg._parse_traced_operand_dims(cand)
+    assert dims == [(32, 5120), (5120,)]
+
+
+def test_aiter_shape_from_candidate_moe_inter_dim_from_w2():
+    """ck_moe: inter_dim is w2's LAST axis (w2=(E, model_dim, inter_dim)), not topk."""
+    cand = {
+        "input_shapes": [
+            {"shape": "(64,2048) bf16<br>(128,1536,2048) bf16<br>(128,2048,768) bf16<br>(64,8,768) bf16"}
+        ]
+    }
+    s = hg._aiter_shape_from_candidate(cand)
+    assert s["M"] == 64  # token
+    assert s["N"] == 2048  # model_dim
+    assert s["K"] == 768  # inter_dim (w2 last axis), NOT 8 (topk) or 1536 (2*inter)
+
+
+def test_aiter_shape_from_candidate_dict_form_passthrough():
+    s = hg._aiter_shape_from_candidate({"input_shapes": {"M": 16, "N": 32, "K": 64}})
+    assert s == {"M": 16, "N": 32, "K": 64}
+
+
+def test_aiter_shape_from_candidate_empty():
+    assert hg._aiter_shape_from_candidate({}) == {}
 
 
 # ---- new type-inference predicates (P1) ----

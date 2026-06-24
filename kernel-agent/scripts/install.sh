@@ -19,10 +19,10 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 export PATH="/opt/venv/bin:$PATH"
 
 # Default every writable artefact location under $USER_DATA_PATH so a single
-# session-dir move relocates Magpie / dependency checkouts / GEAK config /
-# the kernel-agent env file. Operators can still pin individual repo paths
-# via env overrides (GEAK_ROOT, TRACELENS_ROOT, MAGPIE_DIR, etc.) — the
-# defaults below take effect only when the corresponding env var is unset.
+# session-dir move relocates Magpie / source mirrors / GEAK config / the
+# kernel-agent env file. Operators can still pin individual paths via env
+# overrides (HYPERLOOM_ROOT, MAGPIE_DIR, etc.) — the defaults below take
+# effect only when the corresponding env var is unset.
 #
 # REPO_ROOT / KERNEL_AGENT_ROOT default to the on-disk source location
 # (this script lives at kernel-agent/scripts/install.sh, so its parent's
@@ -87,16 +87,17 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
 #   2. AMD-AGI/TraceLens-internal -> $TRACELENS_INTERNAL_ROOT (internal: rehydration module)
-# Default base clones the public repo into the pod-local open-source tree.
+# Default base clones the public repo into the workspace runtime tree,
+# matching Magpie / InferenceX rather than persisting pod-local mirrors.
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-# TraceLens v0.6.1 integration (#474): head of
-# release/hyperloom_integration_v0.6.1. The optional internal extension tracks
-# the matching release/hyperloom_integration_v0.6.1 branch of
+# TraceLens v0.7.0 integration (#474): head of
+# release/hyperloom_integration_v0.7.0. The optional internal extension tracks
+# the matching release/hyperloom_integration_v0.7.0 branch of
 # AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
-TRACELENS_REF="dee7fa3182b1ee0d2085a364a2542d8f49acc0f6"
+TRACELENS_REF="35bbb6380cf69a2655ee28260b02b5f2dc481744"
 _tracelens_root_was_set="${TRACELENS_ROOT:+1}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
@@ -126,10 +127,15 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
-# Pin GEAK to the v3.2.1 release, which carries the GEMM tuning entrypoint
-# used by kernel-agent/tools/gemm_tuning.py (minisweagent.run.gemm_tuning).
-# Operators can override with GEAK_REF=<tag|branch|sha>.
-GEAK_REF="${GEAK_REF:-v3.2.1}"
+# Pin GEAK to the v3.2.2 release (commit d3f94cbe, cut from the
+# chore/subagent-docs-upstream-resource branch / PR #290). It carries the
+# GEMM tuning entrypoint used by kernel-agent/tools/gemm_tuning.py
+# (minisweagent.run.gemm_tuning) plus the upstreamed subagent docs/resources.
+# A tag is a permanent ref: it stays reachable regardless of how PR #290 is
+# merged to main (merge/squash/rebase) or whether the source branch is later
+# deleted, unlike a branch-HEAD SHA. Operators can override with
+# GEAK_REF=<tag|branch|sha>; bump to the next patch tag if the branch advances.
+GEAK_REF="${GEAK_REF:-v3.2.2}"
 # e2e whole-pipeline optimizer (formerly the standalone PerfSkills repo). Its
 # code has MIGRATED INTO GEAK on the GEAK_v4 branch (interface/run_e2e.py +
 # e2e_workflow/). Hyperloom calls interface/run_e2e.py at the KERNEL phase when
@@ -215,7 +221,7 @@ fi
 KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
-GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.05}"
+GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
 CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
@@ -367,7 +373,8 @@ run() {
   fi
 }
 
-# Serialize concurrent installs that share one open-source checkout root: the
+# Serialize concurrent installs that share one $USER_DATA_PATH. Installs
+# pointed at the same data root share the auto-cloned dependency checkouts —
 # GEAK / OOB / TraceLens trees below. With no lock, two installs race and
 # corrupt each other's half-cloned trees. The lock lives in $_open_source_root
 # (pod-local) so it tracks exactly what it guards: same-root installs serialize,
@@ -816,7 +823,7 @@ ensure_tracelens() {
   # tree, and at runtime tools/tracelens_analysis.py re-runs the same
   # editable install in a subprocess on every trace_analyze request,
   # producing a tight failure loop. Detecting unwritable source up front
-  # and mirroring to ${TRACELENS_MIRROR_DIR} (parallel to
+  # and mirroring to ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to
   # ${GEAK_ROOT} / ${OOB_ROOT}) lets both
   # the install-time and the runtime pip install land on a writable
   # filesystem. write_env_file() emits the resulting TRACELENS_INTERNAL_ROOT into
@@ -892,7 +899,7 @@ ensure_geak() {
       _PIP_CONSTRAINT_ARGS="--constraint ${GEAK_PIP_CONSTRAINT_FILE}"
     fi
     run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_ROOT}"
-    # GEAK v3.2.1 ships 4 MCP tools under mcp_tools/; all are imported
+    # GEAK v3.2.0 ships 4 MCP tools under mcp_tools/; all are imported
     # by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
     #   * profiler-mcp               — Metrix-backed instrumented profiling
@@ -950,7 +957,7 @@ run:
       finalize_grace_s: 300
       kill_buffer_s: 60
     full:
-      total_s: 7200
+      total_s: 10800
       preprocess_soft_cap_s: 900
       preprocess_hard_cap_fraction: 0.5
       finalize_grace_s: 300
@@ -1333,6 +1340,17 @@ write_env_file() {
     [ -n "${GEAK_MEMORY_MIN_SPEEDUP_VAL}" ] && echo "export GEAK_MEMORY_MIN_SPEEDUP='${GEAK_MEMORY_MIN_SPEEDUP_VAL}'"
     [ -n "${CODEX_MODEL_VAL}" ] && echo "export CODEX_MODEL='${CODEX_MODEL_VAL}'"
     [ -n "${HYPERLOOM_ROCPROF_COMPUTE_PATH:-}" ] && echo "export HYPERLOOM_ROCPROF_COMPUTE_PATH='${HYPERLOOM_ROCPROF_COMPUTE_PATH}'"
+    # GEAK scoring / profiler / shape knobs. These are read by GEAK itself (the
+    # Ray actor), but the optimize CLI sources THIS file and its env replaces the
+    # launcher's exports -- so any knob not persisted here is silently dropped
+    # before reaching the actor (e.g. GEAK_SCORE_TARGET=kernel fell back to wall).
+    # Passthrough-if-set (no hardcoded defaults):
+    #   GEAK_SCORE_TARGET         -> score best-patch on kernel_ms vs wall (E2E-transferable)
+    #   GEAK_SKIP_PROFILE         -> skip the advisory profiler-mcp roofline pass
+    #   GEAK_MAX_BENCHMARK_SHAPES -> harness benchmark-shape cap
+    [ -n "${GEAK_SCORE_TARGET:-}" ] && echo "export GEAK_SCORE_TARGET='${GEAK_SCORE_TARGET}'"
+    [ -n "${GEAK_SKIP_PROFILE:-}" ] && echo "export GEAK_SKIP_PROFILE='${GEAK_SKIP_PROFILE}'"
+    [ -n "${GEAK_MAX_BENCHMARK_SHAPES:-}" ] && echo "export GEAK_MAX_BENCHMARK_SHAPES='${GEAK_MAX_BENCHMARK_SHAPES}'"
   } > "$env_file"
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
@@ -1448,7 +1466,7 @@ main() {
     # outputs land under $USER_DATA_PATH/kernel-agent/runs/<session_id>/
     # (created lazily by the tools themselves). All we need here is the
     # writable runtime tree on $USER_DATA_PATH for the env file + GEAK
-    # config + dependency checkouts.
+    # config + source mirrors.
     mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
   fi
   ensure_python
@@ -1459,7 +1477,7 @@ main() {
   ensure_ray_started
   # Hold the install lock for the whole source-mutating region (TraceLens /
   # GEAK / OOB clones + mirrors). System-package steps above (apt/pip)
-  # do not touch dependency checkouts, so they stay outside the lock.
+  # do not touch source-mirrors, so they stay outside the lock.
   acquire_install_lock
   ensure_tracelens
 
