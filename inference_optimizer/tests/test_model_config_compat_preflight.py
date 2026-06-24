@@ -66,6 +66,52 @@ def test_detect_healthy_config_returns_none(tmp_path):
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
+def test_detect_diffusers_pipeline_blocks_without_config_json(tmp_path):
+    m = tmp_path / "flux"
+    m.mkdir()
+    (m / "model_index.json").write_text(
+        json.dumps({"_class_name": "FluxPipeline"}),
+        encoding="utf-8",
+    )
+
+    reason = cli._detect_incompatible_model_config(str(m))
+
+    assert reason is not None
+    assert "Diffusers pipeline" in reason
+    assert "causal LM" in reason
+
+
+def test_detect_null_use_cache_blocks_strict_config_validation(tmp_path):
+    m = tmp_path / "null_use_cache"
+    _write_config(
+        m,
+        model_type="qwen2",
+        max_position_embeddings=4096,
+        use_cache=None,
+    )
+
+    reason = cli._detect_incompatible_model_config(str(m))
+
+    assert reason is not None
+    assert "use_cache" in reason
+    assert "StrictDataclassFieldValidationError" in reason
+
+
+def test_detect_null_use_cache_in_text_config_blocks(tmp_path):
+    m = tmp_path / "nested_null_use_cache"
+    _write_config(
+        m,
+        model_type="wrapper",
+        max_position_embeddings=4096,
+        text_config={"model_type": "qwen2", "use_cache": None},
+    )
+
+    reason = cli._detect_incompatible_model_config(str(m))
+
+    assert reason is not None
+    assert "text_config.use_cache" in reason
+
+
 def test_detect_rope_with_maxpos_ok(tmp_path):
     m = tmp_path / "rope_ok"
     _write_config(
@@ -297,6 +343,38 @@ def test_detect_pure_nested_ministral3_blocked(tmp_path):
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None and "ministral3" in reason
+
+
+def test_detect_nested_qwen3_5_moe_text_unrecognized_blocked(tmp_path):
+    # Qwen3.6 wrapper exposes text_config.model_type=qwen3_5_moe_text; vLLM/
+    # Transformers rejects that nested type during ModelConfig validation.
+    m = tmp_path / "wrapper_nested_qwen3_5_moe_text"
+    _write_config(
+        m,
+        model_type="qwen3_5_moe",
+        architectures=["Qwen3_5MoeForConditionalGeneration"],
+        text_config={
+            "model_type": "qwen3_5_moe_text",
+            "max_position_embeddings": 262144,
+            "vocab_size": 151936,
+        },
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "qwen3_5_moe_text" in reason
+
+
+def test_detect_top_level_qwen3_5_moe_not_blocked(tmp_path):
+    # Bare top-level qwen3_5_moe remains in the text-coercible runtime path; only
+    # the nested text_config subtype has a confirmed registry failure.
+    m = tmp_path / "bare_qwen3_5_moe"
+    _write_config(
+        m,
+        model_type="qwen3_5_moe",
+        architectures=["Qwen3_5MoeForConditionalGeneration"],
+        max_position_embeddings=262144,
+        vocab_size=151936,
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_top_level_ministral3_not_blocked(tmp_path):

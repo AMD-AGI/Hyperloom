@@ -47,6 +47,10 @@ def test_multimodal_by_vision_config():
                     "max_position_embeddings": 4096}) == "multimodal"
 
 
+def test_non_llm_diffusers_repo_filtered_without_config():
+    assert _reason(None, repo="black-forest-labs/FLUX.1-dev") == "non_text_generation"
+
+
 def test_bare_for_conditional_generation_without_vision_is_kept():
     # Text-only MoE that merely use the *ForConditionalGeneration suffix
     # (no vision_config) must NOT be filtered as multimodal.
