@@ -3164,6 +3164,7 @@ class Coordinator:
             "framework_pr_authoring": True,
             "framework_pr_candidate_id": cand_id,
             "framework_pr_batch_id": batch_id,
+            "framework_pr_audit": (audit if isinstance(audit, dict) else {}),
             "source": "coordinator_internal",
             "readonly": False,
             "notes": notes,
@@ -3176,7 +3177,7 @@ class Coordinator:
                 exc_info=True,
             )
         idem = f"framework_pr_authoring:{batch_id}:{cand_id}"
-        await self.tasks.create_or_return_existing(
+        spec_task = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             idempotency_key=idem,
@@ -3194,6 +3195,25 @@ class Coordinator:
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=3600,
         )
+        # Remember which candidate this specialist task authors for. The
+        # downstream integrate_patch task only carries ``specialist_task_id``,
+        # so the authored-outcome bridge resolves the PR-URL candidate id from
+        # this map (else the progress row is keyed on a task_id that never
+        # matches the select key -> FRAMEWORK_PR pump re-dispatches forever).
+        try:
+            spec_tid = str(getattr(spec_task, "task_id", "") or "")
+            if spec_tid and cand_id:
+                if not isinstance(
+                    getattr(state, "framework_pr_specialist_candidate_map", None), dict
+                ):
+                    state.framework_pr_specialist_candidate_map = {}
+                state.framework_pr_specialist_candidate_map[spec_tid] = cand_id
+                state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — best-effort provenance
+            log.debug(
+                "FRAMEWORK_PR authoring: specialist->candidate map write failed",
+                exc_info=True,
+            )
         log.info(
             "FRAMEWORK_PR: dispatched authoring specialist candidate=%s batch=%s gap=%s",
             cand_id,
@@ -8197,12 +8217,31 @@ class Coordinator:
         if not isinstance(res, dict):
             return
         status = str(res.get("status") or "")
-        if status not in ("kept", "reverted", "accuracy_unavailable_reject"):
+        # Record EVERY terminal integrate_patch outcome — not just keep/revert.
+        # A patch that fails to apply / bench (``apply_failed`` /
+        # ``bench_reverted`` / ``error`` …) is still a terminal verdict for the
+        # candidate; without a progress row the FRAMEWORK_PR pump re-selects the
+        # same candidate every tick and livelocks (the authoring specialist's
+        # ``patches_written`` is non-empty so the empty-outcome bridge does not
+        # fire either). Only an empty / in-progress status is skipped.
+        if not status:
             return
         params = getattr(task, "params", None) or {}
+        # Resolve the FRAMEWORK_PR candidate id (a PR URL) that this authored
+        # patch belongs to. The integrate_patch task carries only
+        # ``specialist_task_id``; map that back to the originating candidate via
+        # the dispatch-time map so the progress row is keyed on the same PR URL
+        # that ``_select_next_framework_pr_candidate`` checks. Falling back to a
+        # task_id here would leave the candidate looking unprocessed forever.
+        spec_tid = str(params.get("specialist_task_id") or "")
+        cand_map = getattr(self.shared_state, "framework_pr_specialist_candidate_map", None)
+        mapped_cand = ""
+        if isinstance(cand_map, dict) and spec_tid:
+            mapped_cand = str(cand_map.get(spec_tid) or "")
         cand_id = str(
             params.get("framework_pr_candidate_id")
-            or params.get("specialist_task_id")
+            or mapped_cand
+            or spec_tid
             or getattr(task, "task_id", "")
             or ""
         )
@@ -8268,6 +8307,116 @@ class Coordinator:
             batch_id,
             status,
             gain,
+        )
+
+    def _record_framework_pr_authoring_empty_outcome(
+        self,
+        *,
+        task: "Task",
+        done_payload: dict[str, Any] | None,
+    ) -> None:
+        """Record a terminal FRAMEWORK_PR row when an authoring specialist finishes WITHOUT a patch.
+
+        The authored-patch bridge (`_record_framework_pr_authored_outcome`)
+        only fires on a following ``integrate_patch`` task. An *empty*
+        deliverable (specialist judged the PR already-present / not-applicable,
+        ``patches_written == []``) never produces an ``integrate_patch``, so
+        without this hook the candidate is never marked processed and
+        `_select_next_framework_pr_candidate` re-selects it every tick (the
+        FRAMEWORK_PR pump livelocks re-dispatching the same candidate). Here we
+        stamp a `framework_pr_phase_progress` row + `decision.json` so the pump
+        advances. Idempotent: a candidate that already has a row is skipped.
+
+        Args:
+            task: The completed authoring specialist task (carries the
+                ``framework_pr_*`` provenance markers).
+            done_payload: The specialist's ``specialist_done`` payload.
+        """
+        params = getattr(task, "params", None) or {}
+        if not bool(params.get("framework_pr_authoring")):
+            return
+        if (self.shared_state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_PR:
+            return
+        payload = done_payload if isinstance(done_payload, dict) else {}
+        inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
+        # The downstream integrate_patch (and thus the authored-outcome bridge
+        # that owns the terminal row) is created by
+        # ``_maybe_autosubmit_specialist_patches``, which fires IFF
+        # ``patches_written`` (post safety-vetting) is non-empty. So this
+        # empty-outcome bridge MUST use the SAME signal: if ``patches_written``
+        # is non-empty an integrate_patch will follow and owns the row — do
+        # nothing here. If it is empty we must stamp the terminal row, REGARDLESS
+        # of ``proposal_set``. The dangerous case this guards: a specialist
+        # authors a patch (proposal_set non-empty) that safety-vetting then
+        # DROPS as unusable (missing_target / forbidden_fields), emptying
+        # ``patches_written``. Autosubmit then creates no integrate_patch, so
+        # without stamping here the candidate has no terminal row and the
+        # FRAMEWORK_PR pump re-dispatches it forever (gap-5 livelock).
+        patches = inner.get("patches_written") or []
+        if isinstance(patches, list) and patches:
+            return
+        cand_id = str(params.get("framework_pr_candidate_id") or "")
+        if not cand_id:
+            return
+        batch_id = str(params.get("framework_pr_batch_id") or "")
+        if not isinstance(self.shared_state.framework_pr_phase_progress, list):
+            self.shared_state.framework_pr_phase_progress = []
+        already = {
+            str(p.get("candidate_id") or "")
+            for p in self.shared_state.framework_pr_phase_progress
+            if isinstance(p, dict)
+        }
+        if cand_id in already:
+            return
+        # Map the cached audit verdict to a terminal status.
+        audit = params.get("framework_pr_audit") if isinstance(params.get("framework_pr_audit"), dict) else {}
+        sem = str((audit or {}).get("semantic_status") or "").strip().lower()
+        if sem in ("already_equivalent", "already_superset"):
+            status = "already_present"
+        elif sem in ("not_present", "partially_present"):
+            status = "not_applicable"
+        else:
+            status = "author_empty"
+        reason = str(inner.get("summary") or "").strip()[:500]
+        progress_entry = {
+            "candidate_id": cand_id,
+            "pr_url": "",
+            "status": status,
+            "provenance": "authored_empty",
+            "kept": False,
+            "gain_pct": 0.0,
+            "batch_id": batch_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        self.shared_state.framework_pr_phase_progress.append(progress_entry)
+        try:
+            from .framework_pr_artifacts import write_decision_json
+
+            write_decision_json(
+                self.session_dir,
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status=status,
+                kept=False,
+                provenance="authored_empty",
+                reason=reason,
+                gain_pct=0.0,
+                extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("FRAMEWORK_PR: authored-empty decision.json write failed", exc_info=True)
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "FRAMEWORK_PR authored-empty: save failed for task=%s",
+                getattr(task, "task_id", "?"),
+            )
+        log.info(
+            "FRAMEWORK_PR: authoring specialist empty deliverable candidate=%s batch=%s status=%s",
+            cand_id,
+            batch_id,
+            status,
         )
 
     async def _fan_out_specialist_wave(
@@ -10557,6 +10706,21 @@ class Coordinator:
                     except Exception:  # noqa: BLE001 — defensive
                         log.exception(
                             "specialist bookkeeping hook failed for task=%s",
+                            task.task_id,
+                        )
+                    # FRAMEWORK_PR authoring bridge for an EMPTY deliverable: a
+                    # specialist that authored no patch never spawns an
+                    # integrate_patch, so the authored-outcome bridge below never
+                    # fires. Without a terminal progress row the candidate is
+                    # re-selected every tick (pump livelock). Stamp it here.
+                    try:
+                        self._record_framework_pr_authoring_empty_outcome(
+                            task=task,
+                            done_payload=done_payload,
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "FRAMEWORK_PR authoring empty-outcome bridge failed for task=%s",
                             task.task_id,
                         )
                 # Bump the per-EXPLORE specialist dispatch counter (Robustness reads it to detect storms).

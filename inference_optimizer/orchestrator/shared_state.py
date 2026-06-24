@@ -604,6 +604,15 @@ class SharedState:
     )
     # Default True: FRAMEWORK_PR pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
     framework_pr_authoring_enabled: bool = True
+    # Maps an authoring specialist task_id -> originating FRAMEWORK_PR candidate id
+    # (PR URL). The downstream integrate_patch task only carries
+    # ``specialist_task_id``, so the authored-outcome bridge resolves the real
+    # candidate id through this map; without it the progress row is keyed on the
+    # specialist/integrate task_id and never matches the PR-URL key that
+    # ``_select_next_framework_pr_candidate`` checks -> pump livelock.
+    framework_pr_specialist_candidate_map: dict[str, str] = field(
+        default_factory=dict,
+    )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``. Absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposal).
     enable_roofline: bool = True
     # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM measure time when warm-decision is active, else the cold baseline. Warmup + stack-rebench exempt. Default +20%.

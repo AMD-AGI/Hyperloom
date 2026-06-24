@@ -22,6 +22,7 @@ class _StateStub:
         self.framework_pr_phase_progress: list[dict[str, Any]] = []
         self.framework_pr_critic_decisions: list[dict[str, Any]] = []
         self.framework_pr_authoring_enabled = authoring
+        self.framework_pr_specialist_candidate_map: dict[str, str] = {}
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
         self.model = "test-model"
@@ -281,7 +282,13 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
     assert stub.shared_state.framework_pr_batches[0]["max_gain_pct_observed_in_batch"] == pytest.approx(6.5)
 
 
-def test_record_authored_outcome_ignores_non_terminal_status(tmp_path: Path):
+def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
+    """A non-keep terminal status (apply_failed) MUST still be recorded.
+
+    Without a terminal row the FRAMEWORK_PR pump re-selects the same candidate
+    every tick (the authoring specialist's ``patches_written`` is non-empty so
+    the empty-outcome bridge does not fire). Only empty/in-progress is skipped.
+    """
     stub = _Stub(tmp_path, authoring=True)
     task = SimpleNamespace(task_id="i-2", params={"framework_pr_batch_id": "b1"})
     result = SimpleNamespace(
@@ -293,6 +300,104 @@ def test_record_authored_outcome_ignores_non_terminal_status(tmp_path: Path):
         stub,
         task=task,
         result=result,
+    )
+
+    rows = stub.shared_state.framework_pr_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["status"] == "apply_failed"
+    assert rows[0]["kept"] is False
+
+
+def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path: Path):
+    """integrate_patch carries only specialist_task_id; the bridge must map it
+    back to the originating PR-URL candidate so the row matches the select key.
+    """
+    stub = _Stub(tmp_path, authoring=True)
+    stub.shared_state.framework_pr_specialist_candidate_map = {
+        "spec-7": "https://github.com/ROCm/aiter/pull/3888",
+    }
+    task = SimpleNamespace(
+        task_id="i-9",
+        params={"framework_pr_batch_id": "b1", "specialist_task_id": "spec-7"},
+    )
+    result = SimpleNamespace(
+        state="succeeded",
+        result={"status": "reverted", "delta_pct": -0.3},
+    )
+
+    Coordinator._record_framework_pr_authored_outcome(  # type: ignore[arg-type]
+        stub,
+        task=task,
+        result=result,
+    )
+
+    rows = stub.shared_state.framework_pr_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["candidate_id"] == "https://github.com/ROCm/aiter/pull/3888"
+    assert rows[0]["status"] == "reverted"
+
+
+def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
+    """A specialist authors a patch (proposal_set non-empty) that safety-vetting
+    then DROPS as unusable (missing_target), emptying patches_written. Autosubmit
+    keys off patches_written so it creates NO integrate_patch — the authored
+    bridge never fires. The empty-outcome bridge MUST stamp a terminal row
+    (gate on patches_written, NOT proposal_set), else the FRAMEWORK_PR pump
+    re-dispatches the candidate forever (gap-5 livelock, e.g. aiter #28067).
+    """
+    stub = _Stub(tmp_path, authoring=True)
+    cand = "https://github.com/sgl-project/sglang/pull/28067"
+    task = SimpleNamespace(
+        task_id="spec-28067",
+        params={
+            "framework_pr_authoring": True,
+            "framework_pr_candidate_id": cand,
+            "framework_pr_batch_id": "b1",
+            "framework_pr_audit": {"semantic_status": "not_present"},
+        },
+    )
+    done_payload = {
+        "empty": False,
+        "patches_written": [],  # dropped by safety vetting
+        "proposal_set": [{"name": "serving-gc-off-critical-path"}],
+        "summary": "patch target file absent from framework tree",
+    }
+
+    Coordinator._record_framework_pr_authoring_empty_outcome(  # type: ignore[arg-type]
+        stub,
+        task=task,
+        done_payload=done_payload,
+    )
+
+    rows = stub.shared_state.framework_pr_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["candidate_id"] == cand
+    assert rows[0]["status"] == "not_applicable"
+    assert rows[0]["kept"] is False
+
+
+def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
+    """Non-empty patches_written means autosubmit will create an integrate_patch
+    that owns the terminal row; the empty-outcome bridge must NOT also stamp one.
+    """
+    stub = _Stub(tmp_path, authoring=True)
+    task = SimpleNamespace(
+        task_id="spec-x",
+        params={
+            "framework_pr_authoring": True,
+            "framework_pr_candidate_id": "pr-x",
+            "framework_pr_batch_id": "b1",
+        },
+    )
+    done_payload = {
+        "patches_written": ["patches/001.patch"],
+        "proposal_set": [{"name": "v1"}],
+    }
+
+    Coordinator._record_framework_pr_authoring_empty_outcome(  # type: ignore[arg-type]
+        stub,
+        task=task,
+        done_payload=done_payload,
     )
 
     assert stub.shared_state.framework_pr_phase_progress == []
