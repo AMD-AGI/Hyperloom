@@ -46,6 +46,7 @@ from ._grid_runner import (
     sanitize_script_name,
 )
 from ._subprocess_kill import (
+    DETOKENIZER_STALL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     run_with_session_kill,
     server_log_death_excerpt,
@@ -1536,6 +1537,40 @@ class BaselineExecutor:
         proc_returncode = proc.returncode
         proc_stdout = proc.stdout
         proc_stderr = proc.stderr
+
+        # Detokenizer-stall watchdog reap: the server came up healthy (ready
+        # marker logged) but then went completely silent for the stall grace
+        # window — a hung engine / wedged detokenizer. The clock runs from the
+        # ready marker, so a long cold start never trips it. Short-circuit here:
+        # a stall reap leaves no benchmark_* workspace, so without this it would
+        # misclassify as ``no_workspace``. Distinct ``error_class`` lets the
+        # coordinator fast-fail this baseline / variant instead of burning the
+        # full hard timeout. Harvest whatever the wrapper wrote first.
+        if proc_returncode == DETOKENIZER_STALL_RETURNCODE:
+            stall_candidates = sorted(output_dir.glob("benchmark_*"))
+            stall_destination = stall_candidates[-1] if stall_candidates else output_dir
+            stall_harvested = harvest_leaked_artifacts(
+                stall_destination,
+                subprocess_started_unix=subprocess_started_unix,
+            )
+            log.warning(
+                "baseline_executor: detokenizer-stall watchdog reaped run "
+                "(server ready but log went silent); error_class=detokenizer_stall."
+            )
+            return {
+                "status": "failed",
+                "error_class": "detokenizer_stall",
+                "returncode": proc_returncode,
+                "error": (
+                    "server reported ready but emitted no log output (hung "
+                    "engine / detokenizer stall); reaped by the "
+                    "detokenizer-stall watchdog. See server.log."
+                ),
+                "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
+                "output_dir": str(output_dir),
+                "harvested_artifacts": [str(dst) for _, dst in stall_harvested],
+                "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in stall_harvested],
+            }
 
         # #524: when the inference server's engine/worker bootstrap dies (e.g.
         # vLLM ``RuntimeError: Engine core initialization failed``), the real
