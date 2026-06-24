@@ -38,7 +38,6 @@ Usage:
 Env vars (all optional, CLI flags take precedence):
   CLAW_API_KEY | SAFE_API_KEY        bearer token (ak-xxx)
   SAFE_BASE_URL | SAFE_API_URL       base URL (default: https://core42.primus-safe.amd.com)
-  HARBOR_PREFIX                      image registry prefix
   HF_TOKEN                           HuggingFace token (gated models)
   SAFE_OPTIMIZE_WORKSPACE            override default 'core42-hyperloom'
   SAFE_OPTIMIZE_VOLUME               override default '/wekafs'
@@ -79,7 +78,6 @@ DEFAULT_API_URL = "https://core42.primus-safe.amd.com"
 DEFAULT_REGISTER_WORKSPACE = "core42-hyperloom"
 DEFAULT_SUBMIT_WORKSPACE = "core42-sandbox"
 DEFAULT_VOLUME = "/wekafs"
-DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 # core42 is MI300X; override the Claw prompt-builder's wrong MI355X default so
 # the prompt and TP policy use the right arch. Tool source paths are
 # deliberately NOT pinned: install.sh clones writable per-session copies, and
@@ -297,9 +295,9 @@ SGLANG_ARCHS: set[str] = {
     "GPTBigCodeForCausalLM",
     "FalconForCausalLM",
     "ChatGLMModel",
-    # New architectures natively supported by sglang v0.5.11 (transformers 5.x)
+    # New architectures natively supported by sglang v0.5.12 (transformers 5.x)
     # in the current sandbox image. Without these, detect_framework falls back
-    # to vLLM and the old proxy/vllm/vllm-openai-rocm:v0.19.0 image (transformers
+    # to vLLM and the vllm-openai-rocm:v0.21.0 image (transformers
     # <5) crashes at baseline ("does not recognize this architecture" /
     # "TokenizersBackend does not exist"). Verified against the failing models'
     # config.architectures.
@@ -347,15 +345,6 @@ def is_generative_arch(arch: str) -> bool:
     return any(arch.endswith(s) for s in GENERATIVE_ARCH_SUFFIXES)
 
 
-def _proxy() -> str:
-    """Return the container registry proxy prefix.
-
-    Returns:
-        str: ``$HARBOR_PREFIX`` when set, otherwise the default proxy prefix.
-    """
-    return os.environ.get("HARBOR_PREFIX", DEFAULT_PROXY)
-
-
 def _default_sglang_image() -> str:
     """Return the default SGLang server image.
 
@@ -366,19 +355,17 @@ def _default_sglang_image() -> str:
     """
     # profilerfix: patched libamdhip64/libroctracer so rocprofiler captures
     # kernels under HipGraphLaunch (issue #352). Pre-profilerfix image (revert):
-    # lmsysorg/sglang:v0.5.11-rocm720-mi30x
-    return "primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
+    # lmsysorg/sglang:v0.5.12-rocm720-mi30x
+    return "harbor.core42.primus-safe.amd.com/sync/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix"
 
 
 def _default_vllm_image() -> str:
     """Return the default vLLM server image.
 
     Returns:
-        The proxy-qualified vLLM image (v0.19.0, one minor ahead of the
-        InferenceX baseline to avoid v0.20 breakage).
+        The sync-registry vLLM image (v0.21.0).
     """
-    # v0.19.0: one minor ahead of InferenceX baseline v0.17.0, avoiding v0.20 breakage.
-    return f"{_proxy()}/vllm/vllm-openai-rocm:v0.19.0"
+    return "harbor.core42.primus-safe.amd.com/sync/vllm/vllm-openai-rocm:v0.21.0"
 
 
 # ── HuggingFace client ──────────────────────────────────────────────────────────
