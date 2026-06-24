@@ -131,9 +131,9 @@ class TestPromoteGemmTuningKeep:
 def _eligible_coord(tmp_path, monkeypatch, **overrides):
     """Coordinator wired for a CK-switch-eligible forge workload.
 
-    forge + sglang + fp8 + gfx942 (mi300x) + block-scale fp8. The
-    per-channel/per-token probe is forced to ``False`` (block-scale) unless
-    overridden, so the helper does not depend on a real model config on disk.
+    forge + sglang + fp8 + gfx942 (mi300x) + block-scale fp8. The block-scale
+    probe is forced to ``True`` unless overridden, so the helper does not depend
+    on a real model config on disk.
     """
     kwargs = dict(
         baseline_tput=100.0,
@@ -144,13 +144,13 @@ def _eligible_coord(tmp_path, monkeypatch, **overrides):
     )
     kwargs.update(overrides)
     coord = _coord(tmp_path, **kwargs)
-    monkeypatch.setattr(mcu_mod, "_fp8_is_per_channel_per_token", lambda _p: False)
+    monkeypatch.setattr(mcu_mod, "_fp8_is_block_scale", lambda _p: True)
     return coord
 
 
 class TestCkBlockscaleSwitchEligible:
     """``_ck_blockscale_switch_eligible`` gates the standalone CK backend switch
-    to forge + sglang + fp8 + gfx942 + block-scale (not per-channel/per-token)."""
+    to forge + sglang + fp8 (any signal) + gfx942 + block-scale checkpoints."""
 
     def test_eligible_for_forge_sglang_fp8_mi300x_blockscale(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch)
@@ -165,7 +165,11 @@ class TestCkBlockscaleSwitchEligible:
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is False
 
     def test_not_eligible_non_fp8(self, tmp_path, monkeypatch):
+        # Non-fp8 session precision and no runtime fp8 signal -> not eligible.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
+        monkeypatch.setattr(
+            krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto")
+        )
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is False
 
     def test_not_eligible_non_gfx942_gpu(self, tmp_path, monkeypatch):
@@ -173,9 +177,38 @@ class TestCkBlockscaleSwitchEligible:
         coord = _eligible_coord(tmp_path, monkeypatch, gpu_type="mi355x")
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is False
 
-    def test_not_eligible_per_token_fp8(self, tmp_path, monkeypatch):
+    def test_not_eligible_non_block_scale_fp8(self, tmp_path, monkeypatch):
+        # Per-tensor / static / per-channel-per-token fp8: no weight_block_size,
+        # so the positive block-scale probe declines (Bug #1).
         coord = _eligible_coord(tmp_path, monkeypatch)
-        monkeypatch.setattr(mcu_mod, "_fp8_is_per_channel_per_token", lambda _p: True)
+        monkeypatch.setattr(mcu_mod, "_fp8_is_block_scale", lambda _p: False)
+        assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is False
+
+    def test_eligible_for_runtime_fp8_via_result_precision(self, tmp_path, monkeypatch):
+        # Session precision is bf16, but the forge result envelope stamps the
+        # runtime-resolved precision fp8 (Bug #2, signal #2).
+        coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
+        monkeypatch.setattr(
+            krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto")
+        )
+        assert (
+            coord._ck_blockscale_switch_eligible({"backend": "forge", "precision": "fp8"})
+            is True
+        )
+
+    def test_eligible_for_runtime_fp8_via_quantization_arg(self, tmp_path, monkeypatch):
+        # Session precision bf16 and no result precision, but runtime
+        # --quantization fp8 is resolved from server args (Bug #2, signal #3).
+        coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
+        monkeypatch.setattr(
+            krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("fp8", "auto")
+        )
+        assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is True
+
+    def test_not_eligible_per_token_fp8(self, tmp_path, monkeypatch):
+        # Per-channel/per-token fp8 carries no weight_block_size -> declined.
+        coord = _eligible_coord(tmp_path, monkeypatch)
+        monkeypatch.setattr(mcu_mod, "_fp8_is_block_scale", lambda _p: False)
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is False
 
     def test_non_dict_result_is_not_eligible(self, tmp_path, monkeypatch):
@@ -266,9 +299,9 @@ class TestPromoteInjectsCkBlockscaleEnv:
         envs = coord.shared_state.current_best["extra_envs"]
         assert "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" not in envs
 
-    def test_does_not_inject_for_per_token_fp8(self, tmp_path, monkeypatch):
+    def test_does_not_inject_for_non_block_scale_fp8(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch)
-        monkeypatch.setattr(mcu_mod, "_fp8_is_per_channel_per_token", lambda _p: True)
+        monkeypatch.setattr(mcu_mod, "_fp8_is_block_scale", lambda _p: False)
         coord._promote_gemm_tuning_keep(
             {
                 "status": "ok",
