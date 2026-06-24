@@ -5,7 +5,10 @@ Single source of truth used by both the offline pool filter
 (``filter_candidates.py``) and the online per-model pre-flight in
 ``optimize_submit.py``. ``unrunnable_reason`` is a pure predicate over a HF
 ``config.json`` dict (plus an optional local model directory for file checks);
-``hf_gated`` is the network-based gated/404 probe used by the offline filter.
+``hf_gated`` is the network-based gated/404 probe and ``hf_missing_tokenizer``
+the network-based weights-but-no-tokenizer probe, both used by the offline
+filter (the latter mirrors the local ``missing_tokenizer`` rule for repos that
+are not cached on disk yet).
 
 All rules are config-deterministic except ``missing_tokenizer`` (needs the local
 model dir) and gated/404 (network); the config rules are therefore safe to run
@@ -61,6 +64,9 @@ VISION_MT = {"llava", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "internvl", "mllama"
 _TOKENIZER_FILES = {"tokenizer.json", "tokenizer.model", "vocab.json",
                     "spiece.model", "tokenizer.model.v3", "merges.txt"}
 
+# Weight shard extensions used to tell "has model weights" from a file listing.
+_WEIGHT_EXTS = (".safetensors", ".bin", ".pt")
+
 # Native FP4 quant tags. gfx942 (MI300X / MI325X) has NO native FP4 datapath,
 # so these models cannot serve there; gfx950 (MI355X) is fine.
 _FP4_QUANT_TAGS = ("mxfp4", "nvfp4")
@@ -102,6 +108,20 @@ def is_mi300x(gpu_type):
 _MI300X_BLOCK_RE = re.compile(r"deepseek[-_]?v4(?![0-9])|glm[-_]?5(?![0-9])", re.I)
 _MI300X_ALLOW_RE = re.compile(r"deepseek[-_]?v4[-_]?flash", re.I)
 
+# Non-LLM model families that can appear in broad HF pools but cannot be served
+# by Hyperloom's text-generation benchmark path. Some of these repos (for
+# example FLUX.1-dev) do not have a HF ``config.json`` at the repo root, so keep
+# this repo-name gate outside the config-only rules. Keep the patterns
+# family/token-scoped: a broad ``diffusion`` substring would also match possible
+# text-generation research repos whose config is otherwise runnable.
+_NON_LLM_RE = re.compile(
+    r"(^|[/_-])flux(\.|[/_-]|$)"
+    r"|(^|[/_-])stable[-_]?diffusion([/_-]|$)"
+    r"|(^|[/_-])diffusers([/_-]|$)"
+    r"|(^|[/_-])diffusion[-_]?pipeline([/_-]|$)",
+    re.I,
+)
+
 
 def mi300x_blocked_model(repo):
     """Return the matched model token when ``repo`` is one we never run on
@@ -112,6 +132,14 @@ def mi300x_blocked_model(repo):
     if _MI300X_ALLOW_RE.search(name):
         return ""
     m = _MI300X_BLOCK_RE.search(name)
+    return m.group(0) if m else ""
+
+
+def non_llm_repo(repo):
+    """Return the matched token when ``repo`` is a known non-text-generation
+    family (Diffusers/image-generation), else ``""``.
+    """
+    m = _NON_LLM_RE.search(str(repo or ""))
     return m.group(0) if m else ""
 
 
@@ -150,7 +178,7 @@ def has_weights(model_dir):
     files = _listdir(model_dir)
     if files is None:
         return False
-    return any(f.endswith((".safetensors", ".bin", ".pt")) for f in files)
+    return any(f.endswith(_WEIGHT_EXTS) for f in files)
 
 
 def has_tokenizer(model_dir):
@@ -183,6 +211,12 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None, gpu_type=
     """
     if whitelist and repo and repo in whitelist:
         return None  # curated/whitelisted repo -> never filtered
+    blocked_non_llm = non_llm_repo(repo)
+    if blocked_non_llm:
+        return (
+            "non_text_generation",
+            f"{blocked_non_llm} is a Diffusers/image-generation model, not a decoder-only causal LM",
+        )
     if not isinstance(config, dict):
         return None
     archs = config.get("architectures") or []
@@ -294,6 +328,53 @@ def hf_gated(repo, tokens):
                 if attempt >= 2:
                     return "gated"
                 continue
+            if e.code == 429:
+                _tok_idx[0] += 1
+                time.sleep(5 + attempt * 5)
+                continue
+            return None
+        except Exception:
+            time.sleep(2)
+            continue
+    return None
+
+
+def hf_missing_tokenizer(repo, tokens):
+    """Return 'missing_tokenizer' when the HF repo ships weights but no tokenizer.
+
+    Network mirror of the local ``missing_tokenizer`` rule in
+    ``unrunnable_reason`` (which needs a downloaded model dir). Lets the offline
+    pool filter drop weights-only repos (merged / sharded / finetune dumps that
+    omit tokenizer.* files) BEFORE a sandbox slot is wasted downloading them and
+    the server fails to start. Fail-open: returns None on any fetch error or
+    when the file list cannot be read, so a model we cannot inspect is never
+    dropped on a network hiccup.
+
+    Args:
+        repo: HF repo id.
+        tokens: list of HF tokens (rotated across attempts / rate limits).
+    """
+    if not tokens:
+        return None
+    url = f"https://huggingface.co/api/models/{repo}?expand[]=siblings"
+    for attempt in range(6):
+        tok = tokens[_tok_idx[0] % len(tokens)]
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {tok}", "User-Agent": "ci-tokenizer-check"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                d = json.load(r)
+            files = {s.get("rfilename", "") for s in (d.get("siblings") or [])}
+            if not files:
+                return None
+            has_w = any(f.endswith(_WEIGHT_EXTS) for f in files)
+            has_t = bool(files & _TOKENIZER_FILES)
+            return "missing_tokenizer" if (has_w and not has_t) else None
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return None  # gated/forbidden -> let hf_gated handle it
+            if e.code == 404:
+                return None
             if e.code == 429:
                 _tok_idx[0] += 1
                 time.sleep(5 + attempt * 5)

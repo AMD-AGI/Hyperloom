@@ -296,6 +296,98 @@ def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
     assert "oob" not in versions
 
 
+def test_relabel_perfskills_geak_journey_rewrites_all_geak_tokens() -> None:
+    # The GEAK-e2e pipeline's GEAK must be relabeled to geak_v4 everywhere it
+    # appears in the interface file, so SBD never conflates it with the generic
+    # kernel-agent ``geak`` lane. Non-geak tokens (claude) are untouched.
+    from inference_optimizer.orchestrator.coordinator import (
+        _relabel_perfskills_geak_journey,
+    )
+
+    journey = {
+        "versions": {"geak": {"tool": "geak", "version": "909bc2da"}},
+        "discovery_runs": [
+            {
+                "source": "bypass",
+                "hot_kernels": [
+                    {"kernel_id": "k1", "recommended_backends": ["geak"]},
+                ],
+            }
+        ],
+        "kernels": [
+            {
+                "kernel_id": "k1",
+                "dispatch": {"dispatched": True, "backends": ["geak"]},
+                "backend_result": {
+                    "attempts": [
+                        {"backend": "geak", "status": "succeeded"},
+                        {"backend": "claude", "status": "failed"},
+                    ],
+                    "verification": {"best_backend": "geak"},
+                },
+            }
+        ],
+    }
+    _relabel_perfskills_geak_journey(journey)
+
+    versions = journey["versions"]
+    assert "geak" not in versions
+    assert versions["geak_v4"]["tool"] == "geak_v4"
+    assert versions["geak_v4"]["version"] == "909bc2da"
+    assert journey["discovery_runs"][0]["hot_kernels"][0]["recommended_backends"] == ["geak_v4"]
+    k = journey["kernels"][0]
+    assert k["dispatch"]["backends"] == ["geak_v4"]
+    assert [a["backend"] for a in k["backend_result"]["attempts"]] == ["geak_v4", "claude"]
+    assert k["backend_result"]["verification"]["best_backend"] == "geak_v4"
+
+
+def test_relabel_perfskills_geak_journey_noop_without_geak() -> None:
+    from inference_optimizer.orchestrator.coordinator import (
+        _relabel_perfskills_geak_journey,
+    )
+
+    journey = {
+        "versions": {"tracelens": {"tool": "tracelens"}},
+        "kernels": [{"kernel_id": "k1", "dispatch": {"backends": ["forge"]}}],
+    }
+    _relabel_perfskills_geak_journey(journey)
+    assert set(journey["versions"]) == {"tracelens"}
+    assert journey["kernels"][0]["dispatch"]["backends"] == ["forge"]
+
+
+def test_geak_v4_provenance_resolves_like_geak(tmp_path: Path) -> None:
+    # geak_v4 is registered with the same git-SHA provenance as geak so a real
+    # session mints a populated versions["geak_v4"] entry distinct from geak.
+    sha = _init_git_repo(tmp_path)
+    meta = instrument._tool_metadata("geak_v4", root=str(tmp_path))
+    assert meta["tool"] == "geak_v4"
+    assert meta["commit"] == sha
+    assert meta["version"] == sha
+
+
+def test_geak_v4_provenance_resolves_perfskills_root_env_without_explicit_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # No producer-supplied root: geak_v4 must fall back to $PERFSKILLS_ROOT (the
+    # GEAK_v4 checkout), NOT $GEAK_ROOT (the generic single-kernel GEAK clone),
+    # otherwise versions["geak_v4"] records the wrong repo's SHA.
+    geak_root = tmp_path / "GEAK"
+    perfskills_root = tmp_path / "GEAK-e2e"
+    geak_root.mkdir()
+    perfskills_root.mkdir()
+    _init_git_repo(geak_root)
+    perfskills_sha = _init_git_repo(perfskills_root)
+    monkeypatch.setenv("GEAK_ROOT", str(geak_root))
+    monkeypatch.setenv("PERFSKILLS_ROOT", str(perfskills_root))
+
+    meta = instrument._tool_metadata("geak_v4")
+
+    assert meta["tool"] == "geak_v4"
+    assert meta["root_dir"] == str(perfskills_root)
+    assert meta["commit"] == perfskills_sha
+    assert meta["version"] == perfskills_sha
+
+
 def test_discovery_run_carries_duration(tmp_path: Path) -> None:
     instrument.record_kernel_discovery(
         tmp_path,
