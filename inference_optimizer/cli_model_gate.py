@@ -166,6 +166,9 @@ _SUPPORTED_MODEL_TYPES = frozenset({
 })
 
 _UNSUPPORTED_MODEL_TYPES = frozenset({
+    # RWKV6/Qwen2 hybrid can also be identified by model_type alone in some
+    # checkpoints; keep this aligned with CI submit filtering.
+    "rwkv6qwen2",
     "gemma3",
     "mllama",
     "llava",
@@ -485,6 +488,11 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
                 architectures.append(a)
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
+    nested_model_type = ""
+    nested_model_type_l = ""
+    if isinstance(nested, dict):
+        nested_model_type = str(nested.get("model_type") or "").strip()
+        nested_model_type_l = nested_model_type.lower()
 
     # Hard denylist wins first: explicit VLM arch / model_type is vision_only
     # even if it also carries a ForCausalLM marker (e.g. Phi3VForCausalLM).
@@ -501,6 +509,13 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
             "architecture": architectures[0] if architectures else "",
             "model_type": model_type,
             "signal": f"unsupported model_type '{model_type}'",
+            "verdict": _VERDICT_VISION_ONLY,
+        }
+    if nested_model_type_l in _UNSUPPORTED_MODEL_TYPES:
+        return {
+            "architecture": architectures[0] if architectures else "",
+            "model_type": model_type,
+            "signal": f"unsupported text_config.model_type '{nested_model_type}'",
             "verdict": _VERDICT_VISION_ONLY,
         }
 
@@ -1063,6 +1078,42 @@ def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
     )
 
 
+def _detect_mistral_common_tokenizer_gap(model_path: str, data: dict) -> str | None:
+    """Return a reason for Mistral checkpoints missing Mistral tokenizer files.
+
+    Some Mistral fine-tunes ship ``tokenizer.json`` but omit the files that
+    Transformers' MistralCommonBackend accepts. SGLang then fails during server
+    init with ``ValueError: No tokenizer file found`` even though the generic
+    missing-tokenizer check sees a tokenizer artifact.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {str(a or "").strip() for a in _config_architectures(data)}
+    if model_type != "mistral" and "MistralForCausalLM" not in arches:
+        return None
+
+    auto_map = data.get("auto_map")
+    if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
+        return None
+
+    mdir = Path(model_path)
+    if not (mdir / "tokenizer.json").is_file():
+        return None
+    mistral_files = (
+        "tokenizer.model",
+        "tokenizer.model.v3",
+        "tekken.json",
+        "tokenizer_config.json",
+    )
+    if any((mdir / f).is_file() for f in mistral_files):
+        return None
+    return (
+        "Mistral checkpoint ships tokenizer.json but none of the tokenizer "
+        "metadata/files accepted by Transformers MistralCommonBackend "
+        f"({', '.join(mistral_files)}); sglang server init fails with "
+        "\"No tokenizer file found\"."
+    )
+
+
 def _detect_incompatible_model_config(
     model_path: str, gpu_type: str | None = None,
 ) -> str | None:
@@ -1170,6 +1221,9 @@ def _detect_incompatible_model_config(
     tokenizer_reason = _detect_missing_tokenizer_files(model_path, data)
     if tokenizer_reason is not None:
         return tokenizer_reason
+    mistral_tokenizer_reason = _detect_mistral_common_tokenizer_gap(model_path, data)
+    if mistral_tokenizer_reason is not None:
+        return mistral_tokenizer_reason
     # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
     # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
     auto_map = data.get("auto_map")

@@ -50,7 +50,7 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
 │   ├── kernel-agent.env.sh
 │   ├── geak-config/local.yaml
 │   ├── Magpie/
-│   └── source-mirrors/{Primus-Claw,OOB,InferenceX,TraceLens[,TraceLens-internal]}/
+│   └── source-mirrors/{KernelForge,OOB,InferenceX,TraceLens[,TraceLens-internal]}/
 │       # TraceLens public is required; TraceLens-internal is optional and only
 │       # present when TRACELENS_INTERNAL_ROOT is set (open-source-only otherwise)
 ├── logs/                                 # workspace-shared launcher stdout
@@ -178,9 +178,10 @@ first claude/codex call returns `401`. `install.sh --check-only` is a
 
 **Resume carve-out.** `... optimize --resume` may skip install only when
 ALL hold: (1) `install.sh` exited 0 earlier in the *same shell*; (2)
-`kernel-agent.env.sh` is still sourced; (3)
-`${USER_DATA_PATH:-/workspace/hyperloom}/manifest.json` exists. Any
-failure → treat as fresh launch and re-run `install.sh`.
+`kernel-agent.env.sh` is still sourced; (3) the session being resumed is
+known (explicit `--resume-from`, `$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`,
+or launch-info JSON) and its `manifest.json` exists under that session dir.
+Any failure → treat as fresh launch and re-run `install.sh`.
 
 > The in-loop equivalent is `_preflight()` steps 1–12 (drift repair, not
 > a substitute for this outer gate).
@@ -221,12 +222,18 @@ brief:
   Specialists author patches into an isolated worktree; `integrate_patch`
   does the actual `git apply` + throughput/accuracy gate after Critic
   review.
-  Optional GPU specialists are off by default: launch with
-  `--gpu-specialist-capacity N` (or
-  `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) before Orchestration may
-  dispatch `delegate{action_name='specialist', params={needs_gpu: true,
-  gpu_count: ...}}`. They are limited to short GPU experiments /
-  microbenchmarks and must not start serving servers or Magpie loops.
+  GPU specialists are **on by default at whole-machine capacity** (WS2):
+  `--gpu-specialist-capacity` defaults to the visible GPU count on the launch
+  host (`_default_gpu_specialist_capacity()`), so Orchestration may dispatch
+  `delegate{action_name='specialist', params={needs_gpu: true, gpu_count: ...}}`
+  without any extra flag. Pass `--gpu-specialist-capacity N` (or
+  `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) to clamp the pool, and `0`
+  (either form) to disable GPU specialists entirely. When enabled, GPU
+  specialists serialize against serving through `gpu_research_lane` and
+  exclusively own their leased cards: they may start/stop their own servers
+  (any port that is not the production serving port 8888), profile, autotune,
+  and run real benchmark loops. The one invariant is that they must not touch
+  the production serving process, its cards, or port 8888.
 - **IR-6 HARD force-exit**: EXPLORE exits the moment wall-clock remaining
   < `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase
   budget < `--explore-force-exit-budget-pct` (default 20%). Non-negotiable
@@ -676,6 +683,15 @@ sanitized `*.sh` name; overrides the gpu_type auto-pick) and
 `baseline_no_param_change` PolicyGate rule denies any baseline proposal
 that changes params after a failure — the agent must retry with
 identical params and the run terminates after 3 consecutive failures.
+
+Operator server flags have one supported CLI entry point:
+`optimize --server-args "<framework serve flags>"`. The CLI exports this as
+`INFERENCE_OPTIMIZER_SERVER_ARGS`, and YAML materialization routes it into
+`EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS` for baseline,
+profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
+wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
+`4,16,128` is treated as a sweep ladder: baseline uses the first value and the
+ladder is forwarded to `INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS`.
 
 ### Workload-contract reuse (baseline → explore/sweep)
 

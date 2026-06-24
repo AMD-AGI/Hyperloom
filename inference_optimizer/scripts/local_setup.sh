@@ -25,12 +25,12 @@ HYPERLOOM_DEPS_ROOT="${HYPERLOOM_DEPS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPD
 _open_source_root="${HYPERLOOM_DEPS_ROOT}"
 LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}"
 
-PRIMUS_CLAW_REPO="${PRIMUS_CLAW_REPO:-https://github.com/AMD-AGI/Primus-Claw.git}"
+KERNEL_FORGE_REPO="${KERNEL_FORGE_REPO:-https://github.com/AMD-AGI/KernelForge.git}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
 INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
 TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
-# TraceLens v0.6.1 integration (#474): head of release/hyperloom_integration_v0.6.1.
-TRACELENS_REF="${TRACELENS_REF:-dee7fa3182b1ee0d2085a364a2542d8f49acc0f6}"
+# TraceLens v0.7.0 integration (#474): head of release/hyperloom_integration_v0.7.0.
+TRACELENS_REF="${TRACELENS_REF:-35bbb6380cf69a2655ee28260b02b5f2dc481744}"
 # Preferred container-local checkout for the public repo when operators install
 # TraceLens manually. The internal extension is private: Hyperloom keeps NO
 # repo URL, ref, or default path for it. It is used only when an operator
@@ -57,7 +57,7 @@ Options:
 Advanced env overrides:
   REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV,
   OOB_SRC, INFERENCEX_PATH, TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT,
-  PRIMUS_CLAW_REPO, INFERENCEX_REPO, INFERENCEX_REF,
+  KERNEL_FORGE_REPO, INFERENCEX_REPO, INFERENCEX_REF,
   TRACELENS_REPO, TRACELENS_REF,
   TRACELENS_INTERNAL_ROOT (path to an existing internal extension checkout;
     set to enable it, otherwise open-source-only)
@@ -269,11 +269,11 @@ resolve_oob_src() {
     return 0
   fi
 
-  local root="${_open_source_root}/Primus-Claw"
-  clone_or_update "Primus-Claw" "$PRIMUS_CLAW_REPO" "$root" ""
+  local root="${_open_source_root}/KernelForge"
+  clone_or_update "KernelForge" "$KERNEL_FORGE_REPO" "$root" ""
   OOB_SRC="${root}/OOB"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    [ -d "$OOB_SRC" ] || die "Primus-Claw checkout does not contain OOB/: ${OOB_SRC}"
+    [ -d "$OOB_SRC" ] || die "KernelForge checkout does not contain OOB/: ${OOB_SRC}"
   fi
   export OOB_SRC
   log "OOB_SRC: ${OOB_SRC}"
