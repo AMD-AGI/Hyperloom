@@ -1300,6 +1300,29 @@ def _format_impact_range(
     )
 
 
+def _build_extra_context_block(candidate: dict[str, Any]) -> str:
+    """Render authoritative workload context for the candidate, if supplied.
+
+    Optional, default-off: returns ``""`` when ``extra_dispatch_context`` is
+    absent so the prompt is byte-identical to the stock path. When present
+    (set by the driver's ``--enrich`` mode), it injects the real serving config
+    (ISL/OSL/ctx/conc/TP), E2E/Amdahl framing, neighbouring-kernel/fusion cues
+    and resolved roofline specifics — context HL does not otherwise pass, which
+    is what lets harness-gen pin the true decode shapes instead of guessing.
+
+    Args:
+        candidate: The kernel candidate dict, optionally carrying
+            ``extra_dispatch_context`` (a pre-rendered free-form string).
+
+    Returns:
+        The workload-context prompt block, or ``""`` when absent.
+    """
+    ctx = candidate.get("extra_dispatch_context")
+    if not isinstance(ctx, str) or not ctx.strip():
+        return ""
+    return "\n## WORKLOAD CONTEXT (authoritative — use to build the harness; do NOT guess these)\n" + ctx.strip() + "\n"
+
+
 def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
     """Render a TraceLens hypothesis section for the candidate, if any.
 
@@ -1728,6 +1751,7 @@ def build_prompt(
     platform_intro, hardware_notes = _hardware_prompt_blocks(target_platform)
     platform_build_flag = _target_build_flag(target_platform)
     hypothesis_block = _build_hypothesis_block(candidate)
+    extra_context_block = _build_extra_context_block(candidate)
     benchmark_cases_block = _build_benchmark_cases_block(candidate)
     priority_block = _build_priority_block(candidate)
     bench_block = ""
@@ -1966,6 +1990,7 @@ def build_prompt(
             "",
             hardware_notes,
             hypothesis_block,
+            extra_context_block,
             benchmark_cases_block,
             priority_block,
             "",
