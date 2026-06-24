@@ -73,6 +73,17 @@ def test_save_load_round_trip(tmp_path):
     assert s2.current_best == {"action": "backends", "tput": 2010.0}
 
 
+def test_profile_osl_round_trip(tmp_path):
+    # The explicit profile OSL must survive save/load so a fresh-shell resume
+    # keeps it instead of reverting to the default.
+    s = SharedState(session_id="abc", osl=8192, profile_osl=512)
+    s.save(tmp_path)
+    s2 = SharedState.load_or_init(tmp_path)
+    assert s2.profile_osl == 512
+    # Default stays 0 (= unset → profile uses min(osl, 1024)).
+    assert SharedState(session_id="x").profile_osl == 0
+
+
 def test_tick_exception_round_trip(tmp_path):
     s = SharedState(session_id="abc")
     entry = s.record_tick_exception(

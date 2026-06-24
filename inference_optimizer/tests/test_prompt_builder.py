@@ -103,9 +103,11 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         "## 3. PIPELINE & TIME BUDGET",
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "## 4. ACTIONS YOU MAY USE",
-        "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
-        # Grid catalogue sections retired with the v0.6 backends/params executors.
-        "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
+            "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
+            # Advisory long-run breadth→depth posture (no new constraint).
+            "## MACRO POSTURE (advisory — breadth→depth across the long run)",
+            # Grid catalogue sections retired with the v0.6 backends/params executors.
+            "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
         # 6b. DYNAMIC ACTION removed when dynamic_action folded into ``specialist``.
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
