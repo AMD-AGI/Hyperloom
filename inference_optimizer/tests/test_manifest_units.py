@@ -61,41 +61,40 @@ class TestBuildSessionId:
 
 class TestDescribeDep:
     def test_unset_env(self, monkeypatch):
-        monkeypatch.delenv("MAGPIE_DIR", raising=False)
-        assert mf._describe_dep("MAGPIE_DIR") == {
+        monkeypatch.delenv("MAGPIE_PATH", raising=False)
+        assert mf._describe_dep("MAGPIE_PATH") == {
             "path": "",
             "commit": "",
             "remote": "",
         }
 
     def test_missing_dir_yields_path_only(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MAGPIE_DIR", str(tmp_path / "ghost"))
-        out = mf._describe_dep("MAGPIE_DIR")
+        monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "ghost"))
+        out = mf._describe_dep("MAGPIE_PATH")
         assert out["path"] == str(tmp_path / "ghost")
         assert out["commit"] == "" and out["remote"] == ""
 
     def test_directory_present_calls_git_helpers(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MAGPIE_DIR", str(tmp_path))
+        monkeypatch.setenv("MAGPIE_PATH", str(tmp_path))
         monkeypatch.setattr(mf, "_git_revision_at", lambda p: "abc1234")
         monkeypatch.setattr(mf, "_git_remote_at", lambda p: "https://x/y.git")
-        out = mf._describe_dep("MAGPIE_DIR")
+        out = mf._describe_dep("MAGPIE_PATH")
         assert out["commit"] == "abc1234"
         assert out["remote"] == "https://x/y.git"
 
     def test_first_env_var_wins(self, tmp_path, monkeypatch):
-        """MAGPIE_PATH (preferred) wins over the legacy MAGPIE_DIR fallback."""
-        monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "preferred"))
-        monkeypatch.setenv("MAGPIE_DIR", str(tmp_path / "legacy"))
-        out = mf._describe_dep("MAGPIE_PATH", "MAGPIE_DIR")
+        """When several env vars are given, the first set one wins."""
+        monkeypatch.setenv("DEP_PRIMARY", str(tmp_path / "preferred"))
+        monkeypatch.setenv("DEP_FALLBACK", str(tmp_path / "fallback"))
+        out = mf._describe_dep("DEP_PRIMARY", "DEP_FALLBACK")
         assert out["path"] == str(tmp_path / "preferred")
 
-    def test_falls_back_to_legacy_env_var(self, tmp_path, monkeypatch):
-        """Only the legacy MAGPIE_DIR is set → fallback is honoured
-        (backward compatibility for the MAGPIE_DIR → MAGPIE_PATH rename)."""
-        monkeypatch.delenv("MAGPIE_PATH", raising=False)
-        monkeypatch.setenv("MAGPIE_DIR", str(tmp_path / "legacy"))
-        out = mf._describe_dep("MAGPIE_PATH", "MAGPIE_DIR")
-        assert out["path"] == str(tmp_path / "legacy")
+    def test_falls_back_to_later_env_var(self, tmp_path, monkeypatch):
+        """First env var unset → a later one is honoured."""
+        monkeypatch.delenv("DEP_PRIMARY", raising=False)
+        monkeypatch.setenv("DEP_FALLBACK", str(tmp_path / "fallback"))
+        out = mf._describe_dep("DEP_PRIMARY", "DEP_FALLBACK")
+        assert out["path"] == str(tmp_path / "fallback")
 
 
 # _detect_image

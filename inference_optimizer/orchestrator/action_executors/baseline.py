@@ -1864,11 +1864,14 @@ class BaselineExecutor:
             "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
         }
 
-        # Parse accuracy eval results (GSM8K); RUN_EVAL=true ran lm-eval
-        # while the server was up.
+        # Parse accuracy eval results (GSM8K for serving, or the image-quality
+        # gate for scriptable frameworks); RUN_EVAL=true ran lm-eval while the
+        # server was up. Pass the framework so scriptable runs (xDiT) fail
+        # closed on a missing quality gate instead of falling back to GSM8K.
         from ._accuracy_gate import parse_eval_results
 
-        eval_data = parse_eval_results(workspace)
+        eval_framework = (report or {}).get("framework") or os.environ.get("FRAMEWORK") or None
+        eval_data = parse_eval_results(workspace, framework=eval_framework)
         if eval_data.get("accuracy") is not None:
             result["accuracy"] = eval_data["accuracy"]
             result["accuracy_task"] = eval_data.get("task", "gsm8k")

@@ -231,6 +231,8 @@ def default_baseline_config() -> Path:
         name = "baseline_atom.yaml"
     elif fw == "vllm":
         name = "baseline_vllm.yaml"
+    elif fw == "xdit":
+        name = "baseline_xdit.yaml"
     else:
         name = "baseline_sglang.yaml"
     return asset_root() / "scripts" / "configs" / name
@@ -318,7 +320,9 @@ def materialize_config_with_envs(
     # custom/non-prefixed scripts are not falsely rejected.
     _script = str(bench.get("benchmark_script") or "").lower()
     _fw = str(bench.get("framework") or "").lower()
-    _known_fw = ("sglang", "vllm", "atom")
+    from ... import framework_registry
+
+    _known_fw = framework_registry.names()
     if _script and _fw in _known_fw:
         _other = [k for k in _known_fw if k != _fw and _script.startswith(f"{k}_")]
         if _other:

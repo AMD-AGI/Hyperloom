@@ -131,15 +131,107 @@ def is_high_accuracy_risk(
     return False
 
 
-def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
-    """Extract accuracy score from Magpie workspace's eval output.
+def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
+    """Read a scriptable (server-less) quality gate from the bench report.
 
-    Searches ``results*.json`` recursively for the GSM8K-primary
-    ``exact_match,strict-match`` metric.
+    Scriptable workloads (e.g. xDiT diffusion) cannot run a GSM8K eval; their
+    bench script computes an image-quality gate (LPIPS/SSIM/MSE vs a fixed
+    reference) and embeds it in ``benchmark_report.json`` as a ``quality_gate``
+    block. This reads the most recent such block in ``workspace``.
 
     Args:
         workspace (Path | str): The benchmark workspace to search recursively
-            for ``results*.json``.
+            for ``benchmark_report.json``.
+
+    Returns:
+        dict[str, Any]: ``{"quality_gate": dict, "source_file": str}`` on
+            success, or ``{"quality_gate": None, "error": str}`` otherwise.
+    """
+    workspace = Path(workspace)
+    reports = [
+        Path(f)
+        for f in glob.glob(str(workspace / "**" / "benchmark_report.json"), recursive=True)
+    ]
+    if not reports:
+        return {"quality_gate": None, "error": f"no benchmark_report.json in {workspace}"}
+    latest = max(reports, key=lambda p: p.stat().st_mtime)
+    try:
+        data = json.loads(latest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"quality_gate": None, "error": f"parse error: {exc}"}
+    qg = data.get("quality_gate")
+    if not isinstance(qg, dict):
+        return {"quality_gate": None, "error": f"no quality_gate in {latest}"}
+    return {"quality_gate": qg, "source_file": str(latest)}
+
+
+def quality_gate_passed(
+    quality_gate: dict[str, Any] | None,
+    require: bool = False,
+) -> bool:
+    """Return whether a scriptable quality gate passed.
+
+    Prefers the explicit ``passed`` flag the bench script emits; falls back to
+    evaluating any present thresholds (``lpips <= lpips_max``,
+    ``ssim >= ssim_min``, ``mse <= mse_max``).
+
+    Args:
+        quality_gate (dict[str, Any] | None): The quality-gate block.
+        require (bool): When ``True`` (scriptable workloads, where the gate is
+            the only correctness signal) a missing/empty gate fails the gate
+            (fail-closed). When ``False`` (serving) a missing/empty gate does
+            not block (parity with the no-baseline accuracy skip).
+
+    Returns:
+        bool: ``True`` when the gate passes (or is absent and not required).
+    """
+    if not isinstance(quality_gate, dict) or not quality_gate:
+        return not require
+    if "passed" in quality_gate:
+        return bool(quality_gate["passed"])
+    checks = (
+        ("lpips", "lpips_max", lambda v, lim: v <= lim),
+        ("ssim", "ssim_min", lambda v, lim: v >= lim),
+        ("mse", "mse_max", lambda v, lim: v <= lim),
+    )
+    evaluated = 0
+    for metric_key, limit_key, ok in checks:
+        val = quality_gate.get(metric_key)
+        lim = quality_gate.get(limit_key)
+        if isinstance(val, (int, float)) and isinstance(lim, (int, float)):
+            evaluated += 1
+            if not ok(float(val), float(lim)):
+                return False
+    # A required gate with neither ``passed`` nor any usable threshold pair is
+    # ambiguous; treat it as a failure (fail-closed) for scriptable workloads.
+    if require and evaluated == 0:
+        return False
+    return True
+
+
+def parse_eval_results(
+    workspace: Path | str,
+    framework: str | None = None,
+) -> dict[str, Any]:
+    """Extract accuracy score from Magpie workspace's eval output.
+
+    Scriptable (server-less) workloads take precedence: when a
+    ``benchmark_report.json`` carries a ``quality_gate`` block, that gate is
+    mapped onto the accuracy contract (``1.0`` pass / ``0.0`` fail) so the
+    shared ``accuracy_passed`` gate works unchanged. Otherwise this searches
+    ``results*.json`` recursively for the GSM8K-primary
+    ``exact_match,strict-match`` metric.
+
+    For scriptable frameworks (e.g. xDiT diffusion) the image-quality gate is
+    the only correctness signal, so a missing/invalid gate fails the gate
+    (``accuracy=0.0``, fail-closed) instead of falling back to a GSM8K search
+    that can never match a diffusion workload.
+
+    Args:
+        workspace (Path | str): The benchmark workspace to search recursively
+            for ``benchmark_report.json`` / ``results*.json``.
+        framework (str | None): Framework name, used to decide whether the
+            quality gate is required. Defaults to serving semantics.
 
     Returns:
         dict[str, Any]: ``{"accuracy": float, "task": str, "metric": str,
@@ -147,6 +239,44 @@ def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
             "error": str}`` when no result / metric is found.
     """
     workspace = Path(workspace)
+
+    from ... import framework_registry
+
+    scriptable = framework_registry.is_scriptable(framework)
+
+    # Scriptable quality gate first (xDiT diffusion): map passed→1.0 / fail→0.0.
+    qg_out = parse_quality_gate(workspace)
+    if qg_out.get("quality_gate") is not None:
+        passed = quality_gate_passed(qg_out["quality_gate"], require=scriptable)
+        log.info(
+            "accuracy_gate: quality_gate passed=%s source=%s",
+            passed,
+            qg_out.get("source_file"),
+        )
+        return {
+            "accuracy": 1.0 if passed else 0.0,
+            "task": "quality_gate",
+            "metric": "quality_gate_passed",
+            "quality_gate": qg_out["quality_gate"],
+            "source_file": qg_out.get("source_file"),
+        }
+
+    # Scriptable workloads require the gate: a missing/invalid one fails closed
+    # rather than falling through to a GSM8K search that cannot apply.
+    if scriptable:
+        log.warning(
+            "accuracy_gate: scriptable framework=%s but no quality_gate found: %s",
+            framework,
+            qg_out.get("error", "unknown"),
+        )
+        return {
+            "accuracy": 0.0,
+            "task": "quality_gate",
+            "metric": "quality_gate_passed",
+            "quality_gate": None,
+            "error": qg_out.get("error", "no quality_gate"),
+        }
+
     search_paths = [
         workspace / "eval_*" / "**" / "results*.json",
         workspace / "**" / "results*.json",
