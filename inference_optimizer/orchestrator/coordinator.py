@@ -3532,6 +3532,28 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
             log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
 
+    def _perfskills_enabled(self) -> bool:
+        """Whether the KERNEL phase is delegated to the PerfSkills e2e optimizer.
+
+        The single source of truth is the kernel backend order
+        (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``): when
+        ``perfskills`` appears there, it owns the whole phase.  The
+        ``kernel_optimizer`` state field is the persisted record of that
+        decision (derived from the order at startup); it is used as a resume
+        fallback so this stays correct even when the env var is not re-exported
+        in a fresh shell.
+        """
+        from .kernel_request_handlers import perfskills_selected
+
+        if perfskills_selected():
+            return True
+        return (
+            str(getattr(self.shared_state, "kernel_optimizer", "") or "")
+            .strip()
+            .lower()
+            == "perfskills"
+        )
+
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """Run deterministic KERNEL-entry setup before LLM kernel work (FP8 GEMM tuning gate).
 
