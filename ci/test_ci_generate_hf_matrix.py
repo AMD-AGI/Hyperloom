@@ -66,6 +66,23 @@ def test_filter_entries_missing_warns(capsys):
     assert "not present" in capsys.readouterr().err
 
 
+def test_filter_top_entries_only_drops_explicit_false(monkeypatch):
+    monkeypatch.setenv("INPUT_TOP_ONLY", "true")
+    entries = [
+        {"repo_id": "top", "is_top": True},
+        {"repo_id": "legacy"},
+        {"repo_id": "supplement", "is_top": False},
+    ]
+    out = gm._filter_top_entries(entries)
+    assert [gm._entry_repo(e) for e in out] == ["top", "legacy"]
+
+
+def test_filter_top_entries_disabled(monkeypatch):
+    monkeypatch.delenv("INPUT_TOP_ONLY", raising=False)
+    entries = [{"repo_id": "supplement", "is_top": False}]
+    assert gm._filter_top_entries(entries) == entries
+
+
 # ── _load_candidate_entries ──
 
 
@@ -247,10 +264,20 @@ def test_matrix_entry_string():
 
 def test_matrix_entry_dict_with_meta(monkeypatch):
     monkeypatch.setenv("INPUT_BATCH_SIZE", "10")
-    entry = {"repo_id": "Org/M", "framework": "sglang", "tp": 8, "_selected_batch_index": 2, "_selected_batch_size": 10}
+    entry = {
+        "repo_id": "Org/M",
+        "framework": "sglang",
+        "tp": 8,
+        "is_top": False,
+        "params_b": 685,
+        "_selected_batch_index": 2,
+        "_selected_batch_size": 10,
+    }
     out = gm._matrix_entry(entry)
     assert out["model"] == "Org/M"
     assert out["framework"] == "sglang"
+    assert out["is_top"] is False
+    assert out["params_b"] == 685
     assert out["batch_index"] == 2
     assert out["batch_size"] == 10
 
@@ -275,6 +302,44 @@ def test_collect_entries_candidates_file(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("INPUT_EXCLUDE_ACTIVE_WORKFLOWS", raising=False)
     out = gm.collect_entries()
     assert [gm._entry_repo(e) for e in out] == ["a", "b"]
+
+
+def test_collect_entries_top_only_filters_candidates(tmp_path: Path, monkeypatch):
+    p = tmp_path / "c.json"
+    p.write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {"repo_id": "top", "is_top": True},
+                    {"repo_id": "supplement", "is_top": False},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INPUT_MODELS", raising=False)
+    monkeypatch.setenv("INPUT_CANDIDATES_FILE", str(p))
+    monkeypatch.setenv("INPUT_TOP_ONLY", "true")
+    monkeypatch.delenv("INPUT_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("INPUT_EXCLUDE_LEADERBOARD", raising=False)
+    monkeypatch.delenv("INPUT_EXCLUDE_ACTIVE_WORKFLOWS", raising=False)
+    out = gm.collect_entries()
+    assert [gm._entry_repo(e) for e in out] == ["top"]
+
+
+def test_collect_entries_explicit_filter_bypasses_top_only(tmp_path: Path, monkeypatch):
+    p = tmp_path / "c.json"
+    p.write_text(
+        json.dumps({"candidates": [{"repo_id": "supplement", "is_top": False}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INPUT_MODELS", "supplement")
+    monkeypatch.setenv("INPUT_CANDIDATES_FILE", str(p))
+    monkeypatch.setenv("INPUT_TOP_ONLY", "true")
+    monkeypatch.delenv("INPUT_EXCLUDE_LEADERBOARD", raising=False)
+    monkeypatch.delenv("INPUT_EXCLUDE_ACTIVE_WORKFLOWS", raising=False)
+    out = gm.collect_entries()
+    assert [gm._entry_repo(e) for e in out] == ["supplement"]
 
 
 def test_collect_entries_candidates_file_missing(tmp_path: Path, monkeypatch, capsys):

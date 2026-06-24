@@ -3814,6 +3814,12 @@ def _action_family(action: str) -> str:
     # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
     if s == "gemm_tuning":
         return "gemm_tuning"
+    # PerfSkills/GEAK-e2e: whole-pipeline KERNEL-phase optimizer, bucketed apart
+    # from generic ``kernel`` (which is split across geak/oob/forge adopt
+    # entries) so its gain gets a dedicated row instead of vanishing into
+    # ``other`` or being mis-credited to a backend.
+    if s == "perfskills_e2e":
+        return "perfskills"
     return "other"
 
 
@@ -3995,6 +4001,8 @@ def collect_attribution(
         "framework_pr": 0.0,
         # GEMM_TUNING family, kept apart from ``kernel`` (deterministic tuner vs rewrite).
         "gemm_tuning": 0.0,
+        # PerfSkills/GEAK-e2e family: whole-pipeline KERNEL-phase optimizer.
+        "perfskills": 0.0,
     }
     for e in entries:
         if not isinstance(e, dict):
@@ -4056,6 +4064,8 @@ def collect_attribution(
             "framework_pr_pct_of_total": round(family_totals.get("framework_pr", 0.0), 2),
             # GEMM_TUNING row; always emitted (0.0 when non-FP8/skipped/no KEEP).
             "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
+            # PerfSkills/GEAK-e2e row; always emitted (0.0 when native/no e2e win).
+            "perfskills_pct_of_total": round(family_totals.get("perfskills", 0.0), 2),
             # Legacy rows, kept so archived-session reports reconcile (0.0 on current sessions).
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total": round(family_totals.get("params", 0.0), 2),
@@ -6388,6 +6398,229 @@ def _write_decision_trace_jsonl(
         warnings.append(f"decision_trace: failed to write {target}: {exc!r}")
 
 
+def _perfskills_accepted_kernels_from_journey(
+    result: dict[str, Any],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Derive the accepted (KEEP/integrated) kernels from ``kernel_journey.json``.
+
+    GEAK-e2e's ``result.json`` carries the aggregate win but can ship an empty
+    ``accepted_kernels`` (e.g. a recovered/intermediate flush after a budget
+    SIGTERM). The sibling ``kernel_journey.json`` still records the per-kernel
+    end-to-end outcome, so this reads it and projects each kernel whose ``e2e``
+    sub-object was integrated (or decided ``KEEP``/``ADOPTED``) into a compact
+    accepted-kernel descriptor. Best-effort: a missing/partial file yields ``[]``
+    and never raises.
+
+    Args:
+        result (dict[str, Any]): The normalized ``result.json`` (carries
+            ``kernel_journey_path`` / ``eval_dir`` used to locate the journey).
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        list[dict[str, Any]]: The accepted-kernel descriptors, or ``[]`` when the
+            journey is absent, unreadable, or holds no integrated kernel.
+    """
+    kj_path = str(result.get("kernel_journey_path") or "")
+    if not kj_path:
+        eval_dir = str(result.get("eval_dir") or "")
+        if eval_dir:
+            kj_path = str(Path(eval_dir) / "kernel_journey.json")
+    if not kj_path:
+        return []
+    try:
+        if not Path(kj_path).is_file():
+            return []
+        journey = json.loads(Path(kj_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        warnings.append(f"perfskills: kernel_journey read failed for backfill: {exc}")
+        return []
+    if not isinstance(journey, dict):
+        return []
+
+    accepted: list[dict[str, Any]] = []
+    for k in journey.get("kernels") or []:
+        if not isinstance(k, dict):
+            continue
+        e2e = k.get("e2e")
+        if not isinstance(e2e, dict):
+            continue
+        decision = str(e2e.get("decision") or "").strip().upper()
+        integrated = e2e.get("integrated") is True
+        if not (integrated or decision in ("KEEP", "ADOPTED")):
+            continue
+        kid = str(k.get("kernel_id") or "")
+        if not kid:
+            continue
+        br = k.get("backend_result") if isinstance(k.get("backend_result"), dict) else {}
+        verification = br.get("verification") if isinstance(br.get("verification"), dict) else {}
+        dispatch = k.get("dispatch") if isinstance(k.get("dispatch"), dict) else {}
+        backend = str(
+            verification.get("best_backend")
+            or (dispatch.get("backends") or [None])[0]
+            or ""
+        )
+        # The GEAK-e2e pipeline's GEAK is the distinct ``geak_v4`` variant; the
+        # raw kernel_journey.json labels it plainly ``geak``. Relabel so the
+        # backfilled attribution matches the assembled kernel_journey / versions
+        # map (which the coordinator records under ``geak_v4``).
+        if backend.lower() == "geak":
+            backend = "geak_v4"
+        accepted.append(
+            {
+                "kernel_id": kid,
+                "name": str(k.get("name") or kid),
+                "gpu_pct": _to_float(k.get("gpu_pct")),
+                "micro_speedup": _to_float(
+                    k.get("micro_speedup") or verification.get("micro_speedup")
+                ),
+                "e2e_gain_pct": _to_float(e2e.get("e2e_gain_pct")),
+                "validated": e2e.get("validated") if isinstance(e2e.get("validated"), bool) else None,
+                "decision": decision or "KEEP",
+                "backend": backend,
+                "target_file": e2e.get("target_file"),
+                "extra_server_args": str(e2e.get("extra_server_args") or ""),
+                "source": "kernel_journey_backfill",
+            }
+        )
+    return accepted
+
+
+def collect_perfskills(
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Collect the PerfSkills/GEAK-e2e KERNEL-phase section.
+
+    When the KERNEL phase is delegated to the PerfSkills e2e optimizer
+    (``KERNEL_OPT_BACKEND_ORDER=perfskills``), the native kernel lifecycle is bypassed
+    and the only structured record is ``state.perfskills_result`` (the normalized
+    ``result.json`` plus runner metadata). This collector maps that into the
+    session-breakdown's data contract so the run is auditable: what the optimizer
+    did (per-kernel / per-head), the accepted config, the validated regimes, the
+    gain attribution, and — on a miss — the normalized failure reason.
+
+    Returns an empty ``{}`` when PerfSkills was never engaged, so native sessions
+    are byte-for-byte unaffected (the dashboard hides the section).
+
+    Args:
+        session_dir (Path): Absolute session root (used to relativize paths).
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: The PerfSkills section, or ``{}`` when not engaged.
+    """
+    optimizer = str(state.get("kernel_optimizer") or "").strip().lower()
+    result = state.get("perfskills_result")
+    # ``perfskills_result`` defaults to ``{}`` in SharedState, so an empty dict
+    # must NOT count as engaged — otherwise every native session would emit a
+    # spurious perfskills section. Engage only when the optimizer flag selected
+    # perfskills, or a non-empty result was actually recorded.
+    has_result = isinstance(result, dict) and bool(result)
+    engaged = optimizer == "perfskills" or has_result
+    if not engaged:
+        return {}
+    if not has_result:
+        # Engaged via the optimizer flag but no result recorded yet/at all.
+        return {
+            "engaged": True,
+            "status": "missing",
+            "error_class": "no_result",
+            "error": "kernel_optimizer=perfskills but no perfskills_result recorded",
+            "accepted_kernels": [],
+            "accepted_heads": [],
+        }
+
+    def _rel_if_under(p: Any) -> Any:
+        """Relativize ``p`` against the session dir when it lives under it."""
+        if not p:
+            return p
+        try:
+            pp = Path(str(p))
+            if pp.is_absolute() and str(pp).startswith(str(session_dir)):
+                return _rel(pp, session_dir)
+        except (ValueError, OSError) as exc:
+            # Relativizing is cosmetic: keep the absolute path on failure and
+            # record the reason per the collector's warnings contract.
+            warnings.append(f"perfskills: failed to relativize path {p!r}: {exc}")
+        return p
+
+    status = str(result.get("status") or "unknown")
+    base = _to_float(result.get("baseline_throughput_tok_s"))
+    final = _to_float(result.get("final_throughput_tok_s"))
+    speedup = _to_float(result.get("throughput_speedup"))
+    gain_pct: float | None = None
+    if isinstance(base, (int, float)) and base > 0 and isinstance(final, (int, float)):
+        gain_pct = (final - base) / base * 100.0
+    elif isinstance(speedup, (int, float)) and speedup > 0:
+        gain_pct = (speedup - 1.0) * 100.0
+
+    accepted_kernels = result.get("accepted_kernels") or []
+    accepted_heads = result.get("accepted_heads") or []
+    if not isinstance(accepted_kernels, list):
+        accepted_kernels = []
+        warnings.append("perfskills: accepted_kernels was not a list")
+    if not isinstance(accepted_heads, list):
+        accepted_heads = []
+
+    # Back-fill per-kernel attribution when ``result.json`` shipped the aggregate
+    # win but an empty ``accepted_kernels`` (e.g. a recovered/intermediate flush
+    # after a budget SIGTERM). The sibling ``kernel_journey.json`` still records
+    # the integrated/KEEP kernels, so derive them here to keep the perfskills
+    # section's ``accepted_kernels`` / ``kernels_optimized`` consistent with the
+    # assembled ``kernel_journey``. Only fires on a successful run with an empty
+    # list; a producer-populated list is always preserved verbatim.
+    accepted_kernels_source = "result" if accepted_kernels else None
+    if not accepted_kernels and status == "ok":
+        backfilled = _perfskills_accepted_kernels_from_journey(result, warnings)
+        if backfilled:
+            accepted_kernels = backfilled
+            accepted_kernels_source = "kernel_journey_backfill"
+
+    section: dict[str, Any] = {
+        "engaged": True,
+        "status": status,
+        # Failure provenance (None on success) — answers "why did the e2e miss?".
+        "error_class": result.get("error_class"),
+        "error": result.get("error"),
+        "returncode": result.get("returncode"),
+        # Throughput / gain attribution (口径: aggregate output tok/s).
+        "baseline_throughput_tok_s": base,
+        "final_throughput_tok_s": final,
+        "throughput_speedup": speedup,
+        "gain_pct": gain_pct,
+        "metric_basis": result.get("metric_basis"),
+        "bench_client": result.get("bench_client"),
+        # Latency 口径 (median ms), aligned field names with the native sweep.
+        "ttft_mean_ms": _to_float(result.get("ttft_ms")),
+        "tpot_mean_ms": _to_float(result.get("tpot_ms")),
+        "output_parity": result.get("output_parity"),
+        # What the optimizer actually changed (per-kernel / head / config).
+        "accepted_kernels": accepted_kernels,
+        # Provenance of ``accepted_kernels``: ``result`` (producer-populated),
+        # ``kernel_journey_backfill`` (derived from the journey on an empty
+        # result list), or ``None`` (no accepted kernels at all).
+        "accepted_kernels_source": accepted_kernels_source,
+        "accepted_heads": accepted_heads,
+        "kernels_optimized": len(accepted_kernels),
+        "accepted_config": dict(result.get("accepted_config") or {}),
+        # Regimes the kernels were validated at (sweep points outside need reparity).
+        "validated_regimes": list(result.get("validated_regimes") or []),
+        # Reusable deliverables + human report (relativized when under the session).
+        "eval_dir": _rel_if_under(result.get("eval_dir")),
+        "report_path": _rel_if_under(result.get("report_path")),
+        "final_launch_script": _rel_if_under(result.get("final_launch_script")),
+        "bench_script": _rel_if_under(result.get("bench_script")),
+        "final_patch": _rel_if_under(result.get("final_patch")),
+        # Budget audit (present when the runner was budget-capped/skipped).
+        "runner_timeout_s": _to_int(result.get("runner_timeout_s")),
+        "kill_timeout_s": _to_int(result.get("kill_timeout_s")),
+    }
+    return section
+
+
 __all__ = [
     "collect_attribution",
     "collect_baseline",
@@ -6400,6 +6633,7 @@ __all__ = [
     "collect_kernel_invocations",
     "collect_kernel_lifecycle",
     "collect_param_search",
+    "collect_perfskills",
     "collect_phase_segments",
     "collect_phase_timeline",
     "collect_session",
