@@ -39,7 +39,7 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 | Variable                                  | Required             | Default                                                            | Description                                                                                                                                                                          |
 |-------------------------------------------|----------------------|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `REPO_ROOT`                               | yes (local mode)     | `$(pwd)` when invoked from the repo root                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts.                                                                                                                     |
-| `OOB_SRC`                                 | yes for OOB backends | —                                                                  | Path to the `OOB/` subdirectory inside the Primus-Claw clone.                                                                                                                        |
+| `OOB_SRC`                                 | yes for OOB backends | —                                                                  | Path to the `OOB/` subdirectory inside the KernelForge clone.                                                                                                                        |
 | `INFERENCEX_PATH`                         | yes for baseline / target analysis | —                                                    | Path to the SemiAnalysisAI/InferenceX repo.                                                                                                                                          |
 | `TRACELENS_ROOT`                          | no (installer auto-clones) | `${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `kernel-agent/scripts/install.sh` clones the public repo into the pod-local open-source checkout root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `USER_DATA_PATH`                          | no                   | `/workspace/hyperloom`                                             | Session directory root (logs, runs, mirrors, breakdown). Replaces the retired `INFERENCE_OPTIMIZER_SESSION_DIR` and `WORKSPACE_PATH`.                                                |
@@ -93,7 +93,7 @@ read them when invoked standalone.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `KERNEL_OPT_BACKEND_ORDER`     | unset                         | Comma-separated override for the kernel-opt backend ladder. Values: `forge`, `geak`, `claude`, `codex`, `cursor`. Honoured before the auto-derived default `forge,geak`; OOB backends (`claude`, `codex`, `cursor`) require an explicit override.                    |
+| `KERNEL_OPT_BACKEND_ORDER`     | unset                         | Comma-separated override for the kernel-opt backend ladder. Values: `forge`, `geak`, `claude`, `codex`, `cursor`. Honoured before the auto-derived default `forge,geak,claude,codex,cursor` (Forge-GEAK-OOB); `cursor` is auto-dropped from the default when `CURSOR_API_KEY` is unset.                    |
 | `KERNEL_OPT_MAX_PARALLEL`      | `2`                           | Max parallel kernel-opt attempts per request (per-kernel race fan-out).                                                                                                                            |
 | `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL` | unset           | Cap on how many `PARTIAL` kernel-opt verdicts an action can yield before it short-circuits to `NEEDS_REVIEW`. Useful for keeping budget contained when GEAK is consistently timing out.            |
 
@@ -146,16 +146,19 @@ populate `session_breakdown.json` for downstream consumers
 | `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by PrimusClaw; unset for local runs.                                            |
 | `HYPERLOOM_LANGFUSE_ENABLE` | Master switch (default **off**) for live Langfuse trace push. NOTE: when this flag is on in the environment / `.env`, `scripts/install.sh` auto-installs the optional `langfuse` SDK on demand (and skips it entirely when off), so no separate `pip install '...[trace]'` is required. When `1/true/yes/on` *and* the three `LANGFUSE_*` credentials are set, every in-process LLM call is mirrored into Langfuse while the run is live, and a session-end flush backfills the out-of-process children (geak / oob / robustness / specialist) and KEEP/REVERT decision Scores. The local `reports/trace/*.jsonl` ledger is always written regardless. If the SDK is unavailable, live push degrades to a no-op. **Correlation:** the Langfuse trace id and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session id for standalone runs, so live push and the offline `backfill_langfuse` CLI collapse onto one trace per PrimusClaw session. **Span layout:** `trace → phase span (PRELUDE/EXPLORE/KERNEL/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/oob/…) → Generation`; each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision (trace-level fallback when no matching span exists). **Receipt:** every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting whether the push was enabled (or the `disabled_reason`), the redacted connection config (host + key-presence booleans, never the keys), the derived `trace_id`/`session_id`, and how many generations/scores/spans were actually sent — so an operator can confirm post-hoc whether a run reached Langfuse. |
 
-#### Langfuse — security & known limitations
+#### Langfuse / artifact-package — security & known limitations
 
 * **Sensitive data surface.** When live push is on, `conversations.jsonl`
   (and Langfuse Generations) carry full prompt/response text. `redact_secrets`
   scrubs common token shapes (Bearer, `sk-`/`pk-`, GitHub tokens, some
   `KEY=value`) but is **not** a complete DLP filter — bare keys without a
-  recognizable prefix (e.g. raw AWS `AKIA…`) can slip through. If a session
-  may contain customer code / secrets, define an explicit retention +
-  access-control policy for the Langfuse project, and consider disabling live
-  push for those runs.
+  recognizable prefix (e.g. raw AWS `AKIA…`) can slip through. The artifact
+  packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
+  default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under `/workspace`
+  for the Claw sync. If a session may contain customer code / secrets, define
+  an explicit retention + access-control policy for both the Langfuse project
+  and the `/workspace` package destination, and consider disabling live push
+  or loose packaging for those runs.
 * **`live push` + `backfill_langfuse` overlap.** Both derive the same
   `trace_id` from `claw_session_id`, so running the offline backfill *after* a
   live run re-emits the out-of-process children onto the same trace and can
@@ -163,6 +166,10 @@ populate `session_breakdown.json` for downstream consumers
   recovery tool only when live push did not run.
 * **`flush_session` is idempotent.** A second flush only re-writes the receipt
   (no re-emit), so a duplicated CLOSE step won't double-push.
+* **Package truncation.** The bundle caps at 5000 files / 256 MB. On a very
+  long session the cap can stop the bundle short; the `PACKAGE_MANIFEST` then
+  sets `truncated: true` and lists `dropped_files`, so consumers must not treat
+  a truncated package as complete.
 * **Generation duration is ~0.** Both live and backfill stamp a single
   timestamp (`end == start`), so Langfuse shows no meaningful per-Generation
   duration — counts/usage are accurate, latency is not captured.

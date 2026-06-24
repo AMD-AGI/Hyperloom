@@ -125,6 +125,63 @@ class Workload(TypedDict, total=False):
     objective: WorkloadObjective
 
 
+# §2b Model basics — architecture/scale summary parsed from the served model's
+# ``config.json`` (see ``model_config_utils.summarize_model_config``). Empty
+# ``{}`` on non-transformers models (e.g. diffusion) and on sessions whose
+# state predates the field. Mirrored verbatim from ``state.model_info``.
+class ModelInfo(TypedDict, total=False):
+    """Structural summary of the served model (architecture / scale / attention).
+
+    Best-effort parse of the model's ``config.json``; every field is
+    optional-by-convention so consumers must null-check. ``{}`` when the model
+    is not a transformers checkpoint (diffusion etc.) or the session predates
+    the field.
+
+    Attributes:
+        model_family (str): Base family with generation (``llama3`` / ``qwen3`` /
+            ``deepseek_v3``).
+        model_type (str): HuggingFace ``model_type`` (``qwen2`` / ``llama``).
+        architectures (list[str]): Architecture class names
+            (``["Qwen3ForCausalLM"]``).
+        attention_type (str): Inferred attention variant (``MHA`` / ``GQA`` /
+            ``MQA`` / ``MLA``).
+        is_moe (bool): Whether the model is a Mixture-of-Experts model.
+        num_hidden_layers (int): Number of transformer layers.
+        hidden_size (int): Model hidden dimension.
+        intermediate_size (int): FFN intermediate dimension.
+        num_attention_heads (int): Number of attention heads.
+        num_key_value_heads (int): Number of KV heads (GQA groups).
+        head_dim (int): Per-head dimension.
+        max_position_embeddings (int): Native context length.
+        vocab_size (int): Vocabulary size.
+        torch_dtype (str): Declared weight dtype (``bfloat16`` / ...).
+        kv_cache_dtype (str): KV cache dtype when declared.
+        quantization (str): Weight quant method (``fp8`` / ...); '' when
+            unquantized.
+        num_experts (int): Expert count (MoE only).
+        num_experts_per_tok (int): Activated experts per token (MoE only).
+    """
+
+    model_family: str
+    model_type: str
+    architectures: list[str]
+    attention_type: str
+    is_moe: bool
+    num_hidden_layers: int
+    hidden_size: int
+    intermediate_size: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    max_position_embeddings: int
+    vocab_size: int
+    torch_dtype: str
+    kv_cache_dtype: str
+    quantization: str
+    num_experts: int
+    num_experts_per_tok: int
+
+
 # §3 Baseline
 class BaselineAttemptSummary(TypedDict, total=False):
     """One recorded attempt to establish the baseline measurement.
@@ -893,6 +950,79 @@ class Sweep(TypedDict, total=False):
     config_path: str | None
 
 
+class Perfskills(TypedDict, total=False):
+    """PerfSkills/GEAK-e2e KERNEL-phase section (``KERNEL_OPT_BACKEND_ORDER=perfskills``).
+
+    Emitted only when the KERNEL phase was delegated to the PerfSkills e2e
+    optimizer; ``{}`` (section omitted) on native sessions. Mirrors the
+    normalized ``result.json`` recorded in ``state.perfskills_result`` plus the
+    budget-cap audit. See ``collectors.collect_perfskills``.
+
+    Attributes:
+        engaged (bool): True when PerfSkills owned the KERNEL phase.
+        status (str): ``ok`` / ``no_gain`` / ``error`` / ``timeout`` /
+            ``skipped`` / ``missing`` / ``unknown``.
+        error_class (str | None): Normalized failure class (None on success),
+            e.g. ``timeout`` / ``insufficient_budget`` / ``no_result_json`` /
+            ``runner_crashed`` / ``workflow_parse_error``.
+        error (str | None): Human-readable failure detail.
+        returncode (int | None): Runner subprocess exit code.
+        baseline_throughput_tok_s (float | None): PerfSkills baseline tok/s.
+        final_throughput_tok_s (float | None): PerfSkills final tok/s.
+        throughput_speedup (float | None): final / baseline.
+        gain_pct (float | None): Percent gain over the PerfSkills baseline.
+        metric_basis (str | None): Measurement basis (aggregate output tok/s).
+        bench_client (str | None): ``inferencex`` / ``native``.
+        ttft_mean_ms (float | None): Median TTFT (ms).
+        tpot_mean_ms (float | None): Median TPOT (ms).
+        output_parity (str | None): Output-parity verdict.
+        accepted_kernels (list[Any]): Per-kernel changes the e2e accepted.
+        accepted_kernels_source (str | None): Provenance of ``accepted_kernels``
+            -- ``result`` (producer-populated), ``kernel_journey_backfill``
+            (derived from ``kernel_journey.json`` when the result list was
+            empty), or ``None`` (no accepted kernels).
+        accepted_heads (list[Any]): Per-head changes the e2e accepted.
+        kernels_optimized (int): ``len(accepted_kernels)``.
+        accepted_config (dict[str, Any]): Accepted serving config.
+        validated_regimes (list[Any]): Regimes the kernels were validated at.
+        eval_dir (str | None): Relative path to the e2e eval dir.
+        report_path (str | None): Relative path to the human report.
+        final_launch_script (str | None): Reusable optimized launch script.
+        bench_script (str | None): Reusable bench script (SWEEP reuse handle).
+        final_patch (str | None): Relative path to the final patch.
+        runner_timeout_s (int | None): Budget-capped runner timeout.
+        kill_timeout_s (int | None): Hard subprocess kill timeout.
+    """
+
+    engaged: bool
+    status: str
+    error_class: str | None
+    error: str | None
+    returncode: int | None
+    baseline_throughput_tok_s: float | None
+    final_throughput_tok_s: float | None
+    throughput_speedup: float | None
+    gain_pct: float | None
+    metric_basis: str | None
+    bench_client: str | None
+    ttft_mean_ms: float | None
+    tpot_mean_ms: float | None
+    output_parity: str | None
+    accepted_kernels: list[Any]
+    accepted_kernels_source: str | None
+    accepted_heads: list[Any]
+    kernels_optimized: int
+    accepted_config: dict[str, Any]
+    validated_regimes: list[Any]
+    eval_dir: str | None
+    report_path: str | None
+    final_launch_script: str | None
+    bench_script: str | None
+    final_patch: str | None
+    runner_timeout_s: int | None
+    kill_timeout_s: int | None
+
+
 # §12 Critic / Robustness
 class CriticIteration(TypedDict, total=False):
     """One critic-agent review pass over a proposed change.
@@ -1051,6 +1181,8 @@ class SourceBreakdown(TypedDict, total=False):
         geak_pct_of_total (float): Gain share from GEAK kernel rewrites.
         oob_pct_of_total (float): Gain share from out-of-box backends.
         explore_pct_of_total (float): Gain share from the primary explore family.
+        replay_warm_recipe_pct_of_total (float): Gain share from warm-recipe
+            replay (cortex best_config replay); 0.0 when none was adopted.
         framework_pr_pct_of_total (float): Gain share from FRAMEWORK_PR bake-ins.
         gemm_tuning_pct_of_total (float): Gain share from the FP8 GEMM tuner
             (0.0 on non-FP8 workloads or when the tuner produced no KEEP).
@@ -1064,6 +1196,10 @@ class SourceBreakdown(TypedDict, total=False):
     oob_pct_of_total: float
     # primary explore family bucket.
     explore_pct_of_total: float
+    # REPLAY_WARM_RECIPE (warm-recipe / cortex best_config replay) contribution,
+    # bucketed separately so its gain reconciles against validated_total_pct
+    # instead of vanishing into the non-emitted ``other`` family.
+    replay_warm_recipe_pct_of_total: float
     # FRAMEWORK_PR phase contribution (upstream-PR bake-ins), bucketed
     # separately so per-source totals reconcile against validated_total_pct.
     framework_pr_pct_of_total: float
@@ -1911,6 +2047,9 @@ class SessionBreakdown(TypedDict, total=False):
         exporter_version (str): Version of the exporter that produced the file.
         session (SessionMeta): Session identity, timing, and host context.
         workload (Workload): Model/framework/serving configuration.
+        model_info (ModelInfo): Structural summary of the served model
+            (architecture / scale / attention), parsed from its config.json.
+            Empty {} on non-transformers models or pre-field sessions.
         baseline (Baseline): Pre-optimization reference performance.
         final (Final): Final validated optimization state.
         phase_timeline (list[PhaseEvent]): Flat per-action timeline (v1-reader compat).
@@ -1949,6 +2088,11 @@ class SessionBreakdown(TypedDict, total=False):
 
     session: SessionMeta
     workload: Workload
+    # Structural model summary parsed from config.json (state.model_info
+    # mirror). Additive optional section: empty {} on non-transformers models
+    # (diffusion etc.) and on sessions whose state predates the field, so
+    # v1/v2 readers that don't know it simply ignore it.
+    model_info: ModelInfo
     baseline: Baseline
     final: Final
     # flat per-action timeline (v1 compat); ``phase_segments`` is the boundary view.
@@ -1965,6 +2109,10 @@ class SessionBreakdown(TypedDict, total=False):
     param_search: ParamSearch
     explore_search: ParamSearch
     sweep: Sweep
+    # PerfSkills/GEAK-e2e KERNEL-phase section (KERNEL_OPT_BACKEND_ORDER=perfskills).
+    # Additive + optional: ``{}`` (omitted) on native sessions, so v1/v2 readers
+    # that don't know it simply ignore it and historic breakdowns are unchanged.
+    perfskills: Perfskills
     critic_robustness: CriticRobustness
     telemetry: Telemetry
     attribution: Attribution
@@ -2048,6 +2196,7 @@ __all__ = [
     "LangfuseConfig",
     "LangfusePush",
     "LangfusePushCounts",
+    "ModelInfo",
     "Final",
     "GpuMonitorAggregate",
     "Invocation",

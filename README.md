@@ -76,10 +76,10 @@ The SGLang images are available from two sources — pick the one that matches y
 
 Example images (Harbor refs for the SaFE Authoring Pod path; drop the `harbor.core42.example-internal-host.invalid/proxy/` prefix to get the public Docker Hub ref):
 
-- SGLang MI300X: `harbor.core42.example-internal-host.invalid/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix`
-- SGLang MI355X: `harbor.core42.example-internal-host.invalid/proxy/primussafe/sglang:v0.5.11-rocm720-mi35x-profilerfix`
-- vLLM MI300X: `vllm/vllm-openai-rocm:v0.19.0`
-- vLLM MI355X: `vllm/vllm-openai-rocm:v0.19.0`
+- SGLang MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
+- SGLang MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
+- vLLM MI300X: `docker.io/vllm/vllm-openai-rocm:v0.21.0`
+- vLLM MI355X: `docker.io/vllm/vllm-openai-rocm:v0.21.0`
 
 > The SGLang `-profilerfix` images patch `libamdhip64`/`libroctracer` so rocprofiler captures kernels launched under HipGraphLaunch (issue #352). Use the stock `lmsysorg/sglang:v0.5.11-rocm720-*` images once that fix lands upstream in ROCm.
 
@@ -99,7 +99,7 @@ docker run -d \
   --group-add video \
   -v /path/to/workspace:/workspace \
   -v /path/to/models:/models \
-  primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix \
+  docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix \
   tail -f /dev/null
 ```
 
@@ -165,7 +165,7 @@ OPENAI_BASE_URL=https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1
 | `SAFE_API_KEY` | LLM gateway auth key | `ak-your-safe-apikey` |
 | `OPENAI_BASE_URL` | LLM gateway endpoint | `https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1` |
 | `TRACELENS_INTERNAL_ROOT` (optional, internal users) | Path to your own internal TraceLens extension checkout (`pip install -e .`; rehydration module). Hyperloom never clones it. Set only to enable the internal extension; unset => open-source-only. | (self-provided) |
-| `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to skip cursor and only use claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
+| `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to auto-drop cursor; the default `forge,geak,claude,codex,cursor` ladder then runs as `forge,geak,claude,codex`. | `crsr_xxxxxxxxxxxx` |
 | `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 
 > `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.example-internal-host.invalid/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK or OOB configuration is needed.

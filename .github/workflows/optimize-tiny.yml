@@ -21,9 +21,13 @@ name: SaFE Optimize Tiny (count-filler)
 # instead of the git repo, so the large pool never bloats git history.
 
 on:
-  # Four times a day (every 6 hours, on the hour, UTC).
+  # Four times a day (every 6 hours, UTC) at 05:07/11:07/17:07/23:07 UTC
+  # (Beijing 13/19/01/07). Phase-shifted off 0/6/12/18 so tiny never starts in
+  # the same hour as optimize-submit's own cron (04/10/16/22 UTC); the 1h offset
+  # also leaves room for a 6h batch to fully drain before the next one starts.
+  # Minute :07 (not :00) dodges GitHub's congested top-of-hour scheduling queue.
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '7 5,11,17,23 * * *'
   workflow_dispatch:
     inputs:
       batch_index:

@@ -5,8 +5,9 @@
 Take a completed specialist's worktree patches, apply them to the
 framework source roots, restart the inference server, run the throughput
 + accuracy gate, and either KEEP (advance `optimization_stack`) or
-REVERT (roll the source tree back). This is the Hyperloom-native
-equivalent of Arbor's `integrate` step in the optimization loop.
+REVERT (roll the source tree back). This is the `integrate` step of the
+Arbor optimization loop (arXiv:2606.12563) — Arbor being the research name
+for this orchestration.
 
 `integrate_patch` is a **deterministic Python executor**, not an LLM
 sub-agent. It is the orchestrator's serving-lane-locked integration
