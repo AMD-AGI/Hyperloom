@@ -4190,9 +4190,13 @@ class Coordinator:
         still be flipped and E2E-validated as its own gemm_tuning candidate.
 
         Gated strictly so it only fires for the forge backend on a
-        sglang + fp8 + gfx942 + block-scale (NOT per-channel/per-token)
-        workload; per-channel/per-token fp8 takes a different CK path
-        (``gemm_a8w8_bpreshuffle``) and must never be switched here.
+        sglang + fp8 + gfx942 + block-scale workload. fp8 is accepted from any
+        signal — session precision, the resolved forge result, or a runtime
+        ``--quantization fp8`` server arg (session/yaml precision may still read
+        ``bf16``). Block-scale is required positively (the checkpoint declares
+        ``weight_block_size``), which naturally excludes per-tensor, static and
+        per-channel/per-token fp8 — those take other GEMM paths and must never
+        be switched here.
 
         Args:
             result (dict[str, Any]): The GEMM tuning handler result.
@@ -4212,8 +4216,7 @@ class Coordinator:
         framework = str(getattr(self.shared_state, "framework", "") or "").strip().lower()
         if framework != "sglang":
             return False
-        precision = str(getattr(self.shared_state, "precision", "") or "").strip().lower()
-        if precision != "fp8":
+        if not self._ck_switch_precision_is_fp8(result):
             return False
 
         from ..cli_model_gate import _resolve_amd_gpu_type
@@ -4223,19 +4226,51 @@ class Coordinator:
         if gpu not in _GFX942_GPU_TYPES:
             return False
 
-        # Block-scale fp8 only: a per-channel weight + per-token (dynamic)
-        # activation checkpoint takes the bpreshuffle CK path, not the
-        # block-scale kernel this switch targets. ``_fp8_is_per_channel_per_token``
-        # returns False for block-scale (it carries weight_block_size).
-        from ..model_config_utils import _fp8_is_per_channel_per_token
+        # Block-scale fp8 only, asserted positively: the CK patch only rewrites
+        # the block-scale path (``aiter_w8a8_block_fp8_linear`` /
+        # ``gemm_a8w8_blockscale``), so the checkpoint must declare
+        # ``weight_block_size``. This excludes per-tensor, static and
+        # per-channel/per-token fp8, which take other GEMM paths.
+        from ..model_config_utils import _fp8_is_block_scale
 
         model_path = str(
             getattr(self.shared_state, "model_path", "")
             or os.environ.get("MODEL_PATH", "")
         )
-        if _fp8_is_per_channel_per_token(model_path):
-            return False
-        return True
+        return _fp8_is_block_scale(model_path)
+
+    def _ck_switch_precision_is_fp8(self, result: dict[str, Any]) -> bool:
+        """Whether the workload runs fp8, resolved from any available signal.
+
+        The session-level ``precision`` is not authoritative: precision is often
+        resolved at runtime from server args (``--quantization fp8``) while the
+        session/yaml precision still reads ``bf16``. Accept fp8 from, in order:
+
+        1. ``shared_state.precision`` (session-level), OR
+        2. the forge ``result`` envelope, which stamps the resolved precision
+           (see ``_run_forge_gemm_tuning``), OR
+        3. the runtime ``--quantization`` resolved by
+           ``_resolve_forge_precision_and_quant`` from the actual server args.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning handler result.
+
+        Returns:
+            bool: ``True`` when any signal resolves to fp8.
+        """
+        if str(getattr(self.shared_state, "precision", "") or "").strip().lower() == "fp8":
+            return True
+        if isinstance(result, dict) and str(result.get("precision") or "").strip().lower() == "fp8":
+            return True
+        try:
+            from .kernel_request_handlers import _resolve_forge_precision_and_quant
+
+            precision, _ = _resolve_forge_precision_and_quant(self.shared_state, {})
+            if str(precision or "").strip().lower() == "fp8":
+                return True
+        except Exception:  # noqa: BLE001 - best-effort runtime resolution
+            pass
+        return False
 
     async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
         """Record and post-process a run_gemm_tuning result from any entrypoint.
