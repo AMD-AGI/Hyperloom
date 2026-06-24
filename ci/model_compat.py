@@ -105,8 +105,16 @@ _MI300X_ALLOW_RE = re.compile(r"deepseek[-_]?v4[-_]?flash", re.I)
 # Non-LLM model families that can appear in broad HF pools but cannot be served
 # by Hyperloom's text-generation benchmark path. Some of these repos (for
 # example FLUX.1-dev) do not have a HF ``config.json`` at the repo root, so keep
-# this repo-name gate outside the config-only rules.
-_NON_LLM_RE = re.compile(r"(^|[/_-])flux(\.|[/_-]|$)|stable[-_]?diffusion|diffusion", re.I)
+# this repo-name gate outside the config-only rules. Keep the patterns
+# family/token-scoped: a broad ``diffusion`` substring would also match possible
+# text-generation research repos whose config is otherwise runnable.
+_NON_LLM_RE = re.compile(
+    r"(^|[/_-])flux(\.|[/_-]|$)"
+    r"|(^|[/_-])stable[-_]?diffusion([/_-]|$)"
+    r"|(^|[/_-])diffusers([/_-]|$)"
+    r"|(^|[/_-])diffusion[-_]?pipeline([/_-]|$)",
+    re.I,
+)
 
 
 def mi300x_blocked_model(repo):

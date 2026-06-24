@@ -22,6 +22,7 @@ if str(_CI_DIR) not in sys.path:
     sys.path.insert(0, str(_CI_DIR))
 
 import model_compat  # noqa: E402
+import filter_candidates  # noqa: E402
 
 
 # ── unrunnable_reason: per-rule hits ────────────────────────────────────────
@@ -49,6 +50,23 @@ def test_multimodal_by_vision_config():
 
 def test_non_llm_diffusers_repo_filtered_without_config():
     assert _reason(None, repo="black-forest-labs/FLUX.1-dev") == "non_text_generation"
+
+
+def test_filter_candidates_repo_gate_without_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(filter_candidates, "MODELS_DIR", str(tmp_path))
+    (tmp_path / "black-forest-labs-FLUX.1-dev").mkdir()
+
+    r = filter_candidates.classify_local("black-forest-labs/FLUX.1-dev")
+
+    assert r is not None
+    assert r[0] == "non_text_generation"
+
+
+def test_diffusion_substring_text_repo_is_kept():
+    assert _reason({"architectures": ["LlamaForCausalLM"],
+                    "model_type": "llama",
+                    "max_position_embeddings": 8192},
+                   repo="org/diffusion-language-model") is None
 
 
 def test_bare_for_conditional_generation_without_vision_is_kept():
