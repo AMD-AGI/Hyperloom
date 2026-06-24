@@ -58,6 +58,21 @@ def test_detect_rwkv6qwen2_hybrid_rejected(tmp_path):
     assert "unsupported architecture" in hit["signal"]
 
 
+def test_detect_rwkv6qwen2_hybrid_rejected_by_model_type_only(tmp_path):
+    """Some checkpoints identify the hybrid only by model_type."""
+    m = tmp_path / "rwkv6qwen2_model_type"
+    _write_config(
+        m,
+        {
+            "model_type": "rwkv6qwen2",
+            "max_position_embeddings": 8192,
+        },
+    )
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert "unsupported model_type" in hit["signal"]
+
+
 def test_detect_plain_rwkv_not_rejected(tmp_path):
     """Plain RwkvForCausalLM IS supported by sglang; must NOT be blocked."""
     m = tmp_path / "rwkv"
@@ -85,6 +100,21 @@ def test_detect_unsupported_arch_nested_in_text_config(tmp_path):
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["architecture"] == "RWKV6Qwen2ForCausalLM"
+
+
+def test_detect_unsupported_model_type_nested_in_text_config(tmp_path):
+    """Blocklisted model_type nested under text_config must still be caught."""
+    m = tmp_path / "nested_rwkv6_model_type"
+    _write_config(
+        m,
+        {
+            "model_type": "wrapper",
+            "text_config": {"model_type": "rwkv6qwen2"},
+        },
+    )
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert "unsupported text_config.model_type" in hit["signal"]
 
 
 # 1. classifier — whitelist-based detection
@@ -350,8 +380,8 @@ def test_preflight_blocks_gemma3(tmp_path, monkeypatch):
     assert "text-generation" in detail.lower()
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "unsupported_model_arch"
-    breakdown = sd / "session_breakdown.json"
-    assert breakdown.exists()
+    breakdown = json.loads((sd / "session_breakdown.json").read_text())
+    assert breakdown["session"]["stop_reason"] == "unsupported_model_arch"
 
 
 def test_preflight_blocks_unknown_arch(tmp_path, monkeypatch):
