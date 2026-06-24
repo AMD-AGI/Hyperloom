@@ -486,3 +486,66 @@ def test_hf_gated_not_found(monkeypatch):
     err = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
     _patch_urlopen(monkeypatch, error=err)
     assert model_compat.hf_gated("org/model", ["hf_x"]) == "not_found"
+
+
+# ── hf_missing_tokenizer (network probe, mocked) ─────────────────────────────
+
+
+def _siblings(*names):
+    return {"siblings": [{"rfilename": n} for n in names]}
+
+
+def test_hf_missing_tokenizer_no_tokens_returns_none():
+    assert model_compat.hf_missing_tokenizer("org/model", []) is None
+
+
+def test_hf_missing_tokenizer_weights_without_tokenizer(monkeypatch):
+    # Weights present, no tokenizer.* -> missing_tokenizer.
+    _patch_urlopen(monkeypatch, payload=_siblings(
+        "config.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) == "missing_tokenizer"
+
+
+def test_hf_missing_tokenizer_weights_with_tokenizer_kept(monkeypatch):
+    _patch_urlopen(monkeypatch, payload=_siblings(
+        "config.json", "model.safetensors", "tokenizer.json"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
+
+
+def test_hf_missing_tokenizer_bin_weights_detected(monkeypatch):
+    # .bin shards also count as weights.
+    _patch_urlopen(monkeypatch, payload=_siblings("config.json", "pytorch_model.bin"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) == "missing_tokenizer"
+
+
+def test_hf_missing_tokenizer_no_weights_kept(monkeypatch):
+    # No weight shards at all -> cannot judge -> keep (None).
+    _patch_urlopen(monkeypatch, payload=_siblings("config.json", "README.md"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
+
+
+def test_hf_missing_tokenizer_empty_siblings_kept(monkeypatch):
+    _patch_urlopen(monkeypatch, payload={"siblings": []})
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
+
+
+def test_hf_missing_tokenizer_alt_tokenizer_file_kept(monkeypatch):
+    # tokenizer.model (sentencepiece) counts as a tokenizer too.
+    _patch_urlopen(monkeypatch, payload=_siblings("model.safetensors", "tokenizer.model"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+def test_hf_missing_tokenizer_gated_or_notfound_defers(monkeypatch, code):
+    # 401/403 (gated) and 404 -> fail-open None (let hf_gated own that signal).
+    err = urllib.error.HTTPError("u", code, "x", {}, None)
+    _patch_urlopen(monkeypatch, error=err)
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
+
+
+def test_hf_missing_tokenizer_fail_open_on_error(monkeypatch):
+    # Any non-HTTP fetch error -> fail-open None (never drop on a network hiccup).
+    # Patch sleep so the retry loop does not actually wait.
+    monkeypatch.setattr(model_compat.time, "sleep", lambda *_a, **_k: None)
+    _patch_urlopen(monkeypatch, error=urllib.error.URLError("boom"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
