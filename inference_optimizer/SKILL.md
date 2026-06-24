@@ -178,9 +178,10 @@ first claude/codex call returns `401`. `install.sh --check-only` is a
 
 **Resume carve-out.** `... optimize --resume` may skip install only when
 ALL hold: (1) `install.sh` exited 0 earlier in the *same shell*; (2)
-`kernel-agent.env.sh` is still sourced; (3)
-`${USER_DATA_PATH:-/workspace/hyperloom}/manifest.json` exists. Any
-failure → treat as fresh launch and re-run `install.sh`.
+`kernel-agent.env.sh` is still sourced; (3) the session being resumed is
+known (explicit `--resume-from`, `$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`,
+or launch-info JSON) and its `manifest.json` exists under that session dir.
+Any failure → treat as fresh launch and re-run `install.sh`.
 
 > The in-loop equivalent is `_preflight()` steps 1–12 (drift repair, not
 > a substitute for this outer gate).
