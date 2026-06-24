@@ -84,6 +84,7 @@ from .integrate_patch import (
     DEFAULT_VARIANT_TIMEOUT_SEC,
     _git_apply,
     _git_stash_if_dirty,
+    _with_stash_restore,
     _resolve_framework_root,
 )
 from ..kb_writeback import (
@@ -761,7 +762,7 @@ class FrameworkPrExecutor:
         # prior KEEPs are committed past this sha and survive a reset.
         pre_apply_sha, sha_err = _git_head_sha(framework_root)
         if pre_apply_sha is None:
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "apply_failed",
                 "error_class": "no_pre_apply_sha",
                 "error": (f"could not capture HEAD sha in {framework_root}: {sha_err or 'unknown'}"),
@@ -770,7 +771,7 @@ class FrameworkPrExecutor:
                 "patches_applied": [],
                 "patches_reverted": [],
                 "workspace": str(output_root),
-            }
+            })
 
         # Stage 1: apply patches (with -3 fallback like integrate_patch).
         applied: list[Path] = []
@@ -794,7 +795,7 @@ class FrameworkPrExecutor:
                 applied,
                 pre_apply_sha=pre_apply_sha,
             )
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "apply_failed",
                 "error_class": "git_apply_failed",
                 "error": apply_errors,
@@ -805,10 +806,10 @@ class FrameworkPrExecutor:
                 "patch_source_mode": patch_source_mode,
                 "reason": "git apply failed (see error)",
                 "workspace": str(output_root),
-            }
+            })
 
         if params.get("apply_only"):
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "applied_no_bench",
                 "candidate": candidate,
                 "batch_id": batch_id,
@@ -817,7 +818,7 @@ class FrameworkPrExecutor:
                 "patch_source_mode": patch_source_mode,
                 "reason": "apply_only=True; benchmark skipped",
                 "workspace": str(output_root),
-            }
+            })
 
         # Stage 2: bench via run_grid (size=1).
         try:
@@ -832,7 +833,7 @@ class FrameworkPrExecutor:
                 applied,
                 pre_apply_sha=pre_apply_sha,
             )
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "reverted",
                 "error_class": "framework_script_mismatch",
                 "error": str(exc),
@@ -842,14 +843,14 @@ class FrameworkPrExecutor:
                 "patches_reverted": [str(p) for p in reverted],
                 "reason": str(exc),
                 "workspace": str(output_root),
-            }
+            })
         except Exception as exc:  # noqa: BLE001
             reverted = self._revert_patches(
                 framework_root,
                 applied,
                 pre_apply_sha=pre_apply_sha,
             )
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "reverted",
                 "error_class": "bench_exception",
                 "error": repr(exc),
@@ -859,7 +860,7 @@ class FrameworkPrExecutor:
                 "patches_reverted": [str(p) for p in reverted],
                 "reason": f"bench raised: {exc!r}",
                 "workspace": str(output_root),
-            }
+            })
 
         # Stage 3: KEEP / REVERT.
         base_tput = float(params.get("base_tput") or 0.0)
@@ -900,7 +901,7 @@ class FrameworkPrExecutor:
                 patch_path=str(applied[0]) if applied else "",
                 extra=extra,
             )
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "reverted",
                 "candidate": candidate,
                 "batch_id": batch_id,
@@ -915,7 +916,7 @@ class FrameworkPrExecutor:
                 "reason": "; ".join(reasons) or "gate failed",
                 "bench_result": bench_result,
                 "workspace": str(output_root),
-            }
+            })
 
         # KEEP: commit the patches so they survive the next candidate's
         # REJECT (whose pre_apply_sha already includes this commit).
@@ -929,7 +930,7 @@ class FrameworkPrExecutor:
                 applied,
                 pre_apply_sha=pre_apply_sha,
             )
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "apply_failed",
                 "error_class": "keep_commit_failed",
                 "error": commit_err or "git commit returned no sha",
@@ -945,7 +946,7 @@ class FrameworkPrExecutor:
                 "reason": f"KEEP commit failed: {commit_err}",
                 "bench_result": bench_result,
                 "workspace": str(output_root),
-            }
+            })
 
         await self._write_kb_record(
             candidate=candidate,
@@ -954,7 +955,7 @@ class FrameworkPrExecutor:
             patch_path=str(applied[0]) if applied else "",
             extra=extra,
         )
-        return {
+        return _with_stash_restore(framework_root, stash_state, stash_note, {
             "status": "kept",
             "candidate": candidate,
             "batch_id": batch_id,
@@ -970,7 +971,7 @@ class FrameworkPrExecutor:
             "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
             "bench_result": bench_result,
             "workspace": str(output_root),
-        }
+        })
 
     # KB writeback (D2, Arbor-into-Hyperloom)
     async def _write_kb_record(

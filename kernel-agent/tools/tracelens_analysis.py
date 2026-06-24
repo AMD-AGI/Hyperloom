@@ -107,7 +107,7 @@ _ROUTABLE_STATUS = "resolved"
 _PHASE_SUFFIX_RE = re.compile(r"\s*\((?:prefill|decode|prefilldecode|mixed)\)\s*$")
 
 # Editable source extensions: native device code plus repo-resident Triton .py.
-_NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip")
+_NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h")
 _PY_DIST_ROOT = "/usr/local/lib/python3.12/dist-packages/"
 
 
@@ -293,13 +293,13 @@ def _absolutize_source(path: str) -> str:
 def _is_editable_source(path: str | None, kernel_kind: str | None) -> bool:
     """True for an editable kernel source we can route one GEAK run at.
 
-    Editable means either native device code (``.cu``/``.cuh``/``.hip``) or a
+    Editable means either native device code (``.cu``/``.cuh``/``.hip``/``.h``) or a
     repo-resident Triton/TileLang ``.py`` kernel. The ``.py`` case is gated only
     against *generated* Triton: ``triton_inductor_generated`` and any
     ``torchinductor`` / ``/tmp/`` path are excluded because they are regenerated
     code, not an editable repo source. The leaf's ``kernel_kind``
     (``triton``/``tilelang``/...) does NOT otherwise restrict editability -- a
-    repo ``.py`` Triton/TileLang kernel is as routable as a ``.cu``.
+    repo ``.py`` Triton/TileLang kernel is as routable as a native source.
     """
     if not path:
         return False
