@@ -35,7 +35,9 @@ name: SaFE Optimize Submit
 
 on:
   # Rolling downloads>100 pool: 240 models every 6 hours, firing at UTC
-  # 16:00 / 22:00 / 04:00 / 10:00 (Beijing 00:00 / 06:00 / 12:00 / 18:00).
+  # 16:07 / 22:07 / 04:07 / 10:07 (Beijing 00:07 / 06:07 / 12:07 / 18:07).
+  # Minute is :07 (not :00) on purpose — GitHub delays cron heavily at the top
+  # of the hour when many repos fire at once; an off-peak minute reduces the lag.
   # Each fire submits the NEXT sequential 240-model slice of the rotate pool,
   # now hosted off-repo at
   # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate.json
@@ -48,7 +50,7 @@ on:
   # The tail batch is short (not head-wrapped) so consecutive fires never
   # double-submit the head models. Manual workflow_dispatch is unaffected.
   schedule:
-    - cron: '0 4,10,16,22 * * *'
+    - cron: '7 4,10,16,22 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > legacy hf_top) ──────
