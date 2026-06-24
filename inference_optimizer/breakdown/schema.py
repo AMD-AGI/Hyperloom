@@ -1124,6 +1124,8 @@ class SourceBreakdown(TypedDict, total=False):
         geak_pct_of_total (float): Gain share from GEAK kernel rewrites.
         oob_pct_of_total (float): Gain share from out-of-box backends.
         explore_pct_of_total (float): Gain share from the primary explore family.
+        replay_warm_recipe_pct_of_total (float): Gain share from warm-recipe
+            replay (cortex best_config replay); 0.0 when none was adopted.
         framework_pr_pct_of_total (float): Gain share from FRAMEWORK_PR bake-ins.
         gemm_tuning_pct_of_total (float): Gain share from the FP8 GEMM tuner
             (0.0 on non-FP8 workloads or when the tuner produced no KEEP).
@@ -1137,6 +1139,10 @@ class SourceBreakdown(TypedDict, total=False):
     oob_pct_of_total: float
     # primary explore family bucket.
     explore_pct_of_total: float
+    # REPLAY_WARM_RECIPE (warm-recipe / cortex best_config replay) contribution,
+    # bucketed separately so its gain reconciles against validated_total_pct
+    # instead of vanishing into the non-emitted ``other`` family.
+    replay_warm_recipe_pct_of_total: float
     # FRAMEWORK_PR phase contribution (upstream-PR bake-ins), bucketed
     # separately so per-source totals reconcile against validated_total_pct.
     framework_pr_pct_of_total: float
