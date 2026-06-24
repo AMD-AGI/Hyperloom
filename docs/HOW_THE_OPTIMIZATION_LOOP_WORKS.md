@@ -68,6 +68,16 @@ The LLM does not own a separate framework role in the current runtime.
 
 ## EXPLORE
 
+> **Published as "Arbor."** This EXPLORE-phase orchestration — a persistent
+> Orchestration conversation that profiles, scores candidate interventions,
+> dispatches dynamically-constructed specialists, and gates every result
+> end-to-end before keeping it — is the system described in *Arbor: Tree
+> Search as a Cognition Layer for Autonomous Agents*
+> ([arXiv:2606.12563](https://arxiv.org/abs/2606.12563)). "Arbor" is the
+> research name for Hyperloom's orchestration loop — in particular the
+> free-form specialist search (`specialist scope=freeform`) — not a separate
+> or external component.
+
 EXPLORE searches configuration and source-patch levers through the
 canonical `explore` ledger:
 
