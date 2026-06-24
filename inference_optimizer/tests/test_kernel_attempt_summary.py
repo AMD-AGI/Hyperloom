@@ -368,6 +368,27 @@ def test_glossary_present_and_documents_efficiency_pct(tmp_path: Path) -> None:
     assert "backend_ladder" in out["field_glossary"]
 
 
+def test_dispatch_skip_reason_surfaced_when_present(tmp_path: Path) -> None:
+    """A no_eligible_kernels dispatch skip rides through to the summary."""
+    state = _make_state(top15=[_top15_entry("k001")])
+    state.last_kernel_opt_dispatch_skip = {
+        "reason": "no_eligible_kernels",
+        "kernels_considered": 5,
+        "message": "no eligible kernels to optimize (...)",
+        "ts": "2026-06-22T00:00:00+00:00",
+    }
+    out = build_kernel_optimization_summary(state, tmp_path)
+    assert out["dispatch_skip_reason"]["reason"] == "no_eligible_kernels"
+    assert out["dispatch_skip_reason"]["kernels_considered"] == 5
+
+
+def test_dispatch_skip_reason_empty_by_default(tmp_path: Path) -> None:
+    """No dispatch skip => empty dict, never a failure marker."""
+    state = _make_state(top15=[_top15_entry("k001")])
+    out = build_kernel_optimization_summary(state, tmp_path)
+    assert out["dispatch_skip_reason"] == {}
+
+
 def test_zero_attempts_session_does_not_crash(tmp_path: Path) -> None:
     state = _make_state(top15=[])
     out = build_kernel_optimization_summary(state, tmp_path)

@@ -61,6 +61,81 @@ VISION_MT = {"llava", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "internvl", "mllama"
 _TOKENIZER_FILES = {"tokenizer.json", "tokenizer.model", "vocab.json",
                     "spiece.model", "tokenizer.model.v3", "merges.txt"}
 
+# Native FP4 quant tags. gfx942 (MI300X / MI325X) has NO native FP4 datapath,
+# so these models cannot serve there; gfx950 (MI355X) is fine.
+_FP4_QUANT_TAGS = ("mxfp4", "nvfp4")
+
+
+def _quant_tag(config):
+    """Return the lowercased quantization tag from a HF config.json dict.
+
+    Mirrors optimize_submit._quant_type field priority (vendors disagree on the
+    field name): quant_algo > quant_type > quantization_type > quant_method >
+    method. Returns "" when the model is not quantized.
+    """
+    quant = config.get("quantization_config") or {}
+    raw = (quant.get("quant_algo")
+           or quant.get("quant_type")
+           or quant.get("quantization_type")
+           or quant.get("quant_method")
+           or quant.get("method")
+           or "")
+    return raw.lower() if isinstance(raw, str) else ""
+
+
+def is_fp4_native(config):
+    """True when the model config declares a native FP4 quantization (mxfp4/nvfp4)."""
+    tag = _quant_tag(config)
+    return any(t in tag for t in _FP4_QUANT_TAGS)
+
+
+def is_mi300x(gpu_type):
+    """True when ``gpu_type`` resolves to MI300X (any case / separators)."""
+    compact = re.sub(r"[^a-z0-9]", "", str(gpu_type or "").lower())
+    return compact == "mi300x" or compact.endswith("mi300x")
+
+
+# Models that must NOT run on MI300X regardless of config: the full DeepSeek-V4
+# (too large for single-node gfx942) and the GLM-5 series (multi-node only). The
+# ``(?![0-9])`` guards stop GLM-4.7 / GLM-50 / DeepSeek-V40 false hits. The
+# allow-regex carves out DeepSeek-V4-Flash, which IS supported on MI300X.
+_MI300X_BLOCK_RE = re.compile(r"deepseek[-_]?v4(?![0-9])|glm[-_]?5(?![0-9])", re.I)
+_MI300X_ALLOW_RE = re.compile(r"deepseek[-_]?v4[-_]?flash", re.I)
+
+
+def mi300x_blocked_model(repo):
+    """Return the matched model token when ``repo`` is one we never run on
+    MI300X (full DeepSeek-V4 or GLM-5 series), else "". DeepSeek-V4-Flash is
+    explicitly exempt.
+    """
+    name = str(repo or "")
+    if _MI300X_ALLOW_RE.search(name):
+        return ""
+    m = _MI300X_BLOCK_RE.search(name)
+    return m.group(0) if m else ""
+
+
+# Serving registries with no working AMD/ROCm path: config-deterministic and
+# GPU-independent (they fail to load on MI300X and MI355X alike). Keyed by
+# model_type with an architecture fallback. NOTE: NVIDIA ModelOpt FP8 is handled
+# by the modelopt_fp8 rule, and full DeepSeek-V4 by the MI300X repo-name rule
+# (its DeepseekV4ForCausalLM registry is shared with the supported V4-Flash, so
+# it cannot be filtered by arch without dropping V4-Flash too).
+_UNSUPPORTED_REGISTRY_BY_MT = {
+    "glm_moe_dsa":  "GLM glm_moe_dsa registry not supported on AMD/ROCm",
+    "deepseek_v32": "DeepSeek V3.2 (deepseek_v32) missing AMD runtime path",
+    "rwkv6qwen2":   "RWKV6/Qwen2 hybrid architecture is not supported by sglang/vLLM",
+    # Qwen3.6 MoE: this model_type appears as text_config.model_type; the new
+    # arch is not in the vLLM/Transformers registry, so the baseline server
+    # fails to start.
+    "qwen3_5_moe_text": "Qwen3.6 MoE (qwen3_5_moe_text) not in vLLM/Transformers registry",
+}
+_UNSUPPORTED_REGISTRY_BY_ARCH = {
+    "GlmMoeDsaForCausalLM":   "GLM glm_moe_dsa registry not supported on AMD/ROCm",
+    "DeepseekV32ForCausalLM": "DeepSeek V3.2 (deepseek_v32) missing AMD runtime path",
+    "RWKV6Qwen2ForCausalLM":  "RWKV6/Qwen2 hybrid architecture is not supported by sglang/vLLM",
+}
+
 
 def _listdir(d):
     import os
@@ -86,7 +161,7 @@ def has_tokenizer(model_dir):
     return bool(files & _TOKENIZER_FILES)
 
 
-def unrunnable_reason(config, repo="", model_dir=None, whitelist=None):
+def unrunnable_reason(config, repo="", model_dir=None, whitelist=None, gpu_type=None):
     """Return ``(reason, detail)`` if the model cannot run on the ROCm stack,
     else ``None``.
 
@@ -97,9 +172,14 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None):
             ``missing_tokenizer`` check when weights are present.
         whitelist: Optional set of repo ids exempt from all filtering (e.g. the
             curated daily-fixed pool). Pass ``model_compat.load_whitelist()``.
+        gpu_type: Optional target GPU type. When it resolves to MI300X, native
+            FP4 models are filtered (gfx942 has no FP4 datapath). ``None``
+            disables GPU-specific rules (backward-compatible default).
 
     Rules: multimodal, short_ctx, phi3_longrope, dual_chunk_attention, gemma2,
-    modelopt_fp8, attn_backend (flashinfer), missing_tokenizer.
+    modelopt_fp8, attn_backend (flashinfer), unsupported_arch (glm_moe_dsa /
+    deepseek_v32 / qwen3_5_moe_text), fp4_unsupported (MI300X only),
+    mi300x_unsupported_model (MI300X only), missing_tokenizer.
     """
     if whitelist and repo and repo in whitelist:
         return None  # curated/whitelisted repo -> never filtered
@@ -154,7 +234,31 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None):
     if attn == "flashinfer" or "flashinfer" in blob:
         return ("attn_backend", "requires flashinfer (not on ROCm)")
 
-    # 8) missing tokenizer (only when weights are present locally)
+    # 8) Unsupported serving registry / missing AMD runtime path (config-based,
+    #    GPU-independent): e.g. GLM glm_moe_dsa, DeepSeek V3.2 (deepseek_v32),
+    #    Qwen3.6 MoE (qwen3_5_moe_text, carried as text_config.model_type).
+    tc = config.get("text_config")
+    tc_mt = (tc.get("model_type") or "").lower() if isinstance(tc, dict) else ""
+    detail = (_UNSUPPORTED_REGISTRY_BY_MT.get(mt)
+              or _UNSUPPORTED_REGISTRY_BY_MT.get(tc_mt)
+              or _UNSUPPORTED_REGISTRY_BY_ARCH.get(arch))
+    if detail:
+        return ("unsupported_arch", detail)
+
+    # 9) GPU-specific: native FP4 cannot run on MI300X (gfx942 has no FP4
+    #    datapath). Only applied when the caller passes gpu_type=MI300X.
+    if is_mi300x(gpu_type) and is_fp4_native(config):
+        return ("fp4_unsupported",
+                f"native FP4 ({_quant_tag(config)}) not supported on MI300X (gfx942)")
+
+    # 10) GPU-specific: model never run on MI300X (full DeepSeek-V4 / GLM-5
+    #     series; DeepSeek-V4-Flash exempt). Matched by repo id, MI300X only.
+    if is_mi300x(gpu_type):
+        blocked = mi300x_blocked_model(repo)
+        if blocked:
+            return ("mi300x_unsupported_model", f"{blocked} not run on MI300X")
+
+    # 11) missing tokenizer (only when weights are present locally)
     if model_dir and has_weights(model_dir) and not has_tokenizer(model_dir):
         return ("missing_tokenizer", "weights present but no tokenizer files")
 
