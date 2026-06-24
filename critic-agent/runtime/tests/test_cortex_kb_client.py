@@ -155,139 +155,31 @@ def test_list_maps_points_to_entries_sorted_desc_and_limited(make_client):
 
 
 # ---------------------------------------------------------------------------
-# upsert
+# writes are rejected — Critic is read-only against cortex
 # ---------------------------------------------------------------------------
-def test_upsert_builds_propose_envelope(make_client):
-    client, transport = make_client(
-        [_FakeResp({"proposal_id": 7, "status": "auto_accepted", "point_id": 7})]
-    )
-    res = client.upsert(
-        {
-            "scope": {"model": "Qwen3", "framework": "sglang"},
-            "kind": "technique",
-            "slug": "use-fp8",
-            "importance": 0.7,
-            "summary": "prefer fp8",
-            "metadata": {"source_session": "sess-1"},
-        }
-    )
-
-    body = transport.calls[0]["body"]
-    assert transport.calls[0]["url"] == "http://kb-service.test/v1/points/propose"
-    assert body["kind"] == "critic_technique"
-    assert body["authority"] == "EXPERIENTIAL"
-    assert body["canonical_id"].startswith("critic.technique.use-fp8.")
-    assert body["evidence_refs"][0]["kind"] == "log"
-    assert body["evidence_refs"][0]["ref"] == "critic-session:sess-1"
-    assert body["provenance"]["source"] == "agent_observation"
-    assert body["provenance"]["generator"] == "critic-agent"
-    # reserved attrs round-trip
-    assert body["attrs"]["_critic_scope"] == {"model": "qwen3", "framework": "sglang"}
-    assert body["attrs"]["_critic_importance"] == 0.7
-    assert res["created"] is True
-    assert res["row"]["slug"] == "use-fp8"
-
-
-def test_upsert_canonical_id_is_deterministic(make_client):
-    client, transport = make_client(
-        [
-            _FakeResp({"status": "auto_accepted", "point_id": 1}),
-            _FakeResp({"status": "auto_accepted", "point_id": 1}),
-        ]
-    )
-    payload = {
-        "scope": {"model": "qwen3"},
-        "kind": "pitfall",
-        "slug": "oom",
-        "importance": 0.5,
-    }
-    client.upsert(dict(payload))
-    client.upsert(dict(payload))
-    assert (
-        transport.calls[0]["body"]["canonical_id"]
-        == transport.calls[1]["body"]["canonical_id"]
-    )
-
-
-def test_upsert_missing_field_raises_validation(make_client):
-    client, _ = make_client([])
+def test_upsert_is_rejected(make_client):
+    client, transport = make_client([])
     with pytest.raises(KBValidationError):
-        client.upsert({"scope": {}, "kind": "pitfall", "slug": "x"})  # no importance
+        client.upsert(
+            {"scope": {}, "kind": "pitfall", "slug": "x", "importance": 0.1}
+        )
+    assert transport.calls == []  # never hits the wire
 
 
-# ---------------------------------------------------------------------------
-# batch_insert
-# ---------------------------------------------------------------------------
-def test_batch_insert_builds_bulk_request(make_client):
-    client, transport = make_client(
-        [_FakeResp({"accepted": {"points": [11, 12]}, "rejected": {"points": []}})]
-    )
-    items = [
-        {"scope": {"model": "qwen3"}, "kind": "pitfall", "slug": "a", "importance": 0.5},
-        {"scope": {"model": "qwen3"}, "kind": "technique", "slug": "b", "importance": 0.6},
-    ]
-    res = client.batch_insert(items, on_conflict="upsert")
-
-    body = transport.calls[0]["body"]
-    assert transport.calls[0]["url"] == "http://kb-service.test/v1/bulk/ingest"
-    assert body["pipeline_id"] == "critic-kb"
-    assert "batch_id" in body
-    assert [p["kind"] for p in body["points"]] == ["critic_pitfall", "critic_technique"]
-    assert res["count"] == 2
-
-
-def test_batch_insert_rejected_points_raise(make_client):
-    client, _ = make_client(
-        [
-            _FakeResp(
-                {
-                    "accepted": {"points": []},
-                    "rejected": {
-                        "points": [
-                            {"request_index": 0, "code": "INVALID_INPUT", "message": "bad"}
-                        ]
-                    },
-                }
-            )
-        ]
-    )
+def test_batch_insert_is_rejected(make_client):
+    client, transport = make_client([])
     with pytest.raises(KBValidationError):
         client.batch_insert(
             [{"scope": {}, "kind": "pitfall", "slug": "a", "importance": 0.1}]
         )
+    assert transport.calls == []
 
 
-def test_batch_insert_bad_on_conflict_raises(make_client):
-    client, _ = make_client([])
+def test_add_edges_is_rejected(make_client):
+    client, transport = make_client([])
     with pytest.raises(KBValidationError):
-        client.batch_insert([], on_conflict="merge")
-
-
-# ---------------------------------------------------------------------------
-# add_edges
-# ---------------------------------------------------------------------------
-def test_add_edges_maps_contradicts_to_negate(make_client):
-    client, transport = make_client([_FakeResp({"edge": {"id": 99}})])
-    out = client.add_edges([{"kind": "contradicts", "from_id": 5, "to_id": 6}])
-
-    body = transport.calls[0]["body"]
-    assert transport.calls[0]["url"] == "http://kb-service.test/v1/edges/negate"
-    assert body["from_point"] == 5
-    assert body["to_point"] == 6
-    assert body["authority"] == "EXPERIENTIAL"
-    assert out["added"][0]["kind"] == "negation"
-
-
-def test_add_edges_rejects_non_contradicts(make_client):
-    client, _ = make_client([])
-    with pytest.raises(KBValidationError):
-        client.add_edges([{"kind": "supports", "from_id": 1, "to_id": 2}])
-
-
-def test_add_edges_rejects_non_int_ids(make_client):
-    client, _ = make_client([])
-    with pytest.raises(KBValidationError):
-        client.add_edges([{"kind": "contradicts", "from_id": "kb_x", "to_id": "kb_y"}])
+        client.add_edges([{"kind": "contradicts", "from_id": 1, "to_id": 2}])
+    assert transport.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -323,20 +215,22 @@ def test_5xx_then_success_recovers(make_client):
 # ---------------------------------------------------------------------------
 # CLI resolver wiring
 # ---------------------------------------------------------------------------
-def test_cli_resolves_cortex_client(monkeypatch):
+def test_cli_resolves_cortex_client_from_cortex_kb_url(monkeypatch):
     from runtime.cli import _resolve_kb_client
 
     monkeypatch.setenv("CRITIC_KB_CLIENT_MODE", "cortex")
-    monkeypatch.setenv("KB_BASE_URL", "http://kb-service.test")
+    monkeypatch.setenv("CORTEX_KB_URL", "http://kb-service.test")
+    monkeypatch.delenv("KB_BASE_URL", raising=False)
     client = _resolve_kb_client()
     assert isinstance(client, CortexKBClient)
+    assert client.base_url == "http://kb-service.test"
 
 
-def test_cli_cortex_mode_requires_base_url(monkeypatch):
+def test_cli_cortex_mode_requires_cortex_kb_url(monkeypatch):
     from runtime.cli import _resolve_kb_client
     from runtime.errors import RuntimeAdapterError
 
     monkeypatch.setenv("CRITIC_KB_CLIENT_MODE", "cortex")
-    monkeypatch.delenv("KB_BASE_URL", raising=False)
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
     with pytest.raises(RuntimeAdapterError):
         _resolve_kb_client()
