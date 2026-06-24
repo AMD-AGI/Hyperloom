@@ -27,6 +27,7 @@ import yaml
 from ._canonical_fingerprint import canonical_fingerprint
 from ._robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
+    DETOKENIZER_STALL_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     run_with_session_kill,
@@ -2274,6 +2275,62 @@ async def run_grid(
                     error_class="server_init_dead",
                     note=variant.note,
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in sd_harvested],
+                )
+            )
+            await _pulse_after_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
+
+        # Detokenizer-stall watchdog fired: this variant's server came up
+        # healthy (ready marker logged) but then went completely silent — a hung
+        # engine / wedged detokenizer. The clock runs from the ready marker, so
+        # a long cold start does not trip it. Fast-prune the variant with a
+        # distinct ``error_class`` so the ExploreExecutor drops it and the round
+        # proceeds, instead of burning the full ~2h hard timeout on a server
+        # that will never return tokens. Harvest leaks for RCA.
+        if rc == DETOKENIZER_STALL_RETURNCODE:
+            variant_runtime_sec = round(
+                max(0.0, time.time() - variant_started_unix),
+                2,
+            )
+            ds_candidates = sorted(slot.glob("benchmark_*"))
+            ds_destination = ds_candidates[-1] if ds_candidates else slot
+            ds_harvested = harvest_leaked_artifacts(
+                ds_destination,
+                subprocess_started_unix=variant_started_unix,
+            )
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: detokenizer_stall "
+                "(server ready but log went silent) after %.1fs",
+                i + 1,
+                len(grid),
+                variant.name,
+                variant_runtime_sec,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="detokenizer_stall",
+                error_summary=(
+                    "server reported ready but emitted no log output (hung "
+                    "engine / detokenizer stall); reaped by the "
+                    "detokenizer-stall watchdog"
+                ),
+                extra_args=variant.extra_server_args,
+            )
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    returncode=rc,
+                    runtime_sec=variant_runtime_sec,
+                    error="detokenizer_stall: server ready but log went silent",
+                    error_class="detokenizer_stall",
+                    note=variant.note,
+                    nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in ds_harvested],
                 )
             )
             await _pulse_after_variant(i)
