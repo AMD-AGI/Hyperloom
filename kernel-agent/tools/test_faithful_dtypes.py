@@ -9,7 +9,7 @@ import sys
 from argparse import Namespace
 
 sys.argv = ["x"]
-import tracelens_analysis as tla
+import tracelens_analysis as tla  # noqa: E402 - module reads argv at import time.
 
 
 def test_split_shape_dtype():

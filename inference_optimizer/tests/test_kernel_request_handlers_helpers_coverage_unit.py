@@ -106,6 +106,40 @@ def test_backend_order_default_drops_cursor_without_key(monkeypatch) -> None:
     assert "geak" in out
 
 
+def test_backend_order_drops_perfskills_from_per_kernel_ladder(monkeypatch) -> None:
+    # perfskills is a phase-level delegate, never a per-kernel backend.
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
+    assert krh._backend_order({"backend_order": "perfskills,geak"}) == ["geak"]
+    assert krh._backend_order({"backend_order": "perfskills"}) == []
+
+
+# -- perfskills_selected ---------------------------------------------------
+def test_perfskills_selected_from_env_order(monkeypatch) -> None:
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "perfskills")
+    assert krh.perfskills_selected() is True
+
+
+def test_perfskills_selected_owns_phase_when_mixed(monkeypatch) -> None:
+    # When perfskills appears anywhere in the order it owns the phase.
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak,PerfSkills")
+    assert krh.perfskills_selected() is True
+
+
+def test_perfskills_selected_false_for_native_order(monkeypatch) -> None:
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
+    assert krh.perfskills_selected() is False
+    assert krh.perfskills_selected({"backend_order": "geak,claude"}) is False
+
+
+def test_perfskills_selected_payload_overrides_env(monkeypatch) -> None:
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak")
+    assert krh.perfskills_selected({"backend_order": "perfskills"}) is True
+
+
 # -- _artifact_paths_from_payload -----------------------------------------
 def test_artifact_paths_string_wrapped() -> None:
     assert krh._artifact_paths_from_payload({"artifact_paths": "/a/b.so"}) == ["/a/b.so"]

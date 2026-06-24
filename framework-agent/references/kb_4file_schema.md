@@ -36,13 +36,14 @@ ${FRAMEWORK_AGENT_KB_DIR}/
 |---|---|---|
 | `README.md` | Domain entry point; ~20 lines | rare manual edits |
 | `empirical_kb.md` | Domain-specific findings: flag tables, quantitative perf deltas, version-specific guidance | **only append target** for `contribute_to_kb` |
-| `model_taxonomy.md` | Cross-domain shared (~447 lines fixed); model archetypes | human-reviewed copy-from-Arbor |
-| `shared_pitfalls.md` | Cross-domain shared (~487 lines fixed); pitfalls catalogue | human-reviewed copy-from-Arbor |
+| `model_taxonomy.md` | Cross-domain shared (~447 lines fixed); model archetypes | human-reviewed copy-from-Hyperloom (Arbor) |
+| `shared_pitfalls.md` | Cross-domain shared (~487 lines fixed); pitfalls catalogue | human-reviewed copy-from-Hyperloom (Arbor) |
 
 > `model_taxonomy.md` and `shared_pitfalls.md` are intentionally
-> identical across the six standard domains in Arbor. `kb.py` does
-> not enforce that; if you wish to mirror Arbor, copy the canonical
-> versions once and treat them as read-only mirrors.
+> identical across the six standard domains in Hyperloom (the orchestration
+> published as Arbor, arXiv:2606.12563). `kb.py` does not enforce that; if you
+> wish to mirror them, copy the canonical versions once and treat them as
+> read-only mirrors.
 
 ## Loading priority
 

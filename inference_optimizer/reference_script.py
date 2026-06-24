@@ -227,7 +227,7 @@ def _extract_server_args(
     # Skip the entrypoint prefix itself.
     fw = str(framework or "").strip().lower()
     start = 0
-    if "vllm" in fw and not ("atom" in fw):
+    if "vllm" in fw and "atom" not in fw:
         # ``vllm serve <model> ...`` → entrypoint is the first two tokens.
         for i, t in enumerate(tokens):
             if t == "serve":

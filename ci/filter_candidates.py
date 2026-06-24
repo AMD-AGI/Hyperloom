@@ -18,6 +18,9 @@ Filter rules
 - gemma2            : model_type ``gemma2`` / ``Gemma2ForCausalLM`` (config compat).
 - modelopt_fp8      : ``quantization_config.quant_method == "modelopt"`` (no ROCm loader).
 - attn_backend      : ``attn_implementation == "flashinfer"`` (not on ROCm).
+- unsupported_arch  : serving registry with no ROCm path (GLM ``glm_moe_dsa`` / DeepSeek ``deepseek_v32``).
+- fp4_unsupported   : native FP4 (mxfp4/nvfp4) when target GPU is MI300X (gfx942 has no FP4).
+- mi300x_unsupported_model : full DeepSeek-V4 / GLM-5 series on MI300X (DeepSeek-V4-Flash exempt).
 - missing_tokenizer : weights present locally but no tokenizer files.
 - gated             : HuggingFace ``gated`` field is ``auto`` / ``manual`` (HF API).
 - not_found         : HuggingFace returns 404 for the repo (HF API).
@@ -28,6 +31,7 @@ Env
                           Falls back to ``HF_TOKEN`` / ``HF_TOKEN_2``.
 - ``CI_MODELS_DIR``     : local model cache root (default ``/wekafs/models``).
 - ``CI_FILTER_OUT_DIR`` : output directory for filtered JSON + reports.
+- ``SAFE_OPTIMIZE_GPU_TYPE`` : target GPU for gpu-specific rules (default ``MI300X``).
 
 Usage
 -----
@@ -44,6 +48,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import model_compat  # noqa: E402  (local sibling module)
 
 MODELS_DIR = os.environ.get("CI_MODELS_DIR", "/wekafs/models")
+# Target GPU for the gpu-specific rules (FP4 unsupported on MI300X). core42 is
+# MI300X, so default there; override via SAFE_OPTIMIZE_GPU_TYPE.
+GPU_TYPE = os.environ.get("SAFE_OPTIMIZE_GPU_TYPE", "MI300X")
 OUT_DIR = os.environ.get(
     "CI_FILTER_OUT_DIR", "/wekafs/weilei/claw-dev/ci-candidates-filtered")
 GATED_CACHE = os.path.join(OUT_DIR, "gated_cache.tsv")
@@ -82,7 +89,8 @@ def classify_local(repo):
         cfg = json.load(open(cfg_path))
     except Exception:
         return None
-    return model_compat.unrunnable_reason(cfg, repo=repo, model_dir=mdir)
+    return model_compat.unrunnable_reason(cfg, repo=repo, model_dir=mdir,
+                                          gpu_type=GPU_TYPE)
 
 
 def hf_gated(repo):

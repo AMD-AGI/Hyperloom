@@ -258,7 +258,8 @@ def _editable_roots() -> list[str]:
                 continue
             fpath = os.path.join(d, n)
             try:
-                with open(fpath, errors="replace") as _fh: txt = _fh.read()
+                with open(fpath, errors="replace") as _fh:
+                    txt = _fh.read()
             except OSError:
                 continue
             # Layout 0: bare absolute path on a line (no quotes, no import).
@@ -279,7 +280,8 @@ def _editable_roots() -> list[str]:
                 if fm:
                     finder_file = os.path.join(d, fm.group(1) + ".py")
                     try:
-                        with open(finder_file, errors="replace") as _fh2: ftxt = _fh2.read()
+                        with open(finder_file, errors="replace") as _fh2:
+                            ftxt = _fh2.read()
                     except OSError:
                         continue
                     for m in re.findall(r"['\"](/[^'\"]+)['\"]", ftxt):
@@ -1415,10 +1417,11 @@ def _apply_fellow_env(env: dict) -> None:
     # proxy can stall with no first token / no keepalive; without a client-side
     # timeout the SDK awaits until the outer 900s kill. Bound the claude CLI's
     # own request timeout and cut non-essential traffic / autoupdate that can
-    # also block in headless containers. setdefault keeps operator overrides.
-    env.setdefault("API_TIMEOUT_MS", "300000")
-    env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-    env.setdefault("DISABLE_AUTOUPDATER", "1")
+    # also block in headless containers. Shared with oob/specialist/tracelens so
+    # every claude-CLI/SDK child gets the same read-timeout protection.
+    from _llm_stability_env import apply_llm_stability_env
+
+    apply_llm_stability_env(env)
     # GBrain knowledge integration: forward gbrain credentials so the Forge
     # loop's program.md generator can inject cross-KB knowledge from the
     # unified kernel brain (KernelForge + GEAK + PTAO). The forge-loop child

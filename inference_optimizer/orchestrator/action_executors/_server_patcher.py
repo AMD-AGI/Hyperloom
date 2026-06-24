@@ -353,15 +353,11 @@ _VLLM_PATCH_RE = re.compile(r"^config_vllm_v(\d+(?:\.\d+)*)\.patch$")
 
 def _version_tuple(v: str) -> tuple[int, ...] | None:
     """Parse the leading dotted-numeric run of a version into a tuple.
-    ``0.22.0-rocm`` -> (0, 22, 0); returns None when there is no numeric head."""
-    head = (v or "").strip().split("-", 1)[0].split("+", 1)[0]
-    nums: list[int] = []
-    for part in (head.split(".") if head else []):
-        if part.isdigit():
-            nums.append(int(part))
-        else:
-            break
-    return tuple(nums) if nums else None
+    ``0.22.1rc1.dev`` -> (0, 22, 1); returns None when there is no numeric head."""
+    m = re.match(r"^\s*v?(\d+(?:\.\d+)*)", str(v or ""))
+    if not m:
+        return None
+    return tuple(int(part) for part in m.group(1).split("."))
 
 
 def _resolve_vllm_patch_file(patches_dir: Path, version: str) -> Path | None:
@@ -446,9 +442,10 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
     patches_dir = _patch_tree(tracelens_root, "vllm_patches")
     patch_file = _resolve_vllm_patch_file(patches_dir, version)
     if patch_file is None:
-        log.info(
+        log.warning(
             "_server_patcher: no TraceLens patch for vLLM %s "
-            "(searched %s incl. minor/nearest-lower fallback); skip",
+            "(searched %s incl. minor/nearest-lower fallback); "
+            "TraceLens annotations will be unavailable",
             version, patches_dir,
         )
         return None
