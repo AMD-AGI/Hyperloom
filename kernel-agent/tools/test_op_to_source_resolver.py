@@ -27,10 +27,11 @@ import pytest
 
 _TLA_PATH = Path(__file__).resolve().parent / "tracelens_analysis.py"
 
-# An editable native source must end in .cu/.cuh/.hip and resolve to an
+# An editable native source must end in .cu/.cuh/.hip/.h and resolve to an
 # absolute path; a non-editable one is e.g. an empty/unshipped csrc path.
 _EDITABLE_CU = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/foo.cu"
 _EDITABLE_CU_2 = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/bar.cu"
+_EDITABLE_H = "/sgl-workspace/aiter/csrc/kernels/rope/rope_common.h"
 
 
 @pytest.fixture(scope="module")
@@ -93,6 +94,21 @@ def test_single_multiple_editable_sources_fans_out_one_leaf_per_cu(tla) -> None:
     assert len(leaves) == 2
     assert [leaf.primary_source for leaf in leaves] == [_EDITABLE_CU, _EDITABLE_CU_2]
     assert all(leaf.is_routable for leaf in leaves)
+
+
+def test_single_patchable_header_source_is_routable(tla) -> None:
+    """Curated patchable native headers are editable sources, not non_rewritable."""
+    mapping = {
+        "aiter::rope": _entry(
+            "single",
+            sglang={"kn_entry": _kernel(_EDITABLE_H)},
+        )
+    }
+    res = tla.resolve_op_source("aiter::rope", mapping=mapping)
+    assert res is not None
+    assert res.status == "resolved"
+    assert res.is_routable
+    assert res.sources == [_EDITABLE_H]
 
 
 def test_single_no_editable_source_is_non_rewritable(tla) -> None:
