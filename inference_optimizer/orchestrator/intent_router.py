@@ -240,7 +240,7 @@ class IntentRouter:
         self,
         *,
         source: str,
-        pending: "PendingProposal",
+        pending: "PendingProposal",  # noqa: F821 - deferred ref; imported lazily in handlers to avoid import cycle.
         verdict: str,
         reasoning: str,
     ) -> None:

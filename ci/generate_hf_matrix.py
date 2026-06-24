@@ -426,6 +426,29 @@ def _apply_exclusions_to_entries(entries: list[dict | str]) -> list[dict | str]:
     return out
 
 
+def _filter_top_entries(entries: list[dict | str]) -> list[dict | str]:
+    """Keep only top-pool entries when INPUT_TOP_ONLY is enabled.
+
+    The fixed daily pool can carry supplementary rows for ad-hoc manual runs.
+    Scheduled daily CI should not submit those unless explicitly requested via
+    INPUT_MODELS, so missing ``is_top`` remains backwards-compatible while
+    ``is_top: false`` is filtered out.
+    """
+    if not _truthy(os.environ.get("INPUT_TOP_ONLY")):
+        return entries
+    out = [
+        entry
+        for entry in entries
+        if not (isinstance(entry, dict) and entry.get("is_top") is False)
+    ]
+    skipped = len(entries) - len(out)
+    print(
+        f"top-only filter skipped {skipped}; returning {len(out)} repos",
+        file=sys.stderr,
+    )
+    return out
+
+
 def _apply_exclusions(repos: list[str]) -> list[str]:
     """Apply the exclusion filters to a list of bare repo ids.
 
@@ -752,6 +775,7 @@ def collect_entries() -> list[dict | str]:
         if explicit_repos:
             entries = _filter_entries_by_explicit_models(entries, explicit_repos)
             return _apply_exclusions_to_entries(entries)
+        entries = _filter_top_entries(entries)
         exclude_leaderboard = _truthy(os.environ.get("INPUT_EXCLUDE_LEADERBOARD"))
         exclude_active = _truthy(os.environ.get("INPUT_EXCLUDE_ACTIVE_WORKFLOWS"))
         if exclude_leaderboard:
@@ -817,6 +841,8 @@ def _matrix_entry(entry: dict | str) -> dict:
             "created_at",
             "nodes",
             "rayjob_image",
+            "is_top",
+            "params_b",
         ):
             if entry.get(key) is not None:
                 out[key] = entry[key]
