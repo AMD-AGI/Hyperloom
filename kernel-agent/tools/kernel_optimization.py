@@ -613,7 +613,16 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     if not user_backends:
         env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
         if env_order:
-            user_backends = parse_backends(env_order)
+            # 'perfskills' is a phase-level delegate owned by the coordinator,
+            # not a per-kernel backend; drop it so a perfskills-only order does
+            # not crash parse_backends here (this subprocess only runs on the
+            # native per-kernel path, which the coordinator skips for
+            # PerfSkills). An empty remainder falls back to the default ladder.
+            env_tokens = ",".join(
+                t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() != "perfskills"
+            )
+            if env_tokens:
+                user_backends = parse_backends(env_tokens)
     benchmark_available = has_benchmark(args, candidate)
     source_type = str(candidate.get("source_type") or "unknown")
     # Skip cursor from auto-selected defaults when CURSOR_API_KEY is unset (explicit --backends still wins).
