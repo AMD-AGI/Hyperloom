@@ -20,6 +20,7 @@ import pytest
 
 from inference_optimizer.orchestrator.action_executors import _server_patcher
 from inference_optimizer.orchestrator.action_executors._server_patcher import (
+    ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
 )
@@ -1380,3 +1381,242 @@ def test_apply_atomic_rolls_back_when_post_apply_sentinel_fails(
     assert not (apply_root / "created.py").exists(), (
         "post-apply sentinel failure must roll back already-applied patches"
     )
+
+
+# PR2: KernelForge-owned fp8 block-scale CK-routing patch
+# (ensure_sglang_patched_for_ck_blockscale). Reuses the same fail-soft /
+# idempotent / version-gated machinery as the TraceLens SGLang patcher, but
+# resolves the KernelForge root from FORGE_PATH / KERNEL_FORGE_ROOT /
+# KERNEL_FORGE_PATH and applies the patch shipped under
+# ``<root>/serving_patches/sglang/sglang_<ver>/``.
+_CK_FIXTURE_PATCH = Path("/tmp/fp8_blockscale_ck_routing.patch")
+_CK_SGLANG_VERSION = "0.5.12"
+_CK_ROOT_ENV_VARS = ("FORGE_PATH", "KERNEL_FORGE_ROOT", "KERNEL_FORGE_PATH")
+
+
+def _clear_ck_env(monkeypatch) -> None:
+    """Drop every KernelForge-root + sglang-version-pin env var for isolation."""
+    for var in (
+        *_CK_ROOT_ENV_VARS,
+        "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS",
+        "HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _make_fake_kernelforge(
+    tmp_path: Path,
+    *,
+    version: str = _CK_SGLANG_VERSION,
+    manifest_body: str = "0.5.12\n",
+) -> Path:
+    """Build a fake KernelForge root honoring the PR2 layout contract.
+
+    Copies the verified fixture patch into
+    ``serving_patches/sglang/sglang_<ver>/fp8_blockscale_ck_routing.patch`` and
+    writes the root-level ``serving_patches/sglang/SUPPORTED_VERSIONS.txt`` (so
+    tests never depend on the real KernelForge worktree).
+    """
+    root = tmp_path / "KernelForge"
+    sglang_patches = root / "serving_patches" / "sglang"
+    subdir = _server_patcher._versioned_patches_subdir_name(version) or ""
+    patches_dir = sglang_patches / subdir
+    patches_dir.mkdir(parents=True)
+    shutil.copyfile(
+        _CK_FIXTURE_PATCH,
+        patches_dir / "fp8_blockscale_ck_routing.patch",
+    )
+    (sglang_patches / "SUPPORTED_VERSIONS.txt").write_text(
+        manifest_body,
+        encoding="utf-8",
+    )
+    return root
+
+
+def _make_fake_sglang_for_ck(
+    tmp_path: Path,
+    *,
+    version: str = _CK_SGLANG_VERSION,
+    patched: bool = False,
+    with_fp8_utils: bool = True,
+) -> Path:
+    """Build an editable ``python/sglang/...`` tree with ``fp8_utils.py``.
+
+    When ``patched`` the sentinel file is pre-baked with all three CK markers
+    so ``_ensure_patched`` short-circuits on the idempotency check (no real
+    ``git apply`` against the synthetic tree). Returns the apply root.
+    """
+    apply_root = tmp_path / "sgl_repo"
+    quant = apply_root / "python" / "sglang" / "srt" / "layers" / "quantization"
+    quant.mkdir(parents=True)
+    (apply_root / "python" / "sglang" / "__init__.py").write_text(
+        f'__version__ = "{version}"\n',
+        encoding="utf-8",
+    )
+    if with_fp8_utils:
+        if patched:
+            body = (
+                "# fp8_utils stub (PR2 fixture) — patched.\n"
+                "def _fp8_blockscale_ck_max_m() -> int:\n"
+                "    import os\n"
+                '    return int(os.environ.get("SGLANG_FP8_BLOCKSCALE_CK_MAX_M", "0") or "0")\n'
+                "ck_gemm_a8w8_blockscale = None\n"
+            )
+        else:
+            body = "# fp8_utils stub (PR2 fixture) — unpatched, no CK markers.\n"
+        (quant / "fp8_utils.py").write_text(body, encoding="utf-8")
+    return apply_root
+
+
+def _register_fake_sglang(monkeypatch, apply_root: Path, version: str) -> None:
+    """Install a fake importable ``sglang`` module pointing at ``apply_root``."""
+    init = apply_root / "python" / "sglang" / "__init__.py"
+    fake_mod = types.ModuleType("sglang")
+    fake_mod.__version__ = version  # type: ignore[attr-defined]
+    fake_mod.__file__ = str(init)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang", fake_mod)
+
+
+def test_ck_blockscale_returns_false_without_kernelforge_root(monkeypatch):
+    """No FORGE_PATH/KERNEL_FORGE_ROOT/KERNEL_FORGE_PATH and no arg → fail-soft False."""
+    _clear_ck_env(monkeypatch)
+    assert ensure_sglang_patched_for_ck_blockscale() is False
+
+
+def test_ck_blockscale_returns_false_when_root_missing_on_disk(monkeypatch, tmp_path):
+    """A KernelForge env pointing at a non-existent dir resolves to None → False."""
+    _clear_ck_env(monkeypatch)
+    monkeypatch.setenv("FORGE_PATH", str(tmp_path / "does_not_exist"))
+    assert ensure_sglang_patched_for_ck_blockscale() is False
+
+
+def test_ck_blockscale_idempotent_when_sentinel_present(monkeypatch, tmp_path):
+    """When fp8_utils.py already carries all 3 CK markers, the patcher returns
+    True via the idempotency fast path without invoking git apply."""
+    _clear_ck_env(monkeypatch)
+    root = _make_fake_kernelforge(tmp_path)
+    apply_root = _make_fake_sglang_for_ck(tmp_path, patched=True)
+    _register_fake_sglang(monkeypatch, apply_root, _CK_SGLANG_VERSION)
+    monkeypatch.setenv("KERNEL_FORGE_ROOT", str(root))
+
+    sentinel = (
+        apply_root
+        / "python"
+        / "sglang"
+        / "srt"
+        / "layers"
+        / "quantization"
+        / "fp8_utils.py"
+    )
+    before = sentinel.read_text(encoding="utf-8")
+    assert ensure_sglang_patched_for_ck_blockscale() is True
+    # Fast path is a pure no-op — the sentinel file is not rewritten.
+    assert sentinel.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("env_var", _CK_ROOT_ENV_VARS)
+def test_ck_blockscale_resolves_root_from_each_env_var(monkeypatch, tmp_path, env_var):
+    """Root resolution honors each of the three KernelForge env aliases."""
+    _clear_ck_env(monkeypatch)
+    root = _make_fake_kernelforge(tmp_path)
+    apply_root = _make_fake_sglang_for_ck(tmp_path, patched=True)
+    _register_fake_sglang(monkeypatch, apply_root, _CK_SGLANG_VERSION)
+    monkeypatch.setenv(env_var, str(root))
+    assert ensure_sglang_patched_for_ck_blockscale() is True
+
+
+def test_ck_blockscale_resolves_root_from_explicit_arg(monkeypatch, tmp_path):
+    """An explicit ``kernelforge_root`` arg wins over (absent) env aliases."""
+    _clear_ck_env(monkeypatch)
+    root = _make_fake_kernelforge(tmp_path)
+    apply_root = _make_fake_sglang_for_ck(tmp_path, patched=True)
+    _register_fake_sglang(monkeypatch, apply_root, _CK_SGLANG_VERSION)
+    assert ensure_sglang_patched_for_ck_blockscale(root) is True
+
+
+def test_ck_blockscale_rejects_unsupported_version(monkeypatch, tmp_path):
+    """A version excluded by the root-level SUPPORTED_VERSIONS manifest fails
+    soft and must NOT touch the install tree."""
+    _clear_ck_env(monkeypatch)
+    # Subdir exists for 0.5.12 but the manifest only admits 0.6.0.
+    root = _make_fake_kernelforge(tmp_path, manifest_body="0.6.0\n")
+    apply_root = _make_fake_sglang_for_ck(tmp_path, patched=False)
+    _register_fake_sglang(monkeypatch, apply_root, _CK_SGLANG_VERSION)
+    monkeypatch.setenv("FORGE_PATH", str(root))
+
+    assert ensure_sglang_patched_for_ck_blockscale() is False
+    sentinel = (
+        apply_root
+        / "python"
+        / "sglang"
+        / "srt"
+        / "layers"
+        / "quantization"
+        / "fp8_utils.py"
+    )
+    assert "_fp8_blockscale_ck_max_m" not in sentinel.read_text(encoding="utf-8"), (
+        "patcher must not write to disk for an unsupported version"
+    )
+
+
+def test_ck_blockscale_returns_false_when_no_subdir_for_version(monkeypatch, tmp_path):
+    """No per-version subdir under serving_patches/sglang → fail-soft."""
+    _clear_ck_env(monkeypatch)
+    root = _make_fake_kernelforge(tmp_path)  # ships sglang_0_5_12/
+    apply_root = _make_fake_sglang_for_ck(tmp_path, version="0.5.99", patched=True)
+    _register_fake_sglang(monkeypatch, apply_root, "0.5.99")
+    monkeypatch.setenv("FORGE_PATH", str(root))
+    assert ensure_sglang_patched_for_ck_blockscale() is False
+
+
+def test_ck_blockscale_returns_false_when_fp8_utils_missing(monkeypatch, tmp_path):
+    """An sglang install with no fp8_utils.py (unexpected layout) fails soft."""
+    _clear_ck_env(monkeypatch)
+    root = _make_fake_kernelforge(tmp_path)
+    apply_root = _make_fake_sglang_for_ck(tmp_path, with_fp8_utils=False)
+    _register_fake_sglang(monkeypatch, apply_root, _CK_SGLANG_VERSION)
+    monkeypatch.setenv("FORGE_PATH", str(root))
+    assert ensure_sglang_patched_for_ck_blockscale() is False
+
+
+def test_discover_sglang_ck_plan_shape(monkeypatch, tmp_path):
+    """The discovered plan declares framework ``sglang-ck``, the fp8_utils.py
+    sentinel, and all three CK markers."""
+    _clear_ck_env(monkeypatch)
+    root = _make_fake_kernelforge(tmp_path)
+    apply_root = _make_fake_sglang_for_ck(tmp_path, patched=True)
+    _register_fake_sglang(monkeypatch, apply_root, _CK_SGLANG_VERSION)
+    monkeypatch.setenv("FORGE_PATH", str(root))
+
+    plan = _server_patcher._discover_sglang_ck_plan(None)
+    assert plan is not None
+    assert plan.framework == "sglang-ck"
+    assert plan.sentinel_file.name == "fp8_utils.py"
+    assert set(plan.sentinel_text) == {
+        "_fp8_blockscale_ck_max_m",
+        "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
+        "ck_gemm_a8w8_blockscale",
+    }
+    # Editable layout → -p1 strip, apply root at the repo root.
+    assert plan.apply_strip == 1
+    assert plan.apply_root == apply_root
+
+
+def test_ck_blockscale_returns_false_when_sglang_not_importable(monkeypatch, tmp_path):
+    """No importable sglang → discover returns None → fail-soft False."""
+    _clear_ck_env(monkeypatch)
+    root = _make_fake_kernelforge(tmp_path)
+    monkeypatch.setenv("FORGE_PATH", str(root))
+    monkeypatch.delitem(sys.modules, "sglang", raising=False)
+
+    import builtins
+
+    _real_import = builtins.__import__
+
+    def _blocked_import(name, *args, **kwargs):  # noqa: ANN001 - hook
+        if name == "sglang":
+            raise ImportError("sglang not installed (test simulation)")
+        return _real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _blocked_import)
+    assert ensure_sglang_patched_for_ck_blockscale() is False

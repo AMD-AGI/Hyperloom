@@ -3574,6 +3574,22 @@ class Coordinator:
             )
             variant_name = "a8w8_blockscale_tuned_gemm"
 
+        # fp8 block-scale CK backend switch (still attributed to gemm_tuning):
+        # an a8w8 block-scale tuner KEEP on sglang+fp8 means the CK
+        # gemm_a8w8_blockscale kernel is the big lever (multiple-x at decode M).
+        # Activate M-aware CK routing so BOTH the tuned table AND the CK-default
+        # speedup are realized; the source patch is applied separately by
+        # _workload_envs. Gate on the strongest signal — the a8w8 block-scale
+        # tuner env — plus sglang fp8; never clobber an operator-set value.
+        framework = str(getattr(self.shared_state, "framework", "") or "").strip().lower()
+        precision = str(getattr(self.shared_state, "precision", "") or "").strip().lower()
+        if (
+            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE" in extra_envs
+            and framework == "sglang"
+            and precision in ("", "fp8")
+        ):
+            extra_envs.setdefault("SGLANG_FP8_BLOCKSCALE_CK_MAX_M", "256")
+
         final_report = str(result.get("final_report_path") or "")
 
         # GEAK path: E2E already validated internally.
