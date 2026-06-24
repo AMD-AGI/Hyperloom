@@ -2,8 +2,7 @@
 
 > LLM-facing skill prompt for the "discover candidate PRs" stage of a
 > framework-agent run. Use this prompt as the system / task message when
-> driving framework-agent from a higher-level specialist (Arbor / TBO /
-> Hyperloom).
+> driving framework-agent from a higher-level Hyperloom specialist.
 
 ## Intent
 
