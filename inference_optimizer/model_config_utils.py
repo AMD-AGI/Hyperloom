@@ -160,6 +160,55 @@ def _config_has_model_identity(data: dict) -> bool:
     return False
 
 
+# Standard HF FP8 quant_method handled by sglang's Fp8LinearMethod. Only this
+# loader honours SGLANG_USE_AITER_FP8_PER_TOKEN; compressed-tensors / other
+# formats route through different methods and are intentionally excluded.
+_FP8_QUANT_METHOD = "fp8"
+
+
+def _fp8_is_per_channel_per_token(model_path: str) -> bool:
+    """True when a serialized FP8 checkpoint uses per-channel weight + per-token (dynamic) activation.
+
+    This is exactly the scheme that benefits from the aiter CK
+    ``gemm_a8w8_bpreshuffle`` fast path in sglang's ``apply_fp8_linear``: with
+    ``SGLANG_USE_AITER_FP8_PER_TOKEN=1`` the weights are converted to
+    per-channel scales and dynamic activations use per-token scales, routing
+    the GEMM to the fused CK kernel instead of the slow unfused
+    ``_apply_fallback_scaled_mm``.
+
+    Gated strictly so it is default-safe:
+
+    * ``quantization_config.quant_method == "fp8"`` (the standard HF FP8 format
+      that sglang's ``Fp8LinearMethod`` serves), AND
+    * NO ``weight_block_size`` — block-scale FP8 takes the
+      ``w8a8_block_fp8_linear`` path and is unaffected, AND
+    * activation is dynamic (per-token). ``activation_scheme == "static"`` is a
+      per-tensor activation scheme that takes the fused per-tensor path; an
+      absent scheme defaults to dynamic in sglang's ``Fp8Config``.
+
+    Args:
+        model_path: Filesystem path to the model directory.
+
+    Returns:
+        ``True`` only for non-block FP8 checkpoints with dynamic activation.
+    """
+    data = _load_model_config_dict(model_path)
+    if not isinstance(data, dict):
+        return False
+    qc = data.get("quantization_config")
+    if not isinstance(qc, dict):
+        return False
+    if str(qc.get("quant_method") or "").strip().lower() != _FP8_QUANT_METHOD:
+        return False
+    # Block-scale FP8 is served by a different kernel path; never touch it.
+    if qc.get("weight_block_size") is not None:
+        return False
+    # Only dynamic (per-token) activation hits the fast path; static is
+    # per-tensor and would regress to the unfused fallback if forced.
+    activation = str(qc.get("activation_scheme") or "").strip().lower()
+    return activation in ("", "dynamic")
+
+
 def _model_is_gemma2(model_path: str) -> bool:
     """Best-effort detect a Gemma2 model from config.json (top level or text_config).
 
