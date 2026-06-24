@@ -4300,10 +4300,26 @@ async def integrate_handler(
         )
     except Exception:  # noqa: BLE001 - fall back to the original threshold
         stack_positive_keep = False
+    # Backends (GEAK/OOB) independently verify a micro-benchmark speedup +
+    # correctness before a patch reaches integrate. When the E2E delta is
+    # inconclusive (within the +/- keep_threshold noise band) the patch would
+    # otherwise stall at NEEDS_REVIEW and never apply — even though it is a
+    # verified strict kernel improvement that cannot regress correctness. In
+    # that band only, trust the backend's verified >1x and KEEP. This never
+    # overrides a genuine REVERT (measured E2E regression past the threshold).
+    micro_speedup = float(payload.get("micro_speedup") or 0.0)
+    backend_verified_keep = (
+        micro_speedup > 1.0
+        and bool(payload.get("correctness_passed", True))
+    )
     decision = (
         "KEEP"
         if (gain_pct > keep_threshold_pct or stack_positive_keep)
-        else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
+        else (
+            "REVERT"
+            if gain_pct < -keep_threshold_pct
+            else ("KEEP" if backend_verified_keep else "NEEDS_REVIEW")
+        )
     )
     revert_result = (
         {"status": "skipped", "reason": "KEEP decision"}

@@ -788,6 +788,80 @@ async def test_integrate_handler_needs_review_when_within_threshold(
 
 
 @pytest.mark.asyncio
+async def test_integrate_handler_keeps_backend_verified_when_e2e_inconclusive(
+    session_dir,
+    tmp_path,
+):
+    """Within the E2E noise band (+0.625%), a backend-verified >1x kernel with
+    correctness PASS is KEPT, not stalled at NEEDS_REVIEW. GEAK/OOB independently
+    verify a micro-speedup + correctness before integrate, so a strict kernel
+    improvement should apply even when the E2E delta is inconclusive."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=805.0)  # +0.625% vs 800 -> within threshold
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_verified",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+        # backend-verified signal carried into integrate
+        "micro_speedup": 1.0872,
+        "correctness_passed": True,
+    }
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+    assert res["decision"] == "KEEP"
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_reverts_despite_backend_verified_on_real_regression(
+    session_dir,
+    tmp_path,
+):
+    """A measured E2E regression past the threshold still REVERTs even when the
+    backend reports a verified >1x micro-speedup — trust never overrides a real
+    regression."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=700.0)  # -12.5% vs 800 -> real regression
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_regress",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+        "micro_speedup": 1.0872,
+        "correctness_passed": True,
+    }
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+    assert res["decision"] == "REVERT"
+
+
+@pytest.mark.asyncio
 async def test_integrate_handler_rejects_zero_base_tput(session_dir):
     res = await krh.integrate_handler({"base_tput": 0}, session_dir=session_dir)
     assert res["status"] == "failed"
