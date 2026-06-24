@@ -122,6 +122,7 @@ def _gain_attribution_lines(
         "backends": _to_float(sb.get("backends_pct_of_total")),
         "params": _to_float(sb.get("params_pct_of_total")),
         "explore": _to_float(sb.get("explore_pct_of_total")),
+        "replay_warm_recipe": _to_float(sb.get("replay_warm_recipe_pct_of_total")),
         "geak": _to_float(sb.get("geak_pct_of_total")),
         "oob": _to_float(sb.get("oob_pct_of_total")),
         "sweep": _to_float(sb.get("sweep_pct_of_total")),
