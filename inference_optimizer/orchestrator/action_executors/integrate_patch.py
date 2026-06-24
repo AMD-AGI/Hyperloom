@@ -1373,6 +1373,12 @@ class IntegratePatchExecutor:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
+            # G8: distinguish "accuracy required but unevaluated" from a
+            # throughput/regression revert.
+            _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
+            revert_status = (
+                "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and _tput_ok) else "reverted"
+            )
             await self._maybe_write_framework_pr_kb_record(
                 done_payload=done_payload,
                 outcome="reverted_smoke_fail",
@@ -1380,7 +1386,7 @@ class IntegratePatchExecutor:
                 extra=extra,
             )
             return {
-                "status": "reverted",
+                "status": revert_status,
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [str(p) for p in reverted],
@@ -1734,6 +1740,7 @@ class IntegratePatchExecutor:
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
+            extra_envs=self._framework_run_eval_envs(params),
             out_name="integrate_patch.with_envs.yaml",
         )
 
@@ -1784,6 +1791,23 @@ class IntegratePatchExecutor:
             accuracy_pass = self._grade_accuracy(bench["workspace"], params.get("accuracy_baseline"))
 
         return bench, {"accuracy_pass": accuracy_pass}
+
+    @staticmethod
+    def _framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
+        """Force ``RUN_EVAL=true`` for framework-authored source patches (G2).
+
+        Generic EXPLORE integrate_patch is untouched (returns ``None`` -> the
+        materializer keeps its default RUN_EVAL handling).
+
+        Args:
+            params: The integrate_patch task params.
+
+        Returns:
+            ``{"RUN_EVAL": "true"}`` for framework-authored patches, else
+            ``None``.
+        """
+        fw_authored = bool(params.get("framework_pr_authoring") or params.get("framework_pr_candidate_id"))
+        return {"RUN_EVAL": "true"} if fw_authored else None
 
     @staticmethod
     def _grade_accuracy(result_dir: str, baseline_accuracy: Any) -> bool | None:
@@ -1844,6 +1868,7 @@ class IntegratePatchExecutor:
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
+            extra_envs=self._framework_run_eval_envs(params),
             out_name="integrate_patch.rebench.yaml",
         )
         variant = GridVariant(

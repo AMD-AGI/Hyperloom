@@ -11,6 +11,7 @@ from inference_optimizer.orchestrator.framework_pr_artifacts import (
     candidate_slug,
     summarize_candidate_outcomes,
     write_decision_json,
+    write_semantic_audit,
 )
 
 
@@ -81,6 +82,34 @@ def test_write_decision_json_never_raises_on_bad_session_dir(tmp_path: Path):
     bad.write_text("x", encoding="utf-8")
     out = write_decision_json(bad, candidate_id="c", status="failed")
     assert out is None
+
+
+# write_semantic_audit (G9 — co-located with decision.json)
+def test_write_semantic_audit_co_located(tmp_path: Path):
+    verdict = {
+        "candidate_id": "ROCm/vllm#42",
+        "semantic_status": "already_equivalent",
+        "applicability": "not_applicable",
+        "recommended_next_step": "skip",
+        "confidence": 0.95,
+        "evidence": [{"local_file": "vllm/x.py", "symbol": "f", "reason": "present"}],
+        "risks": [],
+    }
+    dest = write_semantic_audit(tmp_path, candidate_id="ROCm/vllm#42", verdict=verdict)
+    assert dest is not None
+    p = Path(dest)
+    assert p.name == "semantic_audit.json"
+    assert p.parent.parent.name == "framework_pr"
+    assert (p.parent / "semantic_audit.md").exists()
+    data = json.loads(p.read_text())
+    assert data["semantic_status"] == "already_equivalent"
+    # Same slug dir as decision.json -> co-located.
+    decision = write_decision_json(tmp_path, candidate_id="ROCm/vllm#42", status="already_present")
+    assert Path(decision).parent == p.parent
+
+
+def test_write_semantic_audit_empty_verdict_returns_none(tmp_path: Path):
+    assert write_semantic_audit(tmp_path, candidate_id="c", verdict={}) is None
 
 
 # summarize_candidate_outcomes

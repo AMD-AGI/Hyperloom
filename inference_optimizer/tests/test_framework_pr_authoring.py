@@ -102,6 +102,8 @@ class _Stub:
     _record_framework_pr_authored_outcome = Coordinator._record_framework_pr_authored_outcome
     _record_framework_pr_audit_skip = Coordinator._record_framework_pr_audit_skip
     _framework_pr_audit_seed_lines = staticmethod(Coordinator._framework_pr_audit_seed_lines)
+    _framework_audit_skip_confident = staticmethod(Coordinator._framework_audit_skip_confident)
+    _framework_roots_have_git = staticmethod(Coordinator._framework_roots_have_git)
     _pump_framework_pr_phase = Coordinator._pump_framework_pr_phase
 
     def __init__(self, tmp_path: Path, *, authoring: bool = True) -> None:
@@ -343,6 +345,7 @@ def test_pump_audit_direct_apply_dispatches_executor_only(
 
     monkeypatch.setattr(_fa_client, "phase_discover", _discover)
     stub = _Stub(tmp_path, authoring=True)
+    stub._framework_roots_have_git = lambda: True  # hermetic: pretend git checkout
     stub._audit_verdict = {
         "semantic_status": "not_present",
         "applicability": "direct_apply",
@@ -355,6 +358,83 @@ def test_pump_audit_direct_apply_dispatches_executor_only(
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["framework_pr"]  # no specialist
+
+
+def test_pump_audit_direct_apply_degrades_to_author_on_wheel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """G3: direct_apply with no git checkout -> degrade to authoring specialist."""
+
+    async def _discover(**_: Any) -> dict[str, Any]:
+        return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
+    stub = _Stub(tmp_path, authoring=True)
+    stub._framework_roots_have_git = lambda: False  # wheel env (no git)
+    stub._audit_verdict = {
+        "applicability": "direct_apply",
+        "recommended_next_step": "direct_framework_pr",
+        "confidence": 0.8,
+        "evidence": [],
+    }
+
+    _pump(stub)
+
+    kinds = [c["kind"] for c in stub.tasks.created]
+    assert kinds == ["specialist"]  # degraded to authoring
+
+
+def test_pump_audit_skip_low_confidence_downgrades_to_author(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """G5: a low-confidence already-present skip must NOT skip; routes to authoring."""
+
+    async def _discover(**_: Any) -> dict[str, Any]:
+        return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
+    stub = _Stub(tmp_path, authoring=True)
+    stub._audit_verdict = {
+        "semantic_status": "already_equivalent",
+        "applicability": "not_applicable",
+        "recommended_next_step": "skip",
+        "confidence": 0.5,  # below 0.8 floor
+        "evidence": [{"local_file": "vllm/x.py", "symbol": "f", "reason": "maybe"}],
+    }
+
+    _pump(stub)
+
+    kinds = [c["kind"] for c in stub.tasks.created]
+    assert kinds == ["specialist"]  # not skipped
+    # No terminal already_present row was written (it wasn't skipped).
+    assert not any(
+        r.get("status") == "already_present" for r in stub.shared_state.framework_pr_phase_progress
+    )
+
+
+def test_pump_audit_skip_no_evidence_downgrades_to_author(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """G5: high confidence but no evidence -> not a safe skip."""
+
+    async def _discover(**_: Any) -> dict[str, Any]:
+        return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
+    stub = _Stub(tmp_path, authoring=True)
+    stub._audit_verdict = {
+        "recommended_next_step": "skip",
+        "confidence": 0.99,
+        "evidence": [],  # no concrete evidence
+    }
+
+    _pump(stub)
+
+    kinds = [c["kind"] for c in stub.tasks.created]
+    assert kinds == ["specialist"]
 
 
 def test_pump_audit_author_dispatches_specialist_only_with_evidence(

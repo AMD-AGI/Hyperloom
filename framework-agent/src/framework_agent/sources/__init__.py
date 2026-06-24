@@ -167,6 +167,7 @@ def _run_github(request: ExploreRequest) -> list[Candidate]:
         request.repo_url,
         gap_description=request.gap_description,
         limit=request.max_search_candidates,
+        states=request.pr_states or ("open",),
     )
     return [_pr_to_candidate(pr, request.repo_url, "github") for pr in prs]
 

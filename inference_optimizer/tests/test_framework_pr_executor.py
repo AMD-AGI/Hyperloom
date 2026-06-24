@@ -1068,7 +1068,7 @@ async def test_executor_require_accuracy_blocks_keep_when_unevaluated(tmp_path: 
     with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
-    assert result["status"] == "reverted"
+    assert result["status"] == "accuracy_unavailable_reject"
     assert "accuracy gate required" in result["reason"]
     assert (repo / "src.py").read_text().endswith("return 1\n")
 

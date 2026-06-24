@@ -912,6 +912,11 @@ class FrameworkPrExecutor:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
+            # G8: distinguish "accuracy required but unevaluated" (None, not a
+            # measured regression) from a throughput/regression revert.
+            revert_status = (
+                "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and tput_ok) else "reverted"
+            )
             await self._write_kb_record(
                 candidate=candidate,
                 outcome=OUTCOME_REVERTED_SMOKE_FAIL,
@@ -920,7 +925,7 @@ class FrameworkPrExecutor:
                 extra=extra,
             )
             return {
-                "status": "reverted",
+                "status": revert_status,
                 "candidate": candidate,
                 "batch_id": batch_id,
                 "patches_applied": [],
@@ -1108,12 +1113,24 @@ class FrameworkPrExecutor:
         )
         override_script = sanitize_script_name(params.get("benchmark_script"))
         override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        # G2: when the accuracy gate is required and a baseline accuracy exists,
+        # force RUN_EVAL=true so a stale config / process env can't silently
+        # disable eval and leave the gate unable to produce a verdict.
+        bench_extra_envs: dict[str, Any] = {}
+        acc_required = bool(params.get("require_accuracy_for_keep", require_framework_accuracy_default()))
+        try:
+            _acc_base = float(params.get("accuracy_baseline") or 0.0)
+        except (TypeError, ValueError):
+            _acc_base = 0.0
+        if acc_required and _acc_base > 0:
+            bench_extra_envs["RUN_EVAL"] = "true"
         config_path = materialize_config_with_envs(
             config_path,
             output_root,
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
+            extra_envs=bench_extra_envs or None,
             out_name="framework_pr.with_envs.yaml",
         )
 

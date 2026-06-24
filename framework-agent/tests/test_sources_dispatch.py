@@ -165,7 +165,7 @@ def test_dispatch_unions_primus_and_github(monkeypatch) -> None:
             GitHubPr(number=2, title="b", html_url="u2"),
         ]
 
-    def fake_github(repo_url, *, gap_description, limit):  # noqa: ARG001
+    def fake_github(repo_url, *, gap_description, limit, states=("open",)):  # noqa: ARG001
         return [
             GitHubPr(number=2, title="dup", html_url="dup"),  # dup with primus
             GitHubPr(number=3, title="c", html_url="u3"),

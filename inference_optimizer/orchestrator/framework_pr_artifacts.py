@@ -115,6 +115,62 @@ def write_decision_json(
         return None
 
 
+def write_semantic_audit(
+    session_dir: Path | str,
+    *,
+    candidate_id: str,
+    verdict: dict[str, Any],
+) -> str | None:
+    """Persist a candidate's semantic-audit verdict next to its decision.json.
+
+    Writes ``semantic_audit.json`` + a readable ``semantic_audit.md`` under
+    ``runs/framework_pr/<slug>/`` (G9 — co-located with decision.json).
+    Best-effort: returns the JSON path, or ``None`` on failure.
+
+    Args:
+        session_dir: The session root directory.
+        candidate_id: The candidate identifier (slug source).
+        verdict: The ``fa phase-audit`` verdict dict.
+
+    Returns:
+        The absolute path to ``semantic_audit.json``, or ``None``.
+    """
+    if not isinstance(verdict, dict) or not verdict:
+        return None
+    try:
+        slug = candidate_slug(candidate_id)
+        out_dir = runs_dir(Path(session_dir), "framework_pr", slug)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        json_path = out_dir / "semantic_audit.json"
+        json_path.write_text(json.dumps(verdict, indent=2, sort_keys=True), encoding="utf-8")
+        lines = [
+            f"# Semantic audit — {candidate_id}",
+            "",
+            f"- semantic_status: {verdict.get('semantic_status')}",
+            f"- applicability: {verdict.get('applicability')}",
+            f"- recommended_next_step: {verdict.get('recommended_next_step')}",
+            f"- confidence: {verdict.get('confidence')}",
+            f"- layer: {verdict.get('layer')}",
+            "",
+            "## Evidence",
+        ]
+        for ev in verdict.get("evidence") or []:
+            if isinstance(ev, dict):
+                lines.append(
+                    f"- {ev.get('local_file') or '(file?)'}"
+                    + (f" [{ev.get('symbol')}]" if ev.get("symbol") else "")
+                    + (f": {ev.get('reason')}" if ev.get("reason") else "")
+                )
+        risks = verdict.get("risks") or []
+        if risks:
+            lines += ["", "## Risks", *[f"- {r}" for r in risks]]
+        (out_dir / "semantic_audit.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return str(json_path)
+    except Exception:  # noqa: BLE001 — observability is best-effort
+        log.debug("framework_pr_artifacts: write_semantic_audit failed", exc_info=True)
+        return None
+
+
 def summarize_candidate_outcomes(
     progress: list[dict[str, Any]] | None,
     *,
@@ -165,4 +221,5 @@ __all__ = [
     "candidate_slug",
     "summarize_candidate_outcomes",
     "write_decision_json",
+    "write_semantic_audit",
 ]

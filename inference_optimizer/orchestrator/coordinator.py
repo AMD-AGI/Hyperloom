@@ -2732,10 +2732,34 @@ class Coordinator:
         # audit preserves the legacy both-tracks behaviour (zero regression).
         audit = await self._audit_framework_pr_candidate(next_candidate)
         audit_step = str((audit or {}).get("recommended_next_step") or "")
+        _cand_id_log = str(
+            next_candidate.get("candidate_id") or next_candidate.get("pr_url") or next_candidate.get("ref") or ""
+        )
+        # G5: only honour a skip when the audit is confident AND evidence-backed;
+        # otherwise fall through to authoring (never silently skip a GPU test on
+        # a low-confidence already-present claim).
+        if audit_step == "skip" and not self._framework_audit_skip_confident(audit):
+            log.info(
+                "FRAMEWORK_PR: audit skip downgraded (low confidence / no evidence) candidate=%s conf=%s",
+                _cand_id_log,
+                (audit or {}).get("confidence"),
+            )
+            audit_step = "author_via_specialist"
         if audit_step == "skip":
             await self._record_framework_pr_audit_skip(next_candidate, audit)
             state.save(self.session_dir)
             return
+        # G3: direct_apply needs a clean git checkout to apply / commit / reset.
+        # On a wheel install (no git tree among the framework source roots)
+        # degrade to authoring so the candidate still progresses instead of
+        # failing at ``git apply`` in the executor.
+        if audit_step == "direct_framework_pr" and not self._framework_roots_have_git():
+            log.info(
+                "FRAMEWORK_PR: direct_apply downgraded to authoring "
+                "(no git checkout among framework source roots) candidate=%s",
+                _cand_id_log,
+            )
+            audit_step = "author_via_specialist"
         # Critic gate before apply: reject short-circuits with a critic_denied row; approve/abstain enqueues.
         verdict = await self._critic_review_framework_pr_candidate(next_candidate)
         if verdict.get("verdict") == "reject":
@@ -2833,6 +2857,65 @@ class Coordinator:
             pass
         return False
 
+    @staticmethod
+    def _framework_audit_skip_confident(audit: dict[str, Any] | None) -> bool:
+        """True iff an ``already_*`` skip is safe: concrete evidence + confidence ≥ floor (G5).
+
+        Floor is ``INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_SKIP_MIN_CONFIDENCE``
+        (default 0.8). A low-confidence / evidence-free skip must not silently
+        bypass the GPU test.
+
+        Args:
+            audit: The semantic-audit verdict.
+
+        Returns:
+            ``True`` when the skip is confident and evidence-backed.
+        """
+        if not isinstance(audit, dict) or not (audit.get("evidence") or []):
+            return False
+        try:
+            conf = float(audit.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        try:
+            floor = float(os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_SKIP_MIN_CONFIDENCE", "0.8"))
+        except (TypeError, ValueError):
+            floor = 0.8
+        return conf >= floor
+
+    @staticmethod
+    def _framework_roots_have_git() -> bool:
+        """True iff any resolved framework source root is a git work tree (G3 preflight).
+
+        A wheel install (dist-packages, no ``.git``) yields ``False`` → the pump
+        degrades ``direct_apply`` to authoring (the executor's git apply / commit
+        / reset would otherwise fail).
+
+        Returns:
+            ``True`` when at least one source root is inside a git work tree.
+        """
+        import subprocess
+
+        from .framework_paths import resolve_source_file_allowlist
+
+        for root in resolve_source_file_allowlist():
+            p = Path(str(root))
+            if not p.is_dir():
+                continue
+            try:
+                cp = subprocess.run(
+                    ["git", "-C", str(p), "rev-parse", "--is-inside-work-tree"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return False
+            if cp.returncode == 0 and cp.stdout.strip() == "true":
+                return True
+        return False
+
     async def _audit_framework_pr_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
         """Run ``fa phase-audit`` for a candidate; degrade to ``unknown`` on any failure.
 
@@ -2891,6 +2974,19 @@ class Coordinator:
             candidate["_audit"] = audit
         except Exception:  # noqa: BLE001 — caching is best-effort
             pass
+        # G9: persist the verdict next to the candidate's decision.json.
+        try:
+            from .framework_pr_artifacts import write_semantic_audit
+
+            write_semantic_audit(
+                self.session_dir,
+                candidate_id=str(
+                    candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or ""
+                ),
+                verdict=audit,
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("FRAMEWORK_PR: write_semantic_audit failed", exc_info=True)
         log.info(
             "FRAMEWORK_PR: audit candidate=%s status=%s appl=%s next=%s",
             candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "",
@@ -8101,7 +8197,7 @@ class Coordinator:
         if not isinstance(res, dict):
             return
         status = str(res.get("status") or "")
-        if status not in ("kept", "reverted"):
+        if status not in ("kept", "reverted", "accuracy_unavailable_reject"):
             return
         params = getattr(task, "params", None) or {}
         cand_id = str(
