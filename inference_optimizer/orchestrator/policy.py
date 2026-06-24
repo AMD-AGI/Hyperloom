@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -44,6 +45,9 @@ from .specialist_profile import (
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from .agent_role import AgentRole
+
+
+log = logging.getLogger(__name__)
 
 
 def _value_is_present(value: Any) -> bool:
@@ -114,9 +118,6 @@ class PolicyDenied(RuntimeError):
 
 
 _GEMM_TUNING_ACTIONS: frozenset[str] = frozenset({"gemm_tuning", "run_gemm_tuning"})
-
-# Legacy constant kept for backward compat; dynamic check in _validate_fp8_only_action.
-FP8_ONLY_ACTIONS: frozenset[str] = _GEMM_TUNING_ACTIONS
 
 
 # Per-action delegate source allowlist (action_name → source roles); unlisted actions fall through to the general delegate rules.
@@ -268,11 +269,6 @@ def _effective_gpu_specialist_pool_size(shared_state: Any | None = None) -> int:
     )
 
 
-# Ceiling snapshot at import for callers needing a plain int; recomputed lazily by :func:`research_lane_ceiling`.
-MAX_RESEARCH_LANE_CAPACITY: int = research_lane_ceiling()
-
-# Canonical name of the LLM-sub-agent resource lane shared by specialists.
-RESEARCH_LANE_NAME: str = "research_lane"
 DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 12
 
 # Verdicts that allow ``integrate_patch`` without an operator override (``advise`` = soft approval, ``approve`` = green light).
@@ -1284,8 +1280,8 @@ class PolicyGate:
                     tick=int(getattr(state, "tick", 0) or 0),
                     intent_payload={"phase": phase},
                 )
-            except Exception:  # noqa: BLE001 — best-effort audit
-                pass
+            except Exception:  # noqa: BLE001 — best-effort audit, must not block the run
+                log.debug("record_policy_denial (phase_incompatible) failed", exc_info=True)
             return
         raise PolicyDenied(
             f"action {action_name!r} not allowed in phase={phase}",

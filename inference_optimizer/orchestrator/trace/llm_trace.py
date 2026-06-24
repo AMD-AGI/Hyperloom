@@ -377,15 +377,6 @@ def append_llm_call(
         log.debug("llm_trace: langfuse mirror failed", exc_info=True)
 
 
-def row_field_set() -> frozenset[str]:
-    """Public accessor for the closed row schema (used by the collector).
-
-    Returns:
-        The frozenset of canonical row field names.
-    """
-    return _ROW_FIELDS
-
-
 # Sanity guard: the dataclass fields (minus the write-time ``ts``) must
 # stay in lockstep with the on-disk row schema. A drift here means a new
 # field was added to one side only — caught at import, not at runtime.
@@ -400,5 +391,4 @@ __all__ = [
     "LLMTraceRowError",
     "VALID_COMPONENTS",
     "append_llm_call",
-    "row_field_set",
 ]

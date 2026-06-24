@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class T0Result:
-    """Outcome of one :func:`run_t0_anchor` invocation. ``status`` ∈ {ok, resumed, skipped_disabled, skipped_already}."""
+    """Outcome of one :func:`run_t0_anchor` invocation. ``status`` ∈ {ok, resumed, skipped_already}."""
 
     status: str
     session_id: str = ""
@@ -30,7 +30,6 @@ class T0Result:
     warm_present: bool = False
     pitfalls_present: bool = False
     lessons_present: bool = False
-    error: str = ""
 
 
 def _default_status_emitter(line: str) -> None:
@@ -418,7 +417,6 @@ def run_t0_anchor(
     stack_fingerprint: Mapping[str, str] | None = None,
     extra_attrs: Mapping[str, Any] | None = None,
     resume: bool = False,
-    fail_fast: bool = False,
     on_status: Callable[[str], None] | None = None,
     session_dir: Path | None = None,
     save_state: bool = True,
@@ -439,7 +437,6 @@ def run_t0_anchor(
         extra_attrs: Optional extra identity/trace attributes (model_class,
             framework, session ids).
         resume: When ``True``, re-anchor even if already anchored.
-        fail_fast: Reserved flag for fail-fast behavior.
         on_status: Optional status-line callback; defaults to INFO logging.
         session_dir: The session directory (required).
         save_state: When ``True``, persist the mutated SharedState.

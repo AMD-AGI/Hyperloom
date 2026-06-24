@@ -10,10 +10,13 @@ shape consumed by ``report.py`` and downstream frontends.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 _TABLE_ROW_RE = re.compile(
     r"^\|\s*(?P<label>[^|]+?)\s*\|\s*(?P<value>[^|]+?)\s*\|",
@@ -286,22 +289,6 @@ def build_roofline_snapshot(
             "bound_type": top_k.get("bound_type") or None,
         }
     return snap
-
-
-def _snapshot_id_from_meta(meta: dict[str, Any]) -> int | None:
-    """Extract an integer snapshot id from a metadata dict.
-
-    Args:
-        meta (dict[str, Any]): Snapshot metadata.
-
-    Returns:
-        int | None: The first integer-valued id found, or ``None``.
-    """
-    for key in ("snapshot_id", "roofline_snapshot_id"):
-        raw = meta.get(key)
-        if isinstance(raw, int):
-            return raw
-    return None
 
 
 def _num_delta(latest: float | None, baseline: float | None) -> float | None:
@@ -697,4 +684,5 @@ def build_profiler_digest(
 
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 — prompt enrichment must never crash
+        log.debug("build_profiler_digest failed", exc_info=True)
         return ""

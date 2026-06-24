@@ -57,23 +57,6 @@ class Intent:
     type: IntentType
     payload: dict[str, Any] = field(default_factory=dict)
 
-    @classmethod
-    def from_envelope_item(cls, item: dict[str, Any]) -> "Intent":
-        """Build an :class:`Intent` from one raw envelope item.
-
-        Args:
-            item (dict[str, Any]): Raw item with an ``intent_type`` key and
-                an optional ``payload`` mapping.
-
-        Returns:
-            Intent: The parsed intent with a copied payload dict.
-
-        Raises:
-            ValueError: If ``intent_type`` is not a valid :class:`IntentType`.
-        """
-        intent_type = IntentType(item["intent_type"])
-        return cls(type=intent_type, payload=dict(item.get("payload") or {}))
-
 
 # Envelope schema (DESIGN §14.1) — inline to avoid a jsonschema dependency.
 INTENT_ENVELOPE_SCHEMA: dict[str, Any] = {

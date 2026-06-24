@@ -255,23 +255,6 @@ class SpecialistGpuPool:
                 params,
             )
 
-    async def heartbeat(self, lease: GpuLease | None) -> None:
-        """Refresh the heartbeat timestamp for a lease's GPUs.
-
-        Args:
-            lease: The lease to refresh; ``None`` or an empty lease is a no-op.
-        """
-        if lease is None or not lease.gpu_ids:
-            return
-        now_iso = _now_iso()
-        placeholders = ",".join("?" * len(lease.gpu_ids))
-        params = [now_iso] + list(lease.gpu_ids) + [lease.holder_id]
-        async with self.db.transaction() as cur:
-            cur.execute(
-                f"UPDATE gpu_leases SET heartbeat_at=? WHERE gpu_id IN ({placeholders}) AND holder_id=?",
-                params,
-            )
-
     async def reap_expired(self) -> int:
         """Actively delete TTL-expired GPU leases; returns rows reaped.
 

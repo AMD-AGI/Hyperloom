@@ -211,51 +211,6 @@ def _parse_skip_spec(spec: str) -> list[str]:
 _RE_CUDA_GRAPH_MAX_BS = re.compile(r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)")
 
 
-def annotate_multi_node_cuda_graph_max_bs(
-    grid: list["GridVariant"],
-) -> list[dict]:
-    """Return advisory notes for ``--cuda-graph-max-bs N < $CONC`` variants.
-
-    These regress ~50% in multi-node mode (cuda graph cache misses every
-    cross-node decode tick), but the variant is kept in the grid and surfaced
-    as an advisory rather than auto-dropped. Returns ``[]`` outside multi-node
-    mode, when ``$CONC`` is unset/non-positive, or when no variant matches.
-
-    Args:
-        grid (list[GridVariant]): The candidate variants to inspect.
-
-    Returns:
-        list[dict]: Advisory note dicts (``name``/``source``/``reason``) for the
-        matching variants; empty outside multi-node mode or on no match.
-    """
-    from ._multi_node_env import is_multi_node
-
-    if not is_multi_node():
-        return []
-    try:
-        conc = int(os.environ.get("CONC", "64") or 64)
-    except ValueError:
-        conc = 64
-    if conc <= 0:
-        return []
-    notes: list[dict] = []
-    for v in grid:
-        m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
-        if m and int(m.group(1)) < conc:
-            notes.append(
-                {
-                    "name": v.name,
-                    "source": "multi_node_advisory",
-                    "reason": (
-                        f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
-                        "(multi-node graph-cache miss is a known regression; "
-                        "advisory only, not auto-skipped)"
-                    ),
-                }
-            )
-    return notes
-
-
 # ---------------------------------------------------------------------------
 # Multi-node grid prioritisation + invalid-variant filtering
 # ---------------------------------------------------------------------------
@@ -358,8 +313,7 @@ def apply_multi_node_invalid_variants(
 
     Current rule: ``--cuda-graph-max-bs N`` with ``N < $CONC`` regresses ~50%
     in multi-node mode (cuda-graph cache misses every cross-node decode tick),
-    so it is dropped from the explore grid here (the advisory-only counterpart
-    is ``annotate_multi_node_cuda_graph_max_bs``).
+    so it is dropped from the explore grid here.
 
     Args:
         grid (list[GridVariant]): The candidate variants to filter.

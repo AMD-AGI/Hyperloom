@@ -169,6 +169,11 @@ _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 3.0
 # Only the top-N reusable hot kernels are enforced.
 _DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
 
+# How many hot / skipped kernels ``record_trace_analyze`` keeps in the trace
+# summary (the ``hot_kernels_top15`` / ``kernel_roofline_top15`` field names
+# reflect this value).
+_TRACE_HOT_KERNEL_TOP_N = 15
+
 # Per-action audit history cap (``<action>_attempts`` lists keep most recent N).
 _DEFAULT_ATTEMPTS_HISTORY = 20
 
@@ -355,59 +360,6 @@ def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
         for item in obj:
             migrated += _migrate_legacy_extra_sglang_args_keys(item)
     return migrated
-
-
-@dataclass
-class TraceAnalyzeSnapshot:
-    """Reference shape for ``SharedState.last_trace_analyze`` (``F0_pre_merge.MD`` §9); on-disk shape stays a plain dict for Inv-10.1."""
-
-    trace_input: str = ""
-    candidates_path: str = ""
-    kernel_roofline_path: str = ""
-    hot_kernels_top15: list[dict[str, Any]] = field(default_factory=list)
-    kernel_roofline_top15: list[dict[str, Any]] = field(default_factory=list)
-    task_groups: list[dict[str, Any]] = field(default_factory=list)
-    reusable_native_kernel_ids: list[str] = field(default_factory=list)
-    trace_health_warnings: list[dict[str, Any]] = field(default_factory=list)
-    analysis_md_path: str = ""
-    analysis_md_text: str = ""
-    roofline_snapshot_id: int = 0
-    roofline_baseline_gain_at_snapshot: float = 0.0
-    ts: str = ""
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any] | None) -> "TraceAnalyzeSnapshot":
-        """Build a typed snapshot from the on-disk ``last_trace_analyze`` dict.
-
-        Each field is coerced to its declared type with a safe default so a
-        partial / legacy blob never raises. Used as a typed reader on the
-        consumer side; the canonical writer remains
-        :meth:`SharedState.record_trace_analyze`.
-
-        Args:
-            d (dict[str, Any] | None): The raw snapshot dict (e.g. from
-                ``state.json``), or ``None`` to build an all-defaults instance.
-
-        Returns:
-            TraceAnalyzeSnapshot: A populated snapshot with every field
-                normalized to its declared type.
-        """
-        d = d or {}
-        return cls(
-            trace_input=str(d.get("trace_input") or ""),
-            candidates_path=str(d.get("candidates_path") or ""),
-            kernel_roofline_path=str(d.get("kernel_roofline_path") or ""),
-            hot_kernels_top15=list(d.get("hot_kernels_top15") or []),
-            kernel_roofline_top15=list(d.get("kernel_roofline_top15") or []),
-            task_groups=list(d.get("task_groups") or []),
-            reusable_native_kernel_ids=list(d.get("reusable_native_kernel_ids") or []),
-            trace_health_warnings=list(d.get("trace_health_warnings") or []),
-            analysis_md_path=str(d.get("analysis_md_path") or ""),
-            analysis_md_text=str(d.get("analysis_md_text") or ""),
-            roofline_snapshot_id=int(d.get("roofline_snapshot_id") or 0),
-            roofline_baseline_gain_at_snapshot=float(d.get("roofline_baseline_gain_at_snapshot") or 0.0),
-            ts=str(d.get("ts") or ""),
-        )
 
 
 @dataclass
@@ -1149,8 +1101,8 @@ class SharedState:
             from ..breakdown.recorder import instrument
 
             instrument.snapshot_state_sections(session_dir, self)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — author-time capture must never block save
+            log.debug("snapshot_state_sections failed", exc_info=True)
         # Read-only derived artifact: re-render current_setting.sh from the
         # current best route so the operator can audit / re-feed it via
         # --reference-script. Never parsed back (resume restores from state.json).
@@ -1168,7 +1120,7 @@ class SharedState:
                     text, encoding="utf-8",
                 )
         except Exception:  # noqa: BLE001 — derived artifact, never fatal
-            pass
+            log.debug("current_setting.sh render failed", exc_info=True)
 
     # Mutators (Coordinator only — LLM agents go via intents)
     def add_pruned_family(self, family: str) -> bool:
@@ -1196,17 +1148,6 @@ class SharedState:
             bool: ``True`` when ``family`` is in :attr:`pruned_families`.
         """
         return family in self.pruned_families
-
-    def prune_family(self, family: str) -> bool:
-        """Alias for :meth:`add_pruned_family` (policy-loop stop-loss).
-
-        Args:
-            family (str): The action family identifier to prune.
-
-        Returns:
-            bool: ``True`` iff the family was newly added.
-        """
-        return self.add_pruned_family(family)
 
     _POLICY_DENIAL_HISTORY_CAP = 50
 
@@ -1780,8 +1721,8 @@ class SharedState:
                 action=action,
                 entry=entry,
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — author-time capture must never block record
+            log.debug("record_phase_event capture failed", exc_info=True)
         return entry
 
     def record_action_failure(
@@ -2021,7 +1962,7 @@ class SharedState:
                     rocprof_by_kernel_id[str(row["kernel_id"])] = row.get("rocprof_roofline")
             except Exception:  # noqa: BLE001 — sidecar merge is best-effort
                 rocprof_by_kernel_id = {}
-        for entry in hot[:15] if isinstance(hot, list) else []:
+        for entry in hot[:_TRACE_HOT_KERNEL_TOP_N] if isinstance(hot, list) else []:
             if not isinstance(entry, dict):
                 continue
             kid = entry.get("kernel_id")
@@ -2084,7 +2025,7 @@ class SharedState:
                 key=lambda e: float(e.get("gpu_pct") or 0.0),
                 reverse=True,
             )
-            for entry in skipped_sorted[:15]:
+            for entry in skipped_sorted[:_TRACE_HOT_KERNEL_TOP_N]:
                 skipped_summary.append(
                     {
                         "kernel_id": entry.get("kernel_id"),
@@ -2462,8 +2403,8 @@ class SharedState:
                 getattr(self, "_session_dir", None),
                 entry,
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — author-time capture must never block record
+            log.debug("record_specialist_round capture failed", exc_info=True)
 
     def _trim_specialist_rounds(self) -> None:
         """Bound the specialist-round ledger for multi-day runs (keep most recent)."""
@@ -2689,7 +2630,6 @@ class SharedState:
             merged = existing
         # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
         if len(self.gaps) > _GAPS_MAX_ENTRIES:
-            keep_cid = cid
             others = [g for g in self.gaps if g is not merged]
 
             def _sort_key(g: dict[str, Any]) -> str:
@@ -2708,7 +2648,6 @@ class SharedState:
             keep_count = _GAPS_MAX_ENTRIES - 1
             others = others[-keep_count:] if keep_count > 0 else []
             self.gaps = others + [merged]
-            del keep_cid  # silence linters when the local isn't used elsewhere
         return merged
 
     def append_gap_attempt(

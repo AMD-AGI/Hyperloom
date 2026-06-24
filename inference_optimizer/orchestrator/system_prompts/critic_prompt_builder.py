@@ -16,6 +16,10 @@ from ..action_registry import ActionMetadata, ActionRegistry
 from .prompt_builder import KERNEL_OWNED_ACTIONS, _filter_actions
 
 
+# ``accuracy_risk`` above this bar flips the default verdict from ``approve``
+# to ``advise`` and surfaces the action as high-risk in the Critic prompt.
+_HIGH_RISK_ACCURACY_THRESHOLD = 0.30
+
 # Family ordering for the catalogue section.
 _FAMILY_ORDER: tuple[str, ...] = (
     "prep",
@@ -226,7 +230,7 @@ def _section_default_verdict(actions: list[ActionMetadata]) -> list[str]:
         list[str]: Markdown lines describing the default verdict rules by
         accuracy risk and family.
     """
-    high_risk = sorted(a.name for a in actions if a.accuracy_risk > 0.30)
+    high_risk = sorted(a.name for a in actions if a.accuracy_risk > _HIGH_RISK_ACCURACY_THRESHOLD)
     high_risk_line = ", ".join(high_risk) if high_risk else "(none in this run)"
     return [
         "## 4. DEFAULT VERDICT",
@@ -241,8 +245,8 @@ def _section_default_verdict(actions: list[ActionMetadata]) -> list[str]:
         "",
         "- `accuracy_risk == 0` → `approve` unless duplicate proposal or",
         "  `judge_bundle.required_context` is non-empty.",
-        "- `0 < accuracy_risk <= 0.30` → `approve` with `predicted_gain_pct` set.",
-        "- `accuracy_risk > 0.30` → `advise` and call out the per-action",
+        f"- `0 < accuracy_risk <= {_HIGH_RISK_ACCURACY_THRESHOLD:.2f}` → `approve` with `predicted_gain_pct` set.",
+        f"- `accuracy_risk > {_HIGH_RISK_ACCURACY_THRESHOLD:.2f}` → `advise` and call out the per-action",
         "  risk in `notes`; only escalate to `reject` when the safety",
         "  carve-outs in §6 actually fire.",
         f"  Higher-risk actions this run: {high_risk_line}.",

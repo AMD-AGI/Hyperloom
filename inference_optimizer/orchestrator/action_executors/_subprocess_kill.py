@@ -378,8 +378,8 @@ class _StreamCapture:
 _SERVER_LOG_TAIL_BYTES: int = 65536
 
 
-def _server_log_shows_death(path: str) -> bool:
-    """Return True iff ``server.log`` tail contains a terminal-init marker.
+def _server_log_shows_death(path: str) -> str | None:
+    """Return the terminal-init marker present in ``server.log`` tail, else None.
 
     Best-effort and never raises: a missing / unreadable log (server hasn't
     written yet) reads as "not dead" so a slow cold start is never misjudged.
@@ -388,8 +388,10 @@ def _server_log_shows_death(path: str) -> bool:
         path: Filesystem path to the server's ``server.log``.
 
     Returns:
-        True if the log tail contains a terminal engine/worker-init marker,
-        False otherwise (including when the log is missing or unreadable).
+        The first matched terminal engine/worker-init marker string if the log
+        tail contains one, otherwise None (including when the log is missing or
+        unreadable). Returning the marker (rather than a bare bool) lets the
+        watchdog report which fatal line tripped it instead of a placeholder.
     """
     try:
         with open(path, "rb") as fh:
@@ -399,8 +401,11 @@ def _server_log_shows_death(path: str) -> bool:
                 fh.seek(0)
             tail = fh.read().decode("utf-8", "ignore")
     except (OSError, ValueError):
-        return False
-    return any(marker in tail for marker in _SERVER_DEAD_MARKERS)
+        return None
+    for marker in _SERVER_DEAD_MARKERS:
+        if marker in tail:
+            return marker
+    return None
 
 
 def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
@@ -554,7 +559,8 @@ def run_with_session_kill(
         detok_stall_grace_sec: Grace period a ready server may produce no
             generation progress before the stall watchdog reaps the tree;
             defaults to the ``INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC`` env
-            value or 600s. ``≤ 0`` disables the stall gate.
+            value or ``_DETOK_STALL_GRACE_SEC_DEFAULT`` (1800s). ``≤ 0``
+            disables the stall gate.
 
     Returns:
         A ``CompletedProcess`` carrying the child's returncode (or one of the
@@ -849,12 +855,13 @@ def _communicate_with_soft_deadline(
                     elapsed_sec=elapsed,
                 )
         if watchdog_active and grace_sec is not None:
-            if _server_log_shows_death(server_log_path):  # type: ignore[arg-type]
+            death_marker = _server_log_shows_death(server_log_path)  # type: ignore[arg-type]
+            if death_marker is not None:
                 if dead_marker_since is None:
                     dead_marker_since = time.monotonic()
                 elif time.monotonic() - dead_marker_since >= grace_sec:
                     raise _ServerDeadDetected(
-                        marker="server_init_failed",
+                        marker=death_marker,
                         grace_sec=grace_sec,
                         elapsed_sec=elapsed,
                     )

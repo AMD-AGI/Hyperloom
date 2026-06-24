@@ -631,8 +631,8 @@ async def run_conc_sweep(
                 payload,
                 producer="conc_sweep",
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — author-time capture must never break the sweep
+            log.debug("conc_sweep breakdown capture failed", exc_info=True)
         # final.json pointer is added by report.py at CLOSE (this action runs before CLOSE).
 
     log.info(
@@ -644,42 +644,11 @@ async def run_conc_sweep(
     return payload
 
 
-def format_summary_line(payload: dict[str, Any]) -> str:
-    """One-line stdout summary for ``_print_final_summary``.
-
-    Args:
-        payload: The conc-sweep result payload to summarize.
-
-    Returns:
-        A single formatted summary line.
-    """
-    status = payload.get("status", "?")
-    if status == "skipped":
-        return f"  conc_sweep           : skipped ({payload.get('skip_reason', '?')})"
-    s = payload.get("summary", {}) or {}
-    succ = s.get("successful_pairs", 0)
-    failed = s.get("failed_pairs", 0)
-    best_speedup = s.get("best_speedup")
-    best_conc = s.get("best_conc")
-    median = s.get("median_speedup")
-    suffix = ""
-    if payload.get("budget_exhausted"):
-        budget = payload.get("total_budget_sec")
-        suffix = f" [budget_exhausted{f' @{budget}s' if budget else ''}]"
-    parts = [f"  conc_sweep           : {status} (pairs={succ}+{failed}f)"]
-    if isinstance(best_speedup, (int, float)) and best_conc is not None:
-        parts.append(f"best={best_speedup:.2f}x @ conc={best_conc}")
-    if isinstance(median, (int, float)):
-        parts.append(f"median={median:.2f}x")
-    return " ".join(parts) + suffix
-
-
 __all__ = [
     "DEFAULT_CONCS",
     "DEFAULT_NUM_PROMPTS_FACTOR",
     "DEFAULT_TOTAL_BUDGET_SEC",
     "DEFAULT_VARIANT_TIMEOUT_SEC",
     "SCHEMA_VERSION",
-    "format_summary_line",
     "run_conc_sweep",
 ]

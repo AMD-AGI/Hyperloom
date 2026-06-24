@@ -70,10 +70,6 @@ def _kernel_agent_root_from_env() -> Path | None:
     return Path(raw)
 
 
-# Backward-compat re-export (NOT used internally; internal logic must use _kernel_agent_root_from_env() so late env injection wins).
-HYPERLOOM_KERNEL_AGENT_ROOT = _kernel_agent_root_from_env()
-
-
 HandlerResult = dict[str, Any]
 HandlerFn = Callable[..., Awaitable[HandlerResult]]
 
@@ -5291,7 +5287,6 @@ def untried_hot_reusable_kernels(
 
 
 __all__ = [
-    "HYPERLOOM_KERNEL_AGENT_ROOT",
     "KERNEL_REQUEST_HANDLERS",
     "get_handler",
     "has_handler",

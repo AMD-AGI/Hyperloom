@@ -25,7 +25,10 @@ log = logging.getLogger(__name__)
 def _read_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError) as exc:
+        # ValueError covers json.JSONDecodeError; an absent vs malformed file
+        # both degrade to {} but are now distinguishable in debug logs.
+        log.debug("_read_json: could not read %s: %s", path, exc)
         return {}
 
 

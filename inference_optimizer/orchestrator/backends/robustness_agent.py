@@ -272,8 +272,8 @@ class RobustnessAgentBackend:
                 self.session_dir,
                 workdir=workdir,
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — author-time capture must never break the agent loop
+            log.debug("robustness breakdown capture failed", exc_info=True)
 
         metadata: dict[str, Any] = {
             "session_id": session_id,

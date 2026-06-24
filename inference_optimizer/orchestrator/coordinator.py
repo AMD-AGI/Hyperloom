@@ -52,6 +52,14 @@ _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline
 # failures (any error_class), so mixed classes can't dodge the per-class streaks.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
+# Floor on the per-repo framework-PR discover timeout so a slow repo still gets a
+# usable budget even when the phase timeout is spread thin across many repos.
+_FRAMEWORK_PR_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
+# Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
+_DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
+# Default resume-drift floor (%): a re-measured current_best below this fraction
+# of its recorded tput is flagged as drift. Overridable via env.
+_DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 from . import phase_state as _phase_state
 from .optimization_journal import (
     Journal,
@@ -102,7 +110,6 @@ from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _parse_baseline_workload_extra,
     _parse_iso_unix,
     _resolve_roofline_watermark_ratio,
-    _summarize_failed_variants,
     effective_closing_grace_sec,
 )
 
@@ -306,10 +313,6 @@ class PendingProposal:
     payload: dict[str, Any]
     decided: bool = False
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
-    # Kept for review_verdict envelope schema + resume replay; no live writer populates it.
-    verdict_map: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # Always-empty, kept for forward compat + stable defer/restore shape.
-    kb_edge_ids: dict[str, str] = field(default_factory=dict)
 
 
 # #266 lifecycle: path-like keys worth surfacing from a kernel handler
@@ -2128,7 +2131,6 @@ class Coordinator:
                 workload=workload,
                 hw=hw,
                 extra_attrs=extra_attrs,
-                fail_fast=False,
                 session_dir=self.session_dir,
                 save_state=True,
             )
@@ -3130,7 +3132,6 @@ class Coordinator:
                     "last_profile_kernel_breakdown",
                     None,
                 ),
-                tried_refs=self._framework_pr_tried_refs(),
             )
         except Exception:  # noqa: BLE001 — defensive
             directed_gap, directed_keywords = "", []
@@ -3176,7 +3177,7 @@ class Coordinator:
         last_exc: Exception | None = None
         # Spread the phase timeout across repos so one slow repo can't blow the whole budget.
         per_repo_timeout = timeout_sec / float(len(repo_urls)) if repo_urls else timeout_sec
-        per_repo_timeout = max(per_repo_timeout, 30.0)
+        per_repo_timeout = max(per_repo_timeout, _FRAMEWORK_PR_MIN_PER_REPO_TIMEOUT_SEC)
         for repo_url in repo_urls:
             try:
                 repo_payload = await _fa_client.phase_discover(
@@ -3942,8 +3943,7 @@ class Coordinator:
                           "error": repr(exc)})
             return
 
-        result: dict[str, Any] = {}
-        result = _read_perfskills_result(result_path)
+        result: dict[str, Any] = _read_perfskills_result(result_path)
         if not result:
             _finish_skip({
                 "status": "error",
@@ -4817,7 +4817,10 @@ class Coordinator:
             conf = float(warm.get("confidence") or 0.0)
         except (TypeError, ValueError):
             conf = 0.0
-        min_conf = float(getattr(self, "_warm_replay_min_confidence", 0.7) or 0.7)
+        min_conf = float(
+            getattr(self, "_warm_replay_min_confidence", _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE)
+            or _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE
+        )
         recipe = warm.get("recipe") or {}
         if not isinstance(recipe, dict):
             recipe = {}
@@ -7789,7 +7792,9 @@ class Coordinator:
             from ..session_paths import target_baseline_json
 
             return target_baseline_json(self.session_dir).exists()
-        except Exception:  # noqa: BLE001 — defensive; missing helper -> treat as done.
+        except ImportError:
+            # Missing helper -> treat the gate as satisfied (legacy/partial build).
+            log.debug("_target_analysis_baseline_exists: helper unavailable", exc_info=True)
             return True
 
     def _kernel_opt_keep_pending(self) -> str:
@@ -11093,11 +11098,10 @@ class Coordinator:
         throughput_after: float | None,
         stack_depth: int,
         measured_at: str,
-        throughput_before: float | None = None,
     ) -> dict[str, Any]:
         """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
         from .result_recorder import ResultRecorder as _RR
-        return _RR._build_measured_impact(gain_pct=gain_pct, throughput_after=throughput_after, stack_depth=stack_depth, measured_at=measured_at, throughput_before=throughput_before)
+        return _RR._build_measured_impact(gain_pct=gain_pct, throughput_after=throughput_after, stack_depth=stack_depth, measured_at=measured_at)
 
     @staticmethod
     def _predicted_gain(
@@ -11685,9 +11689,12 @@ class Coordinator:
                     cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                     recorded = cb_rec.get("tput")
                     try:
-                        floor = float(os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip() or 95.0)
+                        floor = float(
+                            os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip()
+                            or _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                        )
                     except (TypeError, ValueError):
-                        floor = 95.0
+                        floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
                     if (
                         isinstance(recorded, (int, float))
                         and recorded > 0
@@ -11954,8 +11961,7 @@ __all__ = [
     "PendingProposal",
     "SharedState",
     # Re-exported from coordinator_helpers for callers/tests that reference
-    # them via ``coordinator.<name>`` (e.g. test_coordinator_runtime uses
-    # coordinator._summarize_failed_variants). Declared so the re-export is
+    # them via ``coordinator.<name>``. Declared so the re-export is
     # intentional rather than a flagged unused import.
     "_BASELINE_FINGERPRINT_KEYS",
     "_baseline_params_fingerprint",
@@ -11965,6 +11971,5 @@ __all__ = [
     "_parse_baseline_workload_extra",
     "_parse_iso_unix",
     "_resolve_roofline_watermark_ratio",
-    "_summarize_failed_variants",
     "effective_closing_grace_sec",
 ]

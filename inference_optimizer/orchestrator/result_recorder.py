@@ -657,7 +657,6 @@ class ResultRecorder:
         throughput_after: float | None,
         stack_depth: int,
         measured_at: str,
-        throughput_before: float | None = None,
     ) -> dict[str, Any]:
         """GAP 3 — structured ``measured_impact`` payload (dict not legacy string so consumers parse without regex); stack_depth = stack length before this lesson lands.
 
@@ -666,7 +665,6 @@ class ResultRecorder:
             throughput_after: Throughput after the change, or ``None``.
             stack_depth: Optimization-stack length before this lesson lands.
             measured_at: ISO timestamp of the measurement.
-            throughput_before: Throughput before the change, or ``None``.
 
         Returns:
             A compact ``measured_impact`` dict with ``None`` fields stripped.
@@ -678,8 +676,6 @@ class ResultRecorder:
         }
         if throughput_after is not None:
             out["throughput_after"] = float(throughput_after)
-        if throughput_before is not None:
-            out["throughput_before"] = float(throughput_before)
         # Strip None for compactness (prompt section uses .get).
         return {k: v for k, v in out.items() if v is not None}
 

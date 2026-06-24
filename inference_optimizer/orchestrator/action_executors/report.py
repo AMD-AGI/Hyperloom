@@ -280,7 +280,8 @@ def _build_failure_summary(
                 from ._subprocess_kill import server_log_death_excerpt
 
                 excerpt = server_log_death_excerpt(str(server_log_abs))
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 — excerpt enrichment is best-effort
+                log.debug("server_log_death_excerpt failed", exc_info=True)
                 excerpt = None
             if excerpt:
                 error_text = excerpt.strip()
@@ -909,8 +910,8 @@ def _write_kernel_opt_summary(
                 summary,
                 producer="coordinator",
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — author-time capture must never break the report
+            log.debug("kernel_optimization_summary capture failed", exc_info=True)
         return out_path
     except Exception as exc:  # noqa: BLE001
         log.warning(

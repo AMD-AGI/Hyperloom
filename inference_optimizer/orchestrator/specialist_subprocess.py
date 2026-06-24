@@ -16,7 +16,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import time
@@ -232,34 +231,6 @@ def _setup_worktree(
     if cp.returncode != 0:
         return None, (f"git worktree add rc={cp.returncode}: stderr={cp.stderr.strip()[:400]!r}")
     return worktree_path, ""
-
-
-def _teardown_worktree(base: Path | None, worktree_path: Path) -> None:
-    """Best-effort cleanup of a specialist worktree.
-
-    Called only on the REVERT / synth-empty path; the KEEP path leaves the
-    worktree in place so ``integrate_patch`` can pull patches out of it.
-
-    Args:
-        base: Git checkout the worktree was created from, or ``None``.
-        worktree_path: Path of the worktree to remove.
-    """
-    if not worktree_path.exists():
-        return
-    if base is not None and (base / ".git").exists():
-        try:
-            subprocess.run(
-                ["git", "-C", str(base), "worktree", "remove", "--force", str(worktree_path)],
-                capture_output=True,
-                text=True,
-                timeout=30.0,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-    # Fall back to plain rm -rf if the worktree dir survived.
-    if worktree_path.exists():
-        shutil.rmtree(worktree_path, ignore_errors=True)
 
 
 # Dispatcher
@@ -788,5 +759,4 @@ __all__ = [
     "SpecialistSubprocessResult",
     "_pick_worktree_base",
     "_setup_worktree",
-    "_teardown_worktree",
 ]

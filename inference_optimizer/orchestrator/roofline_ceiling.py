@@ -739,30 +739,6 @@ def _derive_head_dim(cfg: dict[str, Any]) -> int:
     return 0
 
 
-def _compute_active_weight_bytes(
-    cfg: dict[str, Any],
-    *,
-    weight_bytes: int,
-    dtype_bytes: float,
-) -> int:
-    """MoE-aware estimate of weight bytes fetched per token (geometry-based, avoids the ~10× over-count from the safetensors total; safe-degrades to ``weight_bytes``).
-
-    Args:
-        cfg: Parsed HF ``config.json``.
-        weight_bytes: Total weight bytes (the safe-degrade fallback).
-        dtype_bytes: Weight bytes-per-element.
-
-    Returns:
-        The estimated per-token active weight bytes.
-    """
-    active, _total_expert, _ne, _ept = _compute_expert_decomposition(
-        cfg,
-        weight_bytes=weight_bytes,
-        dtype_bytes=dtype_bytes,
-    )
-    return active
-
-
 def _compute_expert_decomposition(
     cfg: dict[str, Any],
     *,
@@ -1716,53 +1692,3 @@ def compute_roofline_from_perfmodel(
         hbm_bw_gbps=bw_gbps,
         peak_achievable_tflops=f_peak_tflops,
     )
-
-
-def compute_roofline_breakdown_from_state_v2(
-    state: Any,
-    *,
-    arm: str | None = None,
-) -> "tuple[RooflineBreakdown, PerfModelBreakdown | None]":
-    """Return the primary roofline breakdown AND the per-op PerfModel breakdown.
-
-    The first element is a ``RooflineBreakdown`` from
-    ``compute_roofline_breakdown_from_state``: when the model config is
-    complete, ``mem_tok_per_sec`` / ``cmp_tok_per_sec`` / ``peak_tok_per_sec``
-    all come from the bottom-up PerfModel. Legacy aggregate values are fallback.
-
-    The second element is the full per-op ``PerfModelBreakdown`` (``None`` when
-    the GPU or model config is unsupported).  Its ``decode_tok_per_s`` equals
-    ``breakdown.peak_tok_per_sec`` for supported configs. ``arm`` pins precision
-    to a specific arm ("baseline" anchors the ceiling dtype to baseline).
-
-    Args:
-        state: Shared run state to compute the breakdowns from.
-        arm: Pins precision to a specific arm; ``None`` infers it.
-
-    Returns:
-        A tuple of ``(RooflineBreakdown, PerfModelBreakdown | None)``; the
-        second element is ``None`` when the GPU/model config is unsupported.
-    """
-    legacy = compute_roofline_breakdown_from_state(state, arm=arm)
-    runtime = resolve_runtime_workload(state, arm=arm)
-    meta = load_model_meta(
-        runtime.model_path,
-        precision_hint=runtime.precision,
-    )
-    pm_bd: "PerfModelBreakdown | None" = None
-    if meta is not None:
-        try:
-            rt = resolve_runtime_dtype(state, meta, arm=arm)
-            meta = apply_runtime_dtype(meta, rt)
-            pm_bd = compute_roofline_from_perfmodel(
-                meta=meta,
-                gpu_type=runtime.gpu_type,
-                concurrency=runtime.concurrency,
-                isl=runtime.isl,
-                osl=runtime.osl,
-                num_gpus=runtime.tp,
-                precision_tag=rt.compute_precision_tag or runtime.precision or "bf16",
-            )
-        except Exception:  # noqa: BLE001 — best-effort, never raise
-            pm_bd = None
-    return legacy, pm_bd

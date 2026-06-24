@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -439,7 +440,9 @@ class SqliteLeaseBackend:
         """
         try:
             rows = await self.db.fetchall("SELECT lane, capacity FROM lane_capacity")
-        except Exception:  # noqa: BLE001 — best-effort observation
+        except sqlite3.OperationalError as exc:
+            # Legacy DB never opened with v0.8 lacks the table; fall back to defaults.
+            log.debug("lane_capacities: lane_capacity table unavailable: %s", exc)
             return dict(DEFAULT_LANE_CAPACITIES)
         out: dict[str, int] = dict(DEFAULT_LANE_CAPACITIES)
         for r in rows:

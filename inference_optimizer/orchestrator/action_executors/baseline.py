@@ -6,7 +6,7 @@ Runs the Magpie CLI as a subprocess, parses ``benchmark_report.json``,
 and returns the result on the bus as a ``delegated_result`` event.
 
 RunnerContext.task.params keys (all optional; defaults from
-BASELINE_DEFAULT_CONFIG): ``config_path``, ``output_dir``, ``timeout_sec``.
+default_baseline_config()): ``config_path``, ``output_dir``, ``timeout_sec``.
 
 Returns ``error_class`` on failure so the coordinator can route to
 Robustness RCA later (P1-7).
@@ -30,7 +30,6 @@ from typing import Any, Iterator
 import yaml
 
 from ...compat.payload_aliases import read_extra_server_args
-from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
@@ -239,10 +238,6 @@ def _classify_subprocess_error(
     return "subprocess_nonzero"
 
 
-# Legacy module-level constant kept pointing at the sglang yaml for tests
-# that import it as a fixture path. Runtime sglang/vllm selection goes
-# through `default_baseline_config()`.
-BASELINE_DEFAULT_CONFIG = asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
 BASELINE_DEFAULT_TIMEOUT_SEC = (
     7800  # WARM-start cap, 130 min (raised for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 ~82 min workload)
 )
@@ -1794,7 +1789,6 @@ baseline_executor = BaselineExecutor()
 __all__ = [
     "AITER_JIT_PROBE_PATHS",
     "BASELINE_COLD_START_TIMEOUT_SEC",
-    "BASELINE_DEFAULT_CONFIG",
     "BASELINE_DEFAULT_TIMEOUT_SEC",
     "BaselineExecutor",
     "COLD_START_KERNEL_THRESHOLD",

@@ -502,7 +502,10 @@ class SpecialistPromptInputs:
     max_model_len: int = 0
     # Runtime fingerprint so the specialist can judge lesson applicability;
     # ``framework_version`` is the precise install version. Empty => no
-    # version annotation.
+# version annotation. ``framework`` is the active server framework
+    # (``sglang`` / ``vllm`` / ``atom``); empty falls back to the canonical
+    # sglang/vllm hint blocks, and switches "what to read first" bullets to
+    # atom paths when ``framework == 'atom'``.
     framework: str = ""
     framework_version: str = ""
 
@@ -528,16 +531,8 @@ class SpecialistPromptInputs:
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
-    # Generic sub_kind passthrough so ``_focus_*`` helpers can specialise.
-    sub_kind: str = ""
-
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
-
-    # Active server framework (``sglang`` / ``vllm`` / ``atom``); empty falls
-    # back to the canonical sglang/vllm hint blocks. Switches "what to read
-    # first" bullets to atom paths when ``framework == 'atom'``.
-    framework: str = ""
 
     # Local source navigation hint
     framework_source_roots: tuple[str, ...] = ()

@@ -153,7 +153,8 @@ def _is_multi_node_sandbox() -> bool:
         from ._multi_node_env import is_multi_node
 
         return is_multi_node()
-    except Exception:  # noqa: BLE001 - never block recovery on import error
+    except Exception:  # noqa: BLE001 — never block recovery; default to single-node
+        log.warning("_is_multi_node_sandbox detection failed; assuming single-node", exc_info=True)
         return False
 
 

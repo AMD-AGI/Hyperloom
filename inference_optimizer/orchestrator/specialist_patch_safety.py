@@ -57,16 +57,6 @@ _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
     re.M,
 )
 
-# git-only metadata stripped before semantic diff comparison.
-_DIFF_NORMALISE_DROP_LINES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+(?: \d+)?$", re.M),
-    re.compile(r"^diff --git a/.* b/.*$", re.M),
-    re.compile(r"^new file mode \d+$", re.M),
-    re.compile(r"^deleted file mode \d+$", re.M),
-    re.compile(r"^similarity index \d+%$", re.M),
-)
-
-
 # Patch path within a unified diff (``--- a/<p>`` / ``+++ b/<p>``).
 _PATCH_PATH_RE: re.Pattern[str] = re.compile(
     r"^(?:---|\+\+\+) (?:a|b)/(?P<path>.+)$",
@@ -269,21 +259,6 @@ def is_unified_diff(text: str) -> bool:
         True when at least one ``@@`` hunk header is present.
     """
     return bool(_UNIFIED_DIFF_HUNK_RE.search(text or ""))
-
-
-def normalise_diff_for_compare(text: str) -> str:
-    """Strip git-only metadata + trailing whitespace for semantic comparison.
-
-    Args:
-        text: The diff text to normalise.
-
-    Returns:
-        The normalised diff body (git-only lines and blank lines dropped).
-    """
-    body = text or ""
-    for pat in _DIFF_NORMALISE_DROP_LINES:
-        body = pat.sub("", body)
-    return "\n".join(line.rstrip() for line in body.splitlines() if line.strip())
 
 
 def patch_escapes_tree(patch_text: str) -> str | None:
@@ -518,7 +493,6 @@ __all__ = [
     "cross_domain_rule_descriptors",
     "ground_patch_text",
     "is_unified_diff",
-    "normalise_diff_for_compare",
     "numeric_claims",
     "patch_escapes_tree",
     "patch_file_targets",

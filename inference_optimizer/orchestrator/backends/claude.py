@@ -75,6 +75,9 @@ payload={{"topic":"heartbeat","body_md":"ok"}}.
 # context tools before emitting, so it needs more turns + wall-clock budget.
 _CONVERSATIONAL_MIN_MAX_TURNS: int = 12
 _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC: float = 300.0
+# Raw-completion floor: Claude Code counts the single text message as a turn, so
+# a literal max_turns=1 trips before any output. Give headroom (tools disallowed).
+_RAW_COMPLETION_MIN_MAX_TURNS: int = 8
 
 
 # Built-in tools disallowed in raw_completion mode so the model produces
@@ -287,9 +290,7 @@ class ClaudeBackend:
         full_prompt = self._compose_prompt(prompt)
         max_turns_use = max_turns or self.max_turns_default
         if self.raw_completion:
-            # Claude Code counts the single text message as a turn, so a
-            # literal max_turns=1 trips; give headroom (tools are disallowed).
-            max_turns_use = max(max_turns_use, 8)
+            max_turns_use = max(max_turns_use, _RAW_COMPLETION_MIN_MAX_TURNS)
         resume_session = self._session_id if self.conversational else None
         options = self._build_options(
             tools=tools or [],

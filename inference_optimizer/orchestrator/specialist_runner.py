@@ -45,7 +45,7 @@ from .specialist_subprocess import (
 from . import specialist_patch_safety as _patch_safety
 from .policy import DEFAULT_SPECIALIST_MAX_PROPOSALS
 from .specialist_profile import SpecialistProfile, resolve_specialist_profile
-from .sub_agent_runner import RunnerContext, SubAgentResult
+from .sub_agent_runner import RunnerContext
 from .system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
@@ -158,8 +158,6 @@ class _PreparedRun:
     """Shared setup-phase output threaded into both execution paths."""
 
     domain: SpecialistDomain | None = None
-    # Per-domain sub_kind selected at dispatch (empty = default prompt).
-    sub_kind: str = ""
     gap: str = ""
     max_turns: int = 0
     # Resolved dispatch profile (scope / mode / bench / lane).
@@ -462,7 +460,6 @@ class SpecialistRunner:
         # its catalogue entry (``comm_specialist``) instead of silently failing
         # the key-only ``get_domain`` lookup and dying as ``unknown_domain``.
         domain = domain_for_tag(domain_key)
-        sub_kind = str(params.get("sub_kind") or "").strip()
         profile = resolve_specialist_profile(params)
         task_description = str(params.get("task_description") or "").strip()
 
@@ -527,7 +524,6 @@ class SpecialistRunner:
                 kb_subgraph=dict(params.get("kb_subgraph") or {}),
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
-                sub_kind=str(params.get("sub_kind") or ""),
                 extra_focus_tags=_extra_focus_tags(params, domain),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(params.get("warm_start_pitfalls") or []),
@@ -587,7 +583,6 @@ class SpecialistRunner:
 
         return _PreparedRun(
             domain=domain,
-            sub_kind=sub_kind,
             gap=gap,
             max_turns=max_turns,
             profile=profile,
@@ -1346,33 +1341,6 @@ class SpecialistRunner:
         if wt is None:
             return None, base, err
         return wt, base, ""
-
-    # Coordinator-facing convenience: produce a SubAgentResult shape.
-    @staticmethod
-    def to_sub_agent_result(run_result: SpecialistRunResult) -> SubAgentResult:
-        """Translate the rich runner result into the dispatcher contract.
-
-        Args:
-            run_result (SpecialistRunResult): The runner-level outcome record.
-
-        Returns:
-            SubAgentResult: The TaskRegistry-facing result shape.
-        """
-        state = "succeeded" if run_result.status in ("succeeded", "empty_synthesised", "tool_violation") else "failed"
-        return SubAgentResult(
-            task_id=run_result.task_id,
-            state=state,
-            result={
-                "specialist_done": run_result.specialist_done,
-                "runner_status": run_result.status,
-                "turns_used": run_result.turns_used,
-                "workspace": run_result.workspace,
-                "transcript_path": run_result.transcript_path,
-                "done_path": run_result.done_path,
-                "notes": list(run_result.notes),
-            },
-            error=run_result.error or None,
-        )
 
     # Workspace file protocol
     def _resolve_workspace(self, ctx: RunnerContext) -> Path | None:

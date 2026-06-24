@@ -204,7 +204,6 @@ def _count_substring_occurrences(text: str, substring: str) -> int:
 def _validate_trace_structure(
     trace_dir: Path,
     framework: str,
-    expected_pieces: int = 1,
 ) -> dict[str, Any]:
     """Post-profile sanity check (#210 / Deval's ``check_torch_trace.py``).
 
@@ -234,8 +233,6 @@ def _validate_trace_structure(
         trace_dir: The profile workspace trace directory to inspect.
         framework: The framework name (e.g. ``"sglang"``) gating
             framework-specific checks.
-        expected_pieces: Expected split-piece count (reserved for future
-            checks).
 
     Returns:
         A ``trace_health`` dict with ``issues``,

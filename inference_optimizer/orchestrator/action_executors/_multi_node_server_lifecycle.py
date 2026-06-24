@@ -67,22 +67,8 @@ def _merge_sglang_defaults(extra_args: str) -> str:
     return " ".join(p for p in parts if p)
 
 
-# Round-trip context so callers (profile.py) can recover the trace dir the
-# server was restarted with, even after this helper restored the env.
-_LAST_ROUND_TRACE_DIR: str = ""
-
-
 class ServerRestartFailed(RuntimeError):
     """Raised when the per-round multi-node server restart did not succeed."""
-
-
-def last_round_trace_dir() -> str:
-    """Return the trace dir the most recent restart was wired with (or '').
-
-    Returns:
-        str: The most recent round's profiler trace dir, or ``""`` if none.
-    """
-    return _LAST_ROUND_TRACE_DIR
 
 
 def _resolve_pd_args(
@@ -195,7 +181,6 @@ def _resolve_pd_args(
         state.get("last_restart_pd_decode_extra_args") or os.environ.get("PD_DECODE_EXTRA_ARGS", "") or ""
     ).strip()
 
-    state_nodes = int(state.get("nodes") or 0)
     if pn <= 0 or dn <= 0:
         raise ServerRestartFailed(
             f"pd_mode=disaggregated requires pd_prefill_nodes>0 and pd_decode_nodes>0; got pn={pn} dn={dn}"
@@ -338,8 +323,6 @@ async def restart_server_for_round(
         ServerRestartFailed: On any restart or post-launch /health failure
             (callers let it bubble).
     """
-    global _LAST_ROUND_TRACE_DIR
-
     if not is_multi_node():
         return
 
@@ -376,12 +359,10 @@ async def restart_server_for_round(
         except OSError as exc:
             raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
         os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = torch_profiler_dir
-        _LAST_ROUND_TRACE_DIR = torch_profiler_dir
     else:
         # No profiler this round — drop stale env so the launcher doesn't
         # reuse a previous round's path.
         os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
-        _LAST_ROUND_TRACE_DIR = ""
 
     # Per-variant env overrides → forwarded to the SSH-launched sglang via
     # ``multi_node/cli.py::_collect_forward_env`` (which reads this control
@@ -860,6 +841,5 @@ __all__ = [
     "DEFAULT_HEALTH_TIMEOUT_S",
     "ServerRestartFailed",
     "_merge_sglang_defaults",
-    "last_round_trace_dir",
     "restart_server_for_round",
 ]

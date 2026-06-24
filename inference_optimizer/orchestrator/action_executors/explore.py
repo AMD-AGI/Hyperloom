@@ -622,7 +622,8 @@ class ExploreExecutor:
             # Pull CONC so the seed grid's cudagraph-bracket variant brackets
             # the live decode concurrency.
             _yaml_envs = (_cfg.get("benchmark") or {}).get("envs") or {}
-        except Exception:  # noqa: BLE001
+        except (OSError, yaml.YAMLError) as exc:
+            log.warning("explore: could not resolve framework from %s: %s", config_path, exc)
             framework = ""
             _yaml_envs = {}
 

@@ -131,25 +131,6 @@ def _resolve_benchmark_lib_paths(
     return out
 
 
-# Back-compat single-path helper; new code uses
-# :func:`_resolve_benchmark_lib_paths` to patch every root.
-def _resolve_benchmark_lib_path(
-    inferencex_path: Path | str | None,
-) -> Path | None:
-    """Single-path back-compat shim for :func:`_resolve_benchmark_lib_paths`.
-
-    Args:
-        inferencex_path (Path | str | None): Caller-provided override
-            root.
-
-    Returns:
-        Path | None: The first resolved ``benchmark_lib.sh`` path, or
-        ``None`` when none exist.
-    """
-    paths = _resolve_benchmark_lib_paths(inferencex_path)
-    return paths[0] if paths else None
-
-
 @contextmanager
 def _file_lock(lock_path: str) -> Iterator[None]:
     """Best-effort cross-process mutex via ``fcntl.flock``.
@@ -344,23 +325,6 @@ def _resolve_benchmark_serving_paths(
         if candidate.is_file():
             out.append(candidate)
     return out
-
-
-def _resolve_benchmark_serving_path(
-    inferencex_path: Path | str | None,
-) -> Path | None:
-    """Single-path back-compat shim for :func:`_resolve_benchmark_serving_paths`.
-
-    Args:
-        inferencex_path (Path | str | None): Caller-provided override
-            root.
-
-    Returns:
-        Path | None: The first resolved ``benchmark_serving.py`` path,
-        or ``None`` when none exist.
-    """
-    paths = _resolve_benchmark_serving_paths(inferencex_path)
-    return paths[0] if paths else None
 
 
 def _is_benchmark_serving_patched(src: Path) -> bool:
