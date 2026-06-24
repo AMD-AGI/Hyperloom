@@ -35,7 +35,9 @@ name: SaFE Optimize Submit
 
 on:
   # Rolling downloads>100 pool: 240 models every 6 hours, firing at UTC
-  # 16:00 / 22:00 / 04:00 / 10:00 (Beijing 00:00 / 06:00 / 12:00 / 18:00).
+  # 16:07 / 22:07 / 04:07 / 10:07 (Beijing 00:07 / 06:07 / 12:07 / 18:07).
+  # Minute is :07 (not :00) on purpose — GitHub delays cron heavily at the top
+  # of the hour when many repos fire at once; an off-peak minute reduces the lag.
   # Each fire submits the NEXT sequential 240-model slice of the rotate pool,
   # now hosted off-repo at
   # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate.json
@@ -48,7 +50,7 @@ on:
   # The tail batch is short (not head-wrapped) so consecutive fires never
   # double-submit the head models. Manual workflow_dispatch is unaffected.
   schedule:
-    - cron: '0 4,10,16,22 * * *'
+    - cron: '7 4,10,16,22 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > legacy hf_top) ──────
@@ -181,6 +183,10 @@ on:
         description: 'Per-task wait timeout in minutes (default 420 = 7h)'
         required: false
         default: '420'
+      job_timeout_min:
+        description: 'GitHub job timeout in minutes for each optimize job (default 480 = 8h). Raise it when callers pass a larger max_hours so the wait/collect job is not killed mid-run.'
+        required: false
+        default: '480'
       max_hours:
         description: 'Per-task optimizer budget in hours (default 6)'
         required: false
@@ -256,8 +262,11 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.count != '0'
     runs-on: hyperloom-4hhzn
-    # 7h per-task wait timeout + buffer for register/wait/collect.
-    timeout-minutes: 480
+    # Per-task wait timeout + buffer for register/wait/collect. Caller-tunable
+    # via the job_timeout_min input (default 480 = 8h); raise it when passing a
+    # larger max_hours so the wait/collect job is not killed mid-run. schedule
+    # has no inputs, so it falls back to the 480 default.
+    timeout-minutes: ${{ fromJson(github.event.inputs.job_timeout_min || '480') }}
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(github.event_name == 'schedule' && '240' || github.event.inputs.max_parallel || '240') }}
