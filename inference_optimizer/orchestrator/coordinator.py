@@ -3446,6 +3446,18 @@ class Coordinator:
         state.save(self.session_dir)
         return verdict_row
 
+    async def _maybe_reprofile_for_kernel(self) -> None:
+        """Re-run profile+TraceLens inline if tput rose since the last roofline, so GEAK targets the current bottleneck."""
+        last_rl = float(getattr(self.shared_state, "last_roofline_tput", 0.0) or 0.0)
+        if last_rl <= 0 or self._current_tput_from_validated_gain() <= last_rl:
+            return
+        try:
+            await self.sub.run_task(await self._enqueue_internal_analysis_task(reason="kernel_entry"))
+            self.shared_state.last_roofline_tput = self._current_tput_from_validated_gain()
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
+            log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
+
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """Run deterministic KERNEL-entry setup before LLM kernel work (FP8 GEMM tuning gate).
 
@@ -3460,6 +3472,8 @@ class Coordinator:
             )
             return
         if not self._gemm_tuning_required_before_kernel_opt():
+            # No GEMM tuning here: refresh the snapshot (explore gains) before the LLM drives GEAK.
+            await self._maybe_reprofile_for_kernel()
             return
 
         log.info(
@@ -3511,6 +3525,8 @@ class Coordinator:
                 "tuned_file": result.get("tuned_file"),
             },
         )
+        # Capture explore + GEMM-tuning gains before inline GEAK targets the bottleneck.
+        await self._maybe_reprofile_for_kernel()
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
 
