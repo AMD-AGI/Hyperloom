@@ -292,10 +292,10 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn("GEAK_SAVE_TO_KNOWLEDGE_BASE", ray_runtime_text)
         # No hard-coded /wekafs TRACELENS_ROOT fallback; tool fails loudly when missing.
         self.assertNotIn("DEFAULT_TRACELENS_ROOT", trace_tool_text)
-        self.assertIn(
-            'parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", "")',
-            trace_tool_text,
-        )
+        # Robust to the add_argument(...) call being split across lines: assert
+        # the flag and its TRACELENS_ROOT env default independently.
+        self.assertIn('"--tracelens-root"', trace_tool_text)
+        self.assertIn('default=os.environ.get("TRACELENS_ROOT", "")', trace_tool_text)
         self.assertIn(
             "TraceLens root not provided: set TRACELENS_ROOT in env",
             trace_tool_text,
@@ -314,6 +314,10 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
         self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$TRACELENS_ROOT"', install_text)
         self.assertIn('git -C "$TRACELENS_ROOT" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
+        # PerfSkills (GEAK_v4) existing-checkout path must realign to PERFSKILLS_REF,
+        # mirroring ensure_geak — not just log "already present".
+        self.assertIn('git -C "${PERFSKILLS_ROOT}" fetch --depth 1 origin "$PERFSKILLS_REF"', install_text)
+        self.assertIn('git -C "${PERFSKILLS_ROOT}" checkout -q --force FETCH_HEAD', install_text)
         self.assertNotIn(
             'TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"', install_text
         )
@@ -452,9 +456,13 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            # GEAK is now first in the ladder.
+            # Default ladder is Forge-GEAK-OOB: forge leads, then GEAK, then
+            # the OOB backends (claude, codex; cursor is key-gated).
             self.assertIn("geak", result["selected_backends"])
-            self.assertEqual(result["selected_backends"][0], "geak")
+            self.assertEqual(result["selected_backends"][0], "forge")
+            self.assertEqual(
+                result["selected_backends"][:4], ["forge", "geak", "claude", "codex"]
+            )
             # No bench → flagged for downstream verification gates.
             self.assertTrue(result["backend_selection"]["geak_without_benchmark"])
             # E2E evidence still missing, so still NEEDS_REVIEW.
