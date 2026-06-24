@@ -1796,18 +1796,28 @@ class IntegratePatchExecutor:
     def _framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
         """Force ``RUN_EVAL=true`` for framework-authored source patches (G2).
 
-        Generic EXPLORE integrate_patch is untouched (returns ``None`` -> the
-        materializer keeps its default RUN_EVAL handling).
+        Only forces when a comparable baseline accuracy exists
+        (``accuracy_baseline > 0``): if the run never produced a baseline
+        accuracy (e.g. eval is globally disabled), there is nothing to gate
+        against, so we must NOT force eval on the candidate (don't override an
+        operator's ``RUN_EVAL=false`` nor add a needless eval-failure surface);
+        the materializer's default RUN_EVAL handling applies instead.
+
+        Generic EXPLORE integrate_patch is untouched (returns ``None``).
 
         Args:
             params: The integrate_patch task params.
 
         Returns:
-            ``{"RUN_EVAL": "true"}`` for framework-authored patches, else
-            ``None``.
+            ``{"RUN_EVAL": "true"}`` for framework-authored patches that have a
+            positive baseline accuracy to compare against, else ``None``.
         """
         fw_authored = bool(params.get("framework_pr_authoring") or params.get("framework_pr_candidate_id"))
-        return {"RUN_EVAL": "true"} if fw_authored else None
+        try:
+            baseline = float(params.get("accuracy_baseline") or 0.0)
+        except (TypeError, ValueError):
+            baseline = 0.0
+        return {"RUN_EVAL": "true"} if (fw_authored and baseline > 0) else None
 
     @staticmethod
     def _grade_accuracy(result_dir: str, baseline_accuracy: Any) -> bool | None:
