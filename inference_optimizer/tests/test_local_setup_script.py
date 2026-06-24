@@ -29,7 +29,7 @@ _HOST_LEAK_VARS = (
     "HYPERLOOM_RUNTIME_DIR",
     "HYPERLOOM_DEPS_ROOT",
     "LOCAL_SETUP_ENV",
-    "PRIMUS_CLAW_REPO",
+    "KERNEL_FORGE_REPO",
     "INFERENCEX_REPO",
     "INFERENCEX_REF",
     "TRACELENS_REPO",
@@ -90,14 +90,14 @@ def _git_repo(path: Path, files: dict[str, str]) -> Path:
 def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Path) -> None:
     secret = "ak-secret-that-must-not-be-written"
     remotes = tmp_path / "remotes"
-    primus = _git_repo(remotes / "Primus-Claw", {"OOB/README.md": "oob\n"})
+    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
     inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
     tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
 
     result = _run_local_setup(
         tmp_path,
         env={
-            "PRIMUS_CLAW_REPO": str(primus),
+            "KERNEL_FORGE_REPO": str(forge),
             "INFERENCEX_REPO": str(inferencex),
             "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
@@ -111,7 +111,7 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     assert env_file.exists()
     env_text = env_file.read_text(encoding="utf-8")
     assert f"export REPO_ROOT='{REPO_ROOT}'" in env_text
-    assert f"export OOB_SRC='{tmp_path / 'deps' / 'Primus-Claw' / 'OOB'}'" in env_text
+    assert f"export OOB_SRC='{tmp_path / 'deps' / 'KernelForge' / 'OOB'}'" in env_text
     assert f"export INFERENCEX_PATH='{tmp_path / 'deps' / 'InferenceX'}'" in env_text
     assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
     # Default is open-source-only: no internal extension.
@@ -124,7 +124,7 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
 
 def test_local_setup_uses_internal_extension_when_root_set(tmp_path: Path) -> None:
     remotes = tmp_path / "remotes"
-    primus = _git_repo(remotes / "Primus-Claw", {"OOB/README.md": "oob\n"})
+    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
     inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
     tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
     internal_checkout = _git_repo(tmp_path / "existing" / "TraceLens-internal", {"README.md": "internal\n"})
@@ -132,7 +132,7 @@ def test_local_setup_uses_internal_extension_when_root_set(tmp_path: Path) -> No
     result = _run_local_setup(
         tmp_path,
         env={
-            "PRIMUS_CLAW_REPO": str(primus),
+            "KERNEL_FORGE_REPO": str(forge),
             "INFERENCEX_REPO": str(inferencex),
             "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
@@ -150,14 +150,14 @@ def test_local_setup_uses_internal_extension_when_root_set(tmp_path: Path) -> No
 def test_local_setup_internal_missing_path_falls_back_to_oss_only(tmp_path: Path) -> None:
     # A non-existent TRACELENS_INTERNAL_ROOT must warn and fall back to OSS-only.
     remotes = tmp_path / "remotes"
-    primus = _git_repo(remotes / "Primus-Claw", {"OOB/README.md": "oob\n"})
+    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
     inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
     tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
 
     result = _run_local_setup(
         tmp_path,
         env={
-            "PRIMUS_CLAW_REPO": str(primus),
+            "KERNEL_FORGE_REPO": str(forge),
             "INFERENCEX_REPO": str(inferencex),
             "INFERENCEX_REF": "HEAD",
             "TRACELENS_REPO": str(tracelens_public),
@@ -174,7 +174,7 @@ def test_local_setup_internal_missing_path_falls_back_to_oss_only(tmp_path: Path
 
 
 def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
-    existing_oob = tmp_path / "existing" / "Primus-Claw" / "OOB"
+    existing_oob = tmp_path / "existing" / "KernelForge" / "OOB"
     existing_oob.mkdir(parents=True)
     remotes = tmp_path / "remotes"
     inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
@@ -194,7 +194,7 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr + result.stdout
     env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
     assert f"export OOB_SRC='{existing_oob}'" in env_text
-    assert not (tmp_path / "deps" / "Primus-Claw").exists()
+    assert not (tmp_path / "deps" / "KernelForge").exists()
 
 
 def test_local_setup_fails_for_missing_explicit_dependency_path(tmp_path: Path) -> None:
@@ -251,7 +251,7 @@ def test_local_setup_deps_root_stays_pod_local_under_session_dir(tmp_path: Path)
     assert result.returncode == 0, result.stderr + result.stdout
     assert f"HYPERLOOM_DEPS_ROOT={expected_deps}" in result.stdout
     assert str(session_dir / "runtime" / "open-source-repos") not in result.stdout
-    assert str(expected_deps / "Primus-Claw") in result.stdout
+    assert str(expected_deps / "KernelForge") in result.stdout
     assert str(expected_deps / "TraceLens") in result.stdout
     assert str(expected_deps / "TraceLens-internal") not in result.stdout
     assert "35bbb6380cf69a2655ee28260b02b5f2dc481744" in result.stdout
@@ -274,7 +274,7 @@ def test_local_setup_explicit_deps_root_overrides_pod_local(tmp_path: Path) -> N
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert f"HYPERLOOM_DEPS_ROOT={deps}" in result.stdout
-    assert str(deps / "Primus-Claw") in result.stdout
+    assert str(deps / "KernelForge") in result.stdout
 
 
 # install-harden: loud USER_DATA_PATH fallback notice + flock around the

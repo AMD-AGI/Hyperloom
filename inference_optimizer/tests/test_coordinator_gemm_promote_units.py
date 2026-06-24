@@ -154,6 +154,42 @@ class TestHandleGemmTuningResult:
         assert coord.shared_state.optimization_stack == []
 
     @pytest.mark.asyncio
+    async def test_forge_e2e_rewrites_latest_attempt_history(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        fake = _make_integrate([{"decision": "REVERT", "new_tput": 90.0, "gain_pct": -10.0}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+
+        await coord._handle_gemm_tuning_result(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.5,
+                "backend": "forge",
+                "engine": "forge",
+                "requires_e2e_validation": True,
+                "recommended_env": {"AITER_DENSE": "/dense.json"},
+                "extra_envs": {"AITER_DENSE": "/dense.json"},
+                "tuners_run": [
+                    {
+                        "status": "ok",
+                        "improved_shapes": 3,
+                        "tuner": "dense_gemm",
+                        "env_var": "AITER_DENSE",
+                        "env_value": "/dense.json",
+                    }
+                ],
+            }
+        )
+
+        attempts = coord.shared_state.gemm_tuning_attempts
+        assert len(attempts) == 1
+        assert attempts[0]["engine"] == "forge"
+        assert attempts[0]["e2e_validated"] is True
+        assert attempts[0]["decision"] == "REVERT"
+        assert attempts[0]["best_speedup"] == 1.5
+        assert coord.shared_state.last_gemm_tuning["decision"] == "REVERT"
+
+    @pytest.mark.asyncio
     async def test_non_forge_routes_to_inline_promote(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
 
