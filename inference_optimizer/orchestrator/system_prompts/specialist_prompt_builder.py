@@ -519,6 +519,11 @@ class SpecialistPromptInputs:
     # empty dict renders a placeholder.
     roofline_evidence: dict[str, Any] = field(default_factory=dict)
 
+    # Substrate directional lever priors (cortex ``/v2/reasoning/levers``):
+    # ``{focus, seed, summary, levers:[{knob, direction, confidence, ...}]}``.
+    # Empty dict renders a placeholder; advisory, never a gate.
+    substrate_levers: dict[str, Any] = field(default_factory=dict)
+
     # Recipe summary from T0 ``find-recipe``
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
@@ -1033,6 +1038,93 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # Section 4a — Roofline / TraceLens evidence
+def _section_substrate_levers(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the SUBSTRATE EVIDENCE section from ``inp.substrate_levers``.
+
+    Surfaces the cortex substrate's directional lever priors for this focus so
+    the specialist steers toward measured-beneficial knobs and away from
+    measured-harmful ones *before* spending a trial. Advisory only; the Critic
+    still gates the final answer. Empty digest renders ``(none)``.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``substrate_levers``).
+
+    Returns:
+        The rendered substrate-evidence section lines.
+    """
+    rows = ["## 4b. SUBSTRATE EVIDENCE (advisory)", ""]
+    dig = inp.substrate_levers or {}
+    levers = dig.get("levers") if isinstance(dig, dict) else None
+    if not isinstance(dig, dict) or not isinstance(levers, list) or not levers:
+        rows.append(
+            "(none — the cortex knowledge substrate has no calibrated or "
+            "aggregate lever priors for this model-class yet, or the KB is not "
+            "wired this session.)"
+        )
+        return rows
+
+    summary = dig.get("summary") if isinstance(dig.get("summary"), dict) else {}
+    seed = str(dig.get("seed") or "")
+    head = (
+        "Directional lever priors mined from the fleet's measured knob trials "
+        "(Phase-2 aggregate) and confirmed by calibration (Phase-3) where "
+        "available. Treat **beneficial** as a steer-toward prior and "
+        "**harmful** as a steer-away prior; **neutral** had no measurable "
+        "effect. These are advisory — justify deviations, and the Critic still "
+        "gates the final answer."
+    )
+    rows.append(head)
+    if seed:
+        rows.append("")
+        rows.append(f"Resolved subject: `{seed}`")
+    if summary:
+        rows.append("")
+        rows.append(
+            "Summary: "
+            f"beneficial={int(summary.get('beneficial', 0))}, "
+            f"neutral={int(summary.get('neutral', 0))}, "
+            f"harmful={int(summary.get('harmful', 0))}, "
+            f"calibrated={int(summary.get('calibrated', 0))}"
+        )
+    rows.append("")
+    rows.append("| knob | direction | confidence | basis | evidence |")
+    rows.append("|---|---|---:|---|---|")
+
+    _ORDER = {"beneficial": 0, "harmful": 1, "neutral": 2}
+
+    def _sort_key(lv: dict[str, Any]) -> tuple[int, float]:
+        conf = lv.get("confidence")
+        conf_f = float(conf) if isinstance(conf, (int, float)) else 0.0
+        return (_ORDER.get(str(lv.get("direction")), 3), -conf_f)
+
+    shown = sorted(
+        (lv for lv in levers if isinstance(lv, dict)), key=_sort_key
+    )[:20]
+    for lv in shown:
+        knob = str(lv.get("knob") or "")
+        direction = str(lv.get("direction") or "")
+        conf = lv.get("confidence")
+        conf_str = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "—"
+        calibrated = bool(lv.get("calibrated"))
+        verdict = str(lv.get("verdict") or "")
+        scope = str(lv.get("scope") or "")
+        basis = "calibrated" if calibrated else (f"agg:{verdict}" if verdict else "grounded")
+        if scope == "global":
+            basis += " (global)"
+        confirmed = int(lv.get("confirmed") or 0)
+        deviated = int(lv.get("deviated") or 0)
+        n = int(lv.get("evidence_count") or 0)
+        if confirmed or deviated:
+            evidence = f"+{confirmed}/-{deviated}"
+        else:
+            evidence = f"n={n}" if n else "—"
+        rows.append(f"| `{knob}` | {direction} | {conf_str} | {basis} | {evidence} |")
+    if len(levers) > len(shown):
+        rows.append("")
+        rows.append(f"(+{len(levers) - len(shown)} more lever(s) not shown)")
+    return rows
+
+
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -1657,6 +1749,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_gap(inp),  # 1: § 2-3
         _section_kb_subgraph(inp),  # 2: § 4
         _section_roofline_evidence(inp),  # 3: § 4a
+        _section_substrate_levers(inp),  # 3a: § 4b
         _section_recipe(inp),  # 4: § 5
         _section_lessons(inp),  # 5: § 5b
         _section_pitfalls(inp),  # 6: § 5c
