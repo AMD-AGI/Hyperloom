@@ -1014,6 +1014,22 @@ _VOCAB_WEIGHT_NAMES = (
     "word_embeddings.weight",
     "lm_head.weight",
 )
+_FULL_BASE_WEIGHT_NAMES = (
+    "model.embed_tokens.weight",
+    "embed_tokens.weight",
+    "transformer.wte.weight",
+    "wte.weight",
+    "word_embeddings.weight",
+    "lm_head.weight",
+)
+_PEFT_ADAPTER_WEIGHT_MARKERS = (
+    ".lora_A.",
+    ".lora_B.",
+    ".lora_embedding_A",
+    ".lora_embedding_B",
+    ".modules_to_save.",
+    ".base_layer.",
+)
 _SAFETENSORS_HEADER_LIMIT = 64 * 1024 * 1024
 
 
@@ -1108,6 +1124,58 @@ def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | No
                     f"weight loading will fail."
                 )
     return None
+
+
+def _detect_peft_adapter_only_checkpoint(model_path: str, data: dict) -> str | None:
+    """Return a reason when a checkpoint looks like an unmerged PEFT adapter.
+
+    Some repos ship ``config.json`` plus LoRA/PEFT adapter tensors but not the
+    corresponding base-model weights. The default vLLM/sglang loaders then try
+    to resolve base tensors such as ``base_model.model.lm_head.base_layer.weight``
+    and fail during engine init. Keep this conservative: only block when the
+    safetensors index explicitly carries adapter-shaped tensor names and lacks
+    normal base embedding / LM-head weights.
+    """
+    mdir = Path(model_path)
+    idx = mdir / "model.safetensors.index.json"
+    if not idx.is_file():
+        return None
+    try:
+        weight_map = (json.loads(idx.read_text(encoding="utf-8")) or {}).get(
+            "weight_map",
+        ) or {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(weight_map, dict) or not weight_map:
+        return None
+
+    keys = {str(k) for k in weight_map}
+    has_adapter_tensors = any(
+        marker in key for key in keys for marker in _PEFT_ADAPTER_WEIGHT_MARKERS
+    )
+    has_adapter_manifest = (
+        (mdir / "adapter_config.json").is_file()
+        or any("adapter" in str(v).lower() for v in weight_map.values())
+    )
+    if not has_adapter_tensors and not has_adapter_manifest:
+        return None
+
+    has_base_weights = any(
+        key.endswith(suffix)
+        for key in keys
+        for suffix in _FULL_BASE_WEIGHT_NAMES
+    )
+    if has_base_weights:
+        return None
+
+    return (
+        "checkpoint appears to be an unmerged PEFT/LoRA adapter: "
+        "model.safetensors.index.json contains adapter/base_layer tensor names "
+        "but no full base embedding or lm_head weights. The default "
+        "vLLM/sglang loader cannot reconstruct missing base tensors such as "
+        "base_model.model.lm_head.base_layer.weight; merge the adapter into the "
+        "base model before running Hyperloom."
+    )
 
 
 def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
@@ -1281,6 +1349,9 @@ def _detect_incompatible_model_config(
     private_quant_reason = _detect_private_quant(model_path, data)
     if private_quant_reason is not None:
         return private_quant_reason
+    peft_adapter_reason = _detect_peft_adapter_only_checkpoint(model_path, data)
+    if peft_adapter_reason is not None:
+        return peft_adapter_reason
     vocab_shape_reason = _detect_vocab_weight_shape_mismatch(model_path, data)
     if vocab_shape_reason is not None:
         return vocab_shape_reason

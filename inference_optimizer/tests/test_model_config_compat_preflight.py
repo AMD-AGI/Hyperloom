@@ -1071,6 +1071,48 @@ def test_private_quant_gguf_only_blocks(tmp_path):
     assert reason is not None and "GGUF" in reason
 
 
+def test_peft_adapter_only_checkpoint_blocks(tmp_path):
+    m = tmp_path / "adapter_only"
+    _write_config(m, model_type="qwen2", max_position_embeddings=32768)
+    (m / "adapter_config.json").write_text(
+        json.dumps({"peft_type": "LORA", "base_model_name_or_path": "Qwen/Qwen2-7B"}),
+        encoding="utf-8",
+    )
+    (m / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {
+            "base_model.model.lm_head.lora_A.default.weight": "adapter_model.safetensors",
+            "base_model.model.lm_head.lora_B.default.weight": "adapter_model.safetensors",
+            "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight": (
+                "adapter_model.safetensors"
+            ),
+        }}),
+        encoding="utf-8",
+    )
+
+    reason = cli._detect_incompatible_model_config(str(m))
+
+    assert reason is not None
+    assert "PEFT/LoRA adapter" in reason
+    assert "base_model.model.lm_head.base_layer.weight" in reason
+
+
+def test_merged_peft_like_checkpoint_with_base_weights_not_blocked(tmp_path):
+    m = tmp_path / "merged_adapter"
+    _write_config(m, model_type="qwen2", max_position_embeddings=32768)
+    (m / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {
+            "model.embed_tokens.weight": "model-00001.safetensors",
+            "lm_head.weight": "model-00001.safetensors",
+            "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight": (
+                "model-00001.safetensors"
+            ),
+        }}),
+        encoding="utf-8",
+    )
+
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
 def test_standard_quant_fp8_not_blocked(tmp_path):
     m = tmp_path / "fp8"
     _write_config(
