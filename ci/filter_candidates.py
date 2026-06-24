@@ -84,7 +84,9 @@ def classify_local(repo):
     mdir = os.path.join(MODELS_DIR, slug(repo))
     cfg_path = os.path.join(mdir, "config.json")
     if not os.path.isfile(cfg_path):
-        return None  # no local cache -> judged only by the HF gated check
+        # Some non-LLM repos (for example FLUX Diffusers pipelines) have no
+        # root config.json, so still apply repo-id-only compatibility gates.
+        return model_compat.unrunnable_reason(None, repo=repo)
     try:
         cfg = json.load(open(cfg_path))
     except Exception:

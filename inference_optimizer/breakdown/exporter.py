@@ -287,6 +287,12 @@ def build(
     workload = _pick(
         "workload", _safe_collect("workload", lambda: collectors.collect_workload(state, manifest, warnings), warnings)
     )
+    # §2b model basics — verbatim mirror of ``state.model_info`` (computed once
+    # at launch). Empty {} on non-transformers models / pre-field sessions.
+    model_info = _pick(
+        "model_info",
+        _safe_collect("model_info", lambda: collectors.collect_model_info(state, warnings), warnings, default={}),
+    )
     baseline = _pick(
         "baseline", _safe_collect("baseline", lambda: collectors.collect_baseline(sd, state, warnings), warnings)
     )
@@ -348,6 +354,18 @@ def build(
         _safe_collect("explore_search", lambda: collectors.collect_explore_search(state, warnings), warnings),
     )
     sweep = _pick("sweep", _safe_collect("sweep", lambda: collectors.collect_sweep(sd, state, warnings), warnings))
+    # PerfSkills/GEAK-e2e KERNEL-phase section. Empty {} on native sessions
+    # (the optimizer was never engaged), so the dashboard hides it and historic
+    # breakdowns stay byte-for-byte identical.
+    perfskills = _pick(
+        "perfskills",
+        _safe_collect(
+            "perfskills",
+            lambda: collectors.collect_perfskills(sd, state, warnings),
+            warnings,
+            default={},
+        ),
+    )
     critic_robustness = _pick(
         "critic_robustness",
         _safe_collect("critic_robustness", lambda: collectors.collect_critic_robustness(sd, warnings), warnings),
@@ -542,6 +560,9 @@ def build(
         # §1b enrichment; always present from the exporter (no longer CI-only).
         "session_meta": session_meta,
         "workload": workload,
+        # §2b structural model summary (state.model_info mirror). Additive
+        # optional; empty {} on non-transformers models / pre-field sessions.
+        "model_info": model_info,
         "baseline": baseline,
         "final": final,
         "phase_timeline": phase_timeline,
@@ -558,6 +579,9 @@ def build(
         # v2-native name for the merged ledger; mirrors ``param_search``.
         "explore_search": explore_search,
         "sweep": sweep,
+        # PerfSkills/GEAK-e2e KERNEL section (additive, optional); empty {} →
+        # dashboard hides it on native sessions.
+        "perfskills": perfskills,
         "critic_robustness": critic_robustness,
         "telemetry": telemetry,
         "attribution": attribution,

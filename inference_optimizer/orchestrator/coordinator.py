@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import time
 import traceback
 import uuid
@@ -145,6 +146,69 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
     "tput_tok_s",
 )
 _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome")
+
+# The GEAK used by the GEAK-e2e (PerfSkills) whole-pipeline optimizer is a
+# distinct variant from the kernel-agent's generic per-kernel ``geak`` backend.
+# Its kernel_journey.json labels everything plainly ``geak`` (versions key,
+# dispatch backends, attempt backend, verification.best_backend), which would
+# collide with — and be indistinguishable from — the generic ``geak`` lane in
+# ``session_breakdown.json`` (the ``versions`` map is keyed by tool name, last
+# write wins). We relabel it to ``geak_v4`` on the way into the breakdown so SBD
+# and trace keep the two provenances separate. The raw interface file is left
+# untouched.
+PERFSKILLS_GEAK_BACKEND: str = "geak_v4"
+
+
+def _relabel_perfskills_geak_journey(journey: dict[str, Any]) -> None:
+    """Relabel the PerfSkills GEAK-e2e ``geak`` provenance to ``geak_v4`` in place.
+
+    Rewrites every ``geak`` token the GEAK-e2e ``kernel_journey.json`` carries
+    (the ``versions`` key, each kernel's ``dispatch.backends`` and
+    ``backend_result`` attempt/verification backends, and the discovery
+    ``recommended_backends``) to :data:`PERFSKILLS_GEAK_BACKEND`, so the
+    assembled breakdown never conflates it with the kernel-agent's generic
+    ``geak`` lane. Best-effort and structure-preserving: unknown shapes are
+    skipped, non-``geak`` tokens are left untouched.
+
+    Args:
+        journey (dict[str, Any]): the parsed GEAK-e2e ``kernel_journey.json``
+            (mutated in place).
+    """
+    def _swap(name: Any) -> Any:
+        return PERFSKILLS_GEAK_BACKEND if str(name or "").lower() == "geak" else name
+
+    def _swap_list(values: Any) -> list[Any]:
+        return [_swap(v) for v in values] if isinstance(values, list) else values
+
+    # Top-level ``versions`` map: re-key geak -> geak_v4 and fix its ``tool``.
+    versions = journey.get("versions")
+    if isinstance(versions, dict) and "geak" in versions:
+        meta = versions.pop("geak")
+        if isinstance(meta, dict):
+            meta["tool"] = PERFSKILLS_GEAK_BACKEND
+        versions[PERFSKILLS_GEAK_BACKEND] = meta
+
+    for run in journey.get("discovery_runs") or []:
+        if not isinstance(run, dict):
+            continue
+        for hk in run.get("hot_kernels") or []:
+            if isinstance(hk, dict) and "recommended_backends" in hk:
+                hk["recommended_backends"] = _swap_list(hk.get("recommended_backends"))
+
+    for k in journey.get("kernels") or []:
+        if not isinstance(k, dict):
+            continue
+        disp = k.get("dispatch")
+        if isinstance(disp, dict) and "backends" in disp:
+            disp["backends"] = _swap_list(disp.get("backends"))
+        br = k.get("backend_result")
+        if isinstance(br, dict):
+            for att in br.get("attempts") or []:
+                if isinstance(att, dict) and "backend" in att:
+                    att["backend"] = _swap(att.get("backend"))
+            verification = br.get("verification")
+            if isinstance(verification, dict) and "best_backend" in verification:
+                verification["best_backend"] = _swap(verification.get("best_backend"))
 
 
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
@@ -3446,6 +3510,28 @@ class Coordinator:
         state.save(self.session_dir)
         return verdict_row
 
+    def _perfskills_enabled(self) -> bool:
+        """Whether the KERNEL phase is delegated to the PerfSkills e2e optimizer.
+
+        The single source of truth is the kernel backend order
+        (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``): when
+        ``perfskills`` appears there, it owns the whole phase.  The
+        ``kernel_optimizer`` state field is the persisted record of that
+        decision (derived from the order at startup); it is used as a resume
+        fallback so this stays correct even when the env var is not re-exported
+        in a fresh shell.
+        """
+        from .kernel_request_handlers import perfskills_selected
+
+        if perfskills_selected():
+            return True
+        return (
+            str(getattr(self.shared_state, "kernel_optimizer", "") or "")
+            .strip()
+            .lower()
+            == "perfskills"
+        )
+
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """Run deterministic KERNEL-entry setup before LLM kernel work (FP8 GEMM tuning gate).
 
@@ -3458,6 +3544,12 @@ class Coordinator:
                 "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
                 from_phase or "<unknown>",
             )
+            return
+        if self._perfskills_enabled():
+            # PerfSkills owns the whole KERNEL phase: one in-process e2e run
+            # seeded with the EXPLORE best config, then hand straight to SWEEP
+            # (which reuses PerfSkills' final_launch.sh + bench_e2e.sh).
+            await self._run_perfskills_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
             return
@@ -3513,6 +3605,578 @@ class Coordinator:
         )
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
+
+    @staticmethod
+    def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
+        """Extract Hyperloom's bench 口径 for the PerfSkills handoff.
+
+        Reads the materialized baseline recipe's ``benchmark.envs`` (the exact
+        knobs Magpie benched with) and falls back to the process env. Returns
+        only the keys that resolve so absent values leave PerfSkills on its own
+        standalone defaults. Never raises — 口径 propagation must not block the
+        KERNEL phase.
+        """
+        envs: dict[str, Any] = {}
+        try:
+            import yaml  # local import: yaml is not a coordinator top-level dep
+
+            if recipe_path and Path(recipe_path).is_file():
+                cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
+                envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
+        except Exception:  # noqa: BLE001
+            log.warning("bench_protocol: could not read recipe %r", recipe_path,
+                        exc_info=True)
+            envs = {}
+
+        def _pick(key: str, cast: Callable[[str], Any]) -> Any:
+            raw = envs.get(key)
+            if raw is None or str(raw).strip() == "":
+                raw = os.environ.get(key, "")
+            raw = str(raw).strip()
+            if not raw:
+                return None
+            try:
+                return cast(raw)
+            except (TypeError, ValueError):
+                return None
+
+        protocol: dict[str, Any] = {}
+        for proto_key, env_key, cast in (
+            ("random_range_ratio", "RANDOM_RANGE_RATIO", float),
+            ("num_prompts", "NUM_PROMPTS", int),
+            ("num_warmups", "NUM_WARMUPS", int),
+            ("seed", "SEED", int),
+        ):
+            val = _pick(env_key, cast)
+            if val is not None:
+                protocol[proto_key] = val
+        return protocol
+
+    def _perfskills_timeouts(self) -> tuple[int, int, bool]:
+        """Resolve the PerfSkills e2e timeouts from the live run budget.
+
+        The KERNEL phase-entry hook runs PerfSkills synchronously, so a fixed
+        subprocess default would (a) ignore ``--max-hours`` / the run deadline
+        and (b) keep the tick loop from reaching the deadline → closing-phase
+        check until it returns. To stay inside the budget we cap the run so it
+        ALWAYS finishes with at least the closing-grace window left, and shrink
+        the runner's own budget by a safety margin on top of that.
+
+        Returns:
+            tuple[int, int, bool]: ``(runner_timeout_s, kill_timeout_s,
+            budget_known)``. ``runner_timeout_s`` is passed to the runner as its
+            own e2e budget; ``kill_timeout_s`` is the hard subprocess kill
+            (always ≤ remaining − closing_grace so the closing report can run).
+            ``budget_known`` is ``False`` only when no run deadline is set
+            (e.g. a unit test invoking the hook directly), where the env default
+            is used verbatim.
+        """
+        # Standalone fallback ONLY: the 12h (43200s) default applies when no run
+        # deadline is set (budget_known=False) — e.g. a unit test invoking the
+        # hook directly, or PerfSkills run outside an orchestrated session. When
+        # Hyperloom DRIVES the run (deadline known) the budget MUST come from
+        # Hyperloom's live deadline / KERNEL phase allocation, so this default
+        # never caps a Hyperloom-driven run (a long --max-hours session can
+        # legitimately allot KERNEL more than 12h).
+        env_default_timeout = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "43200"))
+        deadline = self._run_deadline
+        if deadline is None:
+            return env_default_timeout, env_default_timeout + 600, False
+        remaining = deadline - time.monotonic()
+        grace = effective_closing_grace_sec(
+            float(getattr(self.shared_state, "max_minutes", 0) or 0), None,
+        )
+        margin = float(os.environ.get("PERFSKILLS_BUDGET_MARGIN_S", "300"))
+        # Reserve the closing window: the subprocess (incl. result.json flush)
+        # must be killed with at least ``grace`` left so closing can still run.
+        kill_budget = remaining - grace
+        # Also honour the KERNEL phase's own wall-clock budget: PerfSkills runs
+        # synchronously inside the phase-entry hook, so a run longer than the
+        # phase allocation would overrun the phase budget the same way it would
+        # overrun the session deadline. Cap by min(session, kernel_phase).
+        phase_rem = _phase_state.phase_budget_remaining_seconds(
+            self.shared_state, budget_pct=self._phase_budget_pct,
+        )
+        if phase_rem is not None:
+            kill_budget = min(kill_budget, float(phase_rem))
+        # Hyperloom-authoritative budget: the runner self-stops ``margin`` before
+        # the hard subprocess kill, and the kill reserves the closing-grace
+        # window. Derived purely from the live budget — the 12h env default does
+        # NOT cap it (requirement: PerfSkills time comes from Hyperloom here).
+        kill_timeout = int(max(0.0, kill_budget))
+        runner_timeout = int(max(0.0, kill_budget - margin))
+        return runner_timeout, kill_timeout, True
+
+    async def _run_perfskills_kernel_phase(self, *, from_phase: str) -> None:
+        """Delegate the KERNEL phase to PerfSkills (one whole-pipeline e2e run).
+
+        Builds a handoff from the EXPLORE best config, runs the PerfSkills
+        runner out-of-process (it owns all Claude-SDK / Workflow detail),
+        records the optimized launch/bench scripts + throughput into state, then
+        signals SWEEP via the ``skip_to_sweep`` escalate hint.
+        """
+        state = self.shared_state
+        cb = state.current_best or {}
+        accepted_flags = str(cb.get("extra_server_args") or "")
+        extra_envs = cb.get("extra_envs") or {}
+        accepted_env = " ".join(f"{k}={v}" for k, v in dict(extra_envs).items())
+        workload = {
+            "isl": int(getattr(state, "isl", 0) or int(os.environ.get("ISL", "1024"))),
+            "osl": int(getattr(state, "osl", 0) or int(os.environ.get("OSL", "1024"))),
+            "conc": int(getattr(state, "conc", 0) or int(os.environ.get("CONC", "64"))),
+        }
+        # Bench 口径 (measurement protocol): forward the SAME knobs Hyperloom
+        # actually benched with so PerfSkills' internal e2e measures identically.
+        # Without this PerfSkills falls back to its own standalone defaults
+        # (e.g. RANDOM_RANGE_RATIO=1 fixed-length vs Hyperloom's 0 variable-length)
+        # and the cross-harness numbers diverge. Source of truth = the materialized
+        # baseline recipe's benchmark.envs (the exact values Magpie ran), with a
+        # process-env fallback. Only keys that resolve are sent; absent keys leave
+        # PerfSkills on its own defaults so it still runs standalone.
+        bench_protocol = self._resolve_bench_protocol(
+            str(getattr(state, "baseline_config_path", "") or "")
+        )
+        handoff = {
+            "schema_version": 1,
+            "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
+            "framework": str(os.environ.get("FRAMEWORK", "") or "sglang"),
+            "gpu_type": str(getattr(state, "gpu_type", "") or os.environ.get("GPU_TYPE", "")),
+            "tp": int(os.environ.get("TP", "1") or 1),
+            "workload": workload,
+            "accepted_flags": accepted_flags,
+            "accepted_env": accepted_env,
+            "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
+            "raw_baseline_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            "exp_root": str(self.session_dir / "perfskills"),
+            # Align PerfSkills' bench CLIENT to Hyperloom's exact one (InferenceX
+            # benchmark_serving.py) so final/sweep numbers are cross-harness 可比.
+            "bench_client": "auto",
+            "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
+            # Pin the serving / optimization GPU set so PerfSkills never guesses:
+            # honour an explicit visibility mask, else 0..tp-1 (matches run_e2e
+            # map_args' own default). Removes ambiguity when Hyperloom drives.
+            "gpu_ids": (
+                os.environ.get("HIP_VISIBLE_DEVICES")
+                or os.environ.get("CUDA_VISIBLE_DEVICES")
+                or ",".join(str(i) for i in range(int(os.environ.get("TP", "1") or 1)))
+            ),
+        }
+        if bench_protocol:
+            handoff["bench_protocol"] = bench_protocol
+
+        out_dir = self.session_dir / "perfskills"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        handoff_path = out_dir / "handoff.json"
+        handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
+
+        from .kernel_request_handlers import _kernel_agent_tool_path
+
+        def _read_perfskills_result(path: Path) -> dict[str, Any]:
+            if not path.is_file():
+                return {}
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return {}
+
+        def _promote_recovered_result(
+            result: dict[str, Any],
+            *,
+            recovered_from: str,
+            runner_timeout_s: int | None = None,
+        ) -> None:
+            state.perfskills_result = result
+            self._promote_perfskills_result(result)
+            self._record_perfskills_kernel_journey(result)
+            evidence = {
+                "status": result.get("status"),
+                "throughput_speedup": result.get("throughput_speedup"),
+                "final_throughput_tok_s": result.get("final_throughput_tok_s"),
+                "eval_dir": result.get("eval_dir"),
+                "report_path": result.get("report_path"),
+                "recovered_from": recovered_from,
+            }
+            if runner_timeout_s is not None:
+                evidence["runner_timeout_s"] = runner_timeout_s
+            self._record_phase_entry_evidence(perfskills=evidence)
+            state.save(self.session_dir)
+            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+
+        def _finish_skip(result: dict[str, Any]) -> None:
+            """Record a (failed/skipped) PerfSkills outcome + wind down to SWEEP.
+
+            Always records the normalized outcome into ``perfskills_result``,
+            mirrors the failure reason onto the phase-entry evidence (so the
+            session-breakdown surfaces WHY the e2e run did not land), then sets
+            the ``skip_to_sweep`` hint so the coordinator never deadlocks.
+            """
+            state.perfskills_result = result
+            self._record_phase_entry_evidence(perfskills={
+                "status": result.get("status"),
+                "error_class": result.get("error_class"),
+                "error": (str(result.get("error") or "")[:500] or None),
+            })
+            state.save(self.session_dir)
+            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+
+        # Crash-recovery: a validated result.json written before the coordinator
+        # crashed (handback never reached state.save) must be promoted on resume.
+        # Guard with ``_perfskills_win_already_recorded`` so a prior cycle's
+        # result.json (``perfskills/`` is a fixed path) does not short-circuit a
+        # fresh KERNEL entry in a later macro-cycle.
+        result_path = out_dir / "result.json"
+        recovered = _read_perfskills_result(result_path)
+        if (
+            recovered.get("status") == "ok"
+            and not self._perfskills_win_already_recorded()
+        ):
+            log.info(
+                "PerfSkills result.json exists but state has no recorded win "
+                "(crash before handback); promoting recovered result."
+            )
+            _promote_recovered_result(recovered, recovered_from="existing_result_json")
+            return
+
+        try:
+            runner = _kernel_agent_tool_path("backends/perfskills_runner.py")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("PerfSkills runner not resolvable; skipping KERNEL")
+            _finish_skip({"status": "error", "error_class": "runner_not_found",
+                          "error": repr(exc)})
+            return
+
+        # Budget-aware timeouts: shrink to the remaining run deadline and always
+        # reserve the closing-grace window (Fix: was a fixed default that
+        # ignored --max-hours and blocked the deadline → closing-phase transition).
+        runner_timeout, kill_timeout, budget_known = self._perfskills_timeouts()
+        min_run = int(os.environ.get("PERFSKILLS_MIN_RUN_S", "600"))
+        if budget_known and runner_timeout < min_run:
+            log.warning(
+                "PerfSkills: only %ds budget remains (< min %ds); skipping e2e "
+                "and winding down to SWEEP so the closing report runs in time.",
+                runner_timeout, min_run,
+            )
+            _finish_skip({
+                "status": "skipped",
+                "error_class": "insufficient_budget",
+                "error": (f"only {runner_timeout}s of KERNEL budget remained "
+                          f"(< min {min_run}s); skipped to protect the closing "
+                          f"report window"),
+                "runner_timeout_s": runner_timeout,
+            })
+            return
+
+        cmd = ["python3", str(runner), str(handoff_path), str(out_dir),
+               "--timeout-s", str(runner_timeout)]
+        log.info("KERNEL entry: delegating to PerfSkills e2e (from=%s) "
+                 "runner_timeout=%ds kill_timeout=%ds budget_known=%s cmd=%s",
+                 from_phase or "<unknown>", runner_timeout, kill_timeout,
+                 budget_known, " ".join(cmd))
+
+        # Run in its own process group so a timeout can SIGTERM the whole
+        # runner -> run_e2e -> vllm/node tree (grace to flush result.json), then
+        # SIGKILL. A bare subprocess.run(timeout=) would SIGKILL only the direct
+        # child and orphan run_e2e + its servers.
+        term_grace = int(os.environ.get("PERFSKILLS_TERM_GRACE_S", "180"))
+
+        def _run() -> subprocess.CompletedProcess:
+            p = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env=dict(os.environ), start_new_session=True,
+            )
+
+            def _killpg(sig: int) -> None:
+                try:
+                    os.killpg(os.getpgid(p.pid), sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+            try:
+                out, err = p.communicate(timeout=kill_timeout)
+            except subprocess.TimeoutExpired:
+                _killpg(signal.SIGTERM)
+                try:
+                    out, err = p.communicate(timeout=term_grace)
+                except subprocess.TimeoutExpired:
+                    _killpg(signal.SIGKILL)
+                    out, err = p.communicate()
+                raise subprocess.TimeoutExpired(
+                    cmd, kill_timeout, output=out, stderr=err,
+                )
+            return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
+        try:
+            proc = await asyncio.to_thread(_run)
+            stderr_tail = (proc.stderr or "")[-2000:]
+            if proc.returncode != 0:
+                log.warning("PerfSkills runner rc=%s: %s", proc.returncode, stderr_tail)
+        except subprocess.TimeoutExpired:
+            log.warning("PerfSkills runner exceeded kill_timeout=%ds; SIGTERM'd "
+                        "to let it flush, then reclaimed the closing window",
+                        kill_timeout)
+            # The graceful SIGTERM gives run_e2e a window to flush result.json
+            # (recover-from-disk). If it landed a real win, keep it instead of
+            # discarding the whole KERNEL phase as a timeout.
+            recovered = _read_perfskills_result(result_path)
+            if recovered.get("status") == "ok":
+                log.info("PerfSkills flushed an OK result.json under SIGTERM "
+                         "grace; promoting the recovered win despite the cap.")
+                _promote_recovered_result(
+                    recovered,
+                    recovered_from="sigterm_flushed_result_json",
+                    runner_timeout_s=runner_timeout,
+                )
+                return
+            _finish_skip({
+                "status": "error",
+                "error_class": "timeout",
+                "error": (f"PerfSkills e2e killed after {kill_timeout}s "
+                          f"(budget-capped); closing window preserved"),
+                "runner_timeout_s": runner_timeout,
+                "kill_timeout_s": kill_timeout,
+            })
+            return
+        except Exception as exc:  # noqa: BLE001
+            log.exception("PerfSkills runner crashed")
+            _finish_skip({"status": "error", "error_class": "runner_crashed",
+                          "error": repr(exc)})
+            return
+
+        result: dict[str, Any] = {}
+        result = _read_perfskills_result(result_path)
+        if not result:
+            _finish_skip({
+                "status": "error",
+                "error_class": "no_result_json",
+                "error": (f"runner rc={proc.returncode} produced no parseable "
+                          f"result.json at {result_path}"),
+                "stderr_tail": stderr_tail,
+            })
+            return
+        # Carry the actual exit code so the breakdown can audit a nonzero rc.
+        result.setdefault("returncode", proc.returncode)
+        state.perfskills_result = result
+
+        self._promote_perfskills_result(result)
+        self._record_perfskills_kernel_journey(result)
+        self._record_phase_entry_evidence(perfskills={
+            "status": result.get("status"),
+            "throughput_speedup": result.get("throughput_speedup"),
+            "final_throughput_tok_s": result.get("final_throughput_tok_s"),
+            "eval_dir": result.get("eval_dir"),
+            "report_path": result.get("report_path"),
+            "runner_timeout_s": runner_timeout,
+        })
+        state.save(self.session_dir)
+        await self.bus.append_and_seq(Message.new(
+            "kernel", "orchestration", "response",
+            {
+                "in_reply_to": "",
+                "kind": "perfskills_e2e_done",
+                "status": str(result.get("status") or "unknown"),
+                "speedup": result.get("throughput_speedup"),
+                "result_path": str(result_path),
+            },
+            priority=1,
+        ))
+        # KERNEL is a one-shot under PerfSkills: wind down to SWEEP.
+        state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+
+    def _perfskills_win_already_recorded(self) -> bool:
+        """Whether a PerfSkills e2e win is already in this session's state.
+
+        Used to gate crash-recovery from an existing ``result.json`` so a prior
+        cycle's win (``perfskills/`` is a fixed path) is not re-promoted on a
+        later KERNEL entry. Mirrors the ``optimization_stack`` dedup in
+        ``_promote_perfskills_result``.
+        """
+        return any(
+            isinstance(item, dict) and item.get("action") == "perfskills_e2e"
+            for item in (self.shared_state.optimization_stack or [])
+        )
+
+    def _promote_perfskills_result(self, result: dict[str, Any]) -> None:
+        """Fold a PerfSkills e2e win into current_best + the validated gain ledger.
+
+        Also appends an ``optimization_stack`` entry and the matching
+        ``gain_per_stack_entry`` so the session-breakdown attribution section
+        credits the e2e gain to a concrete stack entry (carrying the per-kernel
+        / head / config evidence from ``result.json``) instead of leaving the
+        gain unattributed.
+        """
+        if not isinstance(result, dict) or result.get("status") not in ("ok",):
+            return
+        new_tput = float(result.get("final_throughput_tok_s") or 0.0)
+        base = float(self.shared_state.baseline_tput or 0.0)
+        if new_tput <= 0:
+            return
+        cb = dict(self.shared_state.current_best or {})
+        cb.update({
+            "action": "perfskills_e2e",
+            "tput": new_tput,
+            "ttft_mean_ms": result.get("ttft_ms"),
+            "tpot_mean_ms": result.get("tpot_ms"),
+            # Sweep-reuse handles: the optimized self-contained launch + bench scripts.
+            "perfskills_launch_script": result.get("final_launch_script"),
+            "perfskills_bench_script": result.get("bench_script"),
+            "perfskills_eval_dir": result.get("eval_dir"),
+            "workspace": result.get("eval_dir"),
+        })
+        self.shared_state.current_best = cb
+
+        # Attribute the e2e gain to a concrete optimization_stack entry so the
+        # breakdown's attribution / optimization_stack sections reflect it (the
+        # native lanes do the same via append_stack_gain_entry).
+        ts = datetime.now(timezone.utc).isoformat()
+        accepted_cfg = result.get("accepted_config") or {}
+        already = any(
+            isinstance(item, dict) and item.get("action") == "perfskills_e2e"
+            for item in (self.shared_state.optimization_stack or [])
+        )
+        if not already:
+            entry = {
+                "action": "perfskills_e2e",
+                "variant_name": "perfskills_e2e",
+                "tput": new_tput,
+                "candidate_extra_server_args": str(accepted_cfg.get("flags") or ""),
+                "extra_envs": (
+                    {"PERFSKILLS_ACCEPTED_ENV": str(accepted_cfg.get("env"))}
+                    if accepted_cfg.get("env") else {}
+                ),
+                "workspace": result.get("eval_dir"),
+                # Per-kernel / head evidence for the attribution + lifecycle view.
+                "accepted_kernels": result.get("accepted_kernels") or [],
+                "accepted_heads": result.get("accepted_heads") or [],
+                "report_path": result.get("report_path"),
+                "source": "perfskills_e2e",
+                "ts": ts,
+            }
+            self.shared_state.optimization_stack.append(entry)
+            self.shared_state.append_stack_gain_entry(
+                action="perfskills_e2e",
+                variant_name="perfskills_e2e",
+                new_tput=new_tput,
+                extra_server_args=str(accepted_cfg.get("flags") or ""),
+                ts=ts,
+            )
+        if base > 0:
+            gain = (new_tput - base) / base * 100.0
+            self.shared_state.cumulative_gain = gain
+            self.shared_state.cumulative_gain_validated = gain
+            self.shared_state.cumulative_gain_validated_ts = (
+                datetime.now(timezone.utc).isoformat()
+            )
+
+    def _record_perfskills_kernel_journey(self, result: dict[str, Any]) -> None:
+        """Replay GEAK-e2e's kernel_journey.json into the breakdown recorder.
+
+        GEAK-e2e is a whole-pipeline e2e optimizer, so its authored kernels
+        never went through the per-kernel SDK recorder path and were invisible
+        in ``kernel_journey`` (only the tracelens discovery substream showed).
+        It now emits a self-contained ``kernel_journey.json`` whose per-kernel
+        sub-objects are shaped EXACTLY as the recorder's
+        ``record_kernel_{dispatch,backend_result,e2e}`` inputs (see GEAK-e2e
+        ``interface/run_e2e.py`` ``build_kernel_journey``). We replay them
+        verbatim so the assembler folds the e2e optimizer's kernels into
+        ``kernel_journey`` next to tracelens discovery — no mapping logic here,
+        the contract file owns it. Best-effort: a missing/partial file never
+        breaks the phase.
+        """
+        if not isinstance(result, dict):
+            return
+        kj_path = str(result.get("kernel_journey_path") or "")
+        if not kj_path:
+            eval_dir = str(result.get("eval_dir") or "")
+            if eval_dir:
+                kj_path = str(Path(eval_dir) / "kernel_journey.json")
+        if not kj_path or not Path(kj_path).is_file():
+            return
+        try:
+            journey = json.loads(Path(kj_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(journey, dict):
+            return
+
+        # The GEAK-e2e pipeline's GEAK is a distinct variant ("geak_v4") from
+        # the kernel-agent's generic ``geak`` backend. Relabel it before replay
+        # so SBD/trace (versions map, kernel_journey backend lanes) never
+        # conflate the two provenances. See ``_relabel_perfskills_geak_journey``.
+        _relabel_perfskills_geak_journey(journey)
+
+        from ..breakdown.recorder import instrument
+
+        sdir = self.session_dir
+        commit = str(getattr(self.shared_state, "code_revision", "") or "")
+        # Stage 1: replay GEAK-e2e's discovery substream (schema §3) so the
+        # assembler backfills each kernel's discovery-sourced fields
+        # (name/gpu_pct/bound_type/source_file). GEAK-e2e profiles via rocprofv3,
+        # not tracelens, so the route is ``bypass``; ``tool=geak_v4`` keeps the
+        # version provenance under the GEAK-e2e variant instead of minting an
+        # empty bypass entry (and apart from the generic ``geak`` lane).
+        for run in (journey.get("discovery_runs") or []):
+            if not isinstance(run, dict):
+                continue
+            try:
+                instrument.record_kernel_discovery(
+                    sdir,
+                    source=str(run.get("source") or "bypass"),
+                    status=str(run.get("status") or "success"),
+                    hot_kernels=list(run.get("hot_kernels") or []),
+                    scan=run.get("scan") if isinstance(run.get("scan"), dict) else None,
+                    tool=PERFSKILLS_GEAK_BACKEND,
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("perfskills kernel_journey discovery replay failed",
+                          exc_info=True)
+        for k in (journey.get("kernels") or []):
+            if not isinstance(k, dict):
+                continue
+            kid = str(k.get("kernel_id") or "")
+            if not kid:
+                continue
+            disp = k.get("dispatch") if isinstance(k.get("dispatch"), dict) else {}
+            try:
+                instrument.record_kernel_dispatch(
+                    sdir,
+                    kernel_id=kid,
+                    dispatched=bool(disp.get("dispatched", True)),
+                    backends=list(disp.get("backends") or []),
+                    skip_reason=str(disp.get("skip_reason") or ""),
+                    orchestration_commit=commit,
+                    task_group=disp.get("task_group"),
+                )
+                br = k.get("backend_result")
+                if isinstance(br, dict):
+                    instrument.record_kernel_backend_result(sdir, br)
+                e2e = k.get("e2e")
+                if isinstance(e2e, dict):
+                    instrument.record_kernel_e2e(
+                        sdir,
+                        kernel_id=kid,
+                        integrated=bool(e2e.get("integrated", False)),
+                        e2e_gain_pct=e2e.get("e2e_gain_pct"),
+                        validated=e2e.get("validated"),
+                        decision=str(e2e.get("decision") or ""),
+                        patch_path=e2e.get("patch_path"),
+                        target_file=e2e.get("target_file"),
+                        extra_server_args=str(e2e.get("extra_server_args") or ""),
+                    )
+            except Exception:  # noqa: BLE001
+                log.debug("perfskills kernel_journey replay failed for %s", kid,
+                          exc_info=True)
+        for tool, meta in (journey.get("versions") or {}).items():
+            if not isinstance(meta, dict):
+                continue
+            try:
+                instrument.record_tool_version(
+                    sdir,
+                    tool=str(tool),
+                    root=str(meta.get("root_dir") or "") or None,
+                    version=str(meta.get("version") or meta.get("commit") or "") or None,
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
         """Record and post-process a run_gemm_tuning result from any entrypoint.
@@ -3630,6 +4294,21 @@ class Coordinator:
         self.shared_state.cumulative_gain_validated_stack_len = len(
             self.shared_state.optimization_stack or []
         )
+
+    def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
+        """Sync the latest GEMM history row after forge E2E rewrites ``result``."""
+        if not isinstance(result, dict):
+            return
+        entry = dict(result)
+        attempts = list(getattr(self.shared_state, "gemm_tuning_attempts", []) or [])
+        if attempts and isinstance(attempts[-1], dict):
+            entry.setdefault("ts", attempts[-1].get("ts"))
+            attempts[-1] = entry
+        else:
+            entry.setdefault("ts", datetime.now(timezone.utc).isoformat())
+            attempts.append(entry)
+        self.shared_state.gemm_tuning_attempts = attempts
+        self.shared_state.last_gemm_tuning = entry
 
     async def _validate_forge_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
         """Sequentially E2E-validate each forge tuner's env independently.
@@ -3809,7 +4488,7 @@ class Coordinator:
             result["status"] = "complete"
             result["decision"] = "REVERT"
             result["micro_decision"] = "candidate_no_e2e_gain"
-        self.shared_state.last_gemm_tuning = dict(result)
+        self._replace_latest_gemm_tuning_attempt(result)
 
     def _should_continue_kernel_after_gemm(self) -> bool:
         """Decide whether to run source-level kernel_opt right after GEMM tuning.
@@ -5256,6 +5935,12 @@ class Coordinator:
         }
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
+        # PerfSkills-owned KERNEL: hand the e2e result to the sweep so it reuses
+        # PerfSkills' bench_e2e.sh + overlay instead of relaunching via Magpie.
+        ps_result = getattr(state, "perfskills_result", None) or {}
+        if isinstance(ps_result, dict) and ps_result.get("status") == "ok" \
+                and ps_result.get("bench_script"):
+            params["perfskills_result"] = ps_result
         cb = state.current_best or {}
         if isinstance(cb, dict):
             cb_args = str(cb.get("extra_server_args") or "")
@@ -5546,6 +6231,42 @@ class Coordinator:
             log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
             await self._record_close_step(
                 "langfuse_flush",
+                status="failed",
+                detail=repr(exc)[:240],
+            )
+
+        # ---------------- Step 2.6: artifact package -> /workspace -------
+        # Bundle the curated result/report/analysis files (incl. the
+        # session_breakdown just written in step 2) into a single zip
+        # placed under ``/workspace`` so the Claw sandbox sync ships it
+        # to object storage even when ``$USER_DATA_PATH`` points at a
+        # wekafs path outside ``/workspace`` (the common production case).
+        # Best-effort: failures are recorded but never abort the close
+        # sequence. The zip carries its own PACKAGE_MANIFEST log of what
+        # went in / what was missing.
+        try:
+            from ..breakdown import package_session_artifacts
+
+            pkg_path = package_session_artifacts(
+                self.session_dir,
+                session_id=str(getattr(self.shared_state, "session_id", "") or ""),
+            )
+            if pkg_path is not None:
+                await self._record_close_step(
+                    "artifact_package",
+                    status="done",
+                    detail=str(pkg_path),
+                )
+            else:
+                await self._record_close_step(
+                    "artifact_package",
+                    status="skipped",
+                    detail="no artifacts matched or dest unwritable",
+                )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("CLOSE step 2.6 (artifact_package) failed")
+            await self._record_close_step(
+                "artifact_package",
                 status="failed",
                 detail=repr(exc)[:240],
             )
@@ -10353,7 +11074,11 @@ class Coordinator:
         if not isinstance(result_dict, dict):
             return None
         error_class = str(result_dict.get("error_class") or "").lower()
-        if error_class in ("crash", "oom", "hang"):
+        # ``detokenizer_stall`` is a hang in all but name (server ready, no
+        # generation progress); record it as a crash-severity pitfall so the
+        # offending variant config is remembered and not re-proposed, instead
+        # of burning explore budget on the same stall again.
+        if error_class in ("crash", "oom", "hang", "detokenizer_stall"):
             return _SEVERITY_CRASH
         status = str(result_dict.get("status") or "").lower()
         if status in ("crash", "oom", "hang"):
