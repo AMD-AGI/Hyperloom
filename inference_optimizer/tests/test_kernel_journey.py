@@ -365,6 +365,29 @@ def test_geak_v4_provenance_resolves_like_geak(tmp_path: Path) -> None:
     assert meta["version"] == sha
 
 
+def test_geak_v4_provenance_resolves_perfskills_root_env_without_explicit_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # No producer-supplied root: geak_v4 must fall back to $PERFSKILLS_ROOT (the
+    # GEAK_v4 checkout), NOT $GEAK_ROOT (the generic single-kernel GEAK clone),
+    # otherwise versions["geak_v4"] records the wrong repo's SHA.
+    geak_root = tmp_path / "GEAK"
+    perfskills_root = tmp_path / "GEAK-e2e"
+    geak_root.mkdir()
+    perfskills_root.mkdir()
+    _init_git_repo(geak_root)
+    perfskills_sha = _init_git_repo(perfskills_root)
+    monkeypatch.setenv("GEAK_ROOT", str(geak_root))
+    monkeypatch.setenv("PERFSKILLS_ROOT", str(perfskills_root))
+
+    meta = instrument._tool_metadata("geak_v4")
+
+    assert meta["tool"] == "geak_v4"
+    assert meta["root_dir"] == str(perfskills_root)
+    assert meta["commit"] == perfskills_sha
+    assert meta["version"] == perfskills_sha
+
+
 def test_discovery_run_carries_duration(tmp_path: Path) -> None:
     instrument.record_kernel_discovery(
         tmp_path,

@@ -1377,6 +1377,13 @@ ensure_perfskills() {
     fi
   else
     log "e2e optimizer checkout already present: ${PERFSKILLS_ROOT}"
+    if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+      # Keep an existing checkout aligned with the requested PERFSKILLS_REF,
+      # mirroring ensure_geak: without this a ref bump (branch/tag/SHA) leaves
+      # the runtime pinned to the stale GEAK_v4 code it first cloned.
+      run git -C "${PERFSKILLS_ROOT}" fetch --depth 1 origin "$PERFSKILLS_REF"
+      run git -C "${PERFSKILLS_ROOT}" checkout -q --force FETCH_HEAD
+    fi
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     # interface/run_e2e.py prefers the python SDK (falls back to `claude -p`).
