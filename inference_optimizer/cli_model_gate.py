@@ -278,13 +278,22 @@ _UNRECOGNIZED_ARCHITECTURES = frozenset({
     "deepseekv4forcausallm", "glm4moeliteforcausallm",
     "mimov2flashforcausallm", "glmmoedsaforcausallm",
 })
-# ministral3 only fails inside a Mistral3 multimodal wrapper (Surpem-Supertron2
-# server.log: vLLM registry raises KeyError('ministral3') for text_config.
-# model_type). A bare top-level ministral3 is left to the framework to judge, so
-# this is checked only against the nested text_config scope.
-_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({"ministral3"})
+# Some model_type values only appear inside nested decoder configs carried by a
+# wrapper. A bare top-level type is left to the framework unless we have a direct
+# repro, so these are checked only against the nested text_config scope.
+#
+# ministral3: Mistral3 multimodal wrapper (Surpem-Supertron2 server.log: vLLM
+# registry raises KeyError('ministral3') for text_config.model_type).
+# qwen3_5_moe_text: Qwen3.6 text decoder wrapper; vLLM/Transformers rejects it
+# with "model type `qwen3_5_moe_text` but Transformers does not recognize this
+# architecture".
+_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({
+    "ministral3",
+    "qwen3_5_moe_text",
+})
 
 _PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
+_STRICT_BOOL_CONFIG_KEYS = ("use_cache",)
 
 # ``_GEMMA2_ARCHITECTURES`` is imported from model_config_utils (single source
 # of truth) at module top.
@@ -892,6 +901,59 @@ def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
         "in engine init."
     )
 
+
+def _detect_diffusers_pipeline_model(model_path: str) -> str | None:
+    """Return a reason when the directory is a Diffusers pipeline, not an LLM.
+
+    Diffusers repos such as FLUX.1-dev ship ``model_index.json`` at the root and
+    no causal-LM ``config.json``. Without this guard they can reach baseline and
+    fail only after server health checks time out.
+    """
+    idx = Path(model_path) / "model_index.json"
+    if not idx.is_file():
+        return None
+    try:
+        data = json.loads(idx.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    class_name = str(data.get("_class_name") or "").strip()
+    if class_name.endswith("Pipeline") or class_name in {
+        "FluxPipeline",
+        "StableDiffusionPipeline",
+        "DiffusionPipeline",
+    }:
+        return (
+            f"model_index.json declares Diffusers pipeline '{class_name or '?'}', "
+            "not a decoder-only causal LM; Hyperloom text-generation benchmarks "
+            "cannot serve this model."
+        )
+    return None
+
+
+def _detect_null_strict_bool_config(data: dict) -> str | None:
+    """Return a reason for config fields that strict HF validators require bool.
+
+    Some checkpoints serialize ``use_cache: null``. The loader path then fails
+    before useful work with ``StrictDataclassFieldValidationError: field
+    'use_cache' expected bool, got NoneType``.
+    """
+    scopes = [("config", data)]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        scopes.append(("text_config", nested))
+    for scope_name, scope in scopes:
+        for key in _STRICT_BOOL_CONFIG_KEYS:
+            if key in scope and scope.get(key) is None:
+                return (
+                    f"{scope_name}.{key} is null, but HuggingFace/vLLM strict "
+                    "config validation expects a bool and raises "
+                    "StrictDataclassFieldValidationError before server init."
+                )
+    return None
+
+
 # Local tokenizer artifacts sglang/HF need to build a real tokenizer. A
 # checkpoint shipping only weights + config (no tokenizer) loads a degraded
 # fallback whose warmup encodes an empty prompt → empty (M=0) batch → aiter
@@ -951,6 +1013,22 @@ _VOCAB_WEIGHT_NAMES = (
     "wte.weight",
     "word_embeddings.weight",
     "lm_head.weight",
+)
+_FULL_BASE_WEIGHT_NAMES = (
+    "model.embed_tokens.weight",
+    "embed_tokens.weight",
+    "transformer.wte.weight",
+    "wte.weight",
+    "word_embeddings.weight",
+    "lm_head.weight",
+)
+_PEFT_ADAPTER_WEIGHT_MARKERS = (
+    ".lora_A.",
+    ".lora_B.",
+    ".lora_embedding_A",
+    ".lora_embedding_B",
+    ".modules_to_save.",
+    ".base_layer.",
 )
 _SAFETENSORS_HEADER_LIMIT = 64 * 1024 * 1024
 
@@ -1046,6 +1124,58 @@ def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | No
                     f"weight loading will fail."
                 )
     return None
+
+
+def _detect_peft_adapter_only_checkpoint(model_path: str, data: dict) -> str | None:
+    """Return a reason when a checkpoint looks like an unmerged PEFT adapter.
+
+    Some repos ship ``config.json`` plus LoRA/PEFT adapter tensors but not the
+    corresponding base-model weights. The default vLLM/sglang loaders then try
+    to resolve base tensors such as ``base_model.model.lm_head.base_layer.weight``
+    and fail during engine init. Keep this conservative: only block when the
+    safetensors index explicitly carries adapter-shaped tensor names and lacks
+    normal base embedding / LM-head weights.
+    """
+    mdir = Path(model_path)
+    idx = mdir / "model.safetensors.index.json"
+    if not idx.is_file():
+        return None
+    try:
+        weight_map = (json.loads(idx.read_text(encoding="utf-8")) or {}).get(
+            "weight_map",
+        ) or {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(weight_map, dict) or not weight_map:
+        return None
+
+    keys = {str(k) for k in weight_map}
+    has_adapter_tensors = any(
+        marker in key for key in keys for marker in _PEFT_ADAPTER_WEIGHT_MARKERS
+    )
+    has_adapter_manifest = (
+        (mdir / "adapter_config.json").is_file()
+        or any("adapter" in str(v).lower() for v in weight_map.values())
+    )
+    if not has_adapter_tensors and not has_adapter_manifest:
+        return None
+
+    has_base_weights = any(
+        key.endswith(suffix)
+        for key in keys
+        for suffix in _FULL_BASE_WEIGHT_NAMES
+    )
+    if has_base_weights:
+        return None
+
+    return (
+        "checkpoint appears to be an unmerged PEFT/LoRA adapter: "
+        "model.safetensors.index.json contains adapter/base_layer tensor names "
+        "but no full base embedding or lm_head weights. The default "
+        "vLLM/sglang loader cannot reconstruct missing base tensors such as "
+        "base_model.model.lm_head.base_layer.weight; merge the adapter into the "
+        "base model before running Hyperloom."
+    )
 
 
 def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
@@ -1144,6 +1274,9 @@ def _detect_incompatible_model_config(
     """
     if not model_path:
         return None
+    pipeline_reason = _detect_diffusers_pipeline_model(model_path)
+    if pipeline_reason is not None:
+        return pipeline_reason
     cfg_path = Path(model_path) / "config.json"
     if not cfg_path.is_file():
         return None
@@ -1178,6 +1311,9 @@ def _detect_incompatible_model_config(
     nested = data.get("text_config")
     if isinstance(nested, dict):
         scopes.append(nested)
+    null_bool_reason = _detect_null_strict_bool_config(data)
+    if null_bool_reason is not None:
+        return null_bool_reason
     has_rope = any(
         s.get(k) for s in scopes for k in _ROPE_CONFIG_KEYS
     )
@@ -1213,6 +1349,9 @@ def _detect_incompatible_model_config(
     private_quant_reason = _detect_private_quant(model_path, data)
     if private_quant_reason is not None:
         return private_quant_reason
+    peft_adapter_reason = _detect_peft_adapter_only_checkpoint(model_path, data)
+    if peft_adapter_reason is not None:
+        return peft_adapter_reason
     vocab_shape_reason = _detect_vocab_weight_shape_mismatch(model_path, data)
     if vocab_shape_reason is not None:
         return vocab_shape_reason
