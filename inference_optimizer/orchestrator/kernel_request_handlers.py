@@ -2463,6 +2463,52 @@ def _optimization_wrapper_timeout_sec(payload: dict) -> int:
     return int(_optimization_budget_minutes(payload) * 60) + 180
 
 
+def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
+    """Return the raw, lowercased kernel backend order from payload/env.
+
+    This is the single source of truth for kernel-backend selection and is
+    shared by both the per-kernel ladder (:func:`_backend_order`) and the
+    phase-level PerfSkills check (:func:`perfskills_selected`).  Unknown tokens
+    are kept here on purpose; callers filter to the set they understand.
+
+    Precedence (highest to lowest): ``payload['backend_order']`` ->
+    ``KERNEL_OPT_BACKEND_ORDER`` env -> ``KERNEL_OPT_BACKENDS`` env.  When none
+    is set an empty list is returned so callers can apply their own default.
+
+    Args:
+        payload: Optional request payload that may carry ``backend_order``.
+
+    Returns:
+        list[str]: The ordered, lowercased backend tokens (may be empty).
+    """
+    raw = (
+        (payload or {}).get("backend_order")
+        or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+        or os.environ.get("KERNEL_OPT_BACKENDS")
+    )
+    if not raw:
+        return []
+    return [item.strip().lower() for item in str(raw).split(",") if item.strip()]
+
+
+def perfskills_selected(payload: dict | None = None) -> bool:
+    """Whether ``perfskills`` is requested in the kernel backend order.
+
+    ``perfskills`` is not a per-kernel backend: when it appears in the order it
+    means "delegate the whole KERNEL phase to the PerfSkills e2e optimizer".
+    It therefore *owns* the phase whenever present (any other backends in the
+    order are ignored for the kernel phase), so an order of just ``perfskills``
+    runs only PerfSkills.
+
+    Args:
+        payload: Optional request payload that may carry ``backend_order``.
+
+    Returns:
+        bool: ``True`` when ``perfskills`` is in the resolved order.
+    """
+    return "perfskills" in _raw_kernel_backend_order(payload)
+
+
 def _kernel_ladder_budget_sec(payload: dict) -> int:
     """Total wall-clock budget for one kernel's whole backend ladder.
 
@@ -2519,13 +2565,8 @@ def _backend_order(payload: dict) -> list[str]:
         list[str]: The filtered, ordered backend names (subset of
             ``{"claude", "codex", "cursor", "geak"}``).
     """
-    raw = (
-        payload.get("backend_order")
-        or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
-        or os.environ.get("KERNEL_OPT_BACKENDS")
-    )
-    if raw:
-        order = [item.strip().lower() for item in str(raw).split(",") if item.strip()]
+    order = _raw_kernel_backend_order(payload)
+    if order:
         explicit = True
     else:
         # Ignore legacy payload["backends"]; the default ladder (GEAK first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
@@ -2533,7 +2574,9 @@ def _backend_order(payload: dict) -> list[str]:
         explicit = False
     # `forge` (Kernel-Forge autonomous-loop backend) is first in
     # _DEFAULT_KERNEL_BACKEND_ORDER; keep it in `allowed` so it survives the
-    # filter for both the default and any explicit backend_order.
+    # filter for both the default and any explicit backend_order.  `perfskills`
+    # is intentionally absent: it is a phase-level delegate (see
+    # ``perfskills_selected``), not a per-kernel backend, so it is dropped here.
     allowed = {"claude", "codex", "cursor", "geak", "forge"}
     selected = [backend for backend in order if backend in allowed]
     # Drop cursor from the auto-derived ladder when CURSOR_API_KEY is unset (explicit order still wins).

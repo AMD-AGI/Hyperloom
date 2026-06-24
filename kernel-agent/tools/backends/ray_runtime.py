@@ -331,7 +331,24 @@ SAFE_ENV_KEYS = (
     "GEAK_USE_KNOWLEDGE_BASE",
     "GEAK_MEMORY_DISABLE",
     "GEAK_MEMORY_NO_CROSS_SESSION",
+    # Trace-captured argument signature (tensors + scalar args, in call order):
+    # forwarded so GEAK's harness builder reconstructs the exact kernel call.
+    "GEAK_RAW_ARG_SPEC_JSON",
     "MSWEA_MODEL_NAME",
+    # e2e optimizer (GEAK@GEAK_v4, formerly PerfSkills): the runner path + repo
+    # root so a Ray worker can locate interface/run_e2e.py and the e2e_workflow/
+    # checkout.
+    "PERFSKILLS_ROOT", "PERFSKILLS_E2E_RUNNER",
+    "PERFSKILLS_CLAUDE_EFFORT", "PERFSKILLS_CLAUDE_MODEL", "PERFSKILLS_E2E_TIMEOUT_S",
+    # Scoring/profiler/run knobs read by GEAK itself (the Ray actor); without these
+    # in the allowlist they are stripped at the Ray boundary and silently ignored:
+    # GEAK_SCORE_TARGET (kernel vs wall best-patch selection — the E2E-transferable
+    # signal), GEAK_SKIP_PROFILE (skip the advisory profiler-mcp roofline pass),
+    # GEAK_MAX_BENCHMARK_SHAPES (harness shape cap), GEAK_RUN_MODE (full vs quick).
+    "GEAK_SCORE_TARGET",
+    "GEAK_SKIP_PROFILE",
+    "GEAK_MAX_BENCHMARK_SHAPES",
+    "GEAK_RUN_MODE",
 )
 
 

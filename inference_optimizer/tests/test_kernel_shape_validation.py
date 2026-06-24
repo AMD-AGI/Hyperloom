@@ -158,6 +158,8 @@ def test_finalize_candidates_stamps_trace_provenance():
             str(tools_dir / "tracelens_analysis.py"),
         )
         mod = importlib.util.module_from_spec(spec)
+        # Register before exec so self-referential dataclass annotations (e.g.
+        # OpResolution.fanout: list["OpResolution"]) resolve under py3.10.
         sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)
     finally:
