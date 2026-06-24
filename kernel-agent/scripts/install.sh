@@ -19,10 +19,10 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 export PATH="/opt/venv/bin:$PATH"
 
 # Default every writable artefact location under $USER_DATA_PATH so a single
-# session-dir move relocates Magpie / dependency checkouts / GEAK config /
-# the kernel-agent env file. Operators can still pin individual repo paths
-# via env overrides (GEAK_ROOT, TRACELENS_ROOT, MAGPIE_DIR, etc.) — the
-# defaults below take effect only when the corresponding env var is unset.
+# session-dir move relocates Magpie / source mirrors / GEAK config / the
+# kernel-agent env file. Operators can still pin individual paths via env
+# overrides (HYPERLOOM_ROOT, MAGPIE_DIR, etc.) — the defaults below take
+# effect only when the corresponding env var is unset.
 #
 # REPO_ROOT / KERNEL_AGENT_ROOT default to the on-disk source location
 # (this script lives at kernel-agent/scripts/install.sh, so its parent's
@@ -87,16 +87,17 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
 #   2. AMD-AGI/TraceLens-internal -> $TRACELENS_INTERNAL_ROOT (internal: rehydration module)
-# Default base clones the public repo into the pod-local open-source tree.
+# Default base clones the public repo into the workspace runtime tree,
+# matching Magpie / InferenceX rather than persisting pod-local mirrors.
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-# TraceLens v0.6.1 integration (#474): head of
-# release/hyperloom_integration_v0.6.1. The optional internal extension tracks
-# the matching release/hyperloom_integration_v0.6.1 branch of
+# TraceLens v0.7.0 integration (#474): head of
+# release/hyperloom_integration_v0.7.0. The optional internal extension tracks
+# the matching release/hyperloom_integration_v0.7.0 branch of
 # AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
-TRACELENS_REF="dee7fa3182b1ee0d2085a364a2542d8f49acc0f6"
+TRACELENS_REF="35bbb6380cf69a2655ee28260b02b5f2dc481744"
 _tracelens_root_was_set="${TRACELENS_ROOT:+1}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
@@ -126,11 +127,41 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
-# Pin GEAK to the v3.2.1 release, which carries the GEMM tuning entrypoint
-# used by kernel-agent/tools/gemm_tuning.py (minisweagent.run.gemm_tuning).
-# Operators can override with GEAK_REF=<tag|branch|sha>.
-GEAK_REF="${GEAK_REF:-v3.2.1}"
-OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
+# Pin GEAK to the v3.2.2 release (commit d3f94cbe, cut from the
+# chore/subagent-docs-upstream-resource branch / PR #290). It carries the
+# GEMM tuning entrypoint used by kernel-agent/tools/gemm_tuning.py
+# (minisweagent.run.gemm_tuning) plus the upstreamed subagent docs/resources.
+# A tag is a permanent ref: it stays reachable regardless of how PR #290 is
+# merged to main (merge/squash/rebase) or whether the source branch is later
+# deleted, unlike a branch-HEAD SHA. Operators can override with
+# GEAK_REF=<tag|branch|sha>; bump to the next patch tag if the branch advances.
+GEAK_REF="${GEAK_REF:-v3.2.2}"
+# e2e whole-pipeline optimizer (formerly the standalone PerfSkills repo). Its
+# code has MIGRATED INTO GEAK on the GEAK_v4 branch (interface/run_e2e.py +
+# e2e_workflow/). Hyperloom calls interface/run_e2e.py at the KERNEL phase when
+# KERNEL_OPT_BACKEND_ORDER=perfskills. This is a SECOND GEAK checkout pinned to the
+# e2e branch, kept SEPARATE from the single-kernel GEAK checkout above. The
+# PERFSKILLS_* names are retained as the stable handle for this optimizer;
+# operators override repo/ref/root with PERFSKILLS_REPO / PERFSKILLS_REF /
+# PERFSKILLS_ROOT.
+PERFSKILLS_REPO="${PERFSKILLS_REPO:-${GEAK_REPO}}"
+PERFSKILLS_ROOT="${PERFSKILLS_ROOT:-${_open_source_root}/GEAK-e2e}"
+PERFSKILLS_REF="${PERFSKILLS_REF:-GEAK_v4}"
+PERFSKILLS_E2E_RUNNER="${PERFSKILLS_E2E_RUNNER:-${PERFSKILLS_ROOT}/interface/run_e2e.py}"
+# --- OOB source resolution (BEGIN: kept in sync with test_oob_src_default) ---
+# OOB now ships inside the KernelForge checkout ($FORGE_PATH/OOB), so derive
+# the OOB source from the forge path instead of requiring a separate OOB path
+# to be injected by the caller (the legacy DEFAULT_OOB_PATH env). An explicit
+# OOB_SRC is still honoured as an operator override. Honour the same forge-root
+# aliases as the forge backend (kernel-agent/tools/backends/forge_submit.py),
+# and fall back to the legacy bundle layout only when no forge path is provided.
+_forge_root="${FORGE_PATH:-${KERNEL_FORGE_ROOT:-${KERNEL_FORGE_PATH:-}}}"
+if [ -n "${_forge_root}" ]; then
+  OOB_SRC="${OOB_SRC:-${_forge_root%/}/OOB}"
+else
+  OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
+fi
+# --- OOB source resolution (END) ---
 OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
@@ -203,7 +234,7 @@ fi
 KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
-GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.05}"
+GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
 CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
 # GEAK/OOB use the user's LiteLLM-compatible endpoint. The canonical env is
 # OPENAI_BASE_URL + SAFE_API_KEY; keep fallbacks for older launchers.
@@ -238,6 +269,15 @@ CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh
 # not differentiate, just install everything".
 CHECK_ONLY=0
 DRY_RUN=0
+# The PerfSkills/GEAK-e2e optimizer is OPT-IN: it is only used at runtime when a
+# session sets ``KERNEL_OPT_BACKEND_ORDER=perfskills``. The default runtime
+# optimizer is ``native``, so installing the second GEAK-e2e checkout (extra clone + network
+# + claude-agent-sdk pip) unconditionally would tax every native-only user. Gate
+# it behind ``--with-perfskills`` / ``INSTALL_PERFSKILLS=1``; default off.
+case "${INSTALL_PERFSKILLS:-0}" in
+  1|true|TRUE|yes|YES|on|ON) INSTALL_PERFSKILLS=1 ;;
+  *) INSTALL_PERFSKILLS=0 ;;
+esac
 
 usage() {
   cat <<'EOF'
@@ -252,12 +292,16 @@ Always installs:
 Options:
   --check-only       Verify current environment, do not install
   --dry-run          Print actions without running installs
+  --with-perfskills  Also install the PerfSkills/GEAK-e2e optimizer checkout
+                     (only needed for KERNEL_OPT_BACKEND_ORDER=perfskills runs).
   -h, --help         Show this help
 
 Environment (optional):
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
                                         Set 0 to skip — useful for claude-only kernel-opt or CPU-only
                                         sandboxes where BGE-large embedding takes ~1.5h.
+  INSTALL_PERFSKILLS=1                  Install the PerfSkills/GEAK-e2e optimizer checkout (default 0).
+                                        Equivalent to --with-perfskills. Default native users skip it.
 EOF
 }
 
@@ -265,6 +309,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
+    --with-perfskills) INSTALL_PERFSKILLS=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[kernel-agent] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -341,7 +386,8 @@ run() {
   fi
 }
 
-# Serialize concurrent installs that share one open-source checkout root: the
+# Serialize concurrent installs that share one $USER_DATA_PATH. Installs
+# pointed at the same data root share the auto-cloned dependency checkouts —
 # GEAK / OOB / TraceLens trees below. With no lock, two installs race and
 # corrupt each other's half-cloned trees. The lock lives in $_open_source_root
 # (pod-local) so it tracks exactly what it guards: same-root installs serialize,
@@ -790,7 +836,7 @@ ensure_tracelens() {
   # tree, and at runtime tools/tracelens_analysis.py re-runs the same
   # editable install in a subprocess on every trace_analyze request,
   # producing a tight failure loop. Detecting unwritable source up front
-  # and mirroring to ${TRACELENS_MIRROR_DIR} (parallel to
+  # and mirroring to ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to
   # ${GEAK_ROOT} / ${OOB_ROOT}) lets both
   # the install-time and the runtime pip install land on a writable
   # filesystem. write_env_file() emits the resulting TRACELENS_INTERNAL_ROOT into
@@ -866,7 +912,7 @@ ensure_geak() {
       _PIP_CONSTRAINT_ARGS="--constraint ${GEAK_PIP_CONSTRAINT_FILE}"
     fi
     run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_ROOT}"
-    # GEAK v3.2.1 ships 4 MCP tools under mcp_tools/; all are imported
+    # GEAK v3.2.0 ships 4 MCP tools under mcp_tools/; all are imported
     # by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
     #   * profiler-mcp               — Metrix-backed instrumented profiling
@@ -924,7 +970,7 @@ run:
       finalize_grace_s: 300
       kill_buffer_s: 60
     full:
-      total_s: 7200
+      total_s: 10800
       preprocess_soft_cap_s: 900
       preprocess_hard_cap_fraction: 0.5
       finalize_grace_s: 300
@@ -1294,6 +1340,8 @@ write_env_file() {
       echo "export HYPERLOOM_GEAK_ROOT='${HYPERLOOM_ROOT}/geak'"
       echo "export PYTHONPATH='${HYPERLOOM_ROOT}/geak/src:${PYTHONPATH:-}'"
     fi
+    [ -n "${PERFSKILLS_ROOT}" ] && echo "export PERFSKILLS_ROOT='${PERFSKILLS_ROOT}'"
+    [ -n "${PERFSKILLS_E2E_RUNNER}" ] && echo "export PERFSKILLS_E2E_RUNNER='${PERFSKILLS_E2E_RUNNER}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_ROOT}" ] && echo "export GEAK_ROOT='${GEAK_ROOT}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
@@ -1305,9 +1353,62 @@ write_env_file() {
     [ -n "${GEAK_MEMORY_MIN_SPEEDUP_VAL}" ] && echo "export GEAK_MEMORY_MIN_SPEEDUP='${GEAK_MEMORY_MIN_SPEEDUP_VAL}'"
     [ -n "${CODEX_MODEL_VAL}" ] && echo "export CODEX_MODEL='${CODEX_MODEL_VAL}'"
     [ -n "${HYPERLOOM_ROCPROF_COMPUTE_PATH:-}" ] && echo "export HYPERLOOM_ROCPROF_COMPUTE_PATH='${HYPERLOOM_ROCPROF_COMPUTE_PATH}'"
+    # GEAK scoring / profiler / shape knobs. These are read by GEAK itself (the
+    # Ray actor), but the optimize CLI sources THIS file and its env replaces the
+    # launcher's exports -- so any knob not persisted here is silently dropped
+    # before reaching the actor (e.g. GEAK_SCORE_TARGET=kernel fell back to wall).
+    # Passthrough-if-set (no hardcoded defaults):
+    #   GEAK_SCORE_TARGET         -> score best-patch on kernel_ms vs wall (E2E-transferable)
+    #   GEAK_SKIP_PROFILE         -> skip the advisory profiler-mcp roofline pass
+    #   GEAK_MAX_BENCHMARK_SHAPES -> harness benchmark-shape cap
+    [ -n "${GEAK_SCORE_TARGET:-}" ] && echo "export GEAK_SCORE_TARGET='${GEAK_SCORE_TARGET}'"
+    [ -n "${GEAK_SKIP_PROFILE:-}" ] && echo "export GEAK_SKIP_PROFILE='${GEAK_SKIP_PROFILE}'"
+    [ -n "${GEAK_MAX_BENCHMARK_SHAPES:-}" ] && echo "export GEAK_MAX_BENCHMARK_SHAPES='${GEAK_MAX_BENCHMARK_SHAPES}'"
   } > "$env_file"
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
+}
+
+# Clone the e2e optimizer (GEAK@GEAK_v4, formerly PerfSkills) the same way
+# ensure_geak does: SHA pins use a shallow fetch-checkout; tags/branches use
+# git clone --branch. It is NOT pip-installed (it's a JS workflow dir invoked
+# via the Claude Code Workflow tool); we only need the checkout + the
+# claude_agent_sdk that its interface/run_e2e.py uses.
+ensure_perfskills() {
+  log "ensuring e2e optimizer (GEAK@${PERFSKILLS_REF}, formerly PerfSkills)"
+  if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+    mkdir -p "${PERFSKILLS_ROOT}"
+  fi
+  if [ ! -d "${PERFSKILLS_ROOT}/.git" ]; then
+    if [[ "$PERFSKILLS_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      run git init -q "${PERFSKILLS_ROOT}"
+      run git -C "${PERFSKILLS_ROOT}" remote add origin "$PERFSKILLS_REPO"
+      run git -C "${PERFSKILLS_ROOT}" fetch --depth 1 origin "$PERFSKILLS_REF"
+      run git -C "${PERFSKILLS_ROOT}" checkout -q FETCH_HEAD
+    else
+      run git clone --depth 1 --branch "$PERFSKILLS_REF" "$PERFSKILLS_REPO" "${PERFSKILLS_ROOT}"
+    fi
+  else
+    log "e2e optimizer checkout already present: ${PERFSKILLS_ROOT}"
+    if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+      # Keep an existing checkout aligned with the requested PERFSKILLS_REF,
+      # mirroring ensure_geak: without this a ref bump (branch/tag/SHA) leaves
+      # the runtime pinned to the stale GEAK_v4 code it first cloned.
+      run git -C "${PERFSKILLS_ROOT}" fetch --depth 1 origin "$PERFSKILLS_REF"
+      run git -C "${PERFSKILLS_ROOT}" checkout -q --force FETCH_HEAD
+    fi
+  fi
+  if [ "$CHECK_ONLY" -eq 0 ]; then
+    # interface/run_e2e.py prefers the python SDK (falls back to `claude -p`).
+    _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
+    run python3 -m pip install ${_PIP_FLAGS} claude-agent-sdk anyio || \
+      warn "claude-agent-sdk install failed; run_e2e.py will fall back to the claude CLI"
+    if [ ! -f "${PERFSKILLS_E2E_RUNNER}" ]; then
+      warn "e2e runner not found at ${PERFSKILLS_E2E_RUNNER} (interface/ missing — is the checkout on the GEAK_v4 branch?)"
+    fi
+  else
+    log "check-only: skipping e2e optimizer sdk installation"
+  fi
 }
 
 report_status() {
@@ -1385,7 +1486,7 @@ main() {
     # outputs land under $USER_DATA_PATH/kernel-agent/runs/<session_id>/
     # (created lazily by the tools themselves). All we need here is the
     # writable runtime tree on $USER_DATA_PATH for the env file + GEAK
-    # config + dependency checkouts.
+    # config + source mirrors.
     mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
   fi
   ensure_python
@@ -1396,12 +1497,20 @@ main() {
   ensure_ray_started
   # Hold the install lock for the whole source-mutating region (TraceLens /
   # GEAK / OOB clones + mirrors). System-package steps above (apt/pip)
-  # do not touch dependency checkouts, so they stay outside the lock.
+  # do not touch source-mirrors, so they stay outside the lock.
   acquire_install_lock
   ensure_tracelens
 
   # Always install everything; ensure_oob also calls ensure_llm_auth_files.
   ensure_geak
+  # PerfSkills/GEAK-e2e is opt-in (see INSTALL_PERFSKILLS / --with-perfskills):
+  # the default runtime optimizer is native, so native-only users skip the
+  # extra GEAK-e2e clone + claude-agent-sdk pip.
+  if [ "$INSTALL_PERFSKILLS" -eq 1 ]; then
+    ensure_perfskills
+  else
+    log "skipping PerfSkills/GEAK-e2e optimizer install (default native; pass --with-perfskills or INSTALL_PERFSKILLS=1 to enable)"
+  fi
   ensure_rag_index
   ensure_oob
   write_env_file

@@ -25,7 +25,10 @@ lives in `orchestrator/system_prompts/orchestration.md`. In brief:
   enabled, Orchestration may dispatch
   `delegate{action_name='specialist', params={needs_gpu: true, gpu_count: ...}}`.
   GPU specialists serialize against serving through `gpu_research_lane` and
-  must not start persistent serving servers or Magpie benchmark loops.
+  exclusively own their leased cards: they may start/stop their own servers
+  (any port that is not the production serving port 8888), profile, autotune,
+  and run real benchmark loops. The one invariant is that they must not touch
+  the production serving process, its cards, or port 8888.
 - **IR-6 HARD force-exit**: EXPLORE exits the moment wall-clock remaining <
   `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase budget <
   `--explore-force-exit-budget-pct` (default 20%). Non-negotiable — leaves

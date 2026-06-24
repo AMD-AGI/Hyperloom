@@ -382,6 +382,16 @@ def forge_steps_path(session_dir: Path) -> Path:
     return trace_dir(session_dir) / "forge_steps.jsonl"
 
 
+def gemm_tuning_steps_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/gemm_tuning.jsonl`` — append-only audit of each
+    GEMM-tuning run (forge / geak), one row per dispatched run carrying the
+    tuning ``engine``, micro-decision, best speedup and per-tuner summary.
+    Backfilled into the trace as ``gemm_tuning:<engine>`` spans so a trace
+    attributes the deterministic GEMM tuner as its own source, not just folds
+    its gain into the kernel total."""
+    return trace_dir(session_dir) / "gemm_tuning.jsonl"
+
+
 def specialist_intel_path(session_dir: Path) -> Path:
     """``<sd>/reports/trace/specialist_intel.jsonl`` — append-only audit of the
     intel/tool calls each specialist made (WebSearch / WebFetch / pr_monitor /
@@ -855,6 +865,7 @@ __all__ = [
     "decision_trace_path",
     "proposal_task_map_path",
     "forge_steps_path",
+    "gemm_tuning_steps_path",
     "kernel_agent_runs_dir",
     "kernel_workspace",
     "llm_calls_path",

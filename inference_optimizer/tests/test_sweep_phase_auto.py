@@ -40,6 +40,8 @@ class _BareState:
     pending_stack_validation_apply_results: list[dict[str, Any]] = field(default_factory=list)
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
+    last_sweep: dict[str, Any] = field(default_factory=dict)
+    cumulative_gain_validated: float = 0.0
     save_count: int = 0
 
     def save(self, _session_dir: Path | None) -> None:
@@ -836,6 +838,55 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     assert "simulated DB outage" in evidence["auto_sweep_error"]
     # No task was enqueued.
     assert coord.tasks._tasks == {}
+
+
+# 3b. Q3 — skip auto-sweep on cyclic reloop when no validated gain landed
+@pytest.mark.asyncio
+async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_sweep(coord):
+    """Reloop SWEEP with an unchanged validated gain must skip the auto-sweep + conc_sweep."""
+    coord.shared_state.cumulative_gain_validated = 12.5
+    coord.shared_state.last_sweep = {
+        "ts": "2026-01-01T00:00:00Z",
+        "cumulative_gain_validated_at_record": 12.5,
+    }
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
+    ]
+    await coord._on_enter_sweep(from_phase="KERNEL")
+    # No sweep task enqueued.
+    assert coord.tasks._tasks == {}
+    evidence = coord.shared_state.phase_history[-1]["evidence"]
+    assert evidence["auto_sweep_skipped"] == "no_validated_gain_since_last_sweep"
+    assert "auto_sweep_enqueued" not in evidence
+
+
+@pytest.mark.asyncio
+async def test_on_enter_sweep_runs_when_validated_gain_improved(coord):
+    """A validated gain above the last-sweep watermark must still run the auto-sweep."""
+    coord.shared_state.cumulative_gain_validated = 15.0
+    coord.shared_state.last_sweep = {
+        "ts": "2026-01-01T00:00:00Z",
+        "cumulative_gain_validated_at_record": 12.5,
+    }
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
+    ]
+    await coord._on_enter_sweep(from_phase="KERNEL")
+    assert "internal-sweep-phase_entry" in coord.tasks._tasks
+    evidence = coord.shared_state.phase_history[-1]["evidence"]
+    assert evidence["auto_sweep_enqueued"] is True
+
+
+@pytest.mark.asyncio
+async def test_on_enter_sweep_first_sweep_runs_without_prior_watermark(coord):
+    """The first sweep (no prior last_sweep) must always run."""
+    coord.shared_state.cumulative_gain_validated = 0.0
+    coord.shared_state.last_sweep = {}
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    await coord._on_enter_sweep(from_phase="KERNEL")
+    assert "internal-sweep-phase_entry" in coord.tasks._tasks
 
 
 # 4. End-to-end via real Coordinator
