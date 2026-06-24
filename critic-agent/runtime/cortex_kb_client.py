@@ -1,47 +1,40 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Cortex KB client: maps the Critic 4-endpoint contract onto cortex ``/v1``.
+"""Read-only Cortex KB client: maps the Critic ``list`` read onto cortex ``/v1``.
 
 The Critic was written against the legacy scoped-article contract
 (``POST /api/kb/{list,upsert,batch_insert,edges/add}``) served by
 ``claw-memory-service``. The cortex ``kb-service`` deprecated that surface
-and exposes a graph paradigm instead (``/v1/points`` + ``/v1/edges``). This
-client lets the Critic talk to cortex without changing any caller: it
-implements the same :class:`~runtime.kb_client.KBClient` protocol and
-translates each scoped-article operation into the matching cortex request.
+and exposes a graph paradigm instead (``/v1/points`` + ``/v1/edges``).
 
-Mapping rules
--------------
-* The Critic's ``(scope, kind, slug)`` composite key is folded into a
-  deterministic cortex ``canonical_id`` (``critic.{kind}.{slug}.{hash}``),
-  which is globally unique in ``kb_points`` and therefore idempotent on
-  re-upsert.
-* The Critic ``kind`` is namespaced as ``critic_{kind}`` on the wire so it
-  never collides with cortex's registered ``pitfall`` / ``lesson`` schemas
-  (those enforce strict attrs validation on propose); namespaced kinds take
-  the pass-through validation path.
-* All Critic-specific fields (scope, slug, importance, summary, metadata)
-  live under reserved ``_critic_*`` keys inside ``kb_points.attrs`` so reads
-  can faithfully reconstruct the original scoped-article shape.
-* ``scope_filter`` becomes a JSONB-containment ``attrs_filter`` on
-  ``_critic_scope`` (cortex matches with ``@>``), which both filters by scope
-  and restricts results to Critic-authored rows.
+Against cortex the Critic is a **read-only consumer of priors**: it queries
+existing knowledge to inform a review, but never writes back. This client
+therefore only implements the read path (:meth:`list` ->
+``POST /v1/points/query``); the write methods of the
+:class:`~runtime.kb_client.KBClient` protocol are intentionally rejected so
+an accidental write fails loudly instead of mutating the graph. Deployments
+using this client should run with ``KB_WRITE_ENABLED=false``.
 
-Writes carry the cortex-mandatory ``authority`` / ``evidence_refs`` /
-``provenance`` envelope, synthesised from the Critic payload.
+Read mapping
+------------
+* The Critic ``kind`` is namespaced as ``critic_{kind}`` on the wire, matching
+  how Critic-authored priors are tagged in ``kb_points``.
+* ``scope_filter`` becomes a JSONB-containment ``attrs_filter`` on the
+  reserved ``_critic_scope`` key (cortex matches with ``@>``), which both
+  filters by scope and restricts results to Critic-authored rows.
+* The reserved ``_critic_*`` attrs keys are projected back into the legacy
+  scoped-article entry shape so callers see no difference from the in-memory
+  / HTTP clients.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import random
 import time
 import urllib.error
 import urllib.request
-import uuid
-from datetime import datetime, timezone
 from typing import Any
 
 from .errors import (
@@ -60,11 +53,8 @@ DEFAULT_TIMEOUT_MS = 10_000
 DEFAULT_RETRY_MAX = 3
 DEFAULT_BACKOFF_BASE = 1.0  # seconds; 1, 2, 4 ...
 
-# Cortex requires a write authority on every propose / ingest. Critic priors
-# are reported observations, not authoritative ground truth.
-_CRITIC_AUTHORITY = "EXPERIENTIAL"
-
-# Reserved attrs keys used to round-trip the scoped-article shape.
+# Reserved attrs keys Critic-authored points carry; used to project a cortex
+# point back into the scoped-article entry shape on read.
 _ATTR_SCOPE = "_critic_scope"
 _ATTR_KIND = "_critic_kind"
 _ATTR_SLUG = "_critic_slug"
@@ -74,6 +64,11 @@ _ATTR_METADATA = "_critic_metadata"
 _ATTR_UPDATED_AT = "_critic_updated_at"
 
 _KIND_PREFIX = "critic_"
+
+_READ_ONLY_MSG = (
+    "CortexKBClient is read-only; the Critic must not write to the cortex "
+    "graph KB (run with KB_WRITE_ENABLED=false)"
+)
 
 
 def _normalise_value(value: Any) -> str:
@@ -88,27 +83,13 @@ def _normalise_scope(scope: dict[str, Any]) -> dict[str, str]:
     return {k: _normalise_value(v) for k, v in (scope or {}).items()}
 
 
-def _scope_key(scope: dict[str, str]) -> str:
-    """Deterministic ``k=v|k=v`` string with keys sorted (stable hash input)."""
-    return "|".join(f"{k}={scope[k]}" for k in sorted(scope.keys()))
-
-
-def _canonical_id(scope: dict[str, str], kind: str, slug: str) -> str:
-    """Fold ``(scope, kind, slug)`` into a stable cortex canonical_id."""
-    digest = hashlib.sha256(_scope_key(scope).encode("utf-8")).hexdigest()[:12]
-    return f"critic.{kind}.{slug}.{digest}"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 class CortexKBClient:
-    """Scoped-article-over-graph adapter for the cortex ``kb-service``.
+    """Read-only scoped-article-over-graph adapter for cortex ``kb-service``.
 
     Implements the :class:`~runtime.kb_client.KBClient` protocol so it is a
-    drop-in replacement for :class:`~runtime.kb_client.HTTPKBClient`. Retry /
-    backoff / error mapping mirror the HTTP client (contract §6).
+    drop-in replacement on the read path. Write methods raise
+    :class:`KBValidationError` because the Critic only reads from cortex.
+    Retry / backoff / error mapping mirror the HTTP client (contract §6).
     """
 
     def __init__(
@@ -124,9 +105,9 @@ class CortexKBClient:
         """Configure the cortex transport.
 
         Args:
-            base_url (str): cortex ``kb-service`` base URL (e.g.
-                ``http://kb-service.primus-cortex:8080``); trailing slash is
-                stripped. The ``/v1`` prefix is appended per endpoint.
+            base_url (str): cortex ``kb-service`` base URL (typically
+                ``$CORTEX_KB_URL``); trailing slash is stripped. The ``/v1``
+                prefix is appended per endpoint.
             token (str | None): Bearer token; falls back to
                 ``KB_SERVICE_TOKEN`` when omitted.
             timeout_ms (int): Per-request timeout in milliseconds.
@@ -147,7 +128,7 @@ class CortexKBClient:
         self._sleep = sleep_fn
 
     # ------------------------------------------------------------------
-    # KBClient protocol — list
+    # KBClient protocol — list (the only supported operation)
     # ------------------------------------------------------------------
     def list(
         self,
@@ -179,8 +160,9 @@ class CortexKBClient:
         body: dict[str, Any] = {
             "attrs_filter": attrs_filter,
             "neighbor_preview": False,
-            # Pull a wider page so client-side sort + limit is faithful.
-            "limit": max(int(limit) if limit else 50, int(limit) or 1),
+            # Pull at least the requested page so client-side sort + limit is
+            # faithful even though cortex orders by id, not updated_at.
+            "limit": max(int(limit), 1) if limit else 50,
         }
         if kind is not None:
             body["kind"] = _KIND_PREFIX + kind
@@ -197,169 +179,40 @@ class CortexKBClient:
         return {"entries": entries, "count": len(entries)}
 
     # ------------------------------------------------------------------
-    # KBClient protocol — upsert
+    # KBClient protocol — writes (rejected: Critic is read-only on cortex)
     # ------------------------------------------------------------------
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Upsert a single Critic entry via ``POST /v1/points/propose``.
+        """Reject writes — the Critic is read-only against cortex.
 
-        Returns:
-            dict[str, Any]: ``{"row": <entry>, "created": bool,
-            "cortex": <propose response>}``.
+        Raises:
+            KBValidationError: Always.
         """
-        request_body = self._build_point_request(payload)
-        response = self._post(
-            "/v1/points/propose", request_body, endpoint_label="upsert"
-        )
-        entry = self._payload_to_entry(payload, point_id=response.get("point_id"))
-        return {
-            "row": entry,
-            "created": response.get("status") == "auto_accepted",
-            "cortex": response,
-        }
+        raise KBValidationError(_READ_ONLY_MSG)
 
-    # ------------------------------------------------------------------
-    # KBClient protocol — batch_insert
-    # ------------------------------------------------------------------
     def batch_insert(
         self,
         items: list[dict[str, Any]],
         *,
         on_conflict: str = "upsert",
     ) -> dict[str, Any]:
-        """Batch-upsert Critic entries via ``POST /v1/bulk/ingest``.
-
-        cortex bulk ingest is keyed by ``canonical_id`` and always merges on
-        conflict, so ``on_conflict`` is accepted for protocol compatibility
-        but only ``upsert`` semantics are available server-side. Any per-item
-        rejection raises :class:`KBValidationError` so the whole batch is
-        dead-lettered for replay.
-
-        Returns:
-            dict[str, Any]: ``{"results": [...], "count": n, "cortex": ...}``.
+        """Reject writes — the Critic is read-only against cortex.
 
         Raises:
-            KBValidationError: If ``on_conflict`` is invalid or cortex rejects
-                one or more points.
+            KBValidationError: Always.
         """
-        if on_conflict not in ("upsert", "error"):
-            raise KBValidationError(
-                f"batch_insert: on_conflict must be upsert|error, got {on_conflict!r}"
-            )
-        body = {
-            "points": [self._build_point_request(item) for item in items],
-            "pipeline_id": "critic-kb",
-            "batch_id": uuid.uuid4().hex,
-        }
-        response = self._post("/v1/bulk/ingest", body, endpoint_label="batch_insert")
-        rejected = ((response.get("rejected") or {}).get("points")) or []
-        if rejected:
-            raise KBValidationError(f"batch_insert: cortex rejected points: {rejected!r}")
-        results = [
-            self._payload_to_entry(item, point_id=pid)
-            for item, pid in zip(
-                items, ((response.get("accepted") or {}).get("points")) or []
-            )
-        ]
-        return {"results": results, "count": len(results), "cortex": response}
+        raise KBValidationError(_READ_ONLY_MSG)
 
-    # ------------------------------------------------------------------
-    # KBClient protocol — add_edges
-    # ------------------------------------------------------------------
     def add_edges(self, edges: list[dict[str, Any]]) -> dict[str, Any]:
-        """Create ``contradicts`` edges via ``POST /v1/edges/negate``.
-
-        cortex replaced the scoped-article ``contradicts`` auto-mirror with a
-        directed ``negation`` edge. Endpoints are cortex integer point ids
-        (as returned by :meth:`upsert`). Non-``contradicts`` kinds and
-        non-integer endpoints are rejected.
-
-        Returns:
-            dict[str, Any]: ``{"added": [...], "cortex": [...]}``.
+        """Reject writes — the Critic is read-only against cortex.
 
         Raises:
-            KBValidationError: If an edge is malformed or of an unsupported
-                kind.
+            KBValidationError: Always.
         """
-        added: list[dict[str, Any]] = []
-        raw: list[dict[str, Any]] = []
-        for edge in edges:
-            kind = edge.get("kind")
-            src = edge.get("from_id")
-            dst = edge.get("to_id")
-            if kind != "contradicts":
-                raise KBValidationError(
-                    f"add_edges: only 'contradicts' is supported on cortex, got {kind!r}"
-                )
-            try:
-                from_point = int(src)
-                to_point = int(dst)
-            except (TypeError, ValueError) as exc:
-                raise KBValidationError(
-                    f"add_edges: cortex requires integer point ids, got {src!r}->{dst!r}"
-                ) from exc
-            body = {
-                "from_point": from_point,
-                "to_point": to_point,
-                "reason": "critic_contradiction",
-                "authority": _CRITIC_AUTHORITY,
-                "evidence_refs": self._synthetic_evidence({}),
-                "provenance": self._provenance(),
-            }
-            response = self._post("/v1/edges/negate", body, endpoint_label="edges/add")
-            added.append({"from_id": from_point, "to_id": to_point, "kind": "negation"})
-            raw.append(response)
-        return {"added": added, "cortex": raw}
+        raise KBValidationError(_READ_ONLY_MSG)
 
     # ------------------------------------------------------------------
     # Mapping helpers
     # ------------------------------------------------------------------
-    def _build_point_request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Translate a scoped-article upsert payload into a cortex point."""
-        for field in ("scope", "kind", "slug", "importance"):
-            if field not in payload:
-                raise KBValidationError(f"upsert: missing field {field!r}")
-        scope = _normalise_scope(payload["scope"])
-        kind = str(payload["kind"])
-        slug = str(payload["slug"])
-        metadata = payload.get("metadata") or {}
-        attrs = {
-            _ATTR_SCOPE: scope,
-            _ATTR_KIND: kind,
-            _ATTR_SLUG: slug,
-            _ATTR_IMPORTANCE: float(payload["importance"]),
-            _ATTR_SUMMARY: payload.get("summary", ""),
-            _ATTR_METADATA: metadata,
-            _ATTR_UPDATED_AT: time.time(),
-        }
-        return {
-            "canonical_id": _canonical_id(scope, kind, slug),
-            "kind": _KIND_PREFIX + kind,
-            "attrs": attrs,
-            "authority": _CRITIC_AUTHORITY,
-            "evidence_refs": self._synthetic_evidence(metadata),
-            "provenance": self._provenance(),
-        }
-
-    @staticmethod
-    def _synthetic_evidence(metadata: dict[str, Any]) -> list[dict[str, Any]]:
-        """cortex requires a non-empty evidence list; synthesise a log ref."""
-        source = (metadata or {}).get("source_session") or "critic-agent"
-        return [
-            {
-                "kind": "log",
-                "ref": f"critic-session:{source}",
-                "note": "auto-generated by critic-agent KB write",
-            }
-        ]
-
-    @staticmethod
-    def _provenance() -> dict[str, Any]:
-        return {
-            "source": "agent_observation",
-            "generator": "critic-agent",
-            "generated_at": _now_iso(),
-        }
-
     @staticmethod
     def _strip_kind(cortex_kind: str | None) -> str:
         kind = cortex_kind or ""
@@ -383,25 +236,6 @@ class CortexKBClient:
             "deleted": not point.get("is_active", True),
         }
 
-    def _payload_to_entry(
-        self, payload: dict[str, Any], *, point_id: Any = None
-    ) -> dict[str, Any]:
-        """Echo an upsert/batch payload back as a scoped-article entry."""
-        scope = _normalise_scope(payload.get("scope") or {})
-        kind = str(payload.get("kind") or "")
-        slug = str(payload.get("slug") or "")
-        return {
-            "id": point_id,
-            "canonical_id": _canonical_id(scope, kind, slug) if slug else None,
-            "scope": scope,
-            "kind": kind,
-            "slug": slug,
-            "importance": payload.get("importance"),
-            "summary": payload.get("summary", ""),
-            "metadata": payload.get("metadata") or {},
-            "edges": {},
-        }
-
     # ------------------------------------------------------------------
     # Transport — POST with retry / backoff / error mapping
     # ------------------------------------------------------------------
@@ -412,7 +246,7 @@ class CortexKBClient:
 
         Mirrors :meth:`runtime.kb_client.HTTPKBClient._request`: retries on
         429/5xx/network errors up to ``retry_max`` times; non-retryable 4xx
-        raise the matching typed error so the caller can dead-letter.
+        raise the matching typed error so the caller can degrade gracefully.
 
         Raises:
             KBNotFoundError: On HTTP 404.
