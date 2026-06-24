@@ -3802,6 +3802,120 @@ def _candidate_artifact_paths(
     return deduped
 
 
+_BACKUP_SUFFIXES = {".orig", ".rej", ".bak"}
+
+
+def _unquote_diff_path(raw: str) -> str:
+    """Decode a git diff header path, handling C-style quoting.
+
+    Git emits paths with special characters as C-quoted strings (e.g.
+    ``"b/\\303\\251.py"``). A naive ``..``/absolute check on the still-quoted
+    string can be bypassed, so decode it first.
+
+    Args:
+        raw (str): The raw token following ``+++ `` / ``--- `` (already
+            whitespace-trimmed of a trailing tab-timestamp by the caller).
+
+    Returns:
+        str: The decoded path, or the input unchanged when it is not quoted.
+    """
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        try:
+            return raw[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape")
+        except (UnicodeDecodeError, ValueError):
+            return raw[1:-1]
+    return raw
+
+
+def _strip_diff_prefix(path: str, strip: int) -> str:
+    """Drop the first ``strip`` path components, mirroring ``-p<N>``.
+
+    Empty components (from ``//`` or a leading ``/``) are dropped first so the
+    strip count operates on real path segments and cannot resurrect an absolute
+    path via an empty component.
+
+    Args:
+        path (str): A diff target path (e.g. ``b/dir/file.py``).
+        strip (int): Number of leading components to remove.
+
+    Returns:
+        str: The post-strip relative path, or ``""`` when nothing remains.
+    """
+    parts = [p for p in path.split("/") if p]
+    return "/".join(parts[strip:]) if len(parts) > strip else ""
+
+
+def _select_patch_section(patch_text: str, target_file: str) -> tuple[str, str] | None:
+    """Slice out the per-file diff section that targets ``target_file``.
+
+    Real kernel patches are frequently multi-file, but reconstruction only has
+    the single original kernel on disk, so the whole patch cannot apply in an
+    isolated dir. Extract just the matched file's section and reject anything
+    unsafe or unusable.
+
+    Args:
+        patch_text (str): The full unified diff.
+        target_file (str): Original kernel path the section must target.
+
+    Returns:
+        tuple[str, str] | None: ``(section_text, raw_target_path)`` for the
+            matched file, or ``None`` when no usable/safe section matches.
+    """
+    if not patch_text.strip():
+        return None
+    # Split into per-file blocks. Prefer git's ``diff --git`` boundaries; fall
+    # back to ``--- ``/``+++ `` pairs for plain unified diffs.
+    if re.search(r"(?m)^diff --git ", patch_text):
+        blocks = [b for b in re.split(r"(?m)^(?=diff --git )", patch_text) if b.strip()]
+    else:
+        blocks = [b for b in re.split(r"(?m)^(?=--- )", patch_text) if b.strip()]
+
+    want = Path(target_file).name
+    want_parts = Path(target_file).parts
+    matches: list[tuple[int, str, str]] = []  # (tail_len, raw_path, block)
+    for block in blocks:
+        m = re.search(r"(?m)^\+\+\+ (.+)$", block)
+        if not m:
+            continue
+        raw = _unquote_diff_path(m.group(1).split("\t", 1)[0].strip())
+        if raw == "/dev/null":
+            continue
+        # Strip a leading a/ or b/ for tail comparison only.
+        cmp_path = re.sub(r"^[ab]/", "", raw)
+        cmp_parts = Path(cmp_path).parts
+        if not cmp_parts or Path(cmp_path).name != want:
+            continue
+        if Path(cmp_path).suffix.lower() in _BACKUP_SUFFIXES:
+            continue
+        # Longest common path-tail length (basename match is the floor).
+        tail = 0
+        for a, b in zip(reversed(cmp_parts), reversed(want_parts)):
+            if a != b:
+                break
+            tail += 1
+        matches.append((tail, raw, block))
+
+    if not matches:
+        return None
+    best_tail = max(t for t, _, _ in matches)
+    best = [(r, b) for t, r, b in matches if t == best_tail]
+    if len(best) != 1:
+        return None  # genuine ambiguity: two distinct targets share the tail
+    raw, block = best[0]
+    if "\n@@" not in ("\n" + block):
+        return None  # rename/mode-only/binary section: no hunk to apply
+    # Validate the path that the apply loop actually writes to (after the same
+    # empty-component-aware strip), at every strip level it will try — not a
+    # separately-derived cmp_path. Reject if any usable strip yields an absolute
+    # or ``..``-containing path.
+    stripped = [_strip_diff_prefix(raw, s) for s in (1, 0, 2)]
+    if not any(stripped):
+        return None
+    if any(rel and (os.path.isabs(rel) or ".." in Path(rel).parts) for rel in stripped):
+        return None
+    return block, raw
+
+
 def _reconstruct_source_from_patch(
     patch_path: Path,
     target_file: str,
@@ -3812,9 +3926,9 @@ def _reconstruct_source_from_patch(
     A backend's best artifact is frequently a unified ``.patch``/``.diff``
     (a diff, not a complete file). When no full-source artifact is found, the
     original kernel at ``target_file`` plus the patch deterministically
-    reconstruct the optimized source — the same apply that deployment uses, so
-    the reconstructed file matches what would actually run. Tries ``git apply``
-    across the usual strip levels, then falls back to ``patch``.
+    reconstruct the optimized source. The matched file's section is applied
+    inside an isolated temp dir (so an untrusted patch header cannot escape it),
+    via ``git apply`` then ``patch`` across the usual strip levels.
 
     Args:
         patch_path (Path): Unified diff produced by the backend.
@@ -3830,51 +3944,159 @@ def _reconstruct_source_from_patch(
         return ""
     try:
         original_text = original.read_text(encoding="utf-8", errors="replace")
+        patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    for strip in ("1", "0", "2"):
-        work = output_path.with_suffix(output_path.suffix + ".work")
-        try:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            work.write_text(original_text, encoding="utf-8")
-        except OSError:
-            return ""
-        applied = False
-        # git apply (preferred: honours rename/strip semantics), then patch.
-        try:
-            rc = subprocess.run(
-                ["git", "apply", f"-p{strip}", "--unsafe-paths",
-                 f"--directory={work.parent}", str(patch_path)],
-                capture_output=True, text=True, cwd=work.parent, check=False,
-            )
-            applied = rc.returncode == 0 and work.is_file()
-        except (OSError, ValueError):
-            applied = False
-        if not applied:
+    selected = _select_patch_section(patch_text, target_file)
+    if selected is None:
+        return ""
+    section_text, raw_target = selected
+
+    for strip in (1, 0, 2):
+        rel = _strip_diff_prefix(raw_target, strip)
+        if not rel or os.path.isabs(rel) or ".." in Path(rel).parts:
+            continue
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            work = tmp / rel
+            section = tmp / "section.patch"
+            # Containment guard: confirm the resolved write path stays inside the
+            # temp dir after all path arithmetic, before writing anything.
             try:
-                with patch_path.open(encoding="utf-8", errors="replace") as pf:
-                    rc = subprocess.run(
-                        ["patch", f"-p{strip}", "--force", "--no-backup-if-mismatch",
-                         str(work)],
-                        stdin=pf, capture_output=True, text=True, check=False,
-                    )
-                applied = rc.returncode == 0
+                work.resolve().relative_to(tmp.resolve())
+            except ValueError:
+                continue
+            try:
+                work.parent.mkdir(parents=True, exist_ok=True)
+                work.write_text(original_text, encoding="utf-8")
+                section.write_text(section_text, encoding="utf-8")
+            except OSError:
+                continue
+            applied = False
+            # git apply (honours rename/strip semantics), contained to tmp; no
+            # --unsafe-paths/--directory, so git refuses any path escape itself.
+            try:
+                rc = subprocess.run(
+                    ["git", "apply", f"-p{strip}", "section.patch"],
+                    capture_output=True, text=True, cwd=str(tmp), check=False,
+                )
+                applied = rc.returncode == 0 and work.is_file()
             except (OSError, ValueError):
                 applied = False
-        if applied:
+            if not applied:
+                # patch with an explicit file arg ignores the header path and
+                # only writes ``work`` (any .rej stays in the temp dir).
+                try:
+                    with section.open(encoding="utf-8", errors="replace") as pf:
+                        rc = subprocess.run(
+                            ["patch", f"-p{strip}", "--force", "--no-backup-if-mismatch",
+                             str(work)],
+                            stdin=pf, capture_output=True, text=True, check=False,
+                        )
+                    applied = rc.returncode == 0
+                except (OSError, ValueError):
+                    applied = False
+            if not applied:
+                continue
             try:
                 patched_text = work.read_text(encoding="utf-8", errors="replace")
             except OSError:
-                patched_text = ""
-            work.unlink(missing_ok=True)
+                continue
             if patched_text and patched_text != original_text and _source_text_looks_complete(
                 patched_text, output_path.suffix.lower()
             ):
-                output_path.write_text(patched_text, encoding="utf-8")
+                try:
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(patched_text, encoding="utf-8")
+                except OSError:
+                    return ""
                 return str(output_path)
-        else:
-            work.unlink(missing_ok=True)
     return ""
+
+
+def build_patch_snapshot(
+    patch_path: str,
+    *,
+    worktree: Path | None,
+    kernel_repo: str,
+    clean_base: str,
+    out_dir: Path,
+) -> dict[str, Any] | None:
+    """Stage byte-exact final contents for every file a patch writes.
+
+    Implements the content-addressed deploy capture: parse the patch as a
+    manifest, then for each non-deleted path materialise its exact final bytes
+    into ``out_dir`` (mirrored at the same repo-relative path). Content is
+    sourced, in priority order, from the backend's ``worktree`` (ground-truth
+    written files) and, failing that, by reconstructing from ``clean_base`` +
+    the patch in a contained temp dir. Only manifest paths are staged — never
+    the whole worktree — so scratch the backend left outside the patch never
+    deploys.
+
+    Args:
+        patch_path (str): The winning unified diff.
+        worktree (Path | None): The backend worktree of final files, if any.
+        kernel_repo (str): Repo root, for worktree-relative resolution.
+        clean_base (str): Repo root holding pristine pre-patch sources, used to
+            reconstruct content when the worktree lacks a path.
+        out_dir (Path): Snapshot staging dir to populate.
+
+    Returns:
+        dict[str, Any] | None: ``{"snapshot_dir", "descriptors", "patch_path"}``
+            when every write path was materialised byte-exact, else ``None``
+            (caller treats this as non-deployable -> hard fail downstream).
+    """
+    import apply_kernel_patch as _akp
+
+    try:
+        patch_text = Path(patch_path).read_text(encoding="utf-8", errors="replace")
+        descriptors = _akp.parse_patch_manifest(patch_text)
+    except (OSError, ValueError):
+        return None
+    if not descriptors:
+        return None
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for desc in descriptors:
+        if desc["op"] != "write":
+            continue
+        rel = desc["path"]
+        dst = out_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        sourced = False
+        # 1) worktree ground-truth file at the same relative path.
+        if worktree is not None and kernel_repo:
+            cand = worktree / rel
+            if cand.is_file() or cand.is_symlink():
+                try:
+                    import shutil as _shutil
+                    _shutil.copy2(cand, dst, follow_symlinks=False)
+                    sourced = True
+                except OSError:
+                    sourced = False
+        # 2) reconstruct from clean base + patch (single-file slice).
+        if not sourced and clean_base:
+            base_file = Path(clean_base) / rel
+            reconstructed = _reconstruct_source_from_patch(
+                Path(patch_path), str(base_file), dst.with_suffix(dst.suffix + ".recon")
+            ) if base_file.is_file() else ""
+            if reconstructed:
+                try:
+                    Path(reconstructed).replace(dst)
+                    sourced = True
+                except OSError:
+                    sourced = False
+        if not sourced:
+            # Cannot guarantee byte-exact final content for this path -> the
+            # whole attempt is non-deployable (hard fail, never partial).
+            return None
+
+    return {
+        "snapshot_dir": str(out_dir),
+        "descriptors": descriptors,
+        "patch_path": str(patch_path),
+        "repo_root": str(kernel_repo or ""),
+    }
 
 
 def _select_source_artifact(
@@ -4017,6 +4239,36 @@ def build_verification(
             kernel_repo=kernel_repo,
         )
     artifact_valid = bool(best_artifact_path)
+
+    # Content-addressed deploy capture: when the winning attempt produced a
+    # unified diff, stage byte-exact final contents for the WHOLE patch now
+    # (clean base + worktree are in hand). Deploy then lands all files atomically.
+    deploy_snapshot_dir = ""
+    deploy_patch_path = ""
+    deploy_repo_root = ""
+    if best is not None and artifact_valid:
+        bp = best.get("backend_paths") or {}
+        winning_patch = str(bp.get("geak_per_task_best_patch") or "")
+        if not winning_patch:
+            for key in ("partial_report", "report"):
+                cand = str(bp.get(key) or "")
+                if cand.endswith((".patch", ".diff")):
+                    winning_patch = cand
+                    break
+        if winning_patch and Path(winning_patch).is_file():
+            worktree = _geak_best_worktree(winning_patch)
+            snap_out = (run_dir or Path(winning_patch).parent) / f"{best.get('attempt_id', 'attempt')}_deploy_snapshot"
+            snap = build_patch_snapshot(
+                winning_patch,
+                worktree=worktree,
+                kernel_repo=kernel_repo,
+                clean_base=kernel_repo,
+                out_dir=snap_out,
+            )
+            if snap is not None:
+                deploy_snapshot_dir = snap["snapshot_dir"]
+                deploy_patch_path = snap["patch_path"]
+                deploy_repo_root = snap.get("repo_root", "")
     correctness_signal = getattr(args, "correctness_passed", None)
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
     if correctness_signal is None and best is not None:
@@ -4088,6 +4340,9 @@ def build_verification(
         "artifact_valid": artifact_valid,
         "artifact_source": artifact_source,
         "artifact_error": "" if artifact_valid else artifact_error,
+        "deploy_snapshot_dir": deploy_snapshot_dir,
+        "deploy_patch_path": deploy_patch_path,
+        "deploy_repo_root": deploy_repo_root,
     }
 
 

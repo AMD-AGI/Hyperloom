@@ -889,6 +889,225 @@ def test_patch_only_winner_reconstructs_full_source(tmp_path):
     assert "@@" not in text  # not a diff
 
 
+_RECON_ORIGINAL = (
+    "import triton\n\n\ndef helper():\n    return 1\n\n\ndef kernel():\n    return helper()\n"
+)
+_RECON_KERNEL_SECTION = (
+    "diff --git a/fused_moe.py b/fused_moe.py\n"
+    "--- a/fused_moe.py\n"
+    "+++ b/fused_moe.py\n"
+    "@@ -1,5 +1,8 @@\n"
+    " import triton\n"
+    " \n"
+    " \n"
+    "+_CACHE = {}\n"
+    "+\n"
+    "+\n"
+    " def helper():\n"
+    "     return 1\n"
+)
+
+
+def _reconstruct(tmp_path, patch_text, *, original_name="fused_moe.py", original_text=_RECON_ORIGINAL):
+    """Run reconstruction for ``patch_text`` against a written original kernel."""
+    original = tmp_path / original_name
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_text(original_text, encoding="utf-8")
+    patch_path = tmp_path / "winner.patch"
+    patch_path.write_text(patch_text, encoding="utf-8")
+    out = tmp_path / "reconstructed.py"
+    return ko._reconstruct_source_from_patch(patch_path, str(original), out)
+
+
+def test_reconstruct_git_style_diff_with_index_header(tmp_path):
+    """A real-shape ``diff --git`` + ``index`` multi-component path reconstructs
+    via the contained ``git apply`` path (not silently falling back)."""
+    patch = (
+        "diff --git a/aiter/ops/fused_moe.py b/aiter/ops/fused_moe.py\n"
+        "index 1d75520b5..0159e0442 100644\n"
+        "--- a/aiter/ops/fused_moe.py\n"
+        "+++ b/aiter/ops/fused_moe.py\n"
+        "@@ -1,5 +1,8 @@\n"
+        " import triton\n"
+        " \n"
+        " \n"
+        "+_CACHE = {}\n"
+        "+\n"
+        "+\n"
+        " def helper():\n"
+        "     return 1\n"
+    )
+    out = _reconstruct(tmp_path, patch, original_name="aiter/ops/fused_moe.py")
+    assert out
+    text = Path(out).read_text(encoding="utf-8")
+    assert "_CACHE = {}" in text and "def kernel():" in text and "@@" not in text
+
+
+def test_reconstruct_multi_file_patch_slices_matched_target(tmp_path):
+    """Multi-file patch where only the kernel original exists: the kernel section
+    is sliced and applied (a whole-patch apply would fail on the absent files)."""
+    patch = (
+        "diff --git a/bench.py b/bench.py\n--- a/bench.py\n+++ b/bench.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+        + _RECON_KERNEL_SECTION
+        + "diff --git a/other.py b/other.py\n--- a/other.py\n+++ b/other.py\n"
+        "@@ -1 +1 @@\n-a\n+b\n"
+    )
+    out = _reconstruct(tmp_path, patch)
+    assert out
+    assert "_CACHE = {}" in Path(out).read_text(encoding="utf-8")
+
+
+def test_reconstruct_prefers_real_target_over_orig_sibling(tmp_path):
+    """A ``.orig`` sibling with the same stem must not be chosen over the real
+    kernel file."""
+    patch = (
+        "diff --git a/fused_moe.py.orig b/fused_moe.py.orig\n"
+        "--- a/fused_moe.py.orig\n+++ b/fused_moe.py.orig\n"
+        "@@ -1 +1 @@\n-junk\n+junk2\n"
+        + _RECON_KERNEL_SECTION
+    )
+    out = _reconstruct(tmp_path, patch)
+    assert out
+    assert "_CACHE = {}" in Path(out).read_text(encoding="utf-8")
+
+
+def test_reconstruct_ignores_companion_new_file_dev_null(tmp_path):
+    """A ``/dev/null`` new-file companion entry is ignored, not fatal, as long as
+    the matched kernel section has real hunks."""
+    patch = (
+        "diff --git a/new_helper.py b/new_helper.py\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/new_helper.py\n"
+        "@@ -0,0 +1 @@\n+HELPER = 1\n"
+        + _RECON_KERNEL_SECTION
+    )
+    out = _reconstruct(tmp_path, patch)
+    assert out
+    assert "_CACHE = {}" in Path(out).read_text(encoding="utf-8")
+
+
+def test_reconstruct_rejects_empty_patch(tmp_path):
+    """An empty / 0-byte patch reconstructs nothing."""
+    assert _reconstruct(tmp_path, "") == ""
+    assert _reconstruct(tmp_path, "   \n  \n") == ""
+
+
+def test_reconstruct_rejects_hunkless_patch(tmp_path):
+    """Headers present but no ``@@`` hunk (rename/mode-only shape) → nothing."""
+    patch = (
+        "diff --git a/fused_moe.py b/fused_moe.py\n"
+        "old mode 100644\nnew mode 100755\n"
+        "--- a/fused_moe.py\n+++ b/fused_moe.py\n"
+    )
+    assert _reconstruct(tmp_path, patch) == ""
+
+
+def test_reconstruct_rejects_absolute_path_patch(tmp_path):
+    """An absolute-path diff header is refused (no write outside)."""
+    victim = tmp_path / "victim.py"
+    victim.write_text("safe\n", encoding="utf-8")
+    patch = (
+        f"--- a/fused_moe.py\n+++ {victim}\n@@ -1 +1 @@\n-safe\n+PWNED\n"
+    )
+    assert _reconstruct(tmp_path, patch) == ""
+    assert victim.read_text(encoding="utf-8") == "safe\n"
+
+
+def test_reconstruct_rejects_parent_traversal_patch(tmp_path):
+    """A ``..`` traversal header is refused and writes nothing outside the dir."""
+    outside = tmp_path / "outside.py"
+    outside.write_text("safe\n", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    original = work / "fused_moe.py"
+    original.write_text(_RECON_ORIGINAL, encoding="utf-8")
+    patch_path = work / "winner.patch"
+    patch_path.write_text(
+        "--- a/fused_moe.py\n+++ b/../outside.py\n@@ -1 +1 @@\n-safe\n+PWNED\n",
+        encoding="utf-8",
+    )
+    out = ko._reconstruct_source_from_patch(patch_path, str(original), work / "out.py")
+    assert out == ""
+    assert outside.read_text(encoding="utf-8") == "safe\n"
+
+
+def test_reconstruct_no_matching_target(tmp_path):
+    """A patch that touches only unrelated files yields nothing."""
+    patch = "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-x\n+y\n"
+    assert _reconstruct(tmp_path, patch) == ""
+
+
+def test_reconstruct_double_slash_header_cannot_escape_sandbox(tmp_path):
+    """A ``b//abs/path`` header must not write outside the sandbox: the empty
+    component from ``//`` previously survived the count-based strip and produced
+    an absolute write path (``tmp / "/abs"`` resets to the absolute path). The
+    empty component is now dropped and a containment guard backstops it, so the
+    apply stays inside the temp dir and never creates the outside victim path."""
+    victim_dir = tmp_path / "OUTSIDE"
+    work = tmp_path / "work"
+    work.mkdir()
+    original = work / "fused_moe.py"
+    original.write_text(_RECON_ORIGINAL, encoding="utf-8")
+    escape = f"b/{victim_dir}/fused_moe.py"  # -> b//tmp/.../OUTSIDE/fused_moe.py
+    patch_path = work / "winner.patch"
+    patch_path.write_text(
+        f"diff --git a/fused_moe.py {escape}\n"
+        f"--- a/fused_moe.py\n+++ {escape}\n"
+        "@@ -1,5 +1,8 @@\n import triton\n \n \n+_CACHE = {}\n+\n+\n def helper():\n     return 1\n",
+        encoding="utf-8",
+    )
+    ko._reconstruct_source_from_patch(patch_path, str(original), work / "out.py")
+    # The only security property that matters: nothing written outside the dir.
+    assert not victim_dir.exists()
+
+
+def test_build_patch_snapshot_sources_worktree_and_base(tmp_path):
+    """Snapshot staging materialises byte-exact content for every write path:
+    from the worktree when present, else reconstructed from base + patch."""
+    base = tmp_path / "base" / "aiter" / "ops"
+    base.mkdir(parents=True)
+    (base / "k.py").write_text("import triton\nOLD\n")
+    worktree = tmp_path / "wt"
+    (worktree / "aiter" / "ops").mkdir(parents=True)
+    (worktree / "aiter" / "ops" / "k.py").write_text("import triton\nNEW\n")
+    (worktree / "aiter" / "ops" / "helper.py").write_text("HELP\n")
+    patch = tmp_path / "p.patch"
+    patch.write_text(
+        "diff --git a/aiter/ops/k.py b/aiter/ops/k.py\n--- a/aiter/ops/k.py\n+++ b/aiter/ops/k.py\n"
+        "@@ -1,2 +1,2 @@\n import triton\n-OLD\n+NEW\n"
+        "diff --git a/aiter/ops/helper.py b/aiter/ops/helper.py\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/aiter/ops/helper.py\n@@ -0,0 +1 @@\n+HELP\n"
+    )
+    res = ko.build_patch_snapshot(
+        str(patch), worktree=worktree, kernel_repo=str(tmp_path / "base"),
+        clean_base=str(tmp_path / "base"), out_dir=tmp_path / "snap",
+    )
+    assert res is not None
+    snap = Path(res["snapshot_dir"])
+    assert (snap / "aiter/ops/k.py").read_text() == "import triton\nNEW\n"
+    assert (snap / "aiter/ops/helper.py").read_text() == "HELP\n"
+    assert len(res["descriptors"]) == 2
+
+
+def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):
+    """If any write path can't be made byte-exact (no worktree file, no base to
+    reconstruct from), the attempt is non-deployable -> None (hard fail)."""
+    base = tmp_path / "base"
+    base.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    patch = tmp_path / "p.patch"
+    patch.write_text(
+        "diff --git a/helper.py b/helper.py\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/helper.py\n@@ -0,0 +1 @@\n+HELP\n"
+    )
+    res = ko.build_patch_snapshot(
+        str(patch), worktree=worktree, kernel_repo=str(base),
+        clean_base=str(base), out_dir=tmp_path / "snap",
+    )
+    assert res is None
+
+
 # Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must keep matching both legacy `_optimized.<suffix>` and new `_stdout.log` names (kernel-agent/SKILL.md § Per-attempt stdout file naming).
 
 
