@@ -101,7 +101,7 @@ with prefix `crsr_...`:
 
 | Variable                | Default                  | Description                                                                                                                                                                       |
 |-------------------------|--------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `CURSOR_API_KEY`        | unset                    | Cursor SDK key. **Never** inherited from `SAFE_API_KEY`. `cursor` is not in the default `forge,geak` ladder; include it explicitly in `KERNEL_OPT_BACKEND_ORDER` when you want to use it. |
+| `CURSOR_API_KEY`        | unset                    | Cursor SDK key. **Never** inherited from `SAFE_API_KEY`. `cursor` is the tail of the default `forge,geak,claude,codex,cursor` ladder but is auto-dropped when this key is unset; set it to keep `cursor` in the ladder. |
 | `CURSOR_DEFAULT_MODEL`  | `claude-opus-4-7`        | Override the default Cursor model id.                                                                                                                                              |
 
 The selection notes carry `cursor_key_present: bool` for observability.
@@ -129,7 +129,7 @@ verifies the runtime dependencies.
 | Variable           | Required for                                       | Default                | Description                                                                                                  |
 |--------------------|----------------------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------|
 | `REPO_ROOT`        | Always                                             | `$(pwd)` if invoked from the repo root | This Hyperloom checkout. Locates `inference_optimizer/`, `kernel-agent/`, `.env`, skills, scripts.            |
-| `OOB_SRC`          | OOB kernel-opt backends (claude / codex / cursor)  | none                   | Path to the `OOB/` subdirectory of the [Primus-Claw](https://github.com/AMD-AGI/Primus-Claw) clone.            |
+| `OOB_SRC`          | OOB kernel-opt backends (claude / codex / cursor)  | none                   | Path to the `OOB/` subdirectory of the [KernelForge](https://github.com/AMD-AGI/KernelForge) clone.            |
 | `INFERENCEX_PATH`  | Baseline comparison, target analysis               | none                   | Path to the [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) repo.                    |
 | `TRACELENS_ROOT`   | Profile & kernel detection                         | `${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens` (auto-clone) | When unset, `kernel-agent/scripts/install.sh` clones [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) into the pod-local open-source checkout root and pins it to a fixed SHA. Export it to point at a pre-existing checkout you maintain as an operator override — this skips both the clone and the SHA pin. |
 | `TRACELENS_INTERNAL_ROOT` (optional) | Internal extension (roofline gap, MI355+ MAF) | none | Path to your own internal TraceLens extension checkout (internal users only; self-provided). Unset => open-source-only. Hyperloom never clones it. |
@@ -188,9 +188,9 @@ convenience for persistence between shells.
 The exported (shell) value wins. `.env` only fills missing keys.
 
 **Q: I don't have a Cursor account. Will optimization still work?**
-Yes. The default kernel-opt ladder is `forge,geak`. `cursor` and other OOB
-backends (`claude`, `codex`) are used only when you explicitly include them in
-`KERNEL_OPT_BACKEND_ORDER`; `cursor` still requires `CURSOR_API_KEY`.
+Yes. The default kernel-opt ladder is `forge,geak,claude,codex,cursor`
+(Forge-GEAK-OOB), but `cursor` is auto-dropped from it when `CURSOR_API_KEY` is
+unset, so the run proceeds with `forge,geak,claude,codex`.
 
 **Q: Where do `GEAK_API_KEY` / `ANTHROPIC_API_KEY` come from?**
 They are derived from `SAFE_API_KEY` by `kernel-agent/scripts/install.sh`
