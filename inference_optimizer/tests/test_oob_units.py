@@ -15,7 +15,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-pytest.importorskip("agent_mcp_server")
+_agent_mcp_server = pytest.importorskip("agent_mcp_server")
+_repo_oob_root = Path(__file__).resolve().parents[2] / "OOB"
+_pkg_file_raw = getattr(_agent_mcp_server, "__file__", "") or ""
+_pkg_file = Path(_pkg_file_raw).resolve() if _pkg_file_raw else None
+if not _repo_oob_root.exists() or _pkg_file is None or not _pkg_file.is_relative_to(_repo_oob_root.resolve()):
+    pytest.skip(
+        "editable OOB/ agent_mcp_server tree is not installed from this repo",
+        allow_module_level=True,
+    )
 
 
 @pytest.fixture(autouse=True)

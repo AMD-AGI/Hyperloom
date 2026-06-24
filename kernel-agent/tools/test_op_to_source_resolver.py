@@ -27,10 +27,11 @@ import pytest
 
 _TLA_PATH = Path(__file__).resolve().parent / "tracelens_analysis.py"
 
-# An editable native source must end in .cu/.cuh/.hip and resolve to an
+# An editable native source must end in .cu/.cuh/.hip/.h and resolve to an
 # absolute path; a non-editable one is e.g. an empty/unshipped csrc path.
 _EDITABLE_CU = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/foo.cu"
 _EDITABLE_CU_2 = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/bar.cu"
+_EDITABLE_H = "/sgl-workspace/aiter/csrc/kernels/rope/rope_common.h"
 
 
 @pytest.fixture(scope="module")
@@ -93,6 +94,21 @@ def test_single_multiple_editable_sources_fans_out_one_leaf_per_cu(tla) -> None:
     assert len(leaves) == 2
     assert [leaf.primary_source for leaf in leaves] == [_EDITABLE_CU, _EDITABLE_CU_2]
     assert all(leaf.is_routable for leaf in leaves)
+
+
+def test_single_patchable_header_source_is_routable(tla) -> None:
+    """Curated patchable native headers are editable sources, not non_rewritable."""
+    mapping = {
+        "aiter::rope": _entry(
+            "single",
+            sglang={"kn_entry": _kernel(_EDITABLE_H)},
+        )
+    }
+    res = tla.resolve_op_source("aiter::rope", mapping=mapping)
+    assert res is not None
+    assert res.status == "resolved"
+    assert res.is_routable
+    assert res.sources == [_EDITABLE_H]
 
 
 def test_single_no_editable_source_is_non_rewritable(tla) -> None:
@@ -210,6 +226,76 @@ def test_composite_all_non_editable_is_non_rewritable(tla) -> None:
     assert res.patchable is False
     assert res.fanout == []
     assert res.leaf_resolutions() == []
+
+
+def test_composite_device_name_narrows_to_matching_kernel(tla) -> None:
+    """A composite given the trace device kernel name narrows to that ONE editable
+    source (the hot kernel) instead of fanning out to every co-firing kernel.
+
+    Regression: the Triton fused-MoE label aggregates the MoE GEMM plus co-firing
+    quant/align helpers; without device-name narrowing the resolver fanned out to
+    all three sources (quant.cu, the triton .py, int8.py) and GEAK chased the wrong
+    file. With the trace's device symbol it must resolve to just the GEMM source.
+    """
+    mapping = {
+        "moe::fused": _entry(
+            "composite",
+            sglang={
+                "quant_kernel": _kernel(_EDITABLE_CU),          # co-firing helper
+                "fused_moe_kernel": _kernel(_EDITABLE_CU_2),    # the hot GEMM
+                "int8_kernel": _kernel(_EDITABLE_CU),           # another helper
+            },
+        )
+    }
+    res = tla.resolve_op_source(
+        "moe::fused", framework="sglang",
+        device_kernel_name="_fused_moe_kernel_sequence", mapping=mapping,
+    )
+    assert res is not None
+    assert res.kind == "composite"
+    assert res.status == "resolved"
+    assert res.matched_route == "fused_moe_kernel"   # substring-matched the hot symbol
+    leaves = res.leaf_resolutions()
+    assert len(leaves) == 1
+    assert leaves[0].primary_source == _EDITABLE_CU_2  # narrowed to the GEMM, not fan-out
+
+
+def test_composite_without_device_name_still_fans_out(tla) -> None:
+    """No trace device name -> unchanged behavior: fan out one leaf per editable source."""
+    mapping = {
+        "moe::fused": _entry(
+            "composite",
+            sglang={
+                "fused_moe_kernel": _kernel(_EDITABLE_CU),
+                "other_kernel": _kernel(_EDITABLE_CU_2),
+            },
+        )
+    }
+    res = tla.resolve_op_source("moe::fused", framework="sglang", mapping=mapping)
+    assert res is not None
+    assert res.kind == "composite"
+    leaves = res.leaf_resolutions()
+    assert {lf.primary_source for lf in leaves} == {_EDITABLE_CU, _EDITABLE_CU_2}
+
+
+def test_composite_device_name_no_match_falls_back_to_fanout(tla) -> None:
+    """A device name that matches none of the composite kernels falls back to fan-out."""
+    mapping = {
+        "moe::fused": _entry(
+            "composite",
+            sglang={
+                "fused_moe_kernel": _kernel(_EDITABLE_CU),
+                "other_kernel": _kernel(_EDITABLE_CU_2),
+            },
+        )
+    }
+    res = tla.resolve_op_source(
+        "moe::fused", framework="sglang",
+        device_kernel_name="totally_unrelated_symbol", mapping=mapping,
+    )
+    assert res is not None
+    leaves = res.leaf_resolutions()
+    assert {lf.primary_source for lf in leaves} == {_EDITABLE_CU, _EDITABLE_CU_2}
 
 
 # --------------------------------------------------------------------------- #

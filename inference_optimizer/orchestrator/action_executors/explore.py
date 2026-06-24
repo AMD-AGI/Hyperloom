@@ -572,6 +572,16 @@ class ExploreExecutor:
             overtime_kill_ratio = float(overtime_kill_ratio_raw) if overtime_kill_ratio_raw is not None else 0.0
         except (TypeError, ValueError):
             overtime_kill_ratio = 0.0
+        # Q4: WARM measure-round anchor (client-only, no boot). When warm-decision
+        # is active the overtime kill anchors on this so a one-time cold boot /
+        # aiter recompile no longer trips it; falls back to the cold baseline.
+        baseline_warm_runtime_sec_raw = params.get("baseline_warm_runtime_sec")
+        try:
+            baseline_warm_runtime_sec = (
+                float(baseline_warm_runtime_sec_raw) if baseline_warm_runtime_sec_raw is not None else 0.0
+            )
+        except (TypeError, ValueError):
+            baseline_warm_runtime_sec = 0.0
         if baseline_runtime_sec > 0 and overtime_kill_ratio > 0:
             overtime_deadline_sec: float | None = baseline_runtime_sec * overtime_kill_ratio
         else:
@@ -874,6 +884,29 @@ class ExploreExecutor:
         lifecycle_framework = str(lifecycle.get("framework") or "")
         lifecycle_port = int(lifecycle.get("port") or 0)
 
+        # Q4-a: warm-decision mode. Run a discarded cold *warmup* round first so
+        # the decision round reuses the hot server (client-only) and is measured
+        # warm — apples-to-apples with how ``baseline_tput`` is measured (its own
+        # warmup+measure double-run). Requires server_lifecycle reuse; otherwise
+        # we cannot keep a server hot between rounds, so fall back to the legacy
+        # single cold-decision run. Opt out with
+        # INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION=0.
+        warm_decision_enabled = os.environ.get(
+            "INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1"
+        ).strip().lower() not in {"0", "false", "no", "off"}
+        use_warm_decision = warm_decision_enabled and lifecycle_eligible
+        # Decision-round overtime anchor: the WARM measure time when warm-decision
+        # is active and available, else the cold baseline wall-clock (legacy).
+        decision_anchor_sec = (
+            baseline_warm_runtime_sec
+            if (use_warm_decision and baseline_warm_runtime_sec > 0)
+            else baseline_runtime_sec
+        )
+        if decision_anchor_sec > 0 and overtime_kill_ratio > 0:
+            decision_deadline_sec: float | None = decision_anchor_sec * overtime_kill_ratio
+        else:
+            decision_deadline_sec = None
+
         if runnable:
             for idx, gv in enumerate(runnable):
                 fp = getattr(gv, "canonical_fp", "")
@@ -888,10 +921,93 @@ class ExploreExecutor:
                     {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
                 try:
-                    # 1. Round 1: run the variant on the running stack. When
-                    #    eligible, cleanup=false keeps the server hot for the
-                    #    warm round 2; ``soft_deadline_sec`` is the overtime
-                    #    kill (round 2 below intentionally omits it, Q4).
+                    # Q4-a: warm-decision warmup round. Boot the variant's server
+                    # once and DISCARD the (cold) measurement so the decision
+                    # round below runs warm / client-only — apples-to-apples with
+                    # baseline_tput. cleanup=false keeps the server hot; NO
+                    # soft_deadline (one-time cold boot / aiter recompile must not
+                    # trip the overtime kill — only the hard variant_timeout cap
+                    # gates the warmup).
+                    if use_warm_decision:
+                        warmup_slot = slot / "warmup_round"
+                        warmup_slot.mkdir(parents=True, exist_ok=True)
+                        warmup_results = await run_grid(
+                            base_yaml_path=config_path,
+                            base_extra_args=stack_extra_args,
+                            grid=[gv],
+                            output_root=warmup_slot,
+                            variant_timeout_sec=timeout_sec,
+                            model_path=resolved_model,
+                            gpu_type=resolved_gpu,
+                            benchmark_script=override_script,
+                            result_dir=override_result_dir,
+                            soft_deadline_sec=None,
+                            server_lifecycle=round1_lifecycle,
+                        )
+                        w = warmup_results[0] if warmup_results else None
+                        if w is None or getattr(w, "status", "") != "succeeded":
+                            werr = (getattr(w, "error", "") or "")[-200:] if w is not None else "no_result"
+                            log.warning(
+                                "explore: variant %s warmup round failed (%s); "
+                                "skipping decision round.",
+                                gv.name,
+                                werr,
+                            )
+                            tested_update[fp] = {
+                                "fingerprint": fp,
+                                "name": gv.name,
+                                "extra_server_args": gv.extra_server_args,
+                                "extra_envs": dict(gv.extra_envs),
+                                "note": gv.note,
+                                "outcome": "FAILED",
+                                "status": getattr(w, "status", "failed") if w is not None else "failed",
+                                "tput": None,
+                                "gain_pct": None,
+                                "base_tput": running_base_tput,
+                                "round_id": round_id,
+                                "ts": _now_iso(),
+                                "provenance": provenance,
+                                "workload_signature": ws_sig,
+                                "framework": framework,
+                                "reason": "warmup_failed",
+                            }
+                            if gv.name:
+                                name_index[gv.name] = fp
+                            rejected_update.append(
+                                {
+                                    "fingerprint": fp,
+                                    "name": gv.name,
+                                    "extra_server_args": gv.extra_server_args,
+                                    "extra_envs": dict(gv.extra_envs),
+                                    "note": gv.note,
+                                    "reason": "warmup_failed",
+                                    "gain_pct": None,
+                                    "tput": None,
+                                    "round_id": round_id,
+                                    "ts": _now_iso(),
+                                    "provenance": provenance,
+                                }
+                            )
+                            losers.append(
+                                {
+                                    "fingerprint": fp,
+                                    "name": gv.name,
+                                    "extra_server_args": gv.extra_server_args,
+                                    "extra_envs": dict(gv.extra_envs),
+                                    "provenance": provenance,
+                                    "gain_pct": None,
+                                    "tput": None,
+                                    "reason": "warmup_failed",
+                                    "workspace": getattr(w, "workspace", None) if w is not None else None,
+                                }
+                            )
+                            continue
+                    # Decision round: warm (re-attaches to the warmup's hot
+                    # server, client-only) when ``use_warm_decision``; otherwise a
+                    # fresh cold boot (legacy). cleanup=false keeps it hot for the
+                    # warm stack-rebench round below. ``soft_deadline_sec`` is the
+                    # overtime kill, anchored on the WARM measure time when
+                    # warm-decision is active (stack-rebench omits it, Q4).
                     results = await run_grid(
                         base_yaml_path=config_path,
                         base_extra_args=stack_extra_args,
@@ -902,7 +1018,7 @@ class ExploreExecutor:
                         gpu_type=resolved_gpu,
                         benchmark_script=override_script,
                         result_dir=override_result_dir,
-                        soft_deadline_sec=overtime_deadline_sec,
+                        soft_deadline_sec=decision_deadline_sec,
                         server_lifecycle=round1_lifecycle,
                     )
                     if not results:
@@ -920,7 +1036,7 @@ class ExploreExecutor:
                     if getattr(r, "killed_overtime", False):
                         variant_runtime = float(r.runtime_sec or 0.0)
                         wall_clock_ratio = (
-                            round(variant_runtime / baseline_runtime_sec, 3) if baseline_runtime_sec > 0 else None
+                            round(variant_runtime / decision_anchor_sec, 3) if decision_anchor_sec > 0 else None
                         )
                         # Rough output tok/s salvaged from the engine's partial
                         # server.log throughput logs. Informational only: ``tput``
@@ -950,6 +1066,10 @@ class ExploreExecutor:
                             "baseline_runtime_sec": round(
                                 baseline_runtime_sec,
                                 2,
+                            ),
+                            "overtime_anchor_sec": round(decision_anchor_sec, 2),
+                            "overtime_anchor_kind": (
+                                "warm" if decision_anchor_sec == baseline_warm_runtime_sec and baseline_warm_runtime_sec > 0 else "cold"
                             ),
                             "overtime_kill_ratio": overtime_kill_ratio,
                         }
@@ -991,21 +1111,23 @@ class ExploreExecutor:
                         )
                         log.warning(
                             "explore: variant %s KILLED_OVERTIME "
-                            "(runtime=%.1fs vs baseline=%.1fs, ratio=%.2fx, "
+                            "(runtime=%.1fs vs %s anchor=%.1fs, ratio=%.2fx, "
                             "kill_ratio=%.2fx, est_output_tput=%s tok/s); "
                             "skipping KEEP/REVERT ladder.",
                             gv.name,
                             variant_runtime,
-                            baseline_runtime_sec,
+                            "warm" if (decision_anchor_sec == baseline_warm_runtime_sec and baseline_warm_runtime_sec > 0) else "cold",
+                            decision_anchor_sec,
                             wall_clock_ratio if wall_clock_ratio is not None else -1.0,
                             overtime_kill_ratio,
                             f"{est_tput:.1f}" if est_tput is not None else "n/a",
                         )
                         continue
 
-                    # Cold round-1 gain is the cost gate: only variants that
+                    # Decision-round gain is the cost gate: only variants that
                     # already clear keep_threshold (and the accuracy gate) earn
-                    # a warm round 2.
+                    # a warm stack-rebench round. With warm-decision active this
+                    # measurement is already warm (the cold warmup was discarded).
                     gain = _gain_pct(r.output_throughput, running_base_tput)
                     outcome = "FAILED"
                     reason: str = ""

@@ -425,7 +425,11 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     tmp_path,
     monkeypatch,
 ):
-    """vLLM: OSL=1024, CONC=32, R unset → max=512, delay=5888 per skill."""
+    """vLLM: OSL=1024, CONC=32, R unset → capture capped at 128, delay=6080.
+
+    Capture is the serialization-safe cap (default 128); delay keeps the
+    warmup formula OSL*(R+1)*3 - max_iters/2 = 1024*2*3 - 64 = 6080.
+    """
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -433,15 +437,15 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     out = _materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.delay_iterations 5888" in extra, extra
-    assert "--profiler-config.max_iterations 512" in extra, extra
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
+    assert "--profiler-config.max_iterations 128" in extra, extra
 
 
 def test_materialize_profile_window_vllm_skill_formula_explicit_R(
     tmp_path,
     monkeypatch,
 ):
-    """vLLM: explicit R=0.5 must shrink delay (skill: 3*OSL*(R+1) term)."""
+    """vLLM: explicit R=0.5 must shrink delay (warmup: 3*OSL*(R+1) term)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -450,10 +454,10 @@ def test_materialize_profile_window_vllm_skill_formula_explicit_R(
     out = _materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
-    # R=0.5: delay = 1024 * 1.5 * 3 - 512/2 = 4608 - 256 = 4352; max=512.
+    # R=0.5: max capped at 128; delay = 1024 * 1.5 * 3 - 128/2 = 4608 - 64 = 4544.
     extra = envs["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.delay_iterations 4352" in extra, extra
-    assert "--profiler-config.max_iterations 512" in extra, extra
+    assert "--profiler-config.delay_iterations 4544" in extra, extra
+    assert "--profiler-config.max_iterations 128" in extra, extra
     # And R must round-trip into the YAML as a float, not stringified-int.
     assert envs["RANDOM_RANGE_RATIO"] == 0.5
 
@@ -471,8 +475,9 @@ def test_materialize_profile_window_sglang_skill_formula(
     out = _materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     body = json.loads(rendered["benchmark"]["envs"]["PROFILE_EXTRA_BODY"])
-    assert body["start_step"] == 5888
-    assert body["num_steps"] == 512
+    # max capped at 128; delay = 1024 * 2 * 3 - 128/2 = 6080.
+    assert body["start_step"] == 6080
+    assert body["num_steps"] == 128
 
 
 def test_materialize_persists_inferencex_path_for_magpie(
@@ -494,7 +499,8 @@ def test_materialize_profile_window_clamps_to_skill_floor(
     tmp_path,
     monkeypatch,
 ):
-    """Skill: max_iters floors at 256 (OSL=256, CONC=64 ⇒ 16*OSL/CONC=64, so the floor kicks in)."""
+    """Capture is always the serialization cap (default 128), even for a small
+    OSL whose steady floor is far below it (OSL=256, CONC=64 ⇒ floor=4)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -502,7 +508,7 @@ def test_materialize_profile_window_clamps_to_skill_floor(
     out = _materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.max_iterations 256" in extra, extra
+    assert "--profiler-config.max_iterations 128" in extra, extra
 
 
 # Regression #194 §2: NUM_PROMPTS must be sized to cover the steady-state window (profile mode force-overrides any caller-supplied value).
@@ -510,30 +516,30 @@ def test_materialize_profile_num_prompts_covers_steady_state_window(
     tmp_path,
     monkeypatch,
 ):
-    """OSL=1024 / CONC=32 / R=1 → delay+max = 6400 iters ⇒ NUM_PROMPTS=400."""
+    """OSL=1024 / CONC=32 / R=1 → delay+max = 6208 iters ⇒ NUM_PROMPTS=388."""
     import yaml
 
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
-    # delay=5888, max=512 → required=6400; 6400*32/1024 = 200; *2 = 400.
-    assert envs["NUM_PROMPTS"] == 400, envs.get("NUM_PROMPTS")
+    # delay=6080, max=128 → required=6208; floor(6208*32/1024)=194; *2 = 388.
+    assert envs["NUM_PROMPTS"] == 388, envs.get("NUM_PROMPTS")
 
 
 def test_materialize_profile_num_prompts_floors_at_conc_for_tiny_osl(
     tmp_path,
     monkeypatch,
 ):
-    """Tiny OSL with skill floor max_iters=256 still produces a sane NUM_PROMPTS."""
+    """Tiny OSL with the capped capture still produces a sane NUM_PROMPTS."""
     import yaml
 
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 64, "OSL": 64})
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
-    # max=256, delay=64*2*3-128=256, required=512; 512*32/64=256; *2=512.
-    assert envs["NUM_PROMPTS"] == 512, envs.get("NUM_PROMPTS")
+    # max=128, delay=64*2*3-64=320, required=448; 448*32/64=224; *2=448.
+    assert envs["NUM_PROMPTS"] == 448, envs.get("NUM_PROMPTS")
 
 
 def test_materialize_profile_force_overrides_user_num_prompts(
@@ -554,8 +560,8 @@ def test_materialize_profile_force_overrides_user_num_prompts(
     )
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
-    # Hyperloom-computed 400 must win over the caller's 32.
-    assert envs["NUM_PROMPTS"] == 400, envs.get("NUM_PROMPTS")
+    # Hyperloom-computed 388 must win over the caller's 32.
+    assert envs["NUM_PROMPTS"] == 388, envs.get("NUM_PROMPTS")
 
 
 def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
@@ -625,8 +631,8 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.delay_iterations 5888" in extra, extra
-    assert "--profiler-config.max_iterations 512" in extra, extra
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
+    assert "--profiler-config.max_iterations 128" in extra, extra
     assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
     assert "--profiler-config.detailed_trace_annotation True" in extra, extra
     # Per-framework dispatch: the SGLang patcher must NOT run for a vLLM YAML.
@@ -636,6 +642,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
 def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     tmp_path,
     monkeypatch,
+    caplog,
 ):
     """Patcher False ⇒ EXTRA_VLLM_ARGS keeps only the §1 safe set (else unpatched vLLM crashes on unknown JSON key)."""
     import yaml
@@ -643,11 +650,16 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    caplog.set_level("WARNING")
     out = _materialize_config_with_envs(src, tmp_path)
-    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.delay_iterations 5888" in extra, extra
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    extra = envs["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "capture_torch_profiler_dir" not in extra, extra
     assert "detailed_trace_annotation" not in extra, extra
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
+    assert envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
+    assert "TraceLens runtime patch unavailable" in caplog.text
 
 
 def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
@@ -705,7 +717,7 @@ def test_materialize_profile_kill_switch_skips_patcher_entirely(
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     # Safe §1 flags still present.
-    assert "--profiler-config.delay_iterations 5888" in extra, extra
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
     # TraceLens-only flags absent.
     assert "capture_torch_profiler_dir" not in extra, extra
     assert "detailed_trace_annotation" not in extra, extra
@@ -2535,6 +2547,37 @@ async def test_run_optimization_handler_missing_kernel_id(session_dir):
     )
     assert res["status"] == "failed"
     assert "kernel_id" in res["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_handler_empty_queue_skips_cleanly(session_dir, tmp_path):
+    # Empty eligible queue (all candidates non-reusable) with no specific kernel
+    # named (the post-GEMM auto pass shape) must finish as a clean skip, not a
+    # "missing 'kernel_id'" GEAK failure.
+    candidates_path = _write_candidates_json(
+        tmp_path,
+        {
+            "hot_kernels": [
+                {
+                    "kernel_id": "k001",
+                    "name": "fused_moe",
+                    "source_file": "/sgl-workspace/aiter/moe.py",
+                    "reusable_native_kernel": False,
+                    "duration_us": 100.0,
+                    "gpu_pct": 12.0,
+                },
+            ],
+        },
+    )
+    assert krh._batch_kernel_candidates({"candidates_path": str(candidates_path)}) == []
+    res = await krh.run_optimization_handler(
+        {"candidates_path": str(candidates_path), "session_id": session_dir.name},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "skipped"
+    assert res["reason"] == "no_eligible_kernels"
+    assert res.get("error_class") is None
+    assert res["kernels_considered"] == 1
 
 
 @pytest.mark.asyncio

@@ -211,10 +211,13 @@ def test_scope_freeform():
     assert "optimize the kv cache" in sys_p
 
 
-def test_bench_block_and_auto_retry():
+def test_gpu_autonomy_block_and_auto_retry():
     inp = _rich_inputs(bench=True, mode="patch", auto_retry_reason="timeout on prior attempt")
     sys_p, _ = build_specialist_prompts(inp)
-    assert "In-loop micro-bench" in sys_p
+    # GPU specialists (with a card allocation) get the on-GPU autonomy block
+    # framing broad scripting/profiling/serving freedom + the optional rebench.
+    assert "On-GPU autonomy" in sys_p
+    assert "specialist_rebench" in sys_p
     assert "Auto-retry notice" in sys_p
 
 

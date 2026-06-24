@@ -17,8 +17,8 @@ name: SaFE Optimize Submit
 #                                    register, so download is overlapped
 #                                    with the rest of the batch (no serial
 #                                    prewarm stage that blocks optimize).
-#                                    schedule forces max_parallel=200 so the
-#                                    whole 200-model batch dispatches at once
+#                                    schedule forces max_parallel=240 so the
+#                                    whole 240-model batch dispatches at once
 #                                    (dispatch default stays 60).
 #   3. summarize  (hyperloom-4hhzn) — aggregate per-task artifacts into a
 #                                    ranked ci_summary.{md,json} (sorted by
@@ -34,20 +34,23 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Rolling downloads>100 pool: 200 models TWICE a day, firing at UTC
-  # 04:00 / 16:00 (Beijing 12:00 / 00:00). Each fire submits the
-  # NEXT sequential 200-model slice of the rotate pool, now hosted off-repo at
+  # Rolling downloads>100 pool: 240 models every 6 hours, firing at UTC
+  # 16:07 / 22:07 / 04:07 / 10:07 (Beijing 00:07 / 06:07 / 12:07 / 18:07).
+  # Minute is :07 (not :00) on purpose — GitHub delays cron heavily at the top
+  # of the hour when many repos fire at once; an off-peak minute reduces the lag.
+  # Each fire submits the NEXT sequential 240-model slice of the rotate pool,
+  # now hosted off-repo at
   # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate.json
   # (a date-less symlink that always points at the latest filtered pool;
   # ordered not-run first; the 449 >12B multimodal models are front-loaded),
   # stepping batch 0,1,2,... and wrapping at the pool end. Both
-  # exclude_leaderboard and exclude_active are OFF on schedule: slices are
-  # disjoint, so the whole pool keeps cycling (re-running finished models too).
+  # exclude_leaderboard is OFF on schedule so the whole pool keeps cycling
+  # (re-running finished models too). exclude_active is ON to skip models
+  # already queued/running in other SaFE Optimize Submit runs.
   # The tail batch is short (not head-wrapped) so consecutive fires never
   # double-submit the head models. Manual workflow_dispatch is unaffected.
-  # PAUSED 2026-06-19: scheduled auto-run disabled on request. Uncomment to resume.
-  # schedule:
-  #   - cron: '0 4,16 * * *'
+  schedule:
+    - cron: '7 4,10,16,22 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > legacy hf_top) ──────
@@ -76,15 +79,15 @@ on:
         description: 'Exclude models already queued/running in active optimize-submit workflow runs.'
         type: boolean
         required: false
-        default: false
+        default: true
       min_params:
         description: 'Min parameter count in Billions (e.g. 7 for >=7B). 0 to skip filter.'
         required: false
         default: '7'
       max_parallel:
-        description: 'Max parallel optimize jobs (dispatch default 60; schedule forces 200 to match the 200-model batch).'
+        description: 'Max parallel optimize jobs (default 240; schedule also uses 240).'
         required: false
-        default: '60'
+        default: '240'
       submit_jitter_sec:
         # Anti-thundering-herd. When the whole matrix fans out at once, every
         # job hits SaFE register/submit (Claw-session creation) in the same
@@ -97,13 +100,12 @@ on:
         required: false
         default: '600'
       submit_workspaces:
-        # Comma-separated round-robin pool. Default spreads the batch across
-        # hyperloom + sandbox instead of sending every task to sandbox. Set
-        # empty explicitly only when you want to fall back to the single
-        # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret.
-        description: 'Round-robin submit workspaces (comma-separated). Default uses hyperloom+sandbox.'
+        # Comma-separated round-robin pool. Default submits only to
+        # core42-hyperloom. Set empty explicitly only when you want to fall back
+        # to the single SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret.
+        description: 'Round-robin submit workspaces (comma-separated). Default uses core42-hyperloom only.'
         required: false
-        default: 'core42-hyperloom,core42-sandbox'
+        default: 'core42-hyperloom'
       isl:
         description: 'Input sequence length'
         required: false
@@ -178,13 +180,13 @@ on:
         required: false
         default: true
       task_timeout_min:
-        description: 'Per-task wait timeout in minutes (default 720 = 12h)'
+        description: 'Per-task wait timeout in minutes (default 420 = 7h)'
         required: false
-        default: '720'
+        default: '420'
       max_hours:
-        description: 'Per-task optimizer budget in hours (default 12)'
+        description: 'Per-task optimizer budget in hours (default 6)'
         required: false
-        default: '12'
+        default: '6'
       all_artifacts:
         description: 'Download every artifact (default off — only optimization_report + ci_metrics)'
         type: boolean
@@ -227,20 +229,19 @@ jobs:
       # order then repeating. Anchored so the first fire at/after the anchor is
       # batch 0 (= not-run head, since the pool is ordered not-run-first).
       INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '' || github.event.inputs.batch_index }}
-      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '200' || github.event.inputs.batch_size }}
+      INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '240' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
-      # Schedule does NOT exclude leaderboard-known models, and does NOT exclude
-      # active workflows: the sequential batches are disjoint slices, so each
-      # cron submits its own slice. Keeping both exclusions off means the whole
-      # downloads>100 pool keeps cycling (re-running finished models too) and the
-      # clean batch boundaries are preserved.
+      # Schedule does NOT exclude leaderboard-known models so the pool keeps
+      # cycling. Active-workflow exclusion is ON (same as optimize-tiny) so
+      # cron skips models already queued/running elsewhere; active-refill keeps
+      # batch size at 240.
       INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
-      INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_active_workflows }}
+      INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
@@ -257,11 +258,11 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.count != '0'
     runs-on: hyperloom-4hhzn
-    # 12h per-task wait timeout + buffer for register/wait/collect.
-    timeout-minutes: 780
+    # 7h per-task wait timeout + buffer for register/wait/collect.
+    timeout-minutes: 480
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(github.event_name == 'schedule' && '200' || github.event.inputs.max_parallel || '60') }}
+      max-parallel: ${{ fromJson(github.event_name == 'schedule' && '240' || github.event.inputs.max_parallel || '240') }}
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
       CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
@@ -273,7 +274,7 @@ jobs:
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         working-directory: ci
@@ -325,9 +326,8 @@ jobs:
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
-          # Schedule sends the whole 200-model batch to core42-hyperloom ONLY,
-          # leaving core42-sandbox dedicated to the count-filler (optimize-tiny).
-          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom' || github.event.inputs.submit_workspaces || 'core42-hyperloom,core42-sandbox' }}
+          # All tasks go to core42-hyperloom only (both schedule and dispatch).
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom' || github.event.inputs.submit_workspaces || 'core42-hyperloom' }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
@@ -377,7 +377,7 @@ jobs:
           # Code-level contract: do not rely on natural-language prompt text
           # for these two critical values. SaFE consumes them and renders the
           # generated prompt tail consistently with the CI prefix.
-          ARGS+=(--max-hours "${INPUT_MAX_HOURS:-12}")
+          ARGS+=(--max-hours "${INPUT_MAX_HOURS:-6}")
           # Hard guarantee: SaFE promptPrefix MUST be non-empty. Workflow
           # input is only populated on workflow_dispatch — for schedule
           # trigger we fall back to ci/prompt_prefix.txt (single source of
@@ -436,7 +436,7 @@ jobs:
           if [ -n "${MATRIX_SOURCE_TASK_ID:-}" ]; then
             ARGS+=(--pool-source-task-id "${MATRIX_SOURCE_TASK_ID}")
           fi
-          ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-720}")
+          ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-420}")
           ARGS+=(--output-dir "${OUTPUT_DIR}")
           ARGS+=(--artifacts-dir "${ARTIFACTS_DIR}")
           python3 optimize_submit.py "${ARGS[@]}"
@@ -950,7 +950,7 @@ jobs:
     runs-on: hyperloom-4hhzn
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         # No setup-python on the self-hosted runner — it has system python3
