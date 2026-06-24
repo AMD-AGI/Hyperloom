@@ -77,32 +77,14 @@ jobs:
             echo "::error::candidates pool not found: ${CANDIDATES_FILE}"
             exit 1
           fi
-          out=$(python3 - <<'PY'
-          import json, math, os
-          from datetime import datetime, timezone
-
-          f = os.environ["CANDIDATES_FILE"]
-          n = len(json.load(open(f)).get("candidates") or [])
-          bs = int(os.environ["BATCH_SIZE"])
-          batches = max(math.ceil(n / bs), 1)
-
-          raw = (os.environ.get("INPUT_BATCH_INDEX") or "").strip()
-          if os.environ.get("EVENT") == "schedule" or not raw:
-              # 2 fires/day (UTC 04 and 16). Advance one batch each fire and each
-              # day so the whole pool is swept over ceil(batches/2) days, wrapping.
-              epoch = datetime(2026, 6, 24, tzinfo=timezone.utc).date()
-              now = datetime.now(timezone.utc)
-              days = max((now.date() - epoch).days, 0)
-              slot = days * 2 + (0 if now.hour < 12 else 1)
-              bi = slot % batches
-          else:
-              bi = int(raw) % batches
-
-          start = bi * bs
-          end = min(start + bs, n)
-          print(f"{bi}\t{n}\t{batches}\t{start}\t{end}")
-          PY
-          )
+          # Pool size, then resolve the batch via ci/batch_rotate.py (unit-tested;
+          # auto-rotates on schedule, uses the input index on manual dispatch).
+          n=$(python3 -c "import json,os;print(len(json.load(open(os.environ['CANDIDATES_FILE'])).get('candidates') or []))")
+          out=$(python3 ci/batch_rotate.py \
+            --count "${n}" \
+            --batch-size "${BATCH_SIZE}" \
+            --batch-index "${INPUT_BATCH_INDEX:-}" \
+            --event "${EVENT}")
           bi=$(echo "$out" | cut -f1); n=$(echo "$out" | cut -f2)
           batches=$(echo "$out" | cut -f3); start=$(echo "$out" | cut -f4); end=$(echo "$out" | cut -f5)
           echo "batch_index=${bi}" >> "$GITHUB_OUTPUT"
