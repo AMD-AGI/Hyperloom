@@ -1389,7 +1389,23 @@ def test_apply_atomic_rolls_back_when_post_apply_sentinel_fails(
 # resolves the KernelForge root from FORGE_PATH / KERNEL_FORGE_ROOT /
 # KERNEL_FORGE_PATH and applies the patch shipped under
 # ``<root>/serving_patches/sglang/sglang_<ver>/``.
-_CK_FIXTURE_PATCH = Path("/tmp/fp8_blockscale_ck_routing.patch")
+# Self-contained synthetic CK-routing patch. The patcher tests never actually
+# git-apply this (they exercise the idempotency short-circuit and the fail-soft
+# branches), so the fixture only needs to EXIST at the PR2 layout path — it must
+# not depend on a real file in /tmp or the KernelForge worktree (that made CI
+# fail with FileNotFoundError). It is nonetheless a coherent unified diff that
+# would apply to the unpatched ``fp8_utils.py`` stub and add the three CK markers.
+_CK_FIXTURE_PATCH_TEXT = """\
+diff --git a/python/sglang/srt/layers/quantization/fp8_utils.py b/python/sglang/srt/layers/quantization/fp8_utils.py
+--- a/python/sglang/srt/layers/quantization/fp8_utils.py
++++ b/python/sglang/srt/layers/quantization/fp8_utils.py
+@@ -1 +1,5 @@
+ # fp8_utils stub (PR2 fixture) — unpatched, no CK markers.
++import os
++def _fp8_blockscale_ck_max_m() -> int:
++    return int(os.environ.get("SGLANG_FP8_BLOCKSCALE_CK_MAX_M", "0") or "0")
++ck_gemm_a8w8_blockscale = None
+"""
 _CK_SGLANG_VERSION = "0.5.12"
 _CK_ROOT_ENV_VARS = ("FORGE_PATH", "KERNEL_FORGE_ROOT", "KERNEL_FORGE_PATH")
 
@@ -1412,19 +1428,19 @@ def _make_fake_kernelforge(
 ) -> Path:
     """Build a fake KernelForge root honoring the PR2 layout contract.
 
-    Copies the verified fixture patch into
+    Writes a self-contained synthetic patch into
     ``serving_patches/sglang/sglang_<ver>/fp8_blockscale_ck_routing.patch`` and
-    writes the root-level ``serving_patches/sglang/SUPPORTED_VERSIONS.txt`` (so
-    tests never depend on the real KernelForge worktree).
+    the root-level ``serving_patches/sglang/SUPPORTED_VERSIONS.txt`` so tests
+    never depend on the real KernelForge worktree or any file in /tmp.
     """
     root = tmp_path / "KernelForge"
     sglang_patches = root / "serving_patches" / "sglang"
     subdir = _server_patcher._versioned_patches_subdir_name(version) or ""
     patches_dir = sglang_patches / subdir
     patches_dir.mkdir(parents=True)
-    shutil.copyfile(
-        _CK_FIXTURE_PATCH,
-        patches_dir / "fp8_blockscale_ck_routing.patch",
+    (patches_dir / "fp8_blockscale_ck_routing.patch").write_text(
+        _CK_FIXTURE_PATCH_TEXT,
+        encoding="utf-8",
     )
     (sglang_patches / "SUPPORTED_VERSIONS.txt").write_text(
         manifest_body,
