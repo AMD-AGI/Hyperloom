@@ -102,6 +102,20 @@ def is_mi300x(gpu_type):
 _MI300X_BLOCK_RE = re.compile(r"deepseek[-_]?v4(?![0-9])|glm[-_]?5(?![0-9])", re.I)
 _MI300X_ALLOW_RE = re.compile(r"deepseek[-_]?v4[-_]?flash", re.I)
 
+# Non-LLM model families that can appear in broad HF pools but cannot be served
+# by Hyperloom's text-generation benchmark path. Some of these repos (for
+# example FLUX.1-dev) do not have a HF ``config.json`` at the repo root, so keep
+# this repo-name gate outside the config-only rules. Keep the patterns
+# family/token-scoped: a broad ``diffusion`` substring would also match possible
+# text-generation research repos whose config is otherwise runnable.
+_NON_LLM_RE = re.compile(
+    r"(^|[/_-])flux(\.|[/_-]|$)"
+    r"|(^|[/_-])stable[-_]?diffusion([/_-]|$)"
+    r"|(^|[/_-])diffusers([/_-]|$)"
+    r"|(^|[/_-])diffusion[-_]?pipeline([/_-]|$)",
+    re.I,
+)
+
 
 def mi300x_blocked_model(repo):
     """Return the matched model token when ``repo`` is one we never run on
@@ -112,6 +126,14 @@ def mi300x_blocked_model(repo):
     if _MI300X_ALLOW_RE.search(name):
         return ""
     m = _MI300X_BLOCK_RE.search(name)
+    return m.group(0) if m else ""
+
+
+def non_llm_repo(repo):
+    """Return the matched token when ``repo`` is a known non-text-generation
+    family (Diffusers/image-generation), else ``""``.
+    """
+    m = _NON_LLM_RE.search(str(repo or ""))
     return m.group(0) if m else ""
 
 
@@ -183,6 +205,12 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None, gpu_type=
     """
     if whitelist and repo and repo in whitelist:
         return None  # curated/whitelisted repo -> never filtered
+    blocked_non_llm = non_llm_repo(repo)
+    if blocked_non_llm:
+        return (
+            "non_text_generation",
+            f"{blocked_non_llm} is a Diffusers/image-generation model, not a decoder-only causal LM",
+        )
     if not isinstance(config, dict):
         return None
     archs = config.get("architectures") or []
