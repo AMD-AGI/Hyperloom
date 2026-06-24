@@ -117,7 +117,12 @@ def gated_check_all(repos):
     print(f"[gated] cached={len(cache)} todo={len(todo)}", flush=True)
     with open(GATED_CACHE, "a") as fh:
         for i, repo in enumerate(todo):
-            cache[repo] = hf_gated(repo) or "ok"
+            # gated/not_found first; if servable, also reject weights-only repos
+            # (no tokenizer) via the HF file listing so they never reach a slot.
+            status = hf_gated(repo)
+            if not status:
+                status = model_compat.hf_missing_tokenizer(repo, HF_TOKENS) or "ok"
+            cache[repo] = status
             fh.write(f"{repo}\t{cache[repo]}\n")
             fh.flush()
             if (i + 1) % 200 == 0:
@@ -169,7 +174,7 @@ def main(argv):
             kept = []
             for c, repo in local_keep:
                 st = gated.get(repo) if repo else None
-                if st in ("gated", "not_found"):
+                if st in ("gated", "not_found", "missing_tokenizer"):
                     counts[st] = counts.get(st, 0) + 1
                     report.write(f"{pname}\t{repo}\t{st}\tHF API\n")
                 else:
