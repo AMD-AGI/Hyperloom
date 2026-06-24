@@ -76,8 +76,8 @@ The SGLang images are available from two sources — pick the one that matches y
 
 Example images (Harbor refs for the SaFE Authoring Pod path; drop the `harbor.core42.primus-safe.amd.com/proxy/` prefix to get the public Docker Hub ref):
 
-- SGLang MI300X: `docker.io/lmsysorg/sglang:v0.5.12-rocm720-mi30x`
-- SGLang MI355X: `docker.io/lmsysorg/sglang:v0.5.12-rocm720-mi35x`
+- SGLang MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
+- SGLang MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
 - vLLM MI300X: `docker.io/vllm/vllm-openai-rocm:v0.21.0`
 - vLLM MI355X: `docker.io/vllm/vllm-openai-rocm:v0.21.0`
 
@@ -99,7 +99,7 @@ docker run -d \
   --group-add video \
   -v /path/to/workspace:/workspace \
   -v /path/to/models:/models \
-  docker.io/lmsysorg/sglang:v0.5.12-rocm720-mi30x \
+  docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix \
   tail -f /dev/null
 ```
 
