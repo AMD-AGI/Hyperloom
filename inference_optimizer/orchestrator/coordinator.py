@@ -3510,6 +3510,28 @@ class Coordinator:
         state.save(self.session_dir)
         return verdict_row
 
+    async def _maybe_reprofile_for_kernel(self) -> None:
+        """Re-run profile+TraceLens inline on any change in projected tput vs the last profiled snapshot, so GEAK targets the current bottleneck."""
+        last_rl = float(getattr(self.shared_state, "last_roofline_tput", 0.0) or 0.0)
+        cur = self._current_tput_from_validated_gain()
+        if last_rl <= 0 or cur <= 0:
+            return
+        # Reprofile on ANY material change (rise or fall) since the last roofline;
+        # a stack revert can lower validated tput, which must also re-target GEAK.
+        if abs(cur - last_rl) / last_rl < self._REPROFILE_CHANGE_TOL:
+            return
+        # State-version the idempotency reason on the validated-gain stack so a
+        # genuine change re-runs (new key) while an unchanged state dedupes.
+        stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
+        try:
+            await self.sub.run_task(
+                await self._enqueue_internal_analysis_task(reason=f"kernel_entry_g{stack_len}")
+            )
+            self.shared_state.last_roofline_tput = self._current_tput_from_validated_gain()
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
+            log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
+
     def _perfskills_enabled(self) -> bool:
         """Whether the KERNEL phase is delegated to the PerfSkills e2e optimizer.
 
@@ -3552,8 +3574,12 @@ class Coordinator:
             await self._run_perfskills_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
+            # No GEMM tuning here: refresh the snapshot (explore gains) before the LLM drives GEAK.
+            await self._maybe_reprofile_for_kernel()
             return
 
+        # Refresh the snapshot (explore gains) before GEMM tuning targets the bottleneck.
+        await self._maybe_reprofile_for_kernel()
         log.info(
             "KERNEL entry: running GEMM tuning before source-level kernel_opt",
         )
@@ -3603,6 +3629,8 @@ class Coordinator:
                 "tuned_file": result.get("tuned_file"),
             },
         )
+        # Capture explore + GEMM-tuning gains before inline GEAK targets the bottleneck.
+        await self._maybe_reprofile_for_kernel()
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
 
@@ -4677,6 +4705,10 @@ class Coordinator:
 
     # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh anchored on last_roofline_tput.
     _ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
+    # Relative-change floor for the pre-GEAK reprofile: any |cur-last|/last above
+    # this re-runs profile+TraceLens. Tiny value (validated gain is rounded to 3
+    # decimals) so it is effectively "any change", just absorbing float noise.
+    _REPROFILE_CHANGE_TOL: float = 1e-5
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).
