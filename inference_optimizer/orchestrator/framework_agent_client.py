@@ -225,6 +225,12 @@ async def phase_discover(
         "max_search_candidates": int(max_candidates),
         "batch_id": batch_id,
     }
+    # Plumb the primus_cortex (PR-Monitor) base URL so the fa subprocess can
+    # query internal primus PRs; without it phase-discover falls back to
+    # GitHub-only. The PR-Monitor REST service IS the primus_cortex backend.
+    primus_url = (os.environ.get("PRIMUS_CORTEX_PR_API") or os.environ.get("PR_MONITOR_URL") or "").strip()
+    if primus_url:
+        request["primus_cortex_url"] = primus_url
     ps = [str(s).strip().lower() for s in (pr_states or []) if str(s).strip()]
     if ps:
         request["pr_states"] = ps

@@ -9999,6 +9999,43 @@ class Coordinator:
                 )
             )
 
+    # Phases whose long, serially-drained GPU grids must not starve the
+    # per-phase cyclic budget exit. PRELUDE (baseline/roofline bootstrap),
+    # SWEEP, CLOSE, RECOVER own mandatory work and keep draining normally.
+    _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"EXPLORE", "KERNEL", "FRAMEWORK_PR"})
+
+    def _dispatch_paused_for_phase_budget(self) -> bool:
+        """True when the current phase's cyclic budget is spent, so the dispatcher should stop launching NEW phase-scoped variants.
+
+        Without this, a long interleaved EXPLORE/KERNEL grid (each variant a
+        ~30-min 671B server reboot + benchmark) drains serially inside
+        ``_pump_dispatcher_once`` for hours; because the pump only returns once
+        all dispatchable work is drained, the tick never reaches
+        ``_advance_phase_if_needed`` and the (correctly computed)
+        ``kernel/explore_phase_budget_exhausted`` exit is never applied — the
+        phase machine stalls and the cyclic reloop never fires. Pausing new
+        spawns lets in-flight tasks finish, the pump return, and the phase
+        advance. Scoped to cyclic long-runs + the discretionary search phases so
+        bounded short runs and bootstrap/sweep phases are unaffected.
+
+        Returns:
+            ``True`` when new phase-scoped dispatch should pause for budget.
+        """
+        state = self.shared_state
+        phase = (getattr(state, "phase", "") or "").upper()
+        if phase not in self._BUDGET_GATED_DISPATCH_PHASES:
+            return False
+        try:
+            if not _phase_state.is_cyclic_phases_enabled() or not _phase_state.is_long_run(state):
+                return False
+            remaining = _phase_state.phase_budget_remaining_seconds(
+                state,
+                budget_pct=self._phase_budget_pct,
+            )
+        except Exception:  # noqa: BLE001 — never let the guard wedge dispatch
+            return False
+        return remaining is not None and remaining <= 0.0
+
     async def _pump_dispatcher_once(self) -> None:
         """Dispatch queued tasks respecting per-lane capacity, re-scanning for
         newly-fittable tasks while in-flight tasks run.
@@ -10010,6 +10047,12 @@ class Coordinator:
         already being awaited. The pump still fully drains all currently
         dispatchable work before returning (one-pump-per-tick semantics
         preserved). Inv-7.3: lease bound to task_id, runner releases it.
+
+        Budget guard: once the current phase's cyclic budget is spent
+        (:meth:`_dispatch_paused_for_phase_budget`), stop spawning NEW
+        phase-scoped variants — drain in-flight, then return so the tick reaches
+        ``_advance_phase_if_needed`` and the phase advances (prevents the
+        KERNEL/EXPLORE interleave grid from stalling the phase machine).
         """
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set: a
@@ -10020,9 +10063,13 @@ class Coordinator:
         # lane-freed tasks carry ids absent from this set and still get picked up.
         dispatched_ids: set[str] = set()
         while True:
-            spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
-            dispatched_ids.update(t.task_id for t, _, _ in spawned)
-            inflight.extend(spawned)
+            # Budget guard: stop launching NEW phase-scoped variants once the
+            # phase's cyclic budget is spent; drain in-flight then return so the
+            # tick can advance the phase (KERNEL/EXPLORE stall fix).
+            if not self._dispatch_paused_for_phase_budget():
+                spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
+                dispatched_ids.update(t.task_id for t, _, _ in spawned)
+                inflight.extend(spawned)
             if not inflight:
                 return
             done, _pending = await asyncio.wait(

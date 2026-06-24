@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -262,6 +263,19 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     if not isinstance(gaps, list) or not gaps:
         gaps = [{"gap_canonical_id": "", "gap_description": ""}]
 
+    # Resolve the primus_cortex base URL (the PR-Monitor service). Only enable
+    # the primus_cortex search mode when a URL is available, else enumerate
+    # raises SourceConfigError before it can fall through to GitHub — which
+    # would make discovery empty whenever primus isn't wired. GitHub
+    # (anonymous, best-effort) is always kept so discovery degrades gracefully.
+    primus_url = str(request.get("primus_cortex_url") or os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
+    if primus_url:
+        search_modes = ["primus_cortex", "github"]
+        primus_block: dict[str, Any] = {"primus_cortex": {"base_url": primus_url}}
+    else:
+        search_modes = ["github"]
+        primus_block = {}
+
     seen_refs: set[tuple[str, str]] = set()
     out_cands: list[dict[str, Any]] = []
     for gap in gaps:
@@ -276,9 +290,15 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 "work_dir": work_dir,
                 "baseline": {"throughput": 1.0},
                 "gap_description": gap_desc,
-                "search_modes": ["primus_cortex", "github"],
+                # search_perf_prs MUST be True here: enumerate_candidates
+                # short-circuits to explicit-refs-only (empty for phase-discover)
+                # when it is False, so omitting it made FRAMEWORK_PR discovery
+                # always return 0 candidates (never querying primus_cortex/github).
+                "search_perf_prs": True,
+                "search_modes": search_modes,
                 "pr_states": request.get("pr_states") or ["open"],
                 "max_search_candidates": max_candidates,
+                **primus_block,
             }
         )
         try:
