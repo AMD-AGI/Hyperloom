@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import urllib.error
 from pathlib import Path
@@ -54,12 +55,124 @@ def test_non_llm_diffusers_repo_filtered_without_config():
 
 def test_filter_candidates_repo_gate_without_config(tmp_path, monkeypatch):
     monkeypatch.setattr(filter_candidates, "MODELS_DIR", str(tmp_path))
-    (tmp_path / "black-forest-labs-FLUX.1-dev").mkdir()
 
     r = filter_candidates.classify_local("black-forest-labs/FLUX.1-dev")
 
     assert r is not None
     assert r[0] == "non_text_generation"
+
+
+def test_filter_candidates_classify_local_config_and_bad_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(filter_candidates, "MODELS_DIR", str(tmp_path))
+    short_dir = tmp_path / "org-short"
+    short_dir.mkdir()
+    (short_dir / "config.json").write_text(
+        json.dumps({
+            "architectures": ["LlamaForCausalLM"],
+            "max_position_embeddings": 2048,
+        }),
+        encoding="utf-8",
+    )
+    bad_dir = tmp_path / "org-bad-json"
+    bad_dir.mkdir()
+    (bad_dir / "config.json").write_text("{", encoding="utf-8")
+
+    assert filter_candidates.classify_local("org/short")[0] == "short_ctx"
+    assert filter_candidates.classify_local("org/bad-json") is None
+
+
+def test_filter_candidates_tokens_slug_and_gated_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKENS", "hf_a, hf_b")
+    monkeypatch.setenv("HF_TOKEN", "hf_b")
+    monkeypatch.setenv("HF_TOKEN_2", "hf_c")
+    monkeypatch.setattr(
+        filter_candidates,
+        "GATED_CACHE",
+        str(tmp_path / "gated_cache.tsv"),
+    )
+    (tmp_path / "gated_cache.tsv").write_text(
+        "cached/repo\tgated\nmalformed\n",
+        encoding="utf-8",
+    )
+
+    assert filter_candidates.hf_tokens() == ["hf_a", "hf_b", "hf_c"]
+    assert filter_candidates.slug("org/model") == "org-model"
+    assert filter_candidates.load_gated_cache() == {"cached/repo": "gated"}
+
+
+def test_filter_candidates_gated_check_all_appends_uncached(tmp_path, monkeypatch):
+    cache_path = tmp_path / "gated_cache.tsv"
+    cache_path.write_text("cached/repo\tok\n", encoding="utf-8")
+    monkeypatch.setattr(filter_candidates, "GATED_CACHE", str(cache_path))
+    monkeypatch.setattr(
+        filter_candidates,
+        "hf_gated",
+        lambda repo: "gated" if repo == "new/gated" else None,
+    )
+    monkeypatch.setattr(filter_candidates.time, "sleep", lambda _seconds: None)
+
+    cache = filter_candidates.gated_check_all(["cached/repo", "new/gated", "new/ok"])
+
+    assert cache == {
+        "cached/repo": "ok",
+        "new/gated": "gated",
+        "new/ok": "ok",
+    }
+    assert "new/gated\tgated" in cache_path.read_text(encoding="utf-8")
+
+
+def test_filter_candidates_main_filters_local_and_gated(tmp_path, monkeypatch):
+    models_dir = tmp_path / "models"
+    out_dir = tmp_path / "out"
+    pool_path = tmp_path / "daily.json"
+    pool_path.write_text(
+        json.dumps({
+            "candidates": [
+                {"repo_id": "black-forest-labs/FLUX.1-dev"},
+                {"repo_id": "org/ok"},
+                {"repo_id": "org/gated"},
+                {"repo_id": "org/whitelist"},
+            ]
+        }),
+        encoding="utf-8",
+    )
+    ok_dir = models_dir / "org-ok"
+    ok_dir.mkdir(parents=True)
+    (ok_dir / "config.json").write_text(
+        json.dumps({
+            "architectures": ["LlamaForCausalLM"],
+            "max_position_embeddings": 8192,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(filter_candidates, "MODELS_DIR", str(models_dir))
+    monkeypatch.setattr(filter_candidates, "OUT_DIR", str(out_dir))
+    monkeypatch.setattr(
+        filter_candidates,
+        "GATED_CACHE",
+        str(out_dir / "gated_cache.tsv"),
+    )
+    monkeypatch.setattr(
+        filter_candidates.model_compat,
+        "load_whitelist",
+        lambda: {"org/whitelist"},
+    )
+    monkeypatch.setattr(
+        filter_candidates,
+        "gated_check_all",
+        lambda repos: {"org/ok": "ok", "org/gated": "gated"},
+    )
+
+    filter_candidates.main([str(pool_path)])
+
+    filtered = json.loads((out_dir / "daily_filtered.json").read_text(encoding="utf-8"))
+    assert [c["repo_id"] for c in filtered["candidates"]] == [
+        "org/ok",
+        "org/whitelist",
+    ]
+    report = (out_dir / "pool_filter_report.tsv").read_text(encoding="utf-8")
+    assert "black-forest-labs/FLUX.1-dev\tnon_text_generation" in report
+    assert "org/gated\tgated\tHF API" in report
 
 
 def test_diffusion_substring_text_repo_is_kept():
