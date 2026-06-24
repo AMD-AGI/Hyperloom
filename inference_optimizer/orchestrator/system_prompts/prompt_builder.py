@@ -768,8 +768,9 @@ rewrite (each with a `skip_reason`); they are off-limits, not targets.
                    budget_minutes: 60}}
 
   Backend auto-pick: DO NOT add a `backends` field. The kernel-agent's
-  `choose_backends()` auto-picks per kernel (hip_cpp+bench→GEAK;
-  triton+bench→GEAK then Claude/Codex; python/unknown→Claude/Codex).
+  `choose_backends()` auto-picks the Forge-GEAK-OOB ladder per kernel
+  (forge → geak → claude → codex → cursor; cursor is dropped when
+  CURSOR_API_KEY is unset).
   Pinning a backend forces every kernel through it even where GEAK is
   the only one that can KEEP — the exact #144 last comment Layer 2
   regression. Read `kernel_opt_attempts` + `pending_keep_kernels` to
