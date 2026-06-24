@@ -258,7 +258,8 @@ def _editable_roots() -> list[str]:
                 continue
             fpath = os.path.join(d, n)
             try:
-                with open(fpath, errors="replace") as _fh: txt = _fh.read()
+                with open(fpath, errors="replace") as _fh:
+                    txt = _fh.read()
             except OSError:
                 continue
             # Layout 0: bare absolute path on a line (no quotes, no import).
@@ -279,7 +280,8 @@ def _editable_roots() -> list[str]:
                 if fm:
                     finder_file = os.path.join(d, fm.group(1) + ".py")
                     try:
-                        with open(finder_file, errors="replace") as _fh2: ftxt = _fh2.read()
+                        with open(finder_file, errors="replace") as _fh2:
+                            ftxt = _fh2.read()
                     except OSError:
                         continue
                     for m in re.findall(r"['\"](/[^'\"]+)['\"]", ftxt):

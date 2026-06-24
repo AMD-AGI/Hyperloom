@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import struct
 from pathlib import Path
 
 
@@ -158,6 +159,175 @@ def _config_has_model_identity(data: dict) -> bool:
         if _config_architectures(cfg):
             return True
     return False
+
+
+# Standard HF FP8 quant_method handled by sglang's Fp8LinearMethod. Only this
+# loader honours SGLANG_USE_AITER_FP8_PER_TOKEN; compressed-tensors / other
+# formats route through different methods and are intentionally excluded.
+_FP8_QUANT_METHOD = "fp8"
+# Sanity cap for the safetensors JSON header length (real headers are KB-MB);
+# guards against a corrupt/garbage length prefix triggering a huge read.
+_SAFETENSORS_HEADER_MAX_BYTES = 100 * 1024 * 1024
+
+
+def _read_safetensors_header(path: Path) -> dict | None:
+    """Parse the JSON header of a ``.safetensors`` file without loading tensor data.
+
+    The safetensors layout is: 8-byte little-endian ``uint64`` header length,
+    then that many bytes of UTF-8 JSON mapping tensor name -> ``{dtype, shape,
+    data_offsets}``. Only the header is read.
+
+    Args:
+        path: Path to a ``.safetensors`` file.
+
+    Returns:
+        The parsed header dict, or ``None`` on any read/parse failure.
+    """
+    try:
+        with path.open("rb") as fh:
+            raw_len = fh.read(8)
+            if len(raw_len) != 8:
+                return None
+            (header_len,) = struct.unpack("<Q", raw_len)
+            if header_len <= 0 or header_len > _SAFETENSORS_HEADER_MAX_BYTES:
+                return None
+            header_bytes = fh.read(header_len)
+            if len(header_bytes) != header_len:
+                return None
+        header = json.loads(header_bytes)
+    except (OSError, ValueError, struct.error) as exc:
+        logging.warning("safetensors_header_unreadable: %s (%s)", path, exc)
+        return None
+    return header if isinstance(header, dict) else None
+
+
+def _fp8_weight_scale_is_per_channel(model_path: str) -> bool | None:
+    """Classify a serialized FP8 checkpoint's weight-scale granularity.
+
+    Reads the first ``*.weight_scale`` tensor found in the model's safetensors
+    header(s) and classifies it by element count: a per-channel scale has one
+    entry per output channel (numel > 1), while a per-tensor scale is a scalar
+    (numel == 1). Granularity is uniform across a checkpoint, so the first
+    weight-scale tensor is representative.
+
+    Args:
+        model_path: Filesystem path to the model directory.
+
+    Returns:
+        ``True`` for per-channel, ``False`` for per-tensor, or ``None`` when it
+        cannot be determined (no readable safetensors / no weight-scale tensor).
+    """
+    if not model_path:
+        return None
+    files = sorted(Path(model_path).glob("*.safetensors"))
+    if not files:
+        return None
+    for fpath in files:
+        header = _read_safetensors_header(fpath)
+        if not header:
+            continue
+        for name, meta in header.items():
+            if name == "__metadata__" or not isinstance(meta, dict):
+                continue
+            # ``weight_scale_inv`` is the block-scale tensor (a different path
+            # excluded upstream); only the per-channel/per-tensor ``weight_scale``
+            # is relevant here.
+            if "weight_scale" not in name or "weight_scale_inv" in name:
+                continue
+            shape = meta.get("shape")
+            if not isinstance(shape, list):
+                continue
+            numel = 1
+            for dim in shape:
+                if isinstance(dim, int):
+                    numel *= dim
+            return numel > 1
+    return None
+
+
+def _fp8_is_per_channel_per_token(model_path: str) -> bool:
+    """True when a serialized FP8 checkpoint uses per-channel weight + per-token (dynamic) activation.
+
+    This is exactly the scheme that benefits from the aiter CK
+    ``gemm_a8w8_bpreshuffle`` fast path in sglang's ``apply_fp8_linear``: with
+    ``SGLANG_USE_AITER_FP8_PER_TOKEN=1`` the weights are converted to
+    per-channel scales and dynamic activations use per-token scales, routing
+    the GEMM to the fused CK kernel instead of the slow unfused
+    ``_apply_fallback_scaled_mm``.
+
+    Gated strictly so it is default-safe:
+
+    * ``quantization_config.quant_method == "fp8"`` (the standard HF FP8 format
+      that sglang's ``Fp8LinearMethod`` serves), AND
+    * NO ``weight_block_size`` — block-scale FP8 takes the
+      ``w8a8_block_fp8_linear`` path and is unaffected, AND
+    * activation is dynamic (per-token). ``activation_scheme == "static"`` is a
+      per-tensor activation scheme that takes the fused per-tensor path; an
+      absent scheme defaults to dynamic in sglang's ``Fp8Config``, AND
+    * the serialized weight scale is **per-channel**. e2e A/B on MI300X showed a
+      per-tensor FP8 checkpoint already serves from the fast fused per-tensor
+      ``torch._scaled_mm`` path, so forcing per-channel + bpreshuffle CK *regresses*
+      it (~6% lower throughput / higher TPOT). Only per-channel weights hit the
+      slow unfused fallback that the env actually rescues. Granularity is read
+      from the safetensors header; an undeterminable checkpoint declines (safe).
+
+    Args:
+        model_path: Filesystem path to the model directory.
+
+    Returns:
+        ``True`` only for non-block FP8 checkpoints with dynamic activation
+        whose serialized weight scale is confirmed per-channel.
+    """
+    data = _load_model_config_dict(model_path)
+    if not isinstance(data, dict):
+        return False
+    qc = data.get("quantization_config")
+    if not isinstance(qc, dict):
+        return False
+    if str(qc.get("quant_method") or "").strip().lower() != _FP8_QUANT_METHOD:
+        return False
+    # Block-scale FP8 is served by a different kernel path; never touch it.
+    if qc.get("weight_block_size") is not None:
+        return False
+    # Only dynamic (per-token) activation hits the fast path; static is
+    # per-tensor and would regress to the unfused fallback if forced.
+    activation = str(qc.get("activation_scheme") or "").strip().lower()
+    if activation not in ("", "dynamic"):
+        return False
+    # Per-tensor weight checkpoints already use the fast fused per-tensor path;
+    # only confirmed per-channel weights benefit. Undeterminable -> decline.
+    return _fp8_weight_scale_is_per_channel(model_path) is True
+
+
+def _fp8_is_block_scale(model_path: str) -> bool:
+    """True when a serialized FP8 checkpoint uses block-scale quantization.
+
+    Block-scale FP8 is exactly the scheme the CK
+    ``aiter_w8a8_block_fp8_linear`` / ``gemm_a8w8_blockscale`` fast path
+    rewrites: the standard HF FP8 format (``quant_method == "fp8"``, served by
+    sglang's ``Fp8LinearMethod``) that additionally declares a non-empty
+    ``weight_block_size``. Per-tensor, static and per-channel/per-token FP8
+    carry no ``weight_block_size`` and are intentionally excluded — they take
+    other GEMM paths the block-scale switch must never touch.
+
+    Args:
+        model_path: Filesystem path to the model directory.
+
+    Returns:
+        ``True`` only for standard HF FP8 checkpoints that declare a non-empty
+        ``weight_block_size``.
+    """
+    data = _load_model_config_dict(model_path)
+    if not isinstance(data, dict):
+        return False
+    qc = data.get("quantization_config")
+    if not isinstance(qc, dict):
+        return False
+    if str(qc.get("quant_method") or "").strip().lower() != _FP8_QUANT_METHOD:
+        return False
+    # A present-but-empty weight_block_size (``[]`` / ``0`` / ``None``) does not
+    # select the block-scale kernel path; require a non-empty value.
+    return bool(qc.get("weight_block_size"))
 
 
 _MLA_KEYS = ("kv_lora_rank", "qk_rope_head_dim", "qk_nope_head_dim", "q_lora_rank")
