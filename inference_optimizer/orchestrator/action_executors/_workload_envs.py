@@ -46,6 +46,7 @@ def _remove_moe_runner_backend_arg(args: str) -> str:
     """Remove any existing SGLang MoE runner backend flag from an args string."""
     return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
 from ._server_patcher import (
+    ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
 )
@@ -679,6 +680,27 @@ def materialize_config_with_envs(
                 "to restore the gate. This warning fires once per process."
             )
             _RUN_EVAL_DISABLED_WARN_EMITTED = True
+    # KernelForge fp8 block-scale CK backend switch: when the coordinator
+    # promoted an fp8-blockscale gemm_tuning KEEP it injects
+    # SGLANG_FP8_BLOCKSCALE_CK_MAX_M into the serving envs. That env only takes
+    # effect on a KernelForge-patched sglang fp8_utils.py (M-aware CK routing);
+    # the unpatched tree ignores it. Ensure the patch here, strictly scoped to
+    # sglang + an active CK optimization (env present) — there is no point
+    # patching otherwise. Fail-soft: a failed patch just leaves the env a no-op,
+    # so the serving run still proceeds (never hard-fail). Honors the
+    # HYPERLOOM_ENABLE_PATCH kill switch like the TraceLens hook above.
+    _fw = str(bench.get("framework") or "").lower()
+    if (
+        _tracelens_patch_enabled()
+        and "sglang" in _fw
+        and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs
+    ):
+        if not ensure_sglang_patched_for_ck_blockscale():
+            log.warning(
+                "CK fp8 block-scale patch could not be applied; "
+                "SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched "
+                "sglang fp8_utils.py (serving run continues unaffected)."
+            )
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:
