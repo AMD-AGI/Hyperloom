@@ -4178,6 +4178,100 @@ class Coordinator:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _ck_blockscale_switch_eligible(self, result: dict[str, Any]) -> bool:
+        """Whether the fp8 block-scale CK backend switch should be E2E-validated.
+
+        The CK backend switch (``SGLANG_FP8_BLOCKSCALE_CK_MAX_M``) routes the
+        fp8 block-scale GEMM from the Triton default to the aiter CK
+        ``gemm_a8w8_blockscale`` kernel on gfx942. This is the big lever
+        (~2x at decode M, ~+109% e2e) and is INDEPENDENT of the a8w8 table
+        tuning result: the table tuner routinely reports ``no_improvement``
+        because the CK default is already optimal, yet the switch itself must
+        still be flipped and E2E-validated as its own gemm_tuning candidate.
+
+        Gated strictly so it only fires for the forge backend on a
+        sglang + fp8 + gfx942 + block-scale workload. fp8 is accepted from any
+        signal — session precision, the resolved forge result, or a runtime
+        ``--quantization fp8`` server arg (session/yaml precision may still read
+        ``bf16``). Block-scale is required positively (the checkpoint declares
+        ``weight_block_size``), which naturally excludes per-tensor, static and
+        per-channel/per-token fp8 — those take other GEMM paths and must never
+        be switched here.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning handler result.
+
+        Returns:
+            bool: ``True`` only when the CK switch is the relevant lever.
+        """
+        if not isinstance(result, dict):
+            return False
+        from .kernel_request_handlers import _resolve_gemm_tuning_backend
+
+        backend = str(
+            result.get("backend") or _resolve_gemm_tuning_backend({})
+        ).strip().lower()
+        if backend != "forge":
+            return False
+        framework = str(getattr(self.shared_state, "framework", "") or "").strip().lower()
+        if framework != "sglang":
+            return False
+        if not self._ck_switch_precision_is_fp8(result):
+            return False
+
+        from ..cli_model_gate import _resolve_amd_gpu_type
+        from .action_executors._workload_envs import _GFX942_GPU_TYPES
+
+        gpu = _resolve_amd_gpu_type(getattr(self.shared_state, "gpu_type", "") or "")
+        if gpu not in _GFX942_GPU_TYPES:
+            return False
+
+        # Block-scale fp8 only, asserted positively: the CK patch only rewrites
+        # the block-scale path (``aiter_w8a8_block_fp8_linear`` /
+        # ``gemm_a8w8_blockscale``), so the checkpoint must declare
+        # ``weight_block_size``. This excludes per-tensor, static and
+        # per-channel/per-token fp8, which take other GEMM paths.
+        from ..model_config_utils import _fp8_is_block_scale
+
+        model_path = str(
+            getattr(self.shared_state, "model_path", "")
+            or os.environ.get("MODEL_PATH", "")
+        )
+        return _fp8_is_block_scale(model_path)
+
+    def _ck_switch_precision_is_fp8(self, result: dict[str, Any]) -> bool:
+        """Whether the workload runs fp8, resolved from any available signal.
+
+        The session-level ``precision`` is not authoritative: precision is often
+        resolved at runtime from server args (``--quantization fp8``) while the
+        session/yaml precision still reads ``bf16``. Accept fp8 from, in order:
+
+        1. ``shared_state.precision`` (session-level), OR
+        2. the forge ``result`` envelope, which stamps the resolved precision
+           (see ``_run_forge_gemm_tuning``), OR
+        3. the runtime ``--quantization`` resolved by
+           ``_resolve_forge_precision_and_quant`` from the actual server args.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning handler result.
+
+        Returns:
+            bool: ``True`` when any signal resolves to fp8.
+        """
+        if str(getattr(self.shared_state, "precision", "") or "").strip().lower() == "fp8":
+            return True
+        if isinstance(result, dict) and str(result.get("precision") or "").strip().lower() == "fp8":
+            return True
+        try:
+            from .kernel_request_handlers import _resolve_forge_precision_and_quant
+
+            precision, _ = _resolve_forge_precision_and_quant(self.shared_state, {})
+            if str(precision or "").strip().lower() == "fp8":
+                return True
+        except Exception:  # noqa: BLE001 - best-effort runtime resolution
+            pass
+        return False
+
     async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
         """Record and post-process a run_gemm_tuning result from any entrypoint.
 
@@ -4186,7 +4280,14 @@ class Coordinator:
         results can bypass per-tuner E2E validation.
         """
         self.shared_state.record_gemm_tuning(result)
-        if result.get("requires_e2e_validation") and result.get("backend") == "forge":
+        # Forge results route to the per-tuner E2E validator when table tuning
+        # asked for it OR when the CK block-scale backend switch is eligible —
+        # the latter is a standalone lever that must be validated even when the
+        # a8w8 table tuner reported no_improvement (decision != KEEP).
+        if result.get("backend") == "forge" and (
+            result.get("requires_e2e_validation")
+            or self._ck_blockscale_switch_eligible(result)
+        ):
             await self._validate_forge_gemm_tuning_e2e(result)
         else:
             self._promote_gemm_tuning_keep(result)
@@ -4245,6 +4346,15 @@ class Coordinator:
                 {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file} if tuned_file else {}
             )
             variant_name = "a8w8_blockscale_tuned_gemm"
+
+        # fp8 block-scale CK backend switch (still attributed to gemm_tuning).
+        # The primary forge path validates this as a standalone candidate in
+        # _validate_forge_gemm_tuning_e2e (see _handle_gemm_tuning_result
+        # routing); this inline-promote path only injects it as a safety net
+        # for an eligible forge result that reaches inline promotion without
+        # the validator. setdefault so an operator-set value always wins.
+        if self._ck_blockscale_switch_eligible(result):
+            extra_envs.setdefault("SGLANG_FP8_BLOCKSCALE_CK_MAX_M", "256")
 
         final_report = str(result.get("final_report_path") or "")
 
@@ -4338,6 +4448,23 @@ class Coordinator:
                     "env_var": env_var,
                     "env_value": env_value,
                     "micro_speedup": float(t.get("best_micro_speedup") or 1.0),
+                })
+
+        # Standalone fp8 block-scale CK backend switch: independent of the a8w8
+        # table tuner outcome (often no_improvement because the CK default is
+        # already optimal). Inject it as its own candidate so the loop below
+        # E2E-validates baseline Triton vs CK and, on KEEP, attributes the gain
+        # to gemm_tuning. Shape matches a table candidate exactly.
+        if self._ck_blockscale_switch_eligible(result):
+            if not any(
+                c.get("env_var") == "SGLANG_FP8_BLOCKSCALE_CK_MAX_M"
+                for c in candidates
+            ):
+                candidates.append({
+                    "tuner": "ck_blockscale_backend_switch",
+                    "env_var": "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
+                    "env_value": "256",
+                    "micro_speedup": 1.0,
                 })
 
         if not candidates:
