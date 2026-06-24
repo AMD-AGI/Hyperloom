@@ -101,6 +101,9 @@ jobs:
       # Whole pool, every run — no rotation, no slicing.
       INPUT_BATCH_INDEX:     '0'
       INPUT_BATCH_SIZE:      '0'
+      # The JSON may include supplementary very-large rows for manual testing;
+      # scheduled daily CI should only submit the top fixed corpus.
+      INPUT_TOP_ONLY:        'true'
       # This is a curated re-run corpus: never drop a model just because it is
       # already on the leaderboard or running elsewhere.
       INPUT_EXCLUDE_LEADERBOARD:      'false'

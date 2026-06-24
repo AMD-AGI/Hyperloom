@@ -597,6 +597,12 @@ _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
+    # GEAK-e2e (PerfSkills) variant. Resolved the same way as the generic geak
+    # (its repo git SHA), but the GEAK_v4 checkout lives under $PERFSKILLS_ROOT
+    # (the GEAK-e2e clone), NOT $GEAK_ROOT (the single-kernel v3.2.x clone). When
+    # a producer omits an explicit root_dir, the fallback must point at the
+    # GEAK_v4 checkout, else versions["geak_v4"] mis-records the generic GEAK SHA.
+    "geak_v4": {"root_env": "PERFSKILLS_ROOT", "version": "git_short"},
     "mini": {"root_env": "GEAK_ROOT", "version": "git_short"},
     "geak-gaagent": {"root_env": "GEAK_ROOT", "version": "git_short"},
     # forge (Kernel-Forge autonomous loop) is its own backend; it locates its
