@@ -3832,6 +3832,18 @@ def _reconstruct_source_from_patch(
         original_text = original.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+    # Backend-produced diffs are untrusted input. Validate the headers before
+    # applying: the diff must touch exactly one file whose post-image basename
+    # matches the target, with no absolute paths and no ``..`` traversal. This
+    # plus applying to an explicit work file (never ``--directory`` /
+    # ``--unsafe-paths``) keeps a malicious/malformed header from escaping the
+    # extraction dir.
+    if not _patch_targets_only(patch_path, original.name):
+        return ""
+    try:
+        patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
     for strip in ("1", "0", "2"):
         work = output_path.with_suffix(output_path.suffix + ".work")
         try:
@@ -3840,27 +3852,18 @@ def _reconstruct_source_from_patch(
         except OSError:
             return ""
         applied = False
-        # git apply (preferred: honours rename/strip semantics), then patch.
+        # Apply ONLY to the explicit work file: ``patch <strip> <work>`` ignores
+        # the diff's header path (writes solely to the named file), so a hostile
+        # header cannot redirect the write. No --directory, no --unsafe-paths.
         try:
             rc = subprocess.run(
-                ["git", "apply", f"-p{strip}", "--unsafe-paths",
-                 f"--directory={work.parent}", str(patch_path)],
-                capture_output=True, text=True, cwd=work.parent, check=False,
+                ["patch", f"-p{strip}", "--force", "--no-backup-if-mismatch",
+                 str(work)],
+                input=patch_text, capture_output=True, text=True, check=False,
             )
-            applied = rc.returncode == 0 and work.is_file()
+            applied = rc.returncode == 0
         except (OSError, ValueError):
             applied = False
-        if not applied:
-            try:
-                with patch_path.open(encoding="utf-8", errors="replace") as pf:
-                    rc = subprocess.run(
-                        ["patch", f"-p{strip}", "--force", "--no-backup-if-mismatch",
-                         str(work)],
-                        stdin=pf, capture_output=True, text=True, check=False,
-                    )
-                applied = rc.returncode == 0
-            except (OSError, ValueError):
-                applied = False
         if applied:
             try:
                 patched_text = work.read_text(encoding="utf-8", errors="replace")
@@ -3875,6 +3878,44 @@ def _reconstruct_source_from_patch(
         else:
             work.unlink(missing_ok=True)
     return ""
+
+
+def _patch_targets_only(patch_path: Path, expected_basename: str) -> bool:
+    """Return whether a unified diff safely touches only ``expected_basename``.
+
+    Rejects multi-file diffs, absolute target paths, and ``..`` traversal in any
+    ``+++`` / ``---`` header — defense in depth around the reconstruction apply,
+    which itself writes only to an explicit work file. ``/dev/null`` (pure
+    add/delete side) is ignored; the non-null side must basename-match.
+
+    Args:
+        patch_path (Path): The unified diff to validate.
+        expected_basename (str): The original kernel file's basename.
+
+    Returns:
+        bool: True when every header targets only ``expected_basename`` safely.
+    """
+    try:
+        text = patch_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    seen_target = False
+    for line in text.splitlines():
+        if not (line.startswith("+++ ") or line.startswith("--- ")):
+            continue
+        raw = line[4:].strip()
+        # strip a trailing tab-timestamp some diff tools append
+        raw = raw.split("\t", 1)[0].strip()
+        if raw in ("/dev/null", ""):
+            continue
+        # drop a leading a/ or b/ prefix
+        path = raw[2:] if (raw.startswith("a/") or raw.startswith("b/")) else raw
+        if path.startswith("/") or ".." in Path(path).parts:
+            return False
+        if Path(path).name != expected_basename:
+            return False
+        seen_target = True
+    return seen_target
 
 
 def _select_source_artifact(

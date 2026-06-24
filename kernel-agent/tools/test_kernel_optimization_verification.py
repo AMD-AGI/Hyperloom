@@ -887,6 +887,77 @@ def test_patch_only_winner_reconstructs_full_source(tmp_path):
     assert "_CACHE = {}" in text
     assert "def kernel():" in text  # untouched original content preserved
     assert "@@" not in text  # not a diff
+    # Security: nothing was written outside run_dir (no traversal escape).
+    assert Path(artifact_path).resolve().is_relative_to(tmp_path.resolve())
+
+
+def test_patch_with_absolute_path_header_is_rejected(tmp_path):
+    """A backend diff whose header targets an ABSOLUTE path must NOT reconstruct
+    (and must not write outside the work dir). Backend patches are untrusted."""
+    original = tmp_path / "fused_moe.py"
+    original.write_text("import triton\n\n\ndef kernel():\n    return 1\n", encoding="utf-8")
+    evil = tmp_path / "evil.patch"
+    evil.write_text(
+        "--- a/fused_moe.py\n"
+        "+++ /etc/cron.d/pwned\n"
+        "@@ -1,1 +1,2 @@\n"
+        " import triton\n"
+        "+# owned\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed", "attempt_id": "geak-evil", "backend": "geak",
+        "backend_paths": {"geak_per_task_best_patch": str(evil)},
+    }
+    artifact_path, source, _ = ko._select_source_artifact(
+        attempt, target_file=str(original), run_dir=tmp_path,
+    )
+    assert source == "missing"
+    assert artifact_path == ""
+
+
+def test_patch_with_parent_traversal_header_is_rejected(tmp_path):
+    """A backend diff header using ``..`` traversal must NOT reconstruct."""
+    original = tmp_path / "fused_moe.py"
+    original.write_text("import triton\n\n\ndef kernel():\n    return 1\n", encoding="utf-8")
+    evil = tmp_path / "evil.patch"
+    evil.write_text(
+        "--- a/fused_moe.py\n"
+        "+++ b/../../../../tmp/pwned.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " import triton\n"
+        "+# owned\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed", "attempt_id": "geak-evil2", "backend": "geak",
+        "backend_paths": {"geak_per_task_best_patch": str(evil)},
+    }
+    artifact_path, source, _ = ko._select_source_artifact(
+        attempt, target_file=str(original), run_dir=tmp_path,
+    )
+    assert source == "missing"
+    assert artifact_path == ""
+
+
+def test_patch_targeting_other_basename_is_rejected(tmp_path):
+    """A diff that edits a different file than the target kernel is rejected."""
+    original = tmp_path / "fused_moe.py"
+    original.write_text("import triton\n\n\ndef kernel():\n    return 1\n", encoding="utf-8")
+    other = tmp_path / "other.patch"
+    other.write_text(
+        "--- a/setup.py\n+++ b/setup.py\n@@ -1,1 +1,2 @@\n import triton\n+# x\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed", "attempt_id": "geak-other", "backend": "geak",
+        "backend_paths": {"geak_per_task_best_patch": str(other)},
+    }
+    artifact_path, source, _ = ko._select_source_artifact(
+        attempt, target_file=str(original), run_dir=tmp_path,
+    )
+    assert source == "missing"
+    assert artifact_path == ""
 
 
 # Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must keep matching both legacy `_optimized.<suffix>` and new `_stdout.log` names (kernel-agent/SKILL.md § Per-attempt stdout file naming).
