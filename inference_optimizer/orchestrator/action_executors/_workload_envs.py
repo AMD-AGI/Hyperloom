@@ -671,23 +671,10 @@ def materialize_config_with_envs(
         # pipeline keeps the configured tp8 + the clean aiter MLA path.
         # Verified on MI300X: capture passes, decode correct.
         envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
-        # Kimi's client-side tokenizer lives behind custom model code. The
-        # server path already passes --trust-remote-code; mirror that on
-        # Magpie's remote benchmark client without changing other models.
-        envs.setdefault("MAGPIE_TRUST_REMOTE_CODE", "1")
-    if "qwen3.6-35b-a3b" in _model_basename or ("qwen3-6-35b-a3b" in _model_basename):
-        # Qwen3.6 MoE also uses a custom text-generation implementation behind
-        # a config that advertises vision_config. Keep trust scoped to this
-        # exact daily candidate family instead of enabling it globally.
-        envs.setdefault("MAGPIE_TRUST_REMOTE_CODE", "1")
-        _qwen_fw_env = server_args_env_name(bench.get("framework"))
-        _qwen_existing = str(envs.get(_qwen_fw_env, "")).strip()
-        if "trust-remote-code" not in _qwen_existing:
-            from ._grid_runner import merge_server_args
-
-            envs[_qwen_fw_env] = (
-                merge_server_args(_qwen_existing, "--trust-remote-code") if _qwen_existing else "--trust-remote-code"
-            )
+        # NOTE: client trust-remote-code is no longer model-specific. It is
+        # handled generally (model-agnostic) by the "Client trust-remote-code"
+        # block after the server-arg guards below, so Kimi/Qwen3.6/etc. no
+        # longer need a per-model MAGPIE_TRUST_REMOTE_CODE here.
     if "mimo-v2" in _model_basename:
         # MiMo-V2.x (moe_swa) loads MiMoV2ForCausalLM fine but its DEFAULT
         # aiter attention backend SIGABRTs during CUDA-graph capture on
@@ -819,6 +806,40 @@ def materialize_config_with_envs(
     )
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
+    # ── Client trust-remote-code (model-agnostic) ─────────────────────────
+    # The MI300X bench scripts (vllm_mi300x.sh / sglang_mi300x.sh) always
+    # launch the SERVER with --trust-remote-code, so a custom-tokenizer model's
+    # measurement CLIENT must load the same remote code to tokenize prompts —
+    # otherwise transformers raises ValueError mid-warmup and the variant fails
+    # (seen on Kimi-K2 / Qwen3.6 / any custom-code model). Mirror it onto every
+    # client-trust env so custom-code models work WITHOUT per-model special-
+    # casing. This is the single choke point every bench path (baseline /
+    # profile / sweep / explore / framework_pr / conc_sweep) funnels through.
+    # setdefault never overrides an operator's deliberate opt-out (e.g.
+    # extra_envs={"BENCH_TRUST_REMOTE_CODE": "0"}).
+    for _trust_key in (
+        "MAGPIE_TRUST_REMOTE_CODE",  # Magpie sglang remote-direct client
+        "BENCH_TRUST_REMOTE_CODE",  # GEAK bench_e2e.sh inferencex client
+        "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
+    ):
+        envs.setdefault(_trust_key, "1")
+    # Server-side trust-remote-code for custom-code models (Qwen3.6 MoE): the
+    # checkpoint ships a custom text-generation implementation behind a config
+    # that advertises vision_config, so the SERVER must also load remote code
+    # or it refuses the arch at boot. Scoped to this exact daily-candidate
+    # family so other models' server args are untouched; the client side is
+    # already covered model-agnostically above. Merge (never overwrite) so an
+    # operator pin survives, and skip when --trust-remote-code is already set.
+    if "qwen3.6-35b-a3b" in _model_basename or "qwen3-6-35b-a3b" in _model_basename:
+        _trust_existing = str(envs.get(framework_env, "")).strip()
+        if "trust-remote-code" not in _trust_existing:
+            from ._grid_runner import merge_server_args
+
+            envs[framework_env] = (
+                merge_server_args(_trust_existing, "--trust-remote-code")
+                if _trust_existing
+                else "--trust-remote-code"
+            )
     # Accuracy eval (GSM8K) is ON by default; env / extra_envs may override.
     # Disabling it removes the per-variant accuracy gate, so accuracy-
     # destroying changes can pass on throughput alone — warn loudly, never
