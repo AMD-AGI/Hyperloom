@@ -456,9 +456,13 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            # GEAK is now first in the ladder.
+            # Default ladder is Forge-GEAK-OOB: forge leads, then GEAK, then
+            # the OOB backends (claude, codex; cursor is key-gated).
             self.assertIn("geak", result["selected_backends"])
-            self.assertEqual(result["selected_backends"][0], "geak")
+            self.assertEqual(result["selected_backends"][0], "forge")
+            self.assertEqual(
+                result["selected_backends"][:4], ["forge", "geak", "claude", "codex"]
+            )
             # No bench → flagged for downstream verification gates.
             self.assertTrue(result["backend_selection"]["geak_without_benchmark"])
             # E2E evidence still missing, so still NEEDS_REVIEW.
