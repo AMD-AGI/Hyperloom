@@ -173,8 +173,8 @@ class _StubSub:
 
 
 @pytest.mark.asyncio
-async def test_on_enter_kernel_reprofiles_on_positive_gain(coord: Coordinator, monkeypatch):
-    """KERNEL entry (no-GEMM path) reprofiles inline when tput rose since the last roofline (cur=120 > last_rl=100), re-anchoring the watermark before GEAK."""
+async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypatch):
+    """KERNEL entry (no-GEMM path) reprofiles inline when projected tput changed since the last roofline (cur=120 vs last_rl=100), re-anchoring the watermark before GEAK."""
     coord.sub = _StubSub()
     monkeypatch.setattr(coord, "_kernel_enabled", lambda: True)
     monkeypatch.setattr(coord, "_gemm_tuning_required_before_kernel_opt", lambda: False)
@@ -184,21 +184,34 @@ async def test_on_enter_kernel_reprofiles_on_positive_gain(coord: Coordinator, m
     await coord._on_enter_kernel(from_phase="EXPLORE")
 
     assert len(coord.sub.tasks_run) == 1
-    assert coord.sub.tasks_run[0].params["reason"] == "kernel_entry"
+    # Reason is state-versioned on the validated-gain stack length (0 here).
+    assert coord.sub.tasks_run[0].params["reason"] == "kernel_entry_g0"
     assert coord.shared_state.last_roofline_tput == 120.0
 
 
 @pytest.mark.asyncio
-async def test_kernel_entry_reprofile_skips_without_gain(coord: Coordinator):
-    """No gain over the last roofline (cur=120 <= last_rl=200) skips the reprofile and leaves the anchor untouched."""
+async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
+    """No material change vs the last roofline (cur == last_rl) skips the reprofile and leaves the anchor untouched."""
     coord.sub = _StubSub()
-    coord.shared_state.last_roofline_tput = 200.0
-    coord.shared_state.cumulative_gain_validated = 20.0  # cur = 120 < 200
+    coord.shared_state.last_roofline_tput = 100.0
+    coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == last_rl
 
     await coord._maybe_reprofile_for_kernel()
 
     assert coord.sub.tasks_run == []
-    assert coord.shared_state.last_roofline_tput == 200.0
+    assert coord.shared_state.last_roofline_tput == 100.0
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofile_skips_without_prior_roofline(coord: Coordinator):
+    """No prior roofline (last_roofline_tput == 0) means there is nothing to compare a change against; skip."""
+    coord.sub = _StubSub()
+    coord.shared_state.last_roofline_tput = 0.0
+    coord.shared_state.cumulative_gain_validated = 50.0
+
+    await coord._maybe_reprofile_for_kernel()
+
+    assert coord.sub.tasks_run == []
 
 
 @pytest.mark.asyncio
@@ -211,7 +224,7 @@ async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
 
     coord.sub = _RaisingSub()
     coord.shared_state.last_roofline_tput = 100.0
-    coord.shared_state.cumulative_gain_validated = 20.0  # cur = 120 > 100 → would trigger
+    coord.shared_state.cumulative_gain_validated = 20.0  # cur = 120 != 100 → would trigger
 
     await coord._maybe_reprofile_for_kernel()  # must not raise
 
