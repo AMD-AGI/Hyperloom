@@ -102,6 +102,7 @@ from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
 )
 from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     _model_is_gemma2,
+    summarize_model_config,
 )
 from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _default_target_summary,
@@ -3060,6 +3061,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if state.model_path:
             os.environ["MODEL_PATH"] = state.model_path
             print(f"  re-exported MODEL_PATH: {state.model_path}")
+            # Backfill model_info for sessions created before the field existed
+            # (or whose config was unreadable at launch); fail-soft to {}.
+            if not state.model_info:
+                state.model_info = summarize_model_config(state.model_path)
+                if state.model_info:
+                    state.save(session_dir)
+                    print("  backfilled model_info (from config.json)")
         if state.framework:
             os.environ["FRAMEWORK"] = state.framework
             print(f"  re-exported FRAMEWORK : {state.framework}")
@@ -3073,6 +3081,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Re-export workload metadata from SharedState so resume sees the same workload contract (not YAML defaults).
         for state_attr, env_name in (
             ("tp", "TP"),
+            # ``ep`` mirrors EP so single-node vLLM MoE resume still injects
+            # --enable-expert-parallel (#569); lost EP would silently drop it.
+            ("ep", "EP"),
             ("conc", "CONC"),
             ("isl", "ISL"),
             ("osl", "OSL"),
@@ -3082,6 +3093,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             if val:
                 os.environ[env_name] = str(val)
                 print(f"  re-exported {env_name:<14s}: {val}")
+        # Profile-scoped OSL: an explicit --profile-osl on this resume wins;
+        # otherwise re-export the value persisted from the original run so the
+        # profile phase doesn't silently revert to its default (and re-trigger
+        # the oversized-trace / EngineCore-timeout failure this guards against).
+        _resume_profile_osl = getattr(args, "profile_osl", None) or getattr(state, "profile_osl", 0)
+        if _resume_profile_osl:
+            os.environ["PROFILE_OSL"] = str(int(_resume_profile_osl))
+            state.profile_osl = int(_resume_profile_osl)
+            print(f"  re-exported PROFILE_OSL   : {int(_resume_profile_osl)}")
         if state.precision:
             os.environ["PRECISION"] = state.precision
             print(f"  re-exported PRECISION     : {state.precision}")
@@ -3269,6 +3289,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["MAX_MODEL_LEN"] = str(max_model_len)
         os.environ["ISL"] = str(args.isl)
         os.environ["OSL"] = str(args.osl)
+        # Profile-scoped OSL (issue #571): exported only when explicitly set, so
+        # the profile/roofline materializer can decouple its OSL from the served
+        # workload. Unset leaves the profile phase on the global --osl.
+        if getattr(args, "profile_osl", None) is not None:
+            os.environ["PROFILE_OSL"] = str(args.profile_osl)
         os.environ["PRECISION"] = args.precision
         # Mirror resolved framework_version into env (explicit > auto-detect > unset; see _resolve_framework_version).
         _fw_version_for_env = (getattr(args, "framework_version", None) or "").strip() or (
@@ -4082,6 +4107,24 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Input sequence length (default $ISL or 256)")
     opt.add_argument("--osl", type=int, default=int(os.environ.get("OSL", "256")),
                       help="Output sequence length (default $OSL or 256)")
+    opt.add_argument(
+        "--profile-osl",
+        dest="profile_osl",
+        type=int,
+        default=(
+            int(os.environ["PROFILE_OSL"])
+            if os.environ.get("PROFILE_OSL", "").strip().isdigit()
+            else None
+        ),
+        help=(
+            "Profiling-phase output sequence length. When set, it overrides "
+            "--osl for the roofline/profile server ONLY, so its torch-profiler "
+            "trace stays serializable; baseline/optimize phases still run at "
+            "--osl. Default $PROFILE_OSL; when unset the profile phase uses "
+            "min(--osl, 1024) and is auto-lowered further if needed to keep the "
+            "capture window within the serialization cap."
+        ),
+    )
     opt.add_argument(
         "--reference-script",
         dest="reference_script",

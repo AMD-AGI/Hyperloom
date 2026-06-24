@@ -123,9 +123,43 @@ def test_unsupported_arch_deepseek_v32_by_model_type():
                     "quantization_config": {"quant_method": "fp8"}}) == "unsupported_arch"
 
 
+def test_unsupported_arch_qwen3_5_moe_text_via_text_config():
+    # Qwen3.6 MoE carries qwen3_5_moe_text as text_config.model_type; top-level
+    # model_type is qwen3_5_moe. The rule must catch it via text_config.
+    assert _reason({"architectures": ["Qwen3_5MoeForCausalLM"],
+                    "model_type": "qwen3_5_moe",
+                    "text_config": {"model_type": "qwen3_5_moe_text"},
+                    "max_position_embeddings": 262144}) == "unsupported_arch"
+
+
+def test_qwen3_5_moe_without_text_subtype_is_kept():
+    # Bare qwen3_5_moe (no qwen3_5_moe_text text_config) must NOT be filtered by
+    # the registry rule.
+    assert _reason({"architectures": ["Qwen3_5MoeForConditionalGeneration"],
+                    "model_type": "qwen3_5_moe",
+                    "max_position_embeddings": 262144}) is None
+
+
 def test_unsupported_arch_matched_by_architecture_fallback():
     # No/blank model_type -> architecture fallback still catches it.
     assert _reason({"architectures": ["GlmMoeDsaForCausalLM"],
+                    "max_position_embeddings": 131072}) == "unsupported_arch"
+
+
+def test_unsupported_arch_qrwkv6_hybrid_is_filtered():
+    assert _reason({"architectures": ["RWKV6Qwen2ForCausalLM"],
+                    "model_type": "rwkv6qwen2",
+                    "max_position_embeddings": 131072}) == "unsupported_arch"
+
+
+def test_unsupported_arch_qrwkv6_hybrid_matched_by_model_type():
+    assert _reason({"model_type": "rwkv6qwen2",
+                    "max_position_embeddings": 131072}) == "unsupported_arch"
+
+
+def test_unsupported_arch_qrwkv6_hybrid_matched_by_text_config_model_type():
+    assert _reason({"model_type": "wrapper",
+                    "text_config": {"model_type": "rwkv6qwen2"},
                     "max_position_embeddings": 131072}) == "unsupported_arch"
 
 

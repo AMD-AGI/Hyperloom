@@ -19,6 +19,7 @@ Used by ``baseline.py`` (materializes once, surfaces the path) and the
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import shutil
@@ -48,6 +49,17 @@ log = logging.getLogger(__name__)
 
 _MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:[=\s]+)\S+")
 
+# Profile-phase capture defaults (issue #571 / #570). Trace size scales with
+# captured decode steps; an oversized capture serializes too slowly and kills
+# the engine (EngineCore RPC timeout). 128 captured steps was measured
+# serialization-safe (~160 MB/rank, ~29s) on a large TP=8 MoE, so smaller
+# models stay within budget. Tunable via HYPERLOOM_PROFILE_MAX_STEPS_CAP.
+_DEFAULT_PROFILE_MAX_STEPS = 128
+# Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
+# profile reuses min(served OSL, this) so its trace stays light without
+# distorting the served workload more than necessary.
+_PROFILE_DEFAULT_OSL = 1024
+
 
 def _remove_moe_runner_backend_arg(args: str) -> str:
     """Remove any existing SGLang MoE runner backend flag from an args string."""
@@ -58,6 +70,26 @@ _RUN_EVAL_DISABLED_WARN_EMITTED = False
 
 # Truthy-false spellings that disable the accuracy gate.
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
+
+
+def inject_vllm_expert_parallel(
+    server_args: str | None,
+    framework: Any,
+    ep: Any,
+) -> str:
+    """Append vLLM expert-parallel flag when EP is enabled."""
+    args = str(server_args or "").strip()
+    if "vllm" not in str(framework or "").lower():
+        return args
+    try:
+        ep_int = int(ep if ep not in (None, "") else 1)
+    except (TypeError, ValueError):
+        return args
+    if ep_int <= 1:
+        return args
+    if re.search(r"(?:^|\s)--enable-expert-parallel(?:\s|$)", args):
+        return args
+    return f"{args} --enable-expert-parallel".strip()
 
 
 class FrameworkScriptMismatchError(ValueError):
@@ -335,10 +367,13 @@ def materialize_config_with_envs(
     conc_val = int(envs.get("CONC") or 8)
 
     # Steady-state window for profiling configs (detected by PROFILE env or
-    # ``profiler.torch_profiler.enabled``). Formulas match the TraceLens
-    # profiling skill (RANDOM_RANGE_RATIO defaults to 1.0):
-    #   max_iters   = min(1024, max(256, OSL * 16 / CONC))
-    #   delay_iters = OSL * (R + 1) * 3 - max_iters / 2
+    # ``profiler.torch_profiler.enabled``). The captured-step count is capped at
+    # a serialization-safe budget; the profile OSL is resolved (and lowered if
+    # needed) so the steady-state floor fits that cap (RANDOM_RANGE_RATIO
+    # defaults to 1.0):
+    #   max_iters    = HYPERLOOM_PROFILE_MAX_STEPS_CAP (default 128)
+    #   steady_floor = ceil(OSL * (1 + R) / (2 * CONC))   # must be <= max_iters
+    #   delay_iters  = OSL * (R + 1) * 3 - max_iters / 2
     is_profile = str(envs.get("PROFILE", "")).strip() == "1" or (
         bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True
     )
@@ -349,17 +384,81 @@ def materialize_config_with_envs(
         except (TypeError, ValueError):
             r_val = 1.0
         safe_conc = max(conc_val, 1)
+        # --- Profile capture window cap (issue #571 / #570) ----------------
+        # Cap captured decode steps at a serialization-safe default so the
+        # torch-profiler trace can be written without starving the engine RPC
+        # (the EngineCore timeout crash). Operator-tunable.
+        try:
+            cap = int(
+                os.environ.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "").strip()
+                or _DEFAULT_PROFILE_MAX_STEPS
+            )
+        except (TypeError, ValueError):
+            cap = _DEFAULT_PROFILE_MAX_STEPS
+        if cap < 1:
+            cap = _DEFAULT_PROFILE_MAX_STEPS
+
+        # --- Resolve the profile-scoped OSL --------------------------------
+        # The profile/roofline phase may run a lighter OSL than the served
+        # workload so its trace stays serializable; baseline/optimize keep the
+        # global OSL. PROFILE_OSL (via --profile-osl) is an explicit operator
+        # choice and is honored as-is; otherwise default to
+        # min(served OSL, _PROFILE_DEFAULT_OSL). Scoped to is_profile so
+        # baseline/optimize configs are never affected.
+        _profile_osl_raw = os.environ.get("PROFILE_OSL", "").strip()
+        profile_osl_explicit = _profile_osl_raw.isdigit() and int(_profile_osl_raw) > 0
+        if profile_osl_explicit:
+            osl_val = int(_profile_osl_raw)
+        else:
+            osl_val = min(osl_val, _PROFILE_DEFAULT_OSL)
         safe_osl = max(osl_val, 1)
-        max_iters = min(1024, max(256, (osl_val * 16) // safe_conc))
+
+        # Steady-state floor: minimum captured decode steps for the splitter to
+        # isolate a steady-state window (mirrors TraceLens
+        # find_steady_state_window). The capture must be >= this or the splitter
+        # reports trace_split_no_steady_state.
+        steady_floor = math.ceil(safe_osl * (1.0 + r_val) / (2.0 * safe_conc))
+        if steady_floor > cap:
+            if profile_osl_explicit:
+                # Honor the operator's explicit OSL; warn that the window may
+                # not contain a steady-state segment at this OSL + cap.
+                log.warning(
+                    "PROFILE_OSL=%d needs %d captured steps to reach steady "
+                    "state, above the profile cap of %d; the trace may lack a "
+                    "steady-state window (trace_split_no_steady_state). Lower "
+                    "--profile-osl or raise HYPERLOOM_PROFILE_MAX_STEPS_CAP.",
+                    osl_val, steady_floor, cap,
+                )
+            else:
+                # Auto path: lower the profile OSL so the floor fits the cap
+                # (largest OSL whose steady floor stays <= cap).
+                fitted_osl = max(1, int(cap * 2 * safe_conc / (1.0 + r_val)))
+                log.warning(
+                    "profile OSL %d would need %d captured steps to reach "
+                    "steady state (> cap %d); lowering profile OSL to %d so the "
+                    "capture stays serializable. Baseline/optimize unaffected.",
+                    osl_val, steady_floor, cap, fitted_osl,
+                )
+                osl_val = fitted_osl
+                safe_osl = max(osl_val, 1)
+                steady_floor = math.ceil(safe_osl * (1.0 + r_val) / (2.0 * safe_conc))
+
+        # Profile server runs at the resolved (possibly reduced) profile OSL,
+        # decoupled from the served --osl.
+        envs["OSL"] = osl_val
+
+        # Capture up to the cap (>= steady_floor in the auto path). delay_iters
+        # keeps the established warmup formula.
+        max_iters = cap
         delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
         # Clamp >= 0 (tiny OSL / huge R can produce a negative delay).
         if delay_iters < 0:
             delay_iters = 0
-        # Operator override for a small eager FlyDSL profile: the default
-        # >=256-step capture is unsavable in eager mode for a 30B MoE, but
-        # eager is the only mode recording the flydsl_moe frames PR#668 keys
-        # on. Set HYPERLOOM_PROFILE_MAX_ITERS small (e.g. 8) with the eager
-        # profile patch.
+        # Operator hard-override of captured steps for a small eager FlyDSL
+        # profile (e.g. 8), which is unsavable in eager mode at the default
+        # capture but is the only mode recording the flydsl_moe frames PR#668
+        # keys on. Honored verbatim; warn when outside the safe band rather
+        # than silently clamping.
         _ovr = os.environ.get("HYPERLOOM_PROFILE_MAX_ITERS", "").strip()
         if _ovr.isdigit() and int(_ovr) > 0:
             max_iters = int(_ovr)
@@ -369,6 +468,20 @@ def materialize_config_with_envs(
                 delay_iters = 8
             if delay_iters < 0:
                 delay_iters = 0
+            if max_iters < steady_floor:
+                log.warning(
+                    "HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state "
+                    "floor of %d; the trace may lack a steady-state window "
+                    "(trace_split_no_steady_state).",
+                    max_iters, steady_floor,
+                )
+            elif max_iters > cap:
+                log.warning(
+                    "HYPERLOOM_PROFILE_MAX_ITERS=%d exceeds the serialization-"
+                    "safe cap of %d; the trace may be too large to serialize "
+                    "(EngineCore RPC timeout).",
+                    max_iters, cap,
+                )
         # TraceLens #194 §2: NUM_PROMPTS must let the engine reach
         # ``delay_iters + max_iters`` decode steps before running out of
         # prompts (N prompts ≈ N * OSL / CONC iters; invert + 2x buffer).
@@ -678,6 +791,11 @@ def materialize_config_with_envs(
         bench.get("framework"),
         bench.get("model"),
         gpu_type=gpu_type or bench.get("runner_type"),
+    )
+    resolved_server_args = inject_vllm_expert_parallel(
+        resolved_server_args,
+        bench.get("framework"),
+        os.environ.get("EP", "").strip() or envs.get("EP"),
     )
     # 5. vLLM/atom argparse dedup (#520): the YAML EXTRA_VLLM_ARGS base and a
     #    sweep/kernel variant can each inject --attention-backend, and
