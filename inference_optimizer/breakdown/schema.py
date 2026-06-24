@@ -125,6 +125,63 @@ class Workload(TypedDict, total=False):
     objective: WorkloadObjective
 
 
+# §2b Model basics — architecture/scale summary parsed from the served model's
+# ``config.json`` (see ``model_config_utils.summarize_model_config``). Empty
+# ``{}`` on non-transformers models (e.g. diffusion) and on sessions whose
+# state predates the field. Mirrored verbatim from ``state.model_info``.
+class ModelInfo(TypedDict, total=False):
+    """Structural summary of the served model (architecture / scale / attention).
+
+    Best-effort parse of the model's ``config.json``; every field is
+    optional-by-convention so consumers must null-check. ``{}`` when the model
+    is not a transformers checkpoint (diffusion etc.) or the session predates
+    the field.
+
+    Attributes:
+        model_family (str): Base family with generation (``llama3`` / ``qwen3`` /
+            ``deepseek_v3``).
+        model_type (str): HuggingFace ``model_type`` (``qwen2`` / ``llama``).
+        architectures (list[str]): Architecture class names
+            (``["Qwen3ForCausalLM"]``).
+        attention_type (str): Inferred attention variant (``MHA`` / ``GQA`` /
+            ``MQA`` / ``MLA``).
+        is_moe (bool): Whether the model is a Mixture-of-Experts model.
+        num_hidden_layers (int): Number of transformer layers.
+        hidden_size (int): Model hidden dimension.
+        intermediate_size (int): FFN intermediate dimension.
+        num_attention_heads (int): Number of attention heads.
+        num_key_value_heads (int): Number of KV heads (GQA groups).
+        head_dim (int): Per-head dimension.
+        max_position_embeddings (int): Native context length.
+        vocab_size (int): Vocabulary size.
+        torch_dtype (str): Declared weight dtype (``bfloat16`` / ...).
+        kv_cache_dtype (str): KV cache dtype when declared.
+        quantization (str): Weight quant method (``fp8`` / ...); '' when
+            unquantized.
+        num_experts (int): Expert count (MoE only).
+        num_experts_per_tok (int): Activated experts per token (MoE only).
+    """
+
+    model_family: str
+    model_type: str
+    architectures: list[str]
+    attention_type: str
+    is_moe: bool
+    num_hidden_layers: int
+    hidden_size: int
+    intermediate_size: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    max_position_embeddings: int
+    vocab_size: int
+    torch_dtype: str
+    kv_cache_dtype: str
+    quantization: str
+    num_experts: int
+    num_experts_per_tok: int
+
+
 # §3 Baseline
 class BaselineAttemptSummary(TypedDict, total=False):
     """One recorded attempt to establish the baseline measurement.
@@ -1984,6 +2041,9 @@ class SessionBreakdown(TypedDict, total=False):
         exporter_version (str): Version of the exporter that produced the file.
         session (SessionMeta): Session identity, timing, and host context.
         workload (Workload): Model/framework/serving configuration.
+        model_info (ModelInfo): Structural summary of the served model
+            (architecture / scale / attention), parsed from its config.json.
+            Empty {} on non-transformers models or pre-field sessions.
         baseline (Baseline): Pre-optimization reference performance.
         final (Final): Final validated optimization state.
         phase_timeline (list[PhaseEvent]): Flat per-action timeline (v1-reader compat).
@@ -2022,6 +2082,11 @@ class SessionBreakdown(TypedDict, total=False):
 
     session: SessionMeta
     workload: Workload
+    # Structural model summary parsed from config.json (state.model_info
+    # mirror). Additive optional section: empty {} on non-transformers models
+    # (diffusion etc.) and on sessions whose state predates the field, so
+    # v1/v2 readers that don't know it simply ignore it.
+    model_info: ModelInfo
     baseline: Baseline
     final: Final
     # flat per-action timeline (v1 compat); ``phase_segments`` is the boundary view.
@@ -2125,6 +2190,7 @@ __all__ = [
     "LangfuseConfig",
     "LangfusePush",
     "LangfusePushCounts",
+    "ModelInfo",
     "Final",
     "GpuMonitorAggregate",
     "Invocation",

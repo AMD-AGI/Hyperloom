@@ -287,6 +287,12 @@ def build(
     workload = _pick(
         "workload", _safe_collect("workload", lambda: collectors.collect_workload(state, manifest, warnings), warnings)
     )
+    # §2b model basics — verbatim mirror of ``state.model_info`` (computed once
+    # at launch). Empty {} on non-transformers models / pre-field sessions.
+    model_info = _pick(
+        "model_info",
+        _safe_collect("model_info", lambda: collectors.collect_model_info(state, warnings), warnings, default={}),
+    )
     baseline = _pick(
         "baseline", _safe_collect("baseline", lambda: collectors.collect_baseline(sd, state, warnings), warnings)
     )
@@ -554,6 +560,9 @@ def build(
         # §1b enrichment; always present from the exporter (no longer CI-only).
         "session_meta": session_meta,
         "workload": workload,
+        # §2b structural model summary (state.model_info mirror). Additive
+        # optional; empty {} on non-transformers models / pre-field sessions.
+        "model_info": model_info,
         "baseline": baseline,
         "final": final,
         "phase_timeline": phase_timeline,
