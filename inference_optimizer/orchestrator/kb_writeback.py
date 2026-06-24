@@ -46,11 +46,15 @@ LESSONS_FILE: str = "lessons.jsonl"
 OUTCOME_INTEGRATED: str = "integrated"
 OUTCOME_REVERTED_SMOKE_FAIL: str = "reverted_smoke_fail"
 OUTCOME_REJECTED_APPLY_FAIL: str = "rejected_apply_fail"
+# Step 3: candidate skipped because the semantic audit found it already present
+# in the live tree (cross-session dedup so later runs don't re-audit it).
+OUTCOME_ALREADY_PRESENT: str = "already_present"
 ALLOWED_OUTCOMES: frozenset[str] = frozenset(
     {
         OUTCOME_INTEGRATED,
         OUTCOME_REVERTED_SMOKE_FAIL,
         OUTCOME_REJECTED_APPLY_FAIL,
+        OUTCOME_ALREADY_PRESENT,
     }
 )
 
@@ -145,6 +149,7 @@ async def write_framework_pr_record(
 
 __all__ = [
     "ALLOWED_OUTCOMES",
+    "OUTCOME_ALREADY_PRESENT",
     "KB_ROOT",
     "LESSONS_FILE",
     "OUTCOME_INTEGRATED",

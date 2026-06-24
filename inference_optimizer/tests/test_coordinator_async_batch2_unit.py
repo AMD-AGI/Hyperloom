@@ -2026,6 +2026,11 @@ async def test_pump_framework_pr_critic_rejects(coord: Coordinator, monkeypatch)
     _enter_framework_pr(coord)
     monkeypatch.setattr(coord, "_select_next_framework_pr_candidate", lambda: {"candidate_id": "c1", "batch_id": "b1"})
 
+    async def _audit(cand):
+        return {"recommended_next_step": ""}  # unknown -> proceed to Critic
+
+    monkeypatch.setattr(coord, "_audit_framework_pr_candidate", _audit)
+
     async def _review(cand):
         return {"verdict": "reject", "rationale": "unsafe"}
 
@@ -2039,6 +2044,12 @@ async def test_pump_framework_pr_critic_rejects(coord: Coordinator, monkeypatch)
 async def test_pump_framework_pr_approve_enqueues(coord: Coordinator, monkeypatch) -> None:
     _enter_framework_pr(coord)
     monkeypatch.setattr(coord, "_select_next_framework_pr_candidate", lambda: {"candidate_id": "c2", "batch_id": "b2"})
+
+    async def _audit(cand):
+        # direct_apply -> raw-diff executor only (keeps this test hermetic).
+        return {"recommended_next_step": "direct_framework_pr"}
+
+    monkeypatch.setattr(coord, "_audit_framework_pr_candidate", _audit)
 
     async def _review(cand):
         return {"verdict": "approve"}

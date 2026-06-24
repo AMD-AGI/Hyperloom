@@ -76,7 +76,7 @@ from typing import Any
 from ...session_paths import runs_dir
 from ..framework_paths import resolve_source_file_allowlist
 from ..specialist_patch_safety import patch_file_targets, patch_targets_missing
-from ._accuracy_gate import accuracy_passed, parse_eval_results
+from ._accuracy_gate import accuracy_keep_block, accuracy_passed, parse_eval_results
 from ._grid_runner import (
     GridVariant,
     VariantResult,
@@ -1339,10 +1339,29 @@ class IntegratePatchExecutor:
             delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
-        # KEEP requires delta_pct ≥ keep_threshold AND accuracy_pass != False.
-        gate_pass = (
-            delta_pct is not None and delta_pct >= keep_threshold_pct and (accuracy_pass is None or accuracy_pass)
+        # KEEP requires delta_pct ≥ keep_threshold AND the accuracy gate.
+        # Step 4 / Q5: framework-authored source patches require the accuracy
+        # gate (gated on the framework_pr authoring markers so generic EXPLORE
+        # integrate_patch keeps its prior throughput-only behaviour).
+        fw_authored = bool(params.get("framework_pr_authoring") or params.get("framework_pr_candidate_id"))
+        acc_required = bool(params.get("require_accuracy_for_keep", fw_authored))
+        acc_baseline = params.get("accuracy_baseline")
+        if acc_required and not acc_baseline:
+            _ss = extra.get("shared_state") or extra.get("state")
+            if _ss is not None:
+                acc_baseline = getattr(_ss, "baseline_accuracy", None)
+        acc_block, acc_reason, acc_degraded = accuracy_keep_block(
+            accuracy_pass,
+            required=acc_required,
+            baseline_accuracy=acc_baseline,
         )
+        if acc_degraded:
+            log.warning(
+                "integrate_patch: accuracy gate required but no baseline accuracy; "
+                "KEEP allowed on throughput only (task=%s)",
+                specialist_task_id,
+            )
+        gate_pass = delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
 
         if not gate_pass:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -1352,8 +1371,8 @@ class IntegratePatchExecutor:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
-            if accuracy_pass is False:
-                reasons.append("accuracy regression detected")
+            if acc_block and acc_reason:
+                reasons.append(acc_reason)
             await self._maybe_write_framework_pr_kb_record(
                 done_payload=done_payload,
                 outcome="reverted_smoke_fail",

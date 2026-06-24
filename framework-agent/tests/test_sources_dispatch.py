@@ -42,6 +42,58 @@ def test_dispatch_explicit_refs_only() -> None:
     assert sources == {"explicit"}
 
 
+# Step 4 — pr_states broadens PR-state coverage (open + merged/closed -> "all")
+def test_pr_states_defaults_to_open() -> None:
+    req = _minimal_request()
+    assert req.pr_states == ("open",)
+
+
+def test_pr_states_parsed_and_validated() -> None:
+    req = _minimal_request(pr_states=["open", "merged", "closed"])
+    assert req.pr_states == ("open", "merged", "closed")
+    with pytest.raises(ValueError):
+        _minimal_request(pr_states=["bogus"])
+
+
+def test_primus_search_state_broadens_with_pr_states(monkeypatch) -> None:
+    """pr_states including merged/closed -> primus search queried with state='all'."""
+    from framework_agent.models import PrimusCortexConfig
+
+    captured: dict[str, str] = {}
+
+    def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+        captured["state"] = state
+        return [GitHubPr(number=7, title="perf fastpath", html_url="https://github.com/x/y/pull/7")]
+
+    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", _fake_search)
+    req = _minimal_request(
+        gap_description="speed up decode",
+        pr_states=["open", "merged", "closed"],
+        primus_cortex={"base_url": "http://primus.local"},
+    )
+    assert isinstance(req.primus_cortex, PrimusCortexConfig)
+    out = src._run_primus_cortex(req)
+    assert captured["state"] == "all"
+    assert out and out[0].source == "primus_cortex"
+
+
+def test_primus_search_state_open_only_default(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
+        captured["state"] = state
+        return []
+
+    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", _fake_search)
+    monkeypatch.setattr(src, "list_perf_prs", lambda *a, **k: [])
+    req = _minimal_request(
+        gap_description="speed up decode",
+        primus_cortex={"base_url": "http://primus.local"},
+    )
+    src._run_primus_cortex(req)
+    assert captured["state"] == "open"
+
+
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
 def test_dispatch_explicit_refs_only_across_frameworks(framework: str) -> None:
     """Explicit candidate_refs come out untouched for every framework (no framework-specific filtering at the dispatch layer)."""

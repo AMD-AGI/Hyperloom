@@ -52,9 +52,21 @@ implemented in current scope.
 
 ## What framework-agent does NOT need
 
-- `SAFE_API_KEY` / `OPENAI_BASE_URL` are not read by this package.
 - No NATS / PostgreSQL / Ray / TraceLens / GEAK / OOB dependency.
 - No coupling with kernel-agent / critic-agent / robustness-agent.
+- No agentic LLM backend / worktree authoring: patch authoring is owned by
+  the Hyperloom `specialist → integrate_patch` path, not this package.
 
 LLM credentials, if used by callers running in Library mode, are owned
 by the outer runtime (Arbor / TBO / etc.), not by this package.
+
+### Optional LLM use (`fa phase-audit --request ... use_llm=true`)
+
+`fa phase-audit` runs a deterministic **static** local-source judge by
+default (no network, no LLM). Its optional refine layer is **opt-in**
+(`request.use_llm=true`): a single chat-completion that reads `SAFE_API_KEY`
++ `OPENAI_BASE_URL` (or request overrides). It is best-effort and
+evidence-gated — any missing credential / failure / invalid output keeps the
+static verdict, and it can never upgrade to an `already_*` status the static
+layer didn't already back with concrete evidence. This is a single bounded
+call for *judging*; it is **not** an agentic authoring backend.

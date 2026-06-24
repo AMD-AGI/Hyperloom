@@ -100,6 +100,8 @@ class _Stub:
     _enqueue_framework_pr_authoring_specialist = Coordinator._enqueue_framework_pr_authoring_specialist
     _framework_pr_authoring_inflight = Coordinator._framework_pr_authoring_inflight
     _record_framework_pr_authored_outcome = Coordinator._record_framework_pr_authored_outcome
+    _record_framework_pr_audit_skip = Coordinator._record_framework_pr_audit_skip
+    _framework_pr_audit_seed_lines = staticmethod(Coordinator._framework_pr_audit_seed_lines)
     _pump_framework_pr_phase = Coordinator._pump_framework_pr_phase
 
     def __init__(self, tmp_path: Path, *, authoring: bool = True) -> None:
@@ -109,6 +111,17 @@ class _Stub:
         self.framework_pr_discover_timeout_sec = 0.0
         self.backends: dict[str, Any] = {"critic": _ApproveCritic()}
         self.state = SimpleNamespace(pending_proposals={})
+        # Audit verdict the pump's _audit_framework_pr_candidate returns; default
+        # unknown (empty recommended_next_step) preserves legacy both-tracks.
+        self._audit_verdict: dict[str, Any] = {"recommended_next_step": ""}
+
+    async def _audit_framework_pr_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        v = self._audit_verdict
+        try:
+            candidate["_audit"] = v
+        except Exception:
+            pass
+        return v
 
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
         # No-op: avoid pulling in KnowledgePlane in the unit test.
@@ -281,3 +294,168 @@ def test_record_authored_outcome_ignores_non_terminal_status(tmp_path: Path):
     )
 
     assert stub.shared_state.framework_pr_phase_progress == []
+
+
+# Step 3 — audit-routed dispatch ------------------------------------------
+def test_pump_audit_skip_records_terminal_row_no_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """already_equivalent audit -> skip: no Critic, no tasks, terminal row + KB."""
+    import inference_optimizer.orchestrator.kb_writeback as kb_writeback
+
+    monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "kb" / "framework_optimization")
+
+    async def _discover(**_: Any) -> dict[str, Any]:
+        return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
+    stub = _Stub(tmp_path, authoring=True)
+    stub._audit_verdict = {
+        "semantic_status": "already_equivalent",
+        "applicability": "not_applicable",
+        "recommended_next_step": "skip",
+        "confidence": 0.95,
+        "evidence": [{"local_file": "vllm/x.py", "symbol": "f", "reason": "present"}],
+        "risks": [],
+    }
+
+    _pump(stub)
+
+    assert stub.tasks.created == []  # no GPU / no specialist
+    assert stub.backends["critic"].call_count == 0  # no Critic
+    prog = stub.shared_state.framework_pr_phase_progress
+    assert len(prog) == 1
+    assert prog[0]["status"] == "already_present"
+    assert prog[0]["provenance"] == "audit"
+    lessons = tmp_path / "kb" / "framework_optimization" / "lessons.jsonl"
+    assert lessons.exists()
+
+
+def test_pump_audit_direct_apply_dispatches_executor_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """direct_apply audit -> raw-diff executor only, even with authoring enabled."""
+
+    async def _discover(**_: Any) -> dict[str, Any]:
+        return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
+    stub = _Stub(tmp_path, authoring=True)
+    stub._audit_verdict = {
+        "semantic_status": "not_present",
+        "applicability": "direct_apply",
+        "recommended_next_step": "direct_framework_pr",
+        "confidence": 0.8,
+        "evidence": [],
+    }
+
+    _pump(stub)
+
+    kinds = [c["kind"] for c in stub.tasks.created]
+    assert kinds == ["framework_pr"]  # no specialist
+
+
+def test_pump_audit_author_dispatches_specialist_only_with_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """needs_rewrite audit -> authoring specialist only, seeded with audit evidence."""
+
+    async def _discover(**_: Any) -> dict[str, Any]:
+        return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
+    stub = _Stub(tmp_path, authoring=True)
+    stub._audit_verdict = {
+        "semantic_status": "partially_present",
+        "applicability": "needs_rewrite",
+        "recommended_next_step": "author_via_specialist",
+        "confidence": 0.5,
+        "evidence": [
+            {"local_file": "vllm/model_executor/layer.py", "symbol": "scaled_op", "reason": "drifted"},
+        ],
+        "risks": ["raw diff likely conflicts"],
+    }
+
+    _pump(stub)
+
+    kinds = [c["kind"] for c in stub.tasks.created]
+    assert kinds == ["specialist"]  # no raw-diff executor
+    notes = stub.tasks.created[0]["params"]["notes"]
+    assert "AUDIT EVIDENCE" in notes
+    assert "vllm/model_executor/layer.py" in notes
+    assert "scaled_op" in notes
+
+
+def test_audit_candidate_reuses_cached_verdict_no_reaudit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Step 4 resume idempotency: a candidate carrying ``_audit`` is not re-audited."""
+    calls = SimpleNamespace(n=0)
+
+    async def _phase_audit(**_: Any) -> dict[str, Any]:
+        calls.n += 1
+        return {"recommended_next_step": "author_via_specialist", "semantic_status": "not_present"}
+
+    monkeypatch.setattr(_fa_client, "phase_audit", _phase_audit)
+    stub = _Stub(tmp_path, authoring=True)
+
+    cand = dict(_CANDIDATE)
+    cand["_audit"] = {"recommended_next_step": "skip", "semantic_status": "already_equivalent"}
+
+    out = asyncio.run(
+        Coordinator._audit_framework_pr_candidate(stub, cand)  # type: ignore[arg-type]
+    )
+    assert out["recommended_next_step"] == "skip"  # cached verdict honoured
+    assert calls.n == 0  # phase_audit not invoked
+
+
+def test_audit_candidate_calls_phase_audit_when_uncached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Without a cached verdict, the real audit calls phase_audit and caches it."""
+    calls = SimpleNamespace(n=0)
+
+    async def _phase_audit(**_: Any) -> dict[str, Any]:
+        calls.n += 1
+        return {"recommended_next_step": "direct_framework_pr", "semantic_status": "not_present"}
+
+    monkeypatch.setattr(_fa_client, "phase_audit", _phase_audit)
+    stub = _Stub(tmp_path, authoring=True)
+    cand = dict(_CANDIDATE)
+
+    out = asyncio.run(
+        Coordinator._audit_framework_pr_candidate(stub, cand)  # type: ignore[arg-type]
+    )
+    assert calls.n == 1
+    assert out["recommended_next_step"] == "direct_framework_pr"
+    assert cand["_audit"]["recommended_next_step"] == "direct_framework_pr"  # cached on candidate
+
+
+def test_pump_audit_author_with_authoring_disabled_falls_back_to_raw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """author_via_specialist + authoring disabled -> raw-diff executor fallback (no stranding)."""
+
+    async def _discover(**_: Any) -> dict[str, Any]:
+        return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
+
+    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
+    stub = _Stub(tmp_path, authoring=False)
+    stub._audit_verdict = {
+        "semantic_status": "not_present",
+        "applicability": "needs_rewrite",
+        "recommended_next_step": "author_via_specialist",
+        "confidence": 0.4,
+        "evidence": [],
+    }
+
+    _pump(stub)
+
+    kinds = [c["kind"] for c in stub.tasks.created]
+    assert kinds == ["framework_pr"]

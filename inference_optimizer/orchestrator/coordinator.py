@@ -2726,6 +2726,16 @@ class Coordinator:
                 state.framework_pr_phase_done = True
                 state.save(self.session_dir)
                 return
+        # Step 3: semantic audit BEFORE the Critic/apply. A confident verdict
+        # routes the candidate (skip already-present, raw-diff for direct_apply,
+        # authoring-with-evidence for needs_rewrite); an unknown / unavailable
+        # audit preserves the legacy both-tracks behaviour (zero regression).
+        audit = await self._audit_framework_pr_candidate(next_candidate)
+        audit_step = str((audit or {}).get("recommended_next_step") or "")
+        if audit_step == "skip":
+            await self._record_framework_pr_audit_skip(next_candidate, audit)
+            state.save(self.session_dir)
+            return
         # Critic gate before apply: reject short-circuits with a critic_denied row; approve/abstain enqueues.
         verdict = await self._critic_review_framework_pr_candidate(next_candidate)
         if verdict.get("verdict") == "reject":
@@ -2746,6 +2756,20 @@ class Coordinator:
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
             )
+            try:
+                from .framework_pr_artifacts import write_decision_json
+
+                write_decision_json(
+                    self.session_dir,
+                    candidate_id=cand_id,
+                    batch_id=str(next_candidate.get("batch_id") or ""),
+                    status="critic_denied",
+                    kept=False,
+                    provenance="critic",
+                    reason=str(verdict.get("rationale") or ""),
+                )
+            except Exception:  # noqa: BLE001 — observability is best-effort
+                log.debug("FRAMEWORK_PR: critic_denied decision.json write failed", exc_info=True)
             state.save(self.session_dir)
             log.info(
                 "FRAMEWORK_PR: critic rejected candidate=%s batch=%s rationale=%r",
@@ -2754,12 +2778,29 @@ class Coordinator:
                 str(verdict.get("rationale") or "")[:200],
             )
             return
-        await self._enqueue_framework_pr_task(next_candidate)
-        # Authoring track (PR-G): also hand the PR to a write-capable specialist to author its own patch.
-        if getattr(state, "framework_pr_authoring_enabled", False):
+        # Route dispatch by the audit verdict (Step 3). ``direct_framework_pr``
+        # -> raw-diff executor only; ``author_via_specialist`` -> authoring
+        # specialist only, seeded with audit evidence; unknown / other ->
+        # legacy both-tracks. A candidate routed to authoring while authoring is
+        # disabled falls back to the raw-diff executor so it still gets a
+        # terminal row (no re-audit loop).
+        authoring_enabled = bool(getattr(state, "framework_pr_authoring_enabled", False))
+        want_raw = audit_step == "direct_framework_pr"
+        want_author = audit_step == "author_via_specialist"
+        if audit_step not in ("direct_framework_pr", "author_via_specialist"):
+            want_raw = True
+            want_author = True
+        if want_author and not authoring_enabled:
+            want_raw = True
+            want_author = False
+        if want_raw:
+            await self._enqueue_framework_pr_task(next_candidate)
+        # Authoring track (PR-G): hand the PR to a write-capable specialist to author its own patch.
+        if want_author and authoring_enabled:
             try:
                 await self._enqueue_framework_pr_authoring_specialist(
                     next_candidate,
+                    audit=audit,
                 )
             except Exception as exc:  # noqa: BLE001 — never wedge the pump
                 log.warning(
@@ -2792,9 +2833,186 @@ class Coordinator:
             pass
         return False
 
+    async def _audit_framework_pr_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        """Run ``fa phase-audit`` for a candidate; degrade to ``unknown`` on any failure.
+
+        A cached verdict stamped on the candidate (``_audit``) is reused so a
+        re-pump / resume never re-audits. An unavailable audit returns an
+        ``unknown`` verdict with an empty ``recommended_next_step`` so the pump
+        falls back to legacy both-tracks routing.
+
+        Args:
+            candidate: The discovered candidate row.
+
+        Returns:
+            The semantic-audit verdict dict.
+        """
+        cached = candidate.get("_audit") if isinstance(candidate, dict) else None
+        if isinstance(cached, dict) and cached.get("recommended_next_step") is not None:
+            return cached
+        state = self.shared_state
+        unknown: dict[str, Any] = {
+            "semantic_status": "unknown",
+            "applicability": "needs_human_review",
+            "recommended_next_step": "",
+            "confidence": 0.0,
+            "evidence": [],
+            "risks": ["audit unavailable"],
+            "source": "audit_unavailable",
+        }
+        try:
+            import os
+
+            from . import framework_agent_client as _fa_client
+            from .framework_paths import resolve_source_file_allowlist
+
+            roots = list(resolve_source_file_allowlist())
+            audit = await _fa_client.phase_audit(
+                candidate=candidate,
+                framework=str(getattr(state, "framework", "") or ""),
+                framework_source_roots=roots,
+                session_dir=self.session_dir,
+                repo_url=str(candidate.get("repo") or ""),
+                diff_url=str(candidate.get("diff_url") or ""),
+                primus_cortex_url=os.environ.get("PRIMUS_CORTEX_PR_API", "").strip(),
+                use_llm=False,
+                timeout_sec=getattr(
+                    self,
+                    "framework_pr_audit_timeout_sec",
+                    _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — audit is advisory; never wedge the pump
+            log.warning("FRAMEWORK_PR: phase-audit failed (%r); routing as unknown", exc)
+            audit = dict(unknown)
+        if not isinstance(audit, dict):
+            audit = dict(unknown)
+        try:
+            candidate["_audit"] = audit
+        except Exception:  # noqa: BLE001 — caching is best-effort
+            pass
+        log.info(
+            "FRAMEWORK_PR: audit candidate=%s status=%s appl=%s next=%s",
+            candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "",
+            audit.get("semantic_status"),
+            audit.get("applicability"),
+            audit.get("recommended_next_step"),
+        )
+        return audit
+
+    @staticmethod
+    def _framework_pr_audit_seed_lines(audit: dict[str, Any] | None) -> list[str]:
+        """Render audit evidence as authoring-seed lines (empty when no audit)."""
+        if not isinstance(audit, dict) or not audit:
+            return []
+        lines = [
+            "",
+            "AUDIT EVIDENCE (from fa phase-audit — author against the LIVE source):",
+            f"- semantic_status: {audit.get('semantic_status') or 'unknown'}",
+            f"- applicability: {audit.get('applicability') or 'unknown'}"
+            " (raw upstream diff likely needs rewriting to fit the local tree)",
+        ]
+        evidence = audit.get("evidence") or []
+        if isinstance(evidence, list):
+            for ev in evidence[:8]:
+                if not isinstance(ev, dict):
+                    continue
+                local_file = str(ev.get("local_file") or "").strip()
+                symbol = str(ev.get("symbol") or "").strip()
+                reason = str(ev.get("reason") or "").strip()
+                if local_file or symbol or reason:
+                    lines.append(
+                        f"  • {local_file or '(file?)'}"
+                        + (f" [{symbol}]" if symbol else "")
+                        + (f": {reason}" if reason else "")
+                    )
+        risks = audit.get("risks") or []
+        if isinstance(risks, list) and risks:
+            lines.append("- risks: " + "; ".join(str(r) for r in risks[:4]))
+        return lines
+
+    async def _record_framework_pr_audit_skip(
+        self,
+        candidate: dict[str, Any],
+        audit: dict[str, Any] | None,
+    ) -> None:
+        """Record a terminal progress row + decision.json (+ KB) for an audit-skipped candidate.
+
+        Called when the audit's ``recommended_next_step == "skip"`` (already
+        present / not applicable): no Critic, no GPU, no specialist. Writes the
+        candidate's fate so the batch advances and a later session can dedup.
+
+        Args:
+            candidate: The skipped candidate row.
+            audit: The semantic-audit verdict driving the skip.
+        """
+        state = self.shared_state
+        cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
+        batch_id = str(candidate.get("batch_id") or "")
+        semantic = str((audit or {}).get("semantic_status") or "")
+        status = "already_present" if semantic.startswith("already_") else "not_applicable"
+        progress = getattr(state, "framework_pr_phase_progress", None)
+        if not isinstance(progress, list):
+            progress = []
+            state.framework_pr_phase_progress = progress
+        progress.append(
+            {
+                "candidate_id": cand_id,
+                "pr_url": str(candidate.get("pr_url") or ""),
+                "status": status,
+                "kept": False,
+                "provenance": "audit",
+                "semantic_status": semantic,
+                "confidence": float((audit or {}).get("confidence") or 0.0),
+                "batch_id": batch_id,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        try:
+            from .framework_pr_artifacts import write_decision_json
+
+            write_decision_json(
+                self.session_dir,
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status=status,
+                kept=False,
+                provenance="audit",
+                reason="; ".join(str(r) for r in ((audit or {}).get("risks") or [])) or semantic,
+                extra={
+                    "semantic_status": semantic,
+                    "applicability": (audit or {}).get("applicability"),
+                    "confidence": (audit or {}).get("confidence"),
+                    "evidence": (audit or {}).get("evidence") or [],
+                },
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("FRAMEWORK_PR: audit-skip decision.json write failed", exc_info=True)
+        if status == "already_present":
+            try:
+                from .kb_writeback import OUTCOME_ALREADY_PRESENT, write_framework_pr_record
+
+                await write_framework_pr_record(
+                    pr_url=str(candidate.get("pr_url") or ""),
+                    pr_sha=str(candidate.get("head_sha") or ""),
+                    patch_path="",
+                    outcome=OUTCOME_ALREADY_PRESENT,
+                    tps_delta_pct=0.0,
+                    session_id=str(getattr(state, "session_id", "") or ""),
+                )
+            except Exception:  # noqa: BLE001 — KB writeback is best-effort
+                log.debug("FRAMEWORK_PR: audit-skip KB writeback failed", exc_info=True)
+        log.info(
+            "FRAMEWORK_PR: audit skip candidate=%s status=%s (semantic=%s)",
+            cand_id,
+            status,
+            semantic,
+        )
+
     async def _enqueue_framework_pr_authoring_specialist(
         self,
         candidate: dict[str, Any],
+        audit: dict[str, Any] | None = None,
     ) -> None:
         """Dispatch a write-capable specialist seeded with ``candidate`` (Inv-5.1: flows through autosubmit → Critic → integrate_patch → bench → KEEP/REVERT).
 
@@ -2802,6 +3020,10 @@ class Coordinator:
             candidate: The discovered FRAMEWORK_PR candidate (PR url, title,
                 diff url, batch/candidate ids) used to seed the specialist's
                 authoring task and provenance markers.
+            audit: Optional ``fa phase-audit`` verdict; its evidence (local
+                symbols / why the raw diff doesn't fit / where the change
+                should land) is injected into the seed so the specialist
+                authors against the live source instead of re-discovering it.
         """
         state = self.shared_state
         cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
@@ -2810,28 +3032,32 @@ class Coordinator:
         title = str(candidate.get("title") or "").strip()
         pr_url = str(candidate.get("pr_url") or "").strip()
         diff_url = str(candidate.get("diff_url") or "").strip()
-        notes = "\n".join(
+        notes_lines = [
+            "FRAMEWORK_PR AUTHORING TASK.",
+            "",
+            "A candidate upstream PR was discovered as a lead for this gap.",
+            "Study it as INSPIRATION, then author your OWN source patch into",
+            "your worktree. You are NOT limited to copying the PR's diff — go",
+            "beyond it where the live source + profile evidence justify a",
+            "stronger or more targeted change. If, after reading the source,",
+            "the upstream change is already optimal, you may reproduce its",
+            "essential edit, but prefer a patch tailored to this model /",
+            "hardware / workload.",
+            "",
+            f"- PR title: {title or '(none)'}",
+            f"- PR url: {pr_url or '(none)'}",
+            f"- Unified diff: {diff_url or '(none)'} (fetch with WebFetch to read the upstream change)",
+        ]
+        notes_lines.extend(self._framework_pr_audit_seed_lines(audit))
+        notes_lines.extend(
             [
-                "FRAMEWORK_PR AUTHORING TASK.",
-                "",
-                "A candidate upstream PR was discovered as a lead for this gap.",
-                "Study it as INSPIRATION, then author your OWN source patch into",
-                "your worktree. You are NOT limited to copying the PR's diff — go",
-                "beyond it where the live source + profile evidence justify a",
-                "stronger or more targeted change. If, after reading the source,",
-                "the upstream change is already optimal, you may reproduce its",
-                "essential edit, but prefer a patch tailored to this model /",
-                "hardware / workload.",
-                "",
-                f"- PR title: {title or '(none)'}",
-                f"- PR url: {pr_url or '(none)'}",
-                f"- Unified diff: {diff_url or '(none)'} (fetch with WebFetch to read the upstream change)",
                 "",
                 "Deliverable: a unified-diff patch file in your worktree, listed in",
                 "``patches_written``. The Coordinator applies + benches it and",
                 "decides KEEP/REVERT; you do not benchmark.",
             ]
         )
+        notes = "\n".join(notes_lines)
         params: dict[str, Any] = {
             "domain": "serving_specialist",
             "gap_canonical_id": gap_cid,
@@ -3019,6 +3245,38 @@ class Coordinator:
             if not isinstance(history, list):
                 return
             from . import framework_agent_client as _fa_client
+            from .framework_pr_artifacts import summarize_candidate_outcomes
+
+            # Step 1: classify this phase's candidate outcomes so the report /
+            # robustness can tell "discovered nothing" (empty_discovery) apart
+            # from "tested candidates but none kept" (tested_no_keep).
+            summary = summarize_candidate_outcomes(
+                getattr(state, "framework_pr_phase_progress", None),
+            )
+            outcome_class = str(summary.get("outcome_class") or "empty_discovery")
+
+            # Consecutive empty-discovery tracking → advisory ("framework phase
+            # ineffective"). Reset the streak the moment a phase tested anything.
+            prev_empty = int(getattr(state, "framework_pr_consecutive_empty_discoveries", 0) or 0)
+            if outcome_class == "empty_discovery":
+                consecutive_empty = prev_empty + 1
+            else:
+                consecutive_empty = 0
+            state.framework_pr_consecutive_empty_discoveries = consecutive_empty
+
+            advisory = ""
+            if outcome_class == "empty_discovery" and consecutive_empty >= 2:
+                advisory = (
+                    f"framework phase ineffective: {consecutive_empty} consecutive "
+                    "macro-cycles discovered zero candidates"
+                )
+            elif outcome_class == "tested_no_keep":
+                advisory = (
+                    "framework phase tested candidates but none cleared the gate "
+                    f"(tested={summary.get('tested')}, keeps=0)"
+                )
+            if advisory:
+                log.warning("FRAMEWORK_PR advisory: %s", advisory)
 
             history.append(
                 {
@@ -3027,6 +3285,12 @@ class Coordinator:
                     "failure_count": int(failure_count),
                     "retry_limit": int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
                     "batches_discovered": len(getattr(state, "framework_pr_batches", None) or []),
+                    "outcome_class": outcome_class,
+                    "candidate_outcomes": summary.get("by_status") or {},
+                    "keeps": int(summary.get("keeps") or 0),
+                    "tested": int(summary.get("tested") or 0),
+                    "consecutive_empty_discoveries": consecutive_empty,
+                    "advisory": advisory,
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
             )
@@ -3124,6 +3388,7 @@ class Coordinator:
                     repo_url=repo_url,
                     keywords=directed_keywords,
                     max_candidates=max_candidates,
+                    pr_states=["open", "merged", "closed"],
                     timeout_sec=per_repo_timeout,
                 )
             except Exception as exc:  # noqa: BLE001 — defensive
@@ -3236,6 +3501,9 @@ class Coordinator:
             "batch_id": candidate.get("batch_id") or "",
             "base_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
+            # Step 4 / Q5: source patches require the accuracy gate for KEEP.
+            "require_accuracy_for_keep": True,
+            "accuracy_baseline": float(getattr(state, "baseline_accuracy", 0.0) or 0.0),
         }
         cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or "")
         idem = f"framework_pr:{candidate.get('batch_id', '')}:{cand_id}"
@@ -7865,6 +8133,23 @@ class Coordinator:
         if not isinstance(self.shared_state.framework_pr_phase_progress, list):
             self.shared_state.framework_pr_phase_progress = []
         self.shared_state.framework_pr_phase_progress.append(progress_entry)
+        try:
+            from .framework_pr_artifacts import write_decision_json
+
+            write_decision_json(
+                self.session_dir,
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status=status,
+                kept=status == "kept",
+                provenance="authored",
+                reason=str(res.get("reason") or ""),
+                gain_pct=gain,
+                accuracy_pass=res.get("accuracy_pass"),
+                extra={"specialist_task_id": str(params.get("specialist_task_id") or "")},
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("FRAMEWORK_PR: authored decision.json write failed", exc_info=True)
         # Roll the batch max-gain stat the plateau judge reads.
         batches = getattr(self.shared_state, "framework_pr_batches", None) or []
         if isinstance(batches, list) and batch_id:
@@ -11155,6 +11440,23 @@ class Coordinator:
             if not isinstance(self.shared_state.framework_pr_phase_progress, list):
                 self.shared_state.framework_pr_phase_progress = []
             self.shared_state.framework_pr_phase_progress.append(progress_entry)
+            try:
+                from .framework_pr_artifacts import write_decision_json
+
+                write_decision_json(
+                    self.session_dir,
+                    candidate_id=cand_id,
+                    batch_id=batch_id,
+                    status=status,
+                    kept=kept_flag,
+                    provenance="raw_diff",
+                    reason=str(result.get("reason") or ""),
+                    gain_pct=(float(delta_pct) if isinstance(delta_pct, (int, float)) else None),
+                    accuracy_pass=result.get("accuracy_pass"),
+                    extra={"workspace": str(result.get("workspace") or "")},
+                )
+            except Exception:  # noqa: BLE001 — observability is best-effort
+                log.debug("FRAMEWORK_PR: executor decision.json write failed", exc_info=True)
             # Update batch max-gain rolling stat (for the plateau judge).
             batches = getattr(self.shared_state, "framework_pr_batches", None) or []
             if isinstance(batches, list) and batches:

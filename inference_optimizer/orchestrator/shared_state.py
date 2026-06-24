@@ -592,6 +592,10 @@ class SharedState:
     framework_pr_phase_done: bool = False
     # Consecutive ``fa phase-discover`` failures; phase marked done only after DISCOVER_FAILURE_RETRY_LIMIT (default 3).
     framework_pr_discover_failures: int = 0
+    # Consecutive FRAMEWORK_PR phase completions that discovered zero candidates
+    # (empty_discovery). Drives the Step-1 advisory ("framework phase ineffective");
+    # reset whenever a phase completes having tested >=1 candidate.
+    framework_pr_consecutive_empty_discoveries: int = 0
     # Per-repo candidate cap for ``fa phase-discover``; 0 => DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES.
     framework_pr_max_candidates: int = 0
     # FRAMEWORK_PR Critic-gate decisions; cache lets resume avoid re-calling the Critic.

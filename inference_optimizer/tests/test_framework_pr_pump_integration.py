@@ -175,6 +175,16 @@ class _CoordinatorStub:
         if critic is not None:
             self.backends["critic"] = critic
 
+    async def _audit_framework_pr_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        # Hermetic: default to an "unknown" verdict so the pump preserves the
+        # legacy routing these scenarios assert. Tests may set ``_audit_verdict``.
+        v = getattr(self, "_audit_verdict", None) or {"recommended_next_step": ""}
+        try:
+            candidate["_audit"] = v
+        except Exception:
+            pass
+        return v
+
     def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
         # Pin to a single repo so these scenarios keep one-batch/one-task accounting.
         return [_fa_client.repo_url_for_framework(framework or self._framework)]

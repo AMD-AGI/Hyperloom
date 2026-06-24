@@ -13,6 +13,7 @@ from __future__ import annotations
 import glob
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,64 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # 5% allowed deviation
+
+
+def require_framework_accuracy_default() -> bool:
+    """Default for the framework source-patch accuracy-KEEP gate (Step 4 / Q5).
+
+    Source patches (framework_pr raw-diff + framework-authored integrate_patch)
+    require the accuracy gate by default; opt out with
+    ``INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY=0``.
+
+    Returns:
+        ``True`` unless the env var disables it.
+    """
+    v = os.environ.get("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", "").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def accuracy_keep_block(
+    accuracy_pass: bool | None,
+    *,
+    required: bool,
+    baseline_accuracy: Any,
+) -> tuple[bool, str, bool]:
+    """Decide whether the accuracy gate blocks a KEEP.
+
+    Semantics (Step 4): a measured regression always blocks. When the gate is
+    ``required`` but produced no verdict (``None``): block iff a positive
+    baseline accuracy was available (eval should have run but didn't);
+    otherwise *degrade* (allow throughput-only KEEP) so eval-less runs are not
+    universally blocked.
+
+    Args:
+        accuracy_pass: The gate verdict (``True`` pass / ``False`` regression /
+            ``None`` not evaluated).
+        required: Whether the accuracy gate is mandatory for this KEEP.
+        baseline_accuracy: The baseline accuracy the gate compared against.
+
+    Returns:
+        ``(blocked, reason, degraded)``: whether to block the KEEP, an audit
+        reason, and whether enforcement degraded to throughput-only.
+    """
+    if accuracy_pass is False:
+        return True, "accuracy regression detected", False
+    if accuracy_pass is True:
+        return False, "", False
+    # accuracy_pass is None — the gate did not produce a verdict.
+    if not required:
+        return False, "", False
+    try:
+        base = float(baseline_accuracy)
+    except (TypeError, ValueError):
+        base = 0.0
+    if base > 0:
+        return (
+            True,
+            "accuracy gate required but produced no eval result (RUN_EVAL/baseline accuracy missing)",
+            False,
+        )
+    return False, "", True
 
 # Flags / env vars that indicate accuracy risk > 0; matching variants must
 # pass the accuracy gate before promotion.
@@ -144,3 +203,13 @@ def accuracy_passed(
         return True
     drop = baseline_accuracy - new_accuracy
     return drop <= threshold
+
+
+__all__ = [
+    "ACCURACY_THRESHOLD",
+    "accuracy_keep_block",
+    "accuracy_passed",
+    "is_high_accuracy_risk",
+    "parse_eval_results",
+    "require_framework_accuracy_default",
+]

@@ -16,6 +16,10 @@ Subcommands:
 * ``fa phase-discover`` - Hyperloom FRAMEWORK_PR phase entry point.
   Reads a JSON ``--request`` and writes a JSON ``--out``
   (critic-agent style).
+* ``fa phase-audit`` - static local-source judging of whether a candidate
+  PR is already present in the framework source roots (Step 2); optional
+  opt-in single chat-completion refine. Reads/writes JSON like
+  ``phase-discover``.
 """
 
 from __future__ import annotations
@@ -97,6 +101,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
                 "explore",
                 "kb",
                 "phase-discover",
+                "phase-audit",
             ],
             "subcommands_planned": [],
             "search_modes_supported": ["primus_cortex", "github"],
@@ -106,6 +111,29 @@ def _cmd_schema(args: argparse.Namespace) -> None:
             },
             "promotion_policy": "manual_only",
             "kb_subcommands": ["list", "show", "search", "contribute", "synthesize"],
+            "phase_audit": {
+                "purpose": "static (default) local-source judging of whether a candidate PR is already present; optional opt-in LLM refine",
+                "semantic_status_values": [
+                    "already_equivalent",
+                    "already_superset",
+                    "partially_present",
+                    "not_present",
+                    "unknown",
+                ],
+                "applicability_values": [
+                    "direct_apply",
+                    "needs_rewrite",
+                    "not_applicable",
+                    "needs_human_review",
+                ],
+                "recommended_next_step_values": [
+                    "skip",
+                    "direct_framework_pr",
+                    "author_via_specialist",
+                ],
+                "patch_sources": ["diff_text", "patches_path", "primus_cortex"],
+                "llm": "opt-in via request.use_llm; needs SAFE_API_KEY + OPENAI_BASE_URL; best-effort, evidence-gated",
+            },
         },
         "-",
     )
@@ -249,6 +277,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 "baseline": {"throughput": 1.0},
                 "gap_description": gap_desc,
                 "search_modes": ["primus_cortex", "github"],
+                "pr_states": request.get("pr_states") or ["open"],
                 "max_search_candidates": max_candidates,
             }
         )
@@ -313,6 +342,31 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
         },
         args.out,
     )
+
+
+def _cmd_phase_audit(args: argparse.Namespace) -> None:
+    """Statically audit whether a candidate PR is already present in local source.
+
+    Request shape:
+        {"candidate": {repo, pr_number, ref, diff_url, pr_url, ...},
+         "framework": str, "framework_source_roots": [str, ...],
+         "repo_url": str (optional), "work_dir": str (optional),
+         "diff_text" | "patches_path" | "primus_cortex_url" (optional patch source),
+         "use_llm": bool (optional, default false), "model": str (optional)}
+
+    Output shape (``semantic_audit.json``):
+        {"candidate_id", "semantic_status", "applicability", "confidence",
+         "evidence": [...], "risks": [...], "recommended_next_step",
+         "layer", "metrics", "ts"}
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``request`` and ``out``.
+    """
+    from ..audit import run_phase_audit
+
+    request = _read_json_request(args.request)
+    result = run_phase_audit(request)
+    _emit_json(result, args.out)
 
 
 def _cmd_kb(args: argparse.Namespace) -> None:
@@ -500,6 +554,14 @@ def _build_parser() -> argparse.ArgumentParser:
     pd_p.add_argument("--request", required=True, help="JSON request file path")
     pd_p.add_argument("--out", default="-", help="Output path (default stdout)")
     pd_p.set_defaults(func=_cmd_phase_discover)
+
+    pa_p = sub.add_parser(
+        "phase-audit",
+        help="Statically audit whether a candidate PR is already present in local source",
+    )
+    pa_p.add_argument("--request", required=True, help="JSON request file path")
+    pa_p.add_argument("--out", default="-", help="Output path (default stdout)")
+    pa_p.set_defaults(func=_cmd_phase_audit)
 
     kb_p = sub.add_parser(
         "kb",
