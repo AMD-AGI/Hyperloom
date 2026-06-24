@@ -169,6 +169,26 @@ cat > "$WORKSPACE/specialist_done.json" <<EOF
 EOF
 exit 0
 """
+    elif behavior == "done_with_llm_env":
+        # Echo the LLM-transport stability env so the test can assert the
+        # dispatcher injected a client-side request timeout (Sandbox-hang RCA).
+        body += """
+cat > "$WORKSPACE/specialist_done.json" <<EOF
+{
+  "gap_canonical_id": "gap.test.example",
+  "domain": "serving_specialist",
+  "proposal_set": [],
+  "patches_written": [],
+  "empty": true,
+  "summary": "llm env echo",
+  "confidence": 0.0,
+  "api_timeout_ms": "$API_TIMEOUT_MS",
+  "disable_autoupdater": "$DISABLE_AUTOUPDATER",
+  "disable_nonessential": "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+}
+EOF
+exit 0
+"""
     elif behavior == "crash":
         body += "exit 3\n"
     elif behavior == "partial_then_crash":
@@ -367,6 +387,51 @@ async def test_subprocess_path_injects_allocated_gpu_env(
     assert result.specialist_done["cuda_visible"] == "2,3"
     assert result.specialist_done["rocr_visible"] == "2,3"
     assert result.specialist_done["allocated_gpu_ids"] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_subprocess_path_injects_llm_stability_env(
+    tmp_path: Path,
+    fake_framework_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The dispatcher injects low-risk claude-code stability flags but does not
+    set API_TIMEOUT_MS by default. Specialist liveness is governed by the
+    Hyperloom-owned process.log / heartbeat stale reaper, avoiding external
+    total-request timeout semantics for long streaming responses."""
+    # Ensure no inherited values mask the setdefault under test.
+    for var in (
+        "API_TIMEOUT_MS",
+        "DISABLE_AUTOUPDATER",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    bin_dir = tmp_path / "bin"
+    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_llm_env")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    config = SpecialistSubprocessConfig(
+        claude_executable=str(fake_claude),
+        model="",
+        framework_source_roots=(str(fake_framework_repo),),
+        per_turn_max_seconds=30.0,
+        poll_interval_seconds=0.2,
+    )
+    runner = SpecialistRunner(
+        subprocess_config=config,
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    ctx = _make_runner_ctx("t-spec-llmenv")
+
+    result = await runner.run(ctx)
+
+    assert result.status in ("succeeded", "empty_synthesised")
+    assert result.specialist_done["api_timeout_ms"] == ""
+    assert result.specialist_done["disable_autoupdater"] == "1"
+    assert result.specialist_done["disable_nonessential"] == "1"
 
 
 @pytest.mark.asyncio

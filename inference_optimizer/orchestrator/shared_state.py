@@ -106,8 +106,28 @@ def render_model_arch_compact(arch: dict | None) -> str:
 
 # Default partial-attempt cap for run_optimization; override via env in ``record_kernel_opt`` (1 disables second chance).
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
-# Backend ladder without a KEEP retires the kernel; override via ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
-_DEFAULT_KERNEL_OPT_MAX_FAILURES = 1
+# Backend ladder infra failures can be transient; require two failed ladders
+# before retiring the kernel. Override via
+# ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
+_DEFAULT_KERNEL_OPT_MAX_FAILURES = 2
+
+
+def resolve_kernel_opt_max_failures() -> int:
+    """Resolve the infra-failure retry budget (>=1).
+
+    Shared by ``record_kernel_opt``, ``kernel_work_pending``, and batch
+    dispatch so ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` stays
+    consistent across layers.
+    """
+    env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
+    if env_f:
+        try:
+            return max(1, int(env_f))
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_KERNEL_OPT_MAX_FAILURES
+
+
 # Integration faults (environment / apply / bench crashes) are distinct from a
 # genuine gate REVERT (measured gain below threshold / accuracy regression). A
 # fault means the patch was never fairly measured, so it must not burn the
@@ -414,6 +434,8 @@ class SharedState:
     # KB tags from config.json (``architectures`` + ``model_type``); stamped into recipe-snapshot ``extras`` so fine-tuned models carry base arch identity.
     model_architectures: list[str] = field(default_factory=list)
     model_type: str = ""
+    # config.json-derived structural summary (attention_type / heads / MoE / quant); persisted in state.json for downstream collectors.
+    model_info: dict = field(default_factory=dict)
     framework: str = ""
     gpu_type: str = ""
     # Workload metadata mirrored from manifest.json at session start; resume re-exports env vars. Avoids TP=1 default self-veto in _warm_specialist_params.
@@ -426,8 +448,19 @@ class SharedState:
     conc: int = 0
     isl: int = 0
     osl: int = 0
+    # Profile-phase output length (from --profile-osl). 0 = unset (profile
+    # defaults to min(osl, 1024)). Persisted so a fresh-shell resume keeps the
+    # operator's explicit profile OSL instead of reverting to the default.
+    profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
+    # KERNEL-phase optimizer: "native" (GEAK/per-kernel loop, default) or
+    # "perfskills" (one-shot whole-pipeline e2e optimizer cloned from upstream;
+    # see kernel-agent/tools/backends/perfskills_runner.py).
+    kernel_optimizer: str = "native"
+    # Snapshot of the last PerfSkills e2e run (result.json + final_launch.sh /
+    # bench_e2e.sh handles the SWEEP phase reuses).
+    perfskills_result: dict[str, Any] = field(default_factory=dict)
     # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK_PR route to KERNEL (or SWEEP).
     explore_enabled: bool = True
     # After FP8 GEMM tuning succeeds, continue into source-level kernel_opt by default.
@@ -479,7 +512,12 @@ class SharedState:
     # Structured warm-replay outcome for reports/prompts (status reproduced|drift|failed|skipped, etc.).
     warm_replay_outcome: dict = field(default_factory=dict)
     # Baseline Magpie runtime (s, success path); ExploreExecutor derives overtime-kill deadline. Zero => no-op.
+    # This is the COLD (warmup-round) full boot+bench wall-clock — the hard-cap anchor.
     baseline_runtime_sec: float = 0.0
+    # Baseline WARM measure-round wall-clock (client-only, no boot). Q4: anchors the explore
+    # decision-round overtime kill so it is post-startup apples-to-apples with the warm variant
+    # measurement. Zero => fall back to baseline_runtime_sec (cold anchor).
+    baseline_warm_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
     # Reference launch recipe (from --reference-script or auto-discovery): lowest-priority
     # base server args/envs seeding every baseline. Fact-layer => persisted + restored on resume.
@@ -571,8 +609,8 @@ class SharedState:
     framework_pr_authoring_enabled: bool = True
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``. Absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposal).
     enable_roofline: bool = True
-    # ExploreExecutor per-variant overtime kill multiplier; >0 and baseline_runtime_sec>0 kills past baseline_runtime_sec*ratio (outcome='KILLED_OVERTIME'). Stack-rebench exempt. Default +10%.
-    explore_overtime_kill_ratio: float = 1.10
+    # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM measure time when warm-decision is active, else the cold baseline. Warmup + stack-rebench exempt. Default +20%.
+    explore_overtime_kill_ratio: float = 1.20
     # ExploreExecutor per-variant hard timeout override; 0 => auto-derive from baseline_runtime_sec*(kill_ratio+safety_margin).
     explore_variant_timeout_sec_override: int = 0
     # Headroom added to kill_ratio for auto-derived hard cap (default 0.5); no effect when override > 0.
@@ -583,6 +621,11 @@ class SharedState:
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Most recent run_optimization_done so Orch doesn't re-dispatch the same kernel_id every tick.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
+    # Most recent run_optimization dispatch skipped with no eligible kernels
+    # (empty batch, no named kernel). Recorded honestly as a non-failure so the
+    # breakdown can surface it; it is otherwise invisible in sbd (the result has
+    # no backend and no kernel_id).
+    last_kernel_opt_dispatch_skip: dict[str, Any] = field(default_factory=dict)
     # Per-action audit (kernel parity): each ``last_<action>`` is the most recent attempt snapshot; ``<action>_attempts`` is a capped list.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)
@@ -2360,6 +2403,12 @@ class SharedState:
             "best_for_each_conc": result.get("best_for_each_conc") or {},
             "pareto_front": result.get("pareto_front") or [],
             "workspace": result.get("workspace", ""),
+            # Watermark of validated gain at the moment this sweep ran, so a later
+            # SWEEP entry (cyclic reloop) can skip a redundant full sweep when no
+            # validated improvement landed since (see Coordinator._on_enter_sweep).
+            "cumulative_gain_validated_at_record": float(
+                getattr(self, "cumulative_gain_validated", 0.0) or 0.0
+            ),
         }
 
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
@@ -3309,7 +3358,7 @@ class SharedState:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3); compact (≤5 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
+        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3); compact (≤6 lines, incl. the ``cycle`` = macro-cycle number). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -3357,6 +3406,7 @@ class SharedState:
         allowed_line = f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
         lines = [
             f"phase     : {phase}",
+            f"cycle     : {int(getattr(self, 'macro_cycle', 0) or 0)}",
             f"entered   : {self.phase_started_ts or '(unset)'}",
             budget_line,
             allowed_line,

@@ -348,6 +348,18 @@ def build(
         _safe_collect("explore_search", lambda: collectors.collect_explore_search(state, warnings), warnings),
     )
     sweep = _pick("sweep", _safe_collect("sweep", lambda: collectors.collect_sweep(sd, state, warnings), warnings))
+    # PerfSkills/GEAK-e2e KERNEL-phase section. Empty {} on native sessions
+    # (the optimizer was never engaged), so the dashboard hides it and historic
+    # breakdowns stay byte-for-byte identical.
+    perfskills = _pick(
+        "perfskills",
+        _safe_collect(
+            "perfskills",
+            lambda: collectors.collect_perfskills(sd, state, warnings),
+            warnings,
+            default={},
+        ),
+    )
     critic_robustness = _pick(
         "critic_robustness",
         _safe_collect("critic_robustness", lambda: collectors.collect_critic_robustness(sd, warnings), warnings),
@@ -534,7 +546,7 @@ def build(
         [p.get("benchmark_report_path") for p in (sweep.get("all_variants") or []) if p.get("benchmark_report_path")],
     )
 
-    return {
+    breakdown = {
         "schema_version": schema_version,
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
@@ -558,6 +570,9 @@ def build(
         # v2-native name for the merged ledger; mirrors ``param_search``.
         "explore_search": explore_search,
         "sweep": sweep,
+        # PerfSkills/GEAK-e2e KERNEL section (additive, optional); empty {} →
+        # dashboard hides it on native sessions.
+        "perfskills": perfskills,
         "critic_robustness": critic_robustness,
         "telemetry": telemetry,
         "attribution": attribution,
@@ -607,6 +622,7 @@ def build(
         "warnings": warnings,
         "source_files": source_files,
     }
+    return breakdown
 
 
 def _load_assembled(
