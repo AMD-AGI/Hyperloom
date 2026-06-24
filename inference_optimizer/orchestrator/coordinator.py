@@ -10353,7 +10353,11 @@ class Coordinator:
         if not isinstance(result_dict, dict):
             return None
         error_class = str(result_dict.get("error_class") or "").lower()
-        if error_class in ("crash", "oom", "hang"):
+        # ``detokenizer_stall`` is a hang in all but name (server ready, no
+        # generation progress); record it as a crash-severity pitfall so the
+        # offending variant config is remembered and not re-proposed, instead
+        # of burning explore budget on the same stall again.
+        if error_class in ("crash", "oom", "hang", "detokenizer_stall"):
             return _SEVERITY_CRASH
         status = str(result_dict.get("status") or "").lower()
         if status in ("crash", "oom", "hang"):
