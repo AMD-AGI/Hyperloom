@@ -367,8 +367,9 @@ def _engagement_proof(server_log: Path, target: Path, is_aiter_cu: bool) -> dict
 def apply_and_bench(
     *, pairs: list[tuple[str, str]] | None = None,
     patch_path: str | None = None, target_file: str | None = None,
-    backup_root: str, model: str, backend: str,
-    tp: int, port: int, gpu: str, isl: int, osl: int, conc: int, num_prompts: int, reps: int,
+    backup_root: str, model: str, backend: str = "sglang",
+    tp: int = 1, port: int = 8890, gpu: str = "0",
+    isl: int = 1024, osl: int = 1024, conc: int = 64, num_prompts: int = 320, reps: int = 5,
     out_dir: str, kernel_id: str = "", rebuild_command: str | None = None,
     aiter_rebuild: bool = False, skip_rebuild: bool = False, seed: int = 1234,
 ) -> dict[str, Any]:
