@@ -9,18 +9,12 @@ cross-table atomicity ADR-42 promises.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 from ..storage.connection import SqliteConnection
+from ._time import now_iso
 
-
-def _now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string.
-
-    Returns:
-        str: Timestamp with microsecond precision in UTC.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 @dataclass

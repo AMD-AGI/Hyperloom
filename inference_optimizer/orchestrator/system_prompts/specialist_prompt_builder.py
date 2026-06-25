@@ -502,7 +502,10 @@ class SpecialistPromptInputs:
     max_model_len: int = 0
     # Runtime fingerprint so the specialist can judge lesson applicability;
     # ``framework_version`` is the precise install version. Empty => no
-    # version annotation.
+# version annotation. ``framework`` is the active server framework
+    # (``sglang`` / ``vllm`` / ``atom``); empty falls back to the canonical
+    # sglang/vllm hint blocks, and switches "what to read first" bullets to
+    # atom paths when ``framework == 'atom'``.
     framework: str = ""
     framework_version: str = ""
 
@@ -545,11 +548,6 @@ class SpecialistPromptInputs:
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 
-    # Active server framework (``sglang`` / ``vllm`` / ``atom``); empty falls
-    # back to the canonical sglang/vllm hint blocks. Switches "what to read
-    # first" bullets to atom paths when ``framework == 'atom'``.
-    framework: str = ""
-
     # Local source navigation hint
     framework_source_roots: tuple[str, ...] = ()
     source_hint_directories: tuple[str, ...] = ()
@@ -560,9 +558,8 @@ class SpecialistPromptInputs:
     # Free-form notes from Orchestration (e.g. previous-round resid_qs)
     notes: str = ""
 
-    # Dispatch profile dials (see orchestrator.specialist_profile). Defaults
-    # preserve the legacy single-domain patch-authoring behaviour; later phases
-    # consume these to shape cross-domain / freeform / bench prompting.
+    # Dispatch profile dials (see orchestrator.specialist_profile) that shape
+    # single-domain / cross-domain / freeform / bench prompting.
     scope: str = "domain"
     mode: str = "patch"
     bench: bool = False
@@ -745,8 +742,8 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
-    """Free-form mandate appended when ``scope == 'freeform'`` (absorbed from
-    the retired dynamic_specialist wave channel). The specialist is NOT bound
+    """Free-form mandate appended when ``scope == 'freeform'``. The
+    specialist is NOT bound
     to the domain catalogue — the Orchestration ``task_description`` is the
     whole mandate. The single deliverable is still ONE ``specialist_done``.
 
@@ -778,8 +775,8 @@ def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
-    """Cross-domain mandate appended when ``scope == 'domains'`` (absorbed
-    from the retired dynamic_action channel). The single deliverable is still
+    """Cross-domain mandate appended when ``scope == 'domains'``. The
+    single deliverable is still
     ONE ``specialist_done``; the difference is the patch may span every domain
     in scope and the Critic will hold it to the cross-domain rules.
 
@@ -942,8 +939,9 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 4 — optional KB context
 def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
-    """Issue-J: all prior sources empty, so inject a cold-start directive
-    instead of letting specialists return an empty proposal_set.
+    """Return True when every prior KB/PR/research source is empty, so a
+    cold-start directive is injected instead of letting specialists return
+    an empty proposal_set.
 
     Args:
         inp: The specialist prompt inputs.
@@ -1411,7 +1409,7 @@ def _format_version_note(
     inp: SpecialistPromptInputs,
     lesson_attrs: dict[str, Any],
 ) -> str:
-    """GAP 8 — render a ``[from sglang@X.Y, you're on A.B]`` annotation when
+    """Render a ``[from sglang@X.Y, you're on A.B]`` annotation when
     the lesson's framework_version differs; empty when either side is
     unknown or they match.
 

@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..storage.connection import SqliteConnection
+from ._time import now_iso
 
 
 TASK_STATES = (
@@ -44,13 +45,8 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
 TERMINAL_STATES = frozenset({"succeeded", "cancelled", "needs_manual_review"})
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO 8601 string.
-
-    Returns:
-        str: The current UTC timestamp.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 @dataclass
