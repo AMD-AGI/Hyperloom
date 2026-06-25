@@ -93,7 +93,9 @@ class _Stub:
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
     _collect_framework_pr_priors = Coordinator._collect_framework_pr_priors
+    _unprocessed_framework_pr_candidates = Coordinator._unprocessed_framework_pr_candidates
     _select_next_framework_pr_candidate = Coordinator._select_next_framework_pr_candidate
+    _select_best_framework_pr_candidate = Coordinator._select_best_framework_pr_candidate
     _record_framework_pr_phase_done = Coordinator._record_framework_pr_phase_done
     _critic_review_framework_pr_candidate = Coordinator._critic_review_framework_pr_candidate
     _discover_next_framework_pr_batch = Coordinator._discover_next_framework_pr_batch
@@ -117,6 +119,12 @@ class _Stub:
         # Audit verdict the pump's _audit_framework_pr_candidate returns; default
         # unknown (empty recommended_next_step) preserves legacy both-tracks.
         self._audit_verdict: dict[str, Any] = {"recommended_next_step": ""}
+
+    async def _rank_framework_pr_candidates_llm(
+        self, candidates: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        # Hermetic: force deterministic discovery-order fallback (no LLM call).
+        return None
 
     async def _audit_framework_pr_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
         v = self._audit_verdict

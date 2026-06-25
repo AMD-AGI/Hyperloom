@@ -153,7 +153,9 @@ class _CoordinatorStub:
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
     _collect_framework_pr_priors = Coordinator._collect_framework_pr_priors
+    _unprocessed_framework_pr_candidates = Coordinator._unprocessed_framework_pr_candidates
     _select_next_framework_pr_candidate = Coordinator._select_next_framework_pr_candidate
+    _select_best_framework_pr_candidate = Coordinator._select_best_framework_pr_candidate
     _record_framework_pr_phase_done = Coordinator._record_framework_pr_phase_done
     _critic_review_framework_pr_candidate = Coordinator._critic_review_framework_pr_candidate
     _discover_next_framework_pr_batch = Coordinator._discover_next_framework_pr_batch
@@ -174,6 +176,13 @@ class _CoordinatorStub:
         self.backends: dict[str, Any] = {}
         if critic is not None:
             self.backends["critic"] = critic
+
+    async def _rank_framework_pr_candidates_llm(
+        self, candidates: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        # Hermetic: force the deterministic discovery-order fallback so these
+        # scenarios assert a stable candidate ordering (no network/LLM call).
+        return None
 
     async def _audit_framework_pr_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
         # Hermetic: default to an "unknown" verdict so the pump preserves the

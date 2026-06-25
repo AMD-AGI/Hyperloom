@@ -2681,8 +2681,31 @@ class Coordinator:
         for t in (*queued, *running):
             if getattr(t, "kind", "") == "framework_pr":
                 return
-        # Find the next un-dispatched candidate, or request a new batch if exhausted.
-        next_candidate = self._select_next_framework_pr_candidate()
+        # An authoring specialist (or its downstream integrate_patch) for the
+        # current candidate may still be running. The authoring track records
+        # its terminal progress row only when the dispatcher harvests the
+        # specialist/integrate_patch result; until then the candidate has no
+        # progress row and ``_select_next_framework_pr_candidate`` would
+        # re-select it every tick, re-auditing and re-dispatching the same
+        # candidate forever (observed: pull/1015 re-dispatched 30+ times while
+        # its specialist had already finished but the result was not yet
+        # harvested). Wait only on a live TASK (queued/running) — NOT on a
+        # pending Critic proposal: a stuck/orphaned pending proposal in the
+        # in-memory registry never represents active GPU work and must not
+        # wedge the pump (observed: pump silent for 30+ min after a revert
+        # while 0 tasks ran). The proposal-pending case is still covered by the
+        # original ``next_candidate is None`` inflight wait below.
+        if getattr(state, "framework_pr_authoring_enabled", False):
+            try:
+                _q = await self.tasks.queued()
+                _r = await self.tasks.running()
+            except Exception:  # noqa: BLE001 — defensive
+                _q, _r = [], []
+            if any(getattr(t, "kind", "") in ("specialist", "integrate_patch") for t in (*_q, *_r)):
+                return
+        # Pick the most promising un-dispatched candidate (agent-ranked), or
+        # request a new batch if exhausted.
+        next_candidate = await self._select_best_framework_pr_candidate()
         if next_candidate is None:
             # Hold the phase open while authored patches are still benched/critic-reviewed (gains must land before plateau judge); gated by authoring flag.
             # Only wait when the pump itself discovered a PR batch to author against:
@@ -2712,10 +2735,10 @@ class Coordinator:
                         ),
                         failure_count=failures,
                     )
-                    state.framework_pr_phase_done = True
-                    state.save(self.session_dir)
+                state.framework_pr_phase_done = True
+                state.save(self.session_dir)
                 return
-            next_candidate = self._select_next_framework_pr_candidate()
+            next_candidate = await self._select_best_framework_pr_candidate()
             if next_candidate is None:
                 self._record_framework_pr_phase_done(
                     reason="discover_returned_no_new_candidates",
@@ -3177,7 +3200,7 @@ class Coordinator:
                 exc_info=True,
             )
         idem = f"framework_pr_authoring:{batch_id}:{cand_id}"
-        spec_task = await self.tasks.create_or_return_existing(
+        spec_task, _spec_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             idempotency_key=idem,
@@ -3221,35 +3244,258 @@ class Coordinator:
             gap_cid,
         )
 
-    def _select_next_framework_pr_candidate(self) -> dict[str, Any] | None:
-        """Return the next unprocessed candidate in the latest batch (processed = has progress entry).
+    def _unprocessed_framework_pr_candidates(self) -> list[dict[str, Any]]:
+        """Return all not-yet-processed candidates in the latest batch (order preserved).
+
+        Processed = the candidate id already appears in
+        ``framework_pr_phase_progress``.
 
         Returns:
-            The next candidate dict not yet recorded in the phase progress, or
-            ``None`` when no batch exists or all are processed.
+            The list of candidate dicts lacking a progress row (possibly empty).
         """
         state = self.shared_state
         batches = getattr(state, "framework_pr_batches", None) or []
         if not batches:
-            return None
+            return []
         latest = batches[-1]
         if not isinstance(latest, dict):
-            return None
+            return []
         candidates = latest.get("candidates") or []
         if not isinstance(candidates, list):
-            return None
+            return []
         processed = {
             str(p.get("candidate_id") or "")
             for p in (getattr(state, "framework_pr_phase_progress", None) or [])
             if isinstance(p, dict)
         }
+        out: list[dict[str, Any]] = []
         for cand in candidates:
             if not isinstance(cand, dict):
                 continue
             cand_id = str(cand.get("candidate_id") or cand.get("pr_url") or cand.get("ref") or "")
             if cand_id and cand_id not in processed:
-                return cand
+                out.append(cand)
+        return out
+
+    def _select_next_framework_pr_candidate(self) -> dict[str, Any] | None:
+        """Return the next unprocessed candidate in the latest batch (linear order).
+
+        Used for existence checks and as the deterministic fallback when the
+        agent-driven ranker (:meth:`_select_best_framework_pr_candidate`) is
+        unavailable.
+
+        Returns:
+            The first candidate dict not yet recorded in the phase progress, or
+            ``None`` when no batch exists or all are processed.
+        """
+        unprocessed = self._unprocessed_framework_pr_candidates()
+        return unprocessed[0] if unprocessed else None
+
+    async def _select_best_framework_pr_candidate(self) -> dict[str, Any] | None:
+        """Pick the single most promising unprocessed candidate via the agent.
+
+        The batch is discovered once; each FRAMEWORK_PR exploration then asks the
+        agent (LLM) to choose — among the *currently available* candidates — the
+        one most likely to improve serving throughput for this workload, instead
+        of grinding through the batch in discovery order. Degrades safely: any
+        ranker failure falls back to the first unprocessed candidate so the pump
+        never wedges.
+
+        Returns:
+            The chosen candidate dict, or ``None`` when none remain.
+        """
+        unprocessed = self._unprocessed_framework_pr_candidates()
+        if not unprocessed:
+            return None
+        if len(unprocessed) == 1:
+            return unprocessed[0]
+        try:
+            chosen = await self._rank_framework_pr_candidates_llm(unprocessed)
+        except Exception:  # noqa: BLE001 — ranking is advisory; never wedge the pump
+            log.debug("FRAMEWORK_PR: agent candidate ranking failed", exc_info=True)
+            chosen = None
+        if chosen is not None:
+            return chosen
+        # Deterministic fallback: discovery order.
+        return unprocessed[0]
+
+    async def _rank_framework_pr_candidates_llm(
+        self,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Ask the agent to choose the most promising candidate; ``None`` on any failure.
+
+        Builds a compact workload-context + candidate-list prompt and requests a
+        single ``candidate_id``. Matches the reply back to a candidate (exact id
+        or PR number). Best-effort: returns ``None`` (caller falls back) when the
+        client/model is unavailable, the call errors/times out, or the reply
+        can't be parsed.
+
+        Args:
+            candidates: The unprocessed candidates to rank.
+
+        Returns:
+            The chosen candidate dict, or ``None``.
+        """
+        import json as _json
+
+        client = self._framework_pr_ranker_client()
+        if client is None:
+            return None
+        model = self._framework_pr_ranker_model()
+        if not model:
+            return None
+        state = self.shared_state
+        # Workload context.
+        ctx_lines = [
+            "You are selecting ONE upstream PR to integrate next, to maximize "
+            "LLM serving throughput (tokens/s) for this exact workload:",
+            f"- model: {getattr(state, 'model', '') or getattr(state, 'model_path', '')}",
+            f"- framework: {getattr(state, 'framework', '')}",
+            f"- gpu_type: {getattr(state, 'gpu_type', '')}",
+            f"- precision: {getattr(state, 'precision', '')}",
+            f"- tensor_parallel: {getattr(state, 'tp', '')}",
+        ]
+        best = getattr(state, "best_throughput", None) or getattr(state, "baseline_throughput", None)
+        if best:
+            ctx_lines.append(f"- current_best_throughput_tok_s: {best}")
+        # Candidate list (cap to keep the prompt bounded).
+        cap = 60
+        listed = candidates[:cap]
+        ctx_lines.append("")
+        ctx_lines.append("Candidates (choose the ONE most likely to raise throughput):")
+        for i, c in enumerate(listed):
+            cid = str(c.get("candidate_id") or c.get("pr_url") or c.get("ref") or "")
+            title = str(c.get("title") or "").strip()
+            repo = str(c.get("repo") or c.get("discovered_repo_url") or "").strip()
+            audit = c.get("_audit") if isinstance(c.get("_audit"), dict) else None
+            appl = str((audit or {}).get("applicability") or "") if audit else ""
+            extra = f" [audit_applicability={appl}]" if appl else ""
+            ctx_lines.append(f"{i}. id={cid} repo={repo} title={title!r}{extra}")
+        ctx_lines.append("")
+        ctx_lines.append(
+            "Prefer PRs that target this model's architecture/precision/GPU and "
+            "the serving hot path (MoE/FP8/attention/GEMM/KV-cache/scheduling). "
+            "Deprioritize PRs scoped to unrelated models, archs, or GPUs. "
+            'Reply with ONLY compact JSON: {"candidate_id": "<id>", "reason": "<short>"}.'
+        )
+        prompt = "\n".join(ctx_lines)
+        try:
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_completion_tokens=400,
+                ),
+                timeout=float(
+                    getattr(self, "framework_pr_ranker_timeout_sec", 60.0) or 60.0
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade to fallback
+            log.debug("FRAMEWORK_PR: ranker LLM call failed (%r)", exc)
+            return None
+        try:
+            text = (resp.choices[0].message.content or "").strip()
+        except Exception:  # noqa: BLE001
+            return None
+        if not text:
+            return None
+        # Extract the JSON object (tolerate code fences / surrounding prose).
+        chosen_id = ""
+        reason = ""
+        try:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                obj = _json.loads(text[start : end + 1])
+                chosen_id = str(obj.get("candidate_id") or "").strip()
+                reason = str(obj.get("reason") or "").strip()
+        except Exception:  # noqa: BLE001
+            chosen_id = ""
+        if not chosen_id:
+            return None
+        match = self._match_framework_pr_candidate(chosen_id, candidates)
+        if match is None:
+            log.debug("FRAMEWORK_PR: ranker chose unknown id=%s; falling back", chosen_id)
+            return None
+        log.info(
+            "FRAMEWORK_PR: agent selected candidate=%s (of %d) reason=%s",
+            str(match.get("candidate_id") or match.get("pr_url") or ""),
+            len(candidates),
+            reason[:160],
+        )
+        return match
+
+    @staticmethod
+    def _match_framework_pr_candidate(
+        chosen_id: str,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Map a model-chosen id back to a candidate (exact id, url, ref, or PR number)."""
+        chosen = (chosen_id or "").strip()
+        if not chosen:
+            return None
+        for c in candidates:
+            for key in ("candidate_id", "pr_url", "ref"):
+                if str(c.get(key) or "").strip() == chosen:
+                    return c
+        # Fallback: bare PR number match (e.g. model replied "1015" or "PR:1015").
+        digits = "".join(ch for ch in chosen if ch.isdigit())
+        if digits:
+            for c in candidates:
+                if str(c.get("pr_number") or "").strip() == digits:
+                    return c
         return None
+
+    def _framework_pr_ranker_model(self) -> str:
+        """Model slug for the candidate ranker (env override → orchestration model)."""
+        import os
+
+        env_model = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_PR_RANKER_MODEL", "").strip()
+        if env_model:
+            return env_model
+        backend = self.backends.get("orchestration")
+        return str(getattr(backend, "model", "") or "").strip()
+
+    def _framework_pr_ranker_client(self) -> Any:
+        """Return an OpenAI-compatible async client for ranking, or ``None``.
+
+        Reuses the ProposalScorer's client when present (same gateway/auth);
+        otherwise builds one from ``SAFE_API_KEY``/``OPENAI_API_KEY`` +
+        ``OPENAI_BASE_URL``. Cached on first successful build.
+        """
+        import os
+
+        cached = getattr(self, "_fa_ranker_client", None)
+        if cached is not None:
+            return cached
+        scorer = getattr(self, "_proposal_scorer", None)
+        ensure = getattr(scorer, "_ensure_client", None)
+        if callable(ensure):
+            try:
+                client = ensure()
+                if client is not None:
+                    self._fa_ranker_client = client
+                    return client
+            except Exception:  # noqa: BLE001 — fall through to direct build
+                log.debug("FRAMEWORK_PR: scorer client unavailable for ranker", exc_info=True)
+        try:
+            from openai import AsyncOpenAI  # type: ignore[import-not-found]
+        except ImportError:
+            return None
+        api_key = os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return None
+        base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url.strip()
+        try:
+            client = AsyncOpenAI(**kwargs)
+        except Exception:  # noqa: BLE001
+            return None
+        self._fa_ranker_client = client
+        return client
 
     def _framework_pr_known_candidate_ids(self) -> set[str]:
         """All candidate ids already discovered into any prior batch (dedup for new batches).
@@ -9641,15 +9887,41 @@ class Coordinator:
         patch_name = ""
         if isinstance(proposals, list) and proposals:
             patch_name = str((proposals[0] or {}).get("name") or "")
+        integrate_params: dict[str, Any] = {
+            "specialist_task_id": sid,
+            "provenance": "specialist",
+            "patch_name": patch_name,
+        }
+        # FRAMEWORK_PR authoring provenance passthrough: a candidate dispatched
+        # to the authoring specialist carries its originating PR candidate/batch
+        # id in the specialist task params. Propagate them onto the synthetic
+        # integrate_patch task so ``_record_framework_pr_authored_outcome`` can
+        # key the progress row on the real candidate id (a PR URL). Without this
+        # the bridge falls back to the integrate_patch task_id, the progress row
+        # never matches ``_select_next_framework_pr_candidate``'s candidate id,
+        # and the FRAMEWORK_PR pump re-dispatches the same candidate forever
+        # (livelock observed in the 84-candidate batch run).
+        try:
+            spec_params = getattr(task, "params", None) or {}
+            if bool(spec_params.get("framework_pr_authoring")):
+                integrate_params["framework_pr_authoring"] = True
+                fa_cand = str(spec_params.get("framework_pr_candidate_id") or "")
+                fa_batch = str(spec_params.get("framework_pr_batch_id") or "")
+                if fa_cand:
+                    integrate_params["framework_pr_candidate_id"] = fa_cand
+                if fa_batch:
+                    integrate_params["framework_pr_batch_id"] = fa_batch
+        except Exception:  # noqa: BLE001 — provenance passthrough is best-effort
+            log.debug(
+                "FRAMEWORK_PR: authoring provenance passthrough failed for task=%s",
+                sid,
+                exc_info=True,
+            )
         propose_payload = {
             "action_name": "integrate_patch",
             "provenance": "specialist",
             "predicted_gain_pct": 0.0,
-            "params": {
-                "specialist_task_id": sid,
-                "provenance": "specialist",
-                "patch_name": patch_name,
-            },
+            "params": integrate_params,
         }
         msg = Message.new(
             "coordinator",

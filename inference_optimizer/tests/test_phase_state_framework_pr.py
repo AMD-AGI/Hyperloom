@@ -198,6 +198,123 @@ def test_exit_normal_framework_pr_phase_done_when_signalled():
     assert ev["evidence"] == "no_more_candidates"
 
 
+def test_exit_normal_framework_pr_plateau_after_three_consecutive_no_keep():
+    """3 consecutive benchmarked tests with no KEEP → framework_pr_plateau."""
+    progress = [
+        {"candidate_id": "c1", "status": "reverted", "kept": False},
+        {"candidate_id": "c2", "status": "reverted", "kept": False},
+        {"candidate_id": "c3", "status": "reverted", "kept": False},
+    ]
+    state = _State(framework_pr_phase_progress=progress)
+    out = phase_state.exit_normal_framework_pr(state)
+    assert out is not None
+    reason, ev = out
+    assert reason == "framework_pr_plateau"
+    assert ev["consecutive_no_keep"] == 3
+    assert ev["threshold"] == 3
+
+
+def test_exit_normal_framework_pr_no_plateau_below_threshold():
+    """Two reverts is below the streak threshold → no exit."""
+    progress = [
+        {"candidate_id": "c1", "status": "reverted", "kept": False},
+        {"candidate_id": "c2", "status": "reverted", "kept": False},
+    ]
+    state = _State(framework_pr_phase_progress=progress)
+    assert phase_state.exit_normal_framework_pr(state) is None
+
+
+def test_exit_normal_framework_pr_keep_resets_no_keep_streak():
+    """A KEEP breaks the streak; only reverts after it count."""
+    progress = [
+        {"candidate_id": "c1", "status": "reverted", "kept": False},
+        {"candidate_id": "c2", "status": "kept", "kept": True},
+        {"candidate_id": "c3", "status": "reverted", "kept": False},
+        {"candidate_id": "c4", "status": "reverted", "kept": False},
+    ]
+    state = _State(framework_pr_phase_progress=progress)
+    # Trailing run after the KEEP is only 2 reverts → no plateau.
+    assert phase_state.exit_normal_framework_pr(state) is None
+
+
+def test_exit_normal_framework_pr_plateau_skips_non_benchmarked_rows():
+    """not_applicable / apply_failed rows are neither a test nor a reset."""
+    progress = [
+        {"candidate_id": "c1", "status": "reverted", "kept": False},
+        {"candidate_id": "c2", "status": "not_applicable", "kept": False},
+        {"candidate_id": "c3", "status": "apply_failed", "kept": False},
+        {"candidate_id": "c4", "status": "reverted", "kept": False},
+        {"candidate_id": "c5", "status": "not_applicable", "kept": False},
+        {"candidate_id": "c6", "status": "reverted", "kept": False},
+    ]
+    state = _State(framework_pr_phase_progress=progress)
+    out = phase_state.exit_normal_framework_pr(state)
+    assert out is not None
+    assert out[0] == "framework_pr_plateau"
+    assert out[1]["consecutive_no_keep"] == 3
+
+
+def test_exit_normal_framework_pr_force_exit_beats_plateau():
+    """Priority order: force-exit > plateau."""
+    progress = [
+        {"candidate_id": "c1", "status": "reverted", "kept": False},
+        {"candidate_id": "c2", "status": "reverted", "kept": False},
+        {"candidate_id": "c3", "status": "reverted", "kept": False},
+    ]
+    state = _State(
+        framework_pr_phase_progress=progress,
+        remaining_minutes_value=10.0,
+    )
+    out = phase_state.exit_normal_framework_pr(state, max_hours=2.0)
+    assert out is not None
+    assert out[0] == "framework_pr_force_exit_low_budget"
+
+
+def test_exit_normal_framework_pr_plateau_beats_phase_done():
+    """Priority order: plateau > phase_done."""
+    progress = [
+        {"candidate_id": "c1", "status": "reverted", "kept": False},
+        {"candidate_id": "c2", "status": "reverted", "kept": False},
+        {"candidate_id": "c3", "status": "reverted", "kept": False},
+    ]
+    state = _State(
+        framework_pr_phase_progress=progress,
+        framework_pr_phase_done=True,
+    )
+    out = phase_state.exit_normal_framework_pr(state)
+    assert out is not None
+    assert out[0] == "framework_pr_plateau"
+
+
+def test_exit_normal_framework_pr_plateau_routes_to_explore():
+    """A plateau exit routes FRAMEWORK_PR → EXPLORE via compute_next_phase."""
+    progress = [
+        {"candidate_id": "c1", "status": "reverted", "kept": False},
+        {"candidate_id": "c2", "status": "reverted", "kept": False},
+        {"candidate_id": "c3", "status": "reverted", "kept": False},
+    ]
+    state = _State(framework_pr_phase_progress=progress)
+    out = phase_state.compute_next_phase(state, framework_phase_enabled=True)
+    assert out is not None
+    next_phase, reason, _ev = out
+    assert next_phase == phase_state.PHASE_EXPLORE
+    assert reason == "framework_pr_plateau"
+
+
+def test_exit_normal_framework_pr_plateau_streak_env_override(monkeypatch):
+    """INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK overrides the threshold."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK", "2")
+    progress = [
+        {"candidate_id": "c1", "status": "reverted", "kept": False},
+        {"candidate_id": "c2", "status": "reverted", "kept": False},
+    ]
+    state = _State(framework_pr_phase_progress=progress)
+    out = phase_state.exit_normal_framework_pr(state)
+    assert out is not None
+    assert out[0] == "framework_pr_plateau"
+    assert out[1]["threshold"] == 2
+
+
 def test_exit_normal_framework_pr_force_exit_beats_phase_done():
     """Priority order: force-exit > phase_done."""
     batches = [

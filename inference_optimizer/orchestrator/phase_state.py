@@ -313,7 +313,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "kernel_no_more_leverage",  # KERNEL → SWEEP (non-terminal) via skip_to_sweep
         # FRAMEWORK_PR phase transitions.
         "framework_pr_phase_done",  # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
-        "framework_pr_plateau",  # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
+        "framework_pr_plateau",  # FRAMEWORK_PR → EXPLORE; N consecutive benchmarked candidate tests with no KEEP
         "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
         # R1/R7 cyclic phase machine back-edge reasons (written by compute_next_phase).
         "cycle_reloop",  # SWEEP → FRAMEWORK_PR/EXPLORE; opens a new macro-cycle while budget + leverage remain
@@ -472,6 +472,13 @@ DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE: float = 0.0
 DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK: int = 3
 DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT: float = 1.0
 DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
+# FRAMEWORK_PR per-candidate plateau: after this many consecutive *benchmarked*
+# candidate tests (status ``reverted``/``kept``) without a KEEP, the phase has
+# shown no leverage on the current batch and exits to EXPLORE. Non-benchmarked
+# outcomes (``not_applicable``/``apply_failed``/``already_present``/audit-skip/
+# critic_denied) are neither a test nor a reset — they're skipped. A KEEP resets
+# the streak. Overridable via ``INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK``.
+DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -1840,6 +1847,59 @@ def _framework_pr_pending_candidate_count(state: Any) -> int:
     return pending
 
 
+def _framework_pr_consecutive_no_keep(state: Any) -> int:
+    """Count trailing consecutive *benchmarked* candidate tests without a KEEP.
+
+    Walks ``framework_pr_phase_progress`` from the newest row backwards:
+
+    * a KEEP row (``kept`` truthy or ``status == 'kept'``) stops the walk — the
+      streak is broken (recent improvement), so the trailing no-keep count is
+      whatever accumulated after it;
+    * a benchmarked no-keep row (``status == 'reverted'``) increments the count —
+      the patch applied and was benchmarked but did not clear the keep floor;
+    * any other terminal row (``not_applicable`` / ``apply_failed`` /
+      ``already_present`` / ``no_patches`` / audit-skip / ``critic_denied``) is
+      neither a test nor a reset and is skipped.
+
+    Args:
+        state (Any): Frozen SharedState view exposing
+            ``framework_pr_phase_progress``.
+
+    Returns:
+        int: Number of trailing consecutive benchmarked tests without a KEEP.
+    """
+    progress = getattr(state, "framework_pr_phase_progress", None) or []
+    if not isinstance(progress, list):
+        return 0
+    count = 0
+    for row in reversed(progress):
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").strip().lower()
+        is_keep = bool(row.get("kept")) or status == "kept"
+        if is_keep:
+            break
+        if status == "reverted":
+            count += 1
+    return count
+
+
+def _framework_pr_plateau_streak_threshold() -> int:
+    """Resolve the consecutive-no-keep plateau threshold (env-overridable)."""
+    import os
+
+    try:
+        val = int(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK",
+                DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK,
+            )
+        )
+    except (TypeError, ValueError):
+        return DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK
+    return val if val > 0 else DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK
+
+
 def exit_normal_framework_pr(
     state: Any,
     *,
@@ -1850,7 +1910,9 @@ def exit_normal_framework_pr(
     """FRAMEWORK_PR normal exit.
 
     Priority: 0. HARD force-exit when remaining < ratio*max_hours →
-    ``framework_pr_force_exit_low_budget``; 1. ``framework_pr_phase_done``; else ``None``.
+    ``framework_pr_force_exit_low_budget``; 1. plateau when
+    :func:`_framework_pr_consecutive_no_keep` ≥ threshold →
+    ``framework_pr_plateau``; 2. ``framework_pr_phase_done``; else ``None``.
 
     Args:
         state (Any): Frozen SharedState view; may expose a ``remaining_minutes``
@@ -1886,6 +1948,19 @@ def exit_normal_framework_pr(
                 "max_hours": float(max_hours),
                 "pending_candidate_count": _framework_pr_pending_candidate_count(state),
             }
+
+    # Per-candidate plateau: N consecutive benchmarked tests with no KEEP means
+    # the current batch is not yielding leverage — exit to EXPLORE rather than
+    # grind through the remaining candidates.
+    streak = _framework_pr_consecutive_no_keep(state)
+    threshold = _framework_pr_plateau_streak_threshold()
+    if streak >= threshold:
+        return "framework_pr_plateau", {
+            "evidence": "consecutive_no_keep",
+            "consecutive_no_keep": streak,
+            "threshold": threshold,
+            "pending_candidate_count": _framework_pr_pending_candidate_count(state),
+        }
 
     batches = getattr(state, "framework_pr_batches", None) or []
     if bool(getattr(state, "framework_pr_phase_done", False)):
