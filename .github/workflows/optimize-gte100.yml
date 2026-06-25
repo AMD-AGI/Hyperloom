@@ -113,11 +113,11 @@ jobs:
                   "exclude_active_workflows": "false",
                   "max_parallel": os.environ["MAX_PARALLEL"],
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
-                  # max_hours=12h optimizer budget. wait timeout 780 (=13h) and
-                  # GitHub job timeout 840 (=14h) both sit above 12h so neither
-                  # the wait loop nor the job is killed before the optimizer ends.
-                  "task_timeout_min": "780",
-                  "job_timeout_min": "840",
+                  # max_hours=12h optimizer budget. optimize-submit derives the
+                  # per-task wait timeout (12h+30m = 750m) and the GitHub job
+                  # timeout (12h+60m = 780m) from max_hours in its prepare job,
+                  # so no task_timeout_min/job_timeout_min inputs are sent (GitHub
+                  # caps dispatch inputs at 25).
                   "max_hours": os.environ["MAX_HOURS"],
                   "all_artifacts": "true",
                   "dry_run": os.environ.get("DRY_RUN") or "false",
