@@ -498,6 +498,12 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
         nested_model_type = str(nested.get("model_type") or "").strip()
         nested_model_type_l = nested_model_type.lower()
 
+    # Registry/config incompatibilities are handled by the model-config gate so
+    # they get the precise model_config_incompatible stop reason. Do not emit a
+    # misleading multimodal text-fallback warning for wrappers such as Gemma4.
+    if _detect_unrecognized_architecture(config) is not None:
+        return None
+
     # Hard denylist wins first: explicit VLM arch / model_type is vision_only
     # even if it also carries a ForCausalLM marker (e.g. Phi3VForCausalLM).
     for arch in architectures:
