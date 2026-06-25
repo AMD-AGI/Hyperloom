@@ -10,9 +10,21 @@ instead of living only inside a workflow's shell heredoc.
 
 The rotation is paced by ``max_hours`` (the per-task optimizer budget), mirroring
 optimize-submit's generate_hf_matrix._cron_batch_index: one batch advances per
-``max_hours`` of wall-clock time since the anchor. This keeps the rotation
-correct regardless of how the cron schedule changes (frequency or fire hours) —
-unlike a calendar-day/parity scheme, which silently drifts when the cron moves.
+``max_hours`` of wall-clock time since the anchor.
+
+INVARIANT (must hold): the schedule cron PERIOD must equal ``max_hours``.
+``slot = floor(elapsed / max_hours)`` only advances exactly one batch per fire
+when each fire is ``max_hours`` apart:
+  * cron faster than max_hours (e.g. 4x/day but max_hours=12 -> step 12h = 2
+    fires/slot): two consecutive fires land on the SAME slot -> the SAME batch
+    is dispatched twice.
+  * cron slower than max_hours: some slots are never hit -> batches are skipped.
+This is NOT robust to arbitrary cron changes — it is robust to the ANCHOR
+shifting, not to the period. gte100 deliberately pairs a 12h cron with
+max_hours=12 (and optimize-submit a 6h cron with max_hours=6); if you change one,
+change the other to match. NOTE: gte100 dispatches with
+exclude_active_workflows=false, so it has NO de-dup safety net — a period/
+max_hours mismatch will actually double-submit a batch.
 
 CLI (used by the workflow):
     python3 batch_rotate.py --count N --batch-size B --max-hours H \

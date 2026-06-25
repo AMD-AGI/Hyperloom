@@ -575,11 +575,17 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
 
     The batch index advances by one every ``max_hours`` of elapsed wall-clock
     time since ``_CRON_ANCHOR_UTC`` (0, 1, 2, ... wrapping at the batch count),
-    so the pool is marched in order then repeated. Tying the step to max_hours
-    (the per-task optimizer budget) keeps the rotation correct no matter how the
-    cron schedule changes (e.g. 2x/day -> 4x/day): the slice only moves on once
-    the prior slice's budget has elapsed. It is also independent of ad-hoc
+    so the pool is marched in order then repeated. It is independent of ad-hoc
     manual dispatches (which would otherwise perturb a run-number scheme).
+
+    INVARIANT (must hold): the schedule cron PERIOD must equal ``max_hours``.
+    ``steps = floor(elapsed / max_hours)`` advances exactly one batch per fire
+    ONLY when fires are ``max_hours`` apart. If the cron fires FASTER than
+    max_hours, consecutive fires resolve to the same step -> the same batch is
+    dispatched twice; if SLOWER, some batches are skipped. optimize-submit pairs
+    a 6h cron with max_hours=6 on purpose; change one and you must change the
+    other. (Schedule sets exclude_active_workflows=true, so a transient mismatch
+    is de-duped against in-flight jobs, but the pairing must still be kept.)
 
     Fires strictly before the anchor are clamped to batch 0 (the not-run head)
     rather than wrapping to the tail, so the not-run backlog is drained first.

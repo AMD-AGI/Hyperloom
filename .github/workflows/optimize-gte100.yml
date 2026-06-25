@@ -19,7 +19,10 @@ name: SaFE Optimize gte100 (filtered pool)
 # using minute :07 (not :00) because GitHub heavily delays cron at the top of the
 # hour. The batch rotation is paced by max_hours=12 (one batch per 12h of
 # wall-clock time since the anchor, in batch_rotate.py) — same scheme as
-# optimize-submit — so it stays correct even if this cron later changes.
+# optimize-submit. INVARIANT: the cron PERIOD must equal max_hours (here 12h);
+# if you change this cron's frequency, change MAX_HOURS to match, otherwise the
+# rotation double-submits (cron faster) or skips batches (cron slower). gte100
+# sends exclude_active_workflows=false, so there is no de-dup safety net.
 # Scheduled runs only fire from the DEFAULT branch.
 
 on:
