@@ -12,6 +12,7 @@ outcome for the audit trail.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import json
 import logging
@@ -523,7 +524,10 @@ class SpecialistRunner:
         # blocks dispatch. Reuses a coordinator-precomputed digest when present.
         dual_read = dict(params.get("substrate_dual_read") or {})
         if not dual_read:
-            dual_read = self._compute_substrate_dual_read(params)
+            # Offload the blocking urllib KB call off the event loop so a slow
+            # or unreachable cortex KB can't stall the orchestrator (matches the
+            # repo's asyncio.to_thread convention for sync IO).
+            dual_read = await asyncio.to_thread(self._compute_substrate_dual_read, params)
         if dual_read:
             self._trace_substrate_dual_read(ctx.task.task_id, dual_read)
 
