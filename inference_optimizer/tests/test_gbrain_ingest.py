@@ -49,7 +49,7 @@ def test_scalar_quotes_risky_keeps_barewords() -> None:
 
 def test_recipe_to_page_roundtrips_via_reader() -> None:
     slug, content = recipe_to_page(_recipe())
-    assert slug == "recipe-snapshot/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/0_5_11/fp8"
+    assert slug == "hyperloom-recipe-kb/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/0_5_11/fp8"
     # Check version token quoting survived
     assert content.startswith("---\ntype: recipe\n")
     # the version token must be quoted so it survives YAML parse
