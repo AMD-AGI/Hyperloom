@@ -817,12 +817,43 @@ def _derive_anthropic_base_url(openai_base_url: str) -> str:
     return urlunparse(parsed._replace(path=path))
 
 
-def _reset_claude_config_to_upstream(safe_key: str, anthropic_base_url: str) -> None:
+def _resolve_llm_endpoints() -> tuple[str, str]:
+    """Resolve ``(anthropic_base_url, openai_base_url)`` for split entrypoints.
+
+    Each side keeps an explicit operator value; a missing side falls back to
+    the other so the legacy single-gateway setup (only ``OPENAI_BASE_URL``)
+    keeps working and both Claude and Codex still reach an endpoint. Known
+    stale auth-proxy leftovers (127.0.0.1:4002) are treated as unset so they
+    are re-derived rather than preserved.
+    """
+    openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+    if _is_stale_proxy_url(openai_url):
+        openai_url = ""
+    if _is_stale_proxy_url(anthropic_url):
+        anthropic_url = ""
+
+    if anthropic_url and openai_url:
+        # Both explicitly configured: respect each as-is (true dual entry).
+        return anthropic_url, openai_url
+    if openai_url and not anthropic_url:
+        # Single OpenAI-style gateway: derive the Anthropic base from it.
+        return _derive_anthropic_base_url(openai_url), openai_url
+    if anthropic_url and not openai_url:
+        # Anthropic-only entry: let the OpenAI/Codex side reuse the same URL.
+        return anthropic_url, anthropic_url
+    return "", ""
+
+
+def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: str) -> None:
     """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway (stale 127.0.0.1:4002 would fail).
 
     Args:
-        safe_key (str): The primary API key to write; blank leaves any
-            existing key untouched.
+        primary_api_key (str): The Claude CLI primary API key to write; blank
+            leaves any existing key untouched. Callers should pass the
+            Anthropic-side key (explicit ANTHROPIC_API_KEY wins, SAFE_API_KEY
+            is the fallback) so a split-entrypoint deploy authenticates Claude
+            with its own key rather than the shared gateway key.
         anthropic_base_url (str): The upstream gateway URL; blank is a no-op.
     """
     import json as _json
@@ -843,8 +874,8 @@ def _reset_claude_config_to_upstream(safe_key: str, anthropic_base_url: str) -> 
 
     config_data.setdefault("theme", "dark")
     config_data.setdefault("hasCompletedOnboarding", True)
-    if safe_key:
-        config_data["primaryApiKey"] = safe_key
+    if primary_api_key:
+        config_data["primaryApiKey"] = primary_api_key
     elif "primaryApiKey" not in config_data:
         config_data["primaryApiKey"] = ""
     config_data["customApiUrl"] = anthropic_base_url
@@ -858,14 +889,29 @@ def _reset_claude_config_to_upstream(safe_key: str, anthropic_base_url: str) -> 
 
 
 def _validate_credentials() -> None:
-    """Fail fast when SAFE_API_KEY or OPENAI_BASE_URL is missing; strict by design (no bypass)."""
-    missing: list[str] = []
-    if not os.environ.get("SAFE_API_KEY"):
-        missing.append("SAFE_API_KEY")
-    if not os.environ.get("OPENAI_BASE_URL"):
-        missing.append("OPENAI_BASE_URL")
-    if not missing:
+    """Fail fast when no usable LLM endpoint/key is configured.
+
+    Accepts either the legacy single-gateway pair (``SAFE_API_KEY`` +
+    ``OPENAI_BASE_URL``) or the split Anthropic/OpenAI entrypoints: at least
+    one base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``) and at least
+    one key (``SAFE_API_KEY`` / ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` /
+    ``ANTHROPIC_AUTH_TOKEN``).
+    """
+    has_url = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL"))
+    has_key = bool(
+        os.environ.get("SAFE_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    )
+    if has_url and has_key:
         return
+
+    missing: list[str] = []
+    if not has_url:
+        missing.append("a base URL (OPENAI_BASE_URL or ANTHROPIC_BASE_URL)")
+    if not has_key:
+        missing.append("an API key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)")
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
     env_status = "present" if env_file.exists() else "not found"
@@ -875,12 +921,13 @@ def _validate_credentials() -> None:
         "Tried loading from:\n"
         "  - shell environment\n"
         f"  - $REPO_ROOT/.env  ({env_status}: {env_file})\n\n"
-        "Fix one of:\n"
-        "  1. Copy .env from a working worktree into this one:\n"
-        f"       cp /path/to/main-worktree/.env {env_file}\n"
-        "  2. Export directly into the shell before re-running:\n"
+        "Configure ONE of:\n"
+        "  1. Single gateway (AMD / LiteLLM-style):\n"
         "       export SAFE_API_KEY=sk-xxxxx\n"
-        "       export OPENAI_BASE_URL=https://gateway.example.com/v1",
+        "       export OPENAI_BASE_URL=https://gateway.example.com/v1\n"
+        "  2. Split entrypoints (native Anthropic + OpenAI):\n"
+        "       export ANTHROPIC_BASE_URL=https://api.anthropic.com  ANTHROPIC_API_KEY=sk-ant-xxx\n"
+        "       export OPENAI_BASE_URL=https://api.openai.com/v1      OPENAI_API_KEY=sk-xxx",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -901,8 +948,21 @@ def _is_placeholder_tracelens_path(value: str) -> bool:
 
 
 def _load_dotenv_fallback() -> None:
-    """Source missing keys from ``$REPO_ROOT/.env`` when SAFE_API_KEY/OPENAI_BASE_URL absent; env always wins."""
-    if os.environ.get("SAFE_API_KEY") and os.environ.get("OPENAI_BASE_URL"):
+    """Source missing vars from ``$REPO_ROOT/.env`` until a usable LLM endpoint+key is present; env always wins.
+
+    Skips loading only when both a base URL (OPENAI_BASE_URL / ANTHROPIC_BASE_URL)
+    and a key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY /
+    ANTHROPIC_AUTH_TOKEN) are already set, so split-entrypoint shells that
+    export only the Anthropic side still pull the missing OpenAI vars from .env.
+    """
+    has_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
+    has_key = (
+        os.environ.get("SAFE_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    )
+    if has_url and has_key:
         return
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
@@ -1264,9 +1324,9 @@ def _emit_preflight_diagnostics(
             "ROCR_VISIBLE_DEVICES)"
         )
     if anthropic_base_url:
-        print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url} (direct to gateway)")
+        print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url}")
     else:
-        print("  ANTHROPIC_BASE_URL  = <unset> — OPENAI_BASE_URL missing; Claude SDK will fail")
+        print("  ANTHROPIC_BASE_URL  = <unset> — no LLM base URL resolved; Claude SDK will fail")
     if args is not None:
         kb_enabled = bool(getattr(args, "cortex_enabled", True))
         pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
@@ -1480,21 +1540,59 @@ def _validate_and_resolve_claude_model(
         )
         sys.exit(2)
 
-    # Catalog probe GETs <base>/models; INFERENCE_OPTIMIZER_CATALOG_PROBE_URL overrides the host.
-    base_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip() or os.environ.get(
-        "OPENAI_BASE_URL", ""
-    )
-    if not base_url and resolved_urls is not None:
-        base_url = resolved_urls[1]
+    # Catalog probe GETs <base>/models. The orchestration model is a Claude
+    # model, so probe the Anthropic side first; if that side has no reachable
+    # catalog (e.g. native api.anthropic.com without a LiteLLM /models route)
+    # fall back to the OpenAI side. INFERENCE_OPTIMIZER_CATALOG_PROBE_URL
+    # overrides the host outright (single probe, no fallback).
+    catalog_ids = None
+    override_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
+    if override_url:
+        api_key = (
+            os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("SAFE_API_KEY", "")
+            or os.environ.get("OPENAI_API_KEY", "")
+        )
+        catalog_ids = _probe_llm_catalog(base_url=override_url, api_key=api_key)
+    else:
+        anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+        openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+        if not anthropic_url and resolved_urls is not None:
+            anthropic_url = resolved_urls[0]
+        if not openai_url and resolved_urls is not None:
+            openai_url = resolved_urls[1]
+        anthropic_key = (
+            os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("SAFE_API_KEY", "")
+        )
+        openai_key = (
+            os.environ.get("OPENAI_API_KEY", "")
+            or os.environ.get("SAFE_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+        )
+        # (url, key) candidates in priority order; skip blanks and dedupe so a
+        # single-gateway deploy (same URL both sides) probes only once.
+        seen_urls: set[str] = set()
+        for cand_url, cand_key in ((anthropic_url, anthropic_key), (openai_url, openai_key)):
+            if not cand_url or cand_url in seen_urls:
+                continue
+            seen_urls.add(cand_url)
+            catalog_ids = _probe_llm_catalog(base_url=cand_url, api_key=cand_key)
+            if catalog_ids is not None:
+                break
 
-    api_key = (
-        os.environ.get("SAFE_API_KEY", "")
-        or os.environ.get("OPENAI_API_KEY", "")
-        or os.environ.get("ANTHROPIC_API_KEY", "")
-    )
-
-    catalog_ids = _probe_llm_catalog(base_url=base_url, api_key=api_key)
     if catalog_ids is None:
+        # #340: a custom-model deploy may sit behind a gateway without a
+        # /models route; don't hard-block — warn and trust the operator id.
+        if allow_custom:
+            print(
+                f"Preflight: WARNING — gateway catalog unreachable; cannot verify "
+                f"--claude-model={chosen!r}. Proceeding under "
+                f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 (trusting the operator id)."
+            )
+            return None
         print(
             "ERROR: gateway catalog unreachable after retries; cannot "
             "verify Claude model availability. Refusing to start.",
@@ -1536,24 +1634,47 @@ def _validate_and_resolve_claude_model(
 
 def _smoke_test_codex_model(
     args: argparse.Namespace,
-    catalog_ids: set[str] | None,
+    resolved_urls: tuple[str, str] | None,
 ) -> None:
     """WARN-only catalog check for ``--codex-model`` (no hard gate); flags typos before Coordinator starts.
+
+    Probes the OpenAI-side catalog independently of the Claude check: in a
+    split-entrypoint deploy the Claude catalog lives on the Anthropic gateway
+    and would not list ``gpt-*``, so reusing it would always false-warn.
 
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads
             ``codex_model`` / ``critic_backend`` / ``kernel_codex`` /
             ``no_kernel``).
-        catalog_ids (set[str] | None): The gateway catalog id set; ``None``
-            skips the check.
+        resolved_urls (tuple[str, str] | None): ``(anthropic_url, openai_url)``
+            from preflight; the OpenAI side is probed for the Codex catalog.
     """
-    if catalog_ids is None:
-        return
     # Codex is needed by the Kernel agent (kernel-codex on) and the critic-agent review path.
     critic_uses_codex = args.critic_backend == "agent"
     needs_codex = critic_uses_codex or (args.kernel_codex and not getattr(args, "no_kernel", False))
     if not needs_codex:
         return
+
+    openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
+    if not openai_url:
+        openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    if not openai_url and resolved_urls is not None:
+        openai_url = resolved_urls[1]
+    openai_key = (
+        os.environ.get("OPENAI_API_KEY", "")
+        or os.environ.get("SAFE_API_KEY", "")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    )
+    catalog_ids = _probe_llm_catalog(base_url=openai_url, api_key=openai_key)
+    if catalog_ids is None:
+        # WARN-only path: don't block startup just because the OpenAI catalog
+        # is unreachable (the Claude gate already validated reachability).
+        print(
+            "Preflight: WARNING — OpenAI-side catalog unreachable; skipping "
+            "--codex-model verification (CodexBackend may fail at first turn)."
+        )
+        return
+
     chosen = (args.codex_model or "").strip()
     if chosen in catalog_ids:
         print(f"Preflight: Codex model {chosen!r} confirmed in gateway catalog")
@@ -1647,9 +1768,9 @@ def _preflight(
 ) -> tuple[str, str] | None:
     """Auto-install missing runtime deps and export auth aliases.
 
-    Credentials fallback → auth aliases → SDK install → ANTHROPIC_BASE_URL resolve + ~/.claude reset →
+    Credentials fallback → auth aliases → SDK install → Anthropic/OpenAI base URL resolve + ~/.claude reset →
     ROCm hygiene → ray/Magpie/InferenceX install → CLI presence checks → diagnostics. Returns
-    ``(anthropic_base_url, openai_base_url)`` or ``None`` when ``OPENAI_BASE_URL`` is missing.
+    ``(anthropic_base_url, openai_base_url)`` or ``None`` when no LLM base URL is configured.
 
     Args:
         args (argparse.Namespace | None): Parsed CLI args, used for the
@@ -1657,7 +1778,7 @@ def _preflight(
 
     Returns:
         tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
-            ``None`` when ``OPENAI_BASE_URL`` is missing.
+            ``None`` when neither base URL is configured.
     """
     _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
@@ -1666,8 +1787,9 @@ def _preflight(
     _validate_credentials()
 
     # --- Auth alias export ---
+    # SAFE_API_KEY only FILLS gaps now: an operator who set a provider-specific
+    # key (OPENAI_API_KEY / ANTHROPIC_API_KEY) for split entrypoints keeps it.
     safe_key = os.environ.get("SAFE_API_KEY", "")
-    base_url = os.environ.get("OPENAI_BASE_URL", "")
     if safe_key:
         for alias in (
             "OPENAI_API_KEY",
@@ -1678,41 +1800,9 @@ def _preflight(
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
         ):
-            if os.environ.get(alias) != safe_key:
+            if not os.environ.get(alias):
                 os.environ[alias] = safe_key
-                print(f"Preflight: refreshed {alias} from SAFE_API_KEY")
-    # OOB / GEAK / LLM_API_BASE default to the upstream gateway URL, but an
-    # INTENTIONAL operator override is preserved. This matters for #521: GEAK
-    # runs in a separate network namespace that frequently cannot route to the
-    # gateway directly, while the orchestrator reaches it via a host-local
-    # reverse tunnel. Pointing GEAK_BASE_URL (or OOB_BASE_URL) at that tunnel
-    # only works if preflight does NOT clobber the operator's value back to the
-    # direct gateway URL. We still force-rewrite the known-stale legacy
-    # auth-proxy URL (127.0.0.1:4002) so leftovers from a removed component
-    # can never reach the CLIs.
-    if base_url:
-        for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
-            current = os.environ.get(alias, "").strip()
-            if current and current != base_url and not _is_stale_proxy_url(current):
-                # Operator pinned a distinct, non-stale endpoint (e.g. a tunnel
-                # at 127.0.0.1:18444 for #521); respect it.
-                print(f"Preflight: {alias} kept at {current} (operator override; not forced to gateway)")
-                continue
-            if os.environ.get(alias) != base_url:
-                prev = os.environ.get(alias, "")
-                os.environ[alias] = base_url
-                why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "direct to gateway"
-                print(f"Preflight: {alias} {prev or '<unset>'} -> {base_url} ({why})")
-
-    # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
-    # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the resolved
-    # GEAK_BASE_URL above (operator tunnel override, or the gateway default)
-    # actually reaches the kernel agent instead of a stale install-time URL.
-    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
-    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
-    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
-        print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
-
+                print(f"Preflight: filled {alias} from SAFE_API_KEY")
     # --- Resolve install interpreters ---
     from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
 
@@ -1727,24 +1817,62 @@ def _preflight(
     # Must precede Coordinator import (ClaudeBackend lazy-imports the SDK); sys.executable matches imports.
     _ensure_python_sdks(sys.executable, pip_extra)
 
-    # --- Resolve ANTHROPIC_BASE_URL + reset ~/.claude/config.json ---
-    # Force-override both URL vars so stale 127.0.0.1:4002 leftovers can't reach the CLIs.
+    # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) ---
+    # Explicit operator values on each side are preserved; a missing side falls
+    # back to the other (legacy single-gateway stays one URL). We still rewrite
+    # known-stale 127.0.0.1:4002 leftovers so they can't reach the CLIs.
     resolved_urls: tuple[str, str] | None = None
-    if base_url:
-        anthropic_url = _derive_anthropic_base_url(base_url)
-        orig_anthropic = os.environ.get("ANTHROPIC_BASE_URL", "")
-        orig_openai = os.environ.get("OPENAI_BASE_URL", "")
-        for var, want, prev in (
-            ("ANTHROPIC_BASE_URL", anthropic_url, orig_anthropic),
-            ("OPENAI_BASE_URL", base_url, orig_openai),
+    anthropic_url, openai_url = _resolve_llm_endpoints()
+    if anthropic_url or openai_url:
+        for var, want in (
+            ("ANTHROPIC_BASE_URL", anthropic_url),
+            ("OPENAI_BASE_URL", openai_url),
         ):
-            if os.environ.get(var) != want:
+            if not want:
+                continue
+            prev = os.environ.get(var, "")
+            if prev != want:
+                why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "resolved endpoint"
                 os.environ[var] = want
-                print(f"Preflight: {var} {prev or '<unset>'} -> {want} (direct to gateway)")
-        _reset_claude_config_to_upstream(safe_key, anthropic_url)
-        resolved_urls = (anthropic_url, base_url)
+                print(f"Preflight: {var} {prev or '<unset>'} -> {want} ({why})")
+        # Claude CLI primary key: prefer the explicit Anthropic-side key so a
+        # split-entrypoint deploy auths Claude with its own key; SAFE_API_KEY
+        # (single-gateway) is the fallback.
+        claude_primary_key = (
+            os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or safe_key
+        )
+        _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
+        resolved_urls = (anthropic_url, openai_url)
+
+        # OOB / GEAK / LLM_API_BASE default to the resolved OpenAI-compatible
+        # gateway URL, but an INTENTIONAL operator override is preserved (#521:
+        # GEAK runs in a separate network namespace reached via a host-local
+        # reverse tunnel). We still force-rewrite the known-stale legacy
+        # auth-proxy URL (127.0.0.1:4002) so leftovers can't reach the CLIs.
+        gateway_url = openai_url or anthropic_url
+        if gateway_url:
+            for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+                current = os.environ.get(alias, "").strip()
+                if current and current != gateway_url and not _is_stale_proxy_url(current):
+                    print(f"Preflight: {alias} kept at {current} (operator override; not forced to gateway)")
+                    continue
+                if os.environ.get(alias) != gateway_url:
+                    prev = os.environ.get(alias, "")
+                    os.environ[alias] = gateway_url
+                    why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "direct to gateway"
+                    print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} ({why})")
+
+        # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
+        # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the
+        # resolved GEAK_BASE_URL above actually reaches the kernel agent.
+        geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
+        geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
+        if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
+            print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
     else:
-        print("Preflight: WARNING — OPENAI_BASE_URL unset; Claude/Codex SDKs will fail at first call")
+        print("Preflight: WARNING — no LLM base URL set; Claude/Codex SDKs will fail at first call")
 
     # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
     _unset_hip_visible_devices()
@@ -2839,8 +2967,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     resolved_urls = _preflight(args)
 
     # Hard-gate Claude model before any session work (mutates args.claude_model on fallback; sys.exit(2) on failure).
-    catalog_ids = _validate_and_resolve_claude_model(args, resolved_urls)
-    _smoke_test_codex_model(args, catalog_ids)
+    _validate_and_resolve_claude_model(args, resolved_urls)
+    # Codex smoke probes the OpenAI side independently (split entrypoints).
+    _smoke_test_codex_model(args, resolved_urls)
 
     # `--resume-from <path>` implies `--resume` (operator convenience).
     if args.resume_from and not args.resume:
