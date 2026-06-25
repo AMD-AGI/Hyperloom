@@ -9,7 +9,7 @@ the Critic, and dispatches this executor per approved candidate to::
   1. Fetch the unified diff (explicit ``params.patches`` or
      ``curl candidate.diff_url``; apply happens in the live source root).
   2. Snapshot pre-apply HEAD SHA so REVERT can ``git reset --hard`` back
-     without disturbing prior KEEP commits (PR-327 P1.c).
+     without disturbing prior KEEP commits.
   3. Apply via ``git apply`` (single integration channel).
   4. Bench the patched server (``run_grid([GridVariant])``, size=1).
   5. KEEP commits to the live tree (next candidate stacks); REVERT runs
@@ -30,7 +30,7 @@ Inputs (``ctx.task.params``)::
         the executor curls ``candidate.diff_url`` into the per-task
         workspace and applies that.
     keep_threshold_pct (float, optional) — default DEFAULT_KEEP_THRESHOLD_PCT
-        (1.0 after D1 alignment; imported from integrate_patch).
+        (1.0; imported from integrate_patch).
     base_tput (float, optional) — baseline throughput; falls back to
         ``SharedState.baseline_tput``.
     accuracy_baseline (float, optional) — forwarded to the accuracy gate.
@@ -66,6 +66,7 @@ from typing import Any
 
 from ...session_paths import runs_dir
 from ._accuracy_gate import accuracy_passed, parse_eval_results
+from ._git import _run_git, _run_git_cp
 from ._grid_runner import (
     GridVariant,
     VariantResult,
@@ -114,17 +115,9 @@ def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
         A ``(sha, stderr)`` tuple; ``sha`` is ``None`` on failure with the
         error text in ``stderr``.
     """
-    cmd = ["git", "-C", str(framework_root), "rev-parse", "HEAD"]
-    try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return None, f"git rev-parse spawn failed: {exc!r}"
+    cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
+    if cp is None:
+        return None, "git rev-parse spawn failed"
     if cp.returncode != 0:
         return None, cp.stderr.strip()
     return cp.stdout.strip() or None, ""
@@ -147,30 +140,14 @@ def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
         A ``(ok, stderr)`` tuple; ``ok`` is False on failure with the error
         text in ``stderr``.
     """
-    cmd = ["git", "-C", str(framework_root), "reset", "--hard", sha]
-    try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, f"git reset --hard spawn failed: {exc!r}"
+    cp = _run_git_cp(["-C", str(framework_root), "reset", "--hard", sha], timeout=60.0)
+    if cp is None:
+        return False, "git reset --hard spawn failed"
     if cp.returncode != 0:
         return False, cp.stderr.strip()
-    clean_cmd = ["git", "-C", str(framework_root), "clean", "-fd"]
-    try:
-        cp2 = subprocess.run(
-            clean_cmd,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, f"git clean -fd spawn failed: {exc!r}"
+    cp2 = _run_git_cp(["-C", str(framework_root), "clean", "-fd"], timeout=60.0)
+    if cp2 is None:
+        return False, "git clean -fd spawn failed"
     if cp2.returncode != 0:
         return False, (cp2.stderr or "").strip()
     return True, ""
@@ -193,41 +170,27 @@ def _git_commit_keep(
         A ``(new_sha, stderr)`` tuple; ``new_sha`` is ``None`` on failure with
         the error text in ``stderr``.
     """
-    add = ["git", "-C", str(framework_root), "add", "-A"]
-    try:
-        cp_add = subprocess.run(
-            add,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return None, f"git add -A spawn failed: {exc!r}"
+    cp_add = _run_git_cp(["-C", str(framework_root), "add", "-A"], timeout=60.0)
+    if cp_add is None:
+        return None, "git add -A spawn failed"
     if cp_add.returncode != 0:
         return None, cp_add.stderr.strip()
-    cmd = [
-        "git",
-        "-c",
-        "user.email=framework-pr@hyperloom.local",
-        "-c",
-        "user.name=hyperloom framework_pr",
-        "-C",
-        str(framework_root),
-        "commit",
-        "-m",
-        message,
-    ]
-    try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return None, f"git commit spawn failed: {exc!r}"
+    cp = _run_git_cp(
+        [
+            "-c",
+            "user.email=framework-pr@hyperloom.local",
+            "-c",
+            "user.name=hyperloom framework_pr",
+            "-C",
+            str(framework_root),
+            "commit",
+            "-m",
+            message,
+        ],
+        timeout=60.0,
+    )
+    if cp is None:
+        return None, "git commit spawn failed"
     if cp.returncode != 0:
         return None, cp.stderr.strip()
     new_sha, err = _git_head_sha(framework_root)
@@ -303,37 +266,6 @@ def _fetch_diff_to_path(
     if not dest.exists() or dest.stat().st_size == 0:
         return False, "curl wrote empty / missing file"
     return True, ""
-
-
-def _run_git(
-    args: list[str],
-    *,
-    timeout: float = 120.0,
-) -> tuple[bool, str, str]:
-    """Run ``git <args>`` capturing output. Returns ``(ok, stdout, stderr)``.
-    Never raises (spawn / timeout failures map to ``(False, "", reason)``).
-
-    Args:
-        args (list[str]): The git arguments (without the leading ``git``).
-        timeout (float): The subprocess timeout in seconds.
-
-    Returns:
-        tuple[bool, str, str]: ``(ok, stdout, stderr)`` where ``ok`` reflects a
-            zero return code.
-    """
-    try:
-        cp = subprocess.run(
-            ["git", *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, "", f"git spawn/timeout failed: {exc!r}"
-    if cp.returncode != 0:
-        return False, cp.stdout or "", (cp.stderr or "").strip()
-    return True, cp.stdout or "", cp.stderr or ""
 
 
 def _normalize_repo_id(url_or_slug: str) -> str:
@@ -973,7 +905,7 @@ class FrameworkPrExecutor:
             "workspace": str(output_root),
         })
 
-    # KB writeback (D2, Arbor-into-Hyperloom)
+    # KB writeback: append FRAMEWORK_PR outcome to lessons.jsonl
     async def _write_kb_record(
         self,
         *,

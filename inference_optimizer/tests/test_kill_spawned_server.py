@@ -289,13 +289,14 @@ def test_server_log_shows_death_detects_marker(tmp_path):
     """A ``server.log`` containing a terminal-init marker reads as dead;
     a healthy / missing log reads as alive."""
     log_path = tmp_path / "server.log"
-    assert _server_log_shows_death(str(log_path)) is False  # missing → alive
+    assert _server_log_shows_death(str(log_path)) is None  # missing → alive
     log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")
-    assert _server_log_shows_death(str(log_path)) is False  # healthy → alive
+    assert _server_log_shows_death(str(log_path)) is None  # healthy → alive
     log_path.write_text(
         "ERROR core.py Exception: WorkerProc initialization failed due to an exception in a background process.\n"
     )
-    assert _server_log_shows_death(str(log_path)) is True
+    # dead → returns the matched marker (truthy) rather than a bare bool
+    assert _server_log_shows_death(str(log_path)) is not None
 
 
 def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
@@ -309,7 +310,7 @@ def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
         "(APIServer pid=16160) RuntimeError: Engine core initialization failed. "
         "See root cause above. Failed core proc(s): {}\n"
     )
-    assert _server_log_shows_death(str(log_path)) is True
+    assert _server_log_shows_death(str(log_path)) is not None
 
 
 def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
