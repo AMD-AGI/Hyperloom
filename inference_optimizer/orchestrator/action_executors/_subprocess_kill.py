@@ -825,6 +825,14 @@ def _communicate_with_soft_deadline(
         detok_stall_grace_sec is not None and float(detok_stall_grace_sec) > 0.0
     )
     soft_active = soft_deadline_sec is not None and float(soft_deadline_sec) > 0.0
+    # The soft deadline measures the warm "hot-client" benchmark phase only, so
+    # its anchor is apples-to-apples with the warm client-only baseline anchor
+    # the caller derives the deadline from. When ``server_log_path`` is set we
+    # scan for the server-ready marker and only start the soft-deadline clock
+    # once the server is ready, excluding the (arbitrarily long) cold boot /
+    # warmup / aiter recompile that precedes "ready". Without a server log to
+    # scan we fall back to measuring from subprocess launch.
+    soft_anchor_on_ready = soft_active and bool(server_log_path)
     if capture is None and not soft_active and not watchdog_active and not stall_active:
         return proc.communicate(timeout=hard_timeout)
     if capture is not None and not soft_active and not watchdog_active and not stall_active:
@@ -847,11 +855,19 @@ def _communicate_with_soft_deadline(
     last_activity_at: float | None = None
     while True:
         elapsed = time.monotonic() - start
-        if soft_active and deadline_sec is not None:
-            if deadline_sec - elapsed <= 0.0:
+        # Soft-deadline elapsed: measured from the server-ready marker (the warm
+        # hot-client phase) when anchoring on ready, else from subprocess launch.
+        # Before the server is ready the soft gate is dormant so the cold boot /
+        # warmup never trips it; only the hard ``hard_timeout`` cap gates pre-ready.
+        if soft_anchor_on_ready:
+            soft_elapsed = (time.monotonic() - server_ready_since) if server_ready_since is not None else None
+        else:
+            soft_elapsed = elapsed
+        if soft_active and deadline_sec is not None and soft_elapsed is not None:
+            if deadline_sec - soft_elapsed <= 0.0:
                 raise _SoftDeadlineExceeded(
                     deadline_sec=deadline_sec,
-                    elapsed_sec=elapsed,
+                    elapsed_sec=soft_elapsed,
                 )
         if watchdog_active and grace_sec is not None:
             death_marker = _server_log_shows_death(server_log_path)  # type: ignore[arg-type]
@@ -866,7 +882,10 @@ def _communicate_with_soft_deadline(
                     )
             else:
                 dead_marker_since = None
-        if stall_active and stall_grace_sec is not None:
+        # Scan server.log for the ready marker when either the stall watchdog
+        # or the ready-anchored soft deadline needs it. ``server_ready_since``
+        # is the shared anchor for both gates.
+        if (stall_active and stall_grace_sec is not None) or soft_anchor_on_ready:
             prev_offset = stall_log_offset
             stall_log_offset, saw_ready, _saw_progress = _scan_server_log_increment(
                 server_log_path,  # type: ignore[arg-type]
@@ -884,17 +903,18 @@ def _communicate_with_soft_deadline(
                 last_activity_at = now
             # Armed only once the server is ready; pre-ready weight loading is
             # slow, not stalled, and must never trip this gate.
-            if server_ready_since is not None and last_activity_at is not None:
-                if now - last_activity_at >= stall_grace_sec:
-                    raise _ServerStalledDetected(
-                        grace_sec=stall_grace_sec,
-                        elapsed_sec=elapsed,
-                    )
+            if stall_active and stall_grace_sec is not None:
+                if server_ready_since is not None and last_activity_at is not None:
+                    if now - last_activity_at >= stall_grace_sec:
+                        raise _ServerStalledDetected(
+                            grace_sec=stall_grace_sec,
+                            elapsed_sec=elapsed,
+                        )
         # Slice bounded by every active remaining window so the right gate
         # fires first; the child can still finish inside any slice.
         slice_sec = poll_interval
-        if soft_active and deadline_sec is not None:
-            slice_sec = min(slice_sec, deadline_sec - elapsed)
+        if soft_active and deadline_sec is not None and soft_elapsed is not None:
+            slice_sec = min(slice_sec, deadline_sec - soft_elapsed)
         if hard_timeout is not None:
             hard_remaining = float(hard_timeout) - elapsed
             if hard_remaining <= 0.0:

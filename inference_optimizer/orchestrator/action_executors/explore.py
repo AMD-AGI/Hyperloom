@@ -899,6 +899,10 @@ class ExploreExecutor:
             if (use_warm_decision and baseline_warm_runtime_sec > 0)
             else baseline_runtime_sec
         )
+        # The soft deadline is anchored on the warm client-only measure time and
+        # is enforced from the server-ready marker (see run_with_session_kill), so
+        # the measured runtime and this anchor are both the warm client phase —
+        # apples-to-apples, with cold boot / warmup excluded from both sides.
         if decision_anchor_sec > 0 and overtime_kill_ratio > 0:
             decision_deadline_sec: float | None = decision_anchor_sec * overtime_kill_ratio
         else:
