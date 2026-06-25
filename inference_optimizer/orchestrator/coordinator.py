@@ -8101,21 +8101,13 @@ class Coordinator:
         backend = _resolve_gemm_tuning_backend({})
 
         if backend == "forge":
-            # forge-gemm-tune supports: any MoE model, FP8 dense,
-            # bf16/fp8/fp4 precision, sglang/vllm frameworks.
-            is_moe = bool(
-                getattr(ss, "is_moe", False)
-                or getattr(ss, "model_is_moe", False)
-                or "moe" in str(getattr(ss, "model_type", "") or "").lower()
-                or "moe" in str(getattr(ss, "model_class", "") or "").lower()
-            )
-            eligible = (
-                framework in ("sglang", "vllm", "vllm-aiter")
-                and (
-                    is_moe
-                    or precision in ("fp8", "fp4", "mxfp4")
-                )
-            )
+            # forge-gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
+            # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
+            # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
+            # precision/MoE here, or a category that can optimize gets silently
+            # blocked. Gate only on a supported framework and let forge itself
+            # return no_improvement when a shape can't be beaten.
+            eligible = framework in ("sglang", "vllm", "vllm-aiter")
         else:
             # GEAK: legacy FP8 + SGLang only.
             eligible = (precision == "fp8" and framework == "sglang")

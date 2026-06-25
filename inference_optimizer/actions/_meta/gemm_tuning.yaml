@@ -32,6 +32,8 @@ description: >
 pipeline_phase: deep
 typical_runtime_min: 20.0
 applicable_when:
-  - "framework in ('sglang', 'vllm')"
-  - "(precision == 'fp8' or is_moe or precision in ('bf16', 'fp4'))"
+  # forge handles any precision (bf16/fp16/fp8/fp4/mxfp4), dense or MoE; do not
+  # pre-filter on precision/MoE (real e2e KEEPs include bf16 dense). Gate only
+  # on a supported framework + the deep phase.
+  - "framework in ('sglang', 'vllm', 'vllm-aiter')"
   - "operator_bottleneck_identified or phase == 'deep'"
