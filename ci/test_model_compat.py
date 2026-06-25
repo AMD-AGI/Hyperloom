@@ -258,6 +258,19 @@ def test_unsupported_arch_deepseek_v32_by_model_type():
                     "quantization_config": {"quant_method": "fp8"}}) == "unsupported_arch"
 
 
+def test_unsupported_arch_gemma4_by_model_type():
+    assert _reason({"architectures": ["Gemma4ForCausalLM"],
+                    "model_type": "gemma4",
+                    "max_position_embeddings": 32768}) == "unsupported_arch"
+
+
+def test_empty_quant_method_filtered():
+    assert _reason({"architectures": ["LlamaForCausalLM"],
+                    "model_type": "llama",
+                    "max_position_embeddings": 4096,
+                    "quantization_config": {"quant_method": ""}}) == "quant_empty_method"
+
+
 def test_unsupported_arch_qwen3_5_moe_text_via_text_config():
     # Qwen3.6 MoE carries qwen3_5_moe_text as text_config.model_type; top-level
     # model_type is qwen3_5_moe. The rule must catch it via text_config.
@@ -435,6 +448,23 @@ def test_tokenizer_present_is_kept(tmp_path):
     mdir = _mk_dir(tmp_path, ["config.json", "model.safetensors", "tokenizer.json"])
     assert _reason({"architectures": ["Qwen2ForCausalLM"],
                     "max_position_embeddings": 32768}, model_dir=mdir) is None
+
+
+def test_llama_sentencepiece_without_metadata_filtered(tmp_path):
+    mdir = _mk_dir(tmp_path, ["config.json", "pytorch_model.bin", "tokenizer.model"])
+    assert _reason({"architectures": ["LlamaForCausalLM"],
+                    "model_type": "llama",
+                    "max_position_embeddings": 4096}, model_dir=mdir) == "tokenizer_metadata_gap"
+
+
+def test_llama_sentencepiece_with_tokenizer_config_kept(tmp_path):
+    mdir = _mk_dir(
+        tmp_path,
+        ["config.json", "pytorch_model.bin", "tokenizer.model", "tokenizer_config.json"],
+    )
+    assert _reason({"architectures": ["LlamaForCausalLM"],
+                    "model_type": "llama",
+                    "max_position_embeddings": 4096}, model_dir=mdir) is None
 
 
 def test_no_weights_does_not_flag_missing_tokenizer(tmp_path):
