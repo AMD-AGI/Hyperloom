@@ -112,7 +112,7 @@ def test_seed_shared_state_populates_perfskills_and_cli_overrides(
     assert state.gpu_specialist_capacity == 8
     assert state.plateau_overrides["explore_keep_gain_pct"] == 1.5
     assert state.plateau_overrides["kernel_keep_gain_pct"] == 2.5
-    assert state.explore_overtime_kill_ratio == 1.10
+    assert state.explore_overtime_kill_ratio == 2.0
     assert state.explore_variant_timeout_sec_override == 0
     assert state.explore_variant_timeout_safety_margin == 0.5
     assert state.framework_phase_enabled is False

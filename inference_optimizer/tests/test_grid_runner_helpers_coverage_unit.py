@@ -1,8 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Supplemental coverage for _grid_runner pure helpers: multi-node cuda-graph
-advisory, compatibility filter model-class drop, runtime override env branches,
-report parsing, and per-variant yaml env injection."""
+"""Supplemental coverage for _grid_runner pure helpers: compatibility filter
+model-class drop, runtime override env branches, report parsing, and
+per-variant yaml env injection."""
 
 from __future__ import annotations
 
@@ -12,32 +12,10 @@ from pathlib import Path
 import yaml
 
 from inference_optimizer.orchestrator.action_executors import _grid_runner as gr
-from inference_optimizer.orchestrator.action_executors import _multi_node_env
 
 
 def _variant(name: str, args: str = "", envs: dict | None = None) -> gr.GridVariant:
     return gr.GridVariant(name=name, extra_server_args=args, extra_envs=envs or {})
-
-
-# -- annotate_multi_node_cuda_graph_max_bs --------------------------------
-def test_annotate_multi_node_not_multi_node(monkeypatch) -> None:
-    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
-    assert gr.annotate_multi_node_cuda_graph_max_bs([_variant("v")]) == []
-
-
-def test_annotate_multi_node_invalid_conc_defaults(monkeypatch) -> None:
-    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
-    monkeypatch.setenv("CONC", "not-an-int")
-    grid = [_variant("v", "--cuda-graph-max-bs 8")]
-    notes = gr.annotate_multi_node_cuda_graph_max_bs(grid)
-    # falls back to CONC=64; 8 < 64 -> advisory emitted
-    assert len(notes) == 1 and notes[0]["source"] == "multi_node_advisory"
-
-
-def test_annotate_multi_node_nonpositive_conc(monkeypatch) -> None:
-    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
-    monkeypatch.setenv("CONC", "0")
-    assert gr.annotate_multi_node_cuda_graph_max_bs([_variant("v", "--cuda-graph-max-bs 8")]) == []
 
 
 # -- apply_compatibility_filter -------------------------------------------

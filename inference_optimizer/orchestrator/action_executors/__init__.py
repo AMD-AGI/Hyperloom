@@ -7,7 +7,6 @@ SubAgentRunner when a queued task's ``kind`` matches its registered name.
 """
 
 from .baseline import (
-    BASELINE_DEFAULT_CONFIG,
     BaselineExecutor,
     baseline_executor,
 )
@@ -31,7 +30,6 @@ from .target_analysis import TargetAnalysisExecutor
 from .recover import RecoverExecutor, recover_executor
 
 __all__ = [
-    "BASELINE_DEFAULT_CONFIG",
     "BaselineExecutor",
     "ConcSweepExecutor",
     "DEFAULT_CONC_VALUES",

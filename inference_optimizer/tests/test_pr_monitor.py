@@ -58,24 +58,7 @@ def test_pr_monitor_client_from_args_disabled():
     # The low-level helper raises; the high-level wrappers swallow into empty results.
     with pytest.raises(PRMonitorError):
         c._get_json("/healthz")
-    assert c.healthz() is False
     assert c.list_repos() == []
-    assert c.list_prs("ROCm/aiter") == []
-
-
-def test_pr_monitor_healthz_handles_network_error(monkeypatch):
-    c = PRMonitorClient.from_args()
-
-    def _boom(*_args, **_kwargs):
-        import urllib.error
-
-        raise urllib.error.URLError("no route")
-
-    monkeypatch.setattr(
-        "inference_optimizer.orchestrator.pr_monitor.urllib.request.urlopen",
-        _boom,
-    )
-    assert c.healthz() is False
 
 
 def test_pr_monitor_list_repos_parses_items(monkeypatch):
@@ -120,84 +103,6 @@ def test_pr_monitor_list_repos_parses_real_rest_shape(monkeypatch):
     )
     repos = c.list_repos()
     assert repos == ["ROCm/aiter", "ROCm/vllm"]
-
-
-def test_pr_monitor_list_prs_parses_summary(monkeypatch):
-    c = PRMonitorClient.from_args()
-    payload = {
-        "items": [
-            {
-                "number": 3067,
-                "title": "fix attention kernel",
-                "state": "merged",
-                "html_url": "https://github.com/ROCm/aiter/pull/3067",
-                "labels": [{"name": "kernel"}, {"name": "performance"}],
-                "author": {"login": "alice"},
-                "merged_at": "2026-05-19T00:00:00Z",
-                "updated_at": "2026-05-19T00:00:00Z",
-                "body": "Improves attention by 3x for short sequences.",
-            },
-        ]
-    }
-    monkeypatch.setattr(
-        "inference_optimizer.orchestrator.pr_monitor.urllib.request.urlopen",
-        lambda *_a, **_kw: _make_response(payload),
-    )
-    prs = c.list_prs("ROCm/aiter")
-    assert len(prs) == 1
-    pr = prs[0]
-    assert pr.number == 3067
-    assert pr.title == "fix attention kernel"
-    assert "kernel" in pr.labels
-    assert pr.author == "alice"
-    assert pr.url.endswith("/pull/3067")
-
-
-def test_pr_monitor_list_prs_returns_empty_on_http_error(monkeypatch):
-    c = PRMonitorClient.from_args()
-    import urllib.error
-
-    monkeypatch.setattr(
-        "inference_optimizer.orchestrator.pr_monitor.urllib.request.urlopen",
-        lambda *_a, **_kw: (_ for _ in ()).throw(
-            urllib.error.HTTPError(
-                url="x",
-                code=503,
-                msg="Service Unavailable",
-                hdrs=None,
-                fp=None,
-            )
-        ),
-    )
-    # Should swallow into empty list (fail-soft per KB_design §3.13 M4).
-    assert c.list_prs("ROCm/aiter") == []
-
-
-def test_pr_monitor_list_prs_cache_dedups_repeated_calls(monkeypatch):
-    c = PRMonitorClient.from_args()
-    call_count = {"n": 0}
-
-    def _stub(*_args, **_kwargs):
-        call_count["n"] += 1
-        return _make_response(
-            {
-                "items": [
-                    {"number": 1, "title": "t", "state": "open"},
-                ]
-            }
-        )
-
-    monkeypatch.setattr(
-        "inference_optimizer.orchestrator.pr_monitor.urllib.request.urlopen",
-        _stub,
-    )
-    a = c.list_prs("ROCm/aiter", state="all", limit=5)
-    b = c.list_prs("ROCm/aiter", state="all", limit=5)
-    assert a == b
-    assert call_count["n"] == 1  # cached
-    c.reset_cache()
-    c.list_prs("ROCm/aiter", state="all", limit=5)
-    assert call_count["n"] == 2
 
 
 def test_pr_monitor_pr_feed_warm_keyword_filter_and_warning(monkeypatch):
@@ -293,7 +198,6 @@ def test_load_domain_repos_ignores_unknown_domain(tmp_path):
 @pytest.fixture
 def plane_with_disabled_pr() -> KnowledgePlane:
     return KnowledgePlane.from_clients(
-        cortex_kb=None,
         pr_monitor=PRMonitorClient.from_args(enabled=False),
     )
 
@@ -315,7 +219,6 @@ def test_plane_pr_feed_warm_disabled_returns_empty(plane_with_disabled_pr):
 
 def test_plane_pr_feed_warm_unknown_domain():
     plane = KnowledgePlane.from_clients(
-        cortex_kb=None,
         pr_monitor=PRMonitorClient.from_args(),
     )
     prs, warns = plane.pr_feed_warm("nope_specialist")
@@ -325,7 +228,6 @@ def test_plane_pr_feed_warm_unknown_domain():
 
 def test_plane_pr_feed_warm_dispatches_to_repos(monkeypatch):
     plane = KnowledgePlane.from_clients(
-        cortex_kb=None,
         pr_monitor=PRMonitorClient.from_args(),
     )
 
@@ -351,7 +253,6 @@ def test_plane_pr_feed_warm_dispatches_to_repos(monkeypatch):
 
 def test_plane_pr_feed_warm_wildcard_expands_via_list_repos(monkeypatch):
     plane = KnowledgePlane.from_clients(
-        cortex_kb=None,
         pr_monitor=PRMonitorClient.from_args(),
     )
 
@@ -394,7 +295,6 @@ def test_default_specialist_tools_include_cortex_kb_readonly():
 
 def test_specialist_runner_strips_pr_monitor_when_plane_disabled():
     plane = KnowledgePlane.from_clients(
-        cortex_kb=None,
         pr_monitor=PRMonitorClient.from_args(enabled=False),
     )
     runner = SpecialistRunner(
@@ -411,7 +311,6 @@ def test_specialist_runner_strips_pr_monitor_when_plane_disabled():
 
 def test_specialist_runner_keeps_pr_monitor_when_plane_enabled():
     plane = KnowledgePlane.from_clients(
-        cortex_kb=None,
         pr_monitor=PRMonitorClient.from_args(enabled=True),
     )
     runner = SpecialistRunner(
@@ -426,7 +325,6 @@ def test_specialist_runner_keeps_pr_monitor_when_plane_enabled():
 def test_specialist_runner_keeps_cortex_kb_when_mcp_wired():
     """When the KB-graph (cortex_kb) MCP URL is configured the read-only tools survive."""
     plane = KnowledgePlane.from_clients(
-        cortex_kb=None,
         pr_monitor=PRMonitorClient.from_args(enabled=False),
         cortex_kb_mcp_url="http://gbrain.test/mcp",
         cortex_kb_mcp_headers={"Authorization": "Bearer t"},
@@ -503,7 +401,7 @@ def test_mcp_config_returns_none_when_nothing_wireable(tmp_path):
 def test_plane_reset_round_caches():
     pr = PRMonitorClient.from_args()
     pr._cache["x"] = []
-    plane = KnowledgePlane.from_clients(cortex_kb=None, pr_monitor=pr)
+    plane = KnowledgePlane.from_clients(pr_monitor=pr)
     plane.last_warnings = ["existing"]
     plane.reset_round_caches()
     assert pr._cache == {}

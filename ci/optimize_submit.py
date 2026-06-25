@@ -1828,6 +1828,22 @@ def process_model(
             )
             return rec
 
+        # Online fallback for missing_tokenizer: the local rule above only fires
+        # once the model dir is populated with weights. Not-yet-cached repos that
+        # ship weights but omit tokenizer.* files would otherwise slip through and
+        # fail to serve. Probe the HF file listing directly (HF_TOKEN/HF_TOKEN_2)
+        # so they are skipped before a Claw session is created.
+        hf_tokens = [t for t in (os.environ.get("HF_TOKEN", ""),
+                                  os.environ.get("HF_TOKEN_2", "")) if t]
+        tok_reason = model_compat.hf_missing_tokenizer(repo_id, hf_tokens)
+        if tok_reason:
+            rec.status = "skipped"
+            rec.error = f"{tok_reason}: weights present on HF but no tokenizer files"
+            log.warning(
+                "[%s] PRE-FLIGHT FILTERED — rule=%s — skipping: NOT submitting, "
+                "no Claw session created", repo_id, tok_reason)
+            return rec
+
     framework = overrides.get("framework") or (detected.framework if detected else "")
     precision = overrides.get("precision") or (detected.precision if detected else "FP8")
     tp = overrides.get("tp") or (detected.tp if detected else 1)
