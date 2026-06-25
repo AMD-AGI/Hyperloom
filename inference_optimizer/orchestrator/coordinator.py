@@ -8984,6 +8984,17 @@ class Coordinator:
             if digest:
                 params["substrate_levers"] = digest
 
+        # CONFLICT GUARDRAIL — deterministic dual-read between the substrate's
+        # directional levers (above) and the gbrain warm-start recipe: ask the
+        # substrate to judge the recipe's champion config and flag any lever its
+        # measured evidence contradicts. Emits a ``kb_guardrail`` trace span and
+        # folds the digest into params so the specialist reuses it (one assess
+        # call per focus). Advisory only, fail-soft — never blocks dispatch.
+        if "substrate_dual_read" not in params:
+            dual_read = self._warm_substrate_dual_read(params)
+            if dual_read:
+                params["substrate_dual_read"] = dual_read
+
         # proposal_set cap into params so SpecialistRunner reads it; setdefault lets a delegate shrink it.
         from inference_optimizer.orchestrator.policy import (
             DEFAULT_SPECIALIST_MAX_PROPOSALS,
@@ -9053,6 +9064,90 @@ class Coordinator:
 
         cache[key] = digest
         return digest
+
+    def _warm_substrate_dual_read(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Cross-check the substrate levers against the gbrain warm recipe.
+
+        The coordinator-side conflict guardrail: reuses the warmed
+        ``substrate_levers`` + ``warm_start_recipe`` already on ``params`` and
+        asks the substrate to assess the recipe's champion config, then emits a
+        ``kb_guardrail`` Langfuse span (flagging any conflicting levers) and
+        returns the digest for the specialist to reuse. Cached per focus so a
+        session's repeated dispatches hit the network once.
+
+        Best-effort: returns ``{}`` when no source carries signal or anything
+        fails. Never raises, never blocks dispatch.
+
+        Args:
+            params: The specialist task params (read ``substrate_levers`` /
+                ``warm_start_recipe``; not mutated here).
+
+        Returns:
+            dict[str, Any]: The dual-read digest, or ``{}`` on miss/error.
+        """
+        substrate_levers = params.get("substrate_levers") or {}
+        warm_start_recipe = params.get("warm_start_recipe") or {}
+        if not substrate_levers and not warm_start_recipe:
+            return {}
+
+        focus = self._substrate_focus(params)
+        cache: dict[str, dict[str, Any]] = getattr(self, "_substrate_dual_read_cache", None)
+        if cache is None:
+            cache = {}
+            self._substrate_dual_read_cache = cache
+        key = json.dumps(focus, sort_keys=True)
+        if key in cache:
+            return cache[key]
+
+        digest: dict[str, Any] = {}
+        try:
+            from .substrate_dual_read import compute_dual_read
+
+            digest = compute_dual_read(
+                substrate_levers=substrate_levers,
+                warm_start_recipe=warm_start_recipe,
+            )
+        except Exception as exc:  # noqa: BLE001 — advisory, never a gate
+            log.warning("specialist warmup: substrate dual-read failed: %r", exc)
+            digest = {}
+
+        if digest:
+            self._trace_substrate_guardrail(digest)
+        cache[key] = digest
+        return digest
+
+    def _trace_substrate_guardrail(self, digest: dict[str, Any]) -> None:
+        """Emit the coordinator conflict-guardrail ``kb_guardrail`` trace span.
+
+        Records the full dual-read digest under the ``orchestrator`` agent so
+        the global "did the substrate and gbrain disagree" guardrail evidence
+        is visible on the session trace, independent of any one specialist.
+        No-op when Langfuse is disabled; never raises.
+
+        Args:
+            digest: The dual-read digest from ``_warm_substrate_dual_read``.
+        """
+        try:
+            from .trace.langfuse_emitter import get_emitter
+
+            emitter = get_emitter(self.session_dir)
+            if not emitter.enabled:
+                return
+            conflicts = digest.get("conflicts") if isinstance(digest.get("conflicts"), list) else []
+            emitter.record_kb_span(
+                name="kb_guardrail:substrate_vs_recipe",
+                agent="orchestrator",
+                output=digest,
+                metadata={
+                    "kind": "kb_guardrail",
+                    "verdict": digest.get("verdict"),
+                    "selected_source": digest.get("selected_source"),
+                    "conflict_count": len(conflicts),
+                    "conflict": bool(conflicts),
+                },
+            )
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug("coordinator: substrate guardrail span failed", exc_info=True)
 
     @staticmethod
     def _pr_summary_to_dict(pr: Any) -> dict[str, Any]:
