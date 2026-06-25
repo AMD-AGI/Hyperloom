@@ -282,10 +282,9 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
 # Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
 SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration"})
 
-# Free-form (``scope='freeform'``) sanity-gate limits (absorbed from the
-# retired dynamic_specialist wave channel).
-# WS3: relaxed from 8 → 16; the real ceiling is the ``research_lane`` capacity
-# (2×GPU) and the GPU specialist pool, so this is just a coarse sanity tripwire.
+# Free-form (``scope='freeform'``) sanity-gate limits. Coarse sanity tripwire on
+# free-form specialist wave size; the real ceiling is the ``research_lane``
+# capacity (2×GPU) and the GPU specialist pool.
 SPECIALIST_FREEFORM_WAVE_MAX: int = 16
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 # Lightweight mechanical red-line tripwire over free-form task descriptions:
@@ -558,14 +557,14 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "saturated_directions",
         "bottleneck_shift",
         "cycle_strategy_log",
-        # operator-facing lifecycle event log (#266). Coordinator-only writer
+        # operator-facing lifecycle event log. Coordinator-only writer
         # (SharedState.record_lifecycle_event); LLM update_state must not be
         # able to forge "phase X finished, outputs at <path>" events.
         "lifecycle",
         # specialist sub-agent ledger; LLM cannot inject entries (proposals go via the R3 path).
         "specialist_rounds",
         "specialist_domain_empty_streak",
-        # per-kb_anchor coverage counters (point 1); Coordinator-only writers.
+        # per-kb_anchor coverage counters; Coordinator-only writers.
         "rounds_since_last_specialist",
         "rounds_since_last_keep",
         "last_specialist",
@@ -820,7 +819,7 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
-        # Plan A — kernel-owned actions are not directly delegatable.
+        # Kernel-owned actions are not directly delegatable; require a REQUEST to the kernel agent.
         if action_name in KERNEL_OWNED_ACTIONS:
             raise PolicyDenied(
                 f"action={action_name!r} is owned by the kernel agent; "
@@ -839,7 +838,7 @@ class PolicyGate:
         # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed (concurrent sweeps crash both vllm engines).
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        # conc_sweep_phase_singleton (Bug #11): block duplicate conc_sweep proposals.
+        # conc_sweep_phase_singleton: block duplicate conc_sweep proposals.
         if action_name == CONC_SWEEP_ACTION_NAME:
             self._validate_conc_sweep_singleton(payload, intent_kind="delegate")
         self._validate_fp8_only_action(action_name, intent_kind="delegate")
@@ -942,7 +941,7 @@ class PolicyGate:
                 payload,
                 intent_kind="propose_action",
             )
-        # conc_sweep_phase_singleton (Bug #11) on propose_action.
+        # conc_sweep_phase_singleton on propose_action.
         if action_name == CONC_SWEEP_ACTION_NAME:
             self._validate_conc_sweep_singleton(
                 payload,
@@ -1504,14 +1503,14 @@ class PolicyGate:
             ),
         )
 
-    # ``conc_sweep_phase_singleton`` (Bug #11)
+    # ``conc_sweep_phase_singleton``
     def _validate_conc_sweep_singleton(
         self,
         payload: dict[str, Any],
         *,
         intent_kind: str,
     ) -> None:
-        """Enforce one conc_sweep per SWEEP phase (Bug #11); re-proposals burn GPU for no new data. Escape: ``params.bypass_conc_sweep_singleton=True``.
+        """Enforce one conc_sweep per SWEEP phase; re-proposals burn GPU for no new data. Escape: ``params.bypass_conc_sweep_singleton=True``.
 
         Args:
             payload (dict[str, Any]): the intent payload;
@@ -1710,7 +1709,7 @@ class PolicyGate:
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
 
-        # scope='freeform' (absorbed dynamic_specialist) has no domain anchor:
+        # scope='freeform' has no domain anchor:
         # it skips the tag / gap vocabulary checks and runs a lightweight
         # mechanical sanity gate instead.
         scope_raw = str(params.get("scope") or "").strip().lower()
@@ -1718,7 +1717,7 @@ class PolicyGate:
             self._validate_freeform_specialist_dispatch(params)
             return
 
-        # ``params.tags`` is canonical; a single ``params.domain`` is a backward-compatible alias.
+        # ``params.tags`` is canonical; ``params.domain`` is accepted as a single-tag alias.
         tags = normalize_dispatch_tags(params)
         # A *bare* dispatch — no explicit scope and no domain/tag anchor —
         # defaults to the cheap, read-only freeform lane (point 3: safe & cheap
@@ -1746,9 +1745,9 @@ class PolicyGate:
             )
 
         # ``scope`` dial (domain | domains | freeform). Absent => legacy
-        # single-domain default. ``domains`` is the cross-domain channel that
-        # absorbed the retired dynamic_action worker and requires >1 distinct
-        # tag; ``domain`` is single-tag. (``freeform`` has its own gate.)
+        # single-domain default. ``domains`` is the cross-domain channel and
+        # requires >1 distinct tag; ``domain`` is single-tag. (``freeform`` has
+        # its own gate.)
         scope = str(params.get("scope") or "").strip().lower()
         if scope and scope not in SPECIALIST_SCOPE_VALUES:
             raise PolicyDenied(
@@ -1804,8 +1803,8 @@ class PolicyGate:
                     f"delegate{{action='specialist'}}: max_turns must be int, got {max_turns_raw!r}",
                     rule="specialist_dispatch_source",
                 ) from exc
-            # WS1: turns are no longer the stop signal — depth is bounded by the
-            # wall-clock budget. ``max_turns=0`` is accepted as "unbounded" (run
+            # Depth is bounded by the wall-clock budget rather than a turn count.
+            # ``max_turns=0`` is accepted as "unbounded" (run
             # to a deliverable conclusion); negatives and values above the
             # effectively-unbounded hard cap are still rejected.
             if max_turns < 0 or max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
@@ -2002,8 +2001,7 @@ class PolicyGate:
         params: dict[str, Any],
     ) -> None:
         """Lightweight mechanical sanity gate for ``scope='freeform'``
-        specialists (absorbed from the retired dynamic_specialist wave
-        channel). Free-form dispatches carry no domain/tag/gap anchor, so this
+        specialists. Free-form dispatches carry no domain/tag/gap anchor, so this
         validates only structural shape: a single ``task_description`` or a
         ``tasks=[...]`` wave (bounded by SPECIALIST_FREEFORM_WAVE_MAX), each
         with a non-empty, length-bounded description that survives the
@@ -2021,8 +2019,7 @@ class PolicyGate:
         # Freeform deliberately skips the domain-anchored max_turns gate: a
         # free-form investigation has no domain/gap to bound its depth, so it is
         # constrained by the task TIMEOUT (lease TTL / wall-clock) rather than a
-        # turn cap. This is by design, NOT an oversight — do not re-add a
-        # max_turns bound here (see Issue 5b review). A GPU request must still
+        # turn cap, by design — no max_turns bound applies here. A GPU request must still
         # clear the same pool ceiling as a domain specialist, otherwise
         # scope='freeform' would be a hole around the GPU accounting.
         self._validate_specialist_gpu_request(params)
@@ -2452,11 +2449,10 @@ class PolicyGate:
 
 
 # ---------------------------------------------------------------------------
-# Policy-denial write-owner functions (folded back from the former
-# shared_state_policy.py satellite; phase 6A). They take ``state`` first and
-# own the PolicyGate denial-streak bookkeeping + its prompt summary, which
-# belongs to this decision domain. ``SharedState`` keeps forwarding shims so
-# existing callers (``state.record_policy_denial`` etc.) are unchanged.
+# Policy-denial write-owner functions. They take ``state`` first and own the
+# PolicyGate denial-streak bookkeeping + its prompt summary, which belongs to
+# this decision domain. ``SharedState`` exposes forwarding shims so existing
+# callers (``state.record_policy_denial`` etc.) reach these.
 # ---------------------------------------------------------------------------
 def record_policy_denial(
     state,

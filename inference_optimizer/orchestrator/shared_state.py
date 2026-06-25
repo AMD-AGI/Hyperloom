@@ -196,7 +196,7 @@ _DEFAULT_LAST_FAILURES = 10
 # phase_history cap (record_phase_transition).
 _PHASE_HISTORY_CAP = 100
 
-# Lifecycle-event log cap (#266). Unlike phase_history (≤6 transitions),
+# Lifecycle-event log cap. Unlike phase_history (≤6 transitions),
 # lifecycle events fire at every step boundary (trace_analyze /
 # run_optimization / integrate / report, ×N kernels ×M rounds), so the cap
 # is generous but still bounds state.json growth on a long run.
@@ -249,7 +249,7 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 LATEST_STATE_SCHEMA_VERSION: int = 2
 
 
-# Phase4 compat (read-only): rename ``extra_sglang_args`` -> ``extra_server_args`` one-shot on load.
+# Legacy key renames applied once on load: ``extra_sglang_args`` -> ``extra_server_args``.
 _PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
     "extra_sglang_args": "extra_server_args",
     "candidate_extra_sglang_args": "candidate_extra_server_args",
@@ -479,7 +479,7 @@ class SharedState:
     # Baseline Magpie runtime (s, success path); ExploreExecutor derives overtime-kill deadline. Zero => no-op.
     # This is the COLD (warmup-round) full boot+bench wall-clock — the hard-cap anchor.
     baseline_runtime_sec: float = 0.0
-    # Baseline WARM measure-round wall-clock (client-only, no boot). Q4: anchors the explore
+    # Baseline WARM measure-round wall-clock (client-only, no boot). Anchors the explore
     # decision-round overtime kill so it is post-startup apples-to-apples with the warm variant
     # measurement. Zero => fall back to baseline_runtime_sec (cold anchor).
     baseline_warm_runtime_sec: float = 0.0
@@ -500,7 +500,7 @@ class SharedState:
     cumulative_gain_validated_ts: str = ""
     # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
-    # Long-run #4 resume sentinels. ``pending_integrate`` is written before a
+    # Resume sentinels. ``pending_integrate`` is written before a
     # non-transactional integrate_patch window and normally cleared after
     # stack/current best are persisted. After a crash, resume recovery replays
     # or rolls back that window before clearing the sentinel.
@@ -622,7 +622,7 @@ class SharedState:
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
     # Per-domain "empty proposal_set" streak; reset on non-empty specialist_done. Robustness escalates on persistent emptiness.
     specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
-    # Per-kb_anchor coverage counters (point 1: long-run per-domain lower-bound).
+    # Per-kb_anchor coverage counters (per-domain lower-bound).
     # ``rounds_since_last_specialist`` — EXPLORE rounds since a specialist for
     # that anchor was dispatched; ``rounds_since_last_keep`` — rounds since a
     # KEEP landed for it. Both ++ once per EXPLORE round (bump_domain_round_counters),
@@ -711,33 +711,33 @@ class SharedState:
     lifecycle: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
-    # R1 cyclic phase machine: macro-cycle counter. cycle 0 is the first pass
+    # Cyclic phase machine: macro-cycle counter. cycle 0 is the first pass
     # (PRELUDE→…→SWEEP); each SWEEP→EXPLORE loopback increments it. Stamped onto
     # every phase_history row. 0 for legacy/non-cyclic runs.
     macro_cycle: int = 0
-    # R2 per-cycle budget: wall-clock minutes allotted to ONE macro-cycle.
+    # Per-cycle budget: wall-clock minutes allotted to ONE macro-cycle.
     # When > 0 the per-phase budget math (phase_budget_remaining_seconds /
     # EXPLORE force-exit) is computed against this window instead of the total
     # ``max_minutes``. 0 disables (legacy: phase budgets are % of total).
     cycle_minutes: float = 0.0
-    # R7 global-convergence tracking: validated cumulative gain at the current
+    # Global-convergence tracking: validated cumulative gain at the current
     # macro-cycle's start, and the consecutive no-gain cycle streak. Updated by
     # the Coordinator on each SWEEP→EXPLORE loopback / terminal close.
     gain_at_cycle_start: float = 0.0
     no_gain_cycle_streak: int = 0
-    # R3 (cyclic bottleneck re-direction): set when a cyclic EXPLORE plateau
+    # Cyclic bottleneck re-direction: set when a cyclic EXPLORE plateau
     # winds the cycle down with ``switch_bottleneck`` — the next macro-cycle's
     # orchestration prompt surfaces a redirect advisory steering specialists off
     # ``last_cycle_bottleneck`` toward the current dominant roofline bottleneck.
     # Cleared once the live top bottleneck actually drifts off the plateaued one.
     pending_bottleneck_switch: bool = False
     last_cycle_bottleneck: str = ""
-    # Long-run #10: latest roofline saturation per specialist-domain family and
+    # Latest roofline saturation per specialist-domain family and
     # prev-cycle -> current-cycle bottleneck movement. Coordinator/record_trace
     # are the only writers; orchestration only sees advisory prompt text.
     saturated_directions: dict[str, dict[str, Any]] = field(default_factory=dict)
     bottleneck_shift: dict[str, Any] = field(default_factory=dict)
-    # Long-run #9: deterministic per-cycle advisory focus log. Each entry is a
+    # Deterministic per-cycle advisory focus log. Each entry is a
     # compact, persisted fact row so cycle strategy survives compaction/resume.
     cycle_strategy_log: list[dict[str, Any]] = field(default_factory=list)
 
@@ -770,7 +770,7 @@ class SharedState:
     # Orchestration working memory — durable compacted reasoning snapshot for compaction + crash-recovery rebuild; Coordinator-only writer, not in session_breakdown.
     orchestration_memory: dict[str, Any] = field(default_factory=dict)
 
-    # Bounded rollback ring of prior good ``orchestration_memory`` records (#1);
+    # Bounded rollback ring of prior good ``orchestration_memory`` records;
     # capped at 10 by the Coordinator. Lets a later degenerate compaction be
     # recovered from a prior snapshot via INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK.
     orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
@@ -853,7 +853,7 @@ class SharedState:
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f for f in cls.__dataclass_fields__}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # Legacy scoreboard fields (read-only compat); already dropped by the filter, listed only to count/log in ``warn`` mode.
+        # Legacy scoreboard fields; already dropped by the filter, listed only to count/log in ``warn`` mode.
         _legacy_drop_fields = (
             "action_scores",
             "score_violation",
@@ -907,7 +907,7 @@ class SharedState:
             synergy_attempted=filtered.get("synergy_attempted"),
         )
 
-        # fact-layer integrity check (Inv-10.1): strict (default) aborts when a fact-layer key was present but didn't load; lenient warns.
+        # fact-layer integrity check: strict (default) aborts when a fact-layer key was present but didn't load; lenient warns.
         if needs_migration and raw:
             mode = (
                 os.environ.get(
@@ -1174,12 +1174,12 @@ class SharedState:
         tick: int,
         intent_payload: dict[str, Any] | None = None,
     ) -> int:
-        """Forwarding shim — implementation in :mod:`.policy` (folded back in phase 6A)."""
+        """Forwarding shim — implementation in :mod:`.policy`."""
         from . import policy as _m
         return _m.record_policy_denial(self, action_name=action_name, rule=rule, hint=hint, intent_type=intent_type, tick=tick, intent_payload=intent_payload)
 
     def reset_policy_denial_streak(self, action_name: str) -> None:
-        """Forwarding shim — implementation in :mod:`.policy` (folded back in phase 6A)."""
+        """Forwarding shim — implementation in :mod:`.policy`."""
         from . import policy as _m
         return _m.reset_policy_denial_streak(self, action_name)
 
@@ -1283,7 +1283,7 @@ class SharedState:
         ts: str | None = None,
         ts_unix: float | None = None,
     ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`.phase_state` (folded back in phase 6B)."""
+        """Forwarding shim — implementation in :mod:`.phase_state`."""
         from . import phase_state as _m
         return _m.record_phase_transition(self, to_phase=to_phase, reason=reason, evidence=evidence, ts=ts, ts_unix=ts_unix)
 
@@ -1360,12 +1360,12 @@ class SharedState:
         duration_s: float | None = None,
         ts: str | None = None,
     ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`.phase_state` (folded back in phase 6B)."""
+        """Forwarding shim — implementation in :mod:`.phase_state`."""
         from . import phase_state as _m
         return _m.record_lifecycle_event(self, step=step, status=status, phase=phase, label=label, artifacts=artifacts, detail=detail, duration_s=duration_s, ts=ts)
 
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
-        """Forwarding shim — implementation in :mod:`.policy` (folded back in phase 6A)."""
+        """Forwarding shim — implementation in :mod:`.policy`."""
         from . import policy as _m
         return _m.to_policy_denial_summary(self, top_k=top_k)
 
@@ -1466,7 +1466,7 @@ class SharedState:
         return applied
 
     def _format_last_kernel_opt(self) -> str:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m._format_last_kernel_opt(self)
 
@@ -1474,12 +1474,12 @@ class SharedState:
         self,
         payload: dict[str, Any] | None,
     ) -> tuple[str, str, str, str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m._resolve_kernel_patch_identity(self, payload)
 
     def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m.kernel_patch_key(self, payload)
 
@@ -1487,7 +1487,7 @@ class SharedState:
         self,
         payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m.find_rejected_kernel_patch(self, payload)
 
@@ -1527,7 +1527,7 @@ class SharedState:
         keep_threshold_pct: float = 1.0,
         max_fault_attempts: int = _MAX_INTEGRATE_FAULT_ATTEMPTS,
     ) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m.record_kernel_integrate_result(
             self,
@@ -1538,48 +1538,48 @@ class SharedState:
         )
 
     def record_kernel_opt(self, result: dict[str, Any]) -> None:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m.record_kernel_opt(self, result)
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m.record_gemm_tuning(self, result)
 
     # Multi-KEEP integrate queue helpers.
     def _kernel_ids_in_optimization_stack(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m._kernel_ids_in_optimization_stack(self)
 
     def _source_files_in_optimization_stack(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m._source_files_in_optimization_stack(self)
 
     def _kernel_ids_with_integrate_attempts(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m._kernel_ids_with_integrate_attempts(self)
 
     def integrate_attempt_count_for_kernel(self, kernel_id: str) -> int:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m.integrate_attempt_count_for_kernel(self, kernel_id)
 
     def _kernel_trace_impact_pct(self, kernel_id: str) -> float:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m._kernel_trace_impact_pct(self, kernel_id)
 
     def next_pending_keep_kernel_id(self) -> str:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m.next_pending_keep_kernel_id(self)
 
     def pending_keep_kernel_ids(self) -> list[str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m.pending_keep_kernel_ids(self)
 
@@ -1595,7 +1595,7 @@ class SharedState:
 
     @property
     def kernel_opt_attempts_count(self) -> int:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m.kernel_opt_attempts_count(self)
 
@@ -1606,7 +1606,7 @@ class SharedState:
         min_gpu_pct: float | None = None,
         top_n: int | None = None,
     ) -> list[str]:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
         from . import kernel_request_handlers as _m
         return _m.untried_hot_reusable_kernels(self, min_gpu_pct=min_gpu_pct, top_n=top_n)
 
@@ -2229,7 +2229,7 @@ class SharedState:
         }
 
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
-        """Record conc_sweep task completion (mirrors record_sweep). Bug #12: status lets exit_normal_sweep return conc_sweep_done so SWEEP→CLOSE fires on conc_sweep alone.
+        """Record conc_sweep task completion (mirrors record_sweep). The status field lets exit_normal_sweep return conc_sweep_done so SWEEP→CLOSE can fire on conc_sweep alone.
 
         Args:
             result (dict[str, Any]): The conc_sweep result envelope; a
@@ -2835,7 +2835,7 @@ class SharedState:
             self.last_specialist = dict(snapshot)
 
     def apply_explore_search_update(self, update: dict[str, Any]) -> None:
-        """Merge an ExploreExecutor search update into persistent state (v0.8 M3); executor never writes ``accepted`` directly — :meth:`record_explore_accepted` is the single writer for that bucket.
+        """Merge an ExploreExecutor search update into persistent state; executor never writes ``accepted`` directly — :meth:`record_explore_accepted` is the single writer for that bucket.
 
         Args:
             update (dict[str, Any]): The executor's explore-search update
@@ -2888,7 +2888,7 @@ class SharedState:
         )
         # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
-        # Drop merged_from_legacy_sig so a later load re-runs the legacy union (defensive vs interleaved fallback session).
+        # Drop merged_from_legacy_sig so a later load re-runs the legacy union.
         merged.pop("merged_from_legacy_sig", None)
         self.explore_search = merged
 
@@ -3171,7 +3171,7 @@ class SharedState:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3); compact (≤6 lines, incl. the ``cycle`` = macro-cycle number). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
+        """Render the per-tick ``=== Phase ===`` block; compact (≤6 lines, incl. the ``cycle`` = macro-cycle number). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -3318,7 +3318,7 @@ class SharedState:
         return "\n".join(lines) or "(no phase history yet)"
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
-        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section (v0.8 §3.3 §4.1); empty when no recipe/pitfalls. Capped; full JSON at runtime/cortex/.kb_warm.json / .kb_pitfalls.json.
+        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section; empty when no recipe/pitfalls. Capped; full JSON at runtime/cortex/.kb_warm.json / .kb_pitfalls.json.
 
         Args:
             max_lines (int): Cap on rendered lines before truncation.
@@ -3368,7 +3368,7 @@ class SharedState:
         return "\n".join(out)
 
     def to_gaps_summary(self, *, max_entries: int = 10) -> str:
-        """Render :attr:`gaps` for prompt injection (KB_design §3.3/§3.5); empty when no gaps. Capped at ``max_entries`` newest rows.
+        """Render :attr:`gaps` for prompt injection; empty when no gaps. Capped at ``max_entries`` newest rows.
 
         Args:
             max_entries (int): Maximum number of newest gap rows to render.
@@ -3493,7 +3493,7 @@ class SharedState:
         return "\n".join(rows)
 
     def to_prompt_summary(self) -> str:
-        """Compact, human-readable snapshot for prompt injection (DESIGN §8.3).
+        """Compact, human-readable snapshot for prompt injection.
 
         Returns:
             str: A multi-line dump of the session's key fact-layer and
@@ -3826,7 +3826,7 @@ class SharedState:
         return strip_base64_data_urls(text)
 
     def _format_analysis_md_full(self) -> str:
-        """Inject TraceLens analysis.md verbatim (Roofline composite design §6.1: no truncation/interpretation) between ``=== TraceLens Analysis ... ===`` bookends; header carries snapshot id + gain. Empty cache → one-line hint to propose ``roofline``.
+        """Inject TraceLens analysis.md verbatim (no truncation/interpretation) between ``=== TraceLens Analysis ... ===`` bookends; header carries snapshot id + gain. Empty cache → one-line hint to propose ``roofline``.
 
         Returns:
             str: The verbatim analysis.md wrapped in bookends, or a one-line
