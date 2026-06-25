@@ -103,6 +103,32 @@ def _scope_diff_to_target(diff_path: Path, target: Path, out_dir: Path) -> Path:
     return scoped
 
 
+def _reset_diff_paths(diff_path: Path, repo_root: Path) -> None:
+    """Reset ONLY the paths a diff touches to their committed state (idempotent apply).
+
+    Parses the diff's ``+++ b/<path>`` headers and, for each, restores a tracked file
+    (``git checkout --``) or removes a stale untracked file a prior run created
+    (``git clean -fq``). Scoped strictly to the diff's own paths — unrelated work in the
+    repo is never touched. No-op on a pristine tree.
+    """
+    paths: set[str] = set()
+    try:
+        for ln in diff_path.read_text(errors="replace").splitlines():
+            if ln.startswith("+++ ") and not ln.startswith("+++ /dev/null"):
+                p = ln[4:].strip()
+                p = p[2:] if (p.startswith("a/") or p.startswith("b/")) else p
+                if p and p != "/dev/null":
+                    paths.add(p)
+    except Exception:  # noqa: BLE001 — best-effort; a parse miss just skips the pre-clean
+        return
+    for p in paths:
+        # tracked -> restore committed version; untracked -> remove. One of these is a no-op.
+        subprocess.run(["git", "-C", str(repo_root), "checkout", "--", p],
+                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(repo_root), "clean", "-fq", "--", p],
+                       capture_output=True, text=True)
+
+
 def _git_apply_diff(diff_path: Path, repo_root: Path, out_dir: Path, target: Path | None = None) -> dict[str, Any]:
     """Apply a unified diff directly to a git repo (handles MULTI-FILE diffs), auto -p level.
 
@@ -113,6 +139,13 @@ def _git_apply_diff(diff_path: Path, repo_root: Path, out_dir: Path, target: Pat
     """
     if target is not None:
         diff_path = _scope_diff_to_target(diff_path, target, out_dir)
+    # Idempotency: a prior apply_and_bench run may have left the diff's own paths dirty
+    # (a modified tracked file, or an untracked file a `new file` hunk created, e.g.
+    # `optimized_versions/<k>.cu`). git apply --check would then fail ("already exists" /
+    # context mismatch) even though the diff is valid against pristine source. Reset ONLY
+    # the paths THIS diff touches to their committed state first — scoped + non-destructive
+    # (never touches unrelated files), so the apply surface matches what the diff expects.
+    _reset_diff_paths(diff_path, repo_root)
     for lvl in (1, 0, 2):
         chk = subprocess.run(["git", "-C", str(repo_root), "apply", f"-p{lvl}", "--check", str(diff_path)],
                              capture_output=True, text=True)
