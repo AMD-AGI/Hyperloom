@@ -8980,7 +8980,10 @@ class Coordinator:
         # to the Critic's ``/assess``). Advisory only; gated on CORTEX_KB_URL,
         # cached per focus, fail-soft.
         if "substrate_levers" not in params:
-            digest = self._warm_substrate_levers(params)
+            # Offload the blocking urllib KB call off the event loop: a slow or
+            # unreachable cortex KB must not stall the orchestrator's reactor /
+            # dispatcher coroutines (repo convention for sync IO).
+            digest = await asyncio.to_thread(self._warm_substrate_levers, params)
             if digest:
                 params["substrate_levers"] = digest
 
@@ -8991,7 +8994,7 @@ class Coordinator:
         # folds the digest into params so the specialist reuses it (one assess
         # call per focus). Advisory only, fail-soft — never blocks dispatch.
         if "substrate_dual_read" not in params:
-            dual_read = self._warm_substrate_dual_read(params)
+            dual_read = await asyncio.to_thread(self._warm_substrate_dual_read, params)
             if dual_read:
                 params["substrate_dual_read"] = dual_read
 
