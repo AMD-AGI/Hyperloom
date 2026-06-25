@@ -88,3 +88,8 @@ ci/candidates/*.json
 !ci/candidates/inferencex_daily_fixed.json
 GPU_optimization_plan.md
 GPU_optimization.md
+explore-opt-5-design.md
+hyperloom_features_zh.csv
+hyperloom_features.csv
+minimaxM3_opts.MD
+top_models.csv
