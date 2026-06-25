@@ -16,9 +16,7 @@ from inference_optimizer.orchestrator import framework_paths as fp
 from inference_optimizer.orchestrator.action_registry import ActionRegistry
 from inference_optimizer.orchestrator.framework_paths import (
     probe_framework_source_roots_for_env,
-    resolve_sglang_server_args_path,
     resolve_source_file_allowlist,
-    resolve_vllm_arg_utils_path,
 )
 from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
@@ -109,100 +107,6 @@ class TestFindSpecOrigin:
         assert fp._find_spec_origin("pkg") is None
 
 
-class TestResolveSglangServerArgs:
-    def test_explicit_env_pointing_to_file(self, tmp_path, monkeypatch):
-        target = tmp_path / "server_args.py"
-        target.write_text("# fake")
-        monkeypatch.setenv(
-            "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS",
-            str(target),
-        )
-        path, source = fp.resolve_sglang_server_args_path()
-        assert path == target
-        assert source == str(target)
-
-    def test_explicit_env_pointing_to_missing_file(self, tmp_path, monkeypatch):
-        target = tmp_path / "missing.py"
-        monkeypatch.setenv(
-            "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS",
-            str(target),
-        )
-        path, source = fp.resolve_sglang_server_args_path()
-        assert path == target
-        assert "not found" in source
-
-    def test_fallback_via_find_spec(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            fp,
-            "_DEFAULT_SGLANG_SERVER_ARGS",
-            tmp_path / "absent.py",
-        )
-        origin = tmp_path / "sglang_pkg"
-        (origin / "srt").mkdir(parents=True)
-        sa = origin / "srt" / "server_args.py"
-        sa.write_text("# fake")
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: origin)
-        path, source = fp.resolve_sglang_server_args_path()
-        assert path == sa
-        assert source == str(sa)
-
-    def test_alt_layout_when_primary_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            fp,
-            "_DEFAULT_SGLANG_SERVER_ARGS",
-            tmp_path / "absent.py",
-        )
-        origin = tmp_path / "sglang_pkg"
-        alt = origin / "python" / "sglang" / "srt" / "server_args.py"
-        alt.parent.mkdir(parents=True)
-        alt.write_text("# fake")
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: origin)
-        path, source = fp.resolve_sglang_server_args_path()
-        assert path == alt
-
-    def test_default_path_returned_when_nothing_resolves(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        sentinel = tmp_path / "still_absent.py"
-        monkeypatch.setattr(fp, "_DEFAULT_SGLANG_SERVER_ARGS", sentinel)
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
-        path, source = fp.resolve_sglang_server_args_path()
-        assert path == sentinel
-        assert "not found" in source
-
-
-class TestResolveVllmArgUtils:
-    def test_default_path_when_present(self, tmp_path, monkeypatch):
-        default = tmp_path / "arg_utils.py"
-        default.write_text("# fake")
-        monkeypatch.setattr(fp, "_DEFAULT_VLLM_ARG_UTILS", default)
-        path, source = fp.resolve_vllm_arg_utils_path()
-        assert path == default
-
-    def test_alt_layout_via_find_spec(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(fp, "_DEFAULT_VLLM_ARG_UTILS", tmp_path / "absent.py")
-        origin = tmp_path / "vllm_pkg"
-        alt = origin / "vllm" / "engine" / "arg_utils.py"
-        alt.parent.mkdir(parents=True)
-        alt.write_text("# fake")
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: origin)
-        path, source = fp.resolve_vllm_arg_utils_path()
-        assert path == alt
-
-    def test_explicit_env_missing_file_returns_not_found_source(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        target = tmp_path / "no.py"
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_VLLM_ARG_UTILS", str(target))
-        path, source = fp.resolve_vllm_arg_utils_path()
-        assert path == target
-        assert "not found" in source
-
-
 class TestGlobInstallPackageRoots:
     def test_finds_dist_packages_under_usr_local(self, tmp_path, monkeypatch):
         base = tmp_path / "usr_local_lib" / "python3.12" / "dist-packages"
@@ -288,67 +192,6 @@ class TestDefaultSourceRootsIncludesAtom:
         assert any("/app/ATOM/atom" in r for r in out)
 
 
-class TestResolveAtomArgUtils:
-    def test_env_override_pointing_to_file(self, tmp_path, monkeypatch):
-        target = tmp_path / "arg_utils.py"
-        target.write_text("# fake")
-        monkeypatch.setenv(
-            "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS",
-            str(target),
-        )
-        path, source = fp.resolve_atom_arg_utils_path()
-        assert path == target
-        assert source == str(target)
-
-    def test_env_override_pointing_to_missing_file(self, tmp_path, monkeypatch):
-        target = tmp_path / "missing.py"
-        monkeypatch.setenv(
-            "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS",
-            str(target),
-        )
-        path, source = fp.resolve_atom_arg_utils_path()
-        assert path == target
-        assert "not found" in source
-
-    def test_default_location_when_present(self, tmp_path, monkeypatch):
-        default = tmp_path / "arg_utils.py"
-        default.write_text("# fake")
-        monkeypatch.setattr(fp, "_DEFAULT_ATOM_ARG_UTILS", default)
-        path, source = fp.resolve_atom_arg_utils_path()
-        assert path == default
-
-    def test_spec_fallback_resolves_model_engine_arg_utils(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        monkeypatch.setattr(
-            fp,
-            "_DEFAULT_ATOM_ARG_UTILS",
-            tmp_path / "absent.py",
-        )
-        origin = tmp_path / "atom_pkg"
-        au = origin / "model_engine" / "arg_utils.py"
-        au.parent.mkdir(parents=True)
-        au.write_text("# fake")
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: origin)
-        path, source = fp.resolve_atom_arg_utils_path()
-        assert path == au
-        assert source == str(au)
-
-    def test_default_path_returned_when_nothing_resolves(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        sentinel = tmp_path / "still_absent.py"
-        monkeypatch.setattr(fp, "_DEFAULT_ATOM_ARG_UTILS", sentinel)
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
-        path, source = fp.resolve_atom_arg_utils_path()
-        assert path == sentinel
-        assert "not found" in source
-
-
 class TestProbeIncludesAtomWhenInstalled:
     def test_atom_picked_up_via_find_spec(self, tmp_path, monkeypatch):
         """A real ``find_spec('atom')`` origin is included even without a /app/ATOM/atom/ default root."""
@@ -379,37 +222,6 @@ class TestProbeIncludesAtomWhenInstalled:
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
         result = fp.probe_framework_source_roots_for_env()
         assert "atom/" in result
-
-
-class TestFrameworkPathsThreeFrameworksSymmetric:
-    """Static guard: all three frameworks' arg-utils resolvers return the ``(Path, str)`` contract on env-override."""
-
-    @pytest.mark.parametrize(
-        "resolver_name",
-        [
-            "resolve_sglang_server_args_path",
-            "resolve_vllm_arg_utils_path",
-            "resolve_atom_arg_utils_path",
-        ],
-    )
-    def test_resolver_returns_path_str_pair(
-        self,
-        resolver_name,
-        tmp_path,
-        monkeypatch,
-    ):
-        env_map = {
-            "resolve_sglang_server_args_path": "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS",
-            "resolve_vllm_arg_utils_path": "INFERENCE_OPTIMIZER_VLLM_ARG_UTILS",
-            "resolve_atom_arg_utils_path": "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS",
-        }
-        target = tmp_path / "fake_args.py"
-        target.write_text("# stub")
-        monkeypatch.setenv(env_map[resolver_name], str(target))
-        path, source = getattr(fp, resolver_name)()
-        assert isinstance(path, Path)
-        assert isinstance(source, str)
-        assert path == target
 
 
 class TestSummariseFrameworkRootDiscovery:
@@ -514,17 +326,6 @@ def test_resolve_source_file_allowlist_unions_env_override(monkeypatch):
     assert "/sgl-workspace/vllm/" in roots
     assert "/custom/vllm/" in roots
     assert "/extra/pkg/" in roots
-
-
-def test_find_spec_fallback_returns_note_when_missing(monkeypatch, tmp_path):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS", "")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_VLLM_ARG_UTILS", "")
-    path, note = resolve_sglang_server_args_path()
-    assert path.name == "server_args.py"
-    assert "not found" in note.lower() or str(path) in note
-    vpath, vnote = resolve_vllm_arg_utils_path()
-    assert vpath.name == "arg_utils.py"
-    assert vnote
 
 
 def test_prompt_renders_framework_source_roots(registry=None):
