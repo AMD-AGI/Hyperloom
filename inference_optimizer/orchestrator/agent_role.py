@@ -10,7 +10,7 @@ Each :class:`AgentRole` binds:
     * which intent types the role is allowed to emit
     * permission flags consumed by :class:`PolicyGate`
 
-v0.6 roster — 4 persistent reactors, no mode gating::
+The four persistent agent roles and their permitted intents::
 
     ┌──────────────┬──────────┬─────────────────────────────────────────┐
     │ name         │ backend  │ allowed intents (high level)            │
@@ -20,7 +20,7 @@ v0.6 roster — 4 persistent reactors, no mode gating::
     │ kernel       │ Claude   │ response (only) / send_message / alert  │
     │ critic       │ Codex    │ review_verdict (only) / send_message /  │
     │              │ no-tools │ ask_question / answer / update_persona  │
-    │              │ + KB Bash│ KB read/write Bash allowlist (§7.3)     │
+    │              │ + KB Bash│ KB read/write Bash allowlist            │
     │ robustness   │ Claude   │ alert / kill_task / force_dispatch /    │
     │              │          │ prune_branch / escalate_strategy_change │
     │              │          │ + always-on tick                        │
@@ -56,7 +56,7 @@ DEFAULT_CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"
 DEFAULT_CODEX_API_KEY_ENV = "OPENAI_API_KEY"
 
 
-# Role permission catalogue (DESIGN §7.6)
+# Role permission catalogue
 _BASE_INTENTS: frozenset[IntentType] = frozenset(
     {
         IntentType.SEND_MESSAGE,
@@ -68,7 +68,7 @@ _BASE_INTENTS: frozenset[IntentType] = frozenset(
 )
 
 
-# Orchestration — only role with REQUEST authority; holds PRUNE_BRANCH (Roofline-v2 C3) + ESCALATE_STRATEGY_CHANGE. FORCE_DISPATCH stays robustness-only.
+# Orchestration — only role with REQUEST authority; holds PRUNE_BRANCH + ESCALATE_STRATEGY_CHANGE. FORCE_DISPATCH stays robustness-only.
 _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.PROPOSE_ACTION,
@@ -85,7 +85,7 @@ _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 _KERNEL_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.RESPONSE,
-        IntentType.UPDATE_STATE,  # only its own action's metric fields (§7.6 ※5)
+        IntentType.UPDATE_STATE,  # only its own action's metric fields
     }
 )
 
@@ -153,7 +153,7 @@ class AgentRole:
 
 # Default registry
 def default_role_registry() -> dict[str, AgentRole]:
-    """Return the canonical v0.6 4-agent registry (PascalCase capable).
+    """Return the canonical 4-agent role registry.
 
     Builds fresh :class:`AgentRole` records for orchestration, kernel,
     critic, and robustness with their default backends, models, and
@@ -191,7 +191,7 @@ def default_role_registry() -> dict[str, AgentRole]:
             allowed_intents=_CRITIC_INTENTS,
             can_delegate_side_effects=False,
             can_mutate_core_state=False,
-            no_tools=True,  # Codex no-tools + KB Bash exception (§7.3)
+            no_tools=True,  # Codex no-tools + KB Bash exception
         ),
         "robustness": AgentRole(
             name="robustness",
