@@ -20,7 +20,7 @@ from ._time import now_iso
 
 DEFAULT_GPU_LEASE_TTL_SEC = 1800
 
-# WS2: GPU-lease / gpu_research_lane TTL grace over the agent wall budget. The
+# GPU-lease / gpu_research_lane TTL grace over the agent wall budget. The
 # iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — the lease must
 # outlive the agent's wall-budget kill so the cards are never reclaimed while
 # the agent is still computing (which would let serving grab them and pollute

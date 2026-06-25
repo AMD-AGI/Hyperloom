@@ -1,4 +1,4 @@
-"""Orchestration working-memory checkpoint / compaction (plan Step 4).
+"""Orchestration working-memory checkpoint / compaction.
 
 Compresses the live ReAct conversation into a compact structured snapshot
 on ``SharedState.orchestration_memory``, then resets + re-seeds from it.
@@ -26,7 +26,7 @@ DEFAULT_CHECKPOINT_EVERY_MINUTES: float = 30.0
 # trigger on long runs is the context-token budget below.
 DEFAULT_CHECKPOINT_CHAR_BUDGET: int = 400_000
 
-# Context-token guardrail (batch-1 #3). The real conversation size is read from
+# Context-token guardrail. The real conversation size is read from
 # the backend's reported usage (input + cache_read + cache_creation tokens). A
 # soft trigger compacts proactively; the hard fraction is the overflow backstop
 # that compacts even when the LLM summary is degenerate (see
@@ -57,7 +57,7 @@ def context_window_for_model(model: str) -> int:
     """
     return MODEL_CONTEXT_WINDOWS.get((model or "").strip(), DEFAULT_MODEL_CONTEXT_WINDOW)
 
-# Content fields that carry forward when a checkpoint reply omits them (#1):
+# Content fields that carry forward when a checkpoint reply omits them:
 # scalar plan + list threads. ``learnings`` accumulates separately.
 _MEMORY_LIST_KEYS: tuple[str, ...] = ("hypotheses", "tried_and_why", "pending")
 
@@ -218,7 +218,7 @@ def is_degenerate_checkpoint(parsed: dict[str, Any]) -> bool:
 def deterministic_memory_fallback(state: Any) -> dict[str, Any]:
     """Synthesise a minimal working-memory record from authoritative SharedState facts.
 
-    Used by the hard context-token guardrail (#3) when the LLM checkpoint reply
+    Used by the hard context-token guardrail when the LLM checkpoint reply
     is degenerate but the conversation must still be compacted to avoid window
     overflow. Pure read of ``state``; never raises on missing attributes.
 
@@ -292,7 +292,7 @@ def build_memory_record(
     ``learnings`` accumulate across checkpoints (deduped, capped) so durable
     lessons survive a later checkpoint that forgets to repeat them. The other
     content fields (``current_plan`` + the list threads) carry the prior value
-    forward when the new reply omits them (#1), so one forgetful checkpoint never
+    forward when the new reply omits them, so one forgetful checkpoint never
     blanks an in-flight plan.
 
     Args:

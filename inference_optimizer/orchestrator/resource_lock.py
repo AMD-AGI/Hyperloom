@@ -4,10 +4,10 @@
 
 ``acquire_many`` is a single ``BEGIN IMMEDIATE`` all-or-nothing batch acquire;
 cross-lane mutual exclusion (DESIGN §3.5.3) co-acquires conflicting lanes.
-v0.8 M6 multi-holder: ``leases`` PK widened to ``(lane, holder_id)``; raises
-:class:`LaneFull` at capacity vs :class:`LaneBusy` cross-lane conflict.
-Inv-7.1 ``benchmark_lane.holders ≤ 1`` preserved by default capacity=1 for
-serving-side lanes.
+Leases are keyed on ``(lane, holder_id)``, supporting multiple holders per
+lane; the manager raises :class:`LaneFull` at capacity vs :class:`LaneBusy`
+on a cross-lane conflict. ``benchmark_lane`` holds at most one holder via the
+default capacity=1 for serving-side lanes.
 """
 
 from __future__ import annotations
@@ -47,10 +47,10 @@ KNOWN_LANES = (
     "gpu_research_lane",
 )
 
-# Lane → lanes that must *also* be free or co-acquired (DESIGN §3.5.3).
-# NOTE: conflicts must be declared symmetrically — ``_expand_lanes`` only
-# expands the *requested* lane's own conflict set, so for serving and
-# gpu_research_lane to block each other, each side must list the other.
+# Lane → lanes that must *also* be free or co-acquired.
+# Conflicts are symmetric: each lane lists every lane it mutexes against.
+# ``_expand_lanes`` only expands the *requested* lane's own conflict set, so
+# two lanes block each other only if each side lists the other.
 LANE_CONFLICTS: dict[str, frozenset[str]] = {
     "benchmark_lane": frozenset(
         {"profile_lane", "server_lifecycle", "gpu_research_lane"}
@@ -449,7 +449,7 @@ class SqliteLeaseBackend:
 class ResourceLockManager:
     """Coordinator-facing wrapper.
 
-    v0.8 M6 adds non-blocking acquire + multi-holder observability so the
+    Provides non-blocking acquire and multi-holder observability so the
     concurrent dispatcher can fan tasks out without spinning on busy errors.
     """
 
