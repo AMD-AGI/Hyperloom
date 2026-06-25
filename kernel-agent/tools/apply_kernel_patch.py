@@ -682,6 +682,11 @@ def apply_snapshot(
                         try:
                             dest.chmod(int(desc["mode"], 8))
                         except (ValueError, OSError):
+                            # Restoring mode bits is best-effort: a bad/garbled
+                            # mode string (ValueError) or a target filesystem
+                            # that rejects chmod (OSError) must not fail the
+                            # apply. The copied content is what matters, so keep
+                            # the default mode and proceed.
                             pass
             touched.append(str(dest))
         except (OSError, ValueError) as exc:
