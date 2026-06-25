@@ -52,6 +52,15 @@ on:
   schedule:
     - cron: '7 4,10,16,22 * * *'
   workflow_dispatch:
+    # ⚠️ HARD LIMIT: GitHub allows at most 25 top-level `inputs` for a
+    # workflow_dispatch event (raised from 10 on 2025-12-04). Exceeding it makes
+    # the workflow fail to parse, so EVERY dispatch (optimize-tiny,
+    # optimize-gte100, manual, API) returns HTTP 422 and no models are submitted.
+    # This block currently defines exactly 25 inputs — DO NOT add a 26th. To add
+    # a new knob, drop/merge an existing input first (e.g. derive it from another
+    # input as the job timeout is derived from max_hours below). Refs:
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+    # https://github.blog/changelog/2025-12-04-actions-workflow-dispatch-workflows-now-support-25-inputs/
     inputs:
       # ── Model source (priority: models > candidates_file > legacy hf_top) ──────
       models:
@@ -179,16 +188,8 @@ on:
         type: boolean
         required: false
         default: true
-      task_timeout_min:
-        description: 'Per-task wait timeout in minutes (default 420 = 7h)'
-        required: false
-        default: '420'
-      job_timeout_min:
-        description: 'GitHub job timeout in minutes for each optimize job (default 480 = 8h). Raise it when callers pass a larger max_hours so the wait/collect job is not killed mid-run.'
-        required: false
-        default: '480'
       max_hours:
-        description: 'Per-task optimizer budget in hours (default 6)'
+        description: 'Per-task optimizer budget in hours (default 6). The per-task wait timeout (max_hours+30m) and the GitHub job timeout (max_hours+60m) are derived from this in the prepare job.'
         required: false
         default: '6'
       all_artifacts:
@@ -215,6 +216,11 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       count:  ${{ steps.matrix.outputs.count }}
+      # Per-task wait timeout (max_hours + 30m) and GitHub job timeout
+      # (max_hours + 60m), computed here since Actions expressions can't do
+      # arithmetic. Both in minutes.
+      task_timeout: ${{ steps.jobtimeout.outputs.task_timeout }}
+      job_timeout:  ${{ steps.jobtimeout.outputs.job_timeout }}
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
       HF_TOKEN_2:            ${{ secrets.HF_TOKEN_2 }}
@@ -255,6 +261,22 @@ jobs:
         id: matrix
         working-directory: ci
         run: python3 generate_hf_matrix.py
+      - name: Compute optimize timeouts
+        id: jobtimeout
+        # Both timeouts derive from max_hours (Actions expressions can't do
+        # arithmetic, so compute in Python). Ascending so each layer has a 30m
+        # buffer over the one below: optimizer budget (max_hours) < task wait
+        # (max_hours + 30m) < GitHub job (max_hours + 60m). schedule has no
+        # inputs -> max_hours falls back to 6 -> task=390, job=420.
+        env:
+          INPUT_MAX_HOURS: ${{ github.event.inputs.max_hours }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          mh = float(os.environ.get("INPUT_MAX_HOURS") or 6)
+          print(f"task_timeout={int(mh * 60 + 30)}")
+          print(f"job_timeout={int(mh * 60 + 60)}")
+          PY
 
   # ── Stage 2: per-model optimization (parallel) ──────────────────────────────
   optimize:
@@ -262,11 +284,10 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.count != '0'
     runs-on: hyperloom-4hhzn
-    # Per-task wait timeout + buffer for register/wait/collect. Caller-tunable
-    # via the job_timeout_min input (default 480 = 8h); raise it when passing a
-    # larger max_hours so the wait/collect job is not killed mid-run. schedule
-    # has no inputs, so it falls back to the 480 default.
-    timeout-minutes: ${{ fromJson(github.event.inputs.job_timeout_min || '480') }}
+    # GitHub job timeout = max_hours + 1h (computed in the prepare job since
+    # Actions expressions can't do arithmetic). Covers register + wait + collect
+    # for the per-task optimizer budget. schedule/6h -> 420m; gte100/12h -> 780m.
+    timeout-minutes: ${{ fromJson(needs.prepare.outputs.job_timeout) }}
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(github.event_name == 'schedule' && '240' || github.event.inputs.max_parallel || '240') }}
@@ -337,7 +358,7 @@ jobs:
           SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom' || github.event.inputs.submit_workspaces || 'core42-hyperloom' }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
-          INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
+          INPUT_TASK_TIMEOUT_MIN: ${{ needs.prepare.outputs.task_timeout }}
           INPUT_MAX_HOURS:        ${{ github.event.inputs.max_hours }}
           # Cron rotates through the production pool — operators can't go
           # back and re-fetch sandbox state after the fact, so force
