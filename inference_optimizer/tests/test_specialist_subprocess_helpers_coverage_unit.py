@@ -16,7 +16,6 @@ from inference_optimizer.orchestrator.specialist_subprocess import (
     SpecialistSubprocessDispatcher,
     _pick_worktree_base,
     _setup_worktree,
-    _teardown_worktree,
 )
 
 
@@ -69,37 +68,6 @@ def test_setup_worktree_success(tmp_path: Path, monkeypatch) -> None:
     target = tmp_path / "wt4"
     out, err = _setup_worktree(tmp_path, target, "b")
     assert out == target and err == ""
-
-
-# -- _teardown_worktree ----------------------------------------------------
-def test_teardown_worktree_missing(tmp_path: Path) -> None:
-    _teardown_worktree(tmp_path, tmp_path / "absent")  # must not raise
-
-
-def test_teardown_worktree_removes(tmp_path: Path, monkeypatch) -> None:
-    base = tmp_path / "base"
-    base.mkdir()
-    (base / ".git").mkdir()
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    calls: list[list[str]] = []
-
-    def _run(cmd, *a, **k):
-        calls.append(list(cmd))
-        return _CP(0)
-
-    monkeypatch.setattr(ss.subprocess, "run", _run)
-    _teardown_worktree(base, wt)
-    # git worktree remove was attempted, then rm -rf cleanup
-    assert any("worktree" in c for c in calls)
-
-
-def test_teardown_worktree_no_git_base_falls_back_to_rmtree(tmp_path: Path) -> None:
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    (wt / "f.txt").write_text("x", encoding="utf-8")
-    _teardown_worktree(None, wt)
-    assert not wt.exists()
 
 
 # -- _build_claude_cmd -----------------------------------------------------

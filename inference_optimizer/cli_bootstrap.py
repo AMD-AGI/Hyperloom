@@ -144,10 +144,10 @@ def _seed_shared_state(
     try:
         explore_overtime_kill_ratio = (
             float(explore_overtime_kill_ratio_raw)
-            if explore_overtime_kill_ratio_raw is not None else 1.10
+            if explore_overtime_kill_ratio_raw is not None else 2.0
         )
     except (TypeError, ValueError):
-        explore_overtime_kill_ratio = 1.10
+        explore_overtime_kill_ratio = 2.0
 
     # --explore-variant-timeout-sec mirror; 0 (default) auto-derives the cap, positive pins it.
     explore_variant_timeout_raw = getattr(

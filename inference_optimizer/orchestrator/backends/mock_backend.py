@@ -22,7 +22,7 @@ Usage::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from ...protocol.intent import Intent
 from .base import BackendTurnResult
@@ -49,21 +49,6 @@ class ScriptedPlan:
     turns: list[MockTurn]
     loop_last: bool = False
     default_intent: Intent | None = None
-
-    @classmethod
-    def from_intents(cls, *intents_per_turn: Iterable[Intent]) -> "ScriptedPlan":
-        """Build a plan from one intent iterable per scripted turn.
-
-        Args:
-            *intents_per_turn (Iterable[Intent]): One iterable of intents for
-                each turn, in playback order.
-
-        Returns:
-            ScriptedPlan: A plan whose turns replay the given intent groups in
-            order.
-        """
-        turns = [MockTurn(intents=list(its)) for its in intents_per_turn]
-        return cls(turns=turns)
 
 
 class MockBackend:
@@ -150,15 +135,6 @@ class MockBackend:
                 _Intent(type=_IT.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
             ]
         )
-
-    @property
-    def remaining_turns(self) -> int:
-        """Number of scripted turns not yet played.
-
-        Returns:
-            int: Count of remaining scripted turns (zero once exhausted).
-        """
-        return max(0, len(self.plan.turns) - self._cursor)
 
 
 __all__ = ["MockBackend", "MockTurn", "ScriptedPlan"]
