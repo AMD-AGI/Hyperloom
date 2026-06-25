@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import statistics
 import subprocess
@@ -73,13 +74,45 @@ def _looks_like_diff(path: Path) -> bool:
     return ("diff --git " in head) or ("\n--- " in head and "\n+++ " in head and "\n@@ " in head)
 
 
-def _git_apply_diff(diff_path: Path, repo_root: Path, out_dir: Path) -> dict[str, Any]:
+def _scope_diff_to_target(diff_path: Path, target: Path, out_dir: Path) -> Path:
+    """Keep only the diff's file-sections whose path matches the declared TARGET; drop the rest.
+
+    Optimizer-emitted diffs can bundle non-kernel artifacts (e.g. a generated ``test_harness.py`` at
+    the repo root) alongside the real kernel change. When several kernels' diffs are applied to one
+    tree those artifacts COLLIDE ("already exists"). Since the caller declares the target file per
+    patch (``--pair PATCH:TARGET``), we filter each diff to just the sections that touch the target's
+    basename — robust to ANY stray file, no per-artifact special-casing. Returns the (possibly
+    filtered) diff path; if filtering would drop everything, returns the original unchanged.
+    """
+    try:
+        text = diff_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return diff_path
+    sections = re.split(r"(?=^diff --git )", text, flags=re.M)
+    sections = [s for s in sections if s.strip()]
+    if len(sections) <= 1:
+        return diff_path  # single-file diff: nothing to scope
+    tname = target.name
+    kept = [s for s in sections if tname in s.split("\n", 1)[0]]
+    if not kept or len(kept) == len(sections):
+        return diff_path  # no match, or nothing to drop -> use as-is
+    scoped = out_dir / f"scoped_{diff_path.stem}_{tname}.diff"
+    scoped.write_text("".join(kept), encoding="utf-8")
+    dropped = len(sections) - len(kept)
+    _log(out_dir, f"scoped diff to '{tname}' (dropped {dropped} non-target file-section(s), e.g. artifacts)")
+    return scoped
+
+
+def _git_apply_diff(diff_path: Path, repo_root: Path, out_dir: Path, target: Path | None = None) -> dict[str, Any]:
     """Apply a unified diff directly to a git repo (handles MULTI-FILE diffs), auto -p level.
 
     The complement to apply_kernel_patch's full-source replace: when the producer hands us a `.diff`
-    (e.g. a multi-file kernel patch), we apply it in-tree with git so all hunks/files land. Revert is
-    `git checkout -- <touched paths>`. Returns {status, touched, p_level, manifest:None}.
+    (e.g. a multi-file kernel patch), we apply it in-tree with git so all hunks/files land. When a
+    ``target`` is given we first scope the diff to that file (drops bundled artifacts that would
+    collide across kernels). Revert is `git checkout -- <touched paths>`. Returns {status, touched, ...}.
     """
+    if target is not None:
+        diff_path = _scope_diff_to_target(diff_path, target, out_dir)
     for lvl in (1, 0, 2):
         chk = subprocess.run(["git", "-C", str(repo_root), "apply", f"-p{lvl}", "--check", str(diff_path)],
                              capture_output=True, text=True)
@@ -319,7 +352,7 @@ def apply_and_bench(
         if _looks_like_diff(Path(pp)):
             # in-tree git apply at the repo that owns the target (aiter for aiter targets)
             repo_root = Path("/sgl-workspace/aiter") if "/aiter/" in str(tf) else Path(tf).parents[2]
-            res = _git_apply_diff(Path(pp), repo_root, out)
+            res = _git_apply_diff(Path(pp), repo_root, out, target=Path(tf))
             ok = res.get("status") == "ok"
             _log(out, f"apply[{i}] {Path(tf).name} (diff) status={res.get('status')}")
             applied.append({"target": tf, "mode": "diff", "status": res.get("status"), "touched": res.get("touched")})
