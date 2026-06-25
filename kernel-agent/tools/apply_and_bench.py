@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import signal
 import statistics
 import subprocess
@@ -58,6 +57,8 @@ def _log(out_dir: Path, msg: str) -> None:
     try:
         (out_dir / "apply_and_bench.log").open("a", encoding="utf-8").write(line + "\n")
     except OSError:
+        # Logging to disk is best-effort; the line already went to stdout above, so a
+        # write failure (e.g. read-only/full out_dir) must not abort the measurement.
         pass
 
 
@@ -153,7 +154,9 @@ def _kill_servers(proc: subprocess.Popen | None, backend: str) -> None:
         try:
             proc.send_signal(signal.SIGTERM)
             time.sleep(15)
-        except Exception:
+        except (ProcessLookupError, OSError):
+            # The server may already be gone (crashed / reaped); the pkill sweep below is the
+            # authoritative teardown, so a failed SIGTERM here is non-fatal.
             pass
     pat = "sglang.launch_server" if backend == "sglang" else "vllm.entrypoints"
     subprocess.run(["pkill", "-9", "-f", pat], check=False)
@@ -271,6 +274,9 @@ def apply_and_bench(
             try:
                 so.unlink(); removed_so.append(str(so))
             except OSError:
+                # A prebuilt .so we can't remove (already gone / perms) just means aiter may
+                # reuse it; AITER_REBUILD=1 + the jit cache invalidation in apply_kernel_patch
+                # still force a recompile, so this is non-fatal.
                 pass
         if removed_so:
             _log(out, f"removed prebuilt aiter .so ({len(removed_so)}) to force rebuild")
