@@ -6489,6 +6489,112 @@ class Coordinator:
         """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
         return self.recorder._aggregate_research_evidence(done_payload)
 
+    async def _enqueue_internal_static_recon_task(
+        self,
+        *,
+        reason: str,
+    ) -> "Task | None":
+        """Enqueue the Coordinator-owned read-only static-recon specialist task.
+
+        Mirrors :meth:`_enqueue_internal_research_scout_task` but seeds a source
+        -code reconnaissance mandate: the specialist greps the framework source
+        tree for un-bridged capability switches (predicates that silently
+        disable a faster path for the current model/GPU/precision). Read-only —
+        produces bridge candidates only; the EXPLORE freeform specialist authors
+        any patch under the normal KEEP gate. Idempotency keyed to the session
+        (PRELUDE one-shot). Returns None when disabled or enqueue fails.
+
+        Args:
+            reason: Tag distinguishing the enqueue site, recorded on the task.
+
+        Returns:
+            The created (or existing) specialist :class:`Task`, or ``None`` when
+            static-recon is disabled or enqueue fails.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "static_recon_enabled", True)):
+            return None
+        idempotency_key = "internal-static-recon-prelude"
+        params: dict[str, Any] = {
+            "domain": "static_recon_specialist",
+            "gap_canonical_id": "gap.static_recon.prelude",
+            "gap_symptom": (
+                "Grep the framework source for un-bridged capability switches "
+                "(predicates that silently disable a faster path for this "
+                "model/GPU/precision) and emit bridge candidates; do not "
+                "benchmark or patch."
+            ),
+            "gap_layer": "static_recon",
+            "source": "coordinator_internal",
+            "reason": str(reason),
+            # Read-only research lane (no worktree, no GPU lease).
+            "readonly": True,
+            "scope": "domain",
+            "mode": "research",
+            "lane": "cpu",
+        }
+        # Seed the curated checklist + its rendered prompt block for the current
+        # (model_class, gpu, precision). Best-effort; an empty checklist still
+        # runs a generic recon pass.
+        try:
+            from . import static_recon_checklist as _src_recon
+
+            _entries = _src_recon.entries_for(
+                model_class=str(getattr(state, "model_class", "") or ""),
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                precision=str(getattr(state, "precision", "") or ""),
+            )
+            _rendered = _src_recon.render_checklist_for_prompt(_entries)
+            if _rendered:
+                params["static_recon_checklist"] = _rendered
+            _dicts = _src_recon.checklist_as_dicts(_entries)
+            if _dicts:
+                params["static_recon_checklist_entries"] = _dicts
+        except Exception:  # noqa: BLE001 — advisory; never block dispatch
+            log.exception("static-recon: checklist seeding failed")
+        await self._warm_specialist_params(params)
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=params,
+                idempotency_key=idempotency_key,
+                requires_lanes=["research_lane"],
+                allowed_tools=[
+                    "Read",
+                    "Grep",
+                    "Glob",
+                    "Write",
+                ],
+                side_effects=["writes_results"],
+                lease_ttl_sec=1800,
+            )
+        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
+            log.exception("static-recon: enqueue failed")
+            return None
+        if not was_existing:
+            try:
+                state.static_recon_runs = int(getattr(state, "static_recon_runs", 0) or 0) + 1
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive bookkeeping
+                log.exception("static-recon: bookkeeping save failed")
+            log.info(
+                "static-recon dispatched: task_id=%s reason=%s",
+                task.task_id,
+                reason,
+            )
+        return task
+
+    async def _maybe_enqueue_prelude_static_recon(self) -> None:
+        """Force-dispatch the PRELUDE static-recon specialist (not LLM-proposable)."""
+        if not bool(getattr(self.shared_state, "static_recon_enabled", True)):
+            return
+        try:
+            await self._enqueue_internal_static_recon_task(
+                reason="prelude_initial",
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("static-recon: PRELUDE dispatch failed")
+
     async def _maybe_force_stalled_domain_specialist(self) -> None:
         """Hard-trigger (point 2): force-dispatch a domain specialist for a
         domain that has gone untouched for too many EXPLORE rounds *and* still
@@ -6696,6 +6802,74 @@ class Coordinator:
                     "research-scout: upsert_gap failed for %s",
                     cid,
                 )
+
+    def _consume_static_recon(self, done_payload: dict[str, Any]) -> None:
+        """Seed static-recon bridge candidates into gaps[] (idempotent, fail-soft).
+
+        Reads the specialist's ``recon`` block, validates each
+        ``bridge_candidate``, and upserts one gap per candidate so the EXPLORE
+        freeform specialist later dispatches against it with a precise mandate
+        (predicate location + consequence + bridge sketch). Read-only producer:
+        no patch is applied here; the normal KEEP gate still governs landing.
+
+        Args:
+            done_payload: The completed static-recon task payload; its ``recon``
+                block carries ``bridge_candidates``.
+        """
+        block = done_payload.get("recon")
+        if not isinstance(block, dict):
+            return
+        candidates = block.get("bridge_candidates")
+        if not isinstance(candidates, list):
+            return
+        seeded = 0
+        for idx, cand in enumerate(candidates):
+            if not isinstance(cand, dict):
+                continue
+            predicate_file = str(cand.get("predicate_file") or "").strip()
+            why = str(cand.get("why_disabled_here") or "").strip()
+            # Mirror the specialist's drop rule: a candidate without a source
+            # anchor + an explanation of the disabled branch is not actionable.
+            if not predicate_file or not why:
+                continue
+            raw_id = str(cand.get("id") or f"cand{idx}").strip() or f"cand{idx}"
+            slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw_id)[:80]
+            cid = f"gap.static_recon.{slug}"
+            predicate_name = str(cand.get("predicate_name") or "").strip()
+            consequence = str(cand.get("consequence") or "").strip()
+            bridge_sketch = str(cand.get("bridge_sketch") or "").strip()
+            domain_hint = str(cand.get("domain_hint") or "freeform").strip() or "freeform"
+            symptom_parts = [
+                f"Un-bridged switch in {predicate_file}"
+                + (f" ({predicate_name})" if predicate_name else "")
+                + f": {why}",
+            ]
+            if consequence:
+                symptom_parts.append(f"Consequence: {consequence}")
+            if bridge_sketch:
+                symptom_parts.append(f"Bridge: {bridge_sketch}")
+            symptom = " ".join(symptom_parts)[:1200]
+            try:
+                self.shared_state.upsert_gap(
+                    {
+                        "canonical_id": cid,
+                        "symptom": symptom,
+                        "layer": "static_recon",
+                        "severity": "medium",
+                        "domain_hint": domain_hint,
+                        "source": "static_recon",
+                        "provenance": predicate_file,
+                    }
+                )
+                seeded += 1
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("static-recon: upsert_gap failed for %s", cid)
+        if seeded:
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("static-recon: SharedState.save after seeding failed")
+        log.info("static-recon consumed: bridge_candidates_seeded=%d", seeded)
 
     async def _enqueue_internal_session_breakdown_task(
         self,
@@ -8902,6 +9076,30 @@ class Coordinator:
             _arch_notes = render_model_arch_compact(getattr(state, "model_arch", None))
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
+
+        # Static-recon specialist extras: structured model_info (machine-parseable
+        # companion to arch_notes) + checklist-derived source-hint directories so
+        # the recon focus block can gate + navigate. Other domains unaffected.
+        if domain == "static_recon_specialist":
+            if "model_info" not in params:
+                _minfo = getattr(state, "model_info", None)
+                if isinstance(_minfo, dict) and _minfo:
+                    params["model_info"] = dict(_minfo)
+            if "source_hint_directories" not in params:
+                try:
+                    from . import static_recon_checklist as _src_recon
+
+                    _dirs = _src_recon.source_hint_directories_for(
+                        model_class=str(getattr(state, "model_class", "") or ""),
+                        gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                        precision=str(getattr(state, "precision", "") or ""),
+                    )
+                    if _dirs:
+                        params["source_hint_directories"] = list(_dirs)
+                except Exception:  # noqa: BLE001 — advisory; never block dispatch
+                    log.exception(
+                        "static-recon: source_hint_directories lookup failed",
+                    )
 
         if "target_gap_notes" not in params:
             try:
@@ -11517,6 +11715,10 @@ class Coordinator:
                 )
                 # Step 4 — research scout (parallel, read-only, CPU-only).
                 await self._maybe_enqueue_prelude_research_scout()
+                # Step 5 — static-recon (parallel, read-only, CPU-only): grep
+                # the framework source for un-bridged capability switches and
+                # seed bridge candidates as gaps[] before EXPLORE starts.
+                await self._maybe_enqueue_prelude_static_recon()
         elif task_kind == "replay_warm_recipe":
             # separate promote path so replay doesn't overwrite baseline_tput/current_best via the baseline branch.
             try:

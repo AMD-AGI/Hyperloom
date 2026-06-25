@@ -690,6 +690,10 @@ class SharedState:
     research_scout_seen_pr_ids: list[str] = field(default_factory=list)
     # Round id of last scout dispatch so K-round re-dispatch fires once per qualifying round.
     research_scout_last_round: int = -1
+    # Static-recon specialist bookkeeping (explore-opt-5 capability A); master
+    # switch ``--no-static-recon``. PRELUDE-only one-shot source reconnaissance.
+    static_recon_enabled: bool = True
+    static_recon_runs: int = 0
     # Total specialist dispatches in current EXPLORE entry; reset on fresh entry. Robustness detects specialist storms.
     explore_specialist_dispatched_count: int = 0
     # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).

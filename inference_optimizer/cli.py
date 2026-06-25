@@ -4700,6 +4700,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "Ignored when ``--no-research-scout`` is set.",
     )
     opt.add_argument(
+        "--static-recon",
+        dest="static_recon",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_STATIC_RECON"),
+        help="Auto-dispatch a read-only static-recon specialist at PRELUDE "
+        "that greps the framework source for un-bridged capability "
+        "switches (predicates that silently disable a faster path for "
+        "this model/GPU/precision, e.g. a CUDA-only ``*_supported()`` "
+        "on ROCm) and seeds bridge candidates as gaps[]. Default on; "
+        "pass ``--no-static-recon`` to disable. Env: "
+        "INFERENCE_OPTIMIZER_STATIC_RECON=0.",
+    )
+    opt.add_argument(
         "--recipe-sediment",
         dest="recipe_sediment",
         action=argparse.BooleanOptionalAction,

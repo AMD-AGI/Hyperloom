@@ -143,6 +143,24 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "KEEP/REVERT."
         ),
     ),
+    SpecialistDomain(
+        key="static_recon_specialist",
+        layer="framework source static reconnaissance / un-bridged switches",
+        kb_anchor="static_recon",
+        pr_repos=("ROCm/vllm", "sgl-project/sglang", "ROCm/aiter"),
+        available_in="M6",
+        description=(
+            "Read-only static-source reconnaissance dispatched at PRELUDE. "
+            "Greps the framework source tree (vLLM / SGLang) for un-bridged "
+            "capability switches — fast paths that should be enabled for the "
+            "current (model, GPU, precision) but are silently disabled by a "
+            "predicate (e.g. a CUDA-only *_supported() returning False on "
+            "ROCm). Seeded with a curated checklist; emits bridge-patch "
+            "candidates as gap seeds. Never benchmarks, applies patches, or "
+            "decides KEEP/REVERT — the EXPLORE freeform specialist authors the "
+            "actual patch under the normal KEEP gate."
+        ),
+    ),
 )
 
 
