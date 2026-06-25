@@ -524,6 +524,12 @@ class SpecialistPromptInputs:
     # Empty dict renders a placeholder; advisory, never a gate.
     substrate_levers: dict[str, Any] = field(default_factory=dict)
 
+    # Substrate↔gbrain dual-read cross-check (see ``substrate_dual_read``):
+    # the substrate's verdict on the gbrain warm recipe's champion config —
+    # ``{verdict, selected_source, conflicts:[...], confirmations:[...], ...}``.
+    # Empty dict renders nothing; advisory, never a gate.
+    substrate_dual_read: dict[str, Any] = field(default_factory=dict)
+
     # Recipe summary from T0 ``find-recipe``
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
@@ -1122,6 +1128,85 @@ def _section_substrate_levers(inp: SpecialistPromptInputs) -> list[str]:
     if len(levers) > len(shown):
         rows.append("")
         rows.append(f"(+{len(levers) - len(shown)} more lever(s) not shown)")
+    return rows
+
+
+def _section_substrate_dual_read(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the SUBSTRATE × WARM-RECIPE CROSS-CHECK from ``substrate_dual_read``.
+
+    Two knowledge sources steer this specialist: the cortex substrate (§4b
+    directional priors) and the gbrain warm-start recipe (§5 champion config).
+    This block reports the substrate's verdict on that recipe — where they
+    agree, and (more importantly) where the substrate's measured evidence flags
+    a recipe lever as harmful. Conflicts are a steer-away signal; agreements
+    reinforce. Advisory only — the Critic still gates the final answer.
+
+    Empty / no-signal digests render nothing (the section is dropped).
+
+    Args:
+        inp: The specialist prompt inputs (reads ``substrate_dual_read``).
+
+    Returns:
+        The rendered cross-check section lines, or ``[]`` to omit the section.
+    """
+    dig = inp.substrate_dual_read or {}
+    if not isinstance(dig, dict) or not dig:
+        return []
+    verdict = str(dig.get("verdict") or "")
+    # Only worth showing when the two sources were actually compared.
+    if verdict in ("", "no_data", "substrate_only"):
+        return []
+
+    rows = ["## 4c. SUBSTRATE × WARM-RECIPE CROSS-CHECK (advisory)", ""]
+    selected = str(dig.get("selected_source") or "")
+    headline = {
+        "conflict": (
+            "**The cortex substrate's measured evidence CONFLICTS with the "
+            "gbrain warm-start recipe below.** Treat the flagged levers as a "
+            "steer-away signal and justify keeping them if you do."
+        ),
+        "agree": (
+            "The cortex substrate **confirms** the gbrain warm-start recipe's "
+            "levers — the two knowledge sources agree."
+        ),
+        "gbrain_only": (
+            "The gbrain warm-start recipe proposes levers the cortex substrate "
+            "has no measured basis for — use the recipe, but it is unverified."
+        ),
+        "no_basis": (
+            "The cortex substrate has no measured basis to judge the gbrain "
+            "warm-start recipe's levers."
+        ),
+    }.get(verdict, "")
+    if headline:
+        rows.append(headline)
+    rows.append("")
+    rows.append(f"Cross-check verdict: **{verdict}** (selected source: `{selected or 'none'}`)")
+
+    conflicts = dig.get("conflicts") if isinstance(dig.get("conflicts"), list) else []
+    if conflicts:
+        rows.append("")
+        rows.append("Conflicting recipe levers (substrate evidence disagrees):")
+        rows.append("")
+        rows.append("| lever | knob | status | note |")
+        rows.append("|---|---|---|---|")
+        for c in conflicts[:12]:
+            if not isinstance(c, dict):
+                continue
+            lever = str(c.get("lever") or "")
+            knob = str(c.get("knob") or "")
+            status = str(c.get("status") or "")
+            note = str(c.get("note") or "").replace("|", "/")
+            rows.append(f"| `{lever}` | `{knob}` | {status} | {note} |")
+
+    confirmations = dig.get("confirmations") if isinstance(dig.get("confirmations"), list) else []
+    if confirmations and not conflicts:
+        rows.append("")
+        confirmed_levers = ", ".join(
+            f"`{c.get('lever')}`" for c in confirmations[:8] if isinstance(c, dict) and c.get("lever")
+        )
+        if confirmed_levers:
+            rows.append(f"Substrate-confirmed recipe levers: {confirmed_levers}")
     return rows
 
 
@@ -1751,6 +1836,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_roofline_evidence(inp),  # 3: § 4a
         _section_substrate_levers(inp),  # 3a: § 4b
         _section_recipe(inp),  # 4: § 5
+        _section_substrate_dual_read(inp),  # 4a: § 4c (substrate × recipe cross-check)
         _section_lessons(inp),  # 5: § 5b
         _section_pitfalls(inp),  # 6: § 5c
         _section_pr_feed(inp),  # 7: § 6
