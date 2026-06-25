@@ -467,6 +467,32 @@ def _default_configs() -> tuple[str, str, str]:
     )
 
 
+def _is_heterogeneous_multi_tensor(candidate: dict) -> bool:
+    """True when the candidate's input_shapes describe several distinct tensors.
+
+    The generic ``_build_configs`` path assumes a single GEMM-like operand whose
+    leading dim is swept (M×N×K). When TraceLens captures an op with several
+    *different-rank* tensors (e.g. paged attention: query (b,h,d), KV cache
+    (pages,1,h,d), kv_indptr (n,), workspace (bytes,) ...) that assumption is
+    wrong: ``_build_configs`` keeps only the highest-rank shapes and drops the
+    rest, silently fabricating a GEMM harness that mismeasures the real op. We
+    detect that here so the caller can REFUSE to fabricate rather than guess.
+
+    Heuristic: >=2 input_shapes with >=2 distinct ranks (dim counts). Same-rank
+    multi-shape (a normal shape sweep) is fine and returns False.
+    """
+    shapes = candidate.get("input_shapes")
+    if not isinstance(shapes, list) or len(shapes) < 2:
+        return False
+    ranks: set[int] = set()
+    for entry in shapes:
+        shape_str = entry.get("shape", "") if isinstance(entry, dict) else str(entry)
+        dims, _ = _parse_shape_string(shape_str)
+        if dims:
+            ranks.add(len(dims))
+    return len(ranks) >= 2
+
+
 def _parse_shape_string(s: str) -> tuple[tuple[int, ...], str]:
     """Parse '(256, 128) bf16' → ((256, 128), 'bf16').
 
@@ -1424,6 +1450,26 @@ def maybe_generate_harness(
         if aiter_hr is not None:
             return aiter_hr
         _log("could not identify kernel or reference function")
+        return None
+
+    # Refuse to fabricate a GEMM harness for a heterogeneous multi-tensor op.
+    # _build_configs would keep only the highest-rank shapes and drop the rest,
+    # silently mismeasuring (this is what broke paged-attention: the flat
+    # multi-tensor shapes were flattened to M/N/K -> broken unpack). First RETRY
+    # via the op_test idiom (reuses the kernel's own @perftest/@benchmark fn,
+    # which builds the real multi-tensor inputs); only if that also fails do we
+    # refuse, so the caller skips-with-reason instead of dispatching a blind one.
+    if _is_heterogeneous_multi_tensor(candidate):
+        _log("heterogeneous multi-tensor input_shapes; GEMM config builder "
+             "unsafe, retrying via op_test idiom")
+        aiter_hr = _try_generate_aiter_harness(
+            analyzer, decorated, candidate, source_file, benchmark_path,
+            out_dir, _log,
+        )
+        if aiter_hr is not None:
+            return aiter_hr
+        _log("HARNESS_SPEC_INSUFFICIENT: heterogeneous multi-tensor op with no "
+             "usable op_test idiom; refusing to fabricate a GEMM harness")
         return None
 
     all_configs, cfg_unpack, config_str_code = _build_configs(candidate)
