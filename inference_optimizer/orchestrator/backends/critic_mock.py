@@ -64,7 +64,7 @@ class MockCriticBackend:
         self.calls.append({"prompt": prompt})
         intents: list[Intent] = []
         for match in _PROPOSAL_RE.finditer(prompt):
-            seq, msg_id, from_agent, raw_payload = match.groups()
+            msg_id = match.group(2)
             if msg_id in self._approved_msg_ids:
                 continue
             self._approved_msg_ids.add(msg_id)

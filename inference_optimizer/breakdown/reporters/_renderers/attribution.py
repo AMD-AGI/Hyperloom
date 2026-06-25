@@ -40,6 +40,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     rows = [
         # explore subsumes the old backends+params split; legacy rows kept for archived reports.
         ["explore", sb.get("explore_pct_of_total"), sb.get("explore_share_pct")],
+        ["replay_warm_recipe", sb.get("replay_warm_recipe_pct_of_total"), sb.get("replay_warm_recipe_share_pct")],
         ["backends", sb.get("backends_pct_of_total"), sb.get("backends_share_pct")],
         ["params", sb.get("params_pct_of_total"), sb.get("params_share_pct")],
         ["sweep", sb.get("sweep_pct_of_total"), sb.get("sweep_share_pct")],

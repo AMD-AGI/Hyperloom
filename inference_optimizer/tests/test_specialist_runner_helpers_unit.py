@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from inference_optimizer.orchestrator import specialist_runner as sr
 from inference_optimizer.orchestrator.specialist_runner import (
     SpecialistFailureType,
-    SpecialistRunResult,
     SpecialistRunner,
     build_empty_specialist_done,
     classify_specialist_failure,
@@ -89,25 +88,6 @@ def test_build_empty_specialist_done():
 def test_build_empty_specialist_done_default_reason():
     out = build_empty_specialist_done(gap_canonical_id="g", domain="d", reason="")
     assert out["summary"] == "specialist exited empty"
-
-
-# ---- to_sub_agent_result --------------------------------------------------
-def _run_result(**over):
-    kwargs = dict(task_id="t1", domain="kernel", gap_canonical_id="g1", status="succeeded", specialist_done={})
-    kwargs.update(over)
-    return SpecialistRunResult(**kwargs)
-
-
-def test_to_sub_agent_result_succeeded():
-    out = SpecialistRunner.to_sub_agent_result(_run_result(task_id="t1", status="empty_synthesised"))
-    assert out.state == "succeeded"
-    assert out.task_id == "t1"
-
-
-def test_to_sub_agent_result_failed():
-    out = SpecialistRunner.to_sub_agent_result(_run_result(task_id="t2", status="stale", error="boom"))
-    assert out.state == "failed"
-    assert out.error == "boom"
 
 
 # ---- path helpers ---------------------------------------------------------

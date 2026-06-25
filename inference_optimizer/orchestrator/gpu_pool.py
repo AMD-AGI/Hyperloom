@@ -15,11 +15,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ..storage.connection import SqliteConnection
+from ._time import now_iso
 
 
 DEFAULT_GPU_LEASE_TTL_SEC = 1800
 
-# WS2: GPU-lease / gpu_research_lane TTL grace over the agent wall budget. The
+# GPU-lease / gpu_research_lane TTL grace over the agent wall budget. The
 # iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — the lease must
 # outlive the agent's wall-budget kill so the cards are never reclaimed while
 # the agent is still computing (which would let serving grab them and pollute
@@ -27,14 +28,8 @@ DEFAULT_GPU_LEASE_TTL_SEC = 1800
 GPU_LEASE_TTL_GRACE = 0.1
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond ISO-8601 string.
-
-    Returns:
-        The current UTC time formatted as a microsecond-precision ISO-8601
-        string.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 def _parse_gpu_list(raw: str) -> list[int]:
@@ -252,23 +247,6 @@ class SpecialistGpuPool:
         async with self.db.transaction() as cur:
             cur.execute(
                 f"DELETE FROM gpu_leases WHERE gpu_id IN ({placeholders}) AND holder_id=?",
-                params,
-            )
-
-    async def heartbeat(self, lease: GpuLease | None) -> None:
-        """Refresh the heartbeat timestamp for a lease's GPUs.
-
-        Args:
-            lease: The lease to refresh; ``None`` or an empty lease is a no-op.
-        """
-        if lease is None or not lease.gpu_ids:
-            return
-        now_iso = _now_iso()
-        placeholders = ",".join("?" * len(lease.gpu_ids))
-        params = [now_iso] + list(lease.gpu_ids) + [lease.holder_id]
-        async with self.db.transaction() as cur:
-            cur.execute(
-                f"UPDATE gpu_leases SET heartbeat_at=? WHERE gpu_id IN ({placeholders}) AND holder_id=?",
                 params,
             )
 
