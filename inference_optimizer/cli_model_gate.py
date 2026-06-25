@@ -228,12 +228,6 @@ _VERDICT_VISION_ONLY = "vision_only"
 _TEXT_COERCIBLE_MODEL_TYPES = frozenset({
     "kimi_k25",
     "qwen3_5_moe",
-    # Gemma-4 ships a vision_config (Gemma4ForConditionalGeneration) but its
-    # text decoder (text_config / gemma4_text) is a standard dense causal LM
-    # that vLLM serves text-only (both Gemma4ForCausalLM and
-    # Gemma4ForConditionalGeneration are registered). Text benchmarks never
-    # exercise the vision tower, so route to the degraded text path.
-    "gemma4",
 })
 
 _MAXPOS_CONFIG_KEYS = (
@@ -272,10 +266,11 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # `glm_moe_dsa` but Transformers does not recognize this architecture" →
 # ModelConfig ValidationError in engine init).
 _UNRECOGNIZED_MODEL_TYPES = frozenset({
-    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash", "glm_moe_dsa",
+    "deepseek_v4", "gemma4", "glm4_moe_lite", "mimo_v2_flash", "glm_moe_dsa",
 })
 _UNRECOGNIZED_ARCHITECTURES = frozenset({
-    "deepseekv4forcausallm", "glm4moeliteforcausallm",
+    "deepseekv4forcausallm", "gemma4forcausallm",
+    "gemma4forconditionalgeneration", "glm4moeliteforcausallm",
     "mimov2flashforcausallm", "glmmoedsaforcausallm",
 })
 # Some model_type values only appear inside nested decoder configs carried by a
@@ -502,6 +497,12 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     if isinstance(nested, dict):
         nested_model_type = str(nested.get("model_type") or "").strip()
         nested_model_type_l = nested_model_type.lower()
+
+    # Registry/config incompatibilities are handled by the model-config gate so
+    # they get the precise model_config_incompatible stop reason. Do not emit a
+    # misleading multimodal text-fallback warning for wrappers such as Gemma4.
+    if _detect_unrecognized_architecture(config) is not None:
+        return None
 
     # Hard denylist wins first: explicit VLM arch / model_type is vision_only
     # even if it also carries a ForCausalLM marker (e.g. Phi3VForCausalLM).
@@ -790,7 +791,14 @@ def _detect_private_quant(model_path: str, data: dict) -> str | None:
     qc = data.get("quantization_config")
     declared_supported = False
     if isinstance(qc, dict):
-        method = str(qc.get("quant_method") or "").strip().lower()
+        raw_method = qc.get("quant_method")
+        method = str(raw_method or "").strip().lower()
+        if "quant_method" in qc and not method:
+            return (
+                "quantization_config.quant_method is empty; sglang/vLLM treats "
+                "the checkpoint as quantized but cannot select a loader and "
+                "fails engine init with \"Unknown quantization method: ''\"."
+            )
         if method and method not in _SUPPORTED_QUANT_METHODS:
             return (
                 f"quantization_config.quant_method '{method}' is a private/"
@@ -1244,6 +1252,36 @@ def _detect_mistral_common_tokenizer_gap(model_path: str, data: dict) -> str | N
     )
 
 
+def _detect_llama_sentencepiece_metadata_gap(model_path: str, data: dict) -> str | None:
+    """Return a reason for Llama checkpoints with bare SentencePiece tokenizer.
+
+    Some local Llama fine-tunes ship ``tokenizer.model`` but omit
+    ``tokenizer_config.json`` / ``tokenizer.json``. SGLang first loads a generic
+    tokenizer backend, then retries the declared-class path with the local
+    absolute model path. The HF Hub validator rejects that path with
+    ``HFValidationError: Repo id must be in the form ...`` before serving starts.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {str(a or "").strip() for a in _config_architectures(data)}
+    if model_type != "llama" and "LlamaForCausalLM" not in arches:
+        return None
+
+    auto_map = data.get("auto_map")
+    if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
+        return None
+
+    mdir = Path(model_path)
+    if not (mdir / "tokenizer.model").is_file():
+        return None
+    if (mdir / "tokenizer_config.json").is_file() or (mdir / "tokenizer.json").is_file():
+        return None
+    return (
+        "Llama checkpoint ships tokenizer.model but lacks tokenizer_config.json "
+        "or tokenizer.json; sglang falls back through a local-path tokenizer "
+        "resolution path that raises HFValidationError before server init."
+    )
+
+
 def _detect_incompatible_model_config(
     model_path: str, gpu_type: str | None = None,
 ) -> str | None:
@@ -1363,6 +1401,9 @@ def _detect_incompatible_model_config(
     mistral_tokenizer_reason = _detect_mistral_common_tokenizer_gap(model_path, data)
     if mistral_tokenizer_reason is not None:
         return mistral_tokenizer_reason
+    llama_tokenizer_reason = _detect_llama_sentencepiece_metadata_gap(model_path, data)
+    if llama_tokenizer_reason is not None:
+        return llama_tokenizer_reason
     # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
     # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
     auto_map = data.get("auto_map")
