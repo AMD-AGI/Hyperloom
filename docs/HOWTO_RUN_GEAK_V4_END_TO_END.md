@@ -48,7 +48,7 @@ remote — nothing is local-only.
 
 | Repo | Remote | Branch (clone this) | PR | Purpose |
 |---|---|---|---|---|
-| **Hyperloom (HL)** | `github.com/AMD-AGI/Hyperloom` | `feat/dispatch-prompt-extra-context-clean` | [#703](https://github.com/AMD-AGI/Hyperloom/pull/703) | builds `kernel_candidates.json` + the enriched dispatch prompt; ships the `apply_and_bench.py` E2E primitive; enforces GEAK prompt-only dispatch |
+| **Hyperloom (HL)** | `github.com/AMD-AGI/Hyperloom` | `feat/dispatch-prompt-extra-context-clean` | [#703](https://github.com/AMD-AGI/Hyperloom/pull/703) | builds `kernel_candidates.json` + the enriched dispatch prompt; ships the `apply_and_bench.py` E2E primitive; enforces GEAK prompt-only dispatch; **runs the combined E2E autonomously** after the GEAK batch (commit `f2216a9`) |
 | **GEAK v4** | `github.com/AMD-AGI/GEAK` | `feat/kernel-workflow-from-analysis` | [#306](https://github.com/AMD-AGI/GEAK/pull/306) | the v4 from-analysis workflow variant (`kernel_workflow_from_analysis.js`); branched off `GEAK_v4` |
 | **GEAK v3** (only if you also run v3) | `github.com/AMD-AGI/GEAK` | `fix/ccache-298-on-322` | [#299](https://github.com/AMD-AGI/GEAK/pull/299) | ccache + MAX_JOBS so aiter/CK `.cu` recompiles finish in budget; pinned sha `39472353` |
 
@@ -209,8 +209,9 @@ apply all of them together in §6.
 
 ## 6. Combined E2E: apply ALL optimized patches together, then remeasure
 
-This is the deliverable number. Use the single shared gate-less primitive
-`apply_and_bench.py` (HL `kernel-agent/tools/`). It:
+This is the deliverable number. There are two ways to get it — **autonomous
+(default, recommended)** and **manual (fallback)**. Both use the same single shared
+gate-less primitive `apply_and_bench.py` (HL `kernel-agent/tools/`), which:
 1. applies each patch to its target (handles aiter `.cu` rebuild with
    `AITER_REBUILD=1` + jit/cpp_itfs cache invalidation; also handles `.diff` via
    `git apply` and full-source-file replacement),
@@ -220,6 +221,30 @@ This is the deliverable number. Use the single shared gate-less primitive
    serving path — e.g. aiter JIT rebuild markers), and
 4. reports the delta and reverts the source. **No KEEP/REVERT/NEEDS_REVIEW
    policy** — it is pure measurement.
+
+### 6a. Autonomous (default) — HL runs it for you, no manual step
+
+When you dispatch the GEAK batch through HL (the `geak_vs_forge_driver.py` path in
+§4), HL **automatically** runs the combined E2E once all kernels finish: it collects
+each kernel's best patch, applies them ALL together, rebuilds, warm-serves the A/B,
+and attaches the result to `result_geak.json` under a `combined_e2e` block. **No
+manual `apply_and_bench` call.** (HL commit `f2216a9` on #703.)
+
+- It is **GEAK-only and opt-in**: the driver sets `payload["combined_e2e"]=True` and
+  passes the serving knobs parsed from `--serving-config`. It only fires when the
+  backend is geak, a servable `model_path` is present, and ≥1 GPU is visible —
+  otherwise it is a silent no-op (OOB/forge never trigger it).
+- It applies each kernel's **best microbench patch** regardless of the per-kernel
+  KEEP/REVERT verdict (the E2E A/B is the arbiter).
+- Result: `result_geak.json` → `combined_e2e: {baseline_median_tok_s,
+  patched_median_tok_s, delta_pct, engagement_proof[...]}`. The driver also prints
+  the delta. **Nothing else to run** — skip to §6c (interpreting).
+
+So the normal flow is: run §4 (dispatch through HL) and read the `combined_e2e`
+block. The manual path below is only for re-measuring an existing run, a custom
+patch selection, or v4 runs driven outside HL's batch handler.
+
+### 6b. Manual (fallback) — explicit `apply_and_bench`
 
 Apply **all** kernels at once with repeated `--pair PATCH:TARGET`:
 
@@ -251,6 +276,8 @@ python3 tools/apply_and_bench.py \
 **Output:** a JSON with `baseline_median_tok_s`, `patched_median_tok_s`,
 `delta_pct`, and `engagement_proof[].engaged=true`. The `delta_pct` is your
 combined E2E result.
+
+### 6c. Interpreting the combined E2E number
 
 > **Interpreting E2E:** on host/decode-bound configs (e.g. an 8B model at TP=1,
 > ~55% GPU), even large kernel speedups can yield a near-flat E2E delta — that's
@@ -285,8 +312,10 @@ analysis (the normal case here, and required for a fair v3-vs-v4 comparison).
 5. [ ] For each hot kernel: run `kernel_workflow_from_analysis.js` via Workflow
        with `seed_target=tgNNN` + `dispatch_prompt_path=<that kernel's prompt>`.
        Collect verified speedup + `final_patch.diff`.
-6. [ ] Apply **all** patches combined with `apply_and_bench.py` (one `--pair`
-       each, `--aiter-rebuild`, serving config matching step 3).
+6. [ ] Combined E2E: if you dispatched through HL (step 3), it runs
+       **autonomously** — read `result_geak.json` → `combined_e2e` (§6a). Otherwise
+       run `apply_and_bench.py` manually (one `--pair` each, `--aiter-rebuild`,
+       serving config matching step 3) — §6b.
 7. [ ] Record: per-kernel verified speedups + the combined E2E `delta_pct`
        (with engagement_proof=true).
 
