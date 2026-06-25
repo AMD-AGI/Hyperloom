@@ -10,6 +10,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 _CI_DIR = Path(__file__).resolve().parent
 if str(_CI_DIR) not in sys.path:
     sys.path.insert(0, str(_CI_DIR))
@@ -118,12 +120,31 @@ def test_resolve_batch_index_explicit_invalid(monkeypatch):
 
 
 def test_resolve_batch_index_empty_uses_rotation(monkeypatch):
-    # Empty batch_index (manual or schedule) -> max_hours-paced rotation, which
-    # honors INPUT_CRON_NOW so a manual backfill can target a specific slice.
+    # Empty batch_index + a cron_now -> max_hours-paced rotation at that instant.
     monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
     monkeypatch.setenv("INPUT_MAX_HOURS", "6")
     monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-15T22:00:00Z")  # anchor + 6h
     assert gm._resolve_batch_index(100, 10) == 1
+
+
+def test_resolve_batch_index_schedule_empty_ok(monkeypatch):
+    # Schedule fire with empty batch_index/cron_now uses the real-clock rotation
+    # (no guard) — INPUT_CRON_NOW just pins the instant for the test.
+    monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
+    monkeypatch.setenv("INPUT_MAX_HOURS", "6")
+    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-15T22:00:00Z")
+    assert gm._resolve_batch_index(100, 10) == 1
+
+
+def test_resolve_batch_index_manual_no_index_no_cron_raises(monkeypatch):
+    # Anti-footgun: manual dispatch with neither batch_index nor cron_now would
+    # duplicate the current schedule slice -> refuse.
+    monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
+    monkeypatch.delenv("INPUT_CRON_NOW", raising=False)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    with pytest.raises(SystemExit):
+        gm._resolve_batch_index(100, 10)
 
 
 def test_resolve_batch_index_zero_batch(monkeypatch):

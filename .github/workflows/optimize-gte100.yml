@@ -17,8 +17,9 @@ name: SaFE Optimize gte100 (filtered pool)
 #
 # Cadence: twice a day (every 12h) at Beijing 11:07 / 23:07 (UTC 03:07 / 15:07),
 # using minute :07 (not :00) because GitHub heavily delays cron at the top of the
-# hour. The two fires still straddle 12:00 UTC so batch_rotate's scheduled_slot
-# advances one batch per fire. max_hours=12 is the per-model optimizer budget.
+# hour. The batch rotation is paced by max_hours=12 (one batch per 12h of
+# wall-clock time since the anchor, in batch_rotate.py) — same scheme as
+# optimize-submit — so it stays correct even if this cron later changes.
 # Scheduled runs only fire from the DEFAULT branch.
 
 on:
@@ -85,6 +86,7 @@ jobs:
             --count "${n}" \
             --batch-size "${BATCH_SIZE}" \
             --batch-index "${INPUT_BATCH_INDEX:-}" \
+            --max-hours "${MAX_HOURS}" \
             --event "${EVENT}")
           bi=$(echo "$out" | cut -f1); n=$(echo "$out" | cut -f2)
           batches=$(echo "$out" | cut -f3); start=$(echo "$out" | cut -f4); end=$(echo "$out" | cut -f5)

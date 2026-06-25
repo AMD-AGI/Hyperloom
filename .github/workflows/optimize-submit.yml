@@ -72,11 +72,11 @@ on:
         required: false
         default: ''
       batch_index:
-        description: 'Batch index (0-based) into candidates_file. Leave EMPTY to use the max_hours-paced rotation (optionally pinned via cron_now); set a number to force a specific slice. Ignored if batch_size is 0.'
+        description: 'Batch index (0-based) into candidates_file. Set a number to force a specific slice. On MANUAL dispatch you MUST set either this OR cron_now (leaving both empty is rejected, since the real-clock rotation would just re-run the current schedule slice). Ignored if batch_size is 0.'
         required: false
         default: ''
       cron_now:
-        description: 'Override "now" (ISO-8601 UTC, e.g. 2026-06-25T01:00:00Z) for the batch rotation when batch_index is empty. Used to backfill a slice aligned with the schedule cycle. Empty = real clock.'
+        description: 'Backfill an already-skipped slice: pass a PAST ISO-8601 UTC instant (e.g. 2026-06-25T01:00:00Z) and the max_hours-paced rotation picks that slice. Use instead of batch_index when you want to stay aligned with the schedule cycle. Empty + empty batch_index on manual dispatch is rejected.'
         required: false
         default: ''
       batch_size:

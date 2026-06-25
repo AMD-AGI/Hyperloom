@@ -496,12 +496,16 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
 
     Priority:
       1. Explicit ``INPUT_BATCH_INDEX`` (manual override of a specific slice).
-      2. Otherwise the max_hours-paced rotation (``_cron_batch_index``), which
-         keys off ``INPUT_CRON_NOW`` (or the real clock when unset). This is used
-         for both schedule fires AND manual dispatches that leave batch_index
-         empty — a manual backfill can pass ``INPUT_CRON_NOW`` to target the same
-         slice the rotation would pick at that instant, so it stays aligned with
-         the schedule cycle and never overlaps the next fire's slice.
+      2. Otherwise the max_hours-paced rotation (``_cron_batch_index``), keyed
+         off ``INPUT_CRON_NOW`` (or the real clock when unset).
+
+    Anti-footgun for manual backfills: on a manual dispatch (``GITHUB_EVENT_NAME``
+    != ``schedule``) where BOTH ``INPUT_BATCH_INDEX`` and ``INPUT_CRON_NOW`` are
+    empty, the rotation at the real clock returns the SAME slice the next
+    schedule fire will pick — i.e. a guaranteed duplicate. We refuse that case so
+    a backfill must explicitly choose a slice (``batch_index``) or a past instant
+    (``cron_now``) and never silently re-runs the current batch. Schedule fires
+    are unaffected (they intentionally use the real clock).
 
     Args:
         pool_size (int): Total number of candidate entries.
@@ -509,6 +513,10 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
 
     Returns:
         int: The 0-based batch index.
+
+    Raises:
+        SystemExit: Manual dispatch with neither ``INPUT_BATCH_INDEX`` nor
+            ``INPUT_CRON_NOW`` set (would duplicate the current schedule slice).
     """
     raw = (os.environ.get("INPUT_BATCH_INDEX") or "").strip()
     if raw:
@@ -518,6 +526,15 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
             return 0
     if batch_size <= 0 or pool_size <= 0:
         return 0
+    is_schedule = os.environ.get("GITHUB_EVENT_NAME") == "schedule"
+    cron_now = (os.environ.get("INPUT_CRON_NOW") or "").strip()
+    if not is_schedule and not cron_now:
+        raise SystemExit(
+            "ERROR: manual dispatch with empty batch_index AND empty cron_now "
+            "would re-run the current schedule slice (duplicate). Pass batch_index "
+            "to target a specific slice, or cron_now (a past UTC instant) to "
+            "backfill an already-skipped slice."
+        )
     return _cron_batch_index(pool_size, batch_size)
 
 
