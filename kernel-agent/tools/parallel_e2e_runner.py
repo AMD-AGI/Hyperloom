@@ -80,27 +80,37 @@ def load_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         env[key.strip()] = value.strip().strip('"').strip("'")
-    if "SAFE_API_KEY" in env:
-        env.setdefault("OOB_API_KEY", env["SAFE_API_KEY"])
-        env.setdefault("ANTHROPIC_API_KEY", env["SAFE_API_KEY"])
-        env.setdefault("OPENAI_API_KEY", env["SAFE_API_KEY"])
-        env.setdefault("ANTHROPIC_AUTH_TOKEN", env["SAFE_API_KEY"])
-    if "ANTHROPIC_AUTH_TOKEN" in env:
-        env.setdefault("ANTHROPIC_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
-        env.setdefault("OPENAI_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
-        env.setdefault("OOB_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
-    if "AMD_API_KEY" in env:
-        env.setdefault("AMD_LLM_API_KEY", env["AMD_API_KEY"])
-        env.setdefault("LLM_API_KEY", env["AMD_API_KEY"])
-        env.setdefault("GEAK_API_KEY", env["AMD_API_KEY"])
-    if "OPENAI_BASE_URL" in env:
-        env.setdefault("ANTHROPIC_BASE_URL", env["OPENAI_BASE_URL"])
-        env.setdefault("OOB_BASE_URL", env["OPENAI_BASE_URL"])
-        env.setdefault("LLM_API_BASE", env["OPENAI_BASE_URL"])
-    elif "ANTHROPIC_BASE_URL" in env:
-        env.setdefault("OPENAI_BASE_URL", env["ANTHROPIC_BASE_URL"])
-        env.setdefault("OOB_BASE_URL", env["ANTHROPIC_BASE_URL"])
-        env.setdefault("LLM_API_BASE", env["ANTHROPIC_BASE_URL"])
+    # SAFE_API_KEY stays the primary source so the single-gateway setup is
+    # unchanged; a split deploy (no SAFE_API_KEY) falls back to the per-provider
+    # key. GEAK/OOB speak the OpenAI protocol so they take the OpenAI-side key.
+    openai_key = (
+        env.get("SAFE_API_KEY")
+        or env.get("OPENAI_API_KEY")
+        or env.get("ANTHROPIC_AUTH_TOKEN")
+        or env.get("ANTHROPIC_API_KEY")
+        or env.get("AMD_API_KEY")
+    )
+    if openai_key:
+        env.setdefault("OPENAI_API_KEY", openai_key)
+        env.setdefault("OOB_API_KEY", openai_key)
+        env.setdefault("GEAK_API_KEY", openai_key)
+        env.setdefault("LLM_API_KEY", openai_key)
+        env.setdefault("AMD_LLM_API_KEY", openai_key)
+    anthropic_key = (
+        env.get("SAFE_API_KEY")
+        or env.get("ANTHROPIC_API_KEY")
+        or env.get("ANTHROPIC_AUTH_TOKEN")
+        or env.get("OPENAI_API_KEY")
+    )
+    if anthropic_key:
+        env.setdefault("ANTHROPIC_API_KEY", anthropic_key)
+        env.setdefault("ANTHROPIC_AUTH_TOKEN", anthropic_key)
+    base_url = env.get("OPENAI_BASE_URL") or env.get("ANTHROPIC_BASE_URL")
+    if base_url:
+        env.setdefault("OPENAI_BASE_URL", base_url)
+        env.setdefault("ANTHROPIC_BASE_URL", base_url)
+        env.setdefault("OOB_BASE_URL", base_url)
+        env.setdefault("LLM_API_BASE", base_url)
     return env
 
 
