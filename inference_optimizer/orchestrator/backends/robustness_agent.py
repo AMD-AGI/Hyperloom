@@ -26,9 +26,8 @@ from ...protocol.intent import (
     validate_envelope,
 )
 from ...session_paths import allocate_turn_workdir
-from ._runtime_bridge import invoke_runtime_cli
+from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 from .base import BackendError, BackendTurnResult
-from .critic_agent import RuntimeCall, RuntimeCaller
 
 
 log = logging.getLogger(__name__)

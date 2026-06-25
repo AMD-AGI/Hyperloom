@@ -894,6 +894,9 @@ def _prune_old_workdirs(root: Path, *, keep: int) -> None:
                     try:
                         child.rmdir()
                     except OSError:
+                        # Best-effort cleanup: a non-empty dir (children removed
+                        # in a later deeper-first pass) or a transient FS error
+                        # is tolerated; the outer rmdir / next sweep retries.
                         pass
             stale.rmdir()
         except OSError:

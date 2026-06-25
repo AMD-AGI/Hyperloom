@@ -32,7 +32,7 @@ from ...session_paths import allocate_turn_workdir, manifest_path
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .base import BackendError, BackendTurnResult, build_chat_messages
-from ._runtime_bridge import invoke_runtime_cli
+from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -134,27 +134,6 @@ def _extract_review_json(text: str) -> dict[str, Any] | None:
                 return data
             break  # parsed but wrong shape; don't keep shrinking
     return None
-
-
-@dataclass
-class RuntimeCall:
-    """One ``runtime.cli`` invocation, captured for tests + logging."""
-
-    phase: Literal["prepare-review", "commit-review"]
-    request_path: Path
-    review_path: Path | None
-    out_path: Path
-    cwd: Path
-    env: dict[str, str]
-
-
-RuntimeCaller = Callable[[RuntimeCall], None]
-"""Callable that performs (or fakes) a ``runtime.cli`` invocation.
-
-The default real caller shells out via :mod:`subprocess`. Tests inject a
-fake that writes the desired ``judge_bundle.json`` / ``emit.json`` to
-``out_path`` directly without spawning a Python process.
-"""
 
 
 def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:

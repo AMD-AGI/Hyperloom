@@ -9,12 +9,38 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from typing import TYPE_CHECKING, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Sequence
 
 from .base import BackendError
 
-if TYPE_CHECKING:  # pragma: no cover - typing only (avoids an import cycle)
-    from .critic_agent import RuntimeCall
+
+@dataclass
+class RuntimeCall:
+    """One ``runtime.cli`` invocation, captured for tests + logging.
+
+    Shared by the sibling-agent backends (critic uses ``prepare-review`` /
+    ``commit-review`` phases and sets ``review_path``; robustness uses the
+    ``tick`` phase and leaves ``review_path`` unset), so ``phase`` is a plain
+    ``str`` and ``review_path`` is optional.
+    """
+
+    phase: str
+    request_path: Path
+    out_path: Path
+    cwd: Path
+    env: dict[str, str]
+    review_path: Path | None = None
+
+
+RuntimeCaller = Callable[["RuntimeCall"], None]
+"""Callable that performs (or fakes) a ``runtime.cli`` invocation.
+
+The default real caller shells out via :mod:`subprocess`. Tests inject a
+fake that writes the desired output JSON to ``out_path`` directly without
+spawning a Python process.
+"""
 
 
 def invoke_runtime_cli(
@@ -68,4 +94,4 @@ def invoke_runtime_cli(
         )
 
 
-__all__ = ["invoke_runtime_cli"]
+__all__ = ["RuntimeCall", "RuntimeCaller", "invoke_runtime_cli"]
