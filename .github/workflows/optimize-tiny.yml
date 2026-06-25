@@ -21,13 +21,13 @@ name: SaFE Optimize Tiny (count-filler)
 # instead of the git repo, so the large pool never bloats git history.
 
 on:
-  # Four times a day (every 6 hours, UTC) at 05:07/11:07/17:07/23:07 UTC
-  # (Beijing 13/19/01/07). Phase-shifted off 0/6/12/18 so tiny never starts in
-  # the same hour as optimize-submit's own cron (04/10/16/22 UTC); the 1h offset
-  # also leaves room for a 6h batch to fully drain before the next one starts.
-  # Minute :07 (not :00) dodges GitHub's congested top-of-hour scheduling queue.
+  # Four times a day (every 6 hours, UTC) at 01:07/07:07/13:07/19:07 UTC
+  # (Beijing 09:07 / 15:07 / 21:07 / 03:07). optimize-submit fires 1h earlier
+  # (Beijing 08/14/20/02) and optimize-gte100 1h later (Beijing 10/22), so no
+  # two start in the same hour. Minute :07 (not :00) dodges GitHub's congested
+  # top-of-hour scheduling queue.
   schedule:
-    - cron: '7 5,11,17,23 * * *'
+    - cron: '7 1,7,13,19 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
@@ -132,7 +132,8 @@ jobs:
                   "exclude_active_workflows": "true",
                   "max_parallel": "240",
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
-                  "task_timeout_min": "420",
+                  # task wait + job timeout are derived from max_hours in
+                  # optimize-submit's prepare job (max_hours+30m / +60m).
                   "max_hours": "6",
                   "all_artifacts": "true",
                   "dry_run": os.environ.get("DRY_RUN") or "false",

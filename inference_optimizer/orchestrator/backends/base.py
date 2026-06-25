@@ -60,6 +60,27 @@ def parse_call_timeout_env(env_name: str, *, default: float) -> float:
     return value
 
 
+def build_chat_messages(system_prompt: str | None, user_content: str) -> list[dict[str, Any]]:
+    """Assemble an OpenAI-style chat ``messages`` list.
+
+    Prepends a ``system`` message only when *system_prompt* is non-empty, then
+    appends the ``user`` message. Returns a fresh list each call (callers may
+    mutate it, e.g. to append tool/assistant turns).
+
+    Args:
+        system_prompt: Optional system message content.
+        user_content: The user message content.
+
+    Returns:
+        A new ``[{"role": ...}, ...]`` list.
+    """
+    messages: list[dict[str, Any]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_content})
+    return messages
+
+
 class BackendError(RuntimeError):
     """Backend invocation failed (network, schema, etc.)."""
 
@@ -249,6 +270,7 @@ __all__ = [
     "BackendError",
     "BackendTurnResult",
     "RetryPolicy",
+    "build_chat_messages",
     "parse_call_timeout_env",
     "retry_with_backoff",
 ]

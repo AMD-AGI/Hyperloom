@@ -170,7 +170,7 @@ GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Anthropic /v1/messages transformer.  Without this, GEAK gets
 # Primus.00009 / NotFound on the same key+URL that works through
 # /chat/completions.
-GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-8}"
 case "${GEAK_MODEL_NAME_RAW}" in
   openai/*|anthropic/*|gpt-*|o1-*|o3-*|o4-*)
     GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"

@@ -6,12 +6,11 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterable
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..storage.connection import SqliteConnection
+from ._time import now_iso
 
 
 TOPIC_ALLOWLIST = frozenset({
@@ -44,13 +43,8 @@ TOPIC_ALLOWLIST = frozenset({
 })
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO 8601 string.
-
-    Returns:
-        str: The current UTC timestamp.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 @dataclass
@@ -195,33 +189,6 @@ class MessageBus:
             msg.seq = int(cur.lastrowid)
         return msg.seq
 
-    async def append_batch(self, messages: Iterable[Message]) -> list[int]:
-        """Bulk-insert as a single transaction.
-
-        Args:
-            messages (Iterable[Message]): Messages to insert; each ``seq`` is
-                set in place.
-
-        Returns:
-            list[int]: The assigned sequence ids, in insertion order.
-
-        Raises:
-            ValueError: If any message carries an unknown topic.
-        """
-        seqs: list[int] = []
-        async with self.db.transaction() as cur:
-            for msg in messages:
-                if msg.topic not in TOPIC_ALLOWLIST:
-                    raise ValueError(f"unknown topic: {msg.topic!r}")
-                cur.execute(
-                    "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-                    "in_reply_to, payload, priority, ts) VALUES (?,?,?,?,?,?,?,?)",
-                    msg.to_db_row(),
-                )
-                msg.seq = int(cur.lastrowid)
-                seqs.append(msg.seq)
-        return seqs
-
     async def tail(
         self,
         n: int = 200,
@@ -292,18 +259,6 @@ class MessageBus:
         """
         row = await self.db.fetchone("SELECT COUNT(*) AS c FROM events")
         return int(row["c"]) if row else 0
-
-    @staticmethod
-    def message_to_dict(msg: Message) -> dict:
-        """Convert a message to a plain dict.
-
-        Args:
-            msg (Message): The message to convert.
-
-        Returns:
-            dict: The dataclass fields as a dict.
-        """
-        return asdict(msg)
 
 
 __all__ = ["Message", "MessageBus", "TOPIC_ALLOWLIST"]

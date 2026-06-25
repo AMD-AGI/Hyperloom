@@ -191,6 +191,22 @@ def kernel_workspace(session_dir: Path, kernel_id: str) -> Path:
     return Path(session_dir) / "kernel-agent-workspace" / kid
 
 
+def kernel_agent_runs_root(session_dir: Path) -> Path:
+    """``<sd>/kernel-agent/runs/`` — the parent of all per-tool-invocation
+    kernel-agent run dirs (keyed by tool-invocation session id beneath it).
+
+    Note: distinct from ``paths.kernel_agent_runs_root`` which returns the
+    kernel-agent *root* (one level above ``runs/``).
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/kernel-agent/runs``.
+    """
+    return Path(session_dir) / "kernel-agent" / "runs"
+
+
 def kernel_agent_runs_dir(session_dir: Path, session_id: str) -> Path:
     """``<sd>/kernel-agent/runs/<session_id>/`` — per-tool-invocation
     kernel-agent output (logs, status JSON, optimization_attempts.jsonl,
@@ -206,7 +222,7 @@ def kernel_agent_runs_dir(session_dir: Path, session_id: str) -> Path:
         ``<session_dir>/kernel-agent/runs/<session_id>``.
     """
     sid = str(session_id or "").strip() or "unknown"
-    return Path(session_dir) / "kernel-agent" / "runs" / sid
+    return kernel_agent_runs_root(session_dir) / sid
 
 
 def patches_dir(session_dir: Path, kernel_id: str) -> Path:
@@ -707,6 +723,19 @@ def cortex_pitfalls_json(session_dir: Path) -> Path:
     return cortex_dir(session_dir) / ".kb_pitfalls.json"
 
 
+def cortex_lessons_json(session_dir: Path) -> Path:
+    """Compute the path to ``.kb_lessons.json``, the T0 ``lessons`` snapshot.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to
+            ``<session_dir>/runtime/cortex/.kb_lessons.json``.
+    """
+    return cortex_dir(session_dir) / ".kb_lessons.json"
+
+
 def cortex_pending_ndjson(session_dir: Path) -> Path:
     """``<sd>/runtime/cortex/.kb_pending.ndjson`` — append-only async write
     queue for T2/T3 ops. Consumed by the cortex_kb_flusher daemon; drained at
@@ -842,7 +871,62 @@ def cortex_flusher_status_json(session_dir: Path) -> Path:
     return cortex_dir(session_dir) / ".kb_flusher_status.json"
 
 
+def _prune_old_workdirs(root: Path, *, keep: int) -> None:
+    """Delete all but the newest ``keep`` per-turn workdirs under *root*.
+
+    Entries are sorted by name (zero-padded turn index, so lexical == chrono).
+    All filesystem errors are swallowed best-effort — pruning must never break
+    the caller.
+    """
+    try:
+        entries = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
+    except OSError:
+        return
+    if len(entries) <= keep:
+        return
+    for stale in entries[: len(entries) - keep]:
+        try:
+            for child in stale.rglob("*"):
+                if child.is_file():
+                    child.unlink(missing_ok=True)
+            for child in sorted(stale.rglob("*"), key=lambda p: -len(p.parts)):
+                if child.is_dir():
+                    try:
+                        child.rmdir()
+                    except OSError:
+                        # Best-effort cleanup: a non-empty dir (children removed
+                        # in a later deeper-first pass) or a transient FS error
+                        # is tolerated; the outer rmdir / next sweep retries.
+                        pass
+            stale.rmdir()
+        except OSError:
+            continue
+
+
+def allocate_turn_workdir(session_dir: Path, subdir: str, turn_idx: int, *, keep: int) -> Path:
+    """Allocate (and create) ``<sd>/<subdir>/<turn_idx:06d>/`` for a subprocess
+    agent's per-turn scratch, pruning stale turn dirs down to the newest *keep*.
+
+    Args:
+        session_dir: The session root directory.
+        subdir: The agent's workdir name under the session dir (e.g.
+            ``"critic-workdir"`` / ``"robustness-workdir"``).
+        turn_idx: The current turn index; rendered zero-padded to 6 digits.
+        keep: How many of the most-recent turn dirs to retain.
+
+    Returns:
+        The created per-turn workdir path.
+    """
+    root = Path(session_dir) / subdir
+    root.mkdir(parents=True, exist_ok=True)
+    _prune_old_workdirs(root, keep=keep)
+    wd = root / f"{turn_idx:06d}"
+    wd.mkdir(parents=True, exist_ok=True)
+    return wd
+
+
 __all__ = [
+    "allocate_turn_workdir",
     "agent_dir",
     "agent_inbox",
     "agent_log",
@@ -858,6 +942,7 @@ __all__ = [
     "cortex_flushed_ndjson",
     "cortex_flusher_pid",
     "cortex_flusher_status_json",
+    "cortex_lessons_json",
     "cortex_pending_ndjson",
     "cortex_pitfalls_json",
     "cortex_sid_file",
@@ -867,6 +952,7 @@ __all__ = [
     "forge_steps_path",
     "gemm_tuning_steps_path",
     "kernel_agent_runs_dir",
+    "kernel_agent_runs_root",
     "kernel_workspace",
     "llm_calls_path",
     "logs_dir",

@@ -36,14 +36,13 @@ class IntentType(str, Enum):
     # target_agent) pairs and `kind` per pair.
     REQUEST = "request"
     RESPONSE = "response"
-    REVIEW_VERDICT = "review_verdict"  # Critic-only (DESIGN §18.2)
+    REVIEW_VERDICT = "review_verdict"  # Critic-only
     KILL_TASK = "kill_task"  # Robustness-only; payload.scope must be "task"
-    # Robustness-only scheduling police (DESIGN §19.3).
+    # Robustness-only scheduling police.
     FORCE_DISPATCH = "force_dispatch"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
-    # specialist exit: one per task; PolicyGate R3 validates from_agent
-    # prefix + gap/domain match + payload (policy._validate_specialist_done).
+    # specialist exit: one per task.
     SPECIALIST_DONE = "specialist_done"
 
 
@@ -57,25 +56,8 @@ class Intent:
     type: IntentType
     payload: dict[str, Any] = field(default_factory=dict)
 
-    @classmethod
-    def from_envelope_item(cls, item: dict[str, Any]) -> "Intent":
-        """Build an :class:`Intent` from one raw envelope item.
 
-        Args:
-            item (dict[str, Any]): Raw item with an ``intent_type`` key and
-                an optional ``payload`` mapping.
-
-        Returns:
-            Intent: The parsed intent with a copied payload dict.
-
-        Raises:
-            ValueError: If ``intent_type`` is not a valid :class:`IntentType`.
-        """
-        intent_type = IntentType(item["intent_type"])
-        return cls(type=intent_type, payload=dict(item.get("payload") or {}))
-
-
-# Envelope schema (DESIGN §14.1) — inline to avoid a jsonschema dependency.
+# Envelope schema — inlined to avoid a jsonschema dependency.
 INTENT_ENVELOPE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -103,7 +85,7 @@ INTENT_ENVELOPE_SCHEMA: dict[str, Any] = {
 }
 
 
-# Per-intent payload required-field map (DESIGN §14.1 / §15 dispatch / §18.2)
+# Per-intent payload required-field map
 _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.SEND_MESSAGE: ("topic",),
     IntentType.DELEGATE: ("action_name",),
@@ -128,7 +110,7 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
 }
 
 
-# Tool schema for the Claude SDK (DESIGN §14.2).
+# Tool schema for the Claude SDK.
 EMIT_INTENT_TOOL_SCHEMA: dict[str, Any] = {
     "name": "emit_intent",
     "description": (
@@ -206,7 +188,7 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
 
     Raises:
         IntentValidationError: On any structural issue so the caller can
-            surface a single repair-prompt path (DESIGN §14.4).
+            surface a single repair-prompt path.
     """
     if not isinstance(envelope, dict):
         raise IntentValidationError(f"envelope must be object, got {type(envelope).__name__}")
