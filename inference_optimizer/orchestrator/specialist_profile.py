@@ -1,7 +1,7 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Specialist dispatch profile — the four orthogonal dials that replace the
-former specialist / dynamic_action / dynamic_specialist split.
+"""Specialist dispatch profile — the four orthogonal dials that parameterise a
+single ``specialist`` worker.
 
 A single ``specialist`` worker is parameterised by:
 
@@ -13,9 +13,8 @@ A single ``specialist`` worker is parameterised by:
   (only meaningful for ``mode == patch``).
 * ``lane``   — ``cpu`` (research / freeform default) or ``gpu`` (patch + bench).
 
-Defaults preserve the legacy single-domain patch-authoring behaviour so an
-existing ``delegate{action='specialist', params={domain, gap, ...}}`` call is
-unchanged.
+Defaults resolve a ``delegate{action='specialist', params={domain, gap, ...}}``
+call to single-domain patch-authoring behaviour.
 """
 
 from __future__ import annotations
@@ -41,11 +40,11 @@ LANE_GPU = "gpu"
 LANE_VALUES: frozenset[str] = frozenset({LANE_CPU, LANE_GPU})
 
 
-# Defaults. A dispatch that carries a domain/tag anchor keeps the legacy
+# Defaults. A dispatch that carries a domain/tag anchor resolves to the
 # single-domain, patch-authoring, GPU-leased behaviour (DEFAULT_MODE/_LANE).
 # A *truly bare* dispatch (no scope and no domain/tag anchor) is inferred to be
 # ``freeform`` and therefore resolves to the cheap, read-only research/CPU lane
-# — "safe & cheap first" (KB_design §3.5; the long-run cost lower-bound guard).
+# — "safe & cheap first".
 DEFAULT_SCOPE = SCOPE_DOMAIN
 DEFAULT_MODE = MODE_PATCH
 DEFAULT_BENCH = False
@@ -86,8 +85,6 @@ class SpecialistProfile:
         Bench-capable patch specialists (``mode=patch & bench=True``) run their
         own serving + benchmark loop on their leased cards, so they reserve the
         shared ``benchmark_lane`` to avoid oversubscribing benchmark resources.
-        (The retired ``run_bench`` micro-bench tool used to gate on this same
-        predicate; the lane reservation is the part that still matters.)
 
         Returns:
             ``True`` when the profile is patch-mode with ``bench=True``.

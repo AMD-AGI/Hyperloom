@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from inference_optimizer.orchestrator.action_executors import _git as gitmod
 from inference_optimizer.orchestrator.action_executors import integrate_patch as ip
 
 
@@ -49,14 +50,14 @@ def test_resolve_framework_root_none(monkeypatch):
 
 # ---- _run_git_apply spawn failure -----------------------------------------
 def test_run_git_apply_spawn_fail(tmp_path, monkeypatch):
-    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
+    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
     ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, three_way=False, check_only=True)
     assert ok is False
     assert "spawn failed" in err
 
 
 def test_run_git_apply_success(tmp_path, monkeypatch):
-    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: _CP(0, ""))
+    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: _CP(0, ""))
     ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, three_way=True, check_only=True)
     assert ok is True
 
@@ -100,13 +101,13 @@ def test_git_apply_real_apply(tmp_path, monkeypatch):
 # ---- _git_apply_reverse ---------------------------------------------------
 def test_git_apply_reverse_success(tmp_path, monkeypatch):
     # check passes at level 1, then real reverse-apply succeeds
-    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: _CP(0, ""))
+    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: _CP(0, ""))
     ok, err = ip._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is True
 
 
 def test_git_apply_reverse_check_spawn_fail(tmp_path, monkeypatch):
-    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
+    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
     ok, err = ip._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is False and "spawn failed" in err
 
@@ -119,7 +120,7 @@ def test_git_apply_reverse_real_fails(tmp_path, monkeypatch):
         # first call (--check) ok, second (real) fails
         return _CP(0, "") if calls["n"] == 1 else _CP(1, "reverse failed")
 
-    monkeypatch.setattr(ip.subprocess, "run", _run)
+    monkeypatch.setattr(gitmod.subprocess, "run", _run)
     ok, err = ip._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is False and "reverse failed" in err
 
@@ -133,13 +134,13 @@ def test_git_apply_reverse_real_spawn_fail(tmp_path, monkeypatch):
             return _CP(0, "")  # --check passes
         raise FileNotFoundError("git")  # real reverse-apply spawn fails
 
-    monkeypatch.setattr(ip.subprocess, "run", _run)
+    monkeypatch.setattr(gitmod.subprocess, "run", _run)
     ok, err = ip._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is False and "spawn failed" in err
 
 
 def test_git_apply_reverse_no_level(tmp_path, monkeypatch):
-    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: _CP(1, "no"))
+    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: _CP(1, "no"))
     ok, err = ip._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is False and "no matching -p level" in err
 
@@ -217,7 +218,7 @@ def test_git_commit_kept_no_paths_is_benign_noop(tmp_path, monkeypatch):
         called["n"] += 1
         return _CP(0, "")
 
-    monkeypatch.setattr(ip.subprocess, "run", _run)
+    monkeypatch.setattr(gitmod.subprocess, "run", _run)
     ok, note = ip._git_commit_kept(tmp_path, "msg", [])
     assert ok is True
     assert called["n"] == 0  # never invoked git
@@ -230,7 +231,7 @@ def test_git_commit_kept_scopes_add_to_paths(tmp_path, monkeypatch):
         captured.setdefault("cmds", []).append(cmd)
         return _CP(0, "")
 
-    monkeypatch.setattr(ip.subprocess, "run", _run)
+    monkeypatch.setattr(gitmod.subprocess, "run", _run)
     ok, _ = ip._git_commit_kept(tmp_path, "msg", ["pkg/mod.py"])
     assert ok is True
     add_cmd = captured["cmds"][0]
@@ -241,7 +242,7 @@ def test_git_commit_kept_scopes_add_to_paths(tmp_path, monkeypatch):
 # ---- _git_checkout_clean spawn failure ------------------------------------
 def test_git_checkout_clean_spawn_fail(tmp_path, monkeypatch):
     """git checkout spawn failure is reported directly."""
-    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
+    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
     ok, err = ip._git_checkout_clean(tmp_path)
     assert ok is False and "checkout spawn failed" in err
 
@@ -249,7 +250,7 @@ def test_git_checkout_clean_spawn_fail(tmp_path, monkeypatch):
 # ---- _git_stash_if_dirty three-state tests --------------------------------
 def test_stash_if_dirty_clean_tree(tmp_path, monkeypatch):
     """Clean working tree → returns 'clean'."""
-    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})())
     state, note = ip._git_stash_if_dirty(tmp_path)
     assert state == "clean"
 
@@ -262,7 +263,7 @@ def test_stash_if_dirty_stash_success(tmp_path, monkeypatch):
         if "status" in cmd:
             return type("CP", (), {"returncode": 0, "stdout": "M foo.py\n", "stderr": ""})()
         return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-    monkeypatch.setattr(ip.subprocess, "run", _run)
+    monkeypatch.setattr(gitmod.subprocess, "run", _run)
     state, note = ip._git_stash_if_dirty(tmp_path)
     assert state == "stashed"
     assert any("stash" in c for c in calls[-1])
@@ -274,7 +275,7 @@ def test_stash_if_dirty_stash_fails(tmp_path, monkeypatch):
         if "status" in cmd:
             return type("CP", (), {"returncode": 0, "stdout": "M foo.py\n", "stderr": ""})()
         return type("CP", (), {"returncode": 1, "stdout": "", "stderr": "cannot stash"})()
-    monkeypatch.setattr(ip.subprocess, "run", _run)
+    monkeypatch.setattr(gitmod.subprocess, "run", _run)
     state, note = ip._git_stash_if_dirty(tmp_path)
     assert state == "failed"
     assert "cannot stash" in note
@@ -282,7 +283,7 @@ def test_stash_if_dirty_stash_fails(tmp_path, monkeypatch):
 
 def test_stash_if_dirty_status_exception(tmp_path, monkeypatch):
     """git status throws → returns 'failed'."""
-    monkeypatch.setattr(ip.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
+    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
     state, note = ip._git_stash_if_dirty(tmp_path)
     assert state == "failed"
 
