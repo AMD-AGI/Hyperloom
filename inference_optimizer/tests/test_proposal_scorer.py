@@ -32,19 +32,40 @@ class _FakeUsage:
 
 
 @dataclass
-class _FakeMessage:
-    content: str
+class _FakeDelta:
+    content: str | None
 
 
 @dataclass
-class _FakeChoice:
-    message: _FakeMessage
+class _FakeStreamChoice:
+    delta: _FakeDelta
 
 
 @dataclass
-class _FakeResp:
-    choices: list[_FakeChoice]
+class _FakeChunk:
+    choices: list[_FakeStreamChoice]
     usage: _FakeUsage | None = None
+
+
+class _FakeStream:
+    """Async iterator emulating an OpenAI streaming response: content deltas
+    followed by a final usage-only chunk (``include_usage``)."""
+
+    def __init__(self, text: str, usage: _FakeUsage):
+        self._chunks = [
+            _FakeChunk(choices=[_FakeStreamChoice(_FakeDelta(text))]),
+            _FakeChunk(choices=[], usage=usage),
+        ]
+
+    def __aiter__(self):
+        self._it = iter(self._chunks)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration
 
 
 class _FakeCompletions:
@@ -54,14 +75,15 @@ class _FakeCompletions:
         self._behaviour = behaviour
         self.calls: list[dict[str, Any]] = []
 
-    async def create(self, *, model: str, messages, max_completion_tokens):
-        self.calls.append({"model": model, "messages": messages})
+    async def create(self, *, model: str, messages, max_completion_tokens,
+                     stream=False, stream_options=None):
+        self.calls.append({"model": model, "messages": messages, "stream": stream})
         result = self._behaviour.get(model)
         if isinstance(result, BaseException):
             raise result
-        return _FakeResp(
-            choices=[_FakeChoice(_FakeMessage(result or ""))],
-            usage=_FakeUsage(prompt_tokens=120, completion_tokens=30),
+        return _FakeStream(
+            result or "",
+            _FakeUsage(prompt_tokens=120, completion_tokens=30),
         )
 
 

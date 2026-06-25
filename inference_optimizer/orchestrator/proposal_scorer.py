@@ -311,15 +311,29 @@ class ProposalScorer:
         full_prompt = f"{prompt}\n\n{_SCORING_INSTRUCTIONS}"
         messages = [{"role": "user", "content": full_prompt}]
         _t0 = time.perf_counter()
+        # The Primus-Safe/Vertex proxy rejects non-streaming predictions with an
+        # opaque 400 INVALID_ARGUMENT; only streamed requests are accepted. Stream
+        # and accumulate the deltas, pulling usage from the final chunk.
+        text_parts: list[str] = []
+        usage = None
         try:
-            resp = await asyncio.wait_for(
+            stream = await asyncio.wait_for(
                 client.chat.completions.create(
                     model=model,
                     messages=messages,
                     max_completion_tokens=self.max_completion_tokens,
+                    stream=True,
+                    stream_options={"include_usage": True},
                 ),
                 timeout=self.call_timeout_s,
             )
+            async for chunk in stream:
+                if getattr(chunk, "usage", None) is not None:
+                    usage = chunk.usage
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta is not None and delta.content:
+                        text_parts.append(delta.content)
         except asyncio.TimeoutError as exc:
             raise RuntimeError(f"timed out after {self.call_timeout_s:.0f}s") from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
@@ -327,13 +341,13 @@ class ProposalScorer:
         # no-op when ``session_dir`` is unset).
         self._trace_scorer_llm_call(
             model,
-            getattr(resp, "usage", None),
+            usage,
             latency_ms=latency_ms,
             task_id=task_id,
             tick=tick,
             phase=phase,
         )
-        text = resp.choices[0].message.content or ""
+        text = "".join(text_parts)
         # Persist the full (redacted) prompt + reply so the
         # scorer's conversation lines up with its token row.
         self._record_scorer_conversation(
