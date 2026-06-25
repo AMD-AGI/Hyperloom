@@ -38,12 +38,21 @@ from ._grid_runner import (
     server_args_env_name,
 )
 from ._server_patcher import (
+    ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
 )
-from ...model_config_utils import _load_model_config_dict, _model_is_gemma2
+from ...model_config_utils import (
+    _fp8_is_per_channel_per_token,
+    _load_model_config_dict,
+    _model_is_gemma2,
+)
 
 log = logging.getLogger(__name__)
+
+# gfx942 / CDNA3 dies (MI300X and its MI308X/MI325X siblings) that ship the
+# aiter CK gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
+_GFX942_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x"})
 
 _MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:[=\s]+)\S+")
 
@@ -852,6 +861,46 @@ def materialize_config_with_envs(
                 "to restore the gate. This warning fires once per process."
             )
             _RUN_EVAL_DISABLED_WARN_EMITTED = True
+    # KernelForge fp8 block-scale CK backend switch: when the coordinator
+    # promoted an fp8-blockscale gemm_tuning KEEP it injects
+    # SGLANG_FP8_BLOCKSCALE_CK_MAX_M into the serving envs. That env only takes
+    # effect on a KernelForge-patched sglang fp8_utils.py (M-aware CK routing);
+    # the unpatched tree ignores it. Ensure the patch here, strictly scoped to
+    # sglang + an active CK optimization (env present) — there is no point
+    # patching otherwise. Fail-soft: a failed patch just leaves the env a no-op,
+    # so the serving run still proceeds (never hard-fail). Honors the
+    # HYPERLOOM_ENABLE_PATCH kill switch like the TraceLens hook above.
+    _fw = str(bench.get("framework") or "").lower()
+    if (
+        _tracelens_patch_enabled()
+        and "sglang" in _fw
+        and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs
+    ):
+        if not ensure_sglang_patched_for_ck_blockscale():
+            log.warning(
+                "CK fp8 block-scale patch could not be applied; "
+                "SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched "
+                "sglang fp8_utils.py (serving run continues unaffected)."
+            )
+    # sglang FP8 per-channel/per-token CK fast path: a dense FP8 checkpoint
+    # with per-channel weight + per-token (dynamic) activation falls into the
+    # slow unfused _apply_fallback_scaled_mm in sglang's apply_fp8_linear
+    # unless SGLANG_USE_AITER_FP8_PER_TOKEN=1 flips use_per_token_if_dynamic on
+    # and routes the GEMM to aiter's CK gemm_a8w8_bpreshuffle. Inject it from
+    # Hyperloom, strictly scoped to sglang + fp8 + gfx942 + that exact quant
+    # scheme so per-tensor and block-scale FP8 are never touched. setdefault so
+    # an operator-set value (YAML / extra_envs) always wins.
+    from ...cli import _resolve_amd_gpu_type
+
+    _model_for_quant = str(model_path or os.environ.get("MODEL_PATH", ""))
+    if (
+        "sglang" in _fw
+        and str(bench.get("precision") or "").strip().lower() == "fp8"
+        and _resolve_amd_gpu_type(gpu_type or bench.get("runner_type"))
+        in _GFX942_GPU_TYPES
+        and _fp8_is_per_channel_per_token(_model_for_quant)
+    ):
+        envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:

@@ -3512,6 +3512,28 @@ class Coordinator:
         state.save(self.session_dir)
         return verdict_row
 
+    async def _maybe_reprofile_for_kernel(self) -> None:
+        """Re-run profile+TraceLens inline on any change in projected tput vs the last profiled snapshot, so GEAK targets the current bottleneck."""
+        last_rl = float(getattr(self.shared_state, "last_roofline_tput", 0.0) or 0.0)
+        cur = self._current_tput_from_validated_gain()
+        if last_rl <= 0 or cur <= 0:
+            return
+        # Reprofile on ANY material change (rise or fall) since the last roofline;
+        # a stack revert can lower validated tput, which must also re-target GEAK.
+        if abs(cur - last_rl) / last_rl < self._REPROFILE_CHANGE_TOL:
+            return
+        # State-version the idempotency reason on the validated-gain stack so a
+        # genuine change re-runs (new key) while an unchanged state dedupes.
+        stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
+        try:
+            await self.sub.run_task(
+                await self._enqueue_internal_analysis_task(reason=f"kernel_entry_g{stack_len}")
+            )
+            self.shared_state.last_roofline_tput = self._current_tput_from_validated_gain()
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
+            log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
+
     def _perfskills_enabled(self) -> bool:
         """Whether the KERNEL phase is delegated to the PerfSkills e2e optimizer.
 
@@ -3554,8 +3576,12 @@ class Coordinator:
             await self._run_perfskills_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
+            # No GEMM tuning here: refresh the snapshot (explore gains) before the LLM drives GEAK.
+            await self._maybe_reprofile_for_kernel()
             return
 
+        # Refresh the snapshot (explore gains) before GEMM tuning targets the bottleneck.
+        await self._maybe_reprofile_for_kernel()
         log.info(
             "KERNEL entry: running GEMM tuning before source-level kernel_opt",
         )
@@ -3605,6 +3631,8 @@ class Coordinator:
                 "tuned_file": result.get("tuned_file"),
             },
         )
+        # Capture explore + GEMM-tuning gains before inline GEAK targets the bottleneck.
+        await self._maybe_reprofile_for_kernel()
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
 
@@ -4177,6 +4205,100 @@ class Coordinator:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _ck_blockscale_switch_eligible(self, result: dict[str, Any]) -> bool:
+        """Whether the fp8 block-scale CK backend switch should be E2E-validated.
+
+        The CK backend switch (``SGLANG_FP8_BLOCKSCALE_CK_MAX_M``) routes the
+        fp8 block-scale GEMM from the Triton default to the aiter CK
+        ``gemm_a8w8_blockscale`` kernel on gfx942. This is the big lever
+        (~2x at decode M, ~+109% e2e) and is INDEPENDENT of the a8w8 table
+        tuning result: the table tuner routinely reports ``no_improvement``
+        because the CK default is already optimal, yet the switch itself must
+        still be flipped and E2E-validated as its own gemm_tuning candidate.
+
+        Gated strictly so it only fires for the forge backend on a
+        sglang + fp8 + gfx942 + block-scale workload. fp8 is accepted from any
+        signal — session precision, the resolved forge result, or a runtime
+        ``--quantization fp8`` server arg (session/yaml precision may still read
+        ``bf16``). Block-scale is required positively (the checkpoint declares
+        ``weight_block_size``), which naturally excludes per-tensor, static and
+        per-channel/per-token fp8 — those take other GEMM paths and must never
+        be switched here.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning handler result.
+
+        Returns:
+            bool: ``True`` only when the CK switch is the relevant lever.
+        """
+        if not isinstance(result, dict):
+            return False
+        from .kernel_request_handlers import _resolve_gemm_tuning_backend
+
+        backend = str(
+            result.get("backend") or _resolve_gemm_tuning_backend({})
+        ).strip().lower()
+        if backend != "forge":
+            return False
+        framework = str(getattr(self.shared_state, "framework", "") or "").strip().lower()
+        if framework != "sglang":
+            return False
+        if not self._ck_switch_precision_is_fp8(result):
+            return False
+
+        from ..cli_model_gate import _resolve_amd_gpu_type
+        from .action_executors._workload_envs import _GFX942_GPU_TYPES
+
+        gpu = _resolve_amd_gpu_type(getattr(self.shared_state, "gpu_type", "") or "")
+        if gpu not in _GFX942_GPU_TYPES:
+            return False
+
+        # Block-scale fp8 only, asserted positively: the CK patch only rewrites
+        # the block-scale path (``aiter_w8a8_block_fp8_linear`` /
+        # ``gemm_a8w8_blockscale``), so the checkpoint must declare
+        # ``weight_block_size``. This excludes per-tensor, static and
+        # per-channel/per-token fp8, which take other GEMM paths.
+        from ..model_config_utils import _fp8_is_block_scale
+
+        model_path = str(
+            getattr(self.shared_state, "model_path", "")
+            or os.environ.get("MODEL_PATH", "")
+        )
+        return _fp8_is_block_scale(model_path)
+
+    def _ck_switch_precision_is_fp8(self, result: dict[str, Any]) -> bool:
+        """Whether the workload runs fp8, resolved from any available signal.
+
+        The session-level ``precision`` is not authoritative: precision is often
+        resolved at runtime from server args (``--quantization fp8``) while the
+        session/yaml precision still reads ``bf16``. Accept fp8 from, in order:
+
+        1. ``shared_state.precision`` (session-level), OR
+        2. the forge ``result`` envelope, which stamps the resolved precision
+           (see ``_run_forge_gemm_tuning``), OR
+        3. the runtime ``--quantization`` resolved by
+           ``_resolve_forge_precision_and_quant`` from the actual server args.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning handler result.
+
+        Returns:
+            bool: ``True`` when any signal resolves to fp8.
+        """
+        if str(getattr(self.shared_state, "precision", "") or "").strip().lower() == "fp8":
+            return True
+        if isinstance(result, dict) and str(result.get("precision") or "").strip().lower() == "fp8":
+            return True
+        try:
+            from .kernel_request_handlers import _resolve_forge_precision_and_quant
+
+            precision, _ = _resolve_forge_precision_and_quant(self.shared_state, {})
+            if str(precision or "").strip().lower() == "fp8":
+                return True
+        except Exception:  # noqa: BLE001 - best-effort runtime resolution
+            pass
+        return False
+
     async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
         """Record and post-process a run_gemm_tuning result from any entrypoint.
 
@@ -4185,7 +4307,14 @@ class Coordinator:
         results can bypass per-tuner E2E validation.
         """
         self.shared_state.record_gemm_tuning(result)
-        if result.get("requires_e2e_validation") and result.get("backend") == "forge":
+        # Forge results route to the per-tuner E2E validator when table tuning
+        # asked for it OR when the CK block-scale backend switch is eligible —
+        # the latter is a standalone lever that must be validated even when the
+        # a8w8 table tuner reported no_improvement (decision != KEEP).
+        if result.get("backend") == "forge" and (
+            result.get("requires_e2e_validation")
+            or self._ck_blockscale_switch_eligible(result)
+        ):
             await self._validate_forge_gemm_tuning_e2e(result)
         else:
             self._promote_gemm_tuning_keep(result)
@@ -4244,6 +4373,15 @@ class Coordinator:
                 {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file} if tuned_file else {}
             )
             variant_name = "a8w8_blockscale_tuned_gemm"
+
+        # fp8 block-scale CK backend switch (still attributed to gemm_tuning).
+        # The primary forge path validates this as a standalone candidate in
+        # _validate_forge_gemm_tuning_e2e (see _handle_gemm_tuning_result
+        # routing); this inline-promote path only injects it as a safety net
+        # for an eligible forge result that reaches inline promotion without
+        # the validator. setdefault so an operator-set value always wins.
+        if self._ck_blockscale_switch_eligible(result):
+            extra_envs.setdefault("SGLANG_FP8_BLOCKSCALE_CK_MAX_M", "256")
 
         final_report = str(result.get("final_report_path") or "")
 
@@ -4337,6 +4475,23 @@ class Coordinator:
                     "env_var": env_var,
                     "env_value": env_value,
                     "micro_speedup": float(t.get("best_micro_speedup") or 1.0),
+                })
+
+        # Standalone fp8 block-scale CK backend switch: independent of the a8w8
+        # table tuner outcome (often no_improvement because the CK default is
+        # already optimal). Inject it as its own candidate so the loop below
+        # E2E-validates baseline Triton vs CK and, on KEEP, attributes the gain
+        # to gemm_tuning. Shape matches a table candidate exactly.
+        if self._ck_blockscale_switch_eligible(result):
+            if not any(
+                c.get("env_var") == "SGLANG_FP8_BLOCKSCALE_CK_MAX_M"
+                for c in candidates
+            ):
+                candidates.append({
+                    "tuner": "ck_blockscale_backend_switch",
+                    "env_var": "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
+                    "env_value": "256",
+                    "micro_speedup": 1.0,
                 })
 
         if not candidates:
@@ -4549,6 +4704,10 @@ class Coordinator:
 
     # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh anchored on last_roofline_tput.
     _ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
+    # Relative-change floor for the pre-GEAK reprofile: any |cur-last|/last above
+    # this re-runs profile+TraceLens. Tiny value (validated gain is rounded to 3
+    # decimals) so it is effectively "any change", just absorbing float noise.
+    _REPROFILE_CHANGE_TOL: float = 1e-5
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).
@@ -6235,8 +6394,45 @@ class Coordinator:
                 detail=repr(exc)[:240],
             )
 
-        # ---------------- Fact finalize (Cortex commit) ----------
-        # Writes update_recipe + finalises the local journal (final_throughput /
+        # ---------------- Step 2.6: artifact package -> /workspace -------
+        # Bundle the curated result/report/analysis files (incl. the
+        # session_breakdown just written in step 2) into a single zip
+        # placed under ``/workspace`` so the Claw sandbox sync ships it
+        # to object storage even when ``$USER_DATA_PATH`` points at a
+        # wekafs path outside ``/workspace`` (the common production case).
+        # Best-effort: failures are recorded but never abort the close
+        # sequence. The zip carries its own PACKAGE_MANIFEST log of what
+        # went in / what was missing.
+        try:
+            from ..breakdown import package_session_artifacts
+
+            pkg_path = package_session_artifacts(
+                self.session_dir,
+                session_id=str(getattr(self.shared_state, "session_id", "") or ""),
+            )
+            if pkg_path is not None:
+                await self._record_close_step(
+                    "artifact_package",
+                    status="done",
+                    detail=str(pkg_path),
+                )
+            else:
+                await self._record_close_step(
+                    "artifact_package",
+                    status="skipped",
+                    detail="no artifacts matched or dest unwritable",
+                )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("CLOSE step 2.6 (artifact_package) failed")
+            await self._record_close_step(
+                "artifact_package",
+                status="failed",
+                detail=repr(exc)[:240],
+            )
+
+        # ---------------- Step 4: fact finalize (Cortex commit) ----------
+        # The canonical step-4 "Cortex session commit": writes
+        # update_recipe + finalises the local journal (final_throughput /
         # total_gain_pct). Recorded as the ``fact_finalize`` close_step.
         try:
             self.cortex_finalize_recipe_and_journal()

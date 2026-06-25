@@ -148,7 +148,20 @@ PERFSKILLS_REPO="${PERFSKILLS_REPO:-${GEAK_REPO}}"
 PERFSKILLS_ROOT="${PERFSKILLS_ROOT:-${_open_source_root}/GEAK-e2e}"
 PERFSKILLS_REF="${PERFSKILLS_REF:-GEAK_v4}"
 PERFSKILLS_E2E_RUNNER="${PERFSKILLS_E2E_RUNNER:-${PERFSKILLS_ROOT}/interface/run_e2e.py}"
-OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
+# --- OOB source resolution (BEGIN: kept in sync with test_oob_src_default) ---
+# OOB now ships inside the KernelForge checkout ($FORGE_PATH/OOB), so derive
+# the OOB source from the forge path instead of requiring a separate OOB path
+# to be injected by the caller (the legacy DEFAULT_OOB_PATH env). An explicit
+# OOB_SRC is still honoured as an operator override. Honour the same forge-root
+# aliases as the forge backend (kernel-agent/tools/backends/forge_submit.py),
+# and fall back to the legacy bundle layout only when no forge path is provided.
+_forge_root="${FORGE_PATH:-${KERNEL_FORGE_ROOT:-${KERNEL_FORGE_PATH:-}}}"
+if [ -n "${_forge_root}" ]; then
+  OOB_SRC="${OOB_SRC:-${_forge_root%/}/OOB}"
+else
+  OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
+fi
+# --- OOB source resolution (END) ---
 OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
@@ -157,7 +170,7 @@ GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Anthropic /v1/messages transformer.  Without this, GEAK gets
 # Primus.00009 / NotFound on the same key+URL that works through
 # /chat/completions.
-GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-8}"
 case "${GEAK_MODEL_NAME_RAW}" in
   openai/*|anthropic/*|gpt-*|o1-*|o3-*|o4-*)
     GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"
