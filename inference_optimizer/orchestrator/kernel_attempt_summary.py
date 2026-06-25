@@ -773,12 +773,12 @@ def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int
         Mapping of failure-mode bucket to count.
     """
     breakdown: dict[str, int] = {
-        # Legacy structural buckets (kept for back-compat)
+        # Structural buckets used when no error_class is available.
         "ladder_all_failed": 0,
         "ladder_partial_no_artifact": 0,
         "speedup_below_threshold": 0,
         "ladder_unavailable": 0,
-        # Root-cause buckets derived from error_class
+        # Root-cause buckets derived from error_class.
         "timeout": 0,
         "preprocess_failed": 0,
         "compile_failed": 0,
@@ -808,8 +808,8 @@ def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int
             breakdown[bucket] += 1
             continue
 
-        # 2) Structural fallback (legacy paths: pre-error_class data,
-        #    correctness checked via verification block, etc.)
+        # 2) Structural fallback when no ladder attempt carries an error_class:
+        #    classify via produced artifacts and the verification block.
         any_artifact = any(r.get("produced_artifact") for r in ladder)
         all_failed = all(r.get("status") == "failed" for r in ladder)
         verification = row.get("verification") or {}

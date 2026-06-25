@@ -46,10 +46,10 @@ KIND_OTHER: str = "other"
 def _optional_int(value: Any) -> int | None:
     """Coerce a value to int, or ``None`` on absence / bad type.
 
-    Used to load the optional ``tick`` field tolerantly: an old journal
-    written before D1 has no ``tick`` key, and a corrupted value must not
-    crash :meth:`JournalEntry.from_dict` (the journal is a best-effort
-    audit artifact loaded on resume).
+    Used to load the optional ``tick`` field tolerantly: a journal missing
+    the ``tick`` key or carrying a corrupted value must not crash
+    :meth:`JournalEntry.from_dict` (the journal is a best-effort audit
+    artifact loaded on resume).
 
     Args:
         value: The value to coerce to an int.
@@ -91,8 +91,9 @@ class JournalEntry:
     # Proposer attribution (who proposed this change). ``provenance`` is the raw
     # explore label (``llm_direct`` / ``default_grid`` / ``specialist:<domain>``);
     # ``scope`` is the orthogonal specialist dial (domain / domains / freeform);
-    # ``fingerprint`` is the variant join key into ``explore_search``. All empty
-    # on non-explore rows and on legacy journals (stripped by ``to_dict``).
+    # ``fingerprint`` is the variant join key into ``explore_search``. All
+    # default empty and are stripped by ``to_dict`` when unset (e.g. on
+    # non-explore rows).
     provenance: str = ""
     scope: str = ""
     fingerprint: str = ""
@@ -100,7 +101,7 @@ class JournalEntry:
     # (runtime_sec / wall_clock_ratio_vs_baseline / stack_rebench_tput /
     # estimated_output_throughput). Empty dict stripped by ``to_dict``.
     metrics: dict[str, Any] = field(default_factory=dict)
-    # Full-trace D1: orchestrator tick at the moment of decision. Lets the
+    # Orchestrator tick at the moment of decision. Lets the
     # decision-trace collector join this KEEP/REVERT row to the LLM calls
     # recorded for the same tick. Defaults to ``None`` (not 0) so older
     # journals — and call sites that don't know the tick — are stripped by

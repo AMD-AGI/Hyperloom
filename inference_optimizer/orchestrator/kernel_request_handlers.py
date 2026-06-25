@@ -108,7 +108,7 @@ def _reusable_source_roots() -> tuple[str, ...]:
             if variant and variant not in seen:
                 seen.add(variant)
                 out.append(variant)
-    # PR #668: FlyDSL kernel checkout(s) for moe_flydsl_* candidates.
+    # Add FlyDSL kernel checkout roots for moe_flydsl_* candidates.
     for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
         val = (os.environ.get(env_key, "") or "").strip()
         if val:
@@ -124,26 +124,26 @@ def _reusable_source_roots() -> tuple[str, ...]:
 
 
 _APPLY_TOOL_MODULE: Any | None = None
-# Default ladder: forge first, then geak. claude/codex/cursor are NOT in the
-# default anymore — they only run when explicitly requested via
+# Default ladder: forge first, then geak. Only forge and geak run by default;
+# claude/codex/cursor run only when explicitly requested via
 # KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS (or payload backend_order).
 # They remain in `allowed` (see _backend_order) so env-opt-in still works.
 # Cursor is additionally key-gated (dropped when CURSOR_API_KEY is unset).
 _DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak")
-# Soft cap on concurrent kernel-backend coroutines (legacy MI300X 8-GPU fallback; pin with KERNEL_OPT_MAX_PARALLEL).
+# Fallback concurrency cap on concurrent kernel-backend coroutines, used when visible GPU count is unknown; pin with KERNEL_OPT_MAX_PARALLEL.
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_OOB_BUDGET_MINUTES = 60.0
 # Minimum wall-clock a fallback backend needs to do anything useful (and still
 # salvage partial artifacts). When less than this remains in the per-kernel
 # ladder budget, the ladder stops instead of launching a backend it cannot
-# finish. Mirrors the +180s wrapper grace. See Hyperloom#602.
+# finish. Mirrors the +180s wrapper grace.
 _KERNEL_LADDER_MIN_BACKEND_SEC = 180
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
 
 
 @functools.lru_cache(maxsize=1)
 def _default_geak_budget_minutes() -> float:
-    """Default per-GEAK-attempt budget tracking ``$GEAK_RUN_MODE`` (quick→70, full→130). PR #301: mirrors kernel-agent tool defaults.
+    """Default per-GEAK-attempt budget tracking ``$GEAK_RUN_MODE`` (quick→70, full→130); mirrors kernel-agent tool defaults.
 
     Returns:
         The default per-attempt GEAK budget in minutes.
@@ -1500,9 +1500,8 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
     Dense fp8/fp4 forge tuners (a8w8*/a4w4*) skip themselves unless real GEMM
     shapes are supplied. Hyperloom's specialist runs already write these shapes
     to ``runs/specialist/<hash>/worktree/aiter/configs/*_untuned_gemm.csv`` in
-    forge's ``M,N,K`` format, but the orchestrator never wired them in -- so the
-    overwhelming majority of fp8 sglang sessions were skipped. This resolver
-    picks the newest non-empty CSV matching the resolved quant type.
+    forge's ``M,N,K`` format. This resolver picks the newest non-empty CSV
+    matching the resolved quant type and wires it into the forge tuners.
 
     Returns the CSV path, or "" when none is available (bf16 derives shapes from
     config.json and needs no CSV).
@@ -2101,7 +2100,7 @@ async def trace_analyze_handler(
     )
     if capture_folder:
         cmd += ["--capture-folder", str(capture_folder)]
-    # Forward TraceLens splitter steady-state mode (mixed/decode_only/prefilldecode) via payload or env, so the coordinator can re-issue after a steady_state_chunk warning.
+    # Forward TraceLens splitter steady-state mode (mixed/decode_only/prefilldecode) via payload or env.
     steady_state_mode = payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
@@ -2114,7 +2113,7 @@ async def trace_analyze_handler(
     )
     if analysis_route in ("deterministic", "agent"):
         cmd += ["--analysis-route", analysis_route]
-    # ``--roofline-json`` CLI param retired with the ``pmc_roofline`` action; a stale payload key is silently ignored.
+    # A stale ``--roofline-json`` payload key is silently ignored.
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
@@ -2186,9 +2185,9 @@ async def trace_analyze_handler(
                 trace_report_path=str(report_path or ""),
             )
 
-        # kernel_journey stage 1 (hot-kernel discovery): additive, best-effort.
-        # Records the discovery run + its hot-kernel list + tool provenance so
-        # the journey can thread discovery -> dispatch -> backends -> e2e.
+        # Record hot-kernel discovery provenance (best-effort): the discovery
+        # run + its hot-kernel list + tool provenance, so the journey can thread
+        # discovery -> dispatch -> backends -> e2e.
         try:
             from ..breakdown.recorder import instrument
 
@@ -2496,7 +2495,7 @@ def _kernel_ladder_budget_sec(payload: dict) -> int:
     KERNEL-phase budget cap (which is only re-checked between orchestration
     turns, never mid-``run_optimization``). This budget bounds the whole ladder
     so a fallback only runs within the time left and an exhausted budget exits
-    the ladder cleanly. See Hyperloom#602.
+    the ladder cleanly.
 
     Priority: payload ``kernel_budget_min`` > env
     ``KERNEL_OPT_KERNEL_BUDGET_MIN`` > the single-backend wall-clock budget from
@@ -2733,7 +2732,7 @@ def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
     return out
 
 
-# PR-C default: one backend-ladder dispatch per kernel/source unless an infra
+# Default: one backend-ladder dispatch per kernel/source unless an infra
 # failure still has retry budget (see ``_kernel_dispatch_attempt_cap``).
 _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS = 1
 
@@ -2741,8 +2740,8 @@ _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS = 1
 def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) -> int:
     """Return the batch-eligibility attempt cap for one kernel attempt record.
 
-    Non-infra attempts (PARTIAL, legacy resume rows, etc.) keep the PR-C
-    single-dispatch contract. Only a retryable backend infra failure widens the
+    Non-infra attempts (PARTIAL, legacy resume rows, etc.) keep the
+    single-dispatch rule. Only a retryable backend infra failure widens the
     cap to ``max_failures`` so dispatch, ``record_kernel_opt``, and
     ``kernel_work_pending`` agree on the same budget.
     """
@@ -2841,7 +2840,7 @@ def _batch_kernel_candidates(
             )
 
     def _is_live(kid: str, current_source: str = "") -> bool:
-        """A kernel_id is live (batch-eligible) iff NOT rejected, NOT in-flight, and < max_attempts recorded against the CURRENT source_file (PR-K per-source counting).
+        """A kernel_id is live (batch-eligible) iff NOT rejected, NOT in-flight, and < max_attempts recorded against the CURRENT source_file (per-source counting).
 
         Args:
             kid: The kernel id to test.
@@ -3008,7 +3007,7 @@ async def _run_backend_ladder(
     to the time left, and once less than :data:`_KERNEL_LADDER_MIN_BACKEND_SEC`
     remains the ladder stops rather than launching a fallback it cannot finish.
     This keeps a backend that hangs to its hard timeout from letting the
-    fallback overshoot the budget. See Hyperloom#602.
+    fallback overshoot the budget.
 
     Args:
         base_payload: The base request payload shared by every backend.
@@ -3032,7 +3031,7 @@ async def _run_backend_ladder(
             remaining = deadline - time.monotonic()
             if remaining <= _KERNEL_LADDER_MIN_BACKEND_SEC:
                 # Not enough of the per-kernel budget left to run another
-                # backend usefully; stop instead of overshooting it. #602
+                # backend usefully; stop instead of overshooting it.
                 log.info(
                     "kernel %s: per-kernel ladder budget exhausted (%.0fs left); "
                     "skipping remaining backends %s",
@@ -3109,7 +3108,7 @@ async def _run_kernel_backend_sequence(
     # Bound the whole ladder (all backends for this kernel) to one wall-clock
     # budget so a backend that hangs to its hard timeout cannot let the
     # fallback double the kernel's wall clock and overshoot the KERNEL-phase
-    # cap. Each ladder call caps its backends to the time left. See #602.
+    # cap. Each ladder call caps its backends to the time left.
     ladder_deadline = time.monotonic() + _kernel_ladder_budget_sec(base_payload)
 
     # Forge edits the live repo in-place (temp branch + per-file restore) and
@@ -3323,7 +3322,7 @@ def _backends_cli_arg(value: Any) -> str:
     MUST be comma-joined into bare names, never ``str()``-ed into the repr of a
     list (``"['geak']"``) — the kernel-agent's ``parse_backends`` validator
     correctly rejects that opaque token and the dispatch fails with the
-    self-contradictory "unsupported backend(s): ['geak']". See Hyperloom#601.
+    self-contradictory "unsupported backend(s): ['geak']".
 
     Args:
         value: The raw ``payload["backends"]`` value (str / list / tuple / None).
@@ -3440,7 +3439,7 @@ async def _run_optimization_single(
     timeout_sec = _optimization_wrapper_timeout_sec(payload)
     if timeout_override_sec is not None:
         # The backend ladder caps each subprocess to the time left in the
-        # per-kernel budget so a fallback never overshoots it. See Hyperloom#602.
+        # per-kernel budget so a fallback never overshoots it.
         timeout_sec = max(1, min(timeout_sec, int(timeout_override_sec)))
 
     from .action_executors._multi_node_env import is_multi_node
@@ -3460,7 +3459,7 @@ async def _run_optimization_single(
         # failed result here instead of letting TimeoutExpired propagate to the
         # batch wrapper — that wrapper produces a backend-less result, so the
         # failure was silently bucketed as a GEAK invocation even when a
-        # different optimizer (e.g. claude) actually ran. See Hyperloom#602.
+        # different optimizer (e.g. claude) actually ran.
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         result = {
             "status": "failed",
@@ -3476,7 +3475,7 @@ async def _run_optimization_single(
         # Attribute a result that carries no per-backend attempt ladder
         # (pre-dispatch / infra / timeout) to the backend that actually ran, so
         # downstream recorders never fall back to a silent GEAK default. Only
-        # when this run dispatched a single, unambiguous backend. See #602.
+        # when this run dispatched a single, unambiguous backend.
         if (
             backend
             and "," not in backend
@@ -4408,15 +4407,13 @@ def get_handler(kind: str) -> HandlerFn | None:
 
 
 # ===========================================================================
-# Kernel-decision write-owner functions (folded back from the former
-# shared_state_kernel.py satellite; phase 6C). SharedState is a passive
+# Kernel-decision write-owner functions. SharedState is a passive
 # persisted record; the functions that *own kernel decisions* (recording
 # kernel-opt / integrate / gemm-tuning outcomes, kernel-patch identity,
 # pending-keep bookkeeping, hot-kernel reuse) belong to this kernel domain.
-# They take ``state`` as their first argument and read/mutate it exactly as
-# the original SharedState methods did; SharedState keeps thin forwarding
-# shims so existing callers (``state.record_kernel_opt(...)`` etc.) and the
-# ~54 tests that hit them are unchanged.
+# They take ``state`` as their first argument and read/mutate it; SharedState
+# keeps thin forwarding shims so existing callers
+# (``state.record_kernel_opt(...)`` etc.) keep working.
 #
 # The shared_state default constants are imported lazily inside the functions
 # that need them: ``kernel_request_handlers`` has no module-level shared_state
@@ -4645,7 +4642,7 @@ def record_kernel_integrate_result(
     entry.pop("retryable", None)
     state.kernel_integrate_attempts[key] = entry
 
-    # kernel_journey stage 4 (end-to-end integrate outcome): additive,
+    # Record the end-to-end integrate outcome into the breakdown recorder,
     # idempotent per kernel_id, best-effort.
     try:
         from ..breakdown.recorder import instrument
@@ -4761,8 +4758,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         from ..breakdown.recorder import instrument
         sdir = getattr(state, "_session_dir", None)
         instrument.record_kernel_invocations(sdir, result)
-        # kernel_journey stage 2 (dispatch) + stage 3 (backend attempts):
-        # additive, never overlaps the legacy geak/oob view above.
+        # Record dispatch and per-backend attempts. Distinct from the
+        # geak/oob view above and never overlaps it.
         _kid = str(result.get("kernel_id") or "")
         if sdir and _kid:
             _attempts = result.get("attempts")
@@ -4794,7 +4791,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
                 # Never default an unattributable failure to GEAK — the backend
                 # that ran is stamped on the result upstream when known; only a
                 # genuine pre-dispatch gating failure (no backend launched)
-                # falls through, and "unknown" reflects that honestly. #602
+                # falls through, and "unknown" reflects that honestly.
                 _b = str(result.get("backend") or "").lower() or "unknown"
                 _backends = [_b]
             _dispatched = bool(_attempts) or _failed_predispatch
