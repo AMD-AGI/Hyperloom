@@ -2938,33 +2938,17 @@ def invoke_backend(
         if backend == "geak":
             geak = _import_backend("geak_submit")
             out_dir = _geak_output_dir(args.session_id, prompt_file)
-            # GEAK owns harness construction in its preprocess_v3 orchestrator: it
-            # discovers the op and builds the harness from the dispatch prompt
-            # (captured serving shapes + #703 WORKLOAD CONTEXT) + source. Handing it
-            # an HL-resolved op_test as --test-command makes that op_test (which a
-            # hardcoded op->test map in tracelens_analysis.py may mis-pick, e.g.
-            # test_pa.py for paged attention) the harness seed and can mis-target /
-            # mis-shape the kernel. The canonical baseline run dispatched with NO
-            # test_command (candidates had benchmark_files=None) and GEAK's
-            # preprocess produced the correct harness + 1.2647x. So pass no
-            # test_command for GEAK -> single path, prompt is the interface.
-            # (common_test_command is still used above for the rocprof snapshot.)
-            test_command = ""
+            # GEAK is dispatched PROMPT-ONLY. It owns harness construction in its
+            # preprocess_v3 orchestrator: it discovers the op and builds the harness
+            # from the dispatch prompt (device source + captured serving shapes +
+            # #703 WORKLOAD CONTEXT) alone. HL does NOT pass a test_command/op_test
+            # to GEAK -- a hardcoded op->test map (tracelens_analysis) can mis-pick
+            # (e.g. test_pa.py for paged attention) and seed a wrong harness. The
+            # canonical baseline run dispatched with no test_command and GEAK's
+            # preprocess produced the correct harness + 1.2647x. The prompt is the
+            # only interface. (common_test_command is still computed above solely
+            # for the rocprof before-snapshot, never handed to GEAK.)
             is_multigpu = is_multigpu_common
-            if log_path is not None and test_command:
-                append_log(log_path, f"[geak] test_command={test_command}")
-            if test_command:
-                import shutil as _shutil
-
-                harness_dir = out_dir / "unittest"
-                harness_dir.mkdir(parents=True, exist_ok=True)
-                for _tc_part in test_command.split("&&"):
-                    for _w in _tc_part.strip().split():
-                        if _w.endswith(".py") and Path(_w).exists():
-                            _dst = harness_dir / Path(_w).name
-                            if _dst.exists() and _dst.resolve() == Path(_w).resolve():
-                                continue
-                            _shutil.copy2(_w, _dst)
             previous_env = _apply_geak_env_overrides(args, prompt_file)
             try:
                 result = geak.submit(
@@ -2976,14 +2960,11 @@ def invoke_backend(
                     num_gpus=num_gpus,
                     prefer_ray=prefer_ray,
                     kernel_repo=kernel_repo,
-                    test_command=test_command,
                 )
             finally:
                 _restore_env(previous_env)
             result["stdout"] = result.get("stdout_tail", "")
             result["output_dir"] = str(out_dir)
-            if test_command:
-                result["test_command"] = test_command
             if rocprof_before:
                 result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
                 if rocprof_before.get("reason"):
