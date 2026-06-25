@@ -261,6 +261,39 @@ def llm_proposable_actions_for_with_interleave(
     return base
 
 
+def render_phase_proposable_bullets(
+    *,
+    interleave: bool,
+    explore_enabled: bool = True,
+    disabled_suffix: dict[str, str] | None = None,
+) -> list[str]:
+    """Render per-phase LLM-proposable action bullets (shared by the prompt builders).
+
+    Args:
+        interleave (bool): Whether phase interleave is enabled.
+        explore_enabled (bool): When False, strip ``explore`` from the KERNEL
+            interleave extras (only consulted when ``interleave`` is True).
+        disabled_suffix (dict[str, str] | None): Optional ``phase -> flag`` map;
+            a present flag annotates that phase as ``(DISABLED: <flag> — phase
+            skipped)``.
+
+    Returns:
+        list[str]: One markdown bullet per phase in :data:`PHASE_NAMES`.
+    """
+    suffix = disabled_suffix or {}
+    out: list[str] = []
+    for phase in PHASE_NAMES:
+        proposable = sorted(
+            llm_proposable_actions_for_with_interleave(phase, interleave=interleave, explore_enabled=explore_enabled)
+        )
+        flag = suffix.get(phase)
+        if flag:
+            out.append(f"- **{phase}**: {', '.join(proposable)} (DISABLED: {flag} — phase skipped)")
+        else:
+            out.append(f"- **{phase}**: {', '.join(proposable)}")
+    return out
+
+
 def is_action_llm_proposable_in_phase_with_interleave(
     action_name: str,
     phase: str,
@@ -315,7 +348,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "framework_pr_phase_done",  # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
         "framework_pr_plateau",  # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
         "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
-        # R1/R7 cyclic phase machine back-edge reasons (written by compute_next_phase).
+        # Cyclic phase machine back-edge reasons (transitions that reopen a macro-cycle).
         "cycle_reloop",  # SWEEP → FRAMEWORK_PR/EXPLORE; opens a new macro-cycle while budget + leverage remain
         "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
         # Terminal exits (any phase → CLOSE)
@@ -387,7 +420,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # "'PreTrainedConfig' object has no attribute 'max_position_embeddings'").
         # Fail fast instead of booting a server that dies in engine init.
         "model_config_incompatible",
-        # Baseline arg-validation fast-exit (#522): >=2 consecutive baseline
+        # Baseline arg-validation fast-exit: >=2 consecutive baseline
         # attempts exited <30s on a bad CLI arg (e.g. invalid --attention-backend);
         # deterministic, so stop instead of burning the slow-baseline retry budget.
         "baseline_arg_error",
@@ -457,11 +490,9 @@ DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
-# IR-6 under phase interleave (fix B): when EXPLORE↔KERNEL interleave is on,
-# the original "leave 3h so the *separate* KERNEL phase can run" rationale is
-# obsolete — kernel work already runs *inside* EXPLORE. The time gate then only
-# needs to guarantee SWEEP → CLOSE + report can finish, so it collapses to a
-# small CLOSE-buffer instead of the full KERNEL reservation. The phase-budget
+# When EXPLORE↔KERNEL interleave is on, kernel work runs *inside* EXPLORE, so the
+# time gate only needs to guarantee SWEEP → CLOSE + report can finish: it collapses
+# to a small CLOSE-buffer instead of reserving time for a separate KERNEL phase. The phase-budget
 # fraction gate is disabled in this mode for the same reason (EXPLORE legitimately
 # spends the bulk of the budget because it is also doing KERNEL work). Both are
 # overridable via the explicit thresholds the caller passes.
@@ -555,9 +586,9 @@ def is_cyclic_phases_enabled() -> bool:
 # than this threshold. A short bounded run (``--max-hours ≤ 24``) stays on the
 # legacy single-pass chain with whole-run phase budgets, regardless of the
 # (default-on) cyclic env flag — this is the "≤24h behaves exactly as before"
-# contract. Gating only on the env flag (not the budget) silently compressed
-# short-run phase budgets to the cycle window (DEFAULT_CYCLE_HOURS) and let
-# SWEEP reloop with as little as 30min remaining.
+# contract. Gating on the budget (not just the env flag) keeps short-run phase
+# budgets spanning the whole run rather than being compressed to the cycle
+# window (DEFAULT_CYCLE_HOURS).
 DEFAULT_LONGRUN_THRESHOLD_MINUTES: float = 24 * 60
 
 
@@ -669,7 +700,7 @@ def should_reloop_to_explore(
         evidence["reloop_blocked"] = "max_cycles"
         return False, evidence
 
-    # Long-run #10: physical ceiling convergence. If every roofline family that
+    # Physical ceiling convergence. If every roofline family that
     # has dominated across cycles is now within its configured roofline
     # saturation threshold, stop cleanly instead of relooping on noise-floor
     # 0.1% gains. Env escape hatch restores the pure gain-based behavior.
@@ -1663,7 +1694,7 @@ def exit_normal_sweep(
 ) -> tuple[str, dict[str, Any]] | None:
     """SWEEP normal exit: sweep_done OR conc_sweep_done OR budget exhausted.
 
-    Bug #12: conc_sweep completion emits an exit so a singleton-blocked sweep doesn't idle.
+    Emits an exit on concurrency-sweep completion so a singleton-blocked sweep does not idle.
 
     Args:
         state (Any): Frozen SharedState view exposing ``last_sweep`` and
@@ -2102,7 +2133,7 @@ def make_history_row(
     ts_unix: float,
     cycle: int = 0,
 ) -> dict[str, Any]:
-    """Construct a canonical phase_history row (Inv-2.2 + KB_design §3.2 §6); ``reason`` unvalidated for resume tools.
+    """Construct a canonical phase_history row; ``reason`` unvalidated for resume tools.
 
     ``cycle`` stamps the R1 macro-cycle this transition belongs to (0 for the
     first pass / legacy non-cyclic runs).
@@ -2133,19 +2164,18 @@ def make_history_row(
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle events (#266) — operator-facing phase/step boundary log
+# Lifecycle events — operator-facing phase/step boundary log
 # ---------------------------------------------------------------------------
 #
 # The coordinator's internal phase vocabulary (PRELUDE…CLOSE) and step /
 # handler names (trace_analyze / run_optimization / integrate / report) are
-# precise but unfamiliar to operators reading chat. Issue #266 asks that
-# every phase/step boundary be visible together with where its artifacts
-# landed, so a phase can no longer "run silently".
+# precise but unfamiliar to operators reading chat. A lifecycle event makes
+# every phase/step boundary visible together with where its artifacts landed.
 #
-# A lifecycle event therefore carries BOTH naming dimensions in parallel
-# (the user asked for both): ``phase`` is the real coordinator phase active
-# when the event fired, ``step`` is the machine step/handler name, and
-# ``label`` is the human-friendly name used in #266 / user-facing docs.
+# A lifecycle event carries both naming dimensions in parallel: ``phase`` is
+# the real coordinator phase active when the event fired, ``step`` is the
+# machine step/handler name, and ``label`` is the human-friendly name used in
+# user-facing docs.
 #
 # ``make_lifecycle_event`` is a pure builder mirroring ``make_history_row``;
 # ``SharedState.record_lifecycle_event`` is the single stateful writer
@@ -2278,12 +2308,11 @@ def make_lifecycle_event(
 
 
 # ---------------------------------------------------------------------------
-# Phase-transition / lifecycle write-owner functions (folded back from the
-# former shared_state_phase.py satellite; phase 6B). They take ``state`` first
+# Phase-transition / lifecycle write-owner functions. They take ``state`` first
 # and own the phase_history / lifecycle bookkeeping, which belongs to this
 # phase-state domain (they build rows via make_history_row / make_lifecycle_event
-# defined above). ``SharedState`` keeps forwarding shims so existing callers
-# (``state.record_phase_transition`` etc.) are unchanged.
+# defined above). ``SharedState`` exposes forwarding shims so existing callers
+# (``state.record_phase_transition`` etc.) reach these.
 # ---------------------------------------------------------------------------
 def record_phase_transition(
     state,

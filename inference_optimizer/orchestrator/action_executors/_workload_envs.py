@@ -2,11 +2,9 @@
 
 """Shared workload-env materialization (single source of truth).
 
-Two YAML-rendering paths used to diverge — baseline injected the full process-
-env workload contract while the grid runner dropped it — so downstream variants
-ran at YAML smoke defaults and every one looked like a regression (SKILL Lesson
-4 "Benchmark fairness"). This module is the single source of truth for rendering
-a Magpie YAML with the user's actual workload contract:
+This module is the single source of truth for rendering a Magpie YAML with the
+user's actual process-env workload contract, so the baseline and grid-runner
+paths render identical YAML:
 
 * :func:`materialize_config_with_envs` — write a per-run YAML honoring process
   env (+ optional caller overrides).
@@ -491,7 +489,7 @@ def materialize_config_with_envs(
                     "(EngineCore RPC timeout).",
                     max_iters, cap,
                 )
-        # TraceLens #194 §2: NUM_PROMPTS must let the engine reach
+        # NUM_PROMPTS must let the engine reach
         # ``delay_iters + max_iters`` decode steps before running out of
         # prompts (N prompts ≈ N * OSL / CONC iters; invert + 2x buffer).
         # Hyperloom owns this under PROFILE; a caller value is ignored.
@@ -680,10 +678,8 @@ def materialize_config_with_envs(
         # pipeline keeps the configured tp8 + the clean aiter MLA path.
         # Verified on MI300X: capture passes, decode correct.
         envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
-        # NOTE: client trust-remote-code is no longer model-specific. It is
-        # handled generally (model-agnostic) by the "Client trust-remote-code"
-        # block after the server-arg guards below, so Kimi/Qwen3.6/etc. no
-        # longer need a per-model MAGPIE_TRUST_REMOTE_CODE here.
+        # Client trust-remote-code is handled model-agnostically by the
+        # "Client trust-remote-code" block after the server-arg guards below.
     if "mimo-v2" in _model_basename:
         # MiMo-V2.x (moe_swa) loads MiMoV2ForCausalLM fine but its DEFAULT
         # aiter attention backend SIGABRTs during CUDA-graph capture on

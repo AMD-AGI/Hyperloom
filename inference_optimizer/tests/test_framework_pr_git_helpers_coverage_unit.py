@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from inference_optimizer.orchestrator.action_executors import _git as gitmod
 from inference_optimizer.orchestrator.action_executors import framework_pr as fp
 
 
@@ -40,33 +41,33 @@ def _seq_runner(results: list[Any]):
 
 # -- _git_head_sha ---------------------------------------------------------
 def test_git_head_sha_success(monkeypatch) -> None:
-    monkeypatch.setattr(fp.subprocess, "run", _seq_runner([_CP(0, "deadbeef\n")]))
+    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(0, "deadbeef\n")]))
     sha, err = fp._git_head_sha(Path("/repo"))
     assert sha == "deadbeef" and err == ""
 
 
 def test_git_head_sha_spawn_failure(monkeypatch) -> None:
-    monkeypatch.setattr(fp.subprocess, "run", _seq_runner([FileNotFoundError("git")]))
+    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([FileNotFoundError("git")]))
     sha, err = fp._git_head_sha(Path("/repo"))
     assert sha is None and "spawn failed" in err
 
 
 def test_git_head_sha_nonzero(monkeypatch) -> None:
-    monkeypatch.setattr(fp.subprocess, "run", _seq_runner([_CP(1, "", "fatal: no head")]))
+    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(1, "", "fatal: no head")]))
     sha, err = fp._git_head_sha(Path("/repo"))
     assert sha is None and err == "fatal: no head"
 
 
 # -- _git_reset_hard -------------------------------------------------------
 def test_git_reset_hard_success(monkeypatch) -> None:
-    monkeypatch.setattr(fp.subprocess, "run", _seq_runner([_CP(0), _CP(0)]))
+    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(0), _CP(0)]))
     ok, err = fp._git_reset_hard(Path("/repo"), "sha")
     assert ok is True and err == ""
 
 
 def test_git_reset_hard_reset_spawn_failure(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess,
+        gitmod.subprocess,
         "run",
         _seq_runner([subprocess.TimeoutExpired("git", 60)]),
     )
@@ -75,14 +76,14 @@ def test_git_reset_hard_reset_spawn_failure(monkeypatch) -> None:
 
 
 def test_git_reset_hard_reset_nonzero(monkeypatch) -> None:
-    monkeypatch.setattr(fp.subprocess, "run", _seq_runner([_CP(1, "", "bad sha")]))
+    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(1, "", "bad sha")]))
     ok, err = fp._git_reset_hard(Path("/repo"), "sha")
     assert ok is False and err == "bad sha"
 
 
 def test_git_reset_hard_clean_spawn_failure(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess,
+        gitmod.subprocess,
         "run",
         _seq_runner([_CP(0), FileNotFoundError("git")]),
     )
@@ -92,7 +93,7 @@ def test_git_reset_hard_clean_spawn_failure(monkeypatch) -> None:
 
 def test_git_reset_hard_clean_nonzero(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess,
+        gitmod.subprocess,
         "run",
         _seq_runner([_CP(0), _CP(1, "", "clean failed")]),
     )
@@ -104,7 +105,7 @@ def test_git_reset_hard_clean_nonzero(monkeypatch) -> None:
 def test_git_commit_keep_success(monkeypatch) -> None:
     # add -A ok, commit ok, rev-parse returns new sha
     monkeypatch.setattr(
-        fp.subprocess,
+        gitmod.subprocess,
         "run",
         _seq_runner([_CP(0), _CP(0), _CP(0, "newsha\n")]),
     )
@@ -113,20 +114,20 @@ def test_git_commit_keep_success(monkeypatch) -> None:
 
 
 def test_git_commit_keep_add_spawn_failure(monkeypatch) -> None:
-    monkeypatch.setattr(fp.subprocess, "run", _seq_runner([FileNotFoundError("git")]))
+    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([FileNotFoundError("git")]))
     sha, err = fp._git_commit_keep(Path("/repo"), "msg")
     assert sha is None and "add -A spawn failed" in err
 
 
 def test_git_commit_keep_add_nonzero(monkeypatch) -> None:
-    monkeypatch.setattr(fp.subprocess, "run", _seq_runner([_CP(1, "", "add failed")]))
+    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(1, "", "add failed")]))
     sha, err = fp._git_commit_keep(Path("/repo"), "msg")
     assert sha is None and err == "add failed"
 
 
 def test_git_commit_keep_commit_spawn_failure(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess,
+        gitmod.subprocess,
         "run",
         _seq_runner([_CP(0), subprocess.TimeoutExpired("git", 60)]),
     )
@@ -136,7 +137,7 @@ def test_git_commit_keep_commit_spawn_failure(monkeypatch) -> None:
 
 def test_git_commit_keep_commit_nonzero(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess,
+        gitmod.subprocess,
         "run",
         _seq_runner([_CP(0), _CP(1, "", "nothing to commit")]),
     )
@@ -146,7 +147,7 @@ def test_git_commit_keep_commit_nonzero(monkeypatch) -> None:
 
 def test_git_commit_keep_head_unreadable(monkeypatch) -> None:
     monkeypatch.setattr(
-        fp.subprocess,
+        gitmod.subprocess,
         "run",
         _seq_runner([_CP(0), _CP(0), _CP(1, "", "")]),
     )
@@ -156,19 +157,19 @@ def test_git_commit_keep_head_unreadable(monkeypatch) -> None:
 
 # -- _run_git --------------------------------------------------------------
 def test_run_git_success(monkeypatch) -> None:
-    monkeypatch.setattr(fp.subprocess, "run", _seq_runner([_CP(0, "out", "")]))
+    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(0, "out", "")]))
     ok, out, err = fp._run_git(["status"])
     assert ok is True and out == "out"
 
 
 def test_run_git_spawn_failure(monkeypatch) -> None:
-    monkeypatch.setattr(fp.subprocess, "run", _seq_runner([FileNotFoundError("git")]))
+    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([FileNotFoundError("git")]))
     ok, out, err = fp._run_git(["status"])
     assert ok is False and "spawn/timeout failed" in err
 
 
 def test_run_git_nonzero(monkeypatch) -> None:
-    monkeypatch.setattr(fp.subprocess, "run", _seq_runner([_CP(2, "partial", "boom")]))
+    monkeypatch.setattr(gitmod.subprocess, "run", _seq_runner([_CP(2, "partial", "boom")]))
     ok, out, err = fp._run_git(["status"])
     assert ok is False and out == "partial" and err == "boom"
 
