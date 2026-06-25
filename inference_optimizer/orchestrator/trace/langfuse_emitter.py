@@ -324,15 +324,9 @@ def _load_json(path: Path) -> dict[str, Any]:
         The parsed object, or ``{}`` when the file is missing, unreadable, or
         not a JSON object.
     """
-    import json
+    from .._json_io import read_json
 
-    if not path.exists():
-        return {}
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        return obj if isinstance(obj, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return read_json(path, default={}, require_dict=True)
 
 
 class LangfuseEmitter:

@@ -32,6 +32,7 @@ from .roofline_ceiling import (
     compute_compute_bound_ceiling_tok_per_sec,
     compute_theoretical_peak_output_tok_per_sec,
     load_model_meta,
+    select_peak_and_bound,
 )
 from .shared_state import SharedState
 
@@ -344,21 +345,9 @@ def _build_roofline_ceiling(
             concurrency=c,
         )
         # Resolve T_peak / binding (mirrors compute_roofline_breakdown_from_state).
-        if t_mem <= 0 and t_cmp <= 0:
-            bound_kind = "unknown"
-            t_peak = 0.0
-        elif t_cmp <= 0:
-            bound_kind = "memory"
-            t_peak = t_mem
-        elif t_mem <= 0:
-            bound_kind = "compute"
-            t_peak = t_cmp
-        elif t_cmp < t_mem:
-            bound_kind = "compute"
-            t_peak = t_cmp
-        else:
-            bound_kind = "memory"
-            t_peak = t_mem
+        t_peak, bound_kind = select_peak_and_bound(t_mem, t_cmp)
+        # Local import avoids a module-level conc_sweep -> roofline_snapshot cycle.
+        from .roofline_snapshot import within_roofline_pct
 
         def _mbu_pct(measured: Any) -> float | None:
             """Express a measured throughput as a percent of peak.
@@ -372,9 +361,7 @@ def _build_roofline_ceiling(
             """
             if not isinstance(measured, (int, float)) or measured <= 0:
                 return None
-            if t_peak <= 0:
-                return None
-            return round((float(measured) / t_peak) * 100.0, 2)
+            return within_roofline_pct(peak=float(t_peak), achieved=float(measured))
 
         bt = (by_conc_b.get(c) or {}).get("output_throughput")
         ot = (by_conc_o.get(c) or {}).get("output_throughput")
@@ -631,8 +618,8 @@ async def run_conc_sweep(
                 payload,
                 producer="conc_sweep",
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — author-time capture must never break the sweep
+            log.debug("conc_sweep breakdown capture failed", exc_info=True)
         # final.json pointer is added by report.py at CLOSE (this action runs before CLOSE).
 
     log.info(
@@ -644,42 +631,11 @@ async def run_conc_sweep(
     return payload
 
 
-def format_summary_line(payload: dict[str, Any]) -> str:
-    """One-line stdout summary for ``_print_final_summary``.
-
-    Args:
-        payload: The conc-sweep result payload to summarize.
-
-    Returns:
-        A single formatted summary line.
-    """
-    status = payload.get("status", "?")
-    if status == "skipped":
-        return f"  conc_sweep           : skipped ({payload.get('skip_reason', '?')})"
-    s = payload.get("summary", {}) or {}
-    succ = s.get("successful_pairs", 0)
-    failed = s.get("failed_pairs", 0)
-    best_speedup = s.get("best_speedup")
-    best_conc = s.get("best_conc")
-    median = s.get("median_speedup")
-    suffix = ""
-    if payload.get("budget_exhausted"):
-        budget = payload.get("total_budget_sec")
-        suffix = f" [budget_exhausted{f' @{budget}s' if budget else ''}]"
-    parts = [f"  conc_sweep           : {status} (pairs={succ}+{failed}f)"]
-    if isinstance(best_speedup, (int, float)) and best_conc is not None:
-        parts.append(f"best={best_speedup:.2f}x @ conc={best_conc}")
-    if isinstance(median, (int, float)):
-        parts.append(f"median={median:.2f}x")
-    return " ".join(parts) + suffix
-
-
 __all__ = [
     "DEFAULT_CONCS",
     "DEFAULT_NUM_PROMPTS_FACTOR",
     "DEFAULT_TOTAL_BUDGET_SEC",
     "DEFAULT_VARIANT_TIMEOUT_SEC",
     "SCHEMA_VERSION",
-    "format_summary_line",
     "run_conc_sweep",
 ]
