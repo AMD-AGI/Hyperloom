@@ -4866,18 +4866,21 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="explore_overtime_kill_ratio",
         type=float,
         default=_env_float_or(
-            1.20,
+            2.0,
             "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO",
         ),
         help="Per-variant explore overtime kill: each single-variant "
         "Magpie run in the explore loop is reaped once its "
-        "wall-clock exceeds ``baseline_runtime_sec * RATIO``. The "
-        "variant is recorded with outcome=KILLED_OVERTIME + "
-        "runtime_sec + wall_clock_ratio_vs_baseline (no tput) so "
-        "the LLM can distinguish it from a hard timeout / crash. "
-        "Default 1.10 (kill at +10%% over baseline wall-clock). "
-        "Pass 0 to disable. Env: "
-        "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
+        "POST-READY (pure hot client) wall-clock exceeds "
+        "``decision_anchor_sec * RATIO`` (the warm-decision anchor is "
+        "``baseline_warm_runtime_sec``; pre-ready boot / weight load / "
+        "first-request recompile is excluded — see "
+        "INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY). The variant is "
+        "recorded with outcome=KILLED_OVERTIME + runtime_sec + "
+        "wall_clock_ratio_vs_baseline (no tput) so the LLM can "
+        "distinguish it from a hard timeout / crash. Default 2.0 (kill "
+        "at +100%% over the warm client anchor). Pass 0 to disable. "
+        "Env: INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
     )
     # Explore variant hard timeout — operator override for the auto-derived cap.
     # ExploreExecutor auto-derives from baseline_runtime_sec*(kill_ratio+0.5); 0 (default) keeps auto-derive.

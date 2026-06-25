@@ -609,8 +609,8 @@ class SharedState:
     framework_pr_authoring_enabled: bool = True
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``. Absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposal).
     enable_roofline: bool = True
-    # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM measure time when warm-decision is active, else the cold baseline. Warmup + stack-rebench exempt. Default +20%.
-    explore_overtime_kill_ratio: float = 1.20
+    # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM measure time when warm-decision is active, else the cold baseline. The clock measures only the post-ready (pure hot client) phase, matching the anchor. Warmup + stack-rebench exempt. Default +100%.
+    explore_overtime_kill_ratio: float = 2.0
     # ExploreExecutor per-variant hard timeout override; 0 => auto-derive from baseline_runtime_sec*(kill_ratio+safety_margin).
     explore_variant_timeout_sec_override: int = 0
     # Headroom added to kill_ratio for auto-derived hard cap (default 0.5); no effect when override > 0.

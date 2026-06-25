@@ -773,7 +773,13 @@ def _communicate_with_soft_deadline(
     ``proc.communicate(timeout=hard_timeout)`` (legacy fast path). Otherwise it
     polls in 0.5s slices, enforcing:
 
-    * ``soft_deadline_sec`` — raise :class:`_SoftDeadlineExceeded` once passed;
+    * ``soft_deadline_sec`` — raise :class:`_SoftDeadlineExceeded` once passed.
+      When a ``server_log_path`` is available (and
+      ``INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY`` is not disabled) the
+      clock is measured from the server-ready marker (the "pure hot client"
+      phase) rather than process spawn, so pre-ready boot / weight load /
+      first-request recompile is excluded; without a ``server.log`` it is the
+      legacy from-spawn elapsed;
     * ``server_log_path`` death watchdog — once a terminal init marker
       (:data:`_SERVER_DEAD_MARKERS`) is observed AND it persists for
       ``server_dead_grace_sec`` without the child exiting on its own, raise
@@ -829,6 +835,25 @@ def _communicate_with_soft_deadline(
     deadline_sec = float(soft_deadline_sec) if soft_active else None
     grace_sec = float(server_dead_grace_sec) if watchdog_active else None
     stall_grace_sec = float(detok_stall_grace_sec) if stall_active else None
+    # Caliber fix: when a ``server.log`` is available the soft deadline measures
+    # only the post-ready ("pure hot client") phase — the overtime clock starts
+    # at the server-ready marker, so Magpie startup + server boot / weight load /
+    # first-request JIT recompile (all pre-ready) are excluded. This keeps the
+    # per-variant overtime caliber consistent with the warm anchor
+    # ``baseline_warm_runtime_sec`` (itself a client-only measure round). Without
+    # a ``server.log`` it falls back to the legacy from-spawn clock. Opt out with
+    # ``INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY=0``.
+    soft_from_ready = (
+        soft_active
+        and bool(server_log_path)
+        and os.environ.get(
+            "INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY", "1"
+        ).strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
+    # The server.log increment scan feeds both the stall watchdog and the
+    # from-ready soft-deadline anchor; run it once per slice when either needs it.
+    scan_active = stall_active or soft_from_ready
     poll_interval = 0.5
     start = time.monotonic()
     dead_marker_since: float | None = None
@@ -841,9 +866,39 @@ def _communicate_with_soft_deadline(
     server_ready_since: float | None = None
     last_activity_at: float | None = None
     while True:
-        elapsed = time.monotonic() - start
+        now = time.monotonic()
+        elapsed = now - start
+        # Advance the server.log scan once per slice when any consumer needs it
+        # (stall watchdog and/or the from-ready soft-deadline anchor), latching
+        # the server-ready time and the last-activity time.
+        if scan_active:
+            prev_offset = stall_log_offset
+            stall_log_offset, saw_ready, _saw_progress = _scan_server_log_increment(
+                server_log_path,  # type: ignore[arg-type]
+                stall_log_offset,
+            )
+            if saw_ready and server_ready_since is None:
+                server_ready_since = now
+                last_activity_at = now  # start the silence clock at ready
+            # ANY new bytes in server.log count as liveness — decode throughput,
+            # but also cold-path / JIT / compile logs that a huge model emits
+            # between ready and its first token. Only total silence trips the
+            # stall gate, so a slow-but-logging first request is never killed.
+            if stall_log_offset > prev_offset:
+                last_activity_at = now
+        # Soft deadline. With ``soft_from_ready`` the overtime clock is measured
+        # from the server-ready marker (client-only phase) and stays DORMANT
+        # until ready; otherwise it is the legacy from-spawn elapsed.
         if soft_active and deadline_sec is not None:
-            if deadline_sec - elapsed <= 0.0:
+            if soft_from_ready:
+                if server_ready_since is not None:
+                    soft_elapsed = now - server_ready_since
+                    if deadline_sec - soft_elapsed <= 0.0:
+                        raise _SoftDeadlineExceeded(
+                            deadline_sec=deadline_sec,
+                            elapsed_sec=soft_elapsed,
+                        )
+            elif deadline_sec - elapsed <= 0.0:
                 raise _SoftDeadlineExceeded(
                     deadline_sec=deadline_sec,
                     elapsed_sec=elapsed,
@@ -851,8 +906,8 @@ def _communicate_with_soft_deadline(
         if watchdog_active and grace_sec is not None:
             if _server_log_shows_death(server_log_path):  # type: ignore[arg-type]
                 if dead_marker_since is None:
-                    dead_marker_since = time.monotonic()
-                elif time.monotonic() - dead_marker_since >= grace_sec:
+                    dead_marker_since = now
+                elif now - dead_marker_since >= grace_sec:
                     raise _ServerDeadDetected(
                         marker="server_init_failed",
                         grace_sec=grace_sec,
@@ -860,24 +915,9 @@ def _communicate_with_soft_deadline(
                     )
             else:
                 dead_marker_since = None
+        # Detokenizer-stall watchdog — armed only once the server is ready;
+        # pre-ready weight loading is slow, not stalled, and must never trip it.
         if stall_active and stall_grace_sec is not None:
-            prev_offset = stall_log_offset
-            stall_log_offset, saw_ready, _saw_progress = _scan_server_log_increment(
-                server_log_path,  # type: ignore[arg-type]
-                stall_log_offset,
-            )
-            now = time.monotonic()
-            if saw_ready and server_ready_since is None:
-                server_ready_since = now
-                last_activity_at = now  # start the silence clock at ready
-            # ANY new bytes in server.log count as liveness — decode throughput,
-            # but also cold-path / JIT / compile logs that a huge model emits
-            # between ready and its first token. Only total silence trips the
-            # gate, so a slow-but-logging first request is never killed.
-            if stall_log_offset > prev_offset:
-                last_activity_at = now
-            # Armed only once the server is ready; pre-ready weight loading is
-            # slow, not stalled, and must never trip this gate.
             if server_ready_since is not None and last_activity_at is not None:
                 if now - last_activity_at >= stall_grace_sec:
                     raise _ServerStalledDetected(
@@ -888,7 +928,13 @@ def _communicate_with_soft_deadline(
         # fires first; the child can still finish inside any slice.
         slice_sec = poll_interval
         if soft_active and deadline_sec is not None:
-            slice_sec = min(slice_sec, deadline_sec - elapsed)
+            if soft_from_ready:
+                if server_ready_since is not None:
+                    slice_sec = min(
+                        slice_sec, deadline_sec - (now - server_ready_since)
+                    )
+            else:
+                slice_sec = min(slice_sec, deadline_sec - elapsed)
         if hard_timeout is not None:
             hard_remaining = float(hard_timeout) - elapsed
             if hard_remaining <= 0.0:
