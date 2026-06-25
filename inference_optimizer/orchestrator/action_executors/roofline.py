@@ -413,10 +413,16 @@ class RooflineExecutor:
         # Pin every roofline's arm explicitly so the ceiling precision never
         # relies on a transient current_best inference: PRELUDE measures the
         # baseline arm; all other reasons (watermark etc.) measure current_best.
-        roofline_arm = "baseline" if str(_task_params.get("reason") or "") == "prelude_initial" else "current_best"
+        _reason = str(_task_params.get("reason") or "")
+        roofline_arm = "baseline" if _reason == "prelude_initial" else "current_best"
+        # Post-kernel-opt roofline writes a separate report (kernel_roofline_opt.json)
+        # so the baseline kernel_roofline.json is preserved for before/after diff.
+        roofline_output_name = "kernel_roofline_opt.json" if _reason == "close_post_opt" else ""
         ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
         if roofline_arm:
             ta_payload["roofline_arm"] = roofline_arm
+        if roofline_output_name:
+            ta_payload["roofline_output_name"] = roofline_output_name
         try:
             ta_result = await trace_analyze_handler(
                 ta_payload,
@@ -454,6 +460,8 @@ class RooflineExecutor:
             }
             if roofline_arm:
                 ta_payload_retry["roofline_arm"] = roofline_arm
+            if roofline_output_name:
+                ta_payload_retry["roofline_output_name"] = roofline_output_name
             try:
                 ta_result = await trace_analyze_handler(
                     ta_payload_retry,

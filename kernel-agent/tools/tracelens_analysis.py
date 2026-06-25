@@ -4835,7 +4835,7 @@ def build_kernel_roofline_payload(
     }
 
 
-def kernel_roofline_path_for_run(run_dir: Path) -> Path:
+def kernel_roofline_path_for_run(run_dir: Path, filename: str = "kernel_roofline.json") -> Path:
     """Return the session-level kernel roofline report path (stable dashboard pointer).
 
     PR-C layout is ``.../runs/<session_id>/<ts>_<run_id>/``; the pre-PR-C
@@ -4843,6 +4843,8 @@ def kernel_roofline_path_for_run(run_dir: Path) -> Path:
 
     Args:
         run_dir: The ``runs/<session_id>/`` root for the session.
+        filename: Report file name; use ``kernel_roofline_opt.json`` for the
+            post-kernel-opt snapshot so it does not overwrite the baseline.
 
     Returns:
         The stable session-level kernel roofline report path.
@@ -4853,20 +4855,20 @@ def kernel_roofline_path_for_run(run_dir: Path) -> Path:
         runs_dir = session_sub.parent
         kernel_agent_dir = runs_dir.parent
     except (IndexError, AttributeError):
-        return run_dir / "reports" / "kernel_roofline.json"
+        return run_dir / "reports" / filename
     if runs_dir.name == "runs" and kernel_agent_dir.name == "kernel-agent":
         session_dir = kernel_agent_dir.parent
-        return session_dir / "reports" / "kernel_roofline.json"
+        return session_dir / "reports" / filename
     # Backward-compat: pre-PR-C layout (.../runs/<session_id>/)
     try:
         runs_dir_legacy = run_dir.parent
         kernel_agent_dir_legacy = runs_dir_legacy.parent
     except (IndexError, AttributeError):
-        return run_dir / "reports" / "kernel_roofline.json"
+        return run_dir / "reports" / filename
     if runs_dir_legacy.name == "runs" and kernel_agent_dir_legacy.name == "kernel-agent":
         session_dir = kernel_agent_dir_legacy.parent
-        return session_dir / "reports" / "kernel_roofline.json"
-    return run_dir / "reports" / "kernel_roofline.json"
+        return session_dir / "reports" / filename
+    return run_dir / "reports" / filename
 
 
 def _candidate_model_config_paths(model_name: str) -> list[Path]:
@@ -5408,7 +5410,10 @@ def write_reports(
             )
             existing_report_path = stub_md
 
-    kernel_roofline_path = kernel_roofline_path_for_run(run_dir)
+    kernel_roofline_path = kernel_roofline_path_for_run(
+        run_dir,
+        filename=getattr(args, "roofline_output_name", "kernel_roofline.json") or "kernel_roofline.json",
+    )
     kernel_roofline_payload = build_kernel_roofline_payload(
         trace_input=str(Path(args.trace_input).resolve()),
         trace_input_type=trace_input_type,
@@ -5538,6 +5543,12 @@ def main() -> int:
         "Leave empty for the open-source-only report.",
     )
     parser.add_argument("--roofline-json", default="")
+    parser.add_argument(
+        "--roofline-output-name",
+        default="kernel_roofline.json",
+        help="Report file name under reports/. Pass kernel_roofline_opt.json "
+        "for the post-kernel-opt snapshot so it does not overwrite baseline.",
+    )
     parser.add_argument(
         "--capture-folder",
         default=os.environ.get("TRACELENS_CAPTURE_FOLDER", ""),

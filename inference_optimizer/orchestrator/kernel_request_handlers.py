@@ -308,7 +308,6 @@ def _kernel_agent_root_error() -> str | None:
         return f"{_KERNEL_AGENT_ROOT_ENV} does not exist: {root}"
     return None
 
-
 def _kernel_agent_tool_path(tool_name: str) -> Path:
     """Resolve the absolute path to a kernel-agent shell tool.
 
@@ -2137,6 +2136,11 @@ async def trace_analyze_handler(
     )
     if analysis_route in ("deterministic", "agent"):
         cmd += ["--analysis-route", analysis_route]
+    # Post-kernel-opt roofline writes a separate report so it never overwrites
+    # the baseline kernel_roofline.json; the chart diffs the two snapshots.
+    roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
+    if roofline_output_name:
+        cmd += ["--roofline-output-name", roofline_output_name]
     # ``--roofline-json`` CLI param retired with the ``pmc_roofline`` action; a stale payload key is silently ignored.
     if payload.get("dry_run"):
         cmd += ["--dry-run"]

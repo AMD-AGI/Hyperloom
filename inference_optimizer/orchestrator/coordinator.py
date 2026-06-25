@@ -6075,6 +6075,9 @@ class Coordinator:
     CLOSE_REPORT_TIMEOUT_SEC: float = 600.0
     CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC: float = 300.0
     CLOSE_NDJSON_DRAIN_TIMEOUT_SEC: float = 60.0
+    # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot
+    # is skipped so report/breakdown always run.
+    CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
 
     def _derive_close_stop_reason(self) -> str:
         """Best-effort ``stop_reason`` for a CLOSE reached blank: recover from the newest CLOSE-bound phase_history row, else time_exhausted.
@@ -6096,6 +6099,85 @@ class Coordinator:
             break
         return "time_exhausted"
 
+    def _session_integrated_kernel_patch(self) -> bool:
+        """True iff this session integrated a kernel/source patch (optimization_stack has an integrate/integrate_patch entry). Gates the CLOSE post-opt roofline so pure param-search sessions skip the extra profile.
+
+        Returns:
+            ``True`` when at least one integrate-class optimization landed.
+        """
+        stack = getattr(self.shared_state, "optimization_stack", None) or []
+        if not isinstance(stack, list):
+            return False
+        for entry in stack:
+            if isinstance(entry, dict) and str(entry.get("action") or "") in {"integrate", "integrate_patch"}:
+                return True
+        return False
+
+    async def _maybe_run_close_post_opt_roofline(self) -> None:
+        """Best-effort: run one final post-opt roofline at CLOSE when a kernel/source patch was integrated.
+
+        Profiles the final optimized service once and writes
+        reports/kernel_roofline_opt.json (the ``close_post_opt`` reason routes
+        the executor to that file, see action_executors/roofline.py), giving the
+        before/after kernel roofline chart its optimized snapshot. No-op for
+        sessions without an integrate-class optimization; runs synchronously so
+        the report/breakdown steps see the file, but is wrapped by the caller so
+        a failure never blocks close.
+        """
+        if not self._session_integrated_kernel_patch():
+            return
+        # Skip on the wall-clock-deadline close path: that path only has the
+        # closing-grace window (<=120s) reserved for report/breakdown, far too
+        # short for a full profile+TraceLens. Only run on a normal converged
+        # close (closing_phase is False), which still has regular tick budget.
+        if bool(getattr(self.shared_state, "closing_phase", False)):
+            log.info("CLOSE step 0: skipped post-opt roofline (wall-clock closing grace window)")
+            return
+        if self._internal_analysis_kind() != "roofline":
+            # Roofline disabled for this run; nothing to profile.
+            return
+        task = await self._enqueue_internal_analysis_task(reason="close_post_opt")
+        log.info(
+            "CLOSE step 0: running post-opt roofline task=%s (timeout=%.0fs)",
+            task.task_id,
+            self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
+        )
+        # Hard timeout so a slow profile+TraceLens can never stall the close
+        # sequence (report/breakdown still run). On timeout the optimized
+        # snapshot is simply absent; the chart degrades to baseline-only.
+        try:
+            result = await asyncio.wait_for(
+                self.sub.run_task(task),
+                timeout=self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "CLOSE step 0: post-opt roofline timed out after %.0fs; skipping (kernel_roofline_opt.json absent)",
+                self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
+            )
+            try:
+                current = await self.tasks.get(task.task_id)
+                if current.state == "queued":
+                    await self.tasks.transition(
+                        task.task_id,
+                        "cancelled",
+                        {"reason": "close_post_opt_roofline_timeout"},
+                    )
+                elif current.state == "running":
+                    await self.tasks.transition(
+                        task.task_id,
+                        "failed",
+                        {"reason": "close_post_opt_roofline_timeout"},
+                    )
+            except Exception:  # noqa: BLE001 — timeout bookkeeping best-effort
+                log.debug(
+                    "CLOSE step 0: failed to mark timed-out post-opt roofline task",
+                    exc_info=True,
+                )
+            return
+        state = getattr(result, "state", None)
+        log.info("CLOSE step 0: post-opt roofline finished (state=%s)", state)
+
     async def _on_enter_close(self, *, from_phase: str) -> None:
         """CLOSE 5-step sequencer (fixed order): report → session_breakdown → fact_finalize → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs.
 
@@ -6115,6 +6197,17 @@ class Coordinator:
                 log.exception("CLOSE: early stop_reason persist failed; step 5 will retry")
 
         # CLOSE-entry auto-roofline (former N31) deleted in favour of EXPLORE/KERNEL-entry hooks.
+
+        # Step 0: post-optimization roofline (best-effort). Only when this
+        # session integrated a kernel/source patch, profile the final optimized
+        # service once and write reports/kernel_roofline_opt.json so the
+        # before/after kernel roofline chart (baseline kernel_roofline.json vs
+        # this optimized snapshot) has its "after" column. Wrapped so a slow or
+        # failed run never blocks the report / session_breakdown steps below.
+        try:
+            await self._maybe_run_close_post_opt_roofline()
+        except Exception as exc:  # noqa: BLE001 — best-effort; never block close
+            log.warning("CLOSE step 0 (post-opt roofline) failed: %r", exc)
 
         # Step 1: report
         try:
