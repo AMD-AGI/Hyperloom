@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 
 from ..recipe_kb import RecipeKB, recipe_canonical_id
 from ..recipe_snapshot_constants import detect_framework_version
+from ..session_paths import cortex_lessons_json, cortex_pitfalls_json, cortex_warm_json
 
 
 log = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class T0Result:
-    """Outcome of one :func:`run_t0_anchor` invocation. ``status`` ∈ {ok, resumed, skipped_disabled, skipped_already}."""
+    """Outcome of one :func:`run_t0_anchor` invocation. ``status`` ∈ {ok, resumed, skipped_already}."""
 
     status: str
     session_id: str = ""
@@ -30,7 +31,6 @@ class T0Result:
     warm_present: bool = False
     pitfalls_present: bool = False
     lessons_present: bool = False
-    error: str = ""
 
 
 def _default_status_emitter(line: str) -> None:
@@ -127,9 +127,9 @@ def _warm_recipe_source(
     """Resolve which KB path actually supplied the applied warm recipe.
 
     Under the composite remote, a merged row carries ``_field_sources`` /
-    ``_sources`` recording which backend supplied each field. When config-donor
-    decoupling (#587) borrows the replayable champion from a same-architecture
-    sibling, the FINAL applied config comes from the donor's path — so prefer
+    ``_sources`` recording which backend supplied each field. When the
+    replayable champion is borrowed from a same-architecture sibling, the
+    FINAL applied config comes from the donor's path — so prefer
     the donor's ``best_config`` source whenever a separate donor (tier other
     than ``self``) supplied it. Otherwise attribute to the identity match's
     ``best_config`` backend, then its first contributing source, and finally
@@ -418,7 +418,6 @@ def run_t0_anchor(
     stack_fingerprint: Mapping[str, str] | None = None,
     extra_attrs: Mapping[str, Any] | None = None,
     resume: bool = False,
-    fail_fast: bool = False,
     on_status: Callable[[str], None] | None = None,
     session_dir: Path | None = None,
     save_state: bool = True,
@@ -439,7 +438,6 @@ def run_t0_anchor(
         extra_attrs: Optional extra identity/trace attributes (model_class,
             framework, session ids).
         resume: When ``True``, re-anchor even if already anchored.
-        fail_fast: Reserved flag for fail-fast behavior.
         on_status: Optional status-line callback; defaults to INFO logging.
         session_dir: The session directory (required).
         save_state: When ``True``, persist the mutated SharedState.
@@ -743,8 +741,8 @@ def run_t0_anchor(
         warm_conf = 0.0
 
     # Config-donor decoupling: the identity match (warm_point) supplies priors
-    # and the 7-tuple anchor; if it carries no replayable champion config
-    # (the ~47% empty-best_config / seed-only rows), borrow one from the
+    # and the 7-tuple anchor; if it carries no replayable champion config,
+    # borrow one from the
     # nearest same-architecture sibling so the active warm-replay can still
     # fire. The donor's cross-model transfer confidence — not the identity
     # match's confidence — governs the downstream replay gate.
@@ -777,7 +775,7 @@ def run_t0_anchor(
         sort_keys=True,
     )
     try:
-        warm_path = sd / "runtime" / "cortex" / ".kb_warm.json"
+        warm_path = cortex_warm_json(sd)
         warm_path.parent.mkdir(parents=True, exist_ok=True)
         warm_path.write_text(
             json.dumps(
@@ -836,7 +834,7 @@ def run_t0_anchor(
     pitfalls_list: list[dict[str, Any]] = list(warm_point.get("pitfalls") or [])
     lessons_list: list[dict[str, Any]] = list(warm_point.get("lessons") or [])
     try:
-        pit_path = sd / "runtime" / "cortex" / ".kb_pitfalls.json"
+        pit_path = cortex_pitfalls_json(sd)
         pit_path.parent.mkdir(parents=True, exist_ok=True)
         pit_path.write_text(
             json.dumps(
@@ -855,7 +853,7 @@ def run_t0_anchor(
     except OSError as exc:
         log.warning("warm_start_pitfalls snapshot write failed: %s", exc)
     try:
-        les_path = sd / "runtime" / "cortex" / ".kb_lessons.json"
+        les_path = cortex_lessons_json(sd)
         les_path.parent.mkdir(parents=True, exist_ok=True)
         les_path.write_text(
             json.dumps(

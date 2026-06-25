@@ -49,6 +49,19 @@ from .task_registry import Task
 log = __import__("logging").getLogger(__name__)
 
 
+def _coerce_metric(value: Any) -> float | None:
+    """Best-effort float coercion of a metric value.
+
+    Returns ``None`` when *value* is ``None`` or not float-coercible (matching
+    the inline ``float(x) if x is not None else None`` guards this helper
+    replaces in the fact-recording paths).
+    """
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 class ResultRecorder:
     """Synthesizes result records and journal facts on behalf of a Coordinator."""
 
@@ -126,7 +139,7 @@ class ResultRecorder:
                 "failed for task=%s", task.task_id,
             )
 
-        # Per-anchor coverage ledger (point 1): every specialist completion is
+        # Per-anchor coverage ledger: every specialist completion is
         # one "round" — tick all anchors, then zero the one that just ran so a
         # long-idle domain's counter climbs until the hard-trigger forces it.
         try:
@@ -265,7 +278,7 @@ class ResultRecorder:
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
                 task.task_id,
             )
-        # B3: push specialist-authored patches to the Critic so integrate_patch can pass.
+        # Push specialist-authored patches to the Critic so integrate_patch can pass.
         try:
             await self._maybe_autosubmit_specialist_patches(
                 task=task, done_payload=done_payload,
@@ -279,7 +292,7 @@ class ResultRecorder:
     def _record_intervention_for_task(
         self, task: "Task", result: Any,
     ) -> None:
-        """PR-A8: log a completed task's change_type into SharedState.intervention_mix (explore → config; integrate_patch → code_patch_attempt or code_patch when kept). Best-effort.
+        """Log a completed task's change_type into SharedState.intervention_mix (explore → config; integrate_patch → code_patch_attempt or code_patch when kept). Best-effort.
 
         Args:
             task: The completed task whose kind selects the intervention class.
@@ -293,7 +306,7 @@ class ResultRecorder:
             winners = result.get("winners") or []
             best = result.get("best_variant")
             if not winners and not best:
-                # B2: an explore round that KEPT nothing still counts as a config-only attempt.
+                # An explore round that KEPT nothing still counts as a config-only attempt.
                 self.shared_state.record_intervention(
                     change_type="config_attempt",
                     action="explore",
@@ -349,16 +362,8 @@ class ResultRecorder:
                 pitfall/REVERT).
         """
         journal = self._ensure_journal()
-        gain_raw = result_dict.get("gain_pct")
-        try:
-            gain_pct = float(gain_raw) if gain_raw is not None else None
-        except (TypeError, ValueError):
-            gain_pct = None
-        tput_raw = result_dict.get("output_throughput")
-        try:
-            throughput_after = float(tput_raw) if tput_raw is not None else None
-        except (TypeError, ValueError):
-            throughput_after = None
+        gain_pct = _coerce_metric(result_dict.get("gain_pct"))
+        throughput_after = _coerce_metric(result_dict.get("output_throughput"))
         kind = classify_change_kind(task.kind, None)
         change = summarize_change(task.kind, None, result_dict)
         if kept:
@@ -485,16 +490,10 @@ class ResultRecorder:
             outcome = OUTCOME_NO_PROMOTE
         variant_name = str(variant_outcome.get("variant_name") or "")
         metrics = variant_outcome.get("metrics") or {}
-        gain_raw = metrics.get("gain_pct") if isinstance(metrics, dict) else None
-        try:
-            gain_pct = float(gain_raw) if gain_raw is not None else None
-        except (TypeError, ValueError):
-            gain_pct = None
-        tput_raw = metrics.get("output_throughput") if isinstance(metrics, dict) else None
-        try:
-            throughput_after = float(tput_raw) if tput_raw is not None else None
-        except (TypeError, ValueError):
-            throughput_after = None
+        gain_pct = _coerce_metric(metrics.get("gain_pct") if isinstance(metrics, dict) else None)
+        throughput_after = _coerce_metric(
+            metrics.get("output_throughput") if isinstance(metrics, dict) else None
+        )
         variant_attrs = variant_outcome.get("variant") or {}
         kind = classify_change_kind(
             task.kind, variant_attrs if isinstance(variant_attrs, dict) else None,
@@ -667,16 +666,14 @@ class ResultRecorder:
         throughput_after: float | None,
         stack_depth: int,
         measured_at: str,
-        throughput_before: float | None = None,
     ) -> dict[str, Any]:
-        """GAP 3 — structured ``measured_impact`` payload (dict not legacy string so consumers parse without regex); stack_depth = stack length before this lesson lands.
+        """Structured ``measured_impact`` payload (dict not legacy string so consumers parse without regex); stack_depth = stack length before this lesson lands.
 
         Args:
             gain_pct: The measured gain percent, or ``None``.
             throughput_after: Throughput after the change, or ``None``.
             stack_depth: Optimization-stack length before this lesson lands.
             measured_at: ISO timestamp of the measurement.
-            throughput_before: Throughput before the change, or ``None``.
 
         Returns:
             A compact ``measured_impact`` dict with ``None`` fields stripped.
@@ -688,13 +685,11 @@ class ResultRecorder:
         }
         if throughput_after is not None:
             out["throughput_after"] = float(throughput_after)
-        if throughput_before is not None:
-            out["throughput_before"] = float(throughput_before)
         # Strip None for compactness (prompt section uses .get).
         return {k: v for k, v in out.items() if v is not None}
 
     def _collect_workload_tags(self) -> dict[str, Any]:
-        """Return the workload-shape KB tag dict for the current session (GAP 5); shared by recipe attrs + lesson/pitfall writes so the warm-start reader filters symmetrically.
+        """Return the workload-shape KB tag dict for the current session; shared by recipe attrs + lesson/pitfall writes so the warm-start reader filters symmetrically.
 
         Returns:
             A dict of workload-shape KB tags (framework, model, parallelism,
@@ -877,7 +872,7 @@ class ResultRecorder:
         if opt_stack:
             last_entry = opt_stack[-1]
             if isinstance(last_entry, dict):
-                # Read canonical keys first, legacy *_sglang_args as fallback (#332 best_config fix).
+                # Read canonical keys first, legacy *_sglang_args as fallback.
                 stack_args = str(
                     last_entry.get("candidate_extra_server_args")
                     or last_entry.get("extra_server_args")
@@ -1069,7 +1064,7 @@ class ResultRecorder:
                 "sessions":      merged_sessions,
                 "extras":        extras_payload,
             }
-            # Overwrite best_config/best_throughput only on a real improvement (repro 20260531T144553Z: bare baseline clobbered a validated config): requires has_validated_win AND my_tput > live_tput.
+            # Overwrite best_config/best_throughput only on a real improvement: requires has_validated_win AND my_tput > live_tput.
             my_tput = float(attrs.get("best_throughput") or 0.0)
             cb_now = getattr(ss, "current_best", {}) or {}
             cb_args_now = (

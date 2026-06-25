@@ -1,15 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Reliable subprocess-tree teardown for Magpie-launched servers
-(Hyperloom ``bugs.md`` §B).
+"""Reliable subprocess-tree teardown for Magpie-launched servers.
 
 Magpie's shell wrappers ``trap``/``setsid``/``nohup`` the vLLM/SGLang server,
-so on a Hyperloom-side timeout or error the server child survives, holds GPU
-memory, and keeps a ``bash`` alive that later re-sources a script mid-copy
-(bugs.md §C #1). Fix: launch Magpie in its own POSIX session
-(``start_new_session=True``) so ``os.killpg`` reaps the whole tree, and call
-:func:`kill_my_spawned_server` from every exit path (idempotent, never raises).
-Scoped strictly to the tree we created, so it's safe on every benchmark call.
+so on a Hyperloom-side timeout or error the server child can survive, holding
+GPU memory and keeping a ``bash`` alive that may later re-source a script
+mid-copy. To prevent that, Magpie is launched in its own POSIX session
+(``start_new_session=True``) so ``os.killpg`` reaps the whole tree, and
+:func:`kill_my_spawned_server` is called from every exit path (idempotent,
+never raises). Scoped strictly to the tree we created, so it's safe on every
+benchmark call.
 """
 
 from __future__ import annotations
@@ -180,7 +180,7 @@ def kill_my_spawned_server(
 # Sentinel ``returncode`` when ``run_with_session_kill`` reaps a child for an
 # elapsed ``soft_deadline_sec`` (vs the ``timeout=`` hard cap, which still
 # raises ``TimeoutExpired``). Chosen not to collide with a real signal-based
-# ``-N`` returncode; the ExploreExecutor maps it to ``KILLED_OVERTIME``.
+# ``-N`` returncode.
 OVERTIME_KILL_RETURNCODE: int = -909
 
 # Sentinel ``returncode`` when the server-liveness watchdog reaps a child
@@ -204,11 +204,10 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
     "Engine process failed to start",
     "AsyncEngineDeadError",
     "raise EngineDeadError",
-    # vLLM v1 engine-core bootstrap failure tail (#524): the APIServer logs
+    # vLLM v1 engine-core bootstrap failure tail: the APIServer logs
     # ``RuntimeError: Engine core initialization failed`` (already matched
-    # above) followed by ``Failed core proc(s): {...}``. Add the latter as a
-    # second, equally terminal anchor — both only appear once the engine core
-    # is unrecoverable, never on a merely slow cold start.
+    # above) followed by ``Failed core proc(s): {...}``. Both only appear once
+    # the engine core is unrecoverable, never on a merely slow cold start.
     "Failed core proc(s)",
 )
 
@@ -378,8 +377,8 @@ class _StreamCapture:
 _SERVER_LOG_TAIL_BYTES: int = 65536
 
 
-def _server_log_shows_death(path: str) -> bool:
-    """Return True iff ``server.log`` tail contains a terminal-init marker.
+def _server_log_shows_death(path: str) -> str | None:
+    """Return the terminal-init marker present in ``server.log`` tail, else None.
 
     Best-effort and never raises: a missing / unreadable log (server hasn't
     written yet) reads as "not dead" so a slow cold start is never misjudged.
@@ -388,8 +387,10 @@ def _server_log_shows_death(path: str) -> bool:
         path: Filesystem path to the server's ``server.log``.
 
     Returns:
-        True if the log tail contains a terminal engine/worker-init marker,
-        False otherwise (including when the log is missing or unreadable).
+        The first matched terminal engine/worker-init marker string if the log
+        tail contains one, otherwise None (including when the log is missing or
+        unreadable). Returning the marker (rather than a bare bool) lets the
+        watchdog report which fatal line tripped it instead of a placeholder.
     """
     try:
         with open(path, "rb") as fh:
@@ -399,8 +400,11 @@ def _server_log_shows_death(path: str) -> bool:
                 fh.seek(0)
             tail = fh.read().decode("utf-8", "ignore")
     except (OSError, ValueError):
-        return False
-    return any(marker in tail for marker in _SERVER_DEAD_MARKERS)
+        return None
+    for marker in _SERVER_DEAD_MARKERS:
+        if marker in tail:
+            return marker
+    return None
 
 
 def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
@@ -508,7 +512,7 @@ def run_with_session_kill(
     Returns a ``CompletedProcess`` and re-raises ``TimeoutExpired`` like
     ``subprocess.run``.
 
-    ``soft_deadline_sec`` (Fix E): an optional deadline firing before the
+    ``soft_deadline_sec``: an optional deadline firing before the
     ``timeout=`` hard cap; on elapse the tree is reaped and a
     ``CompletedProcess`` with ``returncode = OVERTIME_KILL_RETURNCODE`` is
     returned (does NOT raise). ``None`` / ≤ 0 keeps legacy behaviour. Tests
@@ -554,7 +558,8 @@ def run_with_session_kill(
         detok_stall_grace_sec: Grace period a ready server may produce no
             generation progress before the stall watchdog reaps the tree;
             defaults to the ``INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC`` env
-            value or 600s. ``≤ 0`` disables the stall gate.
+            value or ``_DETOK_STALL_GRACE_SEC_DEFAULT`` (1800s). ``≤ 0``
+            disables the stall gate.
 
     Returns:
         A ``CompletedProcess`` carrying the child's returncode (or one of the
@@ -682,7 +687,7 @@ def run_with_session_kill(
 
 
 class _SoftDeadlineExceeded(Exception):
-    """Internal sentinel for an elapsed soft (Fix-E) deadline. Never bubbles
+    """Internal sentinel for an elapsed soft deadline. Never bubbles
     past :func:`run_with_session_kill` (converted to a ``CompletedProcess``).
     """
 
@@ -904,12 +909,13 @@ def _communicate_with_soft_deadline(
                     elapsed_sec=elapsed,
                 )
         if watchdog_active and grace_sec is not None:
-            if _server_log_shows_death(server_log_path):  # type: ignore[arg-type]
+            death_marker = _server_log_shows_death(server_log_path)  # type: ignore[arg-type]
+            if death_marker is not None:
                 if dead_marker_since is None:
                     dead_marker_since = now
                 elif now - dead_marker_since >= grace_sec:
                     raise _ServerDeadDetected(
-                        marker="server_init_failed",
+                        marker=death_marker,
                         grace_sec=grace_sec,
                         elapsed_sec=elapsed,
                     )

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Specialist sub-agent domain catalogue — v0.8 M5/M6.
+"""Specialist sub-agent domain catalogue.
 
 LLM sub-agent form factor parameterized by a ``domain`` (§3.5 §5) — a stable
 id used by PolicyGate R2. A runtime constant, not per-domain yaml.
@@ -288,9 +288,8 @@ def get_domain(key: str) -> SpecialistDomain | None:
     return None
 
 
-# Synthetic domain for ``scope='freeform'`` dispatches (absorbed from the
-# retired dynamic_specialist wave channel). It is intentionally NOT part of
-# SPECIALIST_DOMAINS / the knowledge-domain vocabulary — it exists only to
+# Synthetic domain for ``scope='freeform'`` dispatches. It is intentionally
+# NOT part of SPECIALIST_DOMAINS / the knowledge-domain vocabulary — it exists only to
 # satisfy the runner's Domain contract. The real mandate is carried by
 # ``params.task_description`` and rendered by the free-form prompt block.
 FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
@@ -307,17 +306,17 @@ FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
 
 # Default number of LLM turns a specialist may run.
 #
-# WS1: the turn count is no longer the stop signal — a specialist runs until it
+# The turn count is not the stop signal — a specialist runs until it
 # reaches a deliverable conclusion, bounded by the explicit wall-clock budget
 # (see ``Coordinator`` dispatch + ``SpecialistSubprocessDispatcher._reap_loop``)
-# rather than by turns. This is set to a practically-unbounded value so the old
+# rather than by turns. This is set to a practically-unbounded value so the
 # ``max_seconds = max_turns × per_turn`` ceiling is decoupled from turns;
 # ``per_turn_max_seconds`` survives only as a single-stuck-turn backstop (and in
 # practice the 300s stale-heartbeat check does that work).
 DEFAULT_SPECIALIST_MAX_TURNS: int = 1000
 
 # Hard cap (PolicyGate R2 ``specialist_max_turns_excess`` enforces this).
-# WS1: lifted to "effectively unbounded"; the real stop is the wall budget.
+# Effectively unbounded; the real stop is the wall-clock budget.
 SPECIALIST_MAX_TURNS_HARD_CAP: int = 1000
 
 
