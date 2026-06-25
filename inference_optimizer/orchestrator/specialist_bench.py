@@ -2,15 +2,8 @@
 
 """Worktree git helpers for patch-authoring specialists.
 
-Migrated out of the retired ``dynamic_action_tools`` module. Exposes the
-worktree-scoped ``git`` helpers (self-check apply, cumulative-diff capture,
-hard reset) used by :class:`SpecialistRunner`.
-
-The legacy ``run_bench`` in-loop micro-bench tool (and its capped/stubbed
-``BENCH_REGISTRY`` whitelist) has been removed: GPU specialists now run real
-serving + benchmark / autotune loops on their own leased cards (see
-``specialist_rebench`` and the opened-up iron rules), so a capped, serving-
-forbidden micro-bench box is no longer the validation path.
+Exposes worktree-scoped ``git`` helpers: self-check apply, cumulative-diff
+capture, and hard reset.
 """
 
 from __future__ import annotations

@@ -4,8 +4,7 @@
 
 This is the canonical home for the anti-hallucination guards that apply to
 *every* specialist patch, regardless of scope (single domain / cross-domain /
-freeform). It absorbs the primitives that previously lived only on the
-``dynamic_action`` path:
+freeform). It provides:
 
 * unified-diff structural validation (a patch must carry at least one hunk),
 * git-grounding (``git apply --check`` against a clean checkout so a fabricated

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Subprocess-based specialist dispatcher — PR-A2 (Arbor-into-Hyperloom).
+"""Subprocess-based specialist dispatcher.
 
 Per-task git worktree under ``runs/specialist/<task_id>/worktree/``, a
 ``claude --print --output-format stream-json`` subprocess scoped via
@@ -307,7 +307,7 @@ class SpecialistSubprocessDispatcher:
         if worktree is not None:
             done_candidates.append(worktree / "specialist_done.json")
         done_candidates.append(workspace / "specialist_done.json")
-        # WS1 incremental checkpoint: the agent atomically rewrites this
+        # Incremental checkpoint: the agent atomically rewrites this
         # partial as it accumulates findings (it does NOT trigger reap — only
         # the final ``specialist_done.json`` does). When a budget kill lands
         # before the final file is written, we recover the partial as the
@@ -336,7 +336,7 @@ class SpecialistSubprocessDispatcher:
         # Bound the spawned claude CLI's own request transport so a stalled
         # gateway stream (partial response, stop_reason=None, then no further
         # chunks) raises client-side instead of hanging forever on socket
-        # read() and freezing the whole optimizer chain (Sandbox-hang RCA).
+        # read() and freezing the whole optimizer chain.
         from ._llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
@@ -417,12 +417,12 @@ class SpecialistSubprocessDispatcher:
                             outcome["error"] = "recovered_from_partial"
                         break
 
-        # 8. Token usage (full-trace B1): the Claude CLI's terminal
-        #    ``stream-json`` result row carries the cumulative session
-        #    ``usage``. Recover it from process.log so the production
-        #    specialist's token spend — which never touches the parent's
-        #    memory — re-enters the unified ledger. Best-effort: a missing
-        #    / truncated log yields ``None`` (parser swallows its own I/O).
+        # Token usage: the Claude CLI's terminal
+        # ``stream-json`` result row carries the cumulative session
+        # ``usage``. Recover it from process.log so the production
+        # specialist's token spend — which never touches the parent's
+        # memory — re-enters the unified ledger. Best-effort: a missing
+        # / truncated log yields ``None`` (parser swallows its own I/O).
         usage = parse_claude_stream_json_usage(process_log)
         # Conversation sibling of the usage recovery above: the same
         # stream-json log carries the assistant's reply. Recover it so the
@@ -599,8 +599,7 @@ class SpecialistSubprocessDispatcher:
             # to process.log (model tokens / tool calls). Relying on
             # heartbeat.json alone reaps productive specialists that stay in
             # a single long tool-call turn without self-writing a heartbeat
-            # (common under gateway latency) — the original cause of
-            # 100%-stale_heartbeat specialist failures. The hard wall-clock
+            # (common under gateway latency). The hard wall-clock
             # cap below still bounds genuinely hung / runaway subprocesses.
             for activity_file in (heartbeat_file, process_log):
                 try:
