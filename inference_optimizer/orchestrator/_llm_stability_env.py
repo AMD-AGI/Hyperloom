@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import MutableMapping
 
-# Match forge's original mitigation (5 min) so all paths behave identically.
+# Default per-request API timeout: 5 minutes (in ms).
 DEFAULT_API_TIMEOUT_MS = "300000"
 
 __all__ = ["DEFAULT_API_TIMEOUT_MS", "apply_llm_stability_env"]

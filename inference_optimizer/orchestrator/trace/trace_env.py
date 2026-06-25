@@ -33,7 +33,6 @@ ENV_LANGFUSE_SECRET_KEY = "LANGFUSE_SECRET_KEY"
 # died. ``flush_at`` is left at the SDK default (512) so steady-state traffic
 # still batches normally and we do not issue one HTTP request per observation.
 ENV_LANGFUSE_FLUSH_INTERVAL = "LANGFUSE_FLUSH_INTERVAL"
-ENV_LANGFUSE_FLUSH_AT = "LANGFUSE_FLUSH_AT"
 _DEFAULT_FLUSH_INTERVAL = "1"
 
 _TRUE_TOKENS: frozenset[str] = frozenset({"1", "true", "yes", "on"})
@@ -112,7 +111,6 @@ def apply_flush_defaults() -> None:
 
 __all__ = [
     "ENV_LANGFUSE_ENABLE",
-    "ENV_LANGFUSE_FLUSH_AT",
     "ENV_LANGFUSE_FLUSH_INTERVAL",
     "ENV_LANGFUSE_HOST",
     "ENV_LANGFUSE_PUBLIC_KEY",

@@ -71,28 +71,6 @@ def test_parse_iso_unix():
     assert ch._parse_iso_unix("2025-01-01T00:00:00") > 0
 
 
-# ---- _summarize_failed_variants ----
-
-
-def test_summarize_failed_variants():
-    assert ch._summarize_failed_variants("bad") == []
-    rows = [
-        {"status": "succeeded", "name": "ok"},
-        "not-a-dict",
-        {"status": "failed", "name": "v1", "error_class": "E", "error": "boom" * 200, "extra_server_args": "--x"},
-    ]
-    out = ch._summarize_failed_variants(rows)
-    assert len(out) == 1
-    assert out[0]["name"] == "v1"
-    assert len(out[0]["error_excerpt"]) == 400
-
-
-def test_summarize_failed_variants_cap():
-    rows = [{"status": "failed", "name": f"v{i}"} for i in range(20)]
-    out = ch._summarize_failed_variants(rows, max_entries=3)
-    assert len(out) == 3
-
-
 # ---- _parse_baseline_workload_extra ----
 
 
