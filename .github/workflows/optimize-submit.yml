@@ -183,10 +183,6 @@ on:
         description: 'Per-task wait timeout in minutes (default 420 = 7h)'
         required: false
         default: '420'
-      job_timeout_min:
-        description: 'GitHub job timeout in minutes for each optimize job (default 480 = 8h). Raise it when callers pass a larger max_hours so the wait/collect job is not killed mid-run.'
-        required: false
-        default: '480'
       max_hours:
         description: 'Per-task optimizer budget in hours (default 6)'
         required: false
@@ -262,11 +258,13 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.count != '0'
     runs-on: hyperloom-4hhzn
-    # Per-task wait timeout + buffer for register/wait/collect. Caller-tunable
-    # via the job_timeout_min input (default 480 = 8h); raise it when passing a
-    # larger max_hours so the wait/collect job is not killed mid-run. schedule
-    # has no inputs, so it falls back to the 480 default.
-    timeout-minutes: ${{ fromJson(github.event.inputs.job_timeout_min || '480') }}
+    # Per-task wait timeout + buffer for register/wait/collect. Tied to max_hours
+    # WITHOUT adding a workflow_dispatch input (GitHub caps inputs at 25) and
+    # WITHOUT arithmetic (unsupported in Actions expressions): long runs
+    # (max_hours>=12, e.g. the gte100 pool) get 840m (14h); everything else
+    # (schedule/6h and default) keeps the previous 480m (8h). schedule has no
+    # inputs so max_hours falls back to 6 -> 480.
+    timeout-minutes: ${{ fromJson(github.event.inputs.max_hours || '6') >= 12 && 840 || 480 }}
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(github.event_name == 'schedule' && '240' || github.event.inputs.max_parallel || '240') }}
