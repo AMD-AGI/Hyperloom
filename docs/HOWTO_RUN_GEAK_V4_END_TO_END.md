@@ -83,13 +83,24 @@ git clone -b fix/ccache-298-on-322 \
 | Model gateway | core42 gateway; `GEAK_USER=<you>@amd.com`, `ANTHROPIC_CUSTOM_HEADERS` | otherwise HTTP 400 (see your env setup script) |
 
 **Always clean stray processes before a run** (zombies hold GPU memory and skew
-latency):
+latency). Critically, kill not just the orchestrators but also the **compiler-probe
+children** — a killed run leaves orphaned `hipcc -c /dev/null` / `ccache hipcc` /
+`ninja` / `clang++ --offload-arch` processes reparented to PID 1 that hold the aiter
+JIT build/ccache lock and **deadlock the next run's harness-init** (symptom:
+attention stuck at the preprocess soft cap for ~1h doing "nothing"):
 ```bash
-pkill -f 'geak_vs_forge_driver|kernel_optimization|minisweagent|/opt/venv/bin/geak' 2>/dev/null
-# verify GPUs idle (0% use, ~0.3GB baseline):
+for pat in 'geak_vs_forge_driver' 'kernel_optimization.py' 'minisweagent' \
+           '/opt/venv/bin/geak' 'rocprof_roofline.py' 'rocprof-compute' \
+           'hipcc.*/dev/null' 'ccache.*hipcc' 'clang\+\+.*offload-arch' 'ninja -v'; do
+  pkill -9 -f "$pat" 2>/dev/null
+done
+# verify GPUs idle (0% use, ~0.3GB baseline) AND no compile stragglers:
 rocm-smi --showuse | grep -i 'GPU use'
 rocm-smi --showmeminfo vram | grep -i 'Used'
+pgrep -af 'hipcc|ninja|/opt/venv/bin/geak'   # expect empty
 ```
+> `run_gvf.sh` does this automatically at the top of every run (skip with
+> `SKIP_PRERUN_CLEANUP=1` when you intentionally run two workloads concurrently).
 
 ---
 
@@ -330,6 +341,12 @@ analysis (the normal case here, and required for a fair v3-vs-v4 comparison).
   requested deliverable is **combined** (all patches together).
 - **Stray processes from a prior run** → hold GPU memory, corrupt latency. Always
   clean first.
+- **Orphaned compiler probes deadlock harness-init** → a killed run leaves
+  `hipcc -c /dev/null` / `ccache hipcc` / `ninja` / `clang++` children reparented to
+  PID 1 that hold the aiter JIT build lock; the next run's attention sits at the
+  preprocess soft cap "doing nothing" for ~1h. It is NOT a slow compile — kill the
+  probe children (see §2) and harness-init resumes immediately. `run_gvf.sh` now
+  does this automatically.
 - **Editing budgets** → don't. Use GEAK's default wall-clock budget unless you
   have a specific reason; document it if you ever change it.
 - **Leaking an op_test into the prompt** → GEAK is PROMPT-ONLY; never pass a
