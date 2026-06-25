@@ -1754,8 +1754,14 @@ def build_prompt(
     extra_context_block = _build_extra_context_block(candidate)
     benchmark_cases_block = _build_benchmark_cases_block(candidate)
     priority_block = _build_priority_block(candidate)
+    # GEAK discovers/builds its own benchmark in preprocess_v3 from the source +
+    # captured shapes + workload context in this prompt. The bench_files list is
+    # populated by a hardcoded op->test map (tracelens_analysis._KNOWN_HARNESS_HINTS)
+    # that can mis-pick (e.g. test_pa.py for paged attention) and seed a wrong
+    # harness, so do NOT surface it in the GEAK prompt: prompt = analysis + shapes +
+    # workload config, GEAK figures out the rest. (Other backends still get it.)
     bench_block = ""
-    if bench_files:
+    if bench_files and backend != "geak":
         bench_block = "\nKnown benchmark/test files (also copied into your workspace as -f):\n"
         for b in bench_files[:8]:
             bench_block += f"- {b}\n"
