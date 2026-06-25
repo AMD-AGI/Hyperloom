@@ -152,6 +152,7 @@ def non_llm_repo(repo):
 _UNSUPPORTED_REGISTRY_BY_MT = {
     "glm_moe_dsa":  "GLM glm_moe_dsa registry not supported on AMD/ROCm",
     "deepseek_v32": "DeepSeek V3.2 (deepseek_v32) missing AMD runtime path",
+    "gemma4":       "Gemma4 is not recognized by the current vLLM/Transformers runtime",
     "rwkv6qwen2":   "RWKV6/Qwen2 hybrid architecture is not supported by sglang/vLLM",
     # Qwen3.6 MoE: this model_type appears as text_config.model_type; the new
     # arch is not in the vLLM/Transformers registry, so the baseline server
@@ -161,6 +162,10 @@ _UNSUPPORTED_REGISTRY_BY_MT = {
 _UNSUPPORTED_REGISTRY_BY_ARCH = {
     "GlmMoeDsaForCausalLM":   "GLM glm_moe_dsa registry not supported on AMD/ROCm",
     "DeepseekV32ForCausalLM": "DeepSeek V3.2 (deepseek_v32) missing AMD runtime path",
+    "Gemma4ForCausalLM":      "Gemma4 is not recognized by the current vLLM/Transformers runtime",
+    "Gemma4ForConditionalGeneration": (
+        "Gemma4 is not recognized by the current vLLM/Transformers runtime"
+    ),
     "RWKV6Qwen2ForCausalLM":  "RWKV6/Qwen2 hybrid architecture is not supported by sglang/vLLM",
 }
 
@@ -261,6 +266,11 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None, gpu_type=
     # 6) NVIDIA ModelOpt FP8 (no ROCm loader)
     if str(qc.get("quant_method", "")).lower() == "modelopt" or "modelopt" in blob:
         return ("modelopt_fp8", "NVIDIA ModelOpt quant, no ROCm loader")
+    if isinstance(qc, dict) and "quant_method" in qc and not str(qc.get("quant_method") or "").strip():
+        return (
+            "quant_empty_method",
+            "quantization_config.quant_method is empty; runtime cannot select a quant loader",
+        )
 
     # 7) unsupported attention backend (FlashInfer)
     attn = str(config.get("attn_implementation",
@@ -295,6 +305,26 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None, gpu_type=
     # 11) missing tokenizer (only when weights are present locally)
     if model_dir and has_weights(model_dir) and not has_tokenizer(model_dir):
         return ("missing_tokenizer", "weights present but no tokenizer files")
+    if model_dir and has_weights(model_dir):
+        files = _listdir(model_dir)
+        if files is not None:
+            is_llama = mt == "llama" or arch == "LlamaForCausalLM"
+            has_custom_tokenizer = bool(
+                isinstance(config.get("auto_map"), dict)
+                and config["auto_map"].get("AutoTokenizer")
+            )
+            if (
+                is_llama
+                and not has_custom_tokenizer
+                and "tokenizer.model" in files
+                and "tokenizer_config.json" not in files
+                and "tokenizer.json" not in files
+            ):
+                return (
+                    "tokenizer_metadata_gap",
+                    "Llama tokenizer.model without tokenizer_config.json/tokenizer.json "
+                    "can fail local-path tokenizer resolution",
+                )
 
     return None
 
