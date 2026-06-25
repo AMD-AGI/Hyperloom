@@ -198,14 +198,17 @@ def _wait_health(proc: subprocess.Popen, port: int, out_dir: Path, tries: int = 
 
 
 def _bench_once(bs: str, model: str, port: int, isl: int, osl: int, conc: int,
-                num_prompts: int, arm: str, rep: int, out_dir: Path) -> float | None:
+                num_prompts: int, arm: str, rep: int, out_dir: Path,
+                seed: int) -> dict[str, float] | None:
+    # Fixed --seed so BOTH arms benchmark the IDENTICAL random prompt set: removes
+    # dataset-draw variance from the A/B so the delta reflects the kernel, not the prompts.
     cmd = [
         sys.executable, bs, "--model", model, "--backend", "vllm",
         "--base-url", f"http://0.0.0.0:{port}", "--dataset-name", "random",
         "--random-input-len", str(isl), "--random-output-len", str(osl),
         "--random-range-ratio", "1", "--num-prompts", str(num_prompts),
         "--max-concurrency", str(conc), "--request-rate", "inf", "--ignore-eos",
-        "--save-result", "--num-warmups", "8",
+        "--save-result", "--num-warmups", "8", "--seed", str(seed),
         "--percentile-metrics", "ttft,tpot,itl,e2el",
         "--result-dir", str(out_dir), "--result-filename", f"{arm}_rep{rep}.json",
     ]
@@ -213,7 +216,14 @@ def _bench_once(bs: str, model: str, port: int, isl: int, osl: int, conc: int,
     subprocess.run(cmd, cwd=str(Path(bs).parent), stdout=blog, stderr=subprocess.STDOUT)
     res = out_dir / f"{arm}_rep{rep}.json"
     try:
-        return float(json.loads(res.read_text())["output_throughput"])
+        d = json.loads(res.read_text())
+        # output_throughput is the headline; tpot/itl are the decode-bound-sensitive
+        # signals (lower=better) that show a kernel delta when aggregate tput is noisy.
+        out: dict[str, float] = {"output_throughput": float(d["output_throughput"])}
+        for k in ("median_tpot_ms", "mean_tpot_ms", "median_itl_ms", "mean_itl_ms"):
+            if d.get(k) is not None:
+                out[k] = float(d[k])
+        return out
     except Exception:
         return None
 
@@ -232,23 +242,52 @@ def _kill_servers(proc: subprocess.Popen | None, backend: str) -> None:
     time.sleep(8)
 
 
+def _spread(xs: list[float]) -> dict[str, float | None]:
+    """median + p25/p75 + stdev for a sample (None-safe for small n)."""
+    if not xs:
+        return {"median": None, "p25": None, "p75": None, "stdev": None, "n": 0}
+    s = sorted(xs)
+    q = statistics.quantiles(s, n=4) if len(s) >= 2 else [s[0], s[0], s[0]]
+    return {
+        "median": statistics.median(s),
+        "p25": q[0], "p75": q[2],
+        "stdev": statistics.stdev(s) if len(s) >= 2 else 0.0,
+        "n": len(s),
+    }
+
+
 def _serve_and_bench(arm: str, backend: str, model: str, tp: int, port: int, gpu: str,
                      isl: int, osl: int, conc: int, num_prompts: int, reps: int,
-                     extra_env: dict[str, str], bs: str, out_dir: Path) -> dict[str, Any]:
+                     extra_env: dict[str, str], bs: str, out_dir: Path,
+                     seed: int) -> dict[str, Any]:
     _log(out_dir, f"=== {arm.upper()} arm: launch server ===")
     proc = _launch_server(backend, model, tp, port, gpu, extra_env, out_dir / f"server_{arm}.log")
     if not _wait_health(proc, port, out_dir):
         _kill_servers(proc, backend)
         return {"arm": arm, "status": "server_failed", "reps": [], "median": None}
-    reps_out: list[float] = []
+    # Untimed WARMUP pass: the server JIT-compiles / captures CUDA graphs on its first
+    # real load, so the first timed run reads ~10-15% low and skews the median. Run one
+    # full benchmark and DISCARD it before the timed reps (open-source-standard warmup).
+    _bench_once(bs, model, port, isl, osl, conc, num_prompts, arm, 0, out_dir, seed)
+    _log(out_dir, f"{arm} warmup pass done (discarded)")
+    reps_out: list[float] = []           # output_throughput per timed rep
+    tpot_out: list[float] = []           # median_tpot_ms per timed rep (decode latency)
     for r in range(1, reps + 1):
-        t = _bench_once(bs, model, port, isl, osl, conc, num_prompts, arm, r, out_dir)
-        _log(out_dir, f"{arm} rep{r} tput={t}")
-        if t is not None:
-            reps_out.append(t)
+        m = _bench_once(bs, model, port, isl, osl, conc, num_prompts, arm, r, out_dir, seed)
+        tput = m.get("output_throughput") if m else None
+        _log(out_dir, f"{arm} rep{r} tput={tput}")
+        if tput is not None:
+            reps_out.append(tput)
+            if m.get("median_tpot_ms") is not None:
+                tpot_out.append(m["median_tpot_ms"])
     _kill_servers(proc, backend)
-    med = statistics.median(reps_out) if reps_out else None
-    return {"arm": arm, "status": "ok" if reps_out else "no_results", "reps": reps_out, "median": med}
+    tput_spread = _spread(reps_out)
+    return {
+        "arm": arm, "status": "ok" if reps_out else "no_results",
+        "reps": reps_out, "median": tput_spread["median"],
+        "tput_spread": tput_spread, "tpot_reps_ms": tpot_out,
+        "tpot_spread_ms": _spread(tpot_out),
+    }
 
 
 def _engagement_proof(server_log: Path, target: Path, is_aiter_cu: bool) -> dict[str, Any]:
@@ -298,7 +337,7 @@ def apply_and_bench(
     backup_root: str, model: str, backend: str,
     tp: int, port: int, gpu: str, isl: int, osl: int, conc: int, num_prompts: int, reps: int,
     out_dir: str, kernel_id: str = "", rebuild_command: str | None = None,
-    aiter_rebuild: bool = False, skip_rebuild: bool = False,
+    aiter_rebuild: bool = False, skip_rebuild: bool = False, seed: int = 1234,
 ) -> dict[str, Any]:
     """Apply ONE OR MORE kernel patches together and measure E2E throughput A/B — NO gate.
 
@@ -327,7 +366,7 @@ def apply_and_bench(
 
     # ---- BASELINE (pristine) ----
     base = _serve_and_bench("baseline", backend, model, tp, port, gpu, isl, osl, conc,
-                            num_prompts, reps, {}, bs, out)
+                            num_prompts, reps, {}, bs, out, seed)
     if base["status"] != "ok":
         return {"status": "baseline_failed", "baseline": base}
 
@@ -390,7 +429,7 @@ def apply_and_bench(
     # ---- PATCHED (all patches live) ----
     try:
         patched = _serve_and_bench("patched", backend, model, tp, port, gpu, isl, osl, conc,
-                                   num_prompts, reps, patched_env, bs, out)
+                                   num_prompts, reps, patched_env, bs, out, seed)
         # ---- ENGAGEMENT PROOF (trust, not policy): were the patched kernels on the live path?
         # Reported per target so a ~0% delta is distinguishable from "patch(es) didn't engage".
         engagement = [
@@ -406,18 +445,39 @@ def apply_and_bench(
 
     b_med, p_med = base.get("median"), patched.get("median")
     delta_pct = (p_med - b_med) / b_med * 100.0 if (b_med and p_med) else None
+    # Throughput significance: a delta is meaningful only if it clears the measurement
+    # noise. Use the arms' [p25,p75] spread — overlapping IQRs => "within noise" (flat),
+    # not a real regression/win. Avoids over-reading a sub-% delta as signal.
+    bs_sp, ps_sp = base.get("tput_spread", {}), patched.get("tput_spread", {})
+    significant = None
+    if all(bs_sp.get(k) is not None for k in ("p25", "p75")) and \
+       all(ps_sp.get(k) is not None for k in ("p25", "p75")):
+        # non-overlapping IQRs => significant
+        significant = (ps_sp["p25"] > bs_sp["p75"]) or (ps_sp["p75"] < bs_sp["p25"])
+    # TPOT (decode latency, lower=better): delta on the decode-bound-sensitive signal.
+    b_tpot = base.get("tpot_spread_ms", {}).get("median")
+    p_tpot = patched.get("tpot_spread_ms", {}).get("median")
+    tpot_delta_pct = (p_tpot - b_tpot) / b_tpot * 100.0 if (b_tpot and p_tpot) else None
     result = {
         "status": "ok" if (b_med and p_med) else "patched_failed",
         "gate": "none (straightforward apply + remeasure; KEEP/REVERT/NEEDS_REVIEW bypassed; policy is the caller's job)",
         "combined": len(pairs) > 1,
         "baseline_median_tok_s": b_med, "patched_median_tok_s": p_med,
-        "delta_pct": delta_pct, "baseline_reps": base.get("reps"),
+        "delta_pct": delta_pct,
+        "significant": significant,            # None=insufficient reps; False=within noise (flat); True=clears IQR
+        "seed": seed, "reps": reps, "warmup_discarded": True,
+        "baseline_tput_spread": bs_sp, "patched_tput_spread": ps_sp,
+        "tpot_delta_pct": tpot_delta_pct,      # negative = faster decode (good)
+        "baseline_tpot_spread_ms": base.get("tpot_spread_ms"),
+        "patched_tpot_spread_ms": patched.get("tpot_spread_ms"),
+        "baseline_reps": base.get("reps"),
         "patched_reps": patched.get("reps"), "removed_prebuilt_so": removed_so,
         "engagement_proof": engagement, "applied": applied,
         "targets": [str(t) for t in targets],
     }
     (out / "apply_and_bench_result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
-    _log(out, f"RESULT baseline={b_med} patched={p_med} delta={delta_pct}% (combined={len(pairs)>1})")
+    _log(out, f"RESULT baseline={b_med} patched={p_med} delta={delta_pct}% "
+              f"significant={significant} tpot_delta={tpot_delta_pct}% (combined={len(pairs)>1})")
     return result
 
 
@@ -438,7 +498,10 @@ def main() -> int:
     ap.add_argument("--osl", type=int, default=1024)
     ap.add_argument("--conc", type=int, default=64)
     ap.add_argument("--num-prompts", type=int, default=320)
-    ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument("--reps", type=int, default=5,
+                    help="timed reps per arm (a separate untimed warmup pass is always discarded first)")
+    ap.add_argument("--seed", type=int, default=1234,
+                    help="random-dataset seed; both arms use it so they benchmark identical prompts")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--kernel-id", default="")
     ap.add_argument("--rebuild-command", default="")
@@ -462,7 +525,7 @@ def main() -> int:
         model=a.model, backend=a.backend, tp=a.tp, port=a.port, gpu=a.gpu, isl=a.isl,
         osl=a.osl, conc=a.conc, num_prompts=a.num_prompts, reps=a.reps, out_dir=a.out_dir,
         kernel_id=a.kernel_id, rebuild_command=a.rebuild_command or None,
-        aiter_rebuild=a.aiter_rebuild, skip_rebuild=a.skip_rebuild,
+        aiter_rebuild=a.aiter_rebuild, skip_rebuild=a.skip_rebuild, seed=a.seed,
     )
     print(json.dumps(res, indent=2))
     return 0 if res.get("status") == "ok" else 1

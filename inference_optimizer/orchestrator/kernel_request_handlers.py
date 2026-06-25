@@ -3336,7 +3336,7 @@ def _run_combined_e2e_sync(
         backup_root=str(session_dir / "e2e_backups"),
         model=model,
         out_dir=str(session_dir / "combined_e2e"),
-        reps=int(payload.get("e2e_reps", 3)),
+        reps=int(payload.get("e2e_reps", 5)),
         gpu="0",
         aiter_rebuild=True,
     )
