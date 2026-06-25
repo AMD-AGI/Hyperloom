@@ -2932,8 +2932,18 @@ def invoke_backend(
         if backend == "geak":
             geak = _import_backend("geak_submit")
             out_dir = _geak_output_dir(args.session_id, prompt_file)
-            # Use the common test_command (already derived + harness-patched above).
-            test_command = common_test_command
+            # GEAK owns harness construction in its preprocess_v3 orchestrator: it
+            # discovers the op and builds the harness from the dispatch prompt
+            # (captured serving shapes + #703 WORKLOAD CONTEXT) + source. Handing it
+            # an HL-resolved op_test as --test-command makes that op_test (which a
+            # hardcoded op->test map in tracelens_analysis.py may mis-pick, e.g.
+            # test_pa.py for paged attention) the harness seed and can mis-target /
+            # mis-shape the kernel. The canonical baseline run dispatched with NO
+            # test_command (candidates had benchmark_files=None) and GEAK's
+            # preprocess produced the correct harness + 1.2647x. So pass no
+            # test_command for GEAK -> single path, prompt is the interface.
+            # (common_test_command is still used above for the rocprof snapshot.)
+            test_command = ""
             is_multigpu = is_multigpu_common
             if log_path is not None and test_command:
                 append_log(log_path, f"[geak] test_command={test_command}")
