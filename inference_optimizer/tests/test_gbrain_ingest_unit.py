@@ -94,7 +94,7 @@ def test_recipe_to_page_emits_fingerprint_and_negatives(monkeypatch) -> None:
             "stack_fingerprint": {"rocm": "6.2", "aiter": "abc"},
         }
     )
-    assert slug.startswith("recipe-snapshot/")
+    assert slug.startswith("hyperloom-recipe-kb/")
     assert "stack_fingerprint" in content
     assert "what_worked" in content
     assert "kind:recipe" in content
