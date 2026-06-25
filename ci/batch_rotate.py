@@ -20,9 +20,12 @@ import argparse
 import math
 from datetime import datetime, timezone
 
-# Anchor day for the scheduled rotation. Fires happen twice a day (UTC 04 & 16);
-# slot advances by 2 each day and by 1 at the 12:00 UTC boundary.
-ROTATE_EPOCH = datetime(2026, 6, 24, tzinfo=timezone.utc).date()
+# Anchor day for the scheduled rotation. Fires happen twice a day (UTC 02 & 14);
+# slot advances by 2 each day and by 1 at the 12:00 UTC boundary. The epoch is
+# the day batch 0 starts: 2026-06-25 (the 06-24 fires never ran — that day's
+# dispatches all failed with HTTP 422 — so the rotation is re-anchored here so
+# batch 0/1 are actually swept instead of being skipped by the calendar clock).
+ROTATE_EPOCH = datetime(2026, 6, 25, tzinfo=timezone.utc).date()
 FIRES_PER_DAY = 2
 
 

@@ -46,24 +46,24 @@ def test_num_batches_invalid_size():
 
 
 def test_slot_epoch_morning_is_zero():
-    # Epoch day, before 12:00 UTC -> slot 0.
-    assert br.scheduled_slot(_utc(2026, 6, 24, 4), epoch=br.ROTATE_EPOCH) == 0
+    # Epoch day (2026-06-25), before 12:00 UTC -> slot 0.
+    assert br.scheduled_slot(_utc(2026, 6, 25, 4), epoch=br.ROTATE_EPOCH) == 0
 
 
 def test_slot_epoch_afternoon_is_one():
-    assert br.scheduled_slot(_utc(2026, 6, 24, 16), epoch=br.ROTATE_EPOCH) == 1
+    assert br.scheduled_slot(_utc(2026, 6, 25, 16), epoch=br.ROTATE_EPOCH) == 1
 
 
 def test_slot_advances_two_per_day():
     # Next day morning -> slot 2; next day afternoon -> slot 3.
-    assert br.scheduled_slot(_utc(2026, 6, 25, 4), epoch=br.ROTATE_EPOCH) == 2
-    assert br.scheduled_slot(_utc(2026, 6, 25, 16), epoch=br.ROTATE_EPOCH) == 3
+    assert br.scheduled_slot(_utc(2026, 6, 26, 4), epoch=br.ROTATE_EPOCH) == 2
+    assert br.scheduled_slot(_utc(2026, 6, 26, 16), epoch=br.ROTATE_EPOCH) == 3
 
 
 def test_slot_noon_boundary():
     # Exactly 12:00 UTC counts as the afternoon fire.
-    assert br.scheduled_slot(_utc(2026, 6, 24, 12), epoch=br.ROTATE_EPOCH) == 1
-    assert br.scheduled_slot(_utc(2026, 6, 24, 11), epoch=br.ROTATE_EPOCH) == 0
+    assert br.scheduled_slot(_utc(2026, 6, 25, 12), epoch=br.ROTATE_EPOCH) == 1
+    assert br.scheduled_slot(_utc(2026, 6, 25, 11), epoch=br.ROTATE_EPOCH) == 0
 
 
 def test_slot_before_epoch_clamps_to_zero():
@@ -73,27 +73,27 @@ def test_slot_before_epoch_clamps_to_zero():
 def test_slot_naive_or_other_tz_is_normalized():
     # +08:00 13:00 == 05:00 UTC (morning) -> slot 0 on epoch day.
     tz8 = timezone(timedelta(hours=8))
-    assert br.scheduled_slot(datetime(2026, 6, 24, 13, tzinfo=tz8), epoch=br.ROTATE_EPOCH) == 0
+    assert br.scheduled_slot(datetime(2026, 6, 25, 13, tzinfo=tz8), epoch=br.ROTATE_EPOCH) == 0
 
 
 # ── resolve_batch_index ─────────────────────────────────────────────────────
 
 
 def test_resolve_schedule_rotates_and_wraps():
-    # 15 batches; slot 0 -> 0, and 15 days later (slot 30) wraps to 0.
+    # 15 batches; epoch-day slot 0 -> batch 0, afternoon -> batch 1.
     assert br.resolve_batch_index(900, 60, event="schedule", batch_index=None,
-                                  now=_utc(2026, 6, 24, 4)) == 0
+                                  now=_utc(2026, 6, 25, 4)) == 0
     assert br.resolve_batch_index(900, 60, event="schedule", batch_index=None,
-                                  now=_utc(2026, 6, 24, 16)) == 1
+                                  now=_utc(2026, 6, 25, 16)) == 1
     # day +7 afternoon -> slot 15 -> wraps to 0
     assert br.resolve_batch_index(900, 60, event="schedule", batch_index=None,
-                                  now=_utc(2026, 7, 1, 16)) == 0
+                                  now=_utc(2026, 7, 2, 16)) == 0
 
 
 def test_resolve_schedule_ignores_input_index():
     # On schedule, a stray input index is ignored in favour of the slot.
     assert br.resolve_batch_index(900, 60, event="schedule", batch_index="9",
-                                  now=_utc(2026, 6, 24, 4)) == 0
+                                  now=_utc(2026, 6, 25, 4)) == 0
 
 
 def test_resolve_dispatch_uses_input():
@@ -110,7 +110,7 @@ def test_resolve_dispatch_wraps_oversized_index():
 def test_resolve_dispatch_empty_input_falls_back_to_slot():
     # Manual run with no index -> behaves like schedule (slot-based).
     assert br.resolve_batch_index(900, 60, event="workflow_dispatch",
-                                  batch_index="", now=_utc(2026, 6, 24, 16)) == 1
+                                  batch_index="", now=_utc(2026, 6, 25, 16)) == 1
 
 
 # ── slice_bounds ────────────────────────────────────────────────────────────
