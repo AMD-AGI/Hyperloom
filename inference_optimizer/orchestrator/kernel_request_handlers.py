@@ -3173,6 +3173,173 @@ async def _run_kernel_backend_sequence(
     return best
 
 
+def _collect_combined_e2e_pairs(results: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Collect (best_patch, target_source) pairs from a batch's per-kernel results.
+
+    Uses each kernel's BEST microbench patch (``geak_per_task_best_patch``)
+    regardless of the per-kernel KEEP/REVERT verdict -- the combined E2E applies
+    ALL optimized patches together and lets the end-to-end A/B be the arbiter.
+    Kernels with no usable patch (e.g. a kernel that produced none) are skipped.
+
+    Args:
+        results: The batch's per-kernel result dicts (``out["batch_results"]``).
+
+    Returns:
+        list[tuple[str, str]]: ``(patch_path, target_source_file)`` pairs, one
+            per kernel that produced a best patch.
+    """
+    pairs: list[tuple[str, str]] = []
+    for r in results or []:
+        if not isinstance(r, dict):
+            continue
+        kid = str(r.get("kernel_id") or "?")
+        target = str(r.get("source_file") or "")
+        best_patch = ""
+        for att in r.get("attempts") or []:
+            bp = att.get("backend_paths") if isinstance(att, dict) else None
+            if isinstance(bp, dict) and bp.get("geak_per_task_best_patch"):
+                best_patch = str(bp["geak_per_task_best_patch"])
+                break
+        if best_patch and target:
+            pairs.append((best_patch, target))
+            log.info("combined_e2e: kernel %s -> patch %s on %s", kid, best_patch, target)
+        else:
+            log.info("combined_e2e: kernel %s skipped (no best patch / target)", kid)
+    return pairs
+
+
+def _combined_e2e_serving_config(payload: dict) -> dict[str, Any]:
+    """Resolve serving knobs (tp/isl/osl/conc/num_prompts/framework) for combined E2E.
+
+    Precedence: explicit ``payload['serving_config']`` dict (what the driver
+    passes, parsed from its --serving-config) -> the materialized workload
+    metadata resolver -> apply_and_bench's own defaults (left unset here).
+    Never hardcodes workload-specific values.
+
+    Args:
+        payload: The run_optimization request payload.
+
+    Returns:
+        dict[str, Any]: Keys among {tp, isl, osl, conc, num_prompts, framework}
+            that were resolved; missing keys fall back to apply_and_bench defaults.
+    """
+    cfg: dict[str, Any] = {}
+    explicit = payload.get("serving_config")
+    if isinstance(explicit, dict):
+        for k in ("tp", "isl", "osl", "conc", "num_prompts", "framework"):
+            if explicit.get(k) is not None:
+                cfg[k] = explicit[k]
+    if "framework" not in cfg and payload.get("framework"):
+        cfg["framework"] = str(payload["framework"]).strip().lower()
+    # Fall back to materialized workload metadata for any unset numeric knob.
+    config_path = str(payload.get("config_path") or "")
+    if config_path:
+        meta = _load_materialized_workload_metadata(config_path)
+        wl = (meta.get("runtime_args") or {}).get("workload") if isinstance(meta, dict) else None
+        if isinstance(wl, dict):
+            for k in ("tp", "isl", "osl", "conc", "num_prompts"):
+                if k not in cfg and wl.get(k) is not None:
+                    cfg[k] = wl[k]
+    return cfg
+
+
+def _run_combined_e2e_sync(
+    results: list[dict[str, Any]], payload: dict, session_dir: Path
+) -> dict[str, Any] | None:
+    """Apply ALL of a GEAK batch's best patches together and measure E2E (blocking).
+
+    GEAK-only, opt-in. Returns None (skip, no-op) unless: ``payload['combined_e2e']``
+    is truthy, the effective backend is geak, a servable ``model_path`` is present,
+    and >=1 GPU is visible. Reuses the gate-less ``apply_and_bench`` primitive (the
+    single shared apply->rebuild->serve->A/B->revert mechanism). Never raises.
+
+    Args:
+        results: The batch's per-kernel result dicts.
+        payload: The run_optimization request payload.
+        session_dir: Session directory (E2E artifacts written under it).
+
+    Returns:
+        dict | None: The apply_and_bench result dict, an ``{status:error}`` dict,
+            or ``None`` when the step is skipped.
+    """
+    if not payload.get("combined_e2e"):
+        return None
+    order = _backend_order(payload)
+    if "geak" not in [b.lower() for b in (order or [])]:
+        log.info("combined_e2e: skipped (backend is not geak: %s)", order)
+        return None
+    model = str(payload.get("model_path") or "").strip()
+    if not model:
+        log.info("combined_e2e: skipped (no model_path to serve)")
+        return None
+    n_gpus = _visible_gpu_count()
+    if not n_gpus or n_gpus < 1:
+        log.info("combined_e2e: skipped (no visible GPU)")
+        return None
+    pairs = _collect_combined_e2e_pairs(results)
+    if not pairs:
+        log.info("combined_e2e: skipped (no kernel produced a patch)")
+        return None
+
+    try:
+        tool = _kernel_agent_tool_path("apply_and_bench.py")
+    except RuntimeError as exc:
+        return {"status": "error", "error": f"apply_and_bench tool not found: {exc}"}
+    spec = importlib.util.spec_from_file_location("apply_and_bench", str(tool))
+    if spec is None or spec.loader is None:
+        return {"status": "error", "error": "could not load apply_and_bench module"}
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:  # noqa: BLE001  # module import failure is non-fatal to the batch
+        return {"status": "error", "error": f"apply_and_bench import failed: {exc}"}
+
+    cfg = _combined_e2e_serving_config(payload)
+    kwargs: dict[str, Any] = dict(
+        pairs=pairs,
+        backup_root=str(session_dir / "e2e_backups"),
+        model=model,
+        out_dir=str(session_dir / "combined_e2e"),
+        reps=int(payload.get("e2e_reps", 3)),
+        gpu="0",
+        aiter_rebuild=True,
+    )
+    # Only forward knobs we actually resolved; apply_and_bench has its own defaults.
+    if cfg.get("framework"):
+        kwargs["backend"] = cfg["framework"]
+    for k in ("tp", "isl", "osl", "conc", "num_prompts"):
+        if cfg.get(k) is not None:
+            kwargs[k] = int(cfg[k])
+    log.info("combined_e2e: applying %d patch(es) -> E2E A/B (model=%s, cfg=%s)",
+             len(pairs), model, cfg)
+    try:
+        return mod.apply_and_bench(**kwargs)
+    except Exception as exc:  # noqa: BLE001  # serving/bench failure must not fail the opt result
+        return {"status": "error", "error": f"apply_and_bench raised: {exc}"}
+
+
+async def _maybe_run_combined_e2e(
+    results: list[dict[str, Any]], payload: dict, session_dir: Path
+) -> dict[str, Any] | None:
+    """Async wrapper: run the blocking combined-E2E in an executor (off the loop).
+
+    Args:
+        results: The batch's per-kernel result dicts.
+        payload: The run_optimization request payload.
+        session_dir: Session directory for E2E artifacts.
+
+    Returns:
+        dict | None: As :func:`_run_combined_e2e_sync`; never raises.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, _run_combined_e2e_sync, results, payload, session_dir
+        )
+    except Exception as exc:  # noqa: BLE001  # belt-and-suspenders: never fail the batch
+        return {"status": "error", "error": f"combined_e2e wrapper failed: {exc}"}
+
+
 async def _run_optimization_batch(
     payload: dict,
     candidates: list[dict[str, Any]],
@@ -3289,6 +3456,12 @@ async def _run_optimization_batch(
     out["max_parallel"] = max_parallel
     out["parallel_backends"] = parallel_backends
     out["batch_results"] = results
+    # Autonomous combined E2E (GEAK-only, opt-in): once all kernels are optimized,
+    # apply ALL their best patches together and remeasure end-to-end throughput, with
+    # no manual step. Skipped (returns None) unless explicitly requested + servable.
+    combined = await _maybe_run_combined_e2e(results, payload, session_dir)
+    if combined is not None:
+        out["combined_e2e"] = combined
     return out
 
 
