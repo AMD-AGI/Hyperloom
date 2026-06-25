@@ -1,16 +1,14 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Canonical variant fingerprint — v0.8 M3.
+"""Canonical variant fingerprint.
 
 A single content-addressed identity for any explore variant so the
 ``explore_search`` ledger has one canonical key per variant and dedup across
 specialist / LLM / default_grid proposals collapses to the same row.
 
-KB_design §3.4 §4.2 (Inv-4.2): the canonical hash could include framework / tp
-/ workload_signature, but for M3 the on-disk fingerprint is content-only
-(``sorted(extra_args)`` + ``sorted(extra_envs)``); the discriminators are kept
-as side metadata. Future milestones may fold workload_signature into the hash
-(with a re-key migration).
+The on-disk fingerprint is content-only (``sorted(extra_args)`` +
+``sorted(extra_envs)``); discriminators such as framework / tp /
+workload_signature are kept as side metadata rather than folded into the hash.
 """
 
 from __future__ import annotations
@@ -35,7 +33,7 @@ def canonical_fingerprint(
     """Return the canonical 16-char fingerprint for a variant.
 
     Single source of truth for the content hash; ``_grid_runner.variant_fingerprint``
-    delegates here for the legacy import path. Normalization: args ``shlex.split``
+    delegates here. Normalization: args ``shlex.split``
     → sorted tokens; envs ``(str(k), str(v))`` sorted by key; 16-char SHA-1.
 
     Args:

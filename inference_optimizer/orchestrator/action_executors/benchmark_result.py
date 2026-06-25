@@ -11,13 +11,14 @@ wrapper status as diagnostics.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 import shutil
 from pathlib import Path
 from typing import Any
+
+from .._json_io import read_json
 
 log = logging.getLogger(__name__)
 
@@ -125,12 +126,7 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         dict[str, Any] | None: The parsed mapping, or ``None`` on IO /
         decode error or when the top-level JSON is not an object.
     """
-    try:
-        with path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
+    return read_json(path, default=None, require_dict=True)
 
 
 def _candidate_raw_jsons(workspace: Path) -> list[Path]:

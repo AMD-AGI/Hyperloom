@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PR Monitor REST client — v0.8 M4.
+"""PR Monitor REST client.
 
 Stdlib-only client for the ``primus-cortex-pr-api`` REST surface. Fail-soft
 (Inv-6.3), read-only, cross-cluster aware (KB_design §3.14 R-02).
@@ -42,7 +42,7 @@ DEFAULT_PR_FEED_TOTAL_BUDGET_SEC: float = 15.0
 
 @dataclass
 class PRSummary:
-    """One PR row returned by ``pr_feed_warm`` / ``list_prs``."""
+    """One PR row returned by ``pr_feed_warm``."""
 
     repo: str
     number: int
@@ -54,26 +54,6 @@ class PRSummary:
     merged_at: str = ""
     updated_at: str = ""
     body_snippet: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise the PR summary to a JSON-friendly dict.
-
-        Returns:
-            dict[str, Any]: All fields, with ``labels`` rendered as a
-            list.
-        """
-        return {
-            "repo": self.repo,
-            "number": self.number,
-            "title": self.title,
-            "url": self.url,
-            "state": self.state,
-            "labels": list(self.labels),
-            "author": self.author,
-            "merged_at": self.merged_at,
-            "updated_at": self.updated_at,
-            "body_snippet": self.body_snippet,
-        }
 
 
 class PRMonitorError(RuntimeError):
@@ -88,7 +68,7 @@ class PRMonitorClient:
     """Stdlib-only REST client for the PR Monitor surface.
 
     ``enabled=False`` (``--degraded-pr``) turns every call into a no-op
-    returning empty data (KB_design §3.13 M4).
+    returning empty data.
     """
 
     base_url: str = DEFAULT_PR_MONITOR_URL
@@ -191,20 +171,6 @@ class PRMonitorClient:
             raise PRMonitorError(f"PR Monitor non-JSON response at {url}: {exc}") from exc
 
     # REST endpoint wrappers
-    def healthz(self) -> bool:
-        """Probe the PR Monitor health endpoint.
-
-        Returns:
-            bool: ``True`` when ``/healthz`` responds successfully;
-            ``False`` on any :class:`PRMonitorError`.
-        """
-        try:
-            self._get_json("/healthz")
-            return True
-        except PRMonitorError as exc:
-            log.info("pr_monitor.healthz failed: %s", exc)
-            return False
-
     def list_repos(self) -> list[str]:
         """Return the list of active repo names PR Monitor knows about.
 
@@ -233,104 +199,6 @@ class PRMonitorClient:
             if name:
                 names.append(name)
         return names
-
-    def list_prs(
-        self,
-        repo: str,
-        *,
-        state: str = "all",
-        since: str | None = None,
-        limit: int = DEFAULT_PR_FEED_PER_REPO_LIMIT,
-    ) -> list[PRSummary]:
-        """List recent PRs for ``repo``.
-
-        Returns :class:`PRSummary` list (empty on failure). Cached by
-        rendered URL to avoid re-hitting the network within a tick.
-
-        Args:
-            repo: Canonical ``owner/name`` repo identifier.
-            state: PR state filter (``all`` / ``open`` / ``closed``).
-            since: Optional ISO lower bound on ``updated_at``.
-            limit: Maximum number of PRs to fetch.
-
-        Returns:
-            The PR summaries, or ``[]`` on failure.
-        """
-        params = {
-            "state": state,
-            "limit": int(limit) if limit and limit > 0 else DEFAULT_PR_FEED_PER_REPO_LIMIT,
-        }
-        if since:
-            params["since"] = since
-        cache_key = f"/repos/{repo}/prs" + (("?" + urllib.parse.urlencode(params)) if params else "")
-        if cache_key in self._cache:
-            return list(self._cache[cache_key])
-        try:
-            data = self._get_json(f"/repos/{repo}/prs", params=params)
-        except PRMonitorError as exc:
-            log.info("pr_monitor.list_prs(%s) failed: %s", repo, exc)
-            self._cache[cache_key] = []
-            return []
-        items = data.get("items") if isinstance(data, dict) else data
-        if not isinstance(items, list):
-            self._cache[cache_key] = []
-            return []
-        prs: list[PRSummary] = []
-        for entry in items:
-            if not isinstance(entry, dict):
-                continue
-            number = entry.get("number") or entry.get("pr_number")
-            try:
-                number_i = int(number) if number is not None else 0
-            except (TypeError, ValueError):
-                continue
-            if number_i <= 0:
-                continue
-            labels_raw = entry.get("labels") or []
-            if isinstance(labels_raw, list):
-                labels = tuple((l.get("name") if isinstance(l, dict) else str(l)) for l in labels_raw if l)
-            else:
-                labels = ()
-            url = str(entry.get("html_url") or entry.get("url") or f"https://github.com/{repo}/pull/{number_i}")
-            body = str(entry.get("body") or "")
-            body_snippet = (body[:280] + "…") if len(body) > 280 else body
-            prs.append(
-                PRSummary(
-                    repo=repo,
-                    number=number_i,
-                    title=str(entry.get("title") or "").strip(),
-                    url=url,
-                    state=str(entry.get("state") or "").strip(),
-                    labels=tuple(str(l).strip() for l in labels if l),
-                    author=str(
-                        (entry.get("author") or {}).get("login")
-                        if isinstance(entry.get("author"), dict)
-                        else (entry.get("author") or entry.get("user") or "")
-                    ).strip(),
-                    merged_at=str(entry.get("merged_at") or "").strip(),
-                    updated_at=str(entry.get("updated_at") or "").strip(),
-                    body_snippet=body_snippet,
-                )
-            )
-        self._cache[cache_key] = list(prs)
-        return prs
-
-    def get_pr(self, repo: str, number: int) -> dict[str, Any] | None:
-        """Fetch the full detail payload for one PR.
-
-        Args:
-            repo (str): Canonical ``owner/name`` repo identifier.
-            number (int): PR number.
-
-        Returns:
-            dict[str, Any] | None: The PR detail dict, or ``None`` on
-            failure.
-        """
-        try:
-            return self._get_json(f"/repos/{repo}/prs/{int(number)}")
-        except PRMonitorError as exc:
-            log.info("pr_monitor.get_pr(%s#%s) failed: %s", repo, number, exc)
-            return None
 
     # High-level helper used by KnowledgePlane.pr_feed_warm
     def pr_feed_warm(
@@ -406,7 +274,7 @@ class PRMonitorClient:
         since: str | None = None,
         limit: int = DEFAULT_PR_FEED_PER_REPO_LIMIT,
     ) -> list[PRSummary]:
-        """Same as :meth:`list_prs` but re-raises :class:`PRMonitorError`.
+        """Fetch PRs for ``repo``, re-raising :class:`PRMonitorError`.
 
         Lets :meth:`pr_feed_warm` distinguish empty-window from fetch-failed.
 

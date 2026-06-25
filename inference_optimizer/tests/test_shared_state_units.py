@@ -23,8 +23,6 @@ class TestPolicyDenialAndPruned:
         assert s.is_pruned("kernel_opt") is True
         # Second add returns False.
         assert s.add_pruned_family("kernel_opt") is False
-        # prune_family is an alias.
-        assert s.prune_family("kernel_opt") is False
 
     def test_record_policy_denial_tracks_streak(self):
         s = SharedState()
