@@ -62,6 +62,42 @@ def _log(out_dir: Path, msg: str) -> None:
         pass
 
 
+def _looks_like_diff(path: Path) -> bool:
+    """True if the file is a unified diff / patch (vs a complete source file)."""
+    if path.suffix in (".diff", ".patch"):
+        return True
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:4000]
+    except OSError:
+        return False
+    return ("diff --git " in head) or ("\n--- " in head and "\n+++ " in head and "\n@@ " in head)
+
+
+def _git_apply_diff(diff_path: Path, repo_root: Path, out_dir: Path) -> dict[str, Any]:
+    """Apply a unified diff directly to a git repo (handles MULTI-FILE diffs), auto -p level.
+
+    The complement to apply_kernel_patch's full-source replace: when the producer hands us a `.diff`
+    (e.g. a multi-file kernel patch), we apply it in-tree with git so all hunks/files land. Revert is
+    `git checkout -- <touched paths>`. Returns {status, touched, p_level, manifest:None}.
+    """
+    for lvl in (1, 0, 2):
+        chk = subprocess.run(["git", "-C", str(repo_root), "apply", f"-p{lvl}", "--check", str(diff_path)],
+                             capture_output=True, text=True)
+        if chk.returncode == 0:
+            ap = subprocess.run(["git", "-C", str(repo_root), "apply", f"-p{lvl}", str(diff_path)],
+                                capture_output=True, text=True)
+            if ap.returncode != 0:
+                return {"status": "failed", "error": f"git apply -p{lvl}: {ap.stderr[:200]}"}
+            # record touched paths for a precise revert
+            touched = subprocess.run(
+                ["git", "-C", str(repo_root), "apply", f"-p{lvl}", "--numstat", str(diff_path)],
+                capture_output=True, text=True).stdout
+            paths = [ln.split("\t")[-1] for ln in touched.splitlines() if "\t" in ln]
+            _log(out_dir, f"git apply -p{lvl} OK ({len(paths)} files): {', '.join(p.split('/')[-1] for p in paths)}")
+            return {"status": "ok", "touched": paths, "p_level": lvl, "manifest": None, "repo_root": str(repo_root)}
+    return {"status": "failed", "error": "git apply: no -p level (0/1/2) applies this diff cleanly"}
+
+
 def _find_benchmark_serving() -> str | None:
     """Locate HL's ``benchmark_serving.py`` (the canonical E2E driver)."""
     roots = [
@@ -224,28 +260,36 @@ def _engagement_proof(server_log: Path, target: Path, is_aiter_cu: bool) -> dict
 
 
 def apply_and_bench(
-    *, patch_path: str, target_file: str, backup_root: str, model: str, backend: str,
+    *, pairs: list[tuple[str, str]] | None = None,
+    patch_path: str | None = None, target_file: str | None = None,
+    backup_root: str, model: str, backend: str,
     tp: int, port: int, gpu: str, isl: int, osl: int, conc: int, num_prompts: int, reps: int,
     out_dir: str, kernel_id: str = "", rebuild_command: str | None = None,
     aiter_rebuild: bool = False, skip_rebuild: bool = False,
 ) -> dict[str, Any]:
-    """Apply a kernel patch and measure E2E throughput A/B — NO keep/revert/needs-review gate.
+    """Apply ONE OR MORE kernel patches together and measure E2E throughput A/B — NO gate.
 
-    Returns a result dict with baseline/patched medians + the throughput delta. Always reverts
-    the source at the end (the patch FILE is kept). Handles aiter ``.cu`` rebuild when
-    ``aiter_rebuild`` is set (removes the prebuilt fused ``.so`` + exports ``AITER_REBUILD=1``
-    so the patched server recompiles the edited kernel; the apply step also invalidates the aiter
-    jit/cpp_itfs caches via ``apply_kernel_patch``).
+    Pass either a single (`patch_path`,`target_file`) or a list of `pairs` [(patch, target), ...].
+    Multiple pairs are applied to the SAME patched server, so the A/B reports the COMBINED effect of
+    all optimized patches (the "apply all patches -> final E2E" number). Always reverts every patched
+    source at the end (patch FILES kept). Handles aiter ``.cu`` rebuild (removes prebuilt fused ``.so``
+    + AITER_REBUILD=1; apply step also invalidates aiter jit/cpp_itfs caches via ``apply_kernel_patch``).
+    No keep/revert/needs-review verdict — that policy is the caller's job.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     bs = _find_benchmark_serving()
     if not bs:
         return {"status": "error", "error": "benchmark_serving.py not found"}
-    target = Path(target_file)
-    is_aiter_cu = "/aiter/" in str(target) and target.suffix in {".cu", ".cuh"}
+    # Normalize to a list of (patch, target) pairs (single-pair back-compat).
+    if not pairs:
+        if not (patch_path and target_file):
+            return {"status": "error", "error": "need pairs=[(patch,target),...] or patch_path+target_file"}
+        pairs = [(patch_path, target_file)]
+    targets = [Path(t) for _, t in pairs]
+    any_aiter_cu = any("/aiter/" in str(t) and t.suffix in {".cu", ".cuh"} for t in targets)
     patched_env: dict[str, str] = {}
-    if aiter_rebuild or is_aiter_cu:
+    if aiter_rebuild or any_aiter_cu:
         patched_env["AITER_REBUILD"] = "1"
 
     # ---- BASELINE (pristine) ----
@@ -254,23 +298,52 @@ def apply_and_bench(
     if base["status"] != "ok":
         return {"status": "baseline_failed", "baseline": base}
 
-    # ---- APPLY (reuses apply_kernel_patch: aiter .cu rebuild + cache invalidation) ----
-    _log(out, "=== APPLY patch (straightforward; no keep/revert/needs-review gate) ===")
-    rb = rebuild_command
-    apply_res = apply_kernel_patch(
-        patch_path=patch_path, target_file=target_file, backup_root=backup_root,
-        kernel_id=kernel_id or "apply_and_bench", rebuild_command=rb,
-        skip_rebuild=skip_rebuild, allow_unknown_target=True,
-    )
-    _log(out, f"apply status={apply_res.get('status')} manifest={apply_res.get('manifest_path')}")
-    if apply_res.get("status") != "ok":
-        return {"status": "apply_failed", "baseline": base, "apply": apply_res}
-    manifest_path = apply_res.get("manifest_path")
-    # For aiter .cu: also drop the prebuilt fused module so the patched server re-JITs the edit.
+    # ---- APPLY all pairs. Each pair's patch may be a FULL SOURCE file (apply_kernel_patch:
+    # backup + aiter .cu rebuild + cache invalidation) OR a unified DIFF/.patch (git apply,
+    # multi-file). We auto-detect so the primitive handles patch/diff/full-source uniformly. ----
+    _log(out, f"=== APPLY {len(pairs)} patch(es) (no keep/revert/needs-review gate) ===")
+    manifests: list[str] = []          # full-source applies -> revert via revert_kernel_patch
+    diff_applies: list[dict[str, Any]] = []  # diff applies -> revert via git checkout of touched paths
+    applied: list[dict[str, Any]] = []
+
+    def _revert_all() -> None:
+        for m in reversed(manifests):
+            revert_kernel_patch(m)
+        for da in reversed(diff_applies):
+            rr = da.get("repo_root", "/sgl-workspace/aiter")
+            for p in da.get("touched", []):
+                subprocess.run(["git", "-C", rr, "checkout", "--", p], check=False)
+        subprocess.run(["git", "-C", "/sgl-workspace/aiter", "checkout", "--", "csrc/"], check=False)
+
+    for i, (pp, tf) in enumerate(pairs):
+        if _looks_like_diff(Path(pp)):
+            # in-tree git apply at the repo that owns the target (aiter for aiter targets)
+            repo_root = Path("/sgl-workspace/aiter") if "/aiter/" in str(tf) else Path(tf).parents[2]
+            res = _git_apply_diff(Path(pp), repo_root, out)
+            ok = res.get("status") == "ok"
+            _log(out, f"apply[{i}] {Path(tf).name} (diff) status={res.get('status')}")
+            applied.append({"target": tf, "mode": "diff", "status": res.get("status"), "touched": res.get("touched")})
+            if not ok:
+                _revert_all()
+                return {"status": "apply_failed", "baseline": base, "applied": applied, "error": res.get("error")}
+            diff_applies.append(res)
+        else:
+            res = apply_kernel_patch(
+                patch_path=pp, target_file=tf, backup_root=backup_root,
+                kernel_id=f"{kernel_id or 'apply_and_bench'}_{i}", rebuild_command=rebuild_command,
+                skip_rebuild=skip_rebuild, allow_unknown_target=True,
+            )
+            _log(out, f"apply[{i}] {Path(tf).name} (full-source) status={res.get('status')}")
+            applied.append({"target": tf, "mode": "full_source", "status": res.get("status"), "manifest": res.get("manifest_path")})
+            if res.get("status") != "ok":
+                _revert_all()
+                return {"status": "apply_failed", "baseline": base, "applied": applied, "error": res.get("error")}
+            if res.get("manifest_path"):
+                manifests.append(res["manifest_path"])
+    # For aiter .cu: drop the prebuilt fused module so the patched server re-JITs the edits.
     removed_so = []
-    if aiter_rebuild or is_aiter_cu:
-        aiter_root = Path("/sgl-workspace/aiter")
-        for so in _aiter_prebuilt_so(aiter_root):
+    if aiter_rebuild or any_aiter_cu:
+        for so in _aiter_prebuilt_so(Path("/sgl-workspace/aiter")):
             try:
                 so.unlink(); removed_so.append(str(so))
             except OSError:
@@ -281,45 +354,47 @@ def apply_and_bench(
         if removed_so:
             _log(out, f"removed prebuilt aiter .so ({len(removed_so)}) to force rebuild")
 
-    # ---- PATCHED ----
+    # ---- PATCHED (all patches live) ----
     try:
         patched = _serve_and_bench("patched", backend, model, tp, port, gpu, isl, osl, conc,
                                    num_prompts, reps, patched_env, bs, out)
-        # ---- ENGAGEMENT PROOF (trust, not policy): was the patched kernel actually on the
-        # live serving path? A delta is meaningless if the patch never engaged. We do NOT
-        # accept/reject on it — we just report it so a +0.0% is distinguishable from "didn't apply".
-        engagement = _engagement_proof(out / "server_patched.log", target, is_aiter_cu)
-        _log(out, f"engagement_proof: engaged={engagement['engaged']} ({engagement['reason']})")
+        # ---- ENGAGEMENT PROOF (trust, not policy): were the patched kernels on the live path?
+        # Reported per target so a ~0% delta is distinguishable from "patch(es) didn't engage".
+        engagement = [
+            dict(target=str(t), **_engagement_proof(out / "server_patched.log", t,
+                 "/aiter/" in str(t) and t.suffix in {".cu", ".cuh"}))
+            for t in targets
+        ]
+        _log(out, f"engagement_proof: {[ (e['target'].split('/')[-1], e['engaged']) for e in engagement ]}")
     finally:
-        # ---- REVERT (restore source; keep the patch file) ----
-        if manifest_path:
-            rev = revert_kernel_patch(manifest_path)
-            _log(out, f"revert status={rev.get('status')}")
-        # belt-and-suspenders clean of the aiter source tree
-        subprocess.run(["git", "-C", "/sgl-workspace/aiter", "checkout", "--", "csrc/"], check=False)
+        # ---- REVERT every patched source (full-source manifests + diff touched-paths). Keep patch files. ----
+        _revert_all()
+        _log(out, f"reverted {len(manifests)} full-source + {len(diff_applies)} diff apply(es)")
 
     b_med, p_med = base.get("median"), patched.get("median")
-    delta_pct = None
-    if b_med and p_med:
-        delta_pct = (p_med - b_med) / b_med * 100.0
+    delta_pct = (p_med - b_med) / b_med * 100.0 if (b_med and p_med) else None
     result = {
         "status": "ok" if (b_med and p_med) else "patched_failed",
         "gate": "none (straightforward apply + remeasure; KEEP/REVERT/NEEDS_REVIEW bypassed; policy is the caller's job)",
+        "combined": len(pairs) > 1,
         "baseline_median_tok_s": b_med, "patched_median_tok_s": p_med,
         "delta_pct": delta_pct, "baseline_reps": base.get("reps"),
         "patched_reps": patched.get("reps"), "removed_prebuilt_so": removed_so,
-        "engagement_proof": engagement,
-        "manifest_path": manifest_path, "target_file": target_file, "patch_path": patch_path,
+        "engagement_proof": engagement, "applied": applied,
+        "targets": [str(t) for t in targets],
     }
     (out / "apply_and_bench_result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
-    _log(out, f"RESULT baseline={b_med} patched={p_med} delta={delta_pct}% engaged={engagement.get('engaged')}")
+    _log(out, f"RESULT baseline={b_med} patched={p_med} delta={delta_pct}% (combined={len(pairs)>1})")
     return result
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Apply a kernel patch + warm-serve E2E remeasure (no decision gate)")
-    ap.add_argument("--patch-path", required=True)
-    ap.add_argument("--target-file", required=True)
+    ap = argparse.ArgumentParser(description="Apply one or more kernel patches + warm-serve E2E remeasure (no decision gate)")
+    ap.add_argument("--patch-path", help="single-patch mode: full optimized source (or complete-file patch)")
+    ap.add_argument("--target-file", help="single-patch mode: file to replace")
+    ap.add_argument("--pair", action="append", default=[], metavar="PATCH:TARGET",
+                    help="multi-patch mode (repeatable): 'patch_path:target_file'. Apply ALL together "
+                         "to one patched server -> COMBINED E2E (the 'apply all optimized patches' number).")
     ap.add_argument("--backup-root", required=True)
     ap.add_argument("--model", required=True)
     ap.add_argument("--backend", default="sglang", choices=["sglang", "vllm"])
@@ -337,8 +412,20 @@ def main() -> int:
     ap.add_argument("--aiter-rebuild", action="store_true")
     ap.add_argument("--skip-rebuild", action="store_true")
     a = ap.parse_args()
+    # Build the (patch, target) pair list: --pair entries (rsplit on last ':' so absolute paths
+    # with no ':' work) plus the single --patch-path/--target-file for back-compat.
+    pairs: list[tuple[str, str]] = []
+    for p in a.pair:
+        if ":" not in p:
+            raise SystemExit(f"--pair must be 'patch:target', got: {p}")
+        patch, tgt = p.rsplit(":", 1)
+        pairs.append((patch, tgt))
+    if a.patch_path and a.target_file:
+        pairs.append((a.patch_path, a.target_file))
+    if not pairs:
+        raise SystemExit("need --pair PATCH:TARGET (repeatable) or --patch-path + --target-file")
     res = apply_and_bench(
-        patch_path=a.patch_path, target_file=a.target_file, backup_root=a.backup_root,
+        pairs=pairs, backup_root=a.backup_root,
         model=a.model, backend=a.backend, tp=a.tp, port=a.port, gpu=a.gpu, isl=a.isl,
         osl=a.osl, conc=a.conc, num_prompts=a.num_prompts, reps=a.reps, out_dir=a.out_dir,
         kernel_id=a.kernel_id, rebuild_command=a.rebuild_command or None,
