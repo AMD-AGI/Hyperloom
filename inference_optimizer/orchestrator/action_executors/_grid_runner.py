@@ -42,9 +42,9 @@ from .benchmark_result import (
 log = logging.getLogger(__name__)
 
 
-# Content-based variant fingerprint (cross-action dedup ledger key). Thin alias
-# of :func:`canonical_fingerprint` (the single source of truth) kept for the
-# legacy import path; both produce the identical 16-char content hash.
+# Content-based variant fingerprint (cross-action dedup ledger key). Delegates
+# to :func:`canonical_fingerprint` (the single source of truth); both produce
+# the identical 16-char content hash.
 def variant_fingerprint(
     extra_server_args: str | None,
     extra_envs: dict[str, Any] | None,
@@ -211,51 +211,6 @@ def _parse_skip_spec(spec: str) -> list[str]:
 _RE_CUDA_GRAPH_MAX_BS = re.compile(r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)")
 
 
-def annotate_multi_node_cuda_graph_max_bs(
-    grid: list["GridVariant"],
-) -> list[dict]:
-    """Return advisory notes for ``--cuda-graph-max-bs N < $CONC`` variants.
-
-    These regress ~50% in multi-node mode (cuda graph cache misses every
-    cross-node decode tick), but the variant is kept in the grid and surfaced
-    as an advisory rather than auto-dropped. Returns ``[]`` outside multi-node
-    mode, when ``$CONC`` is unset/non-positive, or when no variant matches.
-
-    Args:
-        grid (list[GridVariant]): The candidate variants to inspect.
-
-    Returns:
-        list[dict]: Advisory note dicts (``name``/``source``/``reason``) for the
-        matching variants; empty outside multi-node mode or on no match.
-    """
-    from ._multi_node_env import is_multi_node
-
-    if not is_multi_node():
-        return []
-    try:
-        conc = int(os.environ.get("CONC", "64") or 64)
-    except ValueError:
-        conc = 64
-    if conc <= 0:
-        return []
-    notes: list[dict] = []
-    for v in grid:
-        m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
-        if m and int(m.group(1)) < conc:
-            notes.append(
-                {
-                    "name": v.name,
-                    "source": "multi_node_advisory",
-                    "reason": (
-                        f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
-                        "(multi-node graph-cache miss is a known regression; "
-                        "advisory only, not auto-skipped)"
-                    ),
-                }
-            )
-    return notes
-
-
 # ---------------------------------------------------------------------------
 # Multi-node grid prioritisation + invalid-variant filtering
 # ---------------------------------------------------------------------------
@@ -358,8 +313,7 @@ def apply_multi_node_invalid_variants(
 
     Current rule: ``--cuda-graph-max-bs N`` with ``N < $CONC`` regresses ~50%
     in multi-node mode (cuda-graph cache misses every cross-node decode tick),
-    so it is dropped from the explore grid here (the advisory-only counterpart
-    is ``annotate_multi_node_cuda_graph_max_bs``).
+    so it is dropped from the explore grid here.
 
     Args:
         grid (list[GridVariant]): The candidate variants to filter.
@@ -817,10 +771,10 @@ class VariantResult:
     # Surfaced in the LLM critic prompt as ``failed_variants[*].error_class``.
     error_class: str = ""
     note: str = ""
-    # Fix-E: wall-clock seconds the Magpie subprocess consumed; populated on
+    # Wall-clock seconds the Magpie subprocess consumed; populated on
     # success AND on the ``killed_overtime`` path.
     runtime_sec: float | None = None
-    # Fix-E: True iff reaped by the overtime soft deadline; caller demotes to
+    # True iff reaped by the overtime soft deadline; caller demotes to
     # the synthetic ``KILLED_OVERTIME`` outcome (no tput / fingerprint).
     killed_overtime: bool = False
     # Rough output tok/s salvaged from the engine's periodic ``server.log``
@@ -1076,11 +1030,12 @@ _MULTI_VALUE_FLAGS = (
 )
 
 
-# vLLM / atom expose argparse-style single-value options. Unlike sglang
-# (where a repeated flag is harmless last-wins), vLLM v0.21.0 hard-errors on a
-# duplicate / conflicting ``--attention-backend`` — the crash propagates
-# through ``EngineCoreClient`` -> ``wait_for_engine_startup`` -> RuntimeError,
-# then NCCL ``Broken pipe`` on every rank (#520). The duplication arises when
+# vLLM / atom expose argparse-style single-value options that are safe to
+# collapse last-wins. Unlike sglang (where a repeated flag is harmless
+# last-wins), vLLM hard-errors on a duplicate / conflicting
+# ``--attention-backend`` — the crash propagates through ``EngineCoreClient``
+# -> ``wait_for_engine_startup`` -> RuntimeError, then NCCL ``Broken pipe`` on
+# every rank. The duplication arises when
 # the operator's YAML ``EXTRA_VLLM_ARGS`` already pins a flag and a sweep /
 # kernel variant appends the same flag via ``extra_server_args``; ``merge_
 # server_args`` keeps BOTH tokens by design. This set lists the single-value
@@ -1937,7 +1892,7 @@ def _run_magpie(
 
     env.update(magpie_remote_env())
 
-    # #210: pin Magpie's InferenceX resolution to ``$INFERENCEX_PATH`` so it
+    # Pin Magpie's InferenceX resolution to ``$INFERENCEX_PATH`` so it
     # loads the SAME checkout ``_inferencex_patcher`` patched, not a stale
     # ``./InferenceX`` / cache copy. ``MAGPIE_INFERENCEX_PATH`` is Magpie's
     # highest-precedence resolution rung.
@@ -1967,7 +1922,7 @@ def _run_magpie(
         "local",
     ]
     # run_with_session_kill launches Magpie in its own POSIX session and tears
-    # down the whole descendant tree on every exit path (bugs.md §B). See
+    # down the whole descendant tree on every exit path. See
     # ``_subprocess_kill.py``.
     proc = run_with_session_kill(
         cmd,
@@ -2006,8 +1961,8 @@ async def run_grid(
     ``model_path`` / ``gpu_type`` are forwarded to every variant's YAML render.
     ``benchmark_script`` / ``result_dir`` (pre-sanitized) route around scripts
     that hardcode ``--result-dir /workspace/`` (see SKILL.md "Magpie leak-path
-    salvage"). ``soft_deadline_sec`` (Fix E): reap a variant once wall-clock
-    exceeds it, marking it ``killed_overtime=True``; None/0 disables (legacy).
+    salvage"). ``soft_deadline_sec``: reap a variant once wall-clock
+    exceeds it, marking it ``killed_overtime=True``; None/0 disables.
     ``server_lifecycle`` (``{cleanup, pid_dir, port}``) enables Magpie's
     persistent-server reuse so a paired warm round can re-attach to a hot
     server; None keeps the legacy boot-per-variant behaviour.
@@ -2556,8 +2511,8 @@ def pick_winners(
     *,
     keep_threshold_pct: float | None = None,
 ) -> list[VariantResult]:
-    """Filter variants whose throughput beats ``baseline_tput`` by
-    ``keep_threshold_pct`` percent (> 1% = KEEP).
+    """Filter variants whose throughput beats ``baseline_tput`` by more than
+    the resolved ``keep_threshold_pct`` percent.
 
     Resolution of ``keep_threshold_pct``: an explicit caller value wins; ``None``
     falls back to ``MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (2.0%, the empirical

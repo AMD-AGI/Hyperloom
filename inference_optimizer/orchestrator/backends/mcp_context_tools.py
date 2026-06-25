@@ -1,6 +1,6 @@
 """In-process MCP server exposing read-only ``context`` tools.
 
-Plan Step 2 — "context by pull, not push": instead of a full ``SharedState``
+Context by pull, not push: instead of a full ``SharedState``
 dump each tick, the agent pulls context via these tools, each re-exposing an
 existing ``SharedState.to_*_summary`` projection (the single source of truth).
 Unlike ``emit_intent``, these handlers return the real data as the tool
@@ -48,7 +48,7 @@ class ContextProvider:
     analysis_reader: Callable[[], str] | None = None
     denial_reader: Callable[[int], str] | None = None
     recent_outcomes_reader: Callable[[int], str] | None = None
-    # A3: run a whitelisted lane-light action inline (gated side effect, so
+    # Run a whitelisted lane-light action inline (gated side effect, so
     # the Coordinator injects a bridge callable). ``None`` => unavailable.
     action_runner: Callable[[str, dict[str, Any]], str] | None = None
 

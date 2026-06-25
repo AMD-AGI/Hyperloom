@@ -204,38 +204,33 @@ def _count_substring_occurrences(text: str, substring: str) -> int:
 def _validate_trace_structure(
     trace_dir: Path,
     framework: str,
-    expected_pieces: int = 1,
 ) -> dict[str, Any]:
-    """Post-profile sanity check (#210 / Deval's ``check_torch_trace.py``).
+    """Post-profile sanity check on the produced trace structure.
 
     Logs warnings (never raises) when the trace structure suggests
-    TraceLens features didn't reach the framework. Mirrors the 5
-    check_torch_trace.py checks plus one Hyperloom-specific check:
+    TraceLens features didn't reach the framework:
 
     1. ``capture_traces/`` exists with files (graph capture fired)
     2. capture files contain ``cpu_op`` events with ``Input Dims``
        (shape-discovery instrumentation recording per-event shapes)
     3. main-directory trace has ``user_annotation`` events including
-       ``execute_*`` annotations (InferenceX per-step instrumentation
-       fired — relates to ``roofline_annotations`` flag landing)
+       ``execute_*`` annotations (InferenceX per-step instrumentation fired)
     4. ``trace_split/`` per-file ``execute_*`` user_annotations
        counted (splitter ran AND each split is non-empty)
     5. (sglang only) main trace contains ``kernel_shape_profiler``
-       substring (server-side patch from PR #207 landed)
+       substring (server-side patch landed)
     6. (Hyperloom-specific) ``trace_split/`` has ``_steady_state_*``
-       files, NOT ``_extend_*`` / ``_decode_*`` (the #210 smoking-
-       gun: profile_by_stage leaked through PROFILE_EXTRA_BODY)
+       files, NOT ``_extend_*`` / ``_decode_*`` (detects profile_by_stage
+       leaking through PROFILE_EXTRA_BODY)
 
     Read-only; each check warns independently so partial signals stay actionable.
 
-    Returns a structured ``trace_health`` dict (#431): ``per_kernel_attribution_degraded`` (no execute_*/user_annotation events -> cuda-graph folds per-kernel time, 0 hot kernels -> triggers eager re-profile), ``capture_traces_present``, and ``issues`` (logged warning strings).
+    Returns a structured ``trace_health`` dict: ``per_kernel_attribution_degraded`` (no execute_*/user_annotation events -> cuda-graph folds per-kernel time, 0 hot kernels -> triggers eager re-profile), ``capture_traces_present``, and ``issues`` (logged warning strings).
 
     Args:
         trace_dir: The profile workspace trace directory to inspect.
         framework: The framework name (e.g. ``"sglang"``) gating
             framework-specific checks.
-        expected_pieces: Expected split-piece count (reserved for future
-            checks).
 
     Returns:
         A ``trace_health`` dict with ``issues``,
@@ -406,7 +401,7 @@ def _validate_trace_structure(
     }
 
 
-# Legacy constant kept pointing at the sglang profile yaml for fixture use.
+# Constant pointing at the sglang profile yaml, used by tests/fixtures.
 # Runtime sglang/vllm selection goes through `_default_profile_config()`.
 PROFILE_DEFAULT_CONFIG = asset_root() / "scripts" / "configs" / "profile_sglang.yaml"
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap; Qwen3-32B TP=1 profile needs ~3 h with steady-state window
@@ -782,17 +777,10 @@ class ProfileExecutor(BaselineExecutor):
             if isinstance(extra, dict):
                 extra["mn_round_restarted"] = True
 
-        # NOTE: InferenceX patches (``ensure_benchmark_lib_patched`` and
-        # ``ensure_benchmark_serving_patched``) used to live here on the
-        # multi-node feature branch. Main moved them into the
-        # ``_after_materialize_config`` hook (run earlier in the
-        # materialize step) so the patch always covers the exact
-        # InferenceX checkout Magpie will execute, regardless of which
-        # subdirectory benchmark.inferencex_path resolves to. Removing
-        # the duplicate calls here keeps the patch idempotent (same
-        # behaviour) while letting the single-source-of-truth in
-        # ``_after_materialize_config`` carry the resolved-path
-        # validation.
+        # InferenceX patching (``ensure_benchmark_lib_patched`` /
+        # ``ensure_benchmark_serving_patched``) happens in the
+        # ``_after_materialize_config`` hook, which covers the exact InferenceX
+        # checkout Magpie will execute.
         # Multi-node dynamo only: the Dynamo frontend does not propagate
         # /start_profile to the SSH-launched disagg workers, so torch
         # profiling must be triggered directly on each worker's system

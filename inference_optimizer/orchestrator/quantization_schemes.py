@@ -7,7 +7,7 @@ Free-text ``--quantize`` stays available for power users — this is the
 structured path, so the config -> prompt translation lives in exactly one
 place and is reused by the UI's editable "Preview" prompt.
 
-Two invariants, both from issue #453:
+Two invariants:
 
 * **No hard-coded defaults.** :func:`build_quantization_prompt` only emits a
   sentence for a field the caller set explicitly. Anything left unset is
@@ -30,7 +30,7 @@ from typing import Mapping, Sequence
 # Sentinel for "do not quantize" (the dropdown default).
 NO_QUANTIZATION = "none"
 
-# The full set of serving-validated global schemes (issue #453 §4).
+# The full set of serving-validated global schemes.
 SUPPORTED_SCHEMES: tuple[str, ...] = ("fp8", "ptpc_fp8", "mxfp4", "mxfp4_fp8")
 
 # Schemes that require MI355X-class hardware; offered on no other GPU type.
@@ -95,7 +95,7 @@ def validate_scheme(scheme: str | None, gpu_type: str | None) -> None:
 
 @dataclass(frozen=True)
 class QuantizationConfig:
-    """Structured quantization request (issue #453 §4).
+    """Structured quantization request.
 
     Only ``global_scheme`` is required. Every other field is optional and,
     when left at its ``None`` / empty default, is omitted from the generated
@@ -206,7 +206,7 @@ def build_quantization_prompt(
 ) -> str:
     """Render ``cfg`` into the natural-language quantization prompt.
 
-    The output mirrors issue #453 §5.6: an optional intro line followed by
+    The output is an optional intro line followed by
     three light-headed groups — **Quantization strategy**, **Calibration**,
     **Evaluation**. Groups with no explicitly-set fields are dropped entirely
     (no hard-coded defaults). ``model_path`` / ``skill_path`` / ``gpu_type``
@@ -247,8 +247,9 @@ def resolve_scheme_prompt(scheme: str | None) -> str | None:
     fails loudly instead of silently skipping quantization. The prompt carries
     the global scheme only — no hard-coded kv_cache / exclude_layers defaults;
     Quark's intake + plan skill supplies those. Per-layer overrides and the
-    other §4 knobs travel through :func:`build_quantization_prompt` with a fully
-    populated :class:`QuantizationConfig` (the structured UI path).
+    other :class:`QuantizationConfig` fields travel through
+    :func:`build_quantization_prompt` with a fully populated
+    :class:`QuantizationConfig` (the structured UI path).
 
     Args:
         scheme: The global scheme enum, or the ``none`` sentinel.
