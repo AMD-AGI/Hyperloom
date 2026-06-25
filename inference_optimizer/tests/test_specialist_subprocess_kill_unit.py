@@ -1,7 +1,7 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
 """Coverage for specialist_subprocess process teardown: the SIGTERM/SIGKILL
-``_kill`` ladder and the worktree-remove spawn-failure fallback."""
+``_kill`` ladder."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from __future__ import annotations
 from inference_optimizer.orchestrator import specialist_subprocess as ss
 from inference_optimizer.orchestrator.specialist_subprocess import (
     SpecialistSubprocessDispatcher,
-    _teardown_worktree,
 )
 
 
@@ -90,19 +89,3 @@ def test_kill_terminate_and_kill_raise(monkeypatch):
     monkeypatch.setattr(ss.os, "getpgid", lambda pid: (_ for _ in ()).throw(ProcessLookupError("x")))
     monkeypatch.setattr(ss.time, "sleep", lambda s: None)
     SpecialistSubprocessDispatcher._kill(proc)  # must not raise
-
-
-def test_teardown_worktree_remove_spawn_error(tmp_path, monkeypatch):
-    base = tmp_path / "base"
-    (base / ".git").mkdir(parents=True)
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    (wt / "f.txt").write_text("x", encoding="utf-8")
-
-    def _boom(*a, **k):
-        raise FileNotFoundError("git")
-
-    monkeypatch.setattr(ss.subprocess, "run", _boom)
-    # spawn error is swallowed; rm -rf fallback removes the dir
-    _teardown_worktree(base, wt)
-    assert not wt.exists()

@@ -72,9 +72,9 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset(
         "explore",  # explore / specialists / patch integration
         "analysis",  # profile / roofline / deep_kernel_analysis
         "deep",  # kernel_opt / integrate / operator_tuning / vendor_kernel_config
-        "validate",  # reserved; stack validation is inlined into explore
+        "validate",  # reserved; stack validation runs inside explore
         "finalize",  # report
-        "support",  # recover (the rest were retired)
+        "support",  # recover
     }
 )
 

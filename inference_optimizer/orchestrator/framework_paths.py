@@ -117,8 +117,6 @@ def _find_spec_origin(module_name: str) -> Path | None:
     if spec is None or not spec.origin:
         return None
     origin = Path(spec.origin)
-    if origin.name == "__init__.py":
-        return origin.parent
     return origin.parent
 
 
@@ -245,96 +243,6 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
     )
 
 
-def resolve_sglang_server_args_path() -> tuple[Path, str]:
-    """Resolve SGLang server_args.py for AST discovery.
-
-    Honours ``$INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS``, then the default
-    container path, then ``importlib`` discovery.
-
-    Returns:
-        tuple[Path, str]: ``(path, message)`` where ``message`` is the
-            path string on success or a diagnostic on failure.
-    """
-    override = os.environ.get("INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS", "").strip()
-    if override:
-        p = Path(override)
-        if p.is_file():
-            return p, str(p)
-        return p, f"INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS={override} not found"
-    if _DEFAULT_SGLANG_SERVER_ARGS.is_file():
-        return _DEFAULT_SGLANG_SERVER_ARGS, str(_DEFAULT_SGLANG_SERVER_ARGS)
-    origin = _find_spec_origin("sglang")
-    if origin is not None:
-        candidate = origin / "srt" / "server_args.py"
-        if candidate.is_file():
-            return candidate, str(candidate)
-        for alt in (
-            origin / "python" / "sglang" / "srt" / "server_args.py",
-            origin / "sglang" / "srt" / "server_args.py",
-        ):
-            if alt.is_file():
-                return alt, str(alt)
-    return _DEFAULT_SGLANG_SERVER_ARGS, (f"sglang server_args not found (checked {_DEFAULT_SGLANG_SERVER_ARGS})")
-
-
-def resolve_vllm_arg_utils_path() -> tuple[Path, str]:
-    """Resolve vLLM arg_utils.py for AST discovery.
-
-    Honours ``$INFERENCE_OPTIMIZER_VLLM_ARG_UTILS``, then the default
-    container path, then ``importlib`` discovery.
-
-    Returns:
-        tuple[Path, str]: ``(path, message)`` where ``message`` is the
-            path string on success or a diagnostic on failure.
-    """
-    override = os.environ.get("INFERENCE_OPTIMIZER_VLLM_ARG_UTILS", "").strip()
-    if override:
-        p = Path(override)
-        if p.is_file():
-            return p, str(p)
-        return p, f"INFERENCE_OPTIMIZER_VLLM_ARG_UTILS={override} not found"
-    if _DEFAULT_VLLM_ARG_UTILS.is_file():
-        return _DEFAULT_VLLM_ARG_UTILS, str(_DEFAULT_VLLM_ARG_UTILS)
-    origin = _find_spec_origin("vllm")
-    if origin is not None:
-        candidate = origin / "engine" / "arg_utils.py"
-        if candidate.is_file():
-            return candidate, str(candidate)
-        for alt in (origin / "vllm" / "engine" / "arg_utils.py",):
-            if alt.is_file():
-                return alt, str(alt)
-    return _DEFAULT_VLLM_ARG_UTILS, (f"vllm arg_utils not found (checked {_DEFAULT_VLLM_ARG_UTILS})")
-
-
-def resolve_atom_arg_utils_path() -> tuple[Path, str]:
-    """Resolve atom ``model_engine/arg_utils.py`` for AST discovery.
-
-    Returns ``(Path, str)`` where the str is the file path on success or a
-    diagnostic message on failure.
-
-    Returns:
-        A ``(Path, str)`` tuple of the resolved path and either the file path
-        (on success) or a diagnostic message (on failure).
-    """
-    override = os.environ.get("INFERENCE_OPTIMIZER_ATOM_ARG_UTILS", "").strip()
-    if override:
-        p = Path(override)
-        if p.is_file():
-            return p, str(p)
-        return p, f"INFERENCE_OPTIMIZER_ATOM_ARG_UTILS={override} not found"
-    if _DEFAULT_ATOM_ARG_UTILS.is_file():
-        return _DEFAULT_ATOM_ARG_UTILS, str(_DEFAULT_ATOM_ARG_UTILS)
-    origin = _find_spec_origin("atom")
-    if origin is not None:
-        candidate = origin / "model_engine" / "arg_utils.py"
-        if candidate.is_file():
-            return candidate, str(candidate)
-        for alt in (origin / "atom" / "model_engine" / "arg_utils.py",):
-            if alt.is_file():
-                return alt, str(alt)
-    return _DEFAULT_ATOM_ARG_UTILS, (f"atom arg_utils not found (checked {_DEFAULT_ATOM_ARG_UTILS})")
-
-
 def probe_framework_source_roots_for_env() -> str:
     """Colon-separated roots for ``INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS``.
 
@@ -381,10 +289,7 @@ def summarise_framework_root_discovery(roots: str) -> str:
 
 __all__ = [
     "probe_framework_source_roots_for_env",
-    "resolve_atom_arg_utils_path",
     "resolve_patch_target_roots",
-    "resolve_sglang_server_args_path",
     "resolve_source_file_allowlist",
-    "resolve_vllm_arg_utils_path",
     "summarise_framework_root_discovery",
 ]
