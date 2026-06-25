@@ -415,9 +415,16 @@ class RooflineExecutor:
         # baseline arm; all other reasons (watermark etc.) measure current_best.
         _reason = str(_task_params.get("reason") or "")
         roofline_arm = "baseline" if _reason == "prelude_initial" else "current_best"
-        # Post-kernel-opt roofline writes a separate report (kernel_roofline_opt.json)
-        # so the baseline kernel_roofline.json is preserved for before/after diff.
-        roofline_output_name = "kernel_roofline_opt.json" if _reason == "close_post_opt" else ""
+        # Route each roofline to its own report so the PRELUDE baseline snapshot
+        # (kernel_roofline.json) is never overwritten: prelude keeps the default
+        # file, close_post_opt writes the "after" file, every other reason
+        # (watermark/cycle current_best) writes a rolling current snapshot.
+        if _reason == "prelude_initial":
+            roofline_output_name = ""
+        elif _reason == "close_post_opt":
+            roofline_output_name = "kernel_roofline_opt.json"
+        else:
+            roofline_output_name = "kernel_roofline_current.json"
         ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
         if roofline_arm:
             ta_payload["roofline_arm"] = roofline_arm
