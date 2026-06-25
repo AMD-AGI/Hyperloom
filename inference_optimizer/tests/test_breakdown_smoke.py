@@ -1137,6 +1137,85 @@ def test_attribution_gemm_tuning_pct_emitted_even_when_zero(
     assert sb["gemm_tuning_pct_of_total"] == 0.0
 
 
+# A1.0e: replay_warm_recipe surfaces in source_breakdown
+# Regression: replay_warm_recipe KEEPs used to fall into ``"other"`` (which is
+# never emitted), so a pure warm-recipe-replay session showed a validated_total
+# with no per-source split to back it. It now gets its own headline row.
+def test_attribution_replay_warm_recipe_surfaces_in_source_breakdown(
+    tmp_path: Path,
+) -> None:
+    """A ``replay_warm_recipe`` KEEP contributes to
+    ``replay_warm_recipe_pct_of_total`` instead of being lost to ``other``."""
+    sd = _attribution_fixture(
+        tmp_path,
+        {
+            "cumulative_gain_validated": 19.0,
+            "optimization_stack": [
+                {
+                    "action": "replay_warm_recipe",
+                    "variant_name": "warm_replay",
+                    "gain_pct": 19.0,
+                },
+            ],
+            "gain_per_stack_entry": [
+                {
+                    "action": "replay_warm_recipe",
+                    "variant_name": "warm_replay",
+                    "stack_len_before": 0,
+                    "stack_len_after": 1,
+                    "cum_gain_before": 0.0,
+                    "cum_gain_after": 19.0,
+                    "delta_pct": 19.0,
+                    "ts": "2026-06-01T11:00:00+00:00",
+                },
+            ],
+        },
+    )
+    sb = build(sd)["attribution"]["source_breakdown"]
+    assert sb["replay_warm_recipe_pct_of_total"] == pytest.approx(19.0)
+    # Per-source rows reconcile to validated_total (no "other" black-hole).
+    summed = (
+        sb["geak_pct_of_total"]
+        + sb["oob_pct_of_total"]
+        + sb["explore_pct_of_total"]
+        + sb["replay_warm_recipe_pct_of_total"]
+        + sb["sweep_pct_of_total"]
+        + sb["framework_pr_pct_of_total"]
+        + sb["gemm_tuning_pct_of_total"]
+    )
+    assert summed == pytest.approx(sb["validated_total_pct"], abs=0.05)
+
+
+def test_attribution_replay_warm_recipe_pct_emitted_even_when_zero(
+    tmp_path: Path,
+) -> None:
+    """Always emit ``replay_warm_recipe_pct_of_total`` (default 0.0)."""
+    sd = _attribution_fixture(
+        tmp_path,
+        {
+            "cumulative_gain_validated": 5.0,
+            "optimization_stack": [
+                {"action": "params", "variant_name": "p1", "gain_pct": 5.0},
+            ],
+            "gain_per_stack_entry": [
+                {
+                    "action": "params",
+                    "variant_name": "p1",
+                    "stack_len_before": 0,
+                    "stack_len_after": 1,
+                    "cum_gain_before": 0.0,
+                    "cum_gain_after": 5.0,
+                    "delta_pct": 5.0,
+                    "ts": "2026-06-01T11:00:00+00:00",
+                },
+            ],
+        },
+    )
+    sb = build(sd)["attribution"]["source_breakdown"]
+    assert "replay_warm_recipe_pct_of_total" in sb
+    assert sb["replay_warm_recipe_pct_of_total"] == 0.0
+
+
 def test_attribution_phase_breakdown_gemm_tuning_by_tuned_file(
     tmp_path: Path,
 ) -> None:

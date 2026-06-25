@@ -19,8 +19,6 @@ from .. import session_paths
 
 log = logging.getLogger("hyperloom.research_hints")
 
-_HINT_FIELDS = ("what", "expected_impact", "accuracy_risk", "source", "domain_tags", "status")
-
 
 def _coerce_hint(raw: Any) -> dict[str, Any] | None:
     """Normalize one incoming hint; return ``None`` when it has no source.

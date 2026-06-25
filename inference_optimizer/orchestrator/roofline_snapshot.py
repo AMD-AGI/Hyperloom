@@ -9,11 +9,15 @@ shape consumed by ``report.py`` and downstream frontends.
 
 from __future__ import annotations
 
-import json
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
+
+from ._json_io import read_json
+
+log = logging.getLogger(__name__)
 
 _TABLE_ROW_RE = re.compile(
     r"^\|\s*(?P<label>[^|]+?)\s*\|\s*(?P<value>[^|]+?)\s*\|",
@@ -160,11 +164,8 @@ def extract_top_kernel(analysis_md_path: str | Path) -> dict[str, Any] | None:
     best_pct = -1.0
 
     for metrics_path in sorted(cat_dir.glob("*_metrics.json")):
-        try:
-            data = json.loads(metrics_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict):
+        data = read_json(metrics_path, default=None, require_dict=True)
+        if data is None:
             continue
         category = str(data.get("category") or metrics_path.stem.replace("_metrics", ""))
         for op in data.get("operations") or []:
@@ -193,6 +194,13 @@ def extract_top_kernel(analysis_md_path: str | Path) -> dict[str, Any] | None:
     return best
 
 
+def within_roofline_pct(*, peak: float, achieved: float) -> float | None:
+    """``round(achieved/peak*100, 2)``, or None when either input is non-positive."""
+    if peak <= 0 or achieved <= 0:
+        return None
+    return round(achieved / peak * 100.0, 2)
+
+
 def _compute_within_and_gap(
     *,
     peak: float,
@@ -208,10 +216,79 @@ def _compute_within_and_gap(
         A ``(within_roofline_pct, gap_to_roofline_pct)`` tuple, both ``None``
         when either input is non-positive.
     """
-    if peak <= 0 or achieved <= 0:
+    within = within_roofline_pct(peak=peak, achieved=achieved)
+    if within is None:
         return None, None
-    within = round(achieved / peak * 100.0, 2)
     return within, round(100.0 - within, 2)
+
+
+def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str) -> None:
+    """Add ``roofline_provenance`` (+ ``perfmodel_breakdown`` when the PerfModel succeeds) for *arm*.
+
+    Best-effort and in place: any failure leaves *snapshot* untouched.
+    """
+    try:
+        from .roofline_ceiling import (
+            apply_runtime_dtype,
+            compute_roofline_from_perfmodel,
+            load_model_meta,
+            resolve_runtime_dtype,
+            resolve_runtime_workload,
+        )
+
+        runtime = resolve_runtime_workload(state, arm=arm)
+        meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
+        if meta is None:
+            return
+        rt = resolve_runtime_dtype(state, meta, arm=arm)
+        meta = apply_runtime_dtype(meta, rt)
+        pm_bd = compute_roofline_from_perfmodel(
+            meta=meta,
+            gpu_type=runtime.gpu_type,
+            concurrency=runtime.concurrency,
+            isl=runtime.isl,
+            osl=runtime.osl,
+            num_gpus=runtime.tp,
+            precision_tag=rt.compute_precision_tag or runtime.precision or "bf16",
+        )
+        snapshot["roofline_provenance"] = {
+            "formula": "perfmodel" if pm_bd is not None else "legacy",
+            "runtime_weight_dtype": rt.weight_dtype_tag,
+            "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
+            "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
+            "quantization": rt.quantization,
+            "dtype_source": rt.source,
+            "effective_concurrency": runtime.concurrency,
+            "runtime_tp": runtime.tp,
+            "runtime_isl": runtime.isl,
+            "runtime_osl": runtime.osl,
+            "runtime_precision": runtime.precision,
+            "runtime_framework": runtime.framework,
+        }
+        if pm_bd is not None:
+            snapshot["perfmodel_breakdown"] = {
+                "decode_tok_per_s": pm_bd.decode_tok_per_s,
+                "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
+                "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
+                "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
+                "bound_kind": pm_bd.bound_kind,
+                "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
+                "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
+                "ops": [
+                    {
+                        "name": op.name,
+                        "flops": op.flops,
+                        "bytes_moved": op.bytes_moved,
+                        "ai": op.ai,
+                        "time_s": op.time_s,
+                        "bound": op.bound,
+                        "pct_time": op.pct_time,
+                    }
+                    for op in pm_bd.ops
+                ],
+            }
+    except Exception:  # noqa: BLE001 — PerfModel serialization is best-effort
+        pass
 
 
 def build_roofline_snapshot(
@@ -252,7 +329,7 @@ def build_roofline_snapshot(
     snap: dict[str, Any] = {
         "snapshot_id": snapshot_id,
         "ts": ts or "",
-        # 9fe4609 sidecar pointer — overwritten by record_trace_analyze; empty for offline callers.
+        # sidecar pointer — overwritten by record_trace_analyze; empty for offline callers.
         "kernel_roofline_path": "",
         "compute_pct": None,
         "idle_pct": None,
@@ -288,22 +365,6 @@ def build_roofline_snapshot(
     return snap
 
 
-def _snapshot_id_from_meta(meta: dict[str, Any]) -> int | None:
-    """Extract an integer snapshot id from a metadata dict.
-
-    Args:
-        meta (dict[str, Any]): Snapshot metadata.
-
-    Returns:
-        int | None: The first integer-valued id found, or ``None``.
-    """
-    for key in ("snapshot_id", "roofline_snapshot_id"):
-        raw = meta.get(key)
-        if isinstance(raw, int):
-            return raw
-    return None
-
-
 def _num_delta(latest: float | None, baseline: float | None) -> float | None:
     """Return ``latest - baseline`` rounded to two decimals.
 
@@ -323,7 +384,7 @@ def _num_delta(latest: float | None, baseline: float | None) -> float | None:
 def build_roofline_comparison_from_history(
     snapshots: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    """Build the ``roofline_comparison`` block from :attr:`SharedState.roofline_snapshots` (preferred entry point post PR #321).
+    """Build the ``roofline_comparison`` block from :attr:`SharedState.roofline_snapshots` (preferred entry point for building the comparison block from snapshot history).
 
     Append-only: ``snapshots[0]`` is baseline, ``snapshots[-1]`` the latest refresh.
     Same snapshot_id → single_snapshot mode; distinct ids → before_after with ``delta``. ``None`` when history empty.
@@ -697,4 +758,5 @@ def build_profiler_digest(
 
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 — prompt enrichment must never crash
+        log.debug("build_profiler_digest failed", exc_info=True)
         return ""
