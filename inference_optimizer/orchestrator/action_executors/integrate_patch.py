@@ -1,13 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""IntegratePatchExecutor — PR-A4 (Arbor-into-Hyperloom).
+"""IntegratePatchExecutor.
 
 Serving-lane-locked patch integration: consumes a specialist's worktree
 patches, applies them to the live framework source roots, runs a
 throughput + optional accuracy gate, then KEEPs (advances the stack) or
 REVERTs (rolls back the tree).
 
-Deterministic Python executor (no LLM). Per Inv-5.1, this is the single
+Deterministic Python executor (no LLM). This is the single
 allowed ``git apply`` channel against framework_source_roots (specialists
 author patches into their isolated worktree only).
 
@@ -221,9 +221,8 @@ def _preflight_missing_targets(
     A hallucinated-layout patch (e.g. modifying a CUDA-only file on a ROCm
     build) can never apply; flagging it here yields an actionable advisory
     instead of an opaque ``git_apply_failed`` after a wasted apply attempt.
-    Defense-in-depth: ``specialist_patch_safety`` already drops these at
-    authoring time, but patches supplied directly via ``params.patches``
-    bypass that gate.
+    Patches supplied directly via ``params.patches`` bypass the
+    authoring-time ``specialist_patch_safety`` gate, so they are checked here.
 
     Args:
         framework_root: The git checkout the patches target.
@@ -549,11 +548,9 @@ def _patch_touched_paths(
 
     Per header pair (``old`` ``---``, ``new`` ``+++``):
       * created / modified → the ``new`` target exists post-apply → emit it.
-      * deleted (Issue 6) → ``new`` is ``/dev/null`` (or its target is gone)
+      * deleted → ``new`` is ``/dev/null`` (or its target is gone)
         and ``old`` existed pre-apply → emit the ``old`` path so the subsequent
         ``git add -A -- <path>`` stages the *removal* of a tracked file.
-        Without this a pure-deletion KEEP committed nothing, and a later cycle's
-        ``git checkout -- .`` REVERT resurrected the deleted file.
     A header that resolves to neither (matches nothing pre or post) is dropped
     so ``git add`` cannot error on a bogus pathspec.
 
@@ -605,7 +602,7 @@ def _git_commit_kept(
     message: str,
     paths: list[str],
 ) -> tuple[bool, str]:
-    """Commit only the patch-touched ``paths`` to git (R1 cross-cycle durability).
+    """Commit only the patch-touched ``paths`` to git for cross-cycle durability.
 
     In the cyclic phase machine, KEEP patches accumulate across macro-cycles as
     *uncommitted* working-tree edits. A later cycle's REVERT may fall back to
@@ -683,7 +680,7 @@ def _resolve_patch_paths(
     filesystem scan of ``specialist_workspace/{worktree/,}patches/``.
     Entries normalised to absolute Paths; missing ones logged + dropped.
 
-    Security (Issue 5a): a resolved patch path must live inside the specialist
+    Security: a resolved patch path must live inside the specialist
     workspace (or its worktree). ``params.patches`` is LLM-/specialist-
     controllable, so an absolute path pointing outside the sandbox (another
     session's patch, ``/etc/...``) is dropped — otherwise it would be read and
@@ -817,7 +814,7 @@ def _resolve_artifact_specs(
     explicit_artifacts: list[dict[str, Any]] | None,
     done_payload: dict[str, Any] | None,
 ) -> tuple[list[_ArtifactSpec], list[dict[str, str]]]:
-    """Resolve non-diff tuned artifacts to install (B6 / §3.5 contract).
+    """Resolve non-diff tuned artifacts to install.
 
     Order: ``params.artifacts`` → ``specialist_done.artifacts_written``. Each
     entry is ``{source, target, kind, description}``: ``source`` is resolved
@@ -1029,7 +1026,7 @@ class IntegratePatchExecutor:
             if isinstance(cc, dict):
                 config_changes = {str(k): str(v) for k, v in cc.items()}
 
-        # §3.5: non-diff tuned artifacts (e.g. an autotuned config JSON) are a
+        # Non-diff tuned artifacts (e.g. an autotuned config JSON) are a
         # first-class integrable output alongside unified diffs + config_changes.
         explicit_artifacts = params.get("artifacts")
         artifact_specs, artifact_resolve_errors = _resolve_artifact_specs(
@@ -1108,7 +1105,7 @@ class IntegratePatchExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
-        # Long-run #4: mark the non-transactional integrate window before any
+        # Mark the non-transactional integrate window before any
         # framework tree mutation. The Coordinator clears this after promoting
         # the final KEEP/REVERT/APPLY_FAILED result into SharedState.
         if shared_state is not None:
@@ -1305,7 +1302,7 @@ class IntegratePatchExecutor:
             })
 
         # Stage 5: KEEP / REVERT decision.
-        # B4: the Coordinator seeds ``base_tput`` per-dispatch, but a direct
+        # The Coordinator seeds ``base_tput`` per-dispatch, but a direct
         # invocation (resume path / test / external caller) may bypass that and
         # leave it 0.0, which would make ``delta_pct`` None and auto-REVERT a
         # genuinely valid patch. Fall back to the live ``SharedState`` anchor
@@ -1423,7 +1420,7 @@ class IntegratePatchExecutor:
             tps_delta_pct=float(delta_pct or 0.0),
             extra=extra,
         )
-        # R1: in cyclic mode, commit the KEEP so a later macro-cycle's REVERT
+        # In cyclic mode, commit the KEEP so a later macro-cycle's REVERT
         # checkout fallback can't wipe this win (best-effort, non-fatal).
         try:
             from ..phase_state import is_cyclic_phases_enabled
@@ -1496,7 +1493,7 @@ class IntegratePatchExecutor:
         tps_delta_pct: float,
         extra: dict[str, Any],
     ) -> None:
-        """F2-5: append a JSONL record to ``lessons.jsonl`` when the patch
+        """Append a JSONL record to ``lessons.jsonl`` when the patch
         came from the FRAMEWORK_PR phase.
 
         No-op for other provenance or when both dedup keys (``fa_pr_url`` /
@@ -1742,9 +1739,8 @@ class IntegratePatchExecutor:
                 "ttft_ms": getattr(r, "ttft_ms", None),
                 "itl_ms": getattr(r, "itl_ms", None),
                 # ``VariantResult`` exposes the benchmark dir as ``workspace``
-                # (there is no ``result_dir`` attribute); using the wrong name
-                # left ``_grade_accuracy`` with an empty path so the accuracy
-                # gate silently skipped on every patch.
+                # (there is no ``result_dir`` attribute); ``_grade_accuracy``
+                # needs this path to locate the accuracy artifacts.
                 "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),

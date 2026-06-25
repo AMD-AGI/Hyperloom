@@ -1,9 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""ExploreExecutor — v0.8 M3.
+"""ExploreExecutor.
 
-Merges the legacy ``backends`` / ``params`` / ``validate_stack`` actions
-into one unified ``explore`` action (one yaml meta, one
+The unified ``explore`` action (one yaml meta, one
 ``SharedState.explore_search`` ledger, one executor).
 
 Per-variant flow:
@@ -17,10 +16,9 @@ Per-variant flow:
    the threshold (default baseline_tput * 1.005) the variant is evicted
    (``KEEP_UNSTABLE`` → REVERT).
 
-Follows the TBO "one change at a time" rule (KB_design §3.4 "Inv-3
-serving GPU single tenant" + §3 "iron rules"), unlike v0.6's
-run-batch-then-pick-best. ``provenance`` passes through to the ledger
-unchanged so the M5 specialist path can fill ``'specialist:<domain>'``.
+Follows the "one change at a time" rule (single-tenant serving GPU).
+``provenance`` passes through to the ledger unchanged so the specialist
+path can fill ``'specialist:<domain>'``.
 
 Result schema (returned to the bus):
 
@@ -97,7 +95,7 @@ _now_iso = functools.partial(now_iso, "auto")
 
 
 def _initial_explore_search_state() -> dict[str, Any]:
-    """Empty :attr:`SharedState.explore_search` ledger (M3 schema v1).
+    """Empty :attr:`SharedState.explore_search` ledger.
 
     Returns:
         dict[str, Any]: A fresh explore-search ledger with all sections
@@ -146,7 +144,7 @@ def _coerce_args_str(value: Any) -> str:
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     """Convert the LLM/specialist grid payload into GridVariant objects.
 
-    Variant dict shape (M3, KB_design §3.4 §5.1):
+    Variant dict shape:
 
         {
           "name": str (required, unique-in-round),
@@ -570,7 +568,7 @@ class ExploreExecutor:
             overtime_kill_ratio = float(overtime_kill_ratio_raw) if overtime_kill_ratio_raw is not None else 0.0
         except (TypeError, ValueError):
             overtime_kill_ratio = 0.0
-        # Q4: WARM measure-round anchor (client-only, no boot). When warm-decision
+        # WARM measure-round anchor (client-only, no boot). When warm-decision
         # is active the overtime kill anchors on this so a one-time cold boot /
         # aiter recompile no longer trips it; falls back to the cold baseline.
         baseline_warm_runtime_sec_raw = params.get("baseline_warm_runtime_sec")
@@ -883,11 +881,11 @@ class ExploreExecutor:
         lifecycle_framework = str(lifecycle.get("framework") or "")
         lifecycle_port = int(lifecycle.get("port") or 0)
 
-        # Q4-a: warm-decision mode. Run a discarded cold *warmup* round first so
+        # Warm-decision mode. Run a discarded cold *warmup* round first so
         # the decision round reuses the hot server (client-only) and is measured
         # warm — apples-to-apples with how ``baseline_tput`` is measured (its own
         # warmup+measure double-run). Requires server_lifecycle reuse; otherwise
-        # we cannot keep a server hot between rounds, so fall back to the legacy
+        # we cannot keep a server hot between rounds, so fall back to a
         # single cold-decision run. Opt out with
         # INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION=0.
         warm_decision_enabled = os.environ.get(
@@ -920,7 +918,7 @@ class ExploreExecutor:
                     {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
                 try:
-                    # Q4-a: warm-decision warmup round. Boot the variant's server
+                    # Warm-decision warmup round. Boot the variant's server
                     # once and DISCARD the (cold) measurement so the decision
                     # round below runs warm / client-only — apples-to-apples with
                     # baseline_tput. cleanup=false keeps the server hot; NO
@@ -1030,7 +1028,7 @@ class ExploreExecutor:
                     r = results[0]
 
                     # Overtime gate fired: record a ``KILLED_OVERTIME`` row with
-                    # runtime_sec + wall_clock_ratio (no faked tput/gain, per Q3),
+                    # runtime_sec + wall_clock_ratio (no faked tput/gain),
                     # skip all downstream gates + dedup, leave the stack unadvanced.
                     if getattr(r, "killed_overtime", False):
                         variant_runtime = float(r.runtime_sec or 0.0)
@@ -1217,8 +1215,7 @@ class ExploreExecutor:
                             # reuse round 1's hot server (cleanup=true tears it
                             # down) so the measurement is warm and baseline-
                             # comparable; otherwise a fresh cold boot. No
-                            # ``soft_deadline_sec`` (parity with the legacy
-                            # rebench).
+                            # ``soft_deadline_sec`` is applied for the rebench.
                             rebench_variant = GridVariant(
                                 name=f"{gv.name}__stack_rebench",
                                 extra_server_args=gv.extra_server_args,
@@ -1252,8 +1249,8 @@ class ExploreExecutor:
                             stack_rebench_workspace = rebench.workspace
                             stack_rebench_warnings = rebench.warnings
                             stable_floor = rebench.stable_floor
-                            # KEEP_UNSTABLE: rebench missed the stability floor —
-                            # evict the KEEP and treat as REVERT.
+                            # Rebench missed the stability floor: evict the
+                            # KEEP and treat as REVERT.
                             if not rebench.stable:
                                 log.warning(
                                     "explore: variant %s KEEP -> KEEP_UNSTABLE "
@@ -1393,7 +1390,7 @@ class ExploreExecutor:
 
         # Flat per-variant outcomes for the Coordinator's per-variant
         # fact-write hook (KEEP / REVERT / FAILED / KEEP_UNSTABLE /
-        # SKIPPED_DEDUP from this round). JSON-friendly for older readers.
+        # SKIPPED_DEDUP from this round). Serialized as plain JSON.
         reasons_by_fp: dict[str, str] = {
             str(r.get("fingerprint") or ""): str(r.get("reason") or "")
             for r in rejected_update
@@ -1443,9 +1440,9 @@ class ExploreExecutor:
                     "scope": str(te.get("scope") or ""),
                     "metrics": metrics,
                     "reason": reasons_by_fp.get(fp_key, ""),
-                    # Carry the variant knobs so the journal can classify the change
-                    # kind (backend / param / env) at decision-write time -- without
-                    # this dict ``classify_change_kind`` always falls back to OTHER.
+                    # Carry the variant knobs so the journal's
+                    # ``classify_change_kind`` can classify the change kind
+                    # (backend / param / env) at decision-write time.
                     "variant": {
                         "name": str(te.get("name") or ""),
                         "extra_server_args": str(te.get("extra_server_args") or ""),
