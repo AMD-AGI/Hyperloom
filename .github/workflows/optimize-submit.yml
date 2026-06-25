@@ -72,9 +72,13 @@ on:
         required: false
         default: ''
       batch_index:
-        description: 'Batch index (0-based) into candidates_file. Ignored if batch_size is 0.'
+        description: 'Batch index (0-based) into candidates_file. Leave EMPTY to use the max_hours-paced rotation (optionally pinned via cron_now); set a number to force a specific slice. Ignored if batch_size is 0.'
         required: false
-        default: '0'
+        default: ''
+      cron_now:
+        description: 'Override "now" (ISO-8601 UTC, e.g. 2026-06-25T01:00:00Z) for the batch rotation when batch_index is empty. Used to backfill a slice aligned with the schedule cycle. Empty = real clock.'
+        required: false
+        default: ''
       batch_size:
         description: 'Slice size for candidates_file. 0 = take all rows.'
         required: false
@@ -238,7 +242,12 @@ jobs:
       # 4/16) steps batch 0,1,2,... and wraps, marching the whole pool in
       # order then repeating. Anchored so the first fire at/after the anchor is
       # batch 0 (= not-run head, since the pool is ordered not-run-first).
+      # Empty on schedule (and when a manual dispatch leaves it blank) ->
+      # max_hours-paced rotation in generate_hf_matrix. A number forces a slice.
       INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '' || github.event.inputs.batch_index }}
+      # Optional "now" override for the rotation on manual backfills; empty on
+      # schedule so the real clock is used.
+      INPUT_CRON_NOW:        ${{ github.event_name == 'schedule' && '' || github.event.inputs.cron_now }}
       INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '240' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
@@ -248,6 +257,10 @@ jobs:
       # batch size at 240.
       INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
       INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
+      # max_hours paces the schedule batch rotation (one batch advances per
+      # max_hours of wall-clock time) in generate_hf_matrix. schedule has no
+      # inputs -> empty -> generate_hf_matrix falls back to its 6h default.
+      INPUT_MAX_HOURS:                ${{ github.event.inputs.max_hours }}
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
