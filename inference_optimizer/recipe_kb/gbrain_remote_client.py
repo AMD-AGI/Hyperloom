@@ -65,6 +65,15 @@ _RECIPE_SCAN_CAP = 5000
 _LIST_PAGE_SIZE = 100
 _SCAN_CACHE_TTL_SEC = 60.0
 
+# Wall-clock budget for one full ``_scan_recipes`` pass. ``search`` fetches the
+# whole recipe corpus (list_pages + a get_page per slug) and filters
+# client-side, so on a slow / SSE-quirky gateway that scan can dominate the
+# Coordinator boot (the T0 warm-start anchor). gbrain is a READ side-channel and
+# the local store is always available, so the scan is best-effort: when the
+# budget is exceeded it returns whatever it has gathered so far rather than
+# blocking the foreground loop. Override via ``GBRAIN_RECIPE_SCAN_BUDGET_SEC``.
+_RECIPE_SCAN_BUDGET_SEC = 20.0
+
 
 class GbrainRemoteError(RemoteRecipeClientError):
     """Raised on an unrecoverable gbrain MCP interaction.
@@ -103,6 +112,61 @@ class _GbrainMcp:
         self._token = token
         self._timeout = max(0.5, float(timeout_sec))
 
+    def _read_body(self, resp: Any) -> str:
+        """Read the MCP response body without blocking on a non-closing stream.
+
+        gbrain's ``/mcp`` endpoint answers with ``text/event-stream`` framing
+        (``event: message`` + a single ``data: {json}`` line). Some gateway /
+        proxy configurations keep the TCP connection open after emitting that
+        line instead of sending EOF, so a plain ``resp.read()`` (read-to-EOF)
+        blocks in ``socket.readinto`` for the whole session — the per-socket
+        timeout never fires because the connection is merely idle, not closed.
+        That froze the Coordinator boot at the T0 recipe warm-start anchor even
+        though that step is meant to be best-effort and non-blocking.
+
+        This reads incrementally under a hard wall-clock deadline and returns as
+        soon as a complete SSE ``data:`` line (terminated by a blank line or a
+        newline) is available, so a non-terminating stream can no longer hang
+        the foreground loop. JSON (non-SSE) bodies with a ``Content-Length`` are
+        still read whole; the deadline only caps the pathological open-stream
+        case.
+
+        Args:
+            resp: The open ``http.client.HTTPResponse`` from ``urlopen``.
+
+        Returns:
+            The decoded response body text.
+        """
+        deadline = time.monotonic() + max(0.5, float(self._timeout))
+        chunks: list[bytes] = []
+        buf = b""
+        # Non-SSE JSON with a declared length: read it whole (bounded by the
+        # socket timeout already applied by urlopen).
+        ctype = ""
+        try:
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+        except Exception:  # noqa: BLE001 — header access is best-effort
+            ctype = ""
+        if "text/event-stream" not in ctype and resp.headers.get("Content-Length"):
+            return resp.read().decode()
+        while True:
+            if time.monotonic() >= deadline:
+                break
+            try:
+                piece = resp.read(4096)
+            except (OSError, ValueError):
+                break
+            if not piece:
+                break
+            chunks.append(piece)
+            buf += piece
+            # For SSE, one complete ``data:`` record (blank-line terminated, or
+            # at least one full line after a ``data:`` prefix) is all these MCP
+            # calls ever return — stop as soon as we have it.
+            if b"\n\n" in buf or (b"data:" in buf and buf.rstrip().endswith(b"}")):
+                break
+        return b"".join(chunks).decode("utf-8", "replace")
+
     def call(self, tool: str, arguments: dict[str, Any]) -> Any:
         """Invoke an MCP tool over JSON-RPC and return its decoded result.
 
@@ -136,7 +200,7 @@ class _GbrainMcp:
         )
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                raw = resp.read().decode()
+                raw = self._read_body(resp)
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise GbrainRemoteError(f"gbrain {tool} transport error: {exc!r}") from exc
         try:
@@ -459,6 +523,24 @@ class GbrainRemoteRecipeClient:
                 log.warning("invalid GBRAIN_RECIPE_SCAN_TTL_SEC=%r; using default", raw)
         return _SCAN_CACHE_TTL_SEC
 
+    def _scan_budget(self) -> float:
+        """Return the wall-clock budget (seconds) for one full recipe scan.
+
+        ``0`` disables the budget (unbounded scan). Override via
+        ``GBRAIN_RECIPE_SCAN_BUDGET_SEC``.
+
+        Returns:
+            The value from ``GBRAIN_RECIPE_SCAN_BUDGET_SEC`` when valid,
+            otherwise the default budget.
+        """
+        raw = os.environ.get("GBRAIN_RECIPE_SCAN_BUDGET_SEC", "").strip()
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                log.warning("invalid GBRAIN_RECIPE_SCAN_BUDGET_SEC=%r; using default", raw)
+        return _RECIPE_SCAN_BUDGET_SEC
+
     def _get_page_recipe(self, slug: str) -> dict[str, Any] | None:
         """Fetch one gbrain recipe page by slug and project it.
 
@@ -505,7 +587,18 @@ class GbrainRemoteRecipeClient:
         cap = min(int(limit) if limit and limit > 0 else _RECIPE_SCAN_CAP, _RECIPE_SCAN_CAP)
         pages = 0
         max_pages = max(1, (_RECIPE_SCAN_CAP // _LIST_PAGE_SIZE) + 3)
+        # Best-effort wall-clock budget: gbrain is a read side-channel and the
+        # local store is always available, so a full corpus scan must not
+        # dominate the foreground (T0 boot) loop. When the budget is exceeded we
+        # return what we have rather than blocking. A budget hit is NOT cached so
+        # a later tick can complete the scan when the gateway is responsive.
+        budget = self._scan_budget()
+        deadline = time.monotonic() + budget if budget > 0.0 else None
+        budget_hit = False
         while len(out) < cap and pages < max_pages:
+            if deadline is not None and time.monotonic() >= deadline:
+                budget_hit = True
+                break
             params: dict[str, Any] = {
                 "type": "recipe",
                 "limit": _LIST_PAGE_SIZE,
@@ -518,6 +611,9 @@ class GbrainRemoteRecipeClient:
                 break
             new_slugs = 0
             for entry in batch:
+                if deadline is not None and time.monotonic() >= deadline:
+                    budget_hit = True
+                    break
                 slug = entry.get("slug") if isinstance(entry, dict) else None
                 if not slug or slug in seen_slugs:
                     continue
@@ -529,15 +625,26 @@ class GbrainRemoteRecipeClient:
                     if len(out) >= cap:
                         break
             pages += 1
+            if budget_hit:
+                break
             if len(batch) < _LIST_PAGE_SIZE:
                 break
             last = batch[-1].get("updated_at") if isinstance(batch[-1], dict) else None
             if not last or (last == cursor and new_slugs == 0):
                 break
             cursor = last
+        if budget_hit:
+            log.warning(
+                "gbrain recipe scan exceeded %.1fs budget after %d page(s)/%d recipe(s); "
+                "returning partial results (warm-start is best-effort)",
+                budget,
+                pages,
+                len(out),
+            )
         out.sort(key=lambda r: str(r.get("updated_at") or ""), reverse=True)
-        self._scan_cache = list(out)
-        self._scan_cache_ts = time.monotonic()
+        if not budget_hit:
+            self._scan_cache = list(out)
+            self._scan_cache_ts = time.monotonic()
         return out
 
     # -- read surface (mirrors RemoteRecipeClient) -------------------------

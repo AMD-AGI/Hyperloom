@@ -394,6 +394,93 @@ class SqliteLeaseBackend:
                 reaped.append(row)
         return reaped
 
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        """Best-effort liveness probe for a lease-holder PID.
+
+        Uses ``os.kill(pid, 0)`` which raises ``ProcessLookupError`` for a dead
+        PID and ``PermissionError`` for a live PID owned by another user (treated
+        as alive). Any other error is treated as alive so we never reap a holder
+        we cannot positively prove dead.
+        """
+        if pid <= 0:
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return True
+        return True
+
+    async def reap_dead_holders(self) -> list[dict]:
+        """Release leases whose holder process is no longer alive.
+
+        A worker that crashes (segfault, OOM-kill, hipcc abort mid-build, a
+        killed subprocess) leaves its ``(lane, holder_id)`` rows behind until the
+        TTL fires — which for serving lanes is hours. That strands every
+        capacity-1 serving lane and blocks all queued GPU work behind a dead
+        task. This sweep checks each not-yet-expired lease's recorded ``pid`` and
+        deletes the rows whose PID is provably gone, emitting one
+        ``lease_dead_holder_reaped`` event per deleted row so the dispatcher
+        re-evaluates the freed lane immediately instead of waiting out the TTL.
+
+        Rows with a null / non-positive pid are left untouched (we cannot prove
+        them dead). Returns the reaped rows as dicts.
+        """
+        now_iso_str = _now_iso()
+        reaped: list[dict] = []
+        async with self.db.transaction() as cur:
+            cur.execute(
+                "SELECT * FROM leases WHERE expires_at > ?",
+                (now_iso_str,),
+            )
+            live_rows = [dict(r) for r in cur.fetchall()]
+            for row in live_rows:
+                pid_raw = row.get("pid")
+                try:
+                    pid = int(pid_raw) if pid_raw is not None else 0
+                except (TypeError, ValueError):
+                    pid = 0
+                if pid <= 0 or self._pid_alive(pid):
+                    continue
+                cur.execute(
+                    "DELETE FROM leases WHERE lane=? AND holder_id=?",
+                    (row["lane"], row["holder_id"]),
+                )
+                cur.execute(
+                    "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
+                    "in_reply_to, payload, priority, ts) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        uuid.uuid4().hex,
+                        "resource_lock",
+                        "*",
+                        "lease_dead_holder_reaped",
+                        None,
+                        json.dumps(
+                            {
+                                "lane": row["lane"],
+                                "previous_holder": row["holder_id"],
+                                "task_id": row.get("task_id"),
+                                "dead_pid": pid,
+                            }
+                        ),
+                        2,
+                        now_iso_str,
+                    ),
+                )
+                reaped.append(row)
+        if reaped:
+            log.warning(
+                "resource_lock: reaped %d lease(s) from dead holders: %s",
+                len(reaped),
+                ", ".join(f"{r['lane']}<-{r['holder_id'][:12]}(pid={r.get('pid')})" for r in reaped),
+            )
+        return reaped
+
     async def active_lanes(self) -> list[str]:
         """Return the distinct lane names with at least one live holder.
 
@@ -546,6 +633,17 @@ class ResourceLockManager:
             list[dict]: The reaped lease rows.
         """
         return await self.backend.reap_expired()
+
+    async def reap_dead_holders(self) -> list[dict]:
+        """Release leases whose holder process is dead via the backend.
+
+        Returns:
+            list[dict]: The reaped lease rows (dead-PID holders).
+        """
+        fn = getattr(self.backend, "reap_dead_holders", None)
+        if not callable(fn):
+            return []
+        return await fn()
 
     async def active_lanes(self) -> list[str]:
         """Return the distinct lanes with at least one live holder.

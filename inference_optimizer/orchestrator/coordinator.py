@@ -606,6 +606,17 @@ class Coordinator:
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
+        # Minimum ticks between orchestration-memory compactions. A compaction
+        # resets the persistent conversation and forces a full SEED re-push next
+        # tick, so allowing two compactions back-to-back can wedge the run in a
+        # checkpoint-every-tick loop (the SEED's own tokens re-trip the budget).
+        # A true near-window emergency bypasses this floor (see _maybe_checkpoint).
+        try:
+            self._checkpoint_min_tick_gap: int = max(
+                1, int(os.environ.get("INFERENCE_OPTIMIZER_CHECKPOINT_MIN_TICK_GAP", "").strip() or 3)
+            )
+        except (TypeError, ValueError):
+            self._checkpoint_min_tick_gap = 3
         # Consecutive degenerate checkpoint replies (#1); resets on a good one.
         self._consec_degenerate_ckpt: int = 0
         # Disable checkpointing entirely via env.
@@ -1064,6 +1075,37 @@ class Coordinator:
         # Hard context-token guardrail: near the window we MUST compact even when
         # the LLM summary is degenerate (deterministic fallback) to avoid overflow.
         hard = self._checkpoint_policy.is_hard_compaction(tracker.context_tokens_now)
+        # Anti-thrash floor for the TOKEN-budget triggers only. A compaction
+        # RESETS the persistent conversation, so the next tick re-sends the full
+        # SEED whose own token cost re-trips the soft/hard budget — looping
+        # forever (checkpoint every tick → conversation never persists →
+        # orchestration loses cross-tick memory and re-does discovery instead of
+        # progressing). When the token budget is what's firing, require a minimum
+        # tick gap between compactions; genuine cadence triggers (every_ticks /
+        # minutes / chars / phase boundary) are unaffected. A true near-window
+        # emergency (>= 98% of the window — unreachable by a single SEED) always
+        # bypasses the floor so we never overflow the context window.
+        suppress_token_trigger = False
+        if not force and ticks_since < max(1, int(getattr(self, "_checkpoint_min_tick_gap", 2) or 2)):
+            ctx_token_hard = int(getattr(self._checkpoint_policy, "context_token_hard", 0) or 0)
+            ctx_token_soft = int(getattr(self._checkpoint_policy, "context_token_soft", 0) or 0)
+            ctx_now = int(tracker.context_tokens_now)
+            token_due = (
+                (ctx_token_hard > 0 and ctx_now >= ctx_token_hard)
+                or (ctx_token_soft > 0 and ctx_now >= ctx_token_soft)
+            )
+            emergency_ceiling = (
+                int(ctx_token_hard / max(0.01, _orch_mem.DEFAULT_CONTEXT_TOKEN_HARD_FRACTION) * 0.98)
+                if ctx_token_hard > 0
+                else 0
+            )
+            in_emergency = emergency_ceiling > 0 and ctx_now >= emergency_ceiling
+            suppress_token_trigger = token_due and not in_emergency
+            if suppress_token_trigger:
+                # Suppress the token-driven hard flag so the freshly-seeded
+                # conversation can persist; fall through to the cadence check,
+                # which will return False unless a non-token trigger fired.
+                hard = False
         # Authoritative growth signal is the context-token water level; the char
         # count is a fallback for backends that don't report token usage.
         if (
@@ -1074,7 +1116,10 @@ class Coordinator:
                 minutes_since_last=minutes_since,
                 chars_since_last=tracker.chars_since_last,
                 phase_changed=phase_changed,
-                context_tokens_now=tracker.context_tokens_now,
+                # During the anti-thrash window, zero out the token level so the
+                # soft-token trigger can't re-fire the compaction we just
+                # suppressed; cadence triggers still evaluate normally.
+                context_tokens_now=0 if suppress_token_trigger else tracker.context_tokens_now,
             )
         ):
             return False
@@ -10804,6 +10849,26 @@ class Coordinator:
         dispatchable work before returning (one pump per tick). Each GPU lease
         is bound to its task_id and released by the runner.
         """
+        # Dead-holder self-heal (runs EVERY tick, before scanning the queue):
+        # a crashed worker leaves its serving lanes leased and its task stuck
+        # 'running' until the multi-hour TTL fires — which strands every queued
+        # GPU task behind it and makes the explore-dedup deny new delegates as
+        # duplicates of a zombie. Detect the dead PID immediately so the lanes
+        # free and the stuck task fails (retry-eligible) this same tick.
+        try:
+            dead_tasks = await self.tasks.reclaim_dead_running(reason="dead_holder_pump")
+            if dead_tasks:
+                log.warning(
+                    "dispatcher: reclaimed %d running task(s) with dead holders: %s",
+                    len(dead_tasks),
+                    ", ".join(t[:12] for t in dead_tasks),
+                )
+        except Exception:  # noqa: BLE001 — self-heal never aborts the pump
+            log.exception("dispatcher: dead-running task reclaim failed")
+        try:
+            await self.locks.reap_dead_holders()
+        except Exception:  # noqa: BLE001
+            log.exception("dispatcher: dead-holder lease reap failed")
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set: a
         # fast task can complete and be reaped (leaving ``inflight``) before its

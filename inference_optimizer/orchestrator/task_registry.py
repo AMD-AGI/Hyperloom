@@ -434,6 +434,79 @@ class TaskRegistry:
                 reclaimed.append(task_id)
         return reclaimed
 
+    async def reclaim_dead_running(
+        self,
+        *,
+        reason: str = "dead_holder",
+    ) -> list[str]:
+        """Fail running tasks whose lease-holder process is provably dead.
+
+        The TTL-based :meth:`reclaim_expired_running` only fires once a task's
+        ``lease_ttl_sec`` (hours, for serving lanes) elapses. When a worker
+        crashes outright (segfault / OOM-kill / aborted build / killed
+        subprocess) its lease-holder PID is gone immediately, yet the row stays
+        ``running`` — stranding its lanes and making the explore-dedup deny every
+        new delegate as a duplicate of a zombie task.
+
+        This joins ``running`` tasks to the ``leases`` table on ``task_id`` and
+        transitions ``running -> failed`` for any whose recorded ``pid`` is no
+        longer alive (and not the current process). Tasks with no lease row or a
+        null/non-positive pid are left untouched (cannot prove dead). Returns the
+        reclaimed task_ids. Idempotent.
+
+        Args:
+            reason: Reason label recorded in the transition history evidence.
+
+        Returns:
+            The reclaimed task ids (empty when none had a dead holder).
+        """
+        import os as _os
+
+        def _alive(pid: int) -> bool:
+            if pid <= 0:
+                return True
+            try:
+                _os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except OSError:
+                return True
+            return True
+
+        self_pid = _os.getpid()
+        reclaimed: list[str] = []
+        async with self.db.transaction() as cur:
+            cur.execute(
+                "SELECT t.task_id AS task_id, t.history AS history, "
+                "MAX(l.pid) AS pid "
+                "FROM tasks t JOIN leases l ON l.task_id = t.task_id "
+                "WHERE t.state='running' GROUP BY t.task_id"
+            )
+            rows = [(r["task_id"], r["history"], r["pid"]) for r in cur.fetchall()]
+            now_iso = _now_iso()
+            for task_id, history_json, pid_raw in rows:
+                try:
+                    pid = int(pid_raw) if pid_raw is not None else 0
+                except (TypeError, ValueError):
+                    pid = 0
+                if pid <= 0 or pid == self_pid or _alive(pid):
+                    continue
+                history = json.loads(history_json)
+                history.append(
+                    {
+                        "from": "running",
+                        "to": "failed",
+                        "ts": now_iso,
+                        "evidence": {"reason": reason, "dead_pid": pid},
+                    }
+                )
+                cur.execute(
+                    "UPDATE tasks SET state='failed', history=?, updated_at=? WHERE task_id=?",
+                    (json.dumps(history), now_iso, task_id),
+                )
+                reclaimed.append(task_id)
+        return reclaimed
+
     async def cancel_family(self, family_kinds: list[str]) -> list[str]:
         """Bulk-cancel queued tasks of the given kinds (Robustness prune_branch); returns cancelled task_ids.
 

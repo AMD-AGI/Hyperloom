@@ -507,6 +507,81 @@ async def test_reap_expired_keys_on_holder_id(conn, locks):
     assert surviving == ["live"]
 
 
+@pytest.mark.asyncio
+async def test_reap_dead_holders_releases_crashed_pid(conn, locks):
+    """A not-yet-expired lease whose holder PID is dead is reaped immediately."""
+    import os
+
+    # PID 1 is alive (init); a very high PID is (almost certainly) dead.
+    dead_pid = 2_147_483_646
+    assert dead_pid != os.getpid()
+    set_lane_capacity(conn.raw, "benchmark_lane", 1)
+    # Long-lived (not expired) lease held by a dead PID.
+    conn.raw.execute(
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
+        "acquired_at, expires_at, heartbeat_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "benchmark_lane",
+            "zombie",
+            "tz",
+            "explore",
+            dead_pid,
+            "2026-01-01T00:00:00+00:00",
+            "2099-12-31T23:59:59+00:00",  # NOT expired
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    # A second lane held by a live PID (this process) must survive.
+    conn.raw.execute(
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
+        "acquired_at, expires_at, heartbeat_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "profile_lane",
+            "alive",
+            "ta",
+            "profile",
+            os.getpid(),
+            "2026-01-01T00:00:00+00:00",
+            "2099-12-31T23:59:59+00:00",
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    conn.raw.commit()
+    reaped = await locks.reap_dead_holders()
+    assert any(r["holder_id"] == "zombie" for r in reaped)
+    assert all(r["holder_id"] != "alive" for r in reaped)
+    holders = await locks.lane_holders()
+    assert "benchmark_lane" not in holders  # freed
+    assert holders.get("profile_lane") == 1  # live holder survives
+
+
+@pytest.mark.asyncio
+async def test_reap_dead_holders_skips_null_pid(conn, locks):
+    """A lease with a null/zero pid is never reaped (cannot prove dead)."""
+    conn.raw.execute(
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
+        "acquired_at, expires_at, heartbeat_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "benchmark_lane",
+            "nopid",
+            "tn",
+            "explore",
+            0,
+            "2026-01-01T00:00:00+00:00",
+            "2099-12-31T23:59:59+00:00",
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    conn.raw.commit()
+    reaped = await locks.reap_dead_holders()
+    assert reaped == []
+    holders = await locks.lane_holders()
+    assert holders.get("benchmark_lane") == 1
+
+
 # 6. Manager counters + observability
 @pytest.mark.asyncio
 async def test_manager_counters_track_acquire_busy_full(conn, locks):
