@@ -179,6 +179,47 @@ def _serve_and_bench(arm: str, backend: str, model: str, tp: int, port: int, gpu
     return {"arm": arm, "status": "ok" if reps_out else "no_results", "reps": reps_out, "median": med}
 
 
+def _engagement_proof(server_log: Path, target: Path, is_aiter_cu: bool) -> dict[str, Any]:
+    """Was the patched kernel ACTUALLY on the live serving path? (trust, not policy).
+
+    A throughput delta is meaningless if the patch never engaged. We DO NOT accept/reject on this
+    — we only report it so a ~0% result is distinguishable from "patch silently not applied". The
+    signal is backend/kernel-generic:
+      * aiter `.cu` patch: the patched server must have REBUILT the edited kernel (aiter JIT build
+        markers in the server log, e.g. "start build [module_..." / "build ... .so"), since we
+        removed the prebuilt `.so` + set AITER_REBUILD=1. A rebuild => the edited source compiled.
+      * aiter GEMM-DB tune: "is tuned on cu_num" hits > 0.
+      * generic: the kernel source's stem appearing in a build/load line.
+    Absence of any marker => engaged=False (uncertain): the delta should be treated with suspicion.
+    """
+    out: dict[str, Any] = {"engaged": False, "reason": "no server log", "markers": []}
+    try:
+        text = server_log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    markers: list[str] = []
+    stem = target.stem  # e.g. "quant_kernels", "attention_ragged"
+    # aiter JIT rebuild evidence (the strongest proof for a .cu patch we forced to recompile)
+    for pat in ("start build [module_", "] build ", "ninja", ".so", "hipcc"):
+        if pat in text:
+            markers.append(f"jit_build:{pat.strip()}")
+            break
+    if "is tuned on cu_num" in text:
+        n = text.count("is tuned on cu_num")
+        markers.append(f"aiter_db_tuned_hits={n}")
+    if stem and stem in text:
+        markers.append(f"source_stem:{stem}")
+    tuned_hits = text.count("is tuned on cu_num")
+    engaged = bool(markers) and (not is_aiter_cu or any(m.startswith("jit_build") or "tuned_hits" in m for m in markers))
+    out.update({
+        "engaged": engaged,
+        "reason": ("rebuild/tune markers present" if engaged else
+                   "no rebuild/tune marker in server log — patch may not have engaged"),
+        "markers": markers, "aiter_db_tuned_hits": tuned_hits,
+    })
+    return out
+
+
 def apply_and_bench(
     *, patch_path: str, target_file: str, backup_root: str, model: str, backend: str,
     tp: int, port: int, gpu: str, isl: int, osl: int, conc: int, num_prompts: int, reps: int,
@@ -238,6 +279,11 @@ def apply_and_bench(
     try:
         patched = _serve_and_bench("patched", backend, model, tp, port, gpu, isl, osl, conc,
                                    num_prompts, reps, patched_env, bs, out)
+        # ---- ENGAGEMENT PROOF (trust, not policy): was the patched kernel actually on the
+        # live serving path? A delta is meaningless if the patch never engaged. We do NOT
+        # accept/reject on it — we just report it so a +0.0% is distinguishable from "didn't apply".
+        engagement = _engagement_proof(out / "server_patched.log", target, is_aiter_cu)
+        _log(out, f"engagement_proof: engaged={engagement['engaged']} ({engagement['reason']})")
     finally:
         # ---- REVERT (restore source; keep the patch file) ----
         if manifest_path:
@@ -252,14 +298,15 @@ def apply_and_bench(
         delta_pct = (p_med - b_med) / b_med * 100.0
     result = {
         "status": "ok" if (b_med and p_med) else "patched_failed",
-        "gate": "none (straightforward apply + remeasure; KEEP/REVERT/NEEDS_REVIEW bypassed)",
+        "gate": "none (straightforward apply + remeasure; KEEP/REVERT/NEEDS_REVIEW bypassed; policy is the caller's job)",
         "baseline_median_tok_s": b_med, "patched_median_tok_s": p_med,
         "delta_pct": delta_pct, "baseline_reps": base.get("reps"),
         "patched_reps": patched.get("reps"), "removed_prebuilt_so": removed_so,
+        "engagement_proof": engagement,
         "manifest_path": manifest_path, "target_file": target_file, "patch_path": patch_path,
     }
     (out / "apply_and_bench_result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
-    _log(out, f"RESULT baseline={b_med} patched={p_med} delta={delta_pct}%")
+    _log(out, f"RESULT baseline={b_med} patched={p_med} delta={delta_pct}% engaged={engagement.get('engaged')}")
     return result
 
 
