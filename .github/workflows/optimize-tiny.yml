@@ -132,7 +132,8 @@ jobs:
                   "exclude_active_workflows": "true",
                   "max_parallel": "240",
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
-                  "task_timeout_min": "420",
+                  # task wait + job timeout are derived from max_hours in
+                  # optimize-submit's prepare job (max_hours+30m / +60m).
                   "max_hours": "6",
                   "all_artifacts": "true",
                   "dry_run": os.environ.get("DRY_RUN") or "false",
