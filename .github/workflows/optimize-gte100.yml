@@ -15,15 +15,15 @@ name: SaFE Optimize gte100 (filtered pool)
 # (each fire advances one batch, wrapping at the pool end); on manual dispatch
 # the batch_index input is used.
 #
-# Cadence: twice a day at Beijing 00:00 / 12:00 (UTC 16:00 / 04:00), using
+# Cadence: twice a day at Beijing 10:00 / 22:00 (UTC 02:00 / 14:00), using
 # minute :07 (not :00) because GitHub heavily delays cron at the top of the
 # hour. max_hours=12 is the per-model optimizer budget. Scheduled runs only
 # fire from the DEFAULT branch.
 
 on:
-  # Beijing 12:07 (UTC 04:07) and Beijing 00:07 (UTC 16:07) — twice a day.
+  # Beijing 10:07 (UTC 02:07) and Beijing 22:07 (UTC 14:07) — twice a day.
   schedule:
-    - cron: '7 4,16 * * *'
+    - cron: '7 2,14 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
