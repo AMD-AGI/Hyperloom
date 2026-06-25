@@ -241,6 +241,22 @@ def test_magpie_dir_honours_explicit_override(tmp_path, monkeypatch):
     assert paths.magpie_dir() == tmp_path / "operator-magpie"
 
 
+# TraceLens root resolution: mirrors magpie_dir so trace analysis resolves the
+# same checkout as install.sh even when TRACELENS_ROOT was not inherited.
+def test_tracelens_root_derives_from_open_source_root_when_env_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "podlocal"))
+    expected = tmp_path / "podlocal" / "hyperloom" / "open-source-repos" / "TraceLens"
+    assert paths.tracelens_root() == expected
+
+
+def test_tracelens_root_honours_explicit_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "operator-tracelens"))
+    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "ignored"))
+    assert paths.tracelens_root() == tmp_path / "operator-tracelens"
+
+
 # manifest
 def test_write_manifest_writes_v1_schema(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))

@@ -369,6 +369,21 @@ def magpie_dir(session_dir: Path | None = None) -> Path:
     return open_source_root() / "Magpie"
 
 
+def tracelens_root() -> Path:
+    """``<open_source_root>/TraceLens/`` — TraceLens checkout (pod-local;
+    ``$TRACELENS_ROOT`` overrides). Aligned with kernel-agent/scripts/install.sh
+    so script and runtime resolve the same checkout even when the consuming
+    process did not inherit the installer-written env.
+
+    Returns:
+        The TraceLens checkout path.
+    """
+    override = os.environ.get("TRACELENS_ROOT")
+    if override:
+        return Path(override)
+    return open_source_root() / "TraceLens"
+
+
 def kernel_agent_runs_root(session_dir: Path) -> Path:
     """``<sd>/kernel-agent/`` — kernel-agent CLI tool output root (one
     ``runs/<session_id>/`` per invocation). Distinct from the kernel_id-keyed
