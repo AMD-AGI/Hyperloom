@@ -3785,6 +3785,27 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 
+        # Safety-net artifact package -> /workspace. The CLOSE phase
+        # sequencer normally packages at step 2.6, but the wall-clock
+        # deadline path (_enter_closing_phase) and crash paths leave
+        # close_sequence_done False and never run the sequencer, so the
+        # bundle would be missing without this. Best-effort: failures
+        # must not mask stop_reason. Runs after the SBD/final.md +
+        # Langfuse flush above so the freshest products are bundled.
+        try:
+            from .breakdown import package_session_artifacts
+
+            pkg_path = package_session_artifacts(
+                session_dir,
+                session_id=str(
+                    getattr(coordinator.shared_state, "session_id", "") or "",
+                ),
+            )
+            if pkg_path is not None:
+                print(f"Artifact package  : {pkg_path}")
+        except Exception:  # noqa: BLE001
+            log.exception("session artifact package failed (non-fatal)")
+
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
@@ -4915,10 +4936,11 @@ def _build_parser() -> argparse.ArgumentParser:
         )
 
     # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio).
-    # Default 1.20: kill the decision (warm) run once its post-startup wall-clock exceeds the
-    # baseline warm measure time by +20% (outcome=KILLED_OVERTIME). Q4: the decision round now
-    # reuses a pre-warmed server (client-only), so the anchor is the baseline WARM measure time
-    # and one-time cold-boot / aiter recompile no longer trips the kill.
+    # Default 2.0: kill the decision (warm) run once its warm hot-client benchmark phase exceeds
+    # the baseline warm measure time by 2x (outcome=KILLED_OVERTIME). The decision round reuses a
+    # pre-warmed server (client-only) and the kill clock starts at the server-ready marker, so the
+    # measured runtime and the anchor are both the warm client-only phase (apples-to-apples) and
+    # one-time cold-boot / aiter recompile no longer trips the kill.
     # 0 disables (legacy variant_timeout_sec hard cap still applies); overtime kills skip stack rebench.
     def _env_float_or(default: float, env_var: str) -> float:
         """Resolve a float CLI default from an environment variable.
@@ -4961,16 +4983,18 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="explore_overtime_kill_ratio",
         type=float,
         default=_env_float_or(
-            1.20,
+            2.0,
             "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO",
         ),
         help="Per-variant explore overtime kill: each single-variant "
-        "Magpie run in the explore loop is reaped once its "
-        "wall-clock exceeds ``baseline_runtime_sec * RATIO``. The "
-        "variant is recorded with outcome=KILLED_OVERTIME + "
-        "runtime_sec + wall_clock_ratio_vs_baseline (no tput) so "
-        "the LLM can distinguish it from a hard timeout / crash. "
-        "Default 1.10 (kill at +10%% over baseline wall-clock). "
+        "Magpie run in the explore loop is reaped once its warm "
+        "hot-client benchmark phase (measured from the server-ready "
+        "marker, excluding cold boot / warmup) exceeds "
+        "``baseline_warm_runtime_sec * RATIO``. The variant is "
+        "recorded with outcome=KILLED_OVERTIME + runtime_sec + "
+        "wall_clock_ratio_vs_baseline (no tput) so the LLM can "
+        "distinguish it from a hard timeout / crash. Default 2.0 "
+        "(kill at 2x the warm baseline client-phase wall-clock). "
         "Pass 0 to disable. Env: "
         "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
     )
@@ -5341,6 +5365,16 @@ def _run_recover_session(args: argparse.Namespace) -> int:
             print(f"  trace backfill    : rc={rc}")
         except Exception:  # noqa: BLE001
             log.exception("recover-session: trace backfill failed (non-fatal)")
+
+    # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
+    try:
+        from .breakdown import package_session_artifacts
+
+        pkg_path = package_session_artifacts(session_dir)
+        if pkg_path is not None:
+            print(f"  artifact package  : {pkg_path}")
+    except Exception:  # noqa: BLE001
+        log.exception("recover-session: artifact package failed (non-fatal)")
 
     return 0
 

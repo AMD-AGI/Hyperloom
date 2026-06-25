@@ -958,6 +958,32 @@ def collect_workload(
     }
 
 
+# §2b Model basics
+def collect_model_info(
+    state: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Collect the §2b ``model_info`` section (state.model_info passthrough).
+
+    The summary is computed once at launch (``cli_bootstrap`` →
+    ``summarize_model_config``) and persisted on ``state.model_info``, so the
+    breakdown just mirrors it verbatim. Returns ``{}`` when the field is absent
+    (sessions whose state predates it) or empty (non-transformers models such
+    as diffusion checkpoints, where the config.json could not be parsed); the
+    frontend treats an empty object as "model info unavailable".
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (unused here but kept for a
+            uniform collector signature).
+
+    Returns:
+        dict[str, Any]: The model_info object, or ``{}`` when unavailable.
+    """
+    info = state.get("model_info")
+    return dict(info) if isinstance(info, dict) else {}
+
+
 # §3 Baseline
 def collect_baseline(
     session_dir: Path,
@@ -3788,8 +3814,8 @@ def _action_family(action: str) -> str:
 
     Returns:
         str: One of ``kernel`` / ``backends`` / ``params`` / ``validate`` /
-        ``sweep`` / ``explore`` / ``framework_pr`` / ``gemm_tuning``, or
-        ``"other"`` when unrecognized.
+        ``sweep`` / ``explore`` / ``replay_warm_recipe`` / ``framework_pr`` /
+        ``gemm_tuning``, or ``"other"`` when unrecognized.
     """
     s = (action or "").lower()
     if s.startswith("kernel_opt") or s == "integrate":
@@ -3806,6 +3832,12 @@ def _action_family(action: str) -> str:
     # merged explore family subsuming the legacy backends + params buckets.
     if s == "explore":
         return "explore"
+    # REPLAY_WARM_RECIPE: warm-recipe / cortex best_config replay (a prep action).
+    # Its own headline row so its gain reconciles against validated_total_pct
+    # instead of vanishing into the non-emitted ``other`` family. The label may
+    # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
+    if s.split(":", 1)[0] == "replay_warm_recipe":
+        return "replay_warm_recipe"
     # FRAMEWORK_PR: own headline row so per-source totals reconcile against
     # validated_total_pct (else these KEEPs fell into ``other`` and vanished).
     if s == "framework_pr":
@@ -3999,6 +4031,9 @@ def collect_attribution(
         "explore": 0.0,
         # FRAMEWORK_PR family, kept apart from ``other`` for a dedicated row.
         "framework_pr": 0.0,
+        # REPLAY_WARM_RECIPE family: warm-recipe replay, kept apart from ``other``
+        # so its gain gets a dedicated headline row.
+        "replay_warm_recipe": 0.0,
         # GEMM_TUNING family, kept apart from ``kernel`` (deterministic tuner vs rewrite).
         "gemm_tuning": 0.0,
         # PerfSkills/GEAK-e2e family: whole-pipeline KERNEL-phase optimizer.
@@ -4060,6 +4095,11 @@ def collect_attribution(
             "forge_pct_of_total": round(forge_total, 2),
             # primary row.
             "explore_pct_of_total": round(family_totals.get("explore", 0.0), 2),
+            # REPLAY_WARM_RECIPE row; always emitted (0.0 when no warm-recipe
+            # replay was reproduced/adopted this session).
+            "replay_warm_recipe_pct_of_total": round(
+                family_totals.get("replay_warm_recipe", 0.0), 2
+            ),
             # FRAMEWORK_PR row; always emitted (0.0 when disabled/empty).
             "framework_pr_pct_of_total": round(family_totals.get("framework_pr", 0.0), 2),
             # GEMM_TUNING row; always emitted (0.0 when non-FP8/skipped/no KEEP).
@@ -6643,4 +6683,5 @@ __all__ = [
     "collect_telemetry",
     "collect_token_usage",
     "collect_workload",
+    "collect_model_info",
 ]

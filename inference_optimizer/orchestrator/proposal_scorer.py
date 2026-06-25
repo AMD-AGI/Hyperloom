@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .backends.base import parse_call_timeout_env
+from .coordinator_helpers import format_exc_brief
 from .trace.conversation_trace import ConversationRecord, append_conversation
 from .trace.llm_trace import LLMCallRecord, append_llm_call
 
@@ -190,7 +191,7 @@ class ProposalScorer:
     # Test seam — set to bypass real OpenAI client construction.
     client_factory: Callable[[], Any] | None = None
 
-    # Full-trace A6: when set, each model-scoring call appends its token
+    # When set, each model-scoring call appends its token
     # usage to ``<session_dir>/reports/trace/llm_calls.jsonl`` under
     # ``component=proposal_scorer``. ``None`` (the default, and the case
     # in unit tests) disables trace writes entirely.
@@ -328,8 +329,8 @@ class ProposalScorer:
         except asyncio.TimeoutError as exc:
             raise RuntimeError(f"timed out after {self.call_timeout_s:.0f}s") from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        # Full-trace A6: record this model's token spend before parsing.
-        # Best-effort + a no-op when ``session_dir`` is unset (tests).
+        # Record this model's token spend before parsing (best-effort;
+        # no-op when ``session_dir`` is unset).
         self._trace_scorer_llm_call(
             model,
             getattr(resp, "usage", None),
@@ -339,7 +340,7 @@ class ProposalScorer:
             phase=phase,
         )
         text = resp.choices[0].message.content or ""
-        # Full-trace: persist the full (redacted) prompt + reply so the
+        # Persist the full (redacted) prompt + reply so the
         # scorer's conversation lines up with its token row.
         self._record_scorer_conversation(
             model, full_prompt, text, task_id=task_id, tick=tick, phase=phase,
@@ -504,7 +505,7 @@ class ProposalScorer:
         errors: dict[str, str] = {}
         for model, res in zip(self.models, results):
             if isinstance(res, BaseException):
-                errors[model] = f"{type(res).__name__}: {str(res)[:200]}"
+                errors[model] = format_exc_brief(res, limit=200)
                 log.warning(
                     "ProposalScorer: model=%s failed: %r",
                     model,

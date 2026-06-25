@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -29,10 +28,11 @@ from ...protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
-from ...session_paths import manifest_path
+from ...session_paths import allocate_turn_workdir, manifest_path
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
-from .base import BackendError, BackendTurnResult
+from .base import BackendError, BackendTurnResult, build_chat_messages
+from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -136,27 +136,6 @@ def _extract_review_json(text: str) -> dict[str, Any] | None:
     return None
 
 
-@dataclass
-class RuntimeCall:
-    """One ``runtime.cli`` invocation, captured for tests + logging."""
-
-    phase: Literal["prepare-review", "commit-review"]
-    request_path: Path
-    review_path: Path | None
-    out_path: Path
-    cwd: Path
-    env: dict[str, str]
-
-
-RuntimeCaller = Callable[[RuntimeCall], None]
-"""Callable that performs (or fakes) a ``runtime.cli`` invocation.
-
-The default real caller shells out via :mod:`subprocess`. Tests inject a
-fake that writes the desired ``judge_bundle.json`` / ``emit.json`` to
-``out_path`` directly without spawning a Python process.
-"""
-
-
 def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
     """Re-serialize an OpenAI assistant message that issued tool_calls
     (minimal dict shape, pydantic v1/v2 compatible).
@@ -198,45 +177,20 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
         BackendError: If a ``commit-review`` call is missing its review path,
             the subprocess times out, cannot start, or exits non-zero.
     """
-    cmd = [
-        sys.executable,
-        "-m",
-        "runtime.cli",
-        call.phase,
-        "--request",
-        str(call.request_path),
-        "--out",
-        str(call.out_path),
-    ]
+    extra_args: list[str] = []
     if call.phase == "commit-review":
         if call.review_path is None:
             raise BackendError("commit-review invocation missing --review path")
-        cmd += ["--review", str(call.review_path)]
+        extra_args = ["--review", str(call.review_path)]
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(call.cwd),
-            env=call.env,
-            capture_output=True,
-            text=True,
-            timeout=CRITIC_AGENT_RUNTIME_TIMEOUT_SEC,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise BackendError(
-            f"critic-agent runtime.cli {call.phase} timed out after "
-            f"{CRITIC_AGENT_RUNTIME_TIMEOUT_SEC}s (cwd={call.cwd})"
-        ) from exc
-    except FileNotFoundError as exc:
-        raise BackendError(
-            f"critic-agent runtime.cli {call.phase} could not start (python={sys.executable!r}, cwd={call.cwd}): {exc}"
-        ) from exc
-
-    if proc.returncode != 0:
-        # AGENTS.md §Exit codes: 0 success; 2 adapter bug (host → needs_review).
-        raise BackendError(
-            f"critic-agent runtime.cli {call.phase} exited rc={proc.returncode}: stderr={proc.stderr.strip()[:500]!r}"
-        )
+    # AGENTS.md §Exit codes: 0 success; 2 adapter bug (host → needs_review).
+    invoke_runtime_cli(
+        call,
+        module="runtime.cli",
+        agent_label="critic-agent",
+        timeout_sec=CRITIC_AGENT_RUNTIME_TIMEOUT_SEC,
+        extra_args=extra_args,
+    )
 
 
 # Cross-domain enrichment helper for cross-domain (scope=domains) proposals.
@@ -399,7 +353,7 @@ class CriticAgentBackend:
     # prompt so they don't steer the decision). ``True``/``False`` force it.
     kb_assess_inject: bool | None = None
     name: str = "critic-agent"
-    # #170 — optional web tools (web_search / web_fetch). ``web_tools_config``
+    # Optional web tools (web_search / web_fetch). ``web_tools_config``
     # None reads from env; ``web_tool_clients_factory`` injects test clients.
     web_tools_config: "WebToolsConfig | None" = None
     web_tool_clients_factory: Callable[["WebToolsConfig"], "WebToolClients"] | None = None
@@ -513,7 +467,7 @@ class CriticAgentBackend:
             sorted(self._static_context.keys()),
         )
 
-        # #170 — initialize web tools (no-op by default).
+        # Initialize web tools (no-op by default).
         self._init_web_tools()
 
     def _init_web_tools(self) -> None:
@@ -630,7 +584,9 @@ class CriticAgentBackend:
         turn_idx = self._turn_idx
         self._turn_idx += 1
 
-        workdir = self._allocate_workdir(turn_idx)
+        workdir = allocate_turn_workdir(
+            self.session_dir, "critic-workdir", turn_idx, keep=CRITIC_AGENT_WORKDIR_KEEP_COUNT
+        )
         request_path = workdir / "request.json"
         judge_path = workdir / "judge_bundle.json"
         review_path = workdir / "review.json"
@@ -813,59 +769,6 @@ class CriticAgentBackend:
         )
 
     # Helpers
-    def _allocate_workdir(self, turn_idx: int) -> Path:
-        """Create and return a per-turn workdir, pruning stale ones first.
-
-        Args:
-            turn_idx (int): Zero-based index of the current turn, used as the
-                zero-padded subdirectory name.
-
-        Returns:
-            Path: The created ``<session>/critic-workdir/<turn>/`` directory.
-        """
-        root = self.session_dir / "critic-workdir"
-        root.mkdir(parents=True, exist_ok=True)
-        self._prune_old_workdirs(root, keep=CRITIC_AGENT_WORKDIR_KEEP_COUNT)
-        wd = root / f"{turn_idx:06d}"
-        wd.mkdir(parents=True, exist_ok=True)
-        return wd
-
-    @staticmethod
-    def _prune_old_workdirs(root: Path, *, keep: int) -> None:
-        """Remove all but the ``keep`` most recent ``<turn>/`` subdirs.
-
-        Best-effort: listing and removal errors are swallowed so a janitor
-        hiccup never fails the turn.
-
-        Args:
-            root (Path): The ``critic-workdir`` parent directory to prune.
-            keep (int): Number of most recent turn subdirectories to retain.
-        """
-        try:
-            entries = sorted(
-                (p for p in root.iterdir() if p.is_dir()),
-                key=lambda p: p.name,
-            )
-        except OSError:
-            return
-        if len(entries) <= keep:
-            return
-        for stale in entries[: len(entries) - keep]:
-            try:
-                for child in stale.rglob("*"):
-                    if child.is_file():
-                        child.unlink(missing_ok=True)
-                # rmdir bottom-up
-                for child in sorted(stale.rglob("*"), key=lambda p: -len(p.parts)):
-                    if child.is_dir():
-                        try:
-                            child.rmdir()
-                        except OSError:
-                            pass
-                stale.rmdir()
-            except OSError:
-                # Best-effort prune.
-                continue
 
     def _load_static_context_from_manifest(self) -> dict[str, Any]:
         """Derive per-session context for ``request.context`` from
@@ -941,7 +844,7 @@ class CriticAgentBackend:
         env.setdefault("CRITIC_SESSION_MEMORY_DIR", str(memory_dir))
         env["CRITIC_KB_CLIENT_MODE"] = self.kb_mode
 
-        # L4 — point the runtime at the sibling robustness findings JSONL;
+        # Point the runtime at the sibling robustness findings JSONL;
         # set here because the robustness CLI's env never reaches us.
         env.setdefault(
             "ROBUSTNESS_AGENT_SESSION_DIR",
@@ -1161,10 +1064,7 @@ class CriticAgentBackend:
             f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n"
             f"{_REVIEW_OUTPUT_INSTRUCTIONS}"
         )
-        messages: list[dict[str, Any]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_prompt})
+        messages = build_chat_messages(system_prompt, user_prompt)
 
         text, finish = await self._run_reasoning_loop(messages)
 
@@ -1212,7 +1112,7 @@ class CriticAgentBackend:
         """
         tools = self._web_tool_schemas
         max_turns = self._web_tool_max_turns if tools else 0
-        # Full-trace A5: accumulate token usage across every Codex call in
+        # Accumulate token usage across every Codex call in
         # this reasoning loop (initial + tool-use rounds + forced final).
         # OpenAI has no prompt-cache split, so only in/out counters move.
         usage_acc = {"input_tokens": 0, "output_tokens": 0}

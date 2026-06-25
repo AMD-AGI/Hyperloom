@@ -26,7 +26,7 @@ from ...protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import BackendError, BackendTurnResult, parse_call_timeout_env
+from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env
 
 
 _OUTPUT_INSTRUCTIONS = """
@@ -201,10 +201,7 @@ class CodexBackend:
                 envelope fails intent validation.
         """
         full_prompt = f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
-        messages: list[dict[str, Any]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": full_prompt})
+        messages = build_chat_messages(system_prompt, full_prompt)
 
         try:
             resp = await asyncio.wait_for(

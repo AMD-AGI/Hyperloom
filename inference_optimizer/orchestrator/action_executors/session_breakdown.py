@@ -22,6 +22,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from ..coordinator_helpers import format_exc_brief
+
 log = logging.getLogger(__name__)
 
 
@@ -65,7 +67,7 @@ class SessionBreakdownExecutor:
             log.exception("session_breakdown export failed")
             return {
                 "status": "failed",
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": format_exc_brief(exc),
             }
 
         # Surface warnings + size to the bus event.

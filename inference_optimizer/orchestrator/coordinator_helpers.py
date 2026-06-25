@@ -17,6 +17,23 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+def format_exc_brief(exc: BaseException, limit: int | None = None) -> str:
+    """Render an exception as ``"TypeName: message"``, optionally truncated.
+
+    Args:
+        exc: The exception (or any ``BaseException``) to format.
+        limit: When set, truncate the message to this many characters.
+
+    Returns:
+        ``f"{type(exc).__name__}: {str(exc)[:limit]}"`` (no truncation when
+        ``limit`` is ``None``).
+    """
+    msg = str(exc)
+    if limit is not None:
+        msg = msg[:limit]
+    return f"{type(exc).__name__}: {msg}"
+
+
 def _infer_model_class_from_config(model_path: str) -> str:
     """Infer a deterministic model_class from local model metadata.
 
@@ -134,7 +151,6 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "config_path",
     "disable_run_eval",
 )
-_BASELINE_SELF_LOOP_THRESHOLD: int = 2
 
 # Flags whose argparse consumes multiple bare tokens before the next ``--``.
 _MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset(
@@ -191,45 +207,6 @@ def _parse_iso_unix(ts: str) -> float:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.timestamp()
-
-
-def _summarize_failed_variants(
-    all_results: Any,
-    *,
-    max_entries: int = 10,
-) -> list[dict[str, Any]]:
-    """Project ``status=='failed'`` grid_runner rows into a compact list.
-
-    Returns ``[{name, error_class, error_excerpt, extra_server_args}, ...]``
-    (excerpt capped at 400 chars, at most ``max_entries`` rows).
-
-    Args:
-        all_results: Grid-runner result rows; non-list inputs yield ``[]``.
-        max_entries: Maximum number of failed rows to include.
-
-    Returns:
-        A compact list of failed-variant projections.
-    """
-    if not isinstance(all_results, list):
-        return []
-    failed: list[dict[str, Any]] = []
-    for row in all_results:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("status") or "") != "failed":
-            continue
-        err = str(row.get("error") or "")
-        failed.append(
-            {
-                "name": str(row.get("name") or ""),
-                "error_class": str(row.get("error_class") or "") or None,
-                "error_excerpt": err[:400] if err else None,
-                "extra_server_args": str(row.get("extra_server_args") or ""),
-            }
-        )
-        if len(failed) >= max_entries:
-            break
-    return failed
 
 
 def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:

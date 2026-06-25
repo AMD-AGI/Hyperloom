@@ -1,12 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Roofline composite ActionRunner — Roofline-v2 N2 (design §8.4).
+"""Roofline composite ActionRunner.
 
 Pipeline action: orchestrates the atomic ``profile`` + ``trace_analyze``
 sub-steps and produces a fresh TraceLens snapshot (``last_profile_trace`` +
 ``last_trace_analyze.analysis_md_text`` + monotonic ``roofline_snapshot_id``).
 
-Design constraints (§4/§6):
+Design constraints:
 
 * No LLM in the executor — pure orchestration; interpretation happens in the
   main Orchestration context.
@@ -22,27 +22,22 @@ Design constraints (§4/§6):
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .._time import now_iso
 from ..sub_agent_runner import RunnerContext
 
 log = logging.getLogger(__name__)
 
 _PROFILE_MAX_ATTEMPTS = 3
 
-
-def _now_iso() -> str:
-    """Return the current UTC time as a second-precision ISO-8601 string.
-
-    Returns:
-        str: The current UTC timestamp formatted with ``timespec="seconds"``.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+# seconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = functools.partial(now_iso, "seconds")
 
 
 # Auto-recover from TraceLens steady_state_chunk_* failures: when
@@ -247,11 +242,11 @@ class RooflineExecutor:
         from .profile import profile_executor
 
         session_dir = self._resolve_session_dir(ctx)
-        # #266: time the composite so the END lifecycle event reports how
+        # Time the composite so the END lifecycle event reports how
         # long the auto-roofline TraceLens run took.
         _lc_t0 = time.monotonic()
 
-        # #266: emit a paired START so the auto-roofline path (which bypasses
+        # Emit a paired START so the auto-roofline path (which bypasses
         # Coordinator._handle_request) does not show a lone END. Without it the
         # operator sees nothing for the whole profile-retry + TraceLens run —
         # potentially minutes — then a sudden END. Best-effort, never blocks the
@@ -511,7 +506,7 @@ class RooflineExecutor:
                 sub_result=ta_result,
             )
 
-        # #431: trace_analyze status=ok but ZERO hot kernels means cuda-graph capture folded per-kernel time into hipGraphLaunch wrappers (degraded input, not a TraceLens failure). Append a trace_health_warnings entry so the LLM re-profiles in eager mode instead of reading top=[] as "no kernels".
+        # trace_analyze status=ok but ZERO hot kernels means cuda-graph capture folded per-kernel time into hipGraphLaunch wrappers (degraded input, not a TraceLens failure). Append a trace_health_warnings entry so the LLM re-profiles in eager mode instead of reading top=[] as "no kernels".
         hot = ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
         trace_health = profile_result.get("trace_health") or {}
         attribution_degraded = bool(not hot and trace_health.get("per_kernel_attribution_degraded"))
@@ -538,7 +533,7 @@ class RooflineExecutor:
         self.shared_state.record_trace_analyze(ta_payload, ta_result)
         cached = self.shared_state.last_trace_analyze or {}
 
-        # #266: the auto-roofline TraceLens run does NOT pass through
+        # The auto-roofline TraceLens run does NOT pass through
         # Coordinator._handle_request, so emit its lifecycle event here so
         # operators still see "TraceLens finished -> analysis at <path>".
         # Best-effort. The event is recorded into the coordinator's shared
@@ -575,7 +570,7 @@ class RooflineExecutor:
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile_result.get("workspace"),
-            # #431: False on a healthy run; True when trace_analyze produced
+            # False on a healthy run; True when trace_analyze produced
             # 0 hot kernels because cuda-graph folding stripped per-kernel
             # attribution (a ``cuda_graph_attribution_degraded`` entry was
             # appended to trace_health_warnings for the prompt/audit).

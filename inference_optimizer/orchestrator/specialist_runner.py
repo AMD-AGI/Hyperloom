@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""SpecialistRunner — v0.8 M5.
+"""SpecialistRunner.
 
 LLM sub-agent runner for ``delegate{action_name='specialist', ...}``
 (vs the deterministic Python executors of :class:`SubAgentRunner`).
@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..session_paths import runs_dir, specialist_intel_path
+from ._time import now_iso
 from .backends.base import BackendError
 from ..protocol.intent import Intent, IntentType
 from .trace.conversation_trace import ConversationRecord, append_conversation
@@ -45,7 +46,7 @@ from .specialist_subprocess import (
 from . import specialist_patch_safety as _patch_safety
 from .policy import DEFAULT_SPECIALIST_MAX_PROPOSALS
 from .specialist_profile import SpecialistProfile, resolve_specialist_profile
-from .sub_agent_runner import RunnerContext, SubAgentResult
+from .sub_agent_runner import RunnerContext
 from .system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
@@ -73,7 +74,7 @@ def _extra_focus_tags(
     return tuple(t for t in tags if t and t != primary_anchor)
 
 
-# R4/R5 — canonical external tool registry lives in :mod:`policy`; re-exported here for legacy importers.
+# Re-export the external tool registries defined in :mod:`policy` for backward-compatible imports.
 from .policy import (
     CORTEX_KB_READ_TOOL_NAMES as _CORTEX_KB_READ,
     KB_WRITE_TOOL_NAMES as _KB_WRITE,
@@ -124,13 +125,8 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
 SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO 8601 string.
-
-    Returns:
-        str: The current UTC timestamp formatted with microsecond precision.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 def _safe_redact(s: str) -> str:
@@ -158,8 +154,6 @@ class _PreparedRun:
     """Shared setup-phase output threaded into both execution paths."""
 
     domain: SpecialistDomain | None = None
-    # Per-domain sub_kind selected at dispatch (empty = default prompt).
-    sub_kind: str = ""
     gap: str = ""
     max_turns: int = 0
     # Resolved dispatch profile (scope / mode / bench / lane).
@@ -446,7 +440,7 @@ class SpecialistRunner:
         """
         params = ctx.task.params or {}
         domain_key = str(params.get("domain") or "").strip()
-        # B3: a tag-only dispatch ("just give it a topic/domain", e.g.
+        # A tag-only dispatch ("just give it a topic/domain", e.g.
         # ``tags=['systems']`` with no explicit ``domain``) must still resolve.
         # ``normalize_dispatch_tags`` reads ``params.tags`` (falling back to the
         # ``domain`` alias), so back-fill ``domain_key`` from the first resolved
@@ -457,12 +451,11 @@ class SpecialistRunner:
                 domain_key = resolved_tags[0]
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         max_turns = int(params.get("max_turns") or self.default_max_turns)
-        # B7: resolve by anchor first then key (``domain_for_tag``) so a dispatch
+        # Resolve by anchor first then key (``domain_for_tag``) so a dispatch
         # whose ``domain`` carries the KB anchor (e.g. ``communication``) matches
         # its catalogue entry (``comm_specialist``) instead of silently failing
         # the key-only ``get_domain`` lookup and dying as ``unknown_domain``.
         domain = domain_for_tag(domain_key)
-        sub_kind = str(params.get("sub_kind") or "").strip()
         profile = resolve_specialist_profile(params)
         task_description = str(params.get("task_description") or "").strip()
 
@@ -527,7 +520,6 @@ class SpecialistRunner:
                 kb_subgraph=dict(params.get("kb_subgraph") or {}),
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
-                sub_kind=str(params.get("sub_kind") or ""),
                 extra_focus_tags=_extra_focus_tags(params, domain),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(params.get("warm_start_pitfalls") or []),
@@ -587,7 +579,6 @@ class SpecialistRunner:
 
         return _PreparedRun(
             domain=domain,
-            sub_kind=sub_kind,
             gap=gap,
             max_turns=max_turns,
             profile=profile,
@@ -876,11 +867,10 @@ class SpecialistRunner:
                     "metadata": dict(turn_result.metadata),
                 },
             )
-            # Full-trace A3: in-process specialist fallback. The token
-            # spend is already in the transcript's turn metadata; mirror it
-            # onto the unified ledger keyed by task_id + turn so the
-            # collector can join it to the EXPLORE decision. The production
-            # default (subprocess) path is covered separately by B1.
+            # In-process specialist path: the token spend is already in the
+            # transcript's turn metadata; mirror it onto the unified LLM-call
+            # ledger keyed by task_id + turn so the collector can join it to
+            # the EXPLORE decision.
             _tick, _phase = self._ctx_tick_phase(ctx)
             self._trace_specialist_llm_call(
                 task_id=ctx.task.task_id,
@@ -1034,7 +1024,7 @@ class SpecialistRunner:
                 "error": sub_result.error,
             },
         )
-        # Full-trace B1: fold the production specialist's token spend
+        # Fold the production specialist's token spend
         # (recovered from the Claude CLI stream-json log by the dispatcher)
         # into the unified ledger. The subprocess runs one logical agent
         # session, so we record turn=1. ``usage`` already uses the four
@@ -1082,7 +1072,7 @@ class SpecialistRunner:
             turn=1,
             tool_calls=sub_result.tool_calls,
         )
-        # Full-trace B1 conversation: pair the parent-held prompt (the CLI
+        # Pair the parent-held prompt (the CLI
         # never echoes it into the stream-json log) with the assistant reply
         # the dispatcher recovered from process.log, so the production
         # specialist turn lands in conversations.jsonl alongside the
@@ -1347,33 +1337,6 @@ class SpecialistRunner:
             return None, base, err
         return wt, base, ""
 
-    # Coordinator-facing convenience: produce a SubAgentResult shape.
-    @staticmethod
-    def to_sub_agent_result(run_result: SpecialistRunResult) -> SubAgentResult:
-        """Translate the rich runner result into the dispatcher contract.
-
-        Args:
-            run_result (SpecialistRunResult): The runner-level outcome record.
-
-        Returns:
-            SubAgentResult: The TaskRegistry-facing result shape.
-        """
-        state = "succeeded" if run_result.status in ("succeeded", "empty_synthesised", "tool_violation") else "failed"
-        return SubAgentResult(
-            task_id=run_result.task_id,
-            state=state,
-            result={
-                "specialist_done": run_result.specialist_done,
-                "runner_status": run_result.status,
-                "turns_used": run_result.turns_used,
-                "workspace": run_result.workspace,
-                "transcript_path": run_result.transcript_path,
-                "done_path": run_result.done_path,
-                "notes": list(run_result.notes),
-            },
-            error=run_result.error or None,
-        )
-
     # Workspace file protocol
     def _resolve_workspace(self, ctx: RunnerContext) -> Path | None:
         """Resolve (and create) the workspace directory for a run.
@@ -1447,7 +1410,7 @@ class SpecialistRunner:
     def _partial_done_path(self, workspace: Path | None) -> Path | None:
         """Return the ``specialist_done.partial.json`` path in the workspace.
 
-        WS1 incremental checkpoint target: rewritten atomically as findings
+        Incremental checkpoint target, rewritten atomically as findings
         accumulate. Distinct from the final ``specialist_done.json`` so the
         subprocess reaper (which treats the final file's appearance as the exit
         signal) is never tripped early.
@@ -1549,9 +1512,8 @@ class SpecialistRunner:
         """Atomically write ``payload`` as pretty JSON to ``path``.
 
         Writes to a sibling ``.tmp`` then ``os.replace``-s it into place so a
-        concurrent reader (or a high-frequency incremental rewrite under WS1)
-        never observes a half-written file — same pattern as
-        :meth:`_write_heartbeat`.
+        concurrent reader (or a high-frequency incremental rewrite)
+        never observes a half-written file.
 
         Args:
             path (Path): Destination file path.
@@ -1571,7 +1533,7 @@ class SpecialistRunner:
     ) -> None:
         """Write the ``specialist_done.json`` artifact with a timestamp.
 
-        WS1 (B6): writes atomically (temp + ``os.replace``) so partial files
+        Writes atomically (temp + ``os.replace``) so partial files
         are never read. No-ops when no workspace is configured.
 
         Args:
@@ -1588,7 +1550,7 @@ class SpecialistRunner:
         workspace: Path | None,
         payload: dict[str, Any],
     ) -> None:
-        """Atomically (re)write the WS1 incremental checkpoint partial.
+        """Atomically (re)write the incremental checkpoint partial.
 
         Mirrors :meth:`_write_specialist_done` but targets
         ``specialist_done.partial.json`` so the final-file reaper exit signal is
