@@ -18,7 +18,6 @@ is a hard stop for the whole run.
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -95,27 +94,4 @@ async def run_quantization_prelude_async(
     raise SystemExit(3)
 
 
-def run_quantization_prelude(
-    *,
-    prompt: str,
-    source_model: str,
-    workspace: Path,
-) -> str:
-    """Sync wrapper for non-async callers / tests.
-
-    DO NOT call from within a running event loop — the cli prelude awaits
-    :func:`run_quantization_prelude_async` directly because ``_run_optimize``
-    already runs under ``asyncio.run``.
-
-    Args:
-        prompt: User-provided quantization instructions (e.g. scheme text).
-        source_model: Path to the model to quantize.
-        workspace: Working directory; the quantized model is exported under it.
-
-    Returns:
-        The path to the exported quantized model directory.
-    """
-    return asyncio.run(run_quantization_prelude_async(prompt=prompt, source_model=source_model, workspace=workspace))
-
-
-__all__ = ["run_quantization_prelude", "run_quantization_prelude_async"]
+__all__ = ["run_quantization_prelude_async"]

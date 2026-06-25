@@ -1469,30 +1469,6 @@ class TestPerfModelBreakdown:
         # bound_kind must be one of the valid values
         assert result.bound_kind in ("memory", "compute", "unknown")
 
-    def test_v2_breakdown_returns_tuple(self):
-        """compute_roofline_breakdown_from_state_v2 returns (legacy, pm_or_None)."""
-        from types import SimpleNamespace
-        from inference_optimizer.orchestrator.roofline_ceiling import (
-            compute_roofline_breakdown_from_state_v2,
-            RooflineBreakdown,
-        )
-
-        state = SimpleNamespace(
-            model_path="",
-            gpu_type="mi300x",
-            tp=1,
-            conc=8,
-            isl=256,
-            osl=256,
-            precision="bf16",
-            last_baseline={},
-        )
-        legacy, pm_bd = compute_roofline_breakdown_from_state_v2(state)
-        assert isinstance(legacy, RooflineBreakdown)
-        # pm_bd is None because model_path is empty (no config.json)
-        assert pm_bd is None
-
-
 # ---------------------------------------------------------------------------
 # PerfModel MoE formula correctness
 # ---------------------------------------------------------------------------

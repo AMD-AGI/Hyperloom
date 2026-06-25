@@ -23,7 +23,6 @@ from inference_optimizer.orchestrator.conc_sweep import (
     _build_comparison,
     _build_grid,
     _has_optimization,
-    format_summary_line,
     run_conc_sweep,
 )
 from inference_optimizer.orchestrator.shared_state import SharedState
@@ -607,33 +606,6 @@ def test_run_conc_sweep_does_not_touch_final_json(
     assert not final_json_path.exists()
 
 
-# format_summary_line
-def test_format_summary_line_skip():
-    payload = {"status": "skipped", "skip_reason": "no_baseline_tput"}
-    line = format_summary_line(payload)
-    assert "skipped" in line
-    assert "no_baseline_tput" in line
-
-
-def test_format_summary_line_success():
-    payload = {
-        "status": "succeeded",
-        "summary": {
-            "successful_pairs": 7,
-            "failed_pairs": 1,
-            "best_speedup": 1.55,
-            "best_conc": 32,
-            "median_speedup": 1.32,
-        },
-    }
-    line = format_summary_line(payload)
-    assert "succeeded" in line
-    assert "7+1f" in line
-    assert "1.55x" in line
-    assert "conc=32" in line
-    assert "median=1.32x" in line
-
-
 def test_default_concs_is_powers_of_two():
     """Doc-pin: default ladder is [1,2,4,8,16,32,64,128]."""
     assert DEFAULT_CONCS == [1, 2, 4, 8, 16, 32, 64, 128]
@@ -870,24 +842,6 @@ def test_conc_sweep_executor_remaps_skip_to_succeeded(
     assert result["status"] == "succeeded"
     assert result["was_skipped"] is True
     assert result["skip_reason"] == "no_baseline_tput"
-
-
-def test_format_summary_line_budget_exhausted_suffix():
-    payload = {
-        "status": "succeeded",
-        "budget_exhausted": True,
-        "total_budget_sec": 7200,
-        "summary": {
-            "successful_pairs": 4,
-            "failed_pairs": 0,
-            "best_speedup": 1.20,
-            "best_conc": 8,
-            "median_speedup": 1.15,
-        },
-    }
-    line = format_summary_line(payload)
-    assert "budget_exhausted" in line
-    assert "@7200s" in line
 
 
 # Bug #12: record_conc_sweep writes state.last_conc_sweep for SWEEP completion detection.

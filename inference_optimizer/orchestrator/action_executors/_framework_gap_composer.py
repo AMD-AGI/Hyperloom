@@ -2,12 +2,11 @@
 
 """Compose ``gap_description`` + ``keywords`` for the framework_pr arm.
 
-Replaces the typo-prone hand-typed ``--framework-gap`` string (session
-f219629b once picked a MoE PR for a dense workload from a missing ``dense``
-token) with a deterministic composer driven by structured workload data
-(framework, gpu_type, model_class, precision, profile bottleneck). Pure;
-the executor handles I/O. Returns ``(gap, keywords)`` so the executor can
-pass both to fa or pass ``keywords=[]`` to let fa extract from gap.
+Deterministically composes the gap/keyword text from structured workload data
+(framework, gpu_type, model_class, precision, profile bottleneck) instead of a
+hand-typed ``--framework-gap`` string. Pure; the executor handles I/O. Returns
+``(gap, keywords)`` so the executor can pass both to fa or pass ``keywords=[]``
+to let fa extract from gap.
 """
 
 from __future__ import annotations
@@ -15,10 +14,15 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Sequence
 
 
 log = logging.getLogger(__name__)
+
+
+# Only the hottest kernels are scanned for a bottleneck keyword: the breakdown
+# is already time-sorted, so the dominant op is near the top and scanning the
+# long tail only risks matching a noise kernel.
+_MAX_KERNELS_SCANNED = 5
 
 
 # Op-name substring → canonical bottleneck keyword fed to fa. Order matters:
@@ -79,7 +83,7 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
     if isinstance(raw, dict):
         items = raw.get("top_kernels") or raw.get("kernels") or raw.get("rows") or []
         if isinstance(items, list):
-            for item in items[:5]:
+            for item in items[:_MAX_KERNELS_SCANNED]:
                 if isinstance(item, dict):
                     nm = str(item.get("name") or item.get("kernel") or "").strip()
                     if nm:
@@ -87,7 +91,7 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
                 elif isinstance(item, str):
                     candidates.append(item.lower())
     elif isinstance(raw, list):
-        for item in raw[:5]:
+        for item in raw[:_MAX_KERNELS_SCANNED]:
             if isinstance(item, dict):
                 nm = str(item.get("name") or item.get("kernel") or "").strip()
                 if nm:
@@ -151,14 +155,12 @@ def compose_gap(
     model_class: str = "",
     precision: str = "",
     profile_kernel_breakdown_path: str | Path | None = None,
-    tried_refs: Sequence[str] = (),
 ) -> tuple[str, list[str]]:
     """Build ``(gap_description, keywords)`` for the framework_pr arm.
 
     All workload fields are optional; missing pieces drop from the gap.
     ``precision`` comes from ``manifest.json``'s ``workload.precision``.
     ``profile_kernel_breakdown_path`` (when present) adds a bottleneck keyword.
-    ``tried_refs`` is accepted for forward-compat but currently unused.
 
     Args:
         framework: Inference framework name.
@@ -167,8 +169,6 @@ def compose_gap(
         precision: Workload precision.
         profile_kernel_breakdown_path: Optional path to the kernel breakdown
             JSON used to derive a bottleneck keyword.
-        tried_refs: Previously tried PR refs; accepted for forward-compat but
-            currently unused.
 
     Returns:
         A ``(gap_description, keywords)`` tuple: a free-text gap phrase for

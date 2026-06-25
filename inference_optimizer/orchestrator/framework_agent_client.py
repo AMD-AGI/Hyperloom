@@ -237,10 +237,6 @@ async def phase_discover(
     )
 
 
-# NOTE: ``phase_fetch`` / ``phase_emit_proposal`` shims were removed as dead
-# API (zero callers); re-add only when the Coordinator wires a new caller.
-
-
 __all__ = [
     "DEFAULT_FA_PHASE_TIMEOUT_SEC",
     "DISCOVER_FAILURE_RETRY_LIMIT",
