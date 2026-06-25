@@ -864,6 +864,17 @@ REPO_ROOT = os.environ.get(
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+# aiter JIT routing (no-op for non-aiter kernels; only aiter's JIT reads these).
+# aiter is installed EDITABLE via a sys.meta_path finder, so `import aiter` resolves
+# to the ORIGINAL repo regardless of sys.path order, and its JIT compiles
+# AITER_CSRC_DIR=$AITER_META_DIR/csrc. Without overriding AITER_META_DIR the JIT
+# builds the BASELINE csrc/*.cu -> every speedup is ~1.00x and correctness is blind
+# to the patch (the worktree-bypass bug). AITER_JIT_DIR routes build output to a
+# per-worktree dir so artifacts don't pollute the source package and parallel slots
+# don't collide on a shared build/.so/ninja-lock. Both MUST be set BEFORE import aiter.
+os.environ.setdefault("AITER_META_DIR", REPO_ROOT)
+os.environ.setdefault("AITER_JIT_DIR", os.path.join(REPO_ROOT, "_aiter_jit"))
+
 WARMUP = 50
 ITERATIONS = int(os.environ.get("GEAK_BENCHMARK_ITERATIONS", "200"))
 
@@ -1062,6 +1073,15 @@ import sys
 _GEAK_WORK_DIR = os.environ.get("GEAK_WORK_DIR", "")
 if _GEAK_WORK_DIR and _GEAK_WORK_DIR not in sys.path:
     sys.path.insert(0, _GEAK_WORK_DIR)
+# aiter JIT routing (no-op for non-aiter kernels; only aiter's JIT reads these).
+# aiter is editable via a sys.meta_path finder, so `import aiter` resolves to the
+# ORIGINAL repo regardless of sys.path; its JIT compiles AITER_CSRC_DIR=$AITER_META_DIR/csrc.
+# Without overriding AITER_META_DIR the JIT builds the BASELINE csrc/*.cu -> ~1.00x and
+# correctness is blind to the patch. AITER_JIT_DIR routes build output to a per-worktree
+# dir (no source-repo pollution, no parallel-slot collisions). Set BEFORE import aiter.
+if _GEAK_WORK_DIR:
+    os.environ.setdefault("AITER_META_DIR", _GEAK_WORK_DIR)
+    os.environ.setdefault("AITER_JIT_DIR", os.path.join(_GEAK_WORK_DIR, "_aiter_jit"))
 # GEAK controls benchmark iteration count via this env var.
 GEAK_BENCHMARK_ITERATIONS = int(os.environ.get("GEAK_BENCHMARK_ITERATIONS", "30"))
 
