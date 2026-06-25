@@ -124,6 +124,81 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
 # Default per-repo candidate cap for ``fa phase-discover`` (FRAMEWORK_PR).
 DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES: int = 8
 
+
+def _framework_pr_config_levers_from_done(
+    done_payload: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Extract a config-lever set from a FRAMEWORK_PR specialist deliverable.
+
+    A specialist may translate an upstream PR into a CONFIG win (serving flags /
+    env vars already reachable on this build) instead of a source patch. Such a
+    deliverable is a first-class FRAMEWORK_PR result: it flows through the
+    existing ``integrate_patch`` ``config_changes`` channel (apply + bench +
+    accuracy gate), NOT an authored_empty skip.
+
+    The levers are read from the FIRST ``proposal_set`` entry that carries
+    ``extra_args`` and/or ``extra_envs`` (the standard explore-variant schema).
+    ``extra_args`` (a server-arg string or list) and ``extra_envs`` (a mapping)
+    are flattened into a single ``{KEY: value}`` config-changes dict that
+    ``integrate_patch`` layers onto the launch env. Returns ``{}`` when no
+    config lever is present (the caller then treats the deliverable as a patch
+    or an empty outcome as before).
+
+    Args:
+        done_payload: The specialist ``specialist_done`` payload (already
+            unwrapped of any envelope).
+
+    Returns:
+        dict[str, str]: The flattened config-change mapping, or ``{}``.
+    """
+    if not isinstance(done_payload, dict):
+        return {}
+    # A patch deliverable takes precedence — it is not a config-only outcome.
+    patches = done_payload.get("patches_written") or []
+    if isinstance(patches, list) and patches:
+        return {}
+    proposals = done_payload.get("proposal_set") or []
+    if not isinstance(proposals, list):
+        return {}
+    for entry in proposals:
+        if not isinstance(entry, dict):
+            continue
+        levers: dict[str, str] = {}
+        envs = entry.get("extra_envs")
+        if isinstance(envs, dict):
+            for k, v in envs.items():
+                key = str(k).strip()
+                if key:
+                    levers[key] = str(v)
+        args = entry.get("extra_args")
+        arg_tokens: list[str] = []
+        if isinstance(args, str) and args.strip():
+            arg_tokens = args.split()
+        elif isinstance(args, (list, tuple)):
+            arg_tokens = [str(a) for a in args if str(a).strip()]
+        # Fold ``--flag value`` / ``--flag=value`` / bare ``--flag`` pairs into
+        # the config dict so integrate_patch can re-emit them as server args.
+        i = 0
+        while i < len(arg_tokens):
+            tok = arg_tokens[i].strip()
+            if not tok:
+                i += 1
+                continue
+            if "=" in tok and tok.startswith("-"):
+                k, _, v = tok.partition("=")
+                levers[k.strip()] = v.strip()
+                i += 1
+                continue
+            if tok.startswith("-") and i + 1 < len(arg_tokens) and not arg_tokens[i + 1].startswith("-"):
+                levers[tok] = str(arg_tokens[i + 1]).strip()
+                i += 2
+                continue
+            levers[tok] = ""
+            i += 1
+        if levers:
+            return levers
+    return {}
+
 # Point 2 hard-trigger thresholds: EXPLORE rounds a domain may go without a
 # specialist dispatch / a KEEP before the Coordinator force-dispatches one (a
 # real scheduling event, not an advisory nudge). Overridable via SharedState.
@@ -3155,12 +3230,12 @@ class Coordinator:
             "FRAMEWORK_PR AUTHORING TASK.",
             "",
             "A candidate upstream PR was discovered as a lead for this gap.",
-            "Study it as INSPIRATION, then author your OWN source patch into",
-            "your worktree. You are NOT limited to copying the PR's diff — go",
+            "Study it as INSPIRATION, then deliver the BEST win for this model /",
+            "hardware / workload. You are NOT limited to copying the PR's diff — go",
             "beyond it where the live source + profile evidence justify a",
             "stronger or more targeted change. If, after reading the source,",
             "the upstream change is already optimal, you may reproduce its",
-            "essential edit, but prefer a patch tailored to this model /",
+            "essential edit, but prefer a change tailored to this model /",
             "hardware / workload.",
             "",
             f"- PR title: {title or '(none)'}",
@@ -3171,9 +3246,13 @@ class Coordinator:
         notes_lines.extend(
             [
                 "",
-                "Deliverable: a unified-diff patch file in your worktree, listed in",
-                "``patches_written``. The Coordinator applies + benches it and",
-                "decides KEEP/REVERT; you do not benchmark.",
+                "Deliverable — EITHER is valid (pick what actually moves throughput):",
+                "- a unified-diff source patch in your worktree (``patches_written``), OR",
+                "- when the PR's benefit is reachable via serving flags / env vars on",
+                "  this build (e.g. an MTP toggle), a ``proposal_set`` entry carrying",
+                "  ``extra_args`` / ``extra_envs``.",
+                "The Coordinator applies + benches it and decides KEEP/REVERT; you do",
+                "not benchmark. A config-lever deliverable is a full result, not empty.",
             ]
         )
         notes = "\n".join(notes_lines)
@@ -8601,6 +8680,13 @@ class Coordinator:
         patches = inner.get("patches_written") or []
         if isinstance(patches, list) and patches:
             return
+        # Relaxed FRAMEWORK_PR rule: a config-lever deliverable (proposal_set
+        # carrying extra_args / extra_envs) is a FULL result, not "empty". When
+        # one exists, ``_maybe_autosubmit_framework_pr_config`` routes it through
+        # integrate_patch (which owns the terminal row), so do NOT stamp an
+        # authored_empty row here.
+        if _framework_pr_config_levers_from_done(inner):
+            return
         cand_id = str(params.get("framework_pr_candidate_id") or "")
         if not cand_id:
             return
@@ -9954,6 +10040,122 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
                 "B3: save after specialist patch autosubmit failed for task=%s",
+                sid,
+            )
+
+    async def _maybe_autosubmit_framework_pr_config(
+        self,
+        *,
+        task: "Task",
+        done_payload: dict[str, Any],
+    ) -> None:
+        """Route a FRAMEWORK_PR config-lever deliverable through integrate_patch.
+
+        Companion to :meth:`_maybe_autosubmit_specialist_patches`. That bridge
+        fires only on ``patches_written``; this one fires when a FRAMEWORK_PR
+        *authoring* specialist returns NO source patch but a config-lever
+        ``proposal_set`` (extra_args / extra_envs) — the relaxed FRAMEWORK_PR
+        rule that lets a PR's benefit land as serving flags / env vars (e.g. an
+        MTP toggle) without writing source. The levers go into integrate_patch's
+        existing ``config_changes`` channel (apply + bench + accuracy gate +
+        KEEP/REVERT); integrate_patch owns the terminal FRAMEWORK_PR row via
+        ``_record_framework_pr_authored_outcome``. Idempotent per specialist.
+
+        Args:
+            task: The completed authoring specialist task.
+            done_payload: Its ``specialist_done`` payload.
+        """
+        spec_params = getattr(task, "params", None) or {}
+        if not bool(spec_params.get("framework_pr_authoring")):
+            return
+        # A patch deliverable is handled by the patch autosubmit bridge.
+        patches = done_payload.get("patches_written") or []
+        if isinstance(patches, list) and patches:
+            return
+        config_changes = _framework_pr_config_levers_from_done(done_payload)
+        if not config_changes:
+            return
+        sid = str(task.task_id or "").strip()
+        if not sid:
+            return
+        # Already ruled on (e.g. after resume) — nothing to do.
+        try:
+            if self.shared_state.get_specialist_patch_verdict(sid):
+                return
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+        # A synthetic review for this specialist is already in flight.
+        for p in self.state.pending_proposals.values():
+            try:
+                if getattr(p, "action_name", "") != "integrate_patch":
+                    continue
+                pl = getattr(p, "payload", {}) or {}
+                if (pl.get("params") or {}).get("specialist_task_id") == sid:
+                    return
+            except Exception:  # noqa: BLE001 — defensive
+                continue
+        proposals = done_payload.get("proposal_set") or []
+        patch_name = ""
+        if isinstance(proposals, list) and proposals and isinstance(proposals[0], dict):
+            patch_name = str(proposals[0].get("name") or "")
+        integrate_params: dict[str, Any] = {
+            "specialist_task_id": sid,
+            "provenance": "specialist",
+            "patch_name": patch_name,
+            "config_changes": dict(config_changes),
+        }
+        # FRAMEWORK_PR authoring provenance passthrough so the authored-outcome
+        # bridge keys the terminal row on the real PR candidate id.
+        fa_cand = str(spec_params.get("framework_pr_candidate_id") or "")
+        fa_batch = str(spec_params.get("framework_pr_batch_id") or "")
+        integrate_params["framework_pr_authoring"] = True
+        if fa_cand:
+            integrate_params["framework_pr_candidate_id"] = fa_cand
+        if fa_batch:
+            integrate_params["framework_pr_batch_id"] = fa_batch
+        propose_payload = {
+            "action_name": "integrate_patch",
+            "provenance": "specialist",
+            "predicted_gain_pct": 0.0,
+            "params": integrate_params,
+        }
+        msg = Message.new(
+            "coordinator",
+            "*",
+            "proposal",
+            {**propose_payload, "needs_review": True},
+            priority=1,
+        )
+        await self.bus.append_and_seq(msg)
+        self.state.pending_proposals[msg.msg_id] = PendingProposal(
+            proposal_msg_id=msg.msg_id,
+            from_agent="coordinator",
+            action_name="integrate_patch",
+            predicted_gain_pct=0.0,
+            payload=dict(propose_payload),
+        )
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "framework_pr_config_autosubmitted_for_review",
+                "specialist_task_id": sid,
+                "proposal_msg_id": msg.msg_id,
+                "candidate_id": fa_cand,
+                "config_changes": dict(config_changes),
+            },
+        )
+        log.info(
+            "FRAMEWORK_PR: config-lever deliverable routed to integrate_patch "
+            "candidate=%s keys=%s",
+            fa_cand or sid,
+            sorted(config_changes.keys()),
+        )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "FRAMEWORK_PR: save after config autosubmit failed for task=%s",
                 sid,
             )
 

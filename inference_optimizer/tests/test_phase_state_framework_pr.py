@@ -101,8 +101,10 @@ def test_exit_normal_framework_pr_no_force_exit_when_remaining_above_ratio():
     assert phase_state.exit_normal_framework_pr(state, max_hours=2.0) is None
 
 
-def test_exit_normal_framework_pr_does_not_exit_on_plateau():
-    """FRAMEWORK_PR plateau is advisory only, never exits the phase."""
+def test_exit_normal_framework_pr_exits_on_consecutive_reject_plateau():
+    """3 consecutive resolved-no-keep candidates (here 'reject') trip the
+    plateau exit. (Updated from the pre-plateau-feature behaviour where the
+    streak was advisory-only and reject rows were ignored.)"""
     batches = [
         {
             "batch_id": "b1",
@@ -129,7 +131,10 @@ def test_exit_normal_framework_pr_does_not_exit_on_plateau():
         framework_pr_batches=batches,
         framework_pr_phase_progress=progress,
     )
-    assert phase_state.exit_normal_framework_pr(state) is None
+    out = phase_state.exit_normal_framework_pr(state)
+    assert out is not None
+    assert out[0] == "framework_pr_plateau"
+    assert out[1]["consecutive_no_keep"] == 3
 
 
 def test_compute_plateau_framework_pr_returns_signal():
@@ -237,15 +242,35 @@ def test_exit_normal_framework_pr_keep_resets_no_keep_streak():
     assert phase_state.exit_normal_framework_pr(state) is None
 
 
-def test_exit_normal_framework_pr_plateau_skips_non_benchmarked_rows():
-    """not_applicable / apply_failed rows are neither a test nor a reset."""
+def test_exit_normal_framework_pr_plateau_counts_non_benchmarked_no_keep_rows():
+    """not_applicable / apply_failed / authored_empty rows count toward the
+    no-keep streak (they are resolved candidates that did not KEEP).
+
+    In a wheel-based framework env the direct_apply path cannot run and
+    authoring overwhelmingly returns not_applicable / authored_empty, so a batch
+    of dead candidates must still trip the plateau gate — otherwise FRAMEWORK_PR
+    (which has no wall-clock budget cap) grinds for hours without leverage.
+    """
     progress = [
+        {"candidate_id": "c1", "status": "not_applicable", "kept": False},
+        {"candidate_id": "c2", "status": "apply_failed", "kept": False},
+        {"candidate_id": "c3", "status": "authored_empty", "kept": False},
+    ]
+    state = _State(framework_pr_phase_progress=progress)
+    out = phase_state.exit_normal_framework_pr(state)
+    assert out is not None
+    assert out[0] == "framework_pr_plateau"
+    assert out[1]["consecutive_no_keep"] == 3
+
+
+def test_exit_normal_framework_pr_plateau_mixed_terminal_no_keep_rows():
+    """A mix of reverted + non-benchmarked terminal rows all count; a KEEP
+    still breaks the streak so only the trailing run is counted."""
+    progress = [
+        {"candidate_id": "c0", "status": "kept", "kept": True},
         {"candidate_id": "c1", "status": "reverted", "kept": False},
         {"candidate_id": "c2", "status": "not_applicable", "kept": False},
         {"candidate_id": "c3", "status": "apply_failed", "kept": False},
-        {"candidate_id": "c4", "status": "reverted", "kept": False},
-        {"candidate_id": "c5", "status": "not_applicable", "kept": False},
-        {"candidate_id": "c6", "status": "reverted", "kept": False},
     ]
     state = _State(framework_pr_phase_progress=progress)
     out = phase_state.exit_normal_framework_pr(state)

@@ -265,6 +265,18 @@ class ResultRecorder:
                 "B3: specialist patch autosubmit failed for task=%s",
                 task.task_id,
             )
+        # Relaxed FRAMEWORK_PR rule: a config-lever deliverable (no source patch,
+        # but a proposal_set of serving flags / env vars) is routed through the
+        # same integrate_patch gate via its config_changes channel.
+        try:
+            await self._maybe_autosubmit_framework_pr_config(
+                task=task, done_payload=done_payload,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "FRAMEWORK_PR config autosubmit failed for task=%s",
+                task.task_id,
+            )
 
     def _record_intervention_for_task(
         self, task: "Task", result: Any,

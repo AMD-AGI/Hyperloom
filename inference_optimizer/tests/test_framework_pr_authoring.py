@@ -411,6 +411,70 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
     assert stub.shared_state.framework_pr_phase_progress == []
 
 
+# Relaxed rule — config-lever deliverable is first-class -------------------
+def test_config_levers_helper_extracts_from_proposal_set():
+    """A proposal_set entry carrying extra_args / extra_envs is flattened into
+    a config_changes dict; patches take precedence (returns {})."""
+    from inference_optimizer.orchestrator.coordinator import (
+        _framework_pr_config_levers_from_done,
+    )
+
+    done = {
+        "patches_written": [],
+        "proposal_set": [
+            {
+                "name": "mtp-spec-decode",
+                "extra_args": "--speculative-num-steps 3 --enable-mtp",
+                "extra_envs": {"VLLM_USE_MTP": "1"},
+            }
+        ],
+    }
+    levers = _framework_pr_config_levers_from_done(done)
+    assert levers["VLLM_USE_MTP"] == "1"
+    assert levers["--speculative-num-steps"] == "3"
+    assert levers["--enable-mtp"] == ""
+
+    # A patch deliverable is NOT a config-only outcome.
+    assert _framework_pr_config_levers_from_done(
+        {"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}
+    ) == {}
+    # No levers → empty.
+    assert _framework_pr_config_levers_from_done(
+        {"patches_written": [], "proposal_set": [{"name": "research-only"}]}
+    ) == {}
+
+
+def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
+    """A config-lever deliverable (proposal_set with extra_args/extra_envs and no
+    patch) is routed to integrate_patch's config_changes channel, so the
+    empty-outcome bridge must NOT stamp an authored_empty row for it."""
+    stub = _Stub(tmp_path, authoring=True)
+    task = SimpleNamespace(
+        task_id="spec-cfg",
+        params={
+            "framework_pr_authoring": True,
+            "framework_pr_candidate_id": "https://github.com/ROCm/vllm/pull/1014",
+            "framework_pr_batch_id": "b1",
+            "framework_pr_audit": {"semantic_status": "not_present"},
+        },
+    )
+    done_payload = {
+        "patches_written": [],
+        "proposal_set": [
+            {"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}}
+        ],
+        "summary": "PR maps to a config lever on this build",
+    }
+
+    Coordinator._record_framework_pr_authoring_empty_outcome(  # type: ignore[arg-type]
+        stub,
+        task=task,
+        done_payload=done_payload,
+    )
+
+    assert stub.shared_state.framework_pr_phase_progress == []
+
+
 # Step 3 — audit-routed dispatch ------------------------------------------
 def test_pump_audit_skip_records_terminal_row_no_tasks(
     tmp_path: Path,

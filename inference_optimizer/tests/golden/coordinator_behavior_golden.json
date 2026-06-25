@@ -294,8 +294,9 @@
     "phase": "PRELUDE",
     "phase_budget_pct": {
       "CLOSE": 0.02,
-      "EXPLORE": 0.45,
-      "KERNEL": 0.38,
+      "EXPLORE": 0.375,
+      "FRAMEWORK_PR": 0.15,
+      "KERNEL": 0.305,
       "PRELUDE": 0.03,
       "SWEEP": 0.12
     },
