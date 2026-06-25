@@ -374,7 +374,7 @@ class CriticAgentBackend:
     # prompt so they don't steer the decision). ``True``/``False`` force it.
     kb_assess_inject: bool | None = None
     name: str = "critic-agent"
-    # #170 — optional web tools (web_search / web_fetch). ``web_tools_config``
+    # Optional web tools (web_search / web_fetch). ``web_tools_config``
     # None reads from env; ``web_tool_clients_factory`` injects test clients.
     web_tools_config: "WebToolsConfig | None" = None
     web_tool_clients_factory: Callable[["WebToolsConfig"], "WebToolClients"] | None = None
@@ -485,7 +485,7 @@ class CriticAgentBackend:
             sorted(self._static_context.keys()),
         )
 
-        # #170 — initialize web tools (no-op by default).
+        # Initialize web tools (no-op by default).
         self._init_web_tools()
 
     def _init_web_tools(self) -> None:
@@ -862,7 +862,7 @@ class CriticAgentBackend:
         env.setdefault("CRITIC_SESSION_MEMORY_DIR", str(memory_dir))
         env["CRITIC_KB_CLIENT_MODE"] = self.kb_mode
 
-        # L4 — point the runtime at the sibling robustness findings JSONL;
+        # Point the runtime at the sibling robustness findings JSONL;
         # set here because the robustness CLI's env never reaches us.
         env.setdefault(
             "ROBUSTNESS_AGENT_SESSION_DIR",
@@ -1130,7 +1130,7 @@ class CriticAgentBackend:
         """
         tools = self._web_tool_schemas
         max_turns = self._web_tool_max_turns if tools else 0
-        # Full-trace A5: accumulate token usage across every Codex call in
+        # Accumulate token usage across every Codex call in
         # this reasoning loop (initial + tool-use rounds + forced final).
         # OpenAI has no prompt-cache split, so only in/out counters move.
         usage_acc = {"input_tokens": 0, "output_tokens": 0}

@@ -21,7 +21,7 @@ Design contract:
 * **Self-contained redaction**: the redactor strips secret *values*
   (Bearer tokens, ``ak-`` / ``sk-`` / ``pk-`` keys, ``ghp_`` GitHub
   tokens, ``KEY=value`` / ``token: value`` shapes), not just env-var
-  names, because we are now persisting the model's raw text.
+  names, because the model's raw text is persisted to disk.
 """
 
 from __future__ import annotations

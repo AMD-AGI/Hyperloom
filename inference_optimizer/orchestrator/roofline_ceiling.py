@@ -1175,7 +1175,7 @@ def read_baseline_server_args(state: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: TraceLens PerfModel per-op breakdown (bottom-up).
+# TraceLens PerfModel per-op (bottom-up) roofline breakdown.
 # ---------------------------------------------------------------------------
 
 #: Max-achievable (sustained) TFLOPS from TraceLens arch JSON files.
@@ -1514,8 +1514,7 @@ def compute_roofline_from_perfmodel(
     used by TraceLens analysis reports for consistency.
 
     The GEMM / SDPA formulas are inlined here (no TraceLens import) and
-    maintained independently.  They match TraceLens PerfModel exactly
-    (verified by the PoC in roofline_perfmodel_poc.py: deviation < 1.6%).
+    maintained independently.  They mirror TraceLens PerfModel.
 
     Args:
         meta: Model metadata; complete config required (else ``None``).

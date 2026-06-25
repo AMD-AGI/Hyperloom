@@ -88,8 +88,8 @@ def _section_run_context(
 
 
 def _section_phase_review_contract() -> list[str]:
-    """Static phase-aware verdict contract (v0.8 §3.3 §4.3); mirrors
-    ``phase_state.PHASE_LLM_PROPOSABLE_ACTIONS`` (PolicyGate R1).
+    """Render the static phase-aware verdict contract; mirrors
+    ``phase_state.PHASE_LLM_PROPOSABLE_ACTIONS``.
 
     Returns:
         The rendered phase-review-contract lines.

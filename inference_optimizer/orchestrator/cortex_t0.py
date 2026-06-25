@@ -127,9 +127,9 @@ def _warm_recipe_source(
     """Resolve which KB path actually supplied the applied warm recipe.
 
     Under the composite remote, a merged row carries ``_field_sources`` /
-    ``_sources`` recording which backend supplied each field. When config-donor
-    decoupling (#587) borrows the replayable champion from a same-architecture
-    sibling, the FINAL applied config comes from the donor's path — so prefer
+    ``_sources`` recording which backend supplied each field. When the
+    replayable champion is borrowed from a same-architecture sibling, the
+    FINAL applied config comes from the donor's path — so prefer
     the donor's ``best_config`` source whenever a separate donor (tier other
     than ``self``) supplied it. Otherwise attribute to the identity match's
     ``best_config`` backend, then its first contributing source, and finally
@@ -741,8 +741,8 @@ def run_t0_anchor(
         warm_conf = 0.0
 
     # Config-donor decoupling: the identity match (warm_point) supplies priors
-    # and the 7-tuple anchor; if it carries no replayable champion config
-    # (the ~47% empty-best_config / seed-only rows), borrow one from the
+    # and the 7-tuple anchor; if it carries no replayable champion config,
+    # borrow one from the
     # nearest same-architecture sibling so the active warm-replay can still
     # fire. The donor's cross-model transfer confidence — not the identity
     # match's confidence — governs the downstream replay gate.

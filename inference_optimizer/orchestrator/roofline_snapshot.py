@@ -329,7 +329,7 @@ def build_roofline_snapshot(
     snap: dict[str, Any] = {
         "snapshot_id": snapshot_id,
         "ts": ts or "",
-        # 9fe4609 sidecar pointer — overwritten by record_trace_analyze; empty for offline callers.
+        # sidecar pointer — overwritten by record_trace_analyze; empty for offline callers.
         "kernel_roofline_path": "",
         "compute_pct": None,
         "idle_pct": None,
@@ -384,7 +384,7 @@ def _num_delta(latest: float | None, baseline: float | None) -> float | None:
 def build_roofline_comparison_from_history(
     snapshots: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    """Build the ``roofline_comparison`` block from :attr:`SharedState.roofline_snapshots` (preferred entry point post PR #321).
+    """Build the ``roofline_comparison`` block from :attr:`SharedState.roofline_snapshots` (preferred entry point for building the comparison block from snapshot history).
 
     Append-only: ``snapshots[0]`` is baseline, ``snapshots[-1]`` the latest refresh.
     Same snapshot_id → single_snapshot mode; distinct ids → before_after with ``delta``. ``None`` when history empty.

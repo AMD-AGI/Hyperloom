@@ -839,7 +839,6 @@ def _section_rules(rules_md: str) -> list[str]:
     return ["## 7. RULES & OUTPUT PROTOCOL", "", body]
 
 
-# Public API.
 def _section_macro_posture(macro_cycle: int = 0) -> list[str]:
     """Build the advisory long-run MACRO POSTURE section.
 

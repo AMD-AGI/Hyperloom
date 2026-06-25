@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PR Monitor REST client — v0.8 M4.
+"""PR Monitor REST client.
 
 Stdlib-only client for the ``primus-cortex-pr-api`` REST surface. Fail-soft
 (Inv-6.3), read-only, cross-cluster aware (KB_design §3.14 R-02).
@@ -68,7 +68,7 @@ class PRMonitorClient:
     """Stdlib-only REST client for the PR Monitor surface.
 
     ``enabled=False`` (``--degraded-pr``) turns every call into a no-op
-    returning empty data (KB_design §3.13 M4).
+    returning empty data.
     """
 
     base_url: str = DEFAULT_PR_MONITOR_URL

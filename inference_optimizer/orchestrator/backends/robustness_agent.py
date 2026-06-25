@@ -241,8 +241,8 @@ class RobustnessAgentBackend:
             }
         )
 
-        # Author-time breakdown capture: record this robustness signal before
-        # the backend prunes old workdirs (composed into critic_robustness).
+        # Record the robustness signal before stale workdirs are pruned
+        # (folded into the critic_robustness breakdown).
         try:
             from ...breakdown.recorder import instrument
 

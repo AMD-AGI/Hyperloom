@@ -71,7 +71,7 @@ payload={{"topic":"heartbeat","body_md":"ok"}}.
 """.strip()
 
 
-# Conversational-mode floors (plan Step 1): a persistent ReAct turn pulls
+# Conversational-mode floors: a persistent ReAct turn pulls
 # context tools before emitting, so it needs more turns + wall-clock budget.
 _CONVERSATIONAL_MIN_MAX_TURNS: int = 12
 _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC: float = 300.0
@@ -143,7 +143,7 @@ class ClaudeBackend:
     # Default 4 covers tool_use → tool_result → final text; conversational
     # mode raises this floor (more context-pull headroom per turn).
     max_turns_default: int = 4
-    # Persistent-conversation mode (plan Step 1): resume the SAME SDK session
+    # Persistent-conversation mode: resume the SAME SDK session
     # across ticks (``resume=<session_id>``) feeding only a per-tick delta,
     # instead of a fresh stateless conversation. kernel / critic / robustness
     # stay stateless.
@@ -178,9 +178,9 @@ class ClaudeBackend:
     mcp_server_config: Any | None = field(default=None, init=False)
     mcp_tool_name: str | None = field(default=None, init=False)
     # SDK session token captured last turn; replayed via ``resume`` in
-    # conversational mode. ``reset_conversation()`` clears it (plan Step 1/4).
+    # conversational mode. ``reset_conversation()`` clears it.
     _session_id: str | None = field(default=None, init=False)
-    # Read-only context-pull MCP server config (plan Step 2), set via
+    # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
 
@@ -285,7 +285,7 @@ class ClaudeBackend:
         Returns:
             The parsed :class:`BackendTurnResult` for the turn.
         """
-        # ``allow_no_intent`` (plan Step 4): a summary/checkpoint turn asks
+        # ``allow_no_intent``: a summary/checkpoint turn asks
         # for plain-text instead of emit_intent, so relax the no-intent guard.
         full_prompt = self._compose_prompt(prompt)
         max_turns_use = max_turns or self.max_turns_default
@@ -453,7 +453,7 @@ class ClaudeBackend:
         return f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
 
     def set_context_provider(self, provider: ContextProvider | None) -> None:
-        """Attach (or clear) the read-only context-pull MCP server (plan Step 2).
+        """Attach (or clear) the read-only context-pull MCP server.
 
         ``None`` detaches it. Best-effort: a build failure is recorded as a
         soft warning and leaves the backend usable without the pull tools.
@@ -488,7 +488,7 @@ class ClaudeBackend:
     def reset_conversation(self) -> None:
         """Drop the captured session so the next ``run`` starts fresh.
 
-        Used after a checkpoint/compaction or resume rebuild (plan Step 4).
+        Used after a checkpoint/compaction or resume rebuild.
         """
         self._session_id = None
 
@@ -544,7 +544,7 @@ class ClaudeBackend:
         allowed = [t for t in tools if t != EMIT_INTENT_TOOL_NAME]
         if self.mcp_tool_name and self.mcp_tool_name not in allowed:
             allowed.append(self.mcp_tool_name)
-        # Allow-list the context-pull tools' qualified names (plan Step 2);
+        # Allow-list the context-pull tools' qualified names;
         # the SDK needs the qualified form even though bare names are gated.
         if self._context_server_config is not None:
             for qname in CONTEXT_TOOL_QUALIFIED_NAMES:

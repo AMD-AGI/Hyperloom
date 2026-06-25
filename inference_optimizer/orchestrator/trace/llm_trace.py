@@ -7,7 +7,7 @@ every producer — the orchestration/kernel reactor, specialist sub-agents,
 and the Codex/critic/scorer inference steps — emits rows that the collector
 can join without guessing.
 
-Design contract (FULL_TRACE_DESIGN §3.1, §4):
+Design contract:
 
 * **Closed schema**: a row carrying an unknown field — or missing a
   required one — fails fast (:class:`LLMTraceRowError`) so a buggy call
@@ -42,9 +42,8 @@ log = logging.getLogger(__name__)
 
 # Components that may legitimately appear in a trace row. Kept as a closed
 # vocabulary so a typo'd ``component=`` at a call site is caught instead of
-# fragmenting the per-component rollup. Extend this set deliberately when a
-# new producer lands (P1/P2 add specialist subprocess parsing, geak, oob,
-# robustness, tracelens, breakdown).
+# fragmenting the per-component rollup. Add a new producer label here
+# deliberately when one lands.
 VALID_COMPONENTS: frozenset[str] = frozenset(
     {
         "orchestration",
@@ -199,8 +198,8 @@ class LLMCallRecord:
 
         Both :class:`ClaudeBackend` and :class:`CodexBackend` put ``model``
         and the four token counters on ``metadata`` under identical keys, so
-        this one constructor covers every in-process backend call site (A1
-        orchestration/kernel, A2 dynamic_action, A3 specialist fallback).
+        this one constructor covers every in-process backend call site
+        (orchestration/kernel, dynamic_action, specialist fallback).
         Missing token keys degrade to ``None`` rather than ``0`` so the
         collector can distinguish "unreported" from "reported zero".
 
@@ -336,7 +335,7 @@ def append_llm_call(
 
     In-process producers append directly into the parent's
     ``llm_calls.jsonl``. Out-of-process children instead write their own
-    ``reports/trace/ext/<component>-<pid>.jsonl`` shard (legacy/compat path);
+    ``reports/trace/ext/<component>-<pid>.jsonl`` shard;
     the collector and Langfuse emitter backfill those shards at read time, so
     this function intentionally has no shard-target override.
 
