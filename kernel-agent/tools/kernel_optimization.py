@@ -2899,7 +2899,14 @@ def invoke_backend(
         if backend == "forge"
         else _oob_output_dir(args.session_id, prompt_file)
     )
-    if common_test_command:
+    # HL builds a harness only for backends that lack their own preprocess stage
+    # (forge/OOB). GEAK owns harness construction in its preprocess_v3 orchestrator
+    # (it has the shapes, serving config, and harness_kb to build the harness that
+    # matches the live workload), so HL must NOT pre-bake one and force it via
+    # --test-command -- doing so bypasses GEAK's preprocess and was the source of
+    # the GEMM-flattened paged-attention harness. For GEAK, pass the raw
+    # test_command (the op_test) and let GEAK figure it out: one path.
+    if common_test_command and backend != "geak":
         _harness_cmd = _try_generate_harness(
             common_test_command,
             candidate,
