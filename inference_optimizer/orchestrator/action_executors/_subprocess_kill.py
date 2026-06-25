@@ -1,15 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Reliable subprocess-tree teardown for Magpie-launched servers
-(Hyperloom ``bugs.md`` §B).
+"""Reliable subprocess-tree teardown for Magpie-launched servers.
 
 Magpie's shell wrappers ``trap``/``setsid``/``nohup`` the vLLM/SGLang server,
-so on a Hyperloom-side timeout or error the server child survives, holds GPU
-memory, and keeps a ``bash`` alive that later re-sources a script mid-copy
-(bugs.md §C #1). Fix: launch Magpie in its own POSIX session
-(``start_new_session=True``) so ``os.killpg`` reaps the whole tree, and call
-:func:`kill_my_spawned_server` from every exit path (idempotent, never raises).
-Scoped strictly to the tree we created, so it's safe on every benchmark call.
+so on a Hyperloom-side timeout or error the server child can survive, holding
+GPU memory and keeping a ``bash`` alive that may later re-source a script
+mid-copy. To prevent that, Magpie is launched in its own POSIX session
+(``start_new_session=True``) so ``os.killpg`` reaps the whole tree, and
+:func:`kill_my_spawned_server` is called from every exit path (idempotent,
+never raises). Scoped strictly to the tree we created, so it's safe on every
+benchmark call.
 """
 
 from __future__ import annotations
@@ -180,7 +180,7 @@ def kill_my_spawned_server(
 # Sentinel ``returncode`` when ``run_with_session_kill`` reaps a child for an
 # elapsed ``soft_deadline_sec`` (vs the ``timeout=`` hard cap, which still
 # raises ``TimeoutExpired``). Chosen not to collide with a real signal-based
-# ``-N`` returncode; the ExploreExecutor maps it to ``KILLED_OVERTIME``.
+# ``-N`` returncode.
 OVERTIME_KILL_RETURNCODE: int = -909
 
 # Sentinel ``returncode`` when the server-liveness watchdog reaps a child
@@ -204,11 +204,10 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
     "Engine process failed to start",
     "AsyncEngineDeadError",
     "raise EngineDeadError",
-    # vLLM v1 engine-core bootstrap failure tail (#524): the APIServer logs
+    # vLLM v1 engine-core bootstrap failure tail: the APIServer logs
     # ``RuntimeError: Engine core initialization failed`` (already matched
-    # above) followed by ``Failed core proc(s): {...}``. Add the latter as a
-    # second, equally terminal anchor — both only appear once the engine core
-    # is unrecoverable, never on a merely slow cold start.
+    # above) followed by ``Failed core proc(s): {...}``. Both only appear once
+    # the engine core is unrecoverable, never on a merely slow cold start.
     "Failed core proc(s)",
 )
 
@@ -513,7 +512,7 @@ def run_with_session_kill(
     Returns a ``CompletedProcess`` and re-raises ``TimeoutExpired`` like
     ``subprocess.run``.
 
-    ``soft_deadline_sec`` (Fix E): an optional deadline firing before the
+    ``soft_deadline_sec``: an optional deadline firing before the
     ``timeout=`` hard cap; on elapse the tree is reaped and a
     ``CompletedProcess`` with ``returncode = OVERTIME_KILL_RETURNCODE`` is
     returned (does NOT raise). ``None`` / ≤ 0 keeps legacy behaviour. Tests
@@ -688,7 +687,7 @@ def run_with_session_kill(
 
 
 class _SoftDeadlineExceeded(Exception):
-    """Internal sentinel for an elapsed soft (Fix-E) deadline. Never bubbles
+    """Internal sentinel for an elapsed soft deadline. Never bubbles
     past :func:`run_with_session_kill` (converted to a ``CompletedProcess``).
     """
 

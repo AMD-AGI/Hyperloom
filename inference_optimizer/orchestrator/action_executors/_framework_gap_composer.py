@@ -2,12 +2,11 @@
 
 """Compose ``gap_description`` + ``keywords`` for the framework_pr arm.
 
-Replaces the typo-prone hand-typed ``--framework-gap`` string (session
-f219629b once picked a MoE PR for a dense workload from a missing ``dense``
-token) with a deterministic composer driven by structured workload data
-(framework, gpu_type, model_class, precision, profile bottleneck). Pure;
-the executor handles I/O. Returns ``(gap, keywords)`` so the executor can
-pass both to fa or pass ``keywords=[]`` to let fa extract from gap.
+Deterministically composes the gap/keyword text from structured workload data
+(framework, gpu_type, model_class, precision, profile bottleneck) instead of a
+hand-typed ``--framework-gap`` string. Pure; the executor handles I/O. Returns
+``(gap, keywords)`` so the executor can pass both to fa or pass ``keywords=[]``
+to let fa extract from gap.
 """
 
 from __future__ import annotations

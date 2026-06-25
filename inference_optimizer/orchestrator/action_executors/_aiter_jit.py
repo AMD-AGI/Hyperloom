@@ -6,21 +6,18 @@ stale-lock cleanup.
 aiter JIT-compiles GPU kernels on demand with ninja, guarding each module
 build with a per-module file lock (aiter ``jit/core.py`` ``mp_lock`` +
 ``jit/utils/file_baton.py``). The lock is a zero-byte file (``O_CREAT|O_EXCL``,
-no pid inside) and ``FileBaton.wait()`` spins forever with no timeout. When a
-``hipcc`` build process is killed mid-compile (timeout / OOM / KILL_TASK) it
-never releases its lock, so every later process compiling that module spins
-forever — the failure that hung 10 production sessions (``build_count`` frozen,
-server unreachable, robustness escalated).
+no pid inside) and ``FileBaton.wait()`` spins forever with no timeout. A
+``hipcc`` build process killed mid-compile (timeout / OOM / KILL_TASK) never
+releases its lock, so every later process compiling that module spins forever.
 
-The fix sweeps these orphaned locks before each cold server start, but ONLY
-when no compiler process is alive (the jit dir is node-global and shared across
-concurrent benchmarks, so a live ``hipcc`` may legitimately hold a lock). ninja
-resumes the build incrementally from existing ``.o`` once the lock is gone, so
-we delete only locks — never build artifacts.
+This module resolves the aiter jit dir and sweeps these orphaned locks before
+each cold server start, but ONLY when no compiler process is alive (the jit dir
+is node-global and shared across concurrent benchmarks, so a live ``hipcc`` may
+legitimately hold a lock). ninja resumes the build incrementally from existing
+``.o`` once the lock is gone, so we delete only locks — never build artifacts.
 
-This module is the single home for the logic so both ``cli.py`` (startup sweep)
-and ``baseline.py`` (per-cold-start sweep) can import it without a circular
-dependency (``cli.py`` already imports ``baseline``).
+The logic lives here so both ``cli.py`` (startup sweep) and ``baseline.py``
+(per-cold-start sweep) can import it without a circular dependency.
 """
 
 from __future__ import annotations
@@ -38,9 +35,9 @@ log = logging.getLogger(__name__)
 # < N .so files under aiter jit/ ⇒ COLD start (first-time JIT compile pending).
 COLD_START_KERNEL_THRESHOLD = 20
 
-# Legacy fallback probe order for aiter's JIT cache dir, used only when
-# find_spec("aiter") can't resolve aiter dynamically. First existing path
-# wins. Override via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR` (tried first).
+# Fallback probe paths for aiter's JIT cache dir, tried when aiter cannot be
+# resolved via import machinery. First existing path wins. Override via env
+# `INFERENCE_OPTIMIZER_AITER_JIT_DIR` (tried first).
 AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
     "/sgl-workspace/aiter/aiter/jit",
     "/sgl-workspace/aiter/aiter/jit/build",
@@ -79,9 +76,8 @@ def _resolve_aiter_jit_dir_dynamic() -> list[str]:
     """Locate aiter's ``jit/`` dir via Python's import machinery.
 
     Counting at ``<aiter>/jit/`` reflects a warm wheel install (~80
-    pre-built ``.so``); the legacy fixed ``jit/build`` list mis-reports
-    every wheel install as COLD. Returns an ordered candidate list
-    (``jit`` preferred over ``jit/build``); empty if aiter not found.
+    pre-built ``.so``), so ``jit`` is preferred over ``jit/build``. Returns an
+    ordered candidate list; empty if aiter not found.
 
     Returns:
         An ordered list of candidate aiter ``jit/`` directory paths, or an
@@ -137,12 +133,12 @@ def _any_live_compiler() -> bool | None:
 
 
 def _resolve_lock_sweep_dir(aiter_jit_dir: Path | None) -> Path | None:
-    """Resolve the build dir to sweep for locks: arg → env → dynamic → legacy.
+    """Resolve the build dir to sweep for locks: arg → env → dynamic → fallbacks.
 
-    Returns the first existing directory, or ``None`` when nothing resolves.
-    Mirrors the historical resolution order so the swept dir matches what
-    aiter actually writes locks into. A non-None caller arg is trusted as-is
-    (the ``os.walk`` of a nonexistent path simply yields nothing).
+    Returns the first existing directory, or ``None`` when nothing resolves, so
+    the swept dir matches what aiter actually writes locks into. A non-None
+    caller arg is trusted as-is (the ``os.walk`` of a nonexistent path simply
+    yields nothing).
     """
     if aiter_jit_dir is not None:
         return aiter_jit_dir

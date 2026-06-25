@@ -31,9 +31,9 @@ from ._multi_node_env import _read_state, is_multi_node
 log = logging.getLogger(__name__)
 
 
-# Default /health poll timeout. Tightened from 1800s to 900s (~2x normal MoE
-# cold-start headroom) so an incompatible-config variant aborts ~2x faster;
-# override per-run via HYPERLOOM_MN_HEALTH_WAIT_S.
+# Default /health poll timeout (15 min, ~2x MoE cold-start headroom) so an
+# incompatible-config variant aborts promptly; override per-run via
+# HYPERLOOM_MN_HEALTH_WAIT_S.
 DEFAULT_HEALTH_TIMEOUT_S = 900  # 15 min.
 
 # Magpie's sglang_mi*x.sh DEFAULT_ARGS, re-applied in multi-node so tput numbers

@@ -1,7 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Idempotent run-time patcher for vLLM and SGLang server installs
-(Hyperloom issue #194 §4 / §5).
+"""Idempotent run-time patcher for vLLM and SGLang server installs.
 
 The TraceLens profiling skill needs flags that exist only in TraceLens-patched
 vLLM / SGLang builds (``--profiler-config.capture_torch_profiler_dir`` /
@@ -537,10 +536,8 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
     sglang_pkg = sglang_module.parent
     # Always verify the annotation pipeline sentinels, not just the main
-    # kernel_shape_profiler file. Previous logic gated extra_sentinels on
-    # patch filenames matching a hardcoded set, which broke when TraceLens
-    # renamed patches or when partial applies left the main sentinel present
-    # but annotations missing.
+    # kernel_shape_profiler file, so a partial apply that leaves the main
+    # sentinel present but annotations missing is still detected.
     extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = (
         (
             sglang_pkg / "srt" / "managers" / "scheduler.py",

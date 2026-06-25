@@ -1,11 +1,9 @@
-"""Workload sweep that REUSES PerfSkills' delivered scripts.
+"""Workload sweep that relaunches the PerfSkills-optimized server.
 
-When the KERNEL phase was delegated to PerfSkills
+When the KERNEL phase is delegated to PerfSkills
 (``KERNEL_OPT_BACKEND_ORDER=perfskills``), the optimized server is reproduced
-from PerfSkills' own
-``bench_e2e.sh`` + the already-built overlay/flags/env recorded in
-``result.json`` — never reconstructed by Hyperloom (this removes the overlay
-reproduction risk). Each grid point relaunches the optimized server through
+from PerfSkills' own ``bench_e2e.sh`` plus the built overlay/flags/env recorded
+in ``result.json``. Each grid point relaunches the optimized server through
 ``bench_e2e.sh`` (same per-variant-server semantics as the native sweep),
 benches at ``(CONC, ISL, OSL)``, and parses ``bench_summary.json``.
 """
@@ -179,8 +177,7 @@ async def sweep_via_perfskills(
             # Name the per-point dir so the session-breakdown sweep collector's
             # on-disk scanner (_scan_sweep_variants / _VARIANT_NAME_RE expects
             # ``variant_<idx>_conc<c>_isl<i>_osl<o>``) discovers it and populates
-            # ``sweep.all_variants`` — without this the perfskills sweep was only
-            # half-auditable (summary present, per-variant detail missing).
+            # ``sweep.all_variants`` with per-variant detail.
             variant_name = f"variant_{variant_idx}_conc{conc}_isl{isl}_osl{osl}"
             variant_idx += 1
             out_dir = output_root / variant_name

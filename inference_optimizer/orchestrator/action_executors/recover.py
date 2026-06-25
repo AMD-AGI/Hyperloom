@@ -61,8 +61,8 @@ from ..sub_agent_runner import RunnerContext
 log = logging.getLogger(__name__)
 
 
-# VRAM owner patterns to clean up if stuck (mirrors the robustness-agent
-# list plus ``benchmark_serving``, which can hold KV-cache).
+# Process cmdline patterns for servers/benchmarks that can pin VRAM and must
+# be killed during recovery (``benchmark_serving`` can hold KV-cache).
 _OWNER_PATTERNS: tuple[str, ...] = (
     "sglang.launch_server",
     "sglang.srt",
@@ -138,9 +138,9 @@ def _is_multi_node_sandbox() -> bool:
       - ``_all_recovered`` sees low free_mb and returns False.
       - The orchestration LLM then proposes ``recover`` every tick forever.
 
-    The fix: skip the local GPU probe entirely in multi-node mode. Remote
-    GPU health is handled by the Dynamo restart-server / kill-inference
-    path (SSH to the actual pods).
+    In multi-node mode the local GPU probe is skipped entirely; remote GPU
+    health is handled by the Dynamo restart-server / kill-inference path
+    (SSH to the actual pods).
 
     Single-node (``is_multi_node() == False``) is unaffected — the sandbox
     IS the GPU pod, so local rocm-smi / gpureset are meaningful.

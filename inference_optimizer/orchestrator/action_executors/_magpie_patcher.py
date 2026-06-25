@@ -1,13 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Idempotent, atomic-write patcher for Magpie ``_prepare_benchmark_scripts``
-(Hyperloom ``bugs.md`` §C #1 root-cause fix).
+"""Idempotent, atomic-write patcher for Magpie ``_prepare_benchmark_scripts``.
 
 Magpie copies its generic ``scripts/benchmark/*.sh`` into
 ``<InferenceX>/benchmarks/`` via ``shutil.copy2`` (``O_TRUNC`` + chunked,
-non-atomic to a concurrent reader). A leaked ``bash`` from a prior task
-(bugs.md §B) that re-sources a script mid-copy then hits ``syntax error near
-unexpected token 'fi'``. We can't monkey-patch the subprocess Magpie, so we
+non-atomic to a concurrent reader). A concurrent ``bash`` that re-sources a
+script mid-copy then hits ``syntax error near unexpected token 'fi'``. We
+can't monkey-patch the subprocess Magpie, so we
 patch the cloned ``benchmarker.py`` in place to use a temp-file + ``os.replace``
 copy (no observable intermediate state), with an idempotent byte-identical skip
 so a read-only pre-staged ``InferenceX/benchmarks`` deployment no-ops instead of
@@ -47,7 +46,7 @@ log = logging.getLogger(__name__)
 # Atomic-patch outcome reasons. These let a caller (install.sh) tell an
 # EXPECTED no-op apart from a GENUINE failure instead of collapsing both into a
 # single ``False``. Only ``UNRECOGNIZED_SHAPE`` and ``IO_ERROR`` mean the
-# script-tearing race (bugs.md §C #1) may be unmitigated; the rest are benign.
+# script-tearing race may be unmitigated; the rest are benign.
 _ATOMIC_REASON_APPLIED = "applied"  # legacy block rewritten this run
 _ATOMIC_REASON_ALREADY_PATCHED = "already_patched"  # sentinel already present
 _ATOMIC_REASON_UPSTREAM_ATOMIC = "upstream_atomic"  # Magpie already atomic
@@ -110,7 +109,8 @@ _PATCH_SENTINEL = "Hyperloom #C1 patch"
 _REMOTE_TRUST_SENTINEL = "MAGPIE_TRUST_REMOTE_CODE"
 
 # Magpie's remote-server SGLang client path bypasses the local run_benchmark
-# helper, so it used to miss --trust-remote-code for custom tokenizer models.
+# helper, so the trust gate for --trust-remote-code (custom tokenizer models)
+# must be injected into the remote-direct path here.
 _REMOTE_DIRECT_LEGACY_BLOCK = "    SERVER_MONITOR_ARGS=()\n    magpie_run_benchmark_serving_remote_direct || exit $?\n"
 _REMOTE_DIRECT_PATCHED_BLOCK = (
     "    SERVER_MONITOR_ARGS=()\n"
@@ -121,8 +121,8 @@ _REMOTE_DIRECT_PATCHED_BLOCK = (
     "    fi\n"
 )
 
-# Helper upstream Magpie introduced when it made the copy loop race-safe; its
-# presence means the legacy block is gone because upstream already fixed it.
+# Name of the upstream atomic-copy helper; its presence signals Magpie already
+# copies benchmark scripts atomically.
 _UPSTREAM_ATOMIC_HELPER = "_copy_benchmark_script_atomic"
 
 # Atomic-write primitives we look for when upstream inlined the temp-file +

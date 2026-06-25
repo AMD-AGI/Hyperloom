@@ -9,7 +9,7 @@ the Critic, and dispatches this executor per approved candidate to::
   1. Fetch the unified diff (explicit ``params.patches`` or
      ``curl candidate.diff_url``; apply happens in the live source root).
   2. Snapshot pre-apply HEAD SHA so REVERT can ``git reset --hard`` back
-     without disturbing prior KEEP commits (PR-327 P1.c).
+     without disturbing prior KEEP commits.
   3. Apply via ``git apply`` (single integration channel).
   4. Bench the patched server (``run_grid([GridVariant])``, size=1).
   5. KEEP commits to the live tree (next candidate stacks); REVERT runs
@@ -30,7 +30,7 @@ Inputs (``ctx.task.params``)::
         the executor curls ``candidate.diff_url`` into the per-task
         workspace and applies that.
     keep_threshold_pct (float, optional) — default DEFAULT_KEEP_THRESHOLD_PCT
-        (1.0 after D1 alignment; imported from integrate_patch).
+        (1.0; imported from integrate_patch).
     base_tput (float, optional) — baseline throughput; falls back to
         ``SharedState.baseline_tput``.
     accuracy_baseline (float, optional) — forwarded to the accuracy gate.
@@ -905,7 +905,7 @@ class FrameworkPrExecutor:
             "workspace": str(output_root),
         })
 
-    # KB writeback (D2, Arbor-into-Hyperloom)
+    # KB writeback: append FRAMEWORK_PR outcome to lessons.jsonl
     async def _write_kb_record(
         self,
         *,
