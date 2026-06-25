@@ -123,7 +123,7 @@
       "conc": 64,
       "registered": true,
       "note": "Ready (local /wekafs/models/Qwen-Qwen3.6-35B-A3B, id qwen3-6-35b-a3b-8h5dl). Weights are BF16 (~67G, no quantization_config); original FP4 was a no-op on MI300X. Run dynamic FP8 instead — tp8 ~8.4G/GPU, huge headroom. Official repo has NO -Instruct suffix.",
-      "is_top": true
+      "is_top": false
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -342,6 +342,20 @@
       "is_top": false,
       "note": "Supplementary >256B model (~1000B, arch=BailingMoeV2ForCausalLM, model_type=bailing_moe, native dtype BF16 [no quantization_config], precision=BF16) added 2026-06-23 from the sub100 >256B filter drop; pre-staged under /wekafs/models. sglang (same Bailing MoE family as Ling-1T). Very large MoE: tp8 single-node likely insufficient (may need multi-node/higher tp) — VERIFY serving.",
       "params_b": 1000
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 22,
+      "label": "Qwen3-14B FP8",
+      "repo_id": "Qwen/Qwen3-14B-FP8",
+      "framework": "vllm",
+      "precision": "FP8",
+      "tp": 2,
+      "conc": 64,
+      "registered": false,
+      "note": "Dense ~14.8B (arch=Qwen3ForCausalLM, model_type=qwen3), FP8-native weights (F8_E4M3 block-quantized, ~203k dl, ungated). MI300X (gfx942) has no native FP4 so FP8 is the natural fit. 40 attention heads / 8 KV heads divide by tp2 cleanly (40/2=20, 8/2=4); small 14B dense model fits comfortably at tp2 (no need for the pool-default tp8). Single-node vLLM+tp2+conc64. Not pre-staged in core42-hyperloom yet (ungated -> SaFE register downloads on first run).",
+      "is_top": true,
+      "params_b": 15
     }
   ]
 }
