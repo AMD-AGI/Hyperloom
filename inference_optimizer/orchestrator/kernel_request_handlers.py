@@ -17,6 +17,7 @@ import asyncio
 import functools
 import importlib.util
 import json
+import sys
 import logging
 import os
 import re
@@ -3173,6 +3174,41 @@ async def _run_kernel_backend_sequence(
     return best
 
 
+def _resolve_local_model_path(model: str) -> str:
+    """Map a model name/path to a local weights directory the server can load.
+
+    A bare HF id like ``meta-llama-Llama-3.1-8B-Instruct`` passed straight to
+    sglang/vllm triggers a HuggingFace fetch (401 for gated repos), so resolve it
+    to a local directory first. Reuses the existing kernel-agent resolver
+    (``tracelens_analysis._candidate_model_config_paths``, honouring
+    ``$HYPERLOOM_MODELS_ROOT``, default ``/wekafs/models``): the directory holding
+    the first existing ``config.json`` wins. Returns the input unchanged when it
+    is already a directory or nothing resolves (caller/serve layer decides).
+
+    Args:
+        model: A model name or filesystem path.
+
+    Returns:
+        str: A local weights directory if one resolves, else ``model`` unchanged.
+    """
+    if not model:
+        return model
+    if Path(model).is_dir():
+        return model
+    try:
+        tool = _kernel_agent_tool_path("tracelens_analysis.py")
+        tools_dir = str(tool.parent)
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)  # tracelens_analysis imports sibling tools-dir modules
+        import tracelens_analysis as _tla  # type: ignore[import-not-found]
+        for cfg in _tla._candidate_model_config_paths(model):
+            if Path(cfg).is_file():
+                return str(Path(cfg).parent)
+    except Exception as exc:  # noqa: BLE001  # resolution is best-effort; fall back to the raw value
+        log.info("combined_e2e: model-path resolve failed (%s); using raw '%s'", exc, model)
+    return model
+
+
 def _collect_combined_e2e_pairs(results: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """Collect (best_patch, target_source) pairs from a batch's per-kernel results.
 
@@ -3268,7 +3304,7 @@ def _run_combined_e2e_sync(
     if "geak" not in [b.lower() for b in (order or [])]:
         log.info("combined_e2e: skipped (backend is not geak: %s)", order)
         return None
-    model = str(payload.get("model_path") or "").strip()
+    model = _resolve_local_model_path(str(payload.get("model_path") or "").strip())
     if not model:
         log.info("combined_e2e: skipped (no model_path to serve)")
         return None
