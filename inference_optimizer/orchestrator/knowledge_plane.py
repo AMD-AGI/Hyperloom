@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from ..paths import asset_actions_dir
 from .pr_monitor import (
@@ -151,7 +150,6 @@ class KnowledgePlane:
     def from_clients(
         cls,
         *,
-        cortex_kb: Any = None,
         pr_monitor: PRMonitorClient | None = None,
         domain_repos: dict[str, DomainRepos] | None = None,
         pr_feed_window_days: int = DEFAULT_PR_FEED_WINDOW_DAYS,
@@ -163,8 +161,6 @@ class KnowledgePlane:
         """Construct a plane from injected clients and config.
 
         Args:
-            cortex_kb (Any): Optional legacy Cortex KB client (``None`` under
-                v2).
             pr_monitor (PRMonitorClient | None): Optional PR Monitor client.
             domain_repos (dict[str, DomainRepos] | None): Domain→repos config;
                 loaded from disk when ``None``.

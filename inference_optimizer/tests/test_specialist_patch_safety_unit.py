@@ -56,13 +56,6 @@ def test_is_unified_diff():
     assert ps.is_unified_diff("just text") is False
 
 
-def test_normalise_diff_for_compare():
-    out = ps.normalise_diff_for_compare(_DIFF)
-    assert "index" not in out
-    assert "diff --git" not in out
-    assert "@@" in out
-
-
 def test_patch_escapes_tree():
     assert ps.patch_escapes_tree(_DIFF) is None
     # cand after the b/ prefix begins with "/" -> absolute escape

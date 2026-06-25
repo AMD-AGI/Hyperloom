@@ -115,15 +115,7 @@ def test_get_json_non_json(monkeypatch):
         c._get_json("/p")
 
 
-# ---- healthz / list_repos / get_pr ---------------------------------------
-def test_healthz_ok_and_fail(monkeypatch):
-    c = pm.PRMonitorClient(base_url="http://x")
-    _stub_urlopen(monkeypatch, {"status": "ok"})
-    assert c.healthz() is True
-    monkeypatch.setattr(c, "_get_json", lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
-    assert c.healthz() is False
-
-
+# ---- list_repos ----------------------------------------------------------
 def test_list_repos_variants(monkeypatch):
     c = pm.PRMonitorClient(base_url="http://x")
     monkeypatch.setattr(
@@ -150,15 +142,7 @@ def test_list_repos_failure_and_nonlist(monkeypatch):
     assert c.list_repos() == []
 
 
-def test_get_pr_success_and_failure(monkeypatch):
-    c = pm.PRMonitorClient(base_url="http://x")
-    monkeypatch.setattr(c, "_get_json", lambda *a, **k: {"number": 7})
-    assert c.get_pr("a/b", 7) == {"number": 7}
-    monkeypatch.setattr(c, "_get_json", lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
-    assert c.get_pr("a/b", 7) is None
-
-
-# ---- list_prs -------------------------------------------------------------
+# ---- _list_prs_raising fixtures -------------------------------------------
 def _rich_items():
     return [
         {
@@ -184,30 +168,6 @@ def _rich_items():
         {"number": "bad"},  # unparseable -> skip
         "not-a-dict",  # skip
     ]
-
-
-def test_list_prs_success_and_cache(monkeypatch):
-    c = pm.PRMonitorClient(base_url="http://x")
-    monkeypatch.setattr(c, "_get_json", lambda *a, **k: {"items": _rich_items()})
-    prs = c.list_prs("a/b", limit=0)  # limit<=0 -> default
-    assert [p.number for p in prs] == [1, 2]
-    assert prs[0].title == "feat"
-    assert prs[0].labels == ("kernel", "perf")
-    assert prs[0].author == "alice"
-    assert prs[0].body_snippet.endswith("…")
-    assert prs[1].url == "http://pr/2"
-    # second call served from cache
-    monkeypatch.setattr(c, "_get_json", lambda *a, **k: (_ for _ in ()).throw(AssertionError("net")))
-    assert [p.number for p in c.list_prs("a/b", limit=0)] == [1, 2]
-
-
-def test_list_prs_failure_and_nonlist(monkeypatch):
-    c = pm.PRMonitorClient(base_url="http://x")
-    monkeypatch.setattr(c, "_get_json", lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
-    assert c.list_prs("a/b") == []
-    c2 = pm.PRMonitorClient(base_url="http://x")
-    monkeypatch.setattr(c2, "_get_json", lambda *a, **k: {"items": "nope"})
-    assert c2.list_prs("a/b") == []
 
 
 # ---- pr_feed_warm ---------------------------------------------------------
@@ -292,10 +252,3 @@ def test_matches_keywords():
     assert pm._matches_keywords(pr, []) is True
     assert pm._matches_keywords(pr, ["moe"]) is True
     assert pm._matches_keywords(pr, ["nomatch"]) is False
-
-
-def test_pr_summary_to_dict():
-    pr = pm.PRSummary(repo="a/b", number=3, title="t", url="u", state="open", labels=("x", "y"))
-    d = pr.to_dict()
-    assert d["labels"] == ["x", "y"]
-    assert d["number"] == 3

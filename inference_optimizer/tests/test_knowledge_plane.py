@@ -57,7 +57,6 @@ def test_pr_feed_warm_all_domains_returns_entry_per_known_domain():
     )
 
     plane = KnowledgePlane.from_clients(
-        cortex_kb=None,
         pr_monitor=None,
         domain_repos=load_domain_repos(),
     )
@@ -77,7 +76,6 @@ def test_pr_feed_warm_all_domains_stashes_warnings():
     )
 
     plane = KnowledgePlane.from_clients(
-        cortex_kb=None,
         pr_monitor=None,
         domain_repos=load_domain_repos(),
     )
@@ -98,7 +96,6 @@ def test_pr_feed_warm_all_domains_isolates_per_domain_failures():
     )
 
     plane = KnowledgePlane.from_clients(
-        cortex_kb=None,
         pr_monitor=None,
         domain_repos=load_domain_repos(),
     )

@@ -3,9 +3,9 @@
 """Real ``target_analysis`` ActionRunner — external baseline comparison.
 
 Pulls matching reference rows from InferenceX into a ``BaselineSummary`` and
-persists ``target_analysis/target_baseline.json`` + report MD. Report-only by
-design (decision "S2": only :class:`ReportExecutor` reads them) — never touches
-SharedState or any Objective.
+persists ``target_analysis/target_baseline.json`` + report MD. Report-only:
+the persisted artefacts are read solely by :class:`ReportExecutor` — never
+touches SharedState or any Objective.
 
 Failure policy: never fail the task. Any error (HTTP, mapping miss, zero rows,
 malformed env) is recorded in ``BaselineSummary.status`` / ``.warning`` and the
