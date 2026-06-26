@@ -407,41 +407,50 @@ PROFILE_DEFAULT_CONFIG = asset_root() / "scripts" / "configs" / "profile_sglang.
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap; Qwen3-32B TP=1 profile needs ~3 h with steady-state window
 
 
+def _is_capture_trace(path: Path) -> bool:
+    """True when ``path`` lives under a ``capture_traces`` directory.
+
+    CUDA-graph capture sidecars are written under ``capture_traces/`` by both
+    frameworks: SGLang as ``bs_*_rank*.json.gz`` (no ``.trace`` infix) and vLLM
+    as ``graph_capture_*.pt.trace.json.gz`` (which DOES end in ``.trace.json.gz``
+    and so would otherwise be mistaken for a real annotated trace, #735). These
+    capture the one-time graph-capture window and carry no per-iteration
+    annotations, so the steady-state splitter cannot use them. The parent
+    directory is the only framework-agnostic discriminator — a real annotated
+    serving trace never lives under ``capture_traces/``.
+    """
+    return any(part == "capture_traces" for part in path.parts)
+
+
 def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
-    """Return ``*.trace.json.gz`` files under ``trace_dir`` (recursive,
-    stable order).
+    """Return annotated ``*.trace.json.gz`` files under ``trace_dir``.
+
+    Excludes capture sidecars under ``capture_traces/`` (see
+    :func:`_is_capture_trace`) so a vLLM ``graph_capture_*.pt.trace.json.gz`` is
+    never promoted as the primary annotated trace (#735).
 
     Args:
         trace_dir: The directory to scan recursively.
 
     Returns:
-        Sorted ``*.trace.json.gz`` paths found under ``trace_dir``.
+        Sorted annotated ``*.trace.json.gz`` paths, capture sidecars removed.
     """
-    return sorted(trace_dir.rglob("*.trace.json.gz"))
-
-
-# SGLang graph-capture sidecars land as ``capture_traces/bs_*_rank*.json.gz``
-# (no ``.trace`` infix), so the primary ``*.trace.json.gz`` glob misses them.
-# Scoped to capture sidecar names so arbitrary ``*.json.gz`` is never promoted.
-_CAPTURE_SIDECAR_GLOBS = ("bs_*_rank*.json.gz", "graph_capture*.json.gz")
+    return sorted(p for p in trace_dir.rglob("*.trace.json.gz") if not _is_capture_trace(p))
 
 
 def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:
-    """Return SGLang capture sidecars under ``trace_dir`` (fallback only).
+    """Return CUDA-graph capture sidecars under ``trace_dir`` (fallback only).
+
+    Anything under a ``capture_traces/`` directory, regardless of name — both
+    SGLang ``bs_*`` and vLLM ``graph_capture_*`` sidecars (#735).
 
     Args:
         trace_dir: The directory to scan recursively.
 
     Returns:
-        Sorted capture sidecar paths, excluding ``*.trace.json.gz`` already
-        covered by the primary scan.
+        Sorted capture sidecar paths found under ``capture_traces/``.
     """
-    found: set[Path] = set()
-    for pattern in _CAPTURE_SIDECAR_GLOBS:
-        for p in trace_dir.rglob(pattern):
-            if not p.name.endswith(".trace.json.gz"):
-                found.add(p)
-    return sorted(found)
+    return sorted(p for p in trace_dir.rglob("*.json.gz") if _is_capture_trace(p))
 
 
 def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path:

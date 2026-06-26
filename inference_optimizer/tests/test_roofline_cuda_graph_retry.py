@@ -138,3 +138,44 @@ async def test_vllm_eager_retry_uses_framework_env(tmp_path, monkeypatch):
     retry_args = str(seen[1].get("base_extra_args", ""))
     assert "--enforce-eager" in retry_args
     assert "--disable-cuda-graph" not in retry_args
+
+
+# #735: a profile that produced only CUDA-graph capture sidecars (capture-only
+# fallback) carries no per-iteration annotations; the steady-state splitter
+# would die downstream with the misleading trace_split_no_steady_state. The
+# roofline retry must treat this as transient: re-profile (escalating to eager),
+# and only fail with an accurate message if every attempt stays capture-only.
+_CAPTURE_ONLY = {
+    "status": "succeeded",
+    "main_trace_path": "/tmp/ws/torch_trace",
+    "trace_files": ["/tmp/ws/torch_trace/capture_traces/bs_104_rank0.json.gz"],
+    "workspace": "/tmp/ws",
+    "profile_trace_selection_reason": "capture_only_fallback",
+}
+
+
+@pytest.mark.asyncio
+async def test_capture_only_profile_retries_then_succeeds(tmp_path):
+    # First attempt is capture-only -> retry escalates to eager and the second
+    # attempt produces a real annotated trace, so the run proceeds.
+    seen = await _run(tmp_path, _CAPTURE_ONLY)
+    assert len(seen) >= 2
+    # The retry boots eager so the steady-state window gets annotated.
+    assert "--disable-cuda-graph" in str(seen[1].get("base_extra_args", ""))
+
+
+@pytest.mark.asyncio
+async def test_capture_only_every_attempt_fails_clearly(tmp_path):
+    # Every attempt stays capture-only -> terminal failure with an accurate
+    # phase, NOT the misleading downstream trace_split_no_steady_state.
+    async def always_capture_only(c):
+        return dict(_CAPTURE_ONLY)
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
+        new=always_capture_only,
+    ):
+        result = await make_roofline_executor(shared_state=_state())(_ctx(tmp_path))
+    assert result["status"] == "failed"
+    assert result.get("phase") == "profile_capture_only"
+    assert "capture" in str(result.get("error", "")).lower()
