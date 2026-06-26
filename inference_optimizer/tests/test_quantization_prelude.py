@@ -412,3 +412,43 @@ def test_prelude_freetext_takes_priority_over_scheme(tmp_path, monkeypatch):
     args = _Args(model="/models/src", quantize="custom mxfp4 prompt", quantize_scheme="fp8")
     asyncio.run(cli._run_quantization_prelude(args))
     assert seen["prompt"] == "custom mxfp4 prompt"  # free text wins
+
+
+def test_prelude_preserves_source_model_identity(tmp_path, monkeypatch):
+    """Regression: the quantize prelude rewrites args.model to the generic
+    ``<workspace>/quantization/<model>/quantized`` export dir (basename is always
+    ``quantized``). The session / display model identity must NOT collapse to
+    ``quantized`` — otherwise every quantized run lands under
+    ``<root>/quantized/<ts>`` and the report only shows ``Model: quantized``,
+    losing the real model name and colliding across models.
+    """
+    import inference_optimizer.paths as paths
+
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+
+    async def _fake_async(*, prompt, source_model, workspace):
+        # Mirror the real adapter: the export dir basename is always "quantized".
+        return str(tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized")
+
+    monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+
+    args = _Args(model="/wekafs/models/google-gemma-4-26B-A4B-it", quantize="fp8")
+    asyncio.run(cli._run_quantization_prelude(args))
+
+    # The model path is rewritten to the generic quantized export dir ...
+    assert str(args.model).endswith("/quantized")
+    # ... but the identity used for session_dir / state / manifest is preserved.
+    name = cli.resolve_model_display_name(args)
+    assert name != "quantized"
+    assert name == "google-gemma-4-26B-A4B-it-quantized"
+
+
+def test_prelude_no_display_name_without_quantization(monkeypatch):
+    """Without quantization the prelude leaves args untouched, so the identity
+    resolver falls back to the plain model-path basename (no collapse, no
+    spurious suffix)."""
+    args = _Args(model="/models/Qwen3-32B", quantize=None)
+    asyncio.run(cli._run_quantization_prelude(args))
+    assert getattr(args, "model_display_name", None) in (None, "")
+    assert cli.resolve_model_display_name(args) == "Qwen3-32B"

@@ -26,6 +26,30 @@ from .model_config_utils import summarize_model_config
 
 log = logging.getLogger(__name__)
 
+
+def resolve_model_display_name(args: argparse.Namespace) -> str:
+    """Resolve the canonical model identity used for session naming / display.
+
+    The quantization prelude rewrites ``args.model`` to its generic export dir
+    (``<workspace>/quantization/<model>/quantized``), whose basename is always
+    ``quantized``. Deriving the model name from that path basename would collapse
+    every quantized run to ``quantized`` — losing the real model name and
+    colliding all quantized runs under ``<root>/quantized/<ts>``. To avoid that,
+    the prelude pins the source identity on ``args.model_display_name``; this
+    helper prefers it and otherwise falls back to the model-path basename.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        The pinned display name when set, else ``Path(args.model).name``.
+    """
+    override = (getattr(args, "model_display_name", "") or "").strip()
+    if override:
+        return override
+    return Path(str(getattr(args, "model", "") or "")).name
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -200,16 +224,19 @@ def _seed_shared_state(
     # Lowest-priority base for the baseline server args; fully fail-soft.
     _ref_args, _ref_envs, _ref_model, _ref_source = _resolve_reference_recipe(args)
 
+    # Canonical model identity: prefers the quantize prelude's pinned source name
+    # over the (possibly collapsed "quantized") model-path basename.
+    _model_identity = resolve_model_display_name(args)
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
         sandbox_user_id=(os.environ.get("SANDBOX_USER_ID") or "").strip(),
-        model_name=Path(args.model).name,
+        model_name=_model_identity,
         model_path=str(args.model),
         model_class=args.model_class or "",
         # Advisory architecture profile; fresh-launch only (resume rehydrates, must not clobber). Soft-degrade to {}.
         model_arch=_load_model_arch(
-            _workspace_root_resolve(), Path(args.model).name
+            _workspace_root_resolve(), _model_identity
         ),
         # Architecture-identity tags from config.json stamped into recipe-snapshot extras (fine-tune carries base identity).
         model_architectures=_cfg_tags.get("architectures", []),
