@@ -1112,12 +1112,17 @@ class FrameworkPrExecutor:
             and float(baseline_accuracy) > 0
         ):
             try:
-                eval_results = parse_eval_results(bench["result_dir"])
+                eval_results = parse_eval_results(
+                    bench["result_dir"],
+                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                )
                 # parse_eval_results returns {"accuracy": float, ...}; the prior
                 # ``score`` key never existed so this gate silently no-op'd
                 # (accuracy_pass stayed None -> KEEP always allowed). Mirror
                 # integrate_patch._grade_accuracy: read ``accuracy`` and pass
-                # (baseline, new) in the order accuracy_passed expects.
+                # (baseline, new) in the order accuracy_passed expects. The
+                # framework hint lets scriptable (xDiT) quality-gate reports
+                # resolve onto the accuracy contract.
                 new_accuracy = eval_results.get("accuracy")
                 if new_accuracy is not None:
                     accuracy_pass = accuracy_passed(

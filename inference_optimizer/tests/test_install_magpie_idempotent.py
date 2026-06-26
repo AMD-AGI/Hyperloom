@@ -8,12 +8,12 @@ reran ``pip install -e`` unconditionally on every install, briefly tearing
 the egg-link down/up; a sibling session mid-``python -m Magpie`` benchmark
 hit that gap and died with "No module named Magpie" (intermittent, could
 follow an earlier successful run). The fix skips the editable reinstall
-when the checkout exists under ``$MAGPIE_DIR`` AND ``import Magpie``
+when the checkout exists under ``$MAGPIE_PATH`` AND ``import Magpie``
 already resolves into it.
 
 Behaviour contract (asserted below):
 
-* already installed from $MAGPIE_DIR        -> SKIP reinstall (no pip)
+* already installed from $MAGPIE_PATH        -> SKIP reinstall (no pip)
 * import fails (e.g. torn egg-link, fresh)  -> reinstall
 * import resolves elsewhere (stale editable)-> reinstall
 * no checkout present                        -> reinstall
@@ -103,7 +103,7 @@ warn() {{ echo "[warn] $*"; }}
 git_fetch_pinned() {{ echo "[git_fetch_pinned] $*"; }}
 CHECK_ONLY=0
 DRY_RUN=0
-MAGPIE_DIR="{magpie_dir}"
+MAGPIE_PATH="{magpie_dir}"
 MAGPIE_REPO="https://example.invalid/Magpie.git"
 MAGPIE_REF="deadbeef"
 PYTHON="{fake_py}"
@@ -129,7 +129,7 @@ ensure_magpie
 
 
 def test_skip_reinstall_when_already_installed_from_magpie_dir(tmp_path: Path) -> None:
-    # checkout present + import resolves inside $MAGPIE_DIR -> skip pip.
+    # checkout present + import resolves inside $MAGPIE_PATH -> skip pip.
     out, pip_called = _run_ensure_magpie(
         tmp_path,
         checkout_present=True,
@@ -140,7 +140,7 @@ def test_skip_reinstall_when_already_installed_from_magpie_dir(tmp_path: Path) -
 
 
 def test_skip_when_import_resolves_to_subdir_of_magpie_dir(tmp_path: Path) -> None:
-    # editable layouts resolve to $MAGPIE_DIR/Magpie -> still "inside" -> skip.
+    # editable layouts resolve to $MAGPIE_PATH/Magpie -> still "inside" -> skip.
     out, pip_called = _run_ensure_magpie(
         tmp_path,
         checkout_present=True,
@@ -162,7 +162,7 @@ def test_reinstall_when_import_fails(tmp_path: Path) -> None:
 
 
 def test_reinstall_when_import_resolves_elsewhere(tmp_path: Path) -> None:
-    # stale editable points outside $MAGPIE_DIR -> must reinstall, not mask it.
+    # stale editable points outside $MAGPIE_PATH -> must reinstall, not mask it.
     out, pip_called = _run_ensure_magpie(
         tmp_path,
         checkout_present=True,
@@ -172,7 +172,7 @@ def test_reinstall_when_import_resolves_elsewhere(tmp_path: Path) -> None:
 
 
 def test_reinstall_when_no_checkout(tmp_path: Path) -> None:
-    # No checkout under $MAGPIE_DIR -> reinstall (clone+install) regardless of import.
+    # No checkout under $MAGPIE_PATH -> reinstall (clone+install) regardless of import.
     out, pip_called = _run_ensure_magpie(
         tmp_path,
         checkout_present=False,

@@ -6027,6 +6027,25 @@ class Coordinator:
             state.warm_replay_outcome = outcome
             state.save(self.session_dir)
             return
+        # R3 — warm_replay reuses the BaselineExecutor but is an optimization
+        # candidate, not the baseline, so it must clear the image-quality gate
+        # against the pure baseline reference before promotion. A scriptable run
+        # whose gate ran and FAILED (passed=False / threshold violation vs the
+        # baseline reference) is rejected so a faster but quality-degrading warm
+        # config is never pushed onto the stack/current_best. ``require=False``
+        # keeps a missing/skipped gate non-blocking (parity with
+        # ``is_valid_measurement`` and the serving no-baseline accuracy skip).
+        from .action_executors._accuracy_gate import quality_gate_passed
+
+        qg = result.get("quality_gate")
+        if qg is not None and not quality_gate_passed(qg, require=False):
+            outcome["status"] = "quality_failed"
+            outcome["reason"] = "image-quality gate failed vs baseline reference"
+            outcome["quality_gate"] = qg
+            state.warm_replay_outcome = outcome
+            state.save(self.session_dir)
+            log.info("warm-replay REJECTED by quality gate: %s", qg)
+            return
         measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
         min_reproduce = float(
             getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,

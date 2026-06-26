@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from . import framework_registry
 from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
@@ -225,7 +226,8 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     probe is silenced (the optimizer's per-benchmark server restarts
     otherwise trip the same false ``local_server_unreachable``), while the
     rest of LocalProbe keeps running. All other single-node semantics stay
-    untouched.
+    untouched. Scriptable (server-less) frameworks (e.g. xDiT) default the
+    same probe OFF since they never run an inference server.
 
     Args:
         args: Parsed CLI args carrying the robustness-related flags.
@@ -291,8 +293,15 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     #     ``--robustness-disable-local-probe`` this is surgical: only the
     #     127.0.0.1:8888 probe is silenced; the rest of LocalProbe (gpu-leak,
     #     gateway 401, coordinator-zombie, aiter-JIT, disk/fd) keeps running.
+    #   * Scriptable (server-less) frameworks (e.g. xDiT diffusion): there is
+    #     never an inference server, so the 127.0.0.1:8888 probe can never
+    #     succeed and would false-fire local_server_unreachable every tick —
+    #     default it OFF (like multi-node). FRAMEWORK is exported before this
+    #     call; --framework wins, then $FRAMEWORK.
+    fw = (getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")).strip()
+    scriptable_fw = framework_registry.is_scriptable(fw) if fw else False
     disable_server_probe = getattr(args, "robustness_disable_server_probe", None)
-    if disable_server_probe is None and multi_node:
+    if disable_server_probe is None and (multi_node or scriptable_fw):
         disable_server_probe = True
     if disable_server_probe is not None:
         options["auto_probe_inference_server"] = not bool(disable_server_probe)
