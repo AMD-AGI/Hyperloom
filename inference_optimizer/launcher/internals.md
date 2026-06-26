@@ -44,13 +44,17 @@ lives in `orchestrator/system_prompts/orchestration.md`. In brief:
 
 Inserted between PRELUDE and EXPLORE (`--no-framework` opts out). The
 Coordinator owns the loop end-to-end — the LLM never proposes the `framework_pr`
-action. Per tick it discovers a candidate batch via `fa phase-discover`,
-Critic-gates each candidate, then `git apply`s the diff against the live
-framework_source_roots and benchmarks it; KEEP commits to the live tree (next
+action. It discovers a candidate batch **once** via `fa phase-discover`; each
+exploration then processes exactly **one** candidate, with the agent ranking the
+still-available candidates and choosing the one most likely to raise throughput
+(LLM ranker; deterministic discovery-order fallback on any failure). The chosen
+candidate is Critic-gated, then `git apply`d against the live
+framework_source_roots and benchmarked; KEEP commits to the live tree (next
 candidate stacks on top), REVERT does `git reset --hard`. Exits on low budget
-(<0.6 × max_hours), plateau (3 batches < 1% gain), or an empty discovery batch.
-Resume skips completed candidates by idempotency key. The launcher only chooses
-whether the phase runs (`--no-framework`).
+(<0.6 × max_hours), plateau (3 consecutive benchmarked candidate tests with no
+KEEP; env `INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK`), or an empty
+discovery batch. Resume skips completed candidates by idempotency key. The
+launcher only chooses whether the phase runs (`--no-framework`).
 
 ## Retired modules and rules (do not re-introduce)
 
