@@ -32,7 +32,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
-from .base import BackendError, BackendTurnResult, build_chat_messages
+from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
 
@@ -423,6 +423,27 @@ class CriticAgentBackend:
             kwargs: dict[str, Any] = {"api_key": api_key}
             if base_url:
                 kwargs["base_url"] = base_url
+            try:
+                import httpx
+
+                connect_timeout_s = parse_call_timeout_env(
+                    "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
+                    default=CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
+                )
+                rw_timeout_s = parse_call_timeout_env(
+                    "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
+                    default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
+                )
+                kwargs["timeout"] = httpx.Timeout(
+                    connect=connect_timeout_s,
+                    read=rw_timeout_s,
+                    write=rw_timeout_s,
+                    pool=rw_timeout_s,
+                )
+            except Exception:
+                # Keep a best-effort fallback to SDK defaults when timeout wiring
+                # cannot be constructed (e.g., import edge cases).
+                pass                
             self._client = AsyncOpenAI(**kwargs)
 
         # Resolve static per-session context once; absent model/framework keys
