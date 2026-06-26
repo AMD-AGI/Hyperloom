@@ -100,11 +100,11 @@ def test_get_recipe_roundtrip() -> None:
 
 
 def test_get_recipe_uses_direct_slug_fast_path() -> None:
-    slug = "recipe-snapshot/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8"
+    slug = "hyperloom-recipe-kb/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8"
     c = _client(
         {
             slug: _recipe_page("Qwen3-32B", "mi300x", "sglang", "fp8"),
-            "recipe-snapshot/inference/other/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8": (
+            "hyperloom-recipe-kb/inference/other/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8": (
                 _recipe_page("Other", "mi300x", "sglang", "fp8")
             ),
         }
