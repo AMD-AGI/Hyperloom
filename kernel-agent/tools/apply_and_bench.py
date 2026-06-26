@@ -338,6 +338,8 @@ def _bench_once(
                 out[k] = float(d[k])
         return out
     except Exception:
+        # Bench rep produced no parseable result (crash / missing key / bad json):
+        # treat as a dropped sample — the caller filters None and uses the rest.
         return None
 
 
@@ -362,6 +364,8 @@ def _kill_servers(proc: subprocess.Popen | None, backend: str) -> None:
             try:
                 os.killpg(pgid, signal.SIGTERM)
             except (ProcessLookupError, OSError):
+                # Group already gone (server exited/crashed before teardown): nothing to
+                # signal — the SIGKILL sweep below is the authoritative reap, so ignore.
                 pass
             for _ in range(15):  # up to ~15s grace for a clean shutdown
                 if proc.poll() is not None:
@@ -370,6 +374,8 @@ def _kill_servers(proc: subprocess.Popen | None, backend: str) -> None:
             try:
                 os.killpg(pgid, signal.SIGKILL)  # reap any survivors in the group
             except (ProcessLookupError, OSError):
+                # Whole group already reaped (clean SIGTERM exit, or never existed):
+                # success state — nothing left to kill.
                 pass
     else:  # non-POSIX: best-effort single-process teardown
         try:
@@ -379,10 +385,14 @@ def _kill_servers(proc: subprocess.Popen | None, backend: str) -> None:
             try:
                 proc.kill()
             except OSError:
+                # proc already dead between terminate() and kill(): the goal (server
+                # stopped) is met, so swallow.
                 pass
     try:
         proc.wait(timeout=10)
     except (subprocess.TimeoutExpired, OSError):
+        # Final reap is best-effort; the group was already signalled above. Do not
+        # block teardown waiting on a wedged pipe-flush.
         pass
     # Escape hatch: explicit single-tenant blunt sweep (off by default).
     if os.environ.get("APPLY_BENCH_PKILL_SWEEP") == "1":
