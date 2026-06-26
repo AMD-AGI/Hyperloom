@@ -1793,7 +1793,11 @@ class IntegratePatchExecutor:
 
         accuracy_pass: bool | None = None
         if bench.get("status") == "succeeded":
-            accuracy_pass = self._grade_accuracy(bench["workspace"], params.get("accuracy_baseline"))
+            accuracy_pass = self._grade_accuracy(
+                bench["workspace"],
+                params.get("accuracy_baseline"),
+                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+            )
 
         return bench, {"accuracy_pass": accuracy_pass}
 
@@ -1825,11 +1829,17 @@ class IntegratePatchExecutor:
         return {"RUN_EVAL": "true"} if (fw_authored and baseline > 0) else None
 
     @staticmethod
-    def _grade_accuracy(result_dir: str, baseline_accuracy: Any) -> bool | None:
+    def _grade_accuracy(
+        result_dir: str,
+        baseline_accuracy: Any,
+        framework: str | None = None,
+    ) -> bool | None:
         """Grade a bench's accuracy against the baseline.
 
         With a recorded baseline the measured drop is enforced; without one
         (or no eval result) the check is skipped (``None``) and warned loudly.
+        For scriptable frameworks (xDiT) ``parse_eval_results`` fails closed on
+        a missing quality gate instead of falling back to GSM8K.
         """
         # Accept numeric strings (e.g. ``"0.85"``) in addition to int/float so a
         # baseline carried as text is not silently coerced to 0.0 (which would
@@ -1839,7 +1849,7 @@ class IntegratePatchExecutor:
         except (TypeError, ValueError):
             baseline_value = 0.0
         try:
-            eval_results = parse_eval_results(result_dir)
+            eval_results = parse_eval_results(result_dir, framework=framework)
             new_accuracy = eval_results.get("accuracy")
             if new_accuracy is not None and baseline_value > 0:
                 return accuracy_passed(baseline_value, float(new_accuracy))

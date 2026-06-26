@@ -13,10 +13,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+
+def _truthy(val: Any) -> bool:
+    """Interpret common truthy spellings from JSON or env strings."""
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _load_input_json(path: str) -> dict[str, Any]:
@@ -69,7 +77,42 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     tokens = str(args.get("tokens") or "").strip()
     if tokens:
         cmd.extend(["--tokens", tokens])
+    _add_kb_read_opts(cmd, args)
     return cmd
+
+
+def _add_kb_read_opts(cmd: list[str], args: dict[str, Any]) -> None:
+    """Forward gemm-tune-kb read-side flags from input-json or env.
+
+    The input-json takes precedence; env vars let the pipeline enable KB read
+    without the orchestrator having to populate input-json (e.g. via
+    setup_env.sh). Disabled by default so existing behavior is unchanged.
+    """
+    kb_read = args.get("kb_read")
+    if kb_read is None:
+        kb_read = os.environ.get("FORGE_GEMM_TUNE_KB_READ", "")
+    if not _truthy(kb_read):
+        return
+    cmd.append("--kb-read")
+
+    accept = args.get("kb_accept_candidate")
+    if accept is None:
+        accept = os.environ.get("FORGE_GEMM_TUNE_KB_ACCEPT_CANDIDATE", "")
+    if _truthy(accept):
+        cmd.append("--kb-accept-candidate")
+
+    strict = args.get("kb_strict_lib")
+    if strict is None:
+        strict = os.environ.get("FORGE_GEMM_TUNE_KB_STRICT_LIB", "")
+    if _truthy(strict):
+        cmd.append("--kb-strict-lib")
+
+    cur_lib = args.get("kb_current_lib")
+    if cur_lib in (None, ""):
+        cur_lib = os.environ.get("FORGE_GEMM_TUNE_KB_CURRENT_LIB", "")
+    cur_lib = str(cur_lib).strip()
+    if cur_lib:
+        cmd.extend(["--kb-current-lib", cur_lib])
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

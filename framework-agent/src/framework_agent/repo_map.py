@@ -15,6 +15,7 @@ _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
     "sglang": "https://github.com/sgl-project/sglang.git",
     "vllm": "https://github.com/ROCm/vllm.git",
     "atom": "https://github.com/ROCm/ATOM.git",
+    "xdit": "https://github.com/xdit-project/xDiT.git",
 }
 
 

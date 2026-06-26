@@ -353,7 +353,7 @@ def open_source_root() -> Path:
 
 
 def magpie_dir(session_dir: Path | None = None) -> Path:
-    """``<open_source_root>/Magpie/`` — Magpie clone (pod-local; ``$MAGPIE_DIR``
+    """``<open_source_root>/Magpie/`` — Magpie clone (pod-local; ``$MAGPIE_PATH``
     overrides). Aligned with install.sh so script and runtime resolve the same
     checkout. ``session_dir`` param ignored (back-compat).
 
@@ -363,7 +363,7 @@ def magpie_dir(session_dir: Path | None = None) -> Path:
     Returns:
         The Magpie checkout path.
     """
-    override = os.environ.get("MAGPIE_DIR")
+    override = os.environ.get("MAGPIE_PATH")
     if override:
         return Path(override)
     return open_source_root() / "Magpie"

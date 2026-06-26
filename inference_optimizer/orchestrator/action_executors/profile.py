@@ -369,7 +369,7 @@ def _validate_trace_structure(
                 "_steady_state_* — profile_by_stage=True leaked through, "
                 "PROFILE_EXTRA_BODY env was not consumed by the framework. "
                 "Confirm _inferencex_patcher patched Magpie's bundled "
-                "InferenceX (#210; check $MAGPIE_DIR/InferenceX/utils/"
+                "InferenceX (#210; check $MAGPIE_PATH/InferenceX/utils/"
                 "bench_serving/benchmark_serving.py)."
             )
 
@@ -510,6 +510,8 @@ def _default_profile_config() -> Path:
         name = "profile_atom.yaml"
     elif fw == "vllm":
         name = "profile_vllm.yaml"
+    elif fw == "xdit":
+        name = "profile_xdit.yaml"
     else:
         name = "profile_sglang.yaml"
     return asset_root() / "scripts" / "configs" / name

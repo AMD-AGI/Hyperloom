@@ -244,7 +244,7 @@ def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
 def _describe_dep(*env_vars: str) -> dict[str, str]:
     """Build a ``{path, commit, remote}`` provenance dict for one dependency
     pointed at by the first set env var among ``env_vars`` (in priority
-    order — used so MAGPIE_PATH wins over the legacy MAGPIE_DIR). All fields
+    order). All fields
     default to empty string when no env var is set, the directory is missing,
     or git is unhappy — we never raise out of here.
 
@@ -278,7 +278,7 @@ def _build_dependencies() -> dict[str, dict[str, str]]:
         Mapping of dependency name to its ``{path, commit, remote}`` block.
     """
     return {
-        "magpie": _describe_dep("MAGPIE_PATH", "MAGPIE_DIR"),
+        "magpie": _describe_dep("MAGPIE_PATH"),
         "inferencex": _describe_dep("INFERENCEX_PATH"),
     }
 
