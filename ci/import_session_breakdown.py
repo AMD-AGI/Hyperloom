@@ -442,7 +442,7 @@ def compute_framework_gain(attribution: Dict) -> Optional[float]:
     """Compute the framework-source gain.
 
     Sums ``delta_pct`` over ``gain_per_stack_entry[]`` where
-    ``action == "framework_pr"``.
+    ``action == "framework"``.
 
     Args:
         attribution: The ``attribution`` sub-dict.
@@ -457,7 +457,7 @@ def compute_framework_gain(attribution: Dict) -> Optional[float]:
     total = 0.0
     found = False
     for e in entries:
-        if isinstance(e, dict) and e.get("action") == "framework_pr":
+        if isinstance(e, dict) and e.get("action") == "framework":
             delta = e.get("delta_pct")
             if isinstance(delta, (int, float)):
                 total += float(delta)

@@ -188,7 +188,7 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
 * `by_component` — per-agent breakdown (orchestration / kernel / critic /
   specialist / proposal_scorer / geak / oob / …), each with the same
   convenience totals.
-* `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_PR / EXPLORE / SWEEP / …).
+* `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK / EXPLORE / SWEEP / …).
 * `attribution` — `attributed_to_decisions` vs `unattributed` split plus
   `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
   to a KEEP/REVERT or dynamic_action decision (e.g. specialist subprocess

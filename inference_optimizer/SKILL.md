@@ -238,18 +238,18 @@ brief:
   < `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase
   budget < `--explore-force-exit-budget-pct` (default 20%). Non-negotiable
   — leaves buffer for KERNEL → SWEEP → CLOSE + report.
-- **Plateau advisory**: EXPLORE / KERNEL / FRAMEWORK_PR plateau signals
+- **Plateau advisory**: EXPLORE / KERNEL / FRAMEWORK plateau signals
   are computed every tick and rendered as advisory in the orchestration
   prompt. They do NOT drive phase advance — the LLM may emit
   `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
   when it judges further effort unproductive. IR-6 force-exit and the
   per-phase budget remain the only hard advance gates.
 
-### FRAMEWORK_PR phase (Coordinator-internal)
+### FRAMEWORK phase (Coordinator-internal)
 
 Inserted between PRELUDE and EXPLORE (`--no-framework` opts out). The
 Coordinator owns the loop end-to-end — the LLM never proposes the
-`framework_pr` action. Per tick it discovers a candidate batch via
+`framework` action. Per tick it discovers a candidate batch via
 `fa phase-discover`, Critic-gates each candidate, then `git apply`s the
 diff against the live framework_source_roots and benchmarks it; KEEP
 commits to the live tree (next candidate stacks on top), REVERT does
@@ -277,11 +277,11 @@ unified specialist-informed `explore` flow. Do not recreate the retired
 
 Rules that look reasonable but break the current flow:
 
-- **No `framework_pr first-explore priority` rule** in
+- **No `framework first-explore priority` rule** in
   `system_prompts/orchestration.md` — conflicts with the EXPLORE
   specialist-informed flow.
-  Framework-agent runs in the dedicated **FRAMEWORK_PR** phase
-  before EXPLORE; the LLM never proposes the `framework_pr`
+  Framework-agent runs in the dedicated **FRAMEWORK** phase
+  before EXPLORE; the LLM never proposes the `framework`
   action — it is Coordinator-managed and absent from
   `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any
   LLM-side propose / delegate with `rule='phase_incompatible'`.

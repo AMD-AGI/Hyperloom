@@ -146,7 +146,7 @@ Installs:
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
     Node/npm, TraceLens, GEAK, and OOB CLI auth.
   - Chains to framework-agent/scripts/install.sh for the `fa` CLI
-    used by the Coordinator-owned FRAMEWORK_PR phase at optimize-time
+    used by the Coordinator-owned FRAMEWORK phase at optimize-time
     (candidate discovery via `fa phase-discover`).
     framework-agent is fully standalone; the chain just makes the
     `fa` binary available on PATH inside the same sandbox without
@@ -1069,10 +1069,10 @@ chain_kernel_agent() {
 
 # --- 5. Chain to framework-agent ---
 # Mirrors chain_kernel_agent but for the `fa` CLI used by the
-# Coordinator-owned FRAMEWORK_PR phase. framework-agent's installer is
+# Coordinator-owned FRAMEWORK phase. framework-agent's installer is
 # fully self-contained (zero shared state with kernel-agent), so we just
 # delegate. Failures here are non-fatal: the IO main path still
-# works without fa; only the FRAMEWORK_PR phase requires it.
+# works without fa; only the FRAMEWORK phase requires it.
 chain_framework_agent() {
   if [ "$SKIP_FRAMEWORK_AGENT" -eq 1 ]; then
     log "skipping framework-agent installer (--skip-framework-agent)"
@@ -1080,7 +1080,7 @@ chain_framework_agent() {
   fi
   local script="${FRAMEWORK_AGENT_ROOT}/scripts/install.sh"
   if [ ! -f "$script" ]; then
-    warn "framework-agent installer not found at $script; framework_pr arm will be unavailable"
+    warn "framework-agent installer not found at $script; framework arm will be unavailable"
     return 0
   fi
   log "delegating fa CLI install to ${script}"
@@ -1093,7 +1093,7 @@ chain_framework_agent() {
     log "would run: bash '$script' (VENV_PYTHON=${VENV_PYTHON})"
     return 0
   fi
-  bash "$script" || warn "framework-agent install returned non-zero; framework_pr arm will fail at runtime"
+  bash "$script" || warn "framework-agent install returned non-zero; framework arm will fail at runtime"
 }
 
 ensure_inference_optimizer
@@ -1154,7 +1154,7 @@ PY
 _probe_framework_source_roots
 
 # ---------------------------------------------------------------------------
-# framework-agent (sibling skill — drives the standalone FRAMEWORK_PR
+# framework-agent (sibling skill — drives the standalone FRAMEWORK
 # phase via ``fa phase-discover`` for batch enumeration. The
 # Coordinator's executor handles the apply/bench loop directly, so
 # only ``phase-discover`` is wired/kept on the inference_optimizer

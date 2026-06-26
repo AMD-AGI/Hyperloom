@@ -438,11 +438,11 @@ async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     )
 
 
-def test_find_framework_proposal():
-    assert IntegratePatchExecutor._find_framework_proposal(None) is None
-    assert IntegratePatchExecutor._find_framework_proposal({"proposal_set": "x"}) is None
-    assert IntegratePatchExecutor._find_framework_proposal({"proposal_set": [{"provenance": "kernel:x"}]}) is None
-    found = IntegratePatchExecutor._find_framework_proposal(
+def test_find_frameworkoposal():
+    assert IntegratePatchExecutor._find_frameworkoposal(None) is None
+    assert IntegratePatchExecutor._find_frameworkoposal({"proposal_set": "x"}) is None
+    assert IntegratePatchExecutor._find_frameworkoposal({"proposal_set": [{"provenance": "kernel:x"}]}) is None
+    found = IntegratePatchExecutor._find_frameworkoposal(
         {"proposal_set": [{"provenance": "specialist:serving:framework:y", "id": 1}]}
     )
     assert found["id"] == 1

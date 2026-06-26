@@ -15,7 +15,7 @@ Every v0.6 session *does* carry the per-action audit lists
 reconstructs an equivalent ``phase_segments`` (and, when present,
 kernel invocation) view purely from those fields, mapping the old action
 vocabulary onto the canonical phase names used by the v2 pipeline:
-``PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE``.
+``PRELUDE / FRAMEWORK / EXPLORE / KERNEL / SWEEP / CLOSE``.
 
 It is kept deliberately separate from ``collectors.py`` so the main
 pipeline carries no legacy fallback branches. Callers detect a legacy

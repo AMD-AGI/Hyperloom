@@ -1458,7 +1458,7 @@ class IntegratePatchExecutor:
 
     # Helpers
     @staticmethod
-    def _find_framework_proposal(
+    def _find_frameworkoposal(
         done_payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         """Return the first proposal whose provenance starts with
@@ -1507,7 +1507,7 @@ class IntegratePatchExecutor:
             extra: The runner ``extra`` mapping (provides shared state /
                 session id).
         """
-        proposal = self._find_framework_proposal(done_payload)
+        proposal = self._find_frameworkoposal(done_payload)
         if proposal is None:
             return
         pr_url = str(proposal.get("fa_pr_url") or "").strip()
