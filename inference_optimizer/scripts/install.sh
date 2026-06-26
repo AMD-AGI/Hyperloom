@@ -682,7 +682,8 @@ from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
 )
 status = magpie_scripts_patch_status(os.environ["MAGPIE_DIR"])
 print(f"_magpie_patcher: atomic_reason={status.atomic_reason} "
-      f"atomic_ok={status.atomic_ok} remote_trust_ok={status.remote_trust_ok}",
+      f"atomic_ok={status.atomic_ok} remote_trust_ok={status.remote_trust_ok} "
+      f"eval_flag_ok={status.eval_flag_ok}",
       file=sys.stderr)
 if status.ok:
     sys.exit(0)
@@ -695,6 +696,13 @@ if not status.atomic_ok:
     sys.exit(1)
 if not status.remote_trust_ok:
     sys.exit(2)
+# Redundant --concurrent-requests eval flag could not be stripped from a
+# generic benchmark script (unrecognised shape). Non-fatal: RUN_EVAL=true
+# baselines may abort on InferenceX's 'Unknown parameter', but the baseline
+# executor's eval-failure fallback re-runs with RUN_EVAL=false, so the run
+# still proceeds (without an accuracy gate). Distinct exit so install warns.
+if not status.eval_flag_ok:
+    sys.exit(5)
 # Defensive catch-all: a not-ok status with none of the bits above set should
 # never happen, but exit non-zero so we never fall through to exit 0.
 sys.exit(3)
@@ -716,6 +724,8 @@ PY
       fi
     elif [ "$rc" -eq 2 ]; then
       warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
+    elif [ "$rc" -eq 5 ]; then
+      warn "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line). RUN_EVAL=true baselines may abort on InferenceX's 'Unknown parameter: --concurrent-requests'; the baseline executor falls back to RUN_EVAL=false (no accuracy gate) so the run still proceeds. Review _magpie_patcher.py if accuracy eval is required."
     else
       # Benign no-op (rc=1): MAGPIE_DIR unset / benchmarker.py missing. With
       # MAGPIE_REF pinned to an upstream-atomic commit the patcher reports
