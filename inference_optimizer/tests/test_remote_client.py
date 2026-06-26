@@ -37,7 +37,7 @@ def _cid(model: str = "m") -> str:
     return recipe_canonical_id(
         model=model,
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
