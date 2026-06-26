@@ -24,7 +24,7 @@ benchmark:
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
-  timeout_seconds: 2400        # 40 min hard cap
+  timeout_seconds: 7200        # 2 h hard cap (large MoE e.g. DeepSeek-R1 671B: profiled roofline run far exceeds 40 min; stays < the WARM 7800s outer wall cap)
 
   profiler:
     torch_profiler:

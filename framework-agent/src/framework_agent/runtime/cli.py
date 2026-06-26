@@ -16,12 +16,17 @@ Subcommands:
 * ``fa phase-discover`` - Hyperloom FRAMEWORK_PR phase entry point.
   Reads a JSON ``--request`` and writes a JSON ``--out``
   (critic-agent style).
+* ``fa phase-audit`` - static local-source judging of whether a candidate
+  PR is already present in the framework source roots (Step 2); optional
+  opt-in single chat-completion refine. Reads/writes JSON like
+  ``phase-discover``.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -97,6 +102,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
                 "explore",
                 "kb",
                 "phase-discover",
+                "phase-audit",
             ],
             "subcommands_planned": [],
             "search_modes_supported": ["primus_cortex", "github"],
@@ -106,6 +112,29 @@ def _cmd_schema(args: argparse.Namespace) -> None:
             },
             "promotion_policy": "manual_only",
             "kb_subcommands": ["list", "show", "search", "contribute", "synthesize"],
+            "phase_audit": {
+                "purpose": "static (default) local-source judging of whether a candidate PR is already present; optional opt-in LLM refine",
+                "semantic_status_values": [
+                    "already_equivalent",
+                    "already_superset",
+                    "partially_present",
+                    "not_present",
+                    "unknown",
+                ],
+                "applicability_values": [
+                    "direct_apply",
+                    "needs_rewrite",
+                    "not_applicable",
+                    "needs_human_review",
+                ],
+                "recommended_next_step_values": [
+                    "skip",
+                    "direct_framework_pr",
+                    "author_via_specialist",
+                ],
+                "patch_sources": ["diff_text", "patches_path", "primus_cortex"],
+                "llm": "opt-in via request.use_llm; needs SAFE_API_KEY + OPENAI_BASE_URL; best-effort, evidence-gated",
+            },
         },
         "-",
     )
@@ -234,6 +263,19 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     if not isinstance(gaps, list) or not gaps:
         gaps = [{"gap_canonical_id": "", "gap_description": ""}]
 
+    # Resolve the primus_cortex base URL (the PR-Monitor service). Only enable
+    # the primus_cortex search mode when a URL is available, else enumerate
+    # raises SourceConfigError before it can fall through to GitHub — which
+    # would make discovery empty whenever primus isn't wired. GitHub
+    # (anonymous, best-effort) is always kept so discovery degrades gracefully.
+    primus_url = str(request.get("primus_cortex_url") or os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
+    if primus_url:
+        search_modes = ["primus_cortex", "github"]
+        primus_block: dict[str, Any] = {"primus_cortex": {"base_url": primus_url}}
+    else:
+        search_modes = ["github"]
+        primus_block = {}
+
     seen_refs: set[tuple[str, str]] = set()
     out_cands: list[dict[str, Any]] = []
     for gap in gaps:
@@ -248,8 +290,15 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 "work_dir": work_dir,
                 "baseline": {"throughput": 1.0},
                 "gap_description": gap_desc,
-                "search_modes": ["primus_cortex", "github"],
+                # search_perf_prs MUST be True here: enumerate_candidates
+                # short-circuits to explicit-refs-only (empty for phase-discover)
+                # when it is False, so omitting it made FRAMEWORK_PR discovery
+                # always return 0 candidates (never querying primus_cortex/github).
+                "search_perf_prs": True,
+                "search_modes": search_modes,
+                "pr_states": request.get("pr_states") or ["open"],
                 "max_search_candidates": max_candidates,
+                **primus_block,
             }
         )
         try:
@@ -313,6 +362,31 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
         },
         args.out,
     )
+
+
+def _cmd_phase_audit(args: argparse.Namespace) -> None:
+    """Statically audit whether a candidate PR is already present in local source.
+
+    Request shape:
+        {"candidate": {repo, pr_number, ref, diff_url, pr_url, ...},
+         "framework": str, "framework_source_roots": [str, ...],
+         "repo_url": str (optional), "work_dir": str (optional),
+         "diff_text" | "patches_path" | "primus_cortex_url" (optional patch source),
+         "use_llm": bool (optional, default false), "model": str (optional)}
+
+    Output shape (``semantic_audit.json``):
+        {"candidate_id", "semantic_status", "applicability", "confidence",
+         "evidence": [...], "risks": [...], "recommended_next_step",
+         "layer", "metrics", "ts"}
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``request`` and ``out``.
+    """
+    from ..audit import run_phase_audit
+
+    request = _read_json_request(args.request)
+    result = run_phase_audit(request)
+    _emit_json(result, args.out)
 
 
 def _cmd_kb(args: argparse.Namespace) -> None:
@@ -500,6 +574,14 @@ def _build_parser() -> argparse.ArgumentParser:
     pd_p.add_argument("--request", required=True, help="JSON request file path")
     pd_p.add_argument("--out", default="-", help="Output path (default stdout)")
     pd_p.set_defaults(func=_cmd_phase_discover)
+
+    pa_p = sub.add_parser(
+        "phase-audit",
+        help="Statically audit whether a candidate PR is already present in local source",
+    )
+    pa_p.add_argument("--request", required=True, help="JSON request file path")
+    pa_p.add_argument("--out", default="-", help="Output path (default stdout)")
+    pa_p.set_defaults(func=_cmd_phase_audit)
 
     kb_p = sub.add_parser(
         "kb",

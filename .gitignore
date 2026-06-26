@@ -44,6 +44,13 @@ ci/claw-integration.md
 .DS_Store
 Thumbs.db
 
+# Test / coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+
 # Logs
 *.log
 
@@ -69,4 +76,8 @@ CLAUDE.md
 # runtime) — keep only the small InferenceX daily set tracked in git.
 ci/candidates/*.json
 !ci/candidates/inferencex_daily_fixed.json
-.coverage
+GPU_optimization_plan.md
+GPU_optimization.md
+framework_enhance.MD
+reference_sessions
+advise_alter.MD

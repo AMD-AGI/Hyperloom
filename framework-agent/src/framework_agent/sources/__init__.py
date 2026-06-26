@@ -167,6 +167,7 @@ def _run_github(request: ExploreRequest) -> list[Candidate]:
         request.repo_url,
         gap_description=request.gap_description,
         limit=request.max_search_candidates,
+        states=request.pr_states or ("open",),
     )
     return [_pr_to_candidate(pr, request.repo_url, "github") for pr in prs]
 
@@ -241,6 +242,17 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
     label = cfg.default_label
     requested = max(1, request.max_search_candidates)
 
+    # Step 4: broaden PR-state coverage. merged/closed PRs are the
+    # backport-relevant ones that may already be in the local dev build;
+    # semantic audit downstream judges + dedups them. "all" is the API's broad
+    # filter; default stays open-only when pr_states is unset.
+    states = request.pr_states or ("open",)
+    broad = any(s in ("merged", "closed", "all") for s in states)
+    search_state = "all" if broad else "open"
+    # Only forward ``state`` to the label-only list endpoint when broadening;
+    # the open-only default keeps the historical call shape unchanged.
+    list_state_kwargs: dict[str, str] = {"state": search_state} if broad else {}
+
     keywords = _resolve_keywords(request)
 
     if not keywords:
@@ -250,6 +262,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             limit=requested,
             label=label,
             timeout_sec=cfg.timeout_sec,
+            **list_state_kwargs,
         )
         return [_pr_to_candidate(pr, request.repo_url, "primus_cortex") for pr in prs]
 
@@ -261,7 +274,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             base_url=cfg.base_url,
             query=query,
             limit=over_fetch,
-            state="open",
+            state=search_state,
             timeout_sec=cfg.timeout_sec,
         )
     except PrimusCortexError:
@@ -273,6 +286,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             limit=over_fetch,
             label=label,
             timeout_sec=cfg.timeout_sec,
+            **list_state_kwargs,
         )
 
     # /v1/search/prs uses word-AND matching, so a long multi-keyword query can
@@ -286,6 +300,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             limit=over_fetch,
             label=label,
             timeout_sec=cfg.timeout_sec,
+            **list_state_kwargs,
         )
 
     # Rank then trim; scores are carried on Candidate.score for IO's
