@@ -3113,6 +3113,56 @@ class Coordinator:
             _add(_fa_client.repo_url_for_framework(framework or "sglang"))
         return urls
 
+    def _write_prs_tested_from_framework_pr(
+        self, *, task: "Task", result: Any, kept: bool,
+    ) -> None:
+        """Write framework-pr KEEP/REVERT patch into recipe.prs_tested for warm-replay reuse."""
+        if self.cortex_kb is None:
+            return
+        result_dict = result.result if hasattr(result, "result") else (result or {})
+        if not isinstance(result_dict, dict):
+            return
+        status = str(result_dict.get("status") or "")
+        if status not in ("kept", "reverted"):
+            return
+        # Extract patch info from result
+        patches_applied = result_dict.get("patches_applied") or []
+        patch_path = patches_applied[0] if patches_applied else ""
+        delta_pct = result_dict.get("delta_pct") or 0.0
+        candidate = result_dict.get("candidate") or {}
+        pr_url = candidate.get("pr_url") or candidate.get("url") or ""
+        repo = candidate.get("repo") or ""
+        error_class = result_dict.get("error_class") or ""
+        # Build prs_tested entry
+        outcome = "KEEP" if status == "kept" else "REVERT"
+        ss = self.shared_state
+        entry = {
+            "repo": repo or (pr_url.split("/")[3] + "/" + pr_url.split("/")[4] if pr_url and len(pr_url.split("/")) > 4 else "unknown"),
+            "number": int(candidate.get("pr_number") or candidate.get("number") or 0),
+            "outcome": outcome,
+            "patch_file": str(patch_path),
+            "measured_gain_pct": float(delta_pct or 0.0),
+            "applicable_arch": list(getattr(ss, "model_architectures", None) or []),
+            "applicable_precision": str(getattr(ss, "precision", "") or ""),
+            "applicable_platform": "rocm",
+            "error_class": error_class if outcome == "REVERT" else "",
+            "notes": f"{outcome}: {candidate.get('title', patch_path)} ({delta_pct:+.1f}%)",
+            "source_session_id": self._source_session_id(),
+            "tested_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        # Read-modify-write prs_tested
+        try:
+            live = self._read_local_recipe_row()
+            existing_prs = list(live.get("prs_tested") or [])
+            existing_prs.append(entry)
+            self._kb_amend_recipe(recipe_overrides={"prs_tested": existing_prs})
+            log.info(
+                "framework_pr: wrote prs_tested[%s] for %s (gain=%+.1f%%)",
+                outcome, patch_path, delta_pct,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("framework_pr: prs_tested write failed")
+
     def _record_framework_pr_phase_done(
         self,
         *,
@@ -5080,7 +5130,10 @@ class Coordinator:
             }
             state.warm_replay_attempted = True
             return None
-        if not bc_args and not bc_envs:
+        # Extract code patches from warm_start_context (populated by T0).
+        wsc_patches = (wsc.get("recommended_replay") or {}).get("patches") or [] if isinstance(wsc, dict) else []
+        wsc_blocked = wsc.get("blocked_patches") or [] if isinstance(wsc, dict) else []
+        if not bc_args and not bc_envs and not wsc_patches:
             state.warm_replay_outcome = {
                 "status": "skipped",
                 "reason": "best_config_empty",
@@ -5131,6 +5184,9 @@ class Coordinator:
             "config_donor_tier": config_tier,
             "config_source": config_source,
             "baseline_tput_anchor": float(baseline_tput),
+            # Code patches to apply before server launch (from prs_tested[KEEP]).
+            "patches": list(wsc_patches),
+            "blocked_patches": list(wsc_blocked),
         }
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="replay_warm_recipe",
@@ -8317,21 +8373,13 @@ class Coordinator:
         backend = _resolve_gemm_tuning_backend({})
 
         if backend == "forge":
-            # forge-gemm-tune supports: any MoE model, FP8 dense,
-            # bf16/fp8/fp4 precision, sglang/vllm frameworks.
-            is_moe = bool(
-                getattr(ss, "is_moe", False)
-                or getattr(ss, "model_is_moe", False)
-                or "moe" in str(getattr(ss, "model_type", "") or "").lower()
-                or "moe" in str(getattr(ss, "model_class", "") or "").lower()
-            )
-            eligible = (
-                framework in ("sglang", "vllm", "vllm-aiter")
-                and (
-                    is_moe
-                    or precision in ("fp8", "fp4", "mxfp4")
-                )
-            )
+            # forge-gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
+            # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
+            # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
+            # precision/MoE here, or a category that can optimize gets silently
+            # blocked. Gate only on a supported framework and let forge itself
+            # return no_improvement when a shape can't be beaten.
+            eligible = framework in ("sglang", "vllm", "vllm-aiter")
         else:
             # GEAK: legacy FP8 + SGLang only.
             eligible = (precision == "fp8" and framework == "sglang")
@@ -9374,12 +9422,182 @@ class Coordinator:
 
         # PR discovery lives in the FRAMEWORK_PR phase pump.
 
+        # SUBSTRATE EVIDENCE — directional lever priors for this focus from the
+        # cortex KB ``/v2/reasoning/levers`` endpoint (the forward counterpart
+        # to the Critic's ``/assess``). Advisory only; gated on CORTEX_KB_URL,
+        # cached per focus, fail-soft.
+        if "substrate_levers" not in params:
+            # Offload the blocking urllib KB call off the event loop: a slow or
+            # unreachable cortex KB must not stall the orchestrator's reactor /
+            # dispatcher coroutines (repo convention for sync IO).
+            digest = await asyncio.to_thread(self._warm_substrate_levers, params)
+            if digest:
+                params["substrate_levers"] = digest
+
+        # CONFLICT GUARDRAIL — deterministic dual-read between the substrate's
+        # directional levers (above) and the gbrain warm-start recipe: ask the
+        # substrate to judge the recipe's champion config and flag any lever its
+        # measured evidence contradicts. Emits a ``kb_guardrail`` trace span and
+        # folds the digest into params so the specialist reuses it (one assess
+        # call per focus). Advisory only, fail-soft — never blocks dispatch.
+        if "substrate_dual_read" not in params:
+            dual_read = await asyncio.to_thread(self._warm_substrate_dual_read, params)
+            if dual_read:
+                params["substrate_dual_read"] = dual_read
+
         # proposal_set cap into params so SpecialistRunner reads it; setdefault lets a delegate shrink it.
         from inference_optimizer.orchestrator.policy import (
             DEFAULT_SPECIALIST_MAX_PROPOSALS,
         )
 
         params.setdefault("max_proposals", DEFAULT_SPECIALIST_MAX_PROPOSALS)
+
+    def _substrate_focus(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Map SharedState + params to the ``/v2/reasoning/levers`` focus.
+
+        Mirrors the Critic's ``_assess_focus`` so both ends reason over the same
+        subject. Drops empty/``unknown`` dimensions.
+
+        Args:
+            params: The specialist task params (carries the warmed framework).
+
+        Returns:
+            dict[str, Any]: A focus dict with non-empty known dimensions.
+        """
+        state = self.shared_state
+        candidate = {
+            "model": getattr(state, "model_name", "") or "",
+            "hardware": params.get("gpu_type") or getattr(state, "gpu_type", "") or "",
+            "framework": params.get("framework") or getattr(state, "framework", "") or "",
+            "framework_version": params.get("framework_version") or "",
+            "precision": params.get("precision") or getattr(state, "precision", "") or "",
+        }
+        return {k: v for k, v in candidate.items() if v not in (None, "", "unknown")}
+
+    def _warm_substrate_levers(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Fetch the substrate's directional lever digest for this focus.
+
+        Best-effort: returns ``{}`` when no cortex KB is configured, the focus
+        lacks a model, or the call fails. Cached per focus on the Coordinator so
+        repeated specialist dispatches in a session hit the network once.
+
+        Args:
+            params: The specialist task params (read-only here).
+
+        Returns:
+            dict[str, Any]: The decoded digest, or ``{}`` on miss/error.
+        """
+        focus = self._substrate_focus(params)
+        if not focus.get("model"):
+            return {}
+
+        cache: dict[str, dict[str, Any]] = getattr(self, "_substrate_levers_cache", None)
+        if cache is None:
+            cache = {}
+            self._substrate_levers_cache = cache
+        key = json.dumps(focus, sort_keys=True)
+        if key in cache:
+            return cache[key]
+
+        digest: dict[str, Any] = {}
+        try:
+            from .substrate_levers_client import SubstrateLeversClient
+
+            client = SubstrateLeversClient.from_env()
+            if client is not None:
+                got = client.recommend(focus=focus)
+                if isinstance(got, dict):
+                    digest = got
+        except Exception as exc:  # noqa: BLE001 — advisory, never a gate
+            log.warning("specialist warmup: substrate levers fetch failed: %r", exc)
+            digest = {}
+
+        cache[key] = digest
+        return digest
+
+    def _warm_substrate_dual_read(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Cross-check the substrate levers against the gbrain warm recipe.
+
+        The coordinator-side conflict guardrail: reuses the warmed
+        ``substrate_levers`` + ``warm_start_recipe`` already on ``params`` and
+        asks the substrate to assess the recipe's champion config, then emits a
+        ``kb_guardrail`` Langfuse span (flagging any conflicting levers) and
+        returns the digest for the specialist to reuse. Cached per focus so a
+        session's repeated dispatches hit the network once.
+
+        Best-effort: returns ``{}`` when no source carries signal or anything
+        fails. Never raises, never blocks dispatch.
+
+        Args:
+            params: The specialist task params (read ``substrate_levers`` /
+                ``warm_start_recipe``; not mutated here).
+
+        Returns:
+            dict[str, Any]: The dual-read digest, or ``{}`` on miss/error.
+        """
+        substrate_levers = params.get("substrate_levers") or {}
+        warm_start_recipe = params.get("warm_start_recipe") or {}
+        if not substrate_levers and not warm_start_recipe:
+            return {}
+
+        focus = self._substrate_focus(params)
+        cache: dict[str, dict[str, Any]] = getattr(self, "_substrate_dual_read_cache", None)
+        if cache is None:
+            cache = {}
+            self._substrate_dual_read_cache = cache
+        key = json.dumps(focus, sort_keys=True)
+        if key in cache:
+            return cache[key]
+
+        digest: dict[str, Any] = {}
+        try:
+            from .substrate_dual_read import compute_dual_read
+
+            digest = compute_dual_read(
+                substrate_levers=substrate_levers,
+                warm_start_recipe=warm_start_recipe,
+            )
+        except Exception as exc:  # noqa: BLE001 — advisory, never a gate
+            log.warning("specialist warmup: substrate dual-read failed: %r", exc)
+            digest = {}
+
+        if digest:
+            self._trace_substrate_guardrail(digest)
+        cache[key] = digest
+        return digest
+
+    def _trace_substrate_guardrail(self, digest: dict[str, Any]) -> None:
+        """Emit the coordinator conflict-guardrail ``kb_guardrail`` trace span.
+
+        Records the full dual-read digest under the ``orchestrator`` agent so
+        the global "did the substrate and gbrain disagree" guardrail evidence
+        is visible on the session trace, independent of any one specialist.
+        No-op when Langfuse is disabled; never raises.
+
+        Args:
+            digest: The dual-read digest from ``_warm_substrate_dual_read``.
+        """
+        try:
+            from .trace.langfuse_emitter import get_emitter
+
+            emitter = get_emitter(self.session_dir)
+            if not emitter.enabled:
+                return
+            conflicts = digest.get("conflicts") if isinstance(digest.get("conflicts"), list) else []
+            emitter.record_kb_span(
+                name="kb_guardrail:substrate_vs_recipe",
+                agent="orchestrator",
+                output=digest,
+                metadata={
+                    "kind": "kb_guardrail",
+                    "verdict": digest.get("verdict"),
+                    "selected_source": digest.get("selected_source"),
+                    "conflict_count": len(conflicts),
+                    "conflict": bool(conflicts),
+                },
+            )
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug("coordinator: substrate guardrail span failed", exc_info=True)
 
     @staticmethod
     def _pr_summary_to_dict(pr: Any) -> dict[str, Any]:
@@ -11332,6 +11550,15 @@ class Coordinator:
                     self._record_coordinator_exception(
                         stage="dispatcher_fact_write",
                         exc=exc,
+                    )
+            # Framework-PR prs_tested write-back: record KEEP/REVERT patches into recipe.
+            if task.kind == "framework_pr":
+                try:
+                    self._write_prs_tested_from_framework_pr(task=task, result=result, kept=kept)
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "dispatcher: prs_tested write-back failed for task=%s",
+                        task.task_id,
                     )
                     continue
             # explore-round gap update: append per-variant KEEP/REVERT to the gap, then re-run the global refresh.

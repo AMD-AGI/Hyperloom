@@ -265,12 +265,18 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # glm_moe_dsa: confirmed from zai-org-GLM-5.1 server.log ("model type
 # `glm_moe_dsa` but Transformers does not recognize this architecture" →
 # ModelConfig ValidationError in engine init).
+# gemma4: removed from the blocklist. The original entry assumed the framework
+# did not recognize gemma4, but the current runtime (transformers 5.5.0 +
+# vLLM 0.18.2rc1 rocm721) registers it: CONFIG_MAPPING contains "gemma4",
+# AutoConfig resolves Gemma4Config, and vLLM ModelConfig resolves
+# "Gemma4ForConditionalGeneration" (runner_type=generate) without a
+# validation/registry error. The wrapper carries vision_config, so it now
+# falls through to the text_coercible degraded-mode path instead.
 _UNRECOGNIZED_MODEL_TYPES = frozenset({
-    "deepseek_v4", "gemma4", "glm4_moe_lite", "mimo_v2_flash", "glm_moe_dsa",
+    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash", "glm_moe_dsa",
 })
 _UNRECOGNIZED_ARCHITECTURES = frozenset({
-    "deepseekv4forcausallm", "gemma4forcausallm",
-    "gemma4forconditionalgeneration", "glm4moeliteforcausallm",
+    "deepseekv4forcausallm", "glm4moeliteforcausallm",
     "mimov2flashforcausallm", "glmmoedsaforcausallm",
 })
 # Some model_type values only appear inside nested decoder configs carried by a

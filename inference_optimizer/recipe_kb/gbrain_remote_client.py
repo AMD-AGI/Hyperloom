@@ -385,7 +385,7 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
             "stack_fingerprint": dict(attrs.get("stack_fingerprint") or {}),
             "sessions": [],
             "last_profiled": "",
-            "prs_tested": [],
+            "prs_tested": _json_list(attrs.get("prs_tested")),
         },
         "metrics": {
             "throughput": throughput,
@@ -709,7 +709,7 @@ class GbrainRemoteRecipeClient:
         }
         # Fast path: gbrain recipe slugs are the canonical id with ':' as path
         # separators, so exact 7-tuple reads do not need a full corpus scan.
-        direct = self._get_page_recipe("recipe-snapshot/" + canonical_id.replace(":", "/"))
+        direct = self._get_page_recipe("hyperloom-recipe-kb/" + canonical_id.replace(":", "/"))
         if direct is not None and direct.get(C.F_CANONICAL_ID) == canonical_id:
             return direct
         rows = self.search(label_match=label_match, limit=1)
