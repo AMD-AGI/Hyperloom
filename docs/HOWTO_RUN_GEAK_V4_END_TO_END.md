@@ -100,7 +100,15 @@ rocm-smi --showmeminfo vram | grep -i 'Used'
 pgrep -af 'hipcc|ninja|/opt/venv/bin/geak'   # expect empty
 ```
 > `run_gvf.sh` does this automatically at the top of every run (skip with
-> `SKIP_PRERUN_CLEANUP=1` when you intentionally run two workloads concurrently).
+> `SKIP_PRERUN_CLEANUP=1`).
+>
+> **⚠ Single-tenant only.** This blind `pkill -f` sweep is safe ONLY on an
+> experiment box you own end-to-end. It is **not** the fix for the orphaned-probe
+> deadlock on shared nodes (HL issue **#720**, still open) — on a shared node it
+> would kill other tenants' compiler/serving work. The production fix is an
+> attribution-based reaper (target only this run's recorded GEAK pgid/session or
+> processes whose build dir is under this run's workspace). Use
+> `SKIP_PRERUN_CLEANUP=1` on shared nodes.
 
 ---
 
@@ -178,7 +186,7 @@ grep -cE 'test_pa.py|test_quant.py|Known benchmark/test' "$PF"   # -> 0  (no op_
 v4 runs via the Claude Code **Workflow** tool. Invoke the from-analysis variant
 once per target kernel (`seed_target` selects the task group: `tg001`, `tg002`, …).
 
-```jsonc
+```json
 // Workflow tool call
 {
   "scriptPath": "/wekafs/sapmajum/PROJECTS/GEAK_v4_fresh/kernel_workflow/kernel_workflow_from_analysis.js",
@@ -352,4 +360,3 @@ analysis (the normal case here, and required for a fair v3-vs-v4 comparison).
 - **Leaking an op_test into the prompt** → GEAK is PROMPT-ONLY; never pass a
   test_command/harness/op_test. HL #703 enforces this for the geak backend by
   default; just verify with the grep in §4.
-```
