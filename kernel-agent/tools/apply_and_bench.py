@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import signal
 import statistics
 import subprocess
@@ -74,98 +73,72 @@ def _looks_like_diff(path: Path) -> bool:
     return ("diff --git " in head) or ("\n--- " in head and "\n+++ " in head and "\n@@ " in head)
 
 
-def _scope_diff_to_target(diff_path: Path, target: Path, out_dir: Path) -> Path:
-    """Keep only the diff's file-sections whose path matches the declared TARGET; drop the rest.
+def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Path) -> dict[str, Any]:
+    """Reconstruct the BYTE-EXACT optimized source for EVERY file a diff touches.
 
-    Optimizer-emitted diffs can bundle non-kernel artifacts (e.g. a generated ``test_harness.py`` at
-    the repo root) alongside the real kernel change. When several kernels' diffs are applied to one
-    tree those artifacts COLLIDE ("already exists"). Since the caller declares the target file per
-    patch (``--pair PATCH:TARGET``), we filter each diff to just the sections that touch the target's
-    basename — robust to ANY stray file, no per-artifact special-casing. Returns the (possibly
-    filtered) diff path; if filtering would drop everything, returns the original unchanged.
+    Apply the WHOLE diff (all hunks, every file — no scoping, nothing dropped) to a throwaway
+    copy of the repo's CURRENT (committed) tree, then read back each resulting file. This yields
+    the exact bytes the optimizer's patch produces, which the caller then deploys via
+    ``apply_kernel_patch`` (the same full-source replace + backup/manifest path that the
+    integration deploy in #681 uses). Two patch-deploy semantics collapse into one, and companion
+    edits (generated drivers/headers/codegen shims) are preserved rather than filtered out.
+
+    Done in an isolated ``git worktree`` of ``repo_root`` so the live tree is never mutated during
+    reconstruction. Returns ``{status, files: {repo_rel_path: reconstructed_source_path}, error}``.
     """
+    files: dict[str, str] = {}
+    wt = out_dir / f"_recon_wt_{diff_path.stem}"
+    # Use a detached worktree at HEAD so reconstruction is hermetic (live repo untouched).
+    rm = subprocess.run(
+        ["git", "-C", str(repo_root), "worktree", "add", "--detach", "-f", str(wt), "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if rm.returncode != 0:
+        return {"status": "failed", "error": f"git worktree add: {rm.stderr[:200]}"}
     try:
-        text = diff_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return diff_path
-    sections = re.split(r"(?=^diff --git )", text, flags=re.M)
-    sections = [s for s in sections if s.strip()]
-    if len(sections) <= 1:
-        return diff_path  # single-file diff: nothing to scope
-    tname = target.name
-    kept = [s for s in sections if tname in s.split("\n", 1)[0]]
-    if not kept or len(kept) == len(sections):
-        return diff_path  # no match, or nothing to drop -> use as-is
-    scoped = out_dir / f"scoped_{diff_path.stem}_{tname}.diff"
-    scoped.write_text("".join(kept), encoding="utf-8")
-    dropped = len(sections) - len(kept)
-    _log(out_dir, f"scoped diff to '{tname}' (dropped {dropped} non-target file-section(s), e.g. artifacts)")
-    return scoped
-
-
-def _reset_diff_paths(diff_path: Path, repo_root: Path) -> None:
-    """Reset ONLY the paths a diff touches to their committed state (idempotent apply).
-
-    Parses the diff's ``+++ b/<path>`` headers and, for each, restores a tracked file
-    (``git checkout --``) or removes a stale untracked file a prior run created
-    (``git clean -fq``). Scoped strictly to the diff's own paths — unrelated work in the
-    repo is never touched. No-op on a pristine tree.
-    """
-    paths: set[str] = set()
-    try:
-        for ln in diff_path.read_text(errors="replace").splitlines():
-            if ln.startswith("+++ ") and not ln.startswith("+++ /dev/null"):
-                p = ln[4:].strip()
-                p = p[2:] if (p.startswith("a/") or p.startswith("b/")) else p
-                if p and p != "/dev/null":
-                    paths.add(p)
-    except Exception:  # noqa: BLE001 — best-effort; a parse miss just skips the pre-clean
-        return
-    for p in paths:
-        # tracked -> restore committed version; untracked -> remove. One of these is a no-op.
-        subprocess.run(["git", "-C", str(repo_root), "checkout", "--", p], capture_output=True, text=True)
-        subprocess.run(["git", "-C", str(repo_root), "clean", "-fq", "--", p], capture_output=True, text=True)
-
-
-def _git_apply_diff(diff_path: Path, repo_root: Path, out_dir: Path, target: Path | None = None) -> dict[str, Any]:
-    """Apply a unified diff directly to a git repo (handles MULTI-FILE diffs), auto -p level.
-
-    The complement to apply_kernel_patch's full-source replace: when the producer hands us a `.diff`
-    (e.g. a multi-file kernel patch), we apply it in-tree with git so all hunks/files land. When a
-    ``target`` is given we first scope the diff to that file (drops bundled artifacts that would
-    collide across kernels). Revert is `git checkout -- <touched paths>`. Returns {status, touched, ...}.
-    """
-    if target is not None:
-        diff_path = _scope_diff_to_target(diff_path, target, out_dir)
-    # Idempotency: a prior apply_and_bench run may have left the diff's own paths dirty
-    # (a modified tracked file, or an untracked file a `new file` hunk created, e.g.
-    # `optimized_versions/<k>.cu`). git apply --check would then fail ("already exists" /
-    # context mismatch) even though the diff is valid against pristine source. Reset ONLY
-    # the paths THIS diff touches to their committed state first — scoped + non-destructive
-    # (never touches unrelated files), so the apply surface matches what the diff expects.
-    _reset_diff_paths(diff_path, repo_root)
-    for lvl in (1, 0, 2):
-        chk = subprocess.run(
-            ["git", "-C", str(repo_root), "apply", f"-p{lvl}", "--check", str(diff_path)],
-            capture_output=True,
-            text=True,
-        )
-        if chk.returncode == 0:
-            ap = subprocess.run(
-                ["git", "-C", str(repo_root), "apply", f"-p{lvl}", str(diff_path)], capture_output=True, text=True
+        applied = False
+        for lvl in (1, 0, 2):
+            chk = subprocess.run(
+                ["git", "-C", str(wt), "apply", f"-p{lvl}", "--check", str(diff_path)], capture_output=True, text=True
             )
-            if ap.returncode != 0:
-                return {"status": "failed", "error": f"git apply -p{lvl}: {ap.stderr[:200]}"}
-            # record touched paths for a precise revert
-            touched = subprocess.run(
-                ["git", "-C", str(repo_root), "apply", f"-p{lvl}", "--numstat", str(diff_path)],
-                capture_output=True,
-                text=True,
-            ).stdout
-            paths = [ln.split("\t")[-1] for ln in touched.splitlines() if "\t" in ln]
-            _log(out_dir, f"git apply -p{lvl} OK ({len(paths)} files): {', '.join(p.split('/')[-1] for p in paths)}")
-            return {"status": "ok", "touched": paths, "p_level": lvl, "manifest": None, "repo_root": str(repo_root)}
-    return {"status": "failed", "error": "git apply: no -p level (0/1/2) applies this diff cleanly"}
+            if chk.returncode == 0:
+                ap = subprocess.run(
+                    ["git", "-C", str(wt), "apply", f"-p{lvl}", str(diff_path)], capture_output=True, text=True
+                )
+                if ap.returncode != 0:
+                    return {"status": "failed", "error": f"git apply -p{lvl}: {ap.stderr[:200]}"}
+                # numstat lists EVERY touched path (incl. new/companion files) — none dropped.
+                ns = subprocess.run(
+                    ["git", "-C", str(wt), "apply", f"-p{lvl}", "--numstat", str(diff_path)],
+                    capture_output=True,
+                    text=True,
+                ).stdout
+                rels = [ln.split("\t")[-1] for ln in ns.splitlines() if "\t" in ln]
+                recon_dir = out_dir / f"_recon_src_{diff_path.stem}"
+                recon_dir.mkdir(parents=True, exist_ok=True)
+                for rel in rels:
+                    src = wt / rel
+                    if not src.is_file():  # a pure deletion — record so the caller can handle it
+                        files[rel] = ""
+                        continue
+                    dst = recon_dir / rel.replace("/", "__")
+                    dst.write_bytes(src.read_bytes())  # byte-exact
+                    files[rel] = str(dst)
+                applied = True
+                _log(
+                    out_dir,
+                    f"reconstructed {len(files)} file(s) from diff -p{lvl}: "
+                    f"{', '.join(r.split('/')[-1] for r in files)}",
+                )
+                break
+        if not applied:
+            return {"status": "failed", "error": "git apply: no -p level (0/1/2) applies this diff cleanly"}
+        return {"status": "ok", "files": files}
+    finally:
+        subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "remove", "-f", str(wt)], capture_output=True, text=True
+        )
 
 
 def _find_benchmark_serving() -> str | None:
@@ -509,51 +482,65 @@ def apply_and_bench(
     # ---- APPLY all pairs. Each pair's patch may be a FULL SOURCE file (apply_kernel_patch:
     # backup + aiter .cu rebuild + cache invalidation) OR a unified DIFF/.patch (git apply,
     # multi-file). We auto-detect so the primitive handles patch/diff/full-source uniformly. ----
-    _log(out, f"=== APPLY {len(pairs)} patch(es) (no keep/revert/needs-review gate) ===")
-    manifests: list[str] = []  # full-source applies -> revert via revert_kernel_patch
-    diff_applies: list[dict[str, Any]] = []  # diff applies -> revert via git checkout of touched paths
+    # ONE deploy mechanism for everything: a diff is reconstructed to BYTE-EXACT full source(s)
+    # (all files, nothing scoped/dropped), then EVERY file — diff-derived or already-full-source —
+    # is deployed via apply_kernel_patch (backup + aiter .cu rebuild + cache invalidation + manifest),
+    # the SAME path the integration deploy in #681 uses. Revert is uniformly via the manifests.
+    _log(out, f"=== APPLY {len(pairs)} patch(es) (byte-exact via apply_kernel_patch; no gate) ===")
+    manifests: list[str] = []  # every deploy -> revert via revert_kernel_patch(manifest)
     applied: list[dict[str, Any]] = []
 
     def _revert_all() -> None:
         for m in reversed(manifests):
             revert_kernel_patch(m)
-        for da in reversed(diff_applies):
-            rr = da.get("repo_root", "/sgl-workspace/aiter")
-            for p in da.get("touched", []):
-                subprocess.run(["git", "-C", rr, "checkout", "--", p], check=False)
-        subprocess.run(["git", "-C", "/sgl-workspace/aiter", "checkout", "--", "csrc/"], check=False)
+
+    def _deploy_full_source(src_path: str, target: str, tag: str) -> bool:
+        """apply_kernel_patch a complete-source file onto target; record manifest. Returns ok."""
+        res = apply_kernel_patch(
+            patch_path=src_path,
+            target_file=target,
+            backup_root=backup_root,
+            kernel_id=f"{kernel_id or 'apply_and_bench'}_{tag}",
+            rebuild_command=rebuild_command,
+            skip_rebuild=skip_rebuild,
+            allow_unknown_target=True,
+        )
+        _log(out, f"deploy {Path(target).name} <- {Path(src_path).name} status={res.get('status')}")
+        applied.append(
+            {"target": target, "source": src_path, "status": res.get("status"), "manifest": res.get("manifest_path")}
+        )
+        if res.get("status") == "ok" and res.get("manifest_path"):
+            manifests.append(res["manifest_path"])
+        return res.get("status") == "ok"
 
     for i, (pp, tf) in enumerate(pairs):
         if _looks_like_diff(Path(pp)):
-            # in-tree git apply at the repo that owns the target (aiter for aiter targets)
+            # Reconstruct byte-exact full source for EVERY file the diff touches (companion files
+            # preserved), then deploy each via apply_kernel_patch. The declared target (tf) is
+            # deployed to its real path; any additional reconstructed file is deployed in place
+            # (resolved against the repo root that owns the target).
             repo_root = Path("/sgl-workspace/aiter") if "/aiter/" in str(tf) else Path(tf).parents[2]
-            res = _git_apply_diff(Path(pp), repo_root, out, target=Path(tf))
-            ok = res.get("status") == "ok"
-            _log(out, f"apply[{i}] {Path(tf).name} (diff) status={res.get('status')}")
-            applied.append({"target": tf, "mode": "diff", "status": res.get("status"), "touched": res.get("touched")})
-            if not ok:
+            rec = _reconstruct_sources_from_diff(Path(pp), repo_root, out)
+            if rec.get("status") != "ok":
                 _revert_all()
-                return {"status": "apply_failed", "baseline": base, "applied": applied, "error": res.get("error")}
-            diff_applies.append(res)
+                return {"status": "apply_failed", "baseline": base, "applied": applied, "error": rec.get("error")}
+            for rel, src in rec["files"].items():
+                if not src:  # pure deletion in the diff — revert-safe skip (rare for kernel patches)
+                    _log(out, f"diff deletes {rel} — skipping deploy (not a source replacement)")
+                    continue
+                tgt = str(tf) if Path(rel).name == Path(tf).name else str(repo_root / rel)
+                if not _deploy_full_source(src, tgt, f"{i}_{Path(rel).name}"):
+                    _revert_all()
+                    return {
+                        "status": "apply_failed",
+                        "baseline": base,
+                        "applied": applied,
+                        "error": f"deploy failed for {rel}",
+                    }
         else:
-            res = apply_kernel_patch(
-                patch_path=pp,
-                target_file=tf,
-                backup_root=backup_root,
-                kernel_id=f"{kernel_id or 'apply_and_bench'}_{i}",
-                rebuild_command=rebuild_command,
-                skip_rebuild=skip_rebuild,
-                allow_unknown_target=True,
-            )
-            _log(out, f"apply[{i}] {Path(tf).name} (full-source) status={res.get('status')}")
-            applied.append(
-                {"target": tf, "mode": "full_source", "status": res.get("status"), "manifest": res.get("manifest_path")}
-            )
-            if res.get("status") != "ok":
+            if not _deploy_full_source(pp, tf, str(i)):
                 _revert_all()
-                return {"status": "apply_failed", "baseline": base, "applied": applied, "error": res.get("error")}
-            if res.get("manifest_path"):
-                manifests.append(res["manifest_path"])
+                return {"status": "apply_failed", "baseline": base, "applied": applied, "error": "deploy failed"}
     # For aiter .cu: drop the prebuilt fused module so the patched server re-JITs the edits.
     removed_so = []
     if aiter_rebuild or any_aiter_cu:
@@ -587,7 +574,7 @@ def apply_and_bench(
     finally:
         # ---- REVERT every patched source (full-source manifests + diff touched-paths). Keep patch files. ----
         _revert_all()
-        _log(out, f"reverted {len(manifests)} full-source + {len(diff_applies)} diff apply(es)")
+        _log(out, f"reverted {len(manifests)} deploy(s) via manifest")
 
     b_med, p_med = base.get("median"), patched.get("median")
     delta_pct = (p_med - b_med) / b_med * 100.0 if (b_med and p_med) else None
