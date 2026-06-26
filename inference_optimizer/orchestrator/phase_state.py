@@ -346,8 +346,9 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "kernel_no_more_leverage",  # KERNEL → SWEEP (non-terminal) via skip_to_sweep
         # FRAMEWORK_PR phase transitions.
         "framework_pr_phase_done",  # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
-        "framework_pr_plateau",  # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
+        "framework_pr_plateau",  # FRAMEWORK_PR → EXPLORE; N consecutive benchmarked candidate tests with no KEEP
         "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
+        "framework_pr_budget_cap",  # FRAMEWORK_PR → EXPLORE; per-phase wall-clock budget fraction reached
         # Cyclic phase machine back-edge reasons (transitions that reopen a macro-cycle).
         "cycle_reloop",  # SWEEP → FRAMEWORK_PR/EXPLORE; opens a new macro-cycle while budget + leverage remain
         "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
@@ -461,8 +462,11 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 # Default phase budgets (% of wall-clock). IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK_PR uses a time wall.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
-    PHASE_EXPLORE: 0.45,
-    PHASE_KERNEL: 0.38,
+    # FRAMEWORK_PR 0.15 deducted 0.075 each from EXPLORE / KERNEL so the phase
+    # self-caps instead of monopolising the run.
+    PHASE_FRAMEWORK_PR: 0.15,
+    PHASE_EXPLORE: 0.375,
+    PHASE_KERNEL: 0.305,
     PHASE_SWEEP: 0.12,
     PHASE_CLOSE: 0.02,
 }
@@ -503,6 +507,13 @@ DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE: float = 0.0
 DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK: int = 3
 DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT: float = 1.0
 DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
+# FRAMEWORK_PR per-candidate plateau: after this many consecutive *benchmarked*
+# candidate tests (status ``reverted``/``kept``) without a KEEP, the phase has
+# shown no leverage on the current batch and exits to EXPLORE. Non-benchmarked
+# outcomes (``not_applicable``/``apply_failed``/``already_present``/audit-skip/
+# critic_denied) are neither a test nor a reset — they're skipped. A KEEP resets
+# the streak. Overridable via ``INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK``.
+DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -1871,17 +1882,69 @@ def _framework_pr_pending_candidate_count(state: Any) -> int:
     return pending
 
 
+def _framework_pr_consecutive_no_keep(state: Any) -> int:
+    """Count trailing consecutive resolved candidates that did not KEEP.
+
+    Walks ``framework_pr_phase_progress`` newest-first: a KEEP row breaks the
+    streak; any other terminal row increments it — both ``reverted`` (applied +
+    benchmarked, below floor) and the non-benchmarked terminal outcomes
+    (``not_applicable`` / ``apply_failed`` / ``authored_empty`` / ``no_patches``
+    / ``already_present`` / audit-skip / ``critic_denied``). Counting the latter
+    lets a batch of dead candidates trip the plateau instead of grinding on.
+
+    Args:
+        state (Any): Frozen SharedState view exposing
+            ``framework_pr_phase_progress``.
+
+    Returns:
+        int: Number of trailing consecutive resolved candidates without a KEEP.
+    """
+    progress = getattr(state, "framework_pr_phase_progress", None) or []
+    if not isinstance(progress, list):
+        return 0
+    count = 0
+    for row in reversed(progress):
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").strip().lower()
+        is_keep = bool(row.get("kept")) or status == "kept"
+        if is_keep:
+            break
+        count += 1
+    return count
+
+
+def _framework_pr_plateau_streak_threshold() -> int:
+    """Resolve the consecutive-no-keep plateau threshold (env-overridable)."""
+    import os
+
+    try:
+        val = int(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK",
+                DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK,
+            )
+        )
+    except (TypeError, ValueError):
+        return DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK
+    return val if val > 0 else DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK
+
+
 def exit_normal_framework_pr(
     state: Any,
     *,
     max_hours: float | None = None,
     now_unix: float | None = None,
     force_exit_hours_remaining_ratio: float = (DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO),
+    budget_pct: dict[str, float] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """FRAMEWORK_PR normal exit.
 
     Priority: 0. HARD force-exit when remaining < ratio*max_hours →
-    ``framework_pr_force_exit_low_budget``; 1. ``framework_pr_phase_done``; else ``None``.
+    ``framework_pr_force_exit_low_budget``; 0.5. per-phase budget cap reached →
+    ``framework_pr_budget_cap``; 1. plateau when
+    :func:`_framework_pr_consecutive_no_keep` ≥ threshold →
+    ``framework_pr_plateau``; 2. ``framework_pr_phase_done``; else ``None``.
 
     Args:
         state (Any): Frozen SharedState view; may expose a ``remaining_minutes``
@@ -1891,6 +1954,8 @@ def exit_normal_framework_pr(
         now_unix (float | None): Override for the current time.
         force_exit_hours_remaining_ratio (float): Fraction of ``max_hours``
             below which the force-exit gate fires.
+        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
+            to ``state.phase_budget_pct``. Enables the per-phase wall-clock cap.
 
     Returns:
         tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the
@@ -1917,6 +1982,33 @@ def exit_normal_framework_pr(
                 "max_hours": float(max_hours),
                 "pending_candidate_count": _framework_pr_pending_candidate_count(state),
             }
+
+    # Per-phase wall-clock budget cap: now that FRAMEWORK_PR carries a budget
+    # fraction (DEFAULT_PHASE_BUDGET_PCT), rotate to EXPLORE once the phase has
+    # burned its share — guarantees the phase cannot monopolise the run even if
+    # neither plateau nor force-exit fires (e.g. a long stream of slow but
+    # technically-distinct candidates).
+    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
+        cap = phase_cap_seconds(state, budget_pct=budget_pct)
+        return "framework_pr_budget_cap", {
+            "evidence": "phase_budget_cap",
+            "phase_cap_seconds": cap,
+            "phase_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "pending_candidate_count": _framework_pr_pending_candidate_count(state),
+        }
+
+    # Per-candidate plateau: N consecutive benchmarked tests with no KEEP means
+    # the current batch is not yielding leverage — exit to EXPLORE rather than
+    # grind through the remaining candidates.
+    streak = _framework_pr_consecutive_no_keep(state)
+    threshold = _framework_pr_plateau_streak_threshold()
+    if streak >= threshold:
+        return "framework_pr_plateau", {
+            "evidence": "consecutive_no_keep",
+            "consecutive_no_keep": streak,
+            "threshold": threshold,
+            "pending_candidate_count": _framework_pr_pending_candidate_count(state),
+        }
 
     batches = getattr(state, "framework_pr_batches", None) or []
     if bool(getattr(state, "framework_pr_phase_done", False)):
@@ -2020,6 +2112,7 @@ def compute_next_phase(
                     DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO,
                 )
             ),
+            budget_pct=budget_pct,
         )
         if norm is not None:
             # FRAMEWORK_PR → EXPLORE (or KERNEL/SWEEP when collapsed).

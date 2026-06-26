@@ -313,6 +313,43 @@ def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
     assert _server_log_shows_death(str(log_path)) is not None
 
 
+def test_server_log_shows_death_detects_nested_benchmark_log(tmp_path):
+    """Magpie wrappers that ignore ``$SERVER_LOG`` write the real server log to a
+    nested ``benchmark_<fw>_<ts>/server.log``. The watchdog must still detect the
+    crash via that nested file even when the watched ``output_dir/server.log`` is
+    absent (otherwise a hung-after-death server burns the full hard timeout)."""
+    watched = tmp_path / "server.log"  # never written by the wrapper
+    nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
+    nested_dir.mkdir()
+    nested_log = nested_dir / "server.log"
+    assert _server_log_shows_death(str(watched)) is None  # nothing yet → alive
+    nested_log.write_text("INFO loading shards 50%\nINFO graph capture\n")
+    assert _server_log_shows_death(str(watched)) is None  # healthy nested → alive
+    nested_log.write_text(
+        "(EngineCore pid=2581809) RuntimeError: Engine core initialization "
+        "failed. See root cause above. Failed core proc(s): {}\n"
+    )
+    assert _server_log_shows_death(str(watched)) is not None
+
+
+def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
+    """The excerpt helper also falls back to a nested ``benchmark_*/server.log``
+    so the failure classifier still surfaces the real server fault."""
+    watched = tmp_path / "server.log"
+    nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
+    nested_dir.mkdir()
+    nested_log = nested_dir / "server.log"
+    assert server_log_death_excerpt(str(watched)) is None
+    nested_log.write_text(
+        "(EngineCore pid=2581809)     raise RuntimeError(\n"
+        "(EngineCore pid=2581809) RuntimeError: Engine core initialization "
+        "failed. See root cause above. Failed core proc(s): {}\n"
+    )
+    excerpt = server_log_death_excerpt(str(watched))
+    assert excerpt is not None
+    assert "Engine core initialization failed" in excerpt
+
+
 def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
     """#524: the excerpt helper returns the engine/worker-init root-cause line
     (with a little context) so the failure classifier can put the real server

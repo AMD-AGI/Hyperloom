@@ -30,7 +30,23 @@ PERF_TERMS = (
 )
 
 
-def _build_query(repo: str, gap_description: str) -> str:
+def _state_qualifier(states: tuple[str, ...]) -> str:
+    """Map pr_states to a GitHub search state qualifier.
+
+    Open-only (default) keeps ``is:open``; any merged/closed/all broadens to
+    all PR states (omit the state qualifier) so merged PRs are searchable.
+
+    Args:
+        states: The requested PR states.
+
+    Returns:
+        ``"is:open"`` for open-only, else ``""`` (all states).
+    """
+    broad = any(s in ("merged", "closed", "all") for s in (states or ("open",)))
+    return "" if broad else "is:open"
+
+
+def _build_query(repo: str, gap_description: str, states: tuple[str, ...] = ("open",)) -> str:
     """Compose a GitHub Search query string from gap_description + repo scope.
 
     Keywords extracted from ``gap_description`` drive the OR-term clause;
@@ -40,23 +56,23 @@ def _build_query(repo: str, gap_description: str) -> str:
         repo (str): Repository slug in ``owner/name`` form to scope the search.
         gap_description (str): Free-text gap description used to derive search
             keywords.
+        states (tuple[str, ...]): PR states to include (``("open",)`` default;
+            merged/closed/all broadens beyond open).
 
     Returns:
-        str: A GitHub Search query restricted to open PRs in ``repo``.
+        str: A GitHub Search query scoped to ``repo`` and the requested states.
     """
     keywords = extract_keywords(gap_description) if gap_description else []
     if not keywords:
         terms = PERF_TERMS
     else:
         terms = tuple(keywords)
-    return " ".join(
-        [
-            f"repo:{repo}",
-            "is:pr",
-            "is:open",
-            "(" + " OR ".join(terms) + ")",
-        ]
-    )
+    parts = [f"repo:{repo}", "is:pr"]
+    state_q = _state_qualifier(states)
+    if state_q:
+        parts.append(state_q)
+    parts.append("(" + " OR ".join(terms) + ")")
+    return " ".join(parts)
 
 
 def search_perf_prs(
@@ -64,6 +80,7 @@ def search_perf_prs(
     *,
     gap_description: str = "",
     limit: int = 5,
+    states: tuple[str, ...] = ("open",),
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
     """Return open perf-ish PRs via anonymous GitHub Search API.
@@ -88,7 +105,7 @@ def search_perf_prs(
         repo = _repo_slug(repo_url)
     except ValueError:
         return []
-    query = _build_query(repo, gap_description)
+    query = _build_query(repo, gap_description, states)
     url = "https://api.github.com/search/issues?" + urllib.parse.urlencode(
         {"q": query, "sort": "updated", "order": "desc", "per_page": str(limit)}
     )

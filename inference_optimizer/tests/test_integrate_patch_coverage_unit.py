@@ -267,6 +267,80 @@ async def test_revert_when_rebench_accuracy_fails(tmp_path, monkeypatch):
     assert "accuracy regression on rebench" in res["reason"]
 
 
+# ---- REVERT when a framework-authored rebench loses its accuracy verdict ----
+@pytest.mark.asyncio
+async def test_revert_when_rebench_accuracy_missing_with_baseline(tmp_path, monkeypatch):
+    """First bench passes accuracy, but the stable rebench produces NO accuracy
+    verdict. For a framework-authored patch with a baseline accuracy, the gate
+    must reject (mirrors the first-bench accuracy_keep_block) rather than KEEP on
+    the stale first-bench pass."""
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": True}),
+    )
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_confirm_stack_rebench",
+        _stub_confirm(
+            {"stable": True, "tput": 190.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": None}
+        ),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+                "framework_pr_authoring": True,
+                "accuracy_baseline": 0.8,
+            },
+        )
+    )
+    assert res["status"] == "accuracy_unavailable_reject"
+    assert "no eval result" in res["reason"]
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_keep_when_rebench_accuracy_missing_but_not_required(tmp_path, monkeypatch):
+    """A generic (non-framework-authored) integrate_patch with no baseline still
+    KEEPs on a stable rebench with a missing accuracy verdict — the rebench gate
+    only tightens the required+baseline case."""
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
+    )
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_confirm_stack_rebench",
+        _stub_confirm(
+            {"stable": True, "tput": 190.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": None}
+        ),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
+        )
+    )
+    assert res["status"] == "kept"
+
+
 # ---- REVERT path (low throughput) ----
 @pytest.mark.asyncio
 async def test_revert_low_throughput(tmp_path, monkeypatch):
