@@ -3409,10 +3409,11 @@ async def _maybe_run_combined_e2e(
         dict | None: As :func:`_run_combined_e2e_sync`; never raises.
     """
     try:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, _run_combined_e2e_sync, results, payload, session_dir
-        )
+        # get_running_loop() is the correct call inside an async def (the deprecated
+        # get_event_loop() raises "no current event loop" under Python 3.11 when no
+        # loop is set on the thread). We are always inside the orchestrator's loop here.
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _run_combined_e2e_sync, results, payload, session_dir)
     except Exception as exc:  # noqa: BLE001  # belt-and-suspenders: never fail the batch
         return {"status": "error", "error": f"combined_e2e wrapper failed: {exc}"}
 

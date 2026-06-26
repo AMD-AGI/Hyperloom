@@ -66,6 +66,19 @@ def test_serving_config_empty_when_nothing_provided():
     assert krh._combined_e2e_serving_config({}) == {}
 
 
+def test_serving_config_falls_back_to_materialized_metadata(monkeypatch):
+    # config_path present + no explicit serving_config -> pull numeric knobs from the
+    # materialized workload metadata resolver (unset keys only).
+    monkeypatch.setattr(
+        krh,
+        "_load_materialized_workload_metadata",
+        lambda _p: {"runtime_args": {"workload": {"tp": 4, "isl": 2048, "osl": 256}}},
+    )
+    cfg = krh._combined_e2e_serving_config({"config_path": "/some/materialized.yaml", "framework": "vllm"})
+    assert cfg["framework"] == "vllm"
+    assert cfg["tp"] == 4 and cfg["isl"] == 2048 and cfg["osl"] == 256
+
+
 # ---- _resolve_local_model_path ----
 
 
@@ -133,6 +146,20 @@ def _one_pair_results():
     ]
 
 
+def test_combined_e2e_skips_when_no_pairs(monkeypatch, tmp_path):
+    # Past flag/backend/model/GPU guards, but no kernel produced a patch -> None.
+    monkeypatch.setattr(krh, "_visible_gpu_count", lambda: 1)
+    monkeypatch.setattr(krh, "_resolve_local_model_path", lambda m: m)
+    results = [{"kernel_id": "k1", "source_file": "/s/x.cu", "attempts": [{"backend_paths": {}}]}]
+    assert krh._run_combined_e2e_sync(results, _passing_payload(), tmp_path) is None
+
+
+def test_combined_e2e_skips_without_gpu(monkeypatch, tmp_path):
+    monkeypatch.setattr(krh, "_resolve_local_model_path", lambda m: m)
+    monkeypatch.setattr(krh, "_visible_gpu_count", lambda: 0)
+    assert krh._run_combined_e2e_sync(_one_pair_results(), _passing_payload(), tmp_path) is None
+
+
 def test_combined_e2e_tool_not_found(monkeypatch, tmp_path):
     # Past all guards, but the kernel-agent tool path can't resolve -> error dict (not None, not raise).
     monkeypatch.setattr(krh, "_visible_gpu_count", lambda: 1)
@@ -178,8 +205,10 @@ def test_combined_e2e_apply_raises_is_caught(monkeypatch, tmp_path):
 
 def test_maybe_run_combined_e2e_async_wrapper(monkeypatch, tmp_path):
     # The async wrapper runs the sync fn in an executor and returns its result.
+    # Use asyncio.run() (fresh loop) — get_event_loop() raises under py3.11 when no
+    # loop is set on the thread, which is exactly the bug the wrapper now avoids too.
     import asyncio
 
     monkeypatch.setattr(krh, "_run_combined_e2e_sync", lambda r, p, s: {"status": "ok", "via": "wrapper"})
-    out = asyncio.get_event_loop().run_until_complete(krh._maybe_run_combined_e2e([], {}, tmp_path))
+    out = asyncio.run(krh._maybe_run_combined_e2e([], {}, tmp_path))
     assert out == {"status": "ok", "via": "wrapper"}
