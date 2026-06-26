@@ -160,7 +160,8 @@ def test_per_cycle_budget_shrinks_phase_window():
     )
     whole_run = SharedState(**common, cycle_minutes=0.0)
     per_cycle = SharedState(**common, cycle_minutes=360.0)  # 6h cycle
-    budget = dict(ps.DEFAULT_PHASE_BUDGET_PCT)  # EXPLORE = 0.45
+    budget = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
+    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
 
     rem_run = ps.phase_budget_remaining_seconds(
         whole_run,
@@ -172,9 +173,9 @@ def test_per_cycle_budget_shrinks_phase_window():
         budget_pct=budget,
         now_unix=now,
     )
-    # whole-run: 96h*0.45; per-cycle: 6h*0.45 → much smaller.
-    assert rem_run == pytest.approx(96 * 3600 * 0.45)
-    assert rem_cycle == pytest.approx(6 * 3600 * 0.45)
+    # whole-run: 96h*pct; per-cycle: 6h*pct → much smaller.
+    assert rem_run == pytest.approx(96 * 3600 * pct)
+    assert rem_cycle == pytest.approx(6 * 3600 * pct)
     assert rem_cycle < rem_run
 
 
