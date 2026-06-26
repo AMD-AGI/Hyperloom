@@ -244,11 +244,12 @@ def test_compute_explore_variant_timeout_safety_margin_override():
     assert tight == 4554
 
 
-def test_decision_deadline_adds_boot_capture_allowance():
-    """Repro: a small model warm anchor (84s) × 1.2 = 101s kills a candidate
+def test_decision_deadline_uses_2x_cold_baseline():
+    """Repro: a small model warm anchor (84s) × 1.2 = 101s killed a candidate
     whose decision round (108s) includes a one-time cuda-graph re-capture, even
-    though its steady-state throughput beats baseline. The boot+capture
-    allowance (cold 400s − warm 84s) lifts the deadline past 108s."""
+    though its steady-state throughput beat baseline. Anchoring on 2x the COLD
+    baseline (which itself includes boot+capture) lifts the deadline well past
+    108s so the candidate survives to be measured."""
     deadline = _compute_decision_deadline_sec(
         decision_anchor_sec=84.0,
         overtime_kill_ratio=1.2,
@@ -256,13 +257,12 @@ def test_decision_deadline_adds_boot_capture_allowance():
         baseline_warm_runtime_sec=84.0,
         baseline_runtime_sec=400.0,
     )
-    # 84*1.2 + (400-84) = 100.8 + 316 = 416.8
-    assert deadline == pytest.approx(416.8)
+    assert deadline == pytest.approx(800.0)  # 400 * 2.0
     assert deadline > 108.0  # the previously-killed candidate now survives
 
 
-def test_decision_deadline_no_allowance_in_legacy_cold_mode():
-    """Legacy cold anchor already includes boot+capture; no extra allowance."""
+def test_decision_deadline_cold_anchor_in_legacy_mode():
+    """Legacy cold mode also anchors on 2x the cold baseline."""
     deadline = _compute_decision_deadline_sec(
         decision_anchor_sec=400.0,
         overtime_kill_ratio=1.2,
@@ -270,20 +270,24 @@ def test_decision_deadline_no_allowance_in_legacy_cold_mode():
         baseline_warm_runtime_sec=0.0,
         baseline_runtime_sec=400.0,
     )
-    assert deadline == pytest.approx(480.0)
+    assert deadline == pytest.approx(800.0)
 
 
-def test_decision_deadline_none_when_disabled():
-    assert (
-        _compute_decision_deadline_sec(
-            decision_anchor_sec=0.0,
-            overtime_kill_ratio=1.2,
-            use_warm_decision=True,
-            baseline_warm_runtime_sec=84.0,
-            baseline_runtime_sec=400.0,
-        )
-        is None
+def test_decision_deadline_warm_fallback_when_no_cold():
+    """When the cold baseline is unknown, fall back to warm anchor x kill_ratio."""
+    deadline = _compute_decision_deadline_sec(
+        decision_anchor_sec=84.0,
+        overtime_kill_ratio=1.2,
+        use_warm_decision=True,
+        baseline_warm_runtime_sec=84.0,
+        baseline_runtime_sec=0.0,
     )
+    assert deadline == pytest.approx(100.8)  # 84 * 1.2
+
+
+def test_decision_deadline_none_when_ratio_zero_disables():
+    """Operator disables the soft kill with kill_ratio <= 0, even if a baseline
+    is known (only the hard variant_timeout_sec cap then gates)."""
     assert (
         _compute_decision_deadline_sec(
             decision_anchor_sec=84.0,
@@ -296,17 +300,17 @@ def test_decision_deadline_none_when_disabled():
     )
 
 
-def test_decision_deadline_no_allowance_when_warm_ge_cold():
-    """Defensive: if warm anchor >= cold baseline (no measurable capture gap),
-    the allowance is zero and the deadline is just anchor × ratio."""
-    deadline = _compute_decision_deadline_sec(
-        decision_anchor_sec=90.0,
-        overtime_kill_ratio=1.2,
-        use_warm_decision=True,
-        baseline_warm_runtime_sec=90.0,
-        baseline_runtime_sec=85.0,
+def test_decision_deadline_none_when_no_anchor():
+    assert (
+        _compute_decision_deadline_sec(
+            decision_anchor_sec=0.0,
+            overtime_kill_ratio=1.2,
+            use_warm_decision=True,
+            baseline_warm_runtime_sec=0.0,
+            baseline_runtime_sec=0.0,
+        )
+        is None
     )
-    assert deadline == pytest.approx(108.0)
 
 
 # ExploreExecutor wires the auto-derived timeout through run_grid

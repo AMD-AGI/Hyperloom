@@ -1351,13 +1351,18 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     if quantization_arg == "fp8":
         precision = "fp8"
-        # Only explicit per-token env should route to per_token.
-        # Otherwise keep auto so forge can inspect kernel_signature_log
-        # for QuantType.per_Token / blockscale detection.
+        # Hand forge the fp8 GEMM path the model actually runs instead of letting
+        # it fall back to its internal blockscale default. Explicit per-token env
+        # wins; otherwise derive from the checkpoint's static format (config.json
+        # quantization_config). Unreadable config -> "auto" so forge sniffs the
+        # kernel_signature_log (keeps the legacy no-config behaviour unchanged).
         if per_token_signal:
             quant_type = "per_token"
         else:
-            quant_type = "auto"
+            model_path = str(
+                payload.get("model_path") or getattr(state, "model_path", "") or ""
+            ).strip()
+            quant_type = _resolve_fp8_quant_type(model_path)
         return precision, quant_type
 
     if quantization_arg in ("fp4", "mxfp4"):
@@ -1548,8 +1553,8 @@ def _csv_k_values(path: Path) -> set[int]:
     return ks
 
 
-def _model_hidden_size(model_path: str) -> int | None:
-    """Read ``hidden_size`` from a HF ``config.json``; ``None`` when unavailable."""
+def _read_model_config(model_path: str) -> dict | None:
+    """Load a HF ``config.json`` as a dict; ``None`` when unavailable/unreadable."""
     if not model_path:
         return None
     cfg = Path(model_path) / "config.json"
@@ -1557,7 +1562,13 @@ def _model_hidden_size(model_path: str) -> int | None:
         data = json.loads(cfg.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else None
+
+
+def _model_hidden_size(model_path: str) -> int | None:
+    """Read ``hidden_size`` from a HF ``config.json``; ``None`` when unavailable."""
+    data = _read_model_config(model_path)
+    if data is None:
         return None
     candidates: list[dict] = [data]
     nested = data.get("text_config")
@@ -1569,6 +1580,34 @@ def _model_hidden_size(model_path: str) -> int | None:
             if isinstance(val, int) and val > 0:
                 return val
     return None
+
+
+def _resolve_fp8_quant_type(model_path: str) -> str:
+    """Pick the fp8 dense tuner quant_type from the checkpoint's static format.
+
+    forge accepts an explicit ``quant_type``; rather than letting it fall back to
+    its internal blockscale default, hand it the path the model actually runs:
+
+    - ``blockscale`` only when the checkpoint ships block-quantized weights
+      (``config.json`` ``quantization_config.weight_block_size`` or a block-style
+      ``quant_method``) -- the a8w8 blockscale GEMM path.
+    - ``per_token`` for a plain fp16/bf16 checkpoint served under dynamic
+      ``--quantization fp8`` (the a8w8 per-token path).
+    - ``auto`` when ``config.json`` cannot be read, so forge sniffs the
+      ``kernel_signature_log`` itself (preserves the legacy behaviour and keeps
+      the no-readable-config case unchanged).
+    """
+    data = _read_model_config(model_path)
+    if data is None:
+        return "auto"
+    qc = data.get("quantization_config")
+    if isinstance(qc, dict):
+        if qc.get("weight_block_size"):
+            return "blockscale"
+        method = str(qc.get("quant_method") or qc.get("fmt") or "").lower()
+        if "block" in method:
+            return "blockscale"
+    return "per_token"
 
 
 def _csv_matches_model(csv_path: Path, model_path: str) -> bool:

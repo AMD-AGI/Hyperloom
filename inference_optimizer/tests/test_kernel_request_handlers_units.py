@@ -87,6 +87,51 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
 
+    @staticmethod
+    def _write_cfg(model_dir: Path, cfg: dict) -> str:
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+        return str(model_dir)
+
+    def test_resolve_fp8_quant_type(self, tmp_path):
+        block = self._write_cfg(
+            tmp_path / "block",
+            {"hidden_size": 7168, "quantization_config": {"weight_block_size": [128, 128]}},
+        )
+        method_block = self._write_cfg(
+            tmp_path / "mblock",
+            {"quantization_config": {"quant_method": "fp8_block"}},
+        )
+        plain = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
+        assert krh._resolve_fp8_quant_type(block) == "blockscale"
+        assert krh._resolve_fp8_quant_type(method_block) == "blockscale"
+        assert krh._resolve_fp8_quant_type(plain) == "per_token"
+        # Unreadable / missing config -> auto (forge sniffs the runtime log).
+        assert krh._resolve_fp8_quant_type(str(tmp_path / "missing")) == "auto"
+        assert krh._resolve_fp8_quant_type("") == "auto"
+
+    def test_resolve_forge_precision_fp8_plain_model_routes_per_token(self, tmp_path):
+        model = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
+        state = SharedState(precision="bf16", model_path=model)
+        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
+
+    def test_resolve_forge_precision_fp8_block_model_routes_blockscale(self, tmp_path):
+        model = self._write_cfg(
+            tmp_path / "block",
+            {"hidden_size": 7168, "quantization_config": {"weight_block_size": [128, 128]}},
+        )
+        state = SharedState(precision="bf16", model_path=model)
+        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "blockscale")
+
+    def test_resolve_forge_precision_fp8_unreadable_config_keeps_auto(self):
+        # Matches the legacy contract: with no readable config, do not force a
+        # tuner from Hyperloom -- let forge sniff the kernel_signature_log.
+        state = SharedState(precision="bf16", model_path="/models/does-not-exist")
+        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
+
     def test_forge_gemm_tune_available_by_path_and_import(self, monkeypatch):
         monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-gemm-tune")
         assert krh._forge_gemm_tune_available() is True

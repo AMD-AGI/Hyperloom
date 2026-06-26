@@ -399,6 +399,15 @@ def _compute_explore_variant_timeout(
     return int(max(floor_sec, min(ceiling_sec, derived)))
 
 
+# Soft-kill budget multiplier applied to the COLD baseline wall-clock. The cold
+# baseline already includes one server boot + cuda-graph capture + a full
+# benchmark, so a config-changing variant (which must re-boot and re-capture)
+# comfortably fits within 2x. This is robust against variants whose capture is
+# somewhat heavier than the baseline's, while the hard ``variant_timeout_sec``
+# cap still bounds genuine runaways.
+DECISION_DEADLINE_COLD_BASELINE_MULT = 2.0
+
+
 def _compute_decision_deadline_sec(
     *,
     decision_anchor_sec: float,
@@ -409,29 +418,29 @@ def _compute_decision_deadline_sec(
 ) -> float | None:
     """Overtime soft-deadline for an explore decision round.
 
-    The warm anchor (client-only measure time) excludes server boot + cuda-graph
-    capture. Config-changing variants (cuda-graph / attention-backend /
-    quantization / kv-cache-dtype ...) cannot reuse the warm server, so their
-    decision round re-boots and re-captures, paying a one-time cost the warm
-    anchor never charged the baseline. Charging it against the warm anchor killed
+    A config-changing variant (cuda-graph / attention-backend / quantization /
+    kv-cache-dtype ...) cannot reuse the warm server, so its decision round
+    re-boots and re-captures cuda graphs. Anchoring the soft kill on the WARM
+    (client-only) baseline time excluded that one-time cost and killed
     throughput-positive variants outright (observed: 95% of small-model overtime
     kills were >= baseline, median +35%).
 
-    Add the baseline's own cold-minus-warm overhead as a conservative,
-    data-driven boot+capture allowance so the candidate gets the full time it
-    needs. The hard ``variant_timeout_sec`` cap still bounds genuine runaways.
-    Returns ``None`` (no soft kill) when the anchor or ratio is non-positive.
+    Anchor instead on the COLD baseline wall-clock -- which itself includes a
+    boot + capture + benchmark -- and allow ``DECISION_DEADLINE_COLD_BASELINE_MULT``
+    times that. This gives the candidate the full time it needs with conservative
+    headroom; the hard ``variant_timeout_sec`` cap still bounds runaways. Falls
+    back to the warm anchor x kill_ratio only when the cold baseline is unknown.
+    Returns ``None`` (no soft kill) when the operator disabled it
+    (``overtime_kill_ratio <= 0``) or no usable anchor is available.
     """
-    if not (decision_anchor_sec > 0 and overtime_kill_ratio > 0):
+    if overtime_kill_ratio <= 0:
+        # Operator disabled the soft overtime kill; only the hard cap gates.
         return None
-    boot_capture_allowance_sec = 0.0
-    if (
-        use_warm_decision
-        and baseline_warm_runtime_sec > 0
-        and baseline_runtime_sec > baseline_warm_runtime_sec
-    ):
-        boot_capture_allowance_sec = baseline_runtime_sec - baseline_warm_runtime_sec
-    return decision_anchor_sec * overtime_kill_ratio + boot_capture_allowance_sec
+    if baseline_runtime_sec > 0:
+        return baseline_runtime_sec * DECISION_DEADLINE_COLD_BASELINE_MULT
+    if decision_anchor_sec > 0:
+        return decision_anchor_sec * overtime_kill_ratio
+    return None
 
 
 def _join_args(*parts: str) -> str:
