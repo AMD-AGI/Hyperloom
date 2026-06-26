@@ -1351,26 +1351,12 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     if quantization_arg == "fp8":
         precision = "fp8"
-        # Route to the tuner matching the ACTUAL runtime fp8 GEMM path instead of
-        # a blanket blockscale default. The a8w8 *blockscale* path requires the
-        # checkpoint to ship block-quantized weights (config.json
-        # quantization_config with a weight_block_size) -- a static property of
-        # the model. A plain fp16/bf16 checkpoint served under dynamic
-        # ``--quantization fp8`` uses the per-token a8w8 path, never blockscale,
-        # so defaulting it to blockscale tuned a GEMM path it never executes.
-        model_path = str(
-            payload.get("model_path") or getattr(state, "model_path", "") or ""
-        ).strip()
+        # Only explicit per-token env should route to per_token.
+        # Otherwise keep auto so forge can inspect kernel_signature_log
+        # for QuantType.per_Token / blockscale detection.
         if per_token_signal:
             quant_type = "per_token"
-        elif _model_is_block_quantized(model_path):
-            quant_type = "blockscale"
-        elif model_path:
-            # Known model that is not block-quantized -> dynamic fp8 is per-token.
-            quant_type = "per_token"
         else:
-            # Unknown model path: keep auto so forge can sniff the
-            # kernel_signature_log for per_Token / blockscale detection.
             quant_type = "auto"
         return precision, quant_type
 
@@ -1583,33 +1569,6 @@ def _model_hidden_size(model_path: str) -> int | None:
             if isinstance(val, int) and val > 0:
                 return val
     return None
-
-
-def _model_is_block_quantized(model_path: str) -> bool:
-    """Return True when the checkpoint ships block-scale quantized weights.
-
-    The a8w8 *blockscale* GEMM path is only valid for models whose weights are
-    pre-quantized in block-scale format -- detectable via ``config.json``
-    ``quantization_config`` carrying a ``weight_block_size`` (or a block-style
-    ``quant_method``/``fmt``). Plain fp16/bf16 checkpoints quantized dynamically
-    via ``--quantization fp8`` use the per-token a8w8 path instead.
-    """
-    if not model_path:
-        return False
-    cfg = Path(model_path) / "config.json"
-    try:
-        data = json.loads(cfg.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    qc = data.get("quantization_config")
-    if not isinstance(qc, dict):
-        return False
-    if qc.get("weight_block_size"):
-        return True
-    method = str(qc.get("quant_method") or qc.get("fmt") or "").lower()
-    return "block" in method
 
 
 def _csv_matches_model(csv_path: Path, model_path: str) -> bool:

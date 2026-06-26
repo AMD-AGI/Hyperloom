@@ -87,66 +87,6 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
 
-    def test_resolve_forge_precision_fp8_plain_model_routes_per_token(self, tmp_path):
-        # Repro: a plain fp16 checkpoint served under dynamic --quantization fp8
-        # uses the per-token a8w8 path, NOT blockscale. Must not default to auto
-        # (which forge resolves to blockscale and tunes a path never executed).
-        model = tmp_path / "plain"
-        model.mkdir()
-        (model / "config.json").write_text(
-            json.dumps({"hidden_size": 2048, "intermediate_size": 8192}), encoding="utf-8"
-        )
-        state = SharedState(precision="bf16", model_path=str(model))
-        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
-
-    def test_resolve_forge_precision_fp8_block_quantized_routes_blockscale(self, tmp_path):
-        model = tmp_path / "block"
-        model.mkdir()
-        (model / "config.json").write_text(
-            json.dumps(
-                {
-                    "hidden_size": 7168,
-                    "quantization_config": {
-                        "quant_method": "fp8",
-                        "weight_block_size": [128, 128],
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-        state = SharedState(precision="bf16", model_path=str(model))
-        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "blockscale")
-
-    def test_resolve_forge_precision_fp8_unknown_model_keeps_auto(self):
-        # No resolvable model path -> keep auto so forge sniffs the runtime log.
-        state = SharedState(precision="bf16")
-        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
-
-    def test_model_is_block_quantized(self, tmp_path):
-        block = tmp_path / "b"
-        block.mkdir()
-        (block / "config.json").write_text(
-            json.dumps({"quantization_config": {"weight_block_size": [128, 128]}}),
-            encoding="utf-8",
-        )
-        method_block = tmp_path / "mb"
-        method_block.mkdir()
-        (method_block / "config.json").write_text(
-            json.dumps({"quantization_config": {"quant_method": "fp8_block"}}),
-            encoding="utf-8",
-        )
-        plain = tmp_path / "p"
-        plain.mkdir()
-        (plain / "config.json").write_text(json.dumps({"hidden_size": 2048}), encoding="utf-8")
-        assert krh._model_is_block_quantized(str(block)) is True
-        assert krh._model_is_block_quantized(str(method_block)) is True
-        assert krh._model_is_block_quantized(str(plain)) is False
-        assert krh._model_is_block_quantized(str(tmp_path / "missing")) is False
-        assert krh._model_is_block_quantized("") is False
-
     def test_forge_gemm_tune_available_by_path_and_import(self, monkeypatch):
         monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-gemm-tune")
         assert krh._forge_gemm_tune_available() is True
