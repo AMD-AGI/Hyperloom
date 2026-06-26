@@ -2845,6 +2845,21 @@ class Coordinator:
                 _q, _r = [], []
             if any(getattr(t, "kind", "") in ("specialist", "integrate_patch") for t in (*_q, *_r)):
                 return
+            # Proposal-window guard: the task check above misses the interval
+            # between a specialist completing (config-lever / patch deliverable)
+            # and its integrate_patch becoming a live TASK — during that window
+            # the deliverable exists only as a pending Critic proposal. Without
+            # this guard the pump re-selects the same candidate (it has no
+            # progress row yet) and routes a SECOND integrate_patch of the same
+            # deliverable (observed: vllm/pull/1007 benched twice -> 2 no-KEEP
+            # rows -> premature FRAMEWORK_PR plateau after only 2 distinct
+            # candidates). ``_framework_pr_authoring_inflight`` also covers
+            # pending integrate_patch proposals, so waiting here serializes one
+            # candidate's author->integrate->KEEP/REVERT lifecycle before the
+            # next is selected. No livelock risk: the row is stamped when the
+            # integrate_patch resolves, which clears the inflight signal.
+            if await self._framework_pr_authoring_inflight():
+                return
         # Pick the most promising un-dispatched candidate (agent-ranked), or
         # request a new batch if exhausted.
         next_candidate = await self._select_best_framework_pr_candidate()
