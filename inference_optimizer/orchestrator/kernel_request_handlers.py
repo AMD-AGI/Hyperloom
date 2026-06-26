@@ -859,6 +859,10 @@ def _maybe_apply_kernel_patch(
     kid = str(kernel_id or payload.get("kernel_id") or "")
     backup_root = payload.get("backup_root") or (patches_dir(session_dir, kid or "anon") / "backup")
     tool = _load_apply_tool()
+    # Snapshot mode (content-addressed deploy): when a snapshot dir of byte-exact
+    # final files is present, the patch lands atomically across all its files.
+    snapshot_dir = str(payload.get("snapshot_dir") or "").strip() or None
+    repo_root = str(payload.get("kernel_repo") or payload.get("repo") or "").strip() or None
     return tool.apply_kernel_patch(
         patch_path=patch_path,
         target_file=target_file,
@@ -870,6 +874,8 @@ def _maybe_apply_kernel_patch(
         skip_rebuild=bool(payload.get("skip_rebuild", False)),
         allow_unknown_target=bool(payload.get("allow_unknown_target", False)),
         dry_run=bool(payload.get("dry_run_patch", False)),
+        snapshot_dir=snapshot_dir,
+        repo_root=repo_root,
     )
 
 
@@ -981,6 +987,14 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     last_kernel = state.last_kernel_opt or {}
 
     if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
+        # Snapshot deploy: prefer the original patch (manifest) + its byte-exact
+        # snapshot dir so the WHOLE multi-file patch lands atomically.
+        if not resolved.get("snapshot_dir") and last_kernel.get("deploy_snapshot_dir"):
+            resolved["snapshot_dir"] = str(last_kernel["deploy_snapshot_dir"])
+            if last_kernel.get("deploy_patch_path") and not resolved.get("patch_path"):
+                resolved["patch_path"] = str(last_kernel["deploy_patch_path"])
+            if last_kernel.get("deploy_repo_root") and not resolved.get("kernel_repo"):
+                resolved["kernel_repo"] = str(last_kernel["deploy_repo_root"])
         if not resolved.get("patch_path"):
             artifact = (
                 last_kernel.get("best_artifact_path")
@@ -995,6 +1009,12 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     # Multi-KEEP queue fallback: ``last_kernel_opt`` holds only the strongest pending KEEP, so pull patch_path/source_file from the per-kernel ledger for other queued KEEPs.
     if kernel_id:
         attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        if not resolved.get("snapshot_dir") and attempt.get("last_snapshot_dir"):
+            resolved["snapshot_dir"] = str(attempt["last_snapshot_dir"])
+            if attempt.get("last_deploy_patch_path") and not resolved.get("patch_path"):
+                resolved["patch_path"] = str(attempt["last_deploy_patch_path"])
+            if attempt.get("last_deploy_repo_root") and not resolved.get("kernel_repo"):
+                resolved["kernel_repo"] = str(attempt["last_deploy_repo_root"])
         if not resolved.get("patch_path") and attempt.get("last_artifact_path"):
             resolved["patch_path"] = str(attempt["last_artifact_path"])
         if not resolved.get("source_file") and attempt.get("last_source_file"):
@@ -4821,6 +4841,9 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     except (TypeError, ValueError):
         micro_float = 0.0
     best_artifact_path = str(verification.get("best_artifact_path", "") or "")
+    deploy_snapshot_dir = str(verification.get("deploy_snapshot_dir", "") or "")
+    deploy_patch_path = str(verification.get("deploy_patch_path", "") or "")
+    deploy_repo_root = str(verification.get("deploy_repo_root", "") or "")
     source_file = str(
         result.get("source_file")
         or (result.get("candidate") or {}).get("source_file")
@@ -4878,6 +4901,9 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     entry["last_status"] = status
     entry["last_micro_speedup"] = micro_float
     entry["last_artifact_path"] = best_artifact_path
+    entry["last_snapshot_dir"] = deploy_snapshot_dir
+    entry["last_deploy_patch_path"] = deploy_patch_path
+    entry["last_deploy_repo_root"] = deploy_repo_root
     entry["last_source_file"] = source_file
     entry["last_ts"] = ts
     entry["history"] = history
@@ -4904,6 +4930,9 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "compile_passed": verification.get("compile_passed"),
             "correctness_passed": verification.get("correctness_passed"),
             "best_artifact_path": best_artifact_path,
+            "deploy_snapshot_dir": deploy_snapshot_dir,
+            "deploy_patch_path": deploy_patch_path,
+            "deploy_repo_root": deploy_repo_root,
             "source_file": source_file,
             "ts": ts,
         }
