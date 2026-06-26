@@ -747,18 +747,14 @@ def detect_concurrency(tp: int, framework: str) -> int:
 def _sglang_image_for(repo_id: str = "") -> str:
     """Pick the sglang image, honoring per-model baseline-arch needs.
 
-    Default is the profilerfix image. MiMo-V2.x is the exception: the undated
-    v0.5.11 profilerfix base does NOT register ``MiMoV2ForCausalLM`` (the
-    server dies at model-loader registration, three baseline attempts in a
-    row -> ``baseline_failed``), so it needs the image that carries the dated
-    20260508 sglang arch. That image is profilerfix's two patched ROCm libs
-    (libamdhip64/libroctracer, issue #352) layered onto the dated 20260508
-    build, so rocprofiler kernel capture under HipGraphLaunch still works.
-    Must be paired with ``--attention-backend triton`` (injected in
+    Default is the v0.5.12 profilerfix image. Older branches carried a MiMo-V2
+    exception that pinned ``primussafe/sglang:v0.5.11-rocm720-mi30x-mimo-
+    profilerfix`` because the then-current profilerfix image did not register
+    ``MiMoV2ForCausalLM``. The v0.5.12 profilerfix image now includes the MiMo
+    model files, so MiMo should use the same current base as other SGLang
+    models. It is still paired with ``--attention-backend triton`` (injected in
     ``_workload_envs.materialize_config_with_envs``) to dodge the aiter
-    attention CUDA-graph-capture SIGABRT. Matched on the repo basename so it
-    fires for the HF repo id (the /wekafs/<org>-<repo> local path is derived
-    downstream from this same id).
+    attention CUDA-graph-capture SIGABRT.
 
     Args:
         repo_id (str): Model repo id, matched on its basename for overrides.
@@ -767,9 +763,6 @@ def _sglang_image_for(repo_id: str = "") -> str:
         str: The MiMo-V2 sglang image for MiMo-V2.x repos, else the default
         sglang image.
     """
-    basename = (repo_id or "").split("/")[-1].lower()
-    if "mimo-v2" in basename:
-        return "primussafe/sglang:v0.5.11-rocm720-mi30x-mimo-profilerfix"
     return _default_sglang_image()
 
 
