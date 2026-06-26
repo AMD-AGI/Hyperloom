@@ -39,9 +39,14 @@ def test_repo_url_for_framework_unknown_returns_empty():
 # ---------------------------------------------------------------------------
 # Cross-cutting static guards
 # ---------------------------------------------------------------------------
+def test_repo_url_for_xdit():
+    """xdit must resolve to the upstream xDiT repo so framework discovery on the diffusion framework has a target."""
+    assert repo_url_for_framework("xdit") == ("https://github.com/xdit-project/xDiT.git")
+
+
 def test_repo_map_known_frameworks():
-    """The canonical dict must enumerate exactly the three supported frameworks (pinned so future additions update this test intentionally)."""
-    assert set(_FRAMEWORK_TO_REPO_URL.keys()) == {"sglang", "vllm", "atom"}
+    """The canonical dict must enumerate exactly the supported frameworks (pinned so future additions update this test intentionally)."""
+    assert set(_FRAMEWORK_TO_REPO_URL.keys()) == {"sglang", "vllm", "atom", "xdit"}
 
 
 def test_known_frameworks_constant_matches_dict():
