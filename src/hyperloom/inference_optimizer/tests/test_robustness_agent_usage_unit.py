@@ -7,7 +7,7 @@ trace records a ``component=robustness`` ledger row."""
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.roles.robustness_agent import (
+from inference_optimizer.orchestrator.backends.robustness_agent import (
     RobustnessAgentBackend,
 )
 

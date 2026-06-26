@@ -8,7 +8,6 @@ sphinx:
 
 # RTD by default builds html only
 # Additional formats available for extra build time: htmlzip, pdf, epub
-formats: [pdf]
 
 python:
   install:

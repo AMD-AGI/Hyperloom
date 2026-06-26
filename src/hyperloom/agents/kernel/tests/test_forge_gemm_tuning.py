@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 
-_MODULE_PATH = Path(__file__).resolve().parent.parent / "tools" / "forge_gemm_tuning.py"
+_MODULE_PATH = Path(__file__).with_name("forge_gemm_tuning.py")
 _SPEC = importlib.util.spec_from_file_location("forge_gemm_tuning_tool", _MODULE_PATH)
 assert _SPEC and _SPEC.loader
 forge_gemm_tuning = importlib.util.module_from_spec(_SPEC)

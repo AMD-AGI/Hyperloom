@@ -18,9 +18,9 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
-from hyperloom.inference_optimizer.breakdown.recorder import instrument
-from hyperloom.orchestrator.kernel import request_handlers as krh
+from inference_optimizer.breakdown.recorder import assemble_parts
+from inference_optimizer.breakdown.recorder import instrument
+from inference_optimizer.orchestrator import kernel_request_handlers as krh
 
 
 # --------------------------------------------------------------------------- #

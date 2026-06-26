@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.bus.gpu_pool import resolve_gpu_specialist_devices
+from inference_optimizer.orchestrator.gpu_pool import resolve_gpu_specialist_devices
 
 
 _MASK_VARS = (
@@ -65,38 +65,3 @@ def test_empty_mask_yields_empty_pool(monkeypatch) -> None:
     # An explicitly empty mask means "no visible GPUs", not whole-machine.
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "")
     assert resolve_gpu_specialist_devices(4) == []
-
-
-# B1 — serving-disjoint leases: the live serving process holds the first
-# ``serving_tp`` cards, which must be carved off the specialist pool so a
-# specialist never co-resides on a card production is computing on.
-def test_serving_tp_carves_whole_machine_pool(monkeypatch) -> None:
-    # No mask + 8-card box, TP=4 serving → specialist pool {4,5,6,7}.
-    assert resolve_gpu_specialist_devices(8, serving_tp=4) == [4, 5, 6, 7]
-
-
-def test_serving_tp_carves_rocr_mask_pool(monkeypatch) -> None:
-    # A ROCR-pinned 8-card mask with TP=4 serving carves the serving cards off
-    # the front and keeps the specialist on the remaining masked (absolute) ids.
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
-    assert resolve_gpu_specialist_devices(8, serving_tp=4) == [4, 5, 6, 7]
-
-
-def test_serving_tp_zero_preserves_legacy_whole_pool(monkeypatch) -> None:
-    # serving_tp=0 (the default) must preserve the pre-B1 whole-pool behaviour.
-    assert resolve_gpu_specialist_devices(8, serving_tp=0) == [0, 1, 2, 3, 4, 5, 6, 7]
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
-    assert resolve_gpu_specialist_devices(4, serving_tp=0) == [0, 1, 2, 3]
-
-
-def test_serving_tp_claims_whole_pool_yields_empty(monkeypatch) -> None:
-    # serving_tp >= pool size leaves no free cards for a specialist.
-    assert resolve_gpu_specialist_devices(4, serving_tp=4) == []
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
-    assert resolve_gpu_specialist_devices(4, serving_tp=8) == []
-
-
-def test_explicit_operator_pool_ignores_serving_tp(monkeypatch) -> None:
-    # The operator pool is already carved; serving_tp must NOT subtract again.
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", "4;5;6;7")
-    assert resolve_gpu_specialist_devices(4, serving_tp=4) == [4, 5, 6, 7]

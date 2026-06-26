@@ -10,15 +10,12 @@ forwarding it raw and 400-ing with ``Invalid model name``.
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
 
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
+TOOLS_DIR = Path(__file__).resolve().parent
 TL_PATH = TOOLS_DIR / "tracelens_analysis.py"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
 
 
 @pytest.fixture(scope="module")

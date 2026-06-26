@@ -7,6 +7,15 @@
 # list see the documentation:
 #  https://www.sphinx-doc.org/en/master/usage/configuration.html
 
+import os
+import sys
+
+# robustness_agent and framework_agent use a src/ layout.
+# inference_optimizer lives at the repo root and needs no extra path entry.
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(_repo_root, "robustness-agent", "src"))
+sys.path.insert(0, os.path.join(_repo_root, "framework-agent", "src"))
+
 """
 html_theme is usually unchanged (rocm_docs_theme).
 flavor defines the site header display, select the flavor for the corresponding portals
@@ -67,6 +76,8 @@ If the component does not need doxygen, delete this section for optimal build ti
 # Add more addtional package accordingly
 extensions = [
     "rocm_docs",
+    "sphinx.ext.autosummary",
+    "sphinx.ext.autodoc",
 ]
 
 html_title = f"{project} {version_number} documentation"

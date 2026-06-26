@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Roofline profile retry falls back to eager on a cuda-graph capture crash.
+"""P7: roofline profile retry falls back to eager on a cuda-graph capture crash.
 
 sglang's torch profiler collides with HIP CUDA-graph stream capture
 (hipErrorStreamCaptureUnsupported). The roofline retry must then boot the
@@ -13,12 +13,12 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors.roofline import (
+from inference_optimizer.orchestrator.action_executors.roofline import (
     make_roofline_executor,
 )
-from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.state.task_registry import Task
+from inference_optimizer.orchestrator.shared_state import SharedState
+from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
+from inference_optimizer.orchestrator.task_registry import Task
 
 
 def _ctx(tmp_path: Path, params: dict | None = None) -> RunnerContext:
@@ -64,10 +64,10 @@ async def _run(tmp_path, first_result, *, state=None, params=None):
         return _ta_success()
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+        "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
         new=fake_profile,
     ), patch(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
         new=fake_ta,
     ):
         await make_roofline_executor(shared_state=state or _state())(
@@ -138,47 +138,3 @@ async def test_vllm_eager_retry_uses_framework_env(tmp_path, monkeypatch):
     retry_args = str(seen[1].get("base_extra_args", ""))
     assert "--enforce-eager" in retry_args
     assert "--disable-cuda-graph" not in retry_args
-
-
-# #735: a profile that produced only CUDA-graph capture sidecars (capture-only
-# fallback) carries no per-iteration annotations; the steady-state splitter
-# would die downstream with the misleading trace_split_no_steady_state. The
-# roofline retry must treat this as transient: re-profile (escalating to eager),
-# and only fail with an accurate message if every attempt stays capture-only.
-_CAPTURE_ONLY = {
-    "status": "succeeded",
-    "main_trace_path": "/tmp/ws/torch_trace",
-    "trace_files": ["/tmp/ws/torch_trace/capture_traces/bs_104_rank0.json.gz"],
-    "workspace": "/tmp/ws",
-    "profile_trace_selection_reason": "capture_only_fallback",
-}
-
-
-@pytest.mark.asyncio
-async def test_capture_only_profile_retries_then_succeeds(tmp_path):
-    # First attempt is capture-only -> plain re-profile (SAME graph-capture
-    # settings, NOT eager) and the second attempt produces a real annotated
-    # trace, so the run proceeds.
-    seen = await _run(tmp_path, _CAPTURE_ONLY)
-    assert len(seen) >= 2
-    # The retry must NOT escalate to eager — graph-capture is the robust mode
-    # and eager would change the measured workload (#735).
-    assert "--disable-cuda-graph" not in str(seen[1].get("base_extra_args", ""))
-    assert "--enforce-eager" not in str(seen[1].get("base_extra_args", ""))
-
-
-@pytest.mark.asyncio
-async def test_capture_only_every_attempt_fails_clearly(tmp_path):
-    # Every attempt stays capture-only -> terminal failure with an accurate
-    # phase, NOT the misleading downstream trace_split_no_steady_state.
-    async def always_capture_only(c):
-        return dict(_CAPTURE_ONLY)
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
-        new=always_capture_only,
-    ):
-        result = await make_roofline_executor(shared_state=_state())(_ctx(tmp_path))
-    assert result["status"] == "failed"
-    assert result.get("phase") == "profile_capture_only"
-    assert "capture" in str(result.get("error", "")).lower()

@@ -15,15 +15,15 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors.baseline import (
+from inference_optimizer.orchestrator.action_executors.baseline import (
     _is_cuda_graph_capture_failure,
 )
-from hyperloom.orchestrator.actions.executors.roofline import (
+from inference_optimizer.orchestrator.action_executors.roofline import (
     make_roofline_executor,
 )
-from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.state.task_registry import Task
+from inference_optimizer.orchestrator.shared_state import SharedState
+from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
+from inference_optimizer.orchestrator.task_registry import Task
 
 # Real crash tail captured from a failing roofline run (issue #622, Part A).
 _SEQ_LENS_ASSERT_LOG = """\
@@ -111,10 +111,10 @@ async def test_seq_lens_assert_in_server_log_triggers_eager_retry(tmp_path):
         return _ta_success()
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+        "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
         new=fake_profile,
     ), patch(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
         new=fake_ta,
     ):
         await make_roofline_executor(shared_state=_state())(_ctx(tmp_path))

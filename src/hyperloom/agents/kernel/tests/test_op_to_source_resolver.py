@@ -25,13 +25,12 @@ from typing import Any
 
 import pytest
 
-_TLA_PATH = Path(__file__).resolve().parent.parent / "tools" / "tracelens_analysis.py"
+_TLA_PATH = Path(__file__).resolve().parent / "tracelens_analysis.py"
 
-# An editable native source must end in .cu/.cuh/.hip/.h and resolve to an
+# An editable native source must end in .cu/.cuh/.hip and resolve to an
 # absolute path; a non-editable one is e.g. an empty/unshipped csrc path.
 _EDITABLE_CU = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/foo.cu"
 _EDITABLE_CU_2 = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/bar.cu"
-_EDITABLE_H = "/sgl-workspace/aiter/csrc/kernels/rope/rope_common.h"
 
 
 @pytest.fixture(scope="module")
@@ -94,21 +93,6 @@ def test_single_multiple_editable_sources_fans_out_one_leaf_per_cu(tla) -> None:
     assert len(leaves) == 2
     assert [leaf.primary_source for leaf in leaves] == [_EDITABLE_CU, _EDITABLE_CU_2]
     assert all(leaf.is_routable for leaf in leaves)
-
-
-def test_single_patchable_header_source_is_routable(tla) -> None:
-    """Curated patchable native headers are editable sources, not non_rewritable."""
-    mapping = {
-        "aiter::rope": _entry(
-            "single",
-            sglang={"kn_entry": _kernel(_EDITABLE_H)},
-        )
-    }
-    res = tla.resolve_op_source("aiter::rope", mapping=mapping)
-    assert res is not None
-    assert res.status == "resolved"
-    assert res.is_routable
-    assert res.sources == [_EDITABLE_H]
 
 
 def test_single_no_editable_source_is_non_rewritable(tla) -> None:
@@ -228,78 +212,8 @@ def test_composite_all_non_editable_is_non_rewritable(tla) -> None:
     assert res.leaf_resolutions() == []
 
 
-def test_composite_device_name_narrows_to_matching_kernel(tla) -> None:
-    """A composite given the trace device kernel name narrows to that ONE editable
-    source (the hot kernel) instead of fanning out to every co-firing kernel.
-
-    Regression: the Triton fused-MoE label aggregates the MoE GEMM plus co-firing
-    quant/align helpers; without device-name narrowing the resolver fanned out to
-    all three sources (quant.cu, the triton .py, int8.py) and GEAK chased the wrong
-    file. With the trace's device symbol it must resolve to just the GEMM source.
-    """
-    mapping = {
-        "moe::fused": _entry(
-            "composite",
-            sglang={
-                "quant_kernel": _kernel(_EDITABLE_CU),          # co-firing helper
-                "fused_moe_kernel": _kernel(_EDITABLE_CU_2),    # the hot GEMM
-                "int8_kernel": _kernel(_EDITABLE_CU),           # another helper
-            },
-        )
-    }
-    res = tla.resolve_op_source(
-        "moe::fused", framework="sglang",
-        device_kernel_name="_fused_moe_kernel_sequence", mapping=mapping,
-    )
-    assert res is not None
-    assert res.kind == "composite"
-    assert res.status == "resolved"
-    assert res.matched_route == "fused_moe_kernel"   # substring-matched the hot symbol
-    leaves = res.leaf_resolutions()
-    assert len(leaves) == 1
-    assert leaves[0].primary_source == _EDITABLE_CU_2  # narrowed to the GEMM, not fan-out
-
-
-def test_composite_without_device_name_still_fans_out(tla) -> None:
-    """No trace device name -> unchanged behavior: fan out one leaf per editable source."""
-    mapping = {
-        "moe::fused": _entry(
-            "composite",
-            sglang={
-                "fused_moe_kernel": _kernel(_EDITABLE_CU),
-                "other_kernel": _kernel(_EDITABLE_CU_2),
-            },
-        )
-    }
-    res = tla.resolve_op_source("moe::fused", framework="sglang", mapping=mapping)
-    assert res is not None
-    assert res.kind == "composite"
-    leaves = res.leaf_resolutions()
-    assert {lf.primary_source for lf in leaves} == {_EDITABLE_CU, _EDITABLE_CU_2}
-
-
-def test_composite_device_name_no_match_falls_back_to_fanout(tla) -> None:
-    """A device name that matches none of the composite kernels falls back to fan-out."""
-    mapping = {
-        "moe::fused": _entry(
-            "composite",
-            sglang={
-                "fused_moe_kernel": _kernel(_EDITABLE_CU),
-                "other_kernel": _kernel(_EDITABLE_CU_2),
-            },
-        )
-    }
-    res = tla.resolve_op_source(
-        "moe::fused", framework="sglang",
-        device_kernel_name="totally_unrelated_symbol", mapping=mapping,
-    )
-    assert res is not None
-    leaves = res.leaf_resolutions()
-    assert {lf.primary_source for lf in leaves} == {_EDITABLE_CU, _EDITABLE_CU_2}
-
-
 # --------------------------------------------------------------------------- #
-# _select_source_meta
+# _select_sources
 # --------------------------------------------------------------------------- #
 def test_select_sources_framework_hint_picks_matching_container(tla) -> None:
     """With both containers editable and neither on disk, the framework hint decides."""
@@ -309,8 +223,8 @@ def test_select_sources_framework_hint_picks_matching_container(tla) -> None:
         sglang={"ks": _kernel(_EDITABLE_CU_2)},
     )
     resolver = tla.OpResolver({})
-    assert [m[0] for m in resolver._select_source_meta(entry, "vllm")] == [_EDITABLE_CU]
-    assert [m[0] for m in resolver._select_source_meta(entry, "sglang")] == [_EDITABLE_CU_2]
+    assert resolver._select_sources(entry, "vllm") == [_EDITABLE_CU]
+    assert resolver._select_sources(entry, "sglang") == [_EDITABLE_CU_2]
 
 
 def test_select_sources_on_disk_tie_break_beats_framework_hint(tla, tmp_path: Path) -> None:
@@ -324,7 +238,7 @@ def test_select_sources_on_disk_tie_break_beats_framework_hint(tla, tmp_path: Pa
     )
     resolver = tla.OpResolver({})
     # sglang hint, but only the vllm source is present on disk -> vllm wins.
-    assert [m[0] for m in resolver._select_source_meta(entry, "sglang")] == [str(on_disk)]
+    assert resolver._select_sources(entry, "sglang") == [str(on_disk)]
 
 
 # --------------------------------------------------------------------------- #
@@ -520,42 +434,3 @@ def test_finalize_in_dict_non_rewritable_does_not_grep(tla, monkeypatch) -> None
     assert out["reusable_native_kernel"] is False
     assert out["skip_reason"].startswith("op_to_source:")
     assert out["source_file"] == "launcher.py"
-
-
-# --------------------------------------------------------------------------- #
-# load_op_dominant_kernel_map (data-driven composite disambiguation)
-# --------------------------------------------------------------------------- #
-def test_dominant_kernel_map_picks_max_duration(tla, tmp_path) -> None:
-    """The dominant device kernel = max aggregated duration, parsed from the CSV."""
-    import csv as _csv
-
-    csv_dir = tmp_path
-    rows = [
-        {
-            "name": "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel",
-            "kernel_details_summary": (
-                "[{'name': '_per_token_group_quant_8bit', 'stream': 8, 'count': 2001, "
-                "'total_duration_us': np.float64(9266.1), 'mean_duration_us': np.float64(4.63)}, "
-                "{'name': 'fused_moe_kernel', 'stream': 8, 'count': 2001, "
-                "'total_duration_us': np.float64(401466.7), 'mean_duration_us': np.float64(200.63)}]"
-            ),
-        },
-        # second row (different shape) for the same op — durations must aggregate
-        {
-            "name": "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel",
-            "kernel_details_summary": (
-                "[{'name': 'fused_moe_kernel', 'stream': 8, 'count': 138, "
-                "'total_duration_us': np.float64(287774.7), 'mean_duration_us': np.float64(2085.3)}]"
-            ),
-        },
-    ]
-    with (csv_dir / "unified_perf_summary.csv").open("w", newline="") as f:
-        w = _csv.DictWriter(f, fieldnames=["name", "kernel_details_summary"])
-        w.writeheader()
-        w.writerows(rows)
-    m = tla.load_op_dominant_kernel_map(csv_dir)
-    assert m["sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel"] == "fused_moe_kernel"
-
-
-def test_dominant_kernel_map_missing_csv_is_empty(tla, tmp_path) -> None:
-    assert tla.load_op_dominant_kernel_map(tmp_path) == {}

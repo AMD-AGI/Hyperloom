@@ -1,14 +1,15 @@
-"""Regression tests for ordered per-arg dtype propagation from TraceLens args."""
+"""Faithful per-arg dtype propagation.
+
+TraceLens records each kernel arg's dtype INLINE in the analysis.md ``Args``
+column ("(64,5120) bf16"). HL parsed the shape but left ``input_dtypes`` empty,
+so the GEAK harness could not allocate correct-dtype tensors (fp8 weight vs bf16
+activation). These tests verify HL now surfaces the real, ordered per-arg dtypes.
+"""
 import sys
 from argparse import Namespace
-from pathlib import Path
-
-_TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-if str(_TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOLS_DIR))
 
 sys.argv = ["x"]
-import tracelens_analysis as tla  # noqa: E402 - module reads argv at import time.
+import tracelens_analysis as tla
 
 
 def test_split_shape_dtype():
@@ -87,3 +88,22 @@ def test_parse_tolerates_inserted_source_path_column(tmp_path):
     # Args shape parses — neither is corrupted by the extra 'Source Path' column.
     assert c.get("tracelens_launcher_path") == "/x/k.cu"
     assert c["shapes"] == ["(64,5120) bf16"]
+
+
+def test_parse_still_rejects_reordered_canonical_columns(tmp_path):
+    # Bound<->Efficiency swapped -> canonical relative order broken -> reject.
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
+        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### 🔴 P1: Reordered (Tensile)\n\n**Identification:** stub\n**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Bound | Efficiency |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "compute-bound | 40% of 708 TFLOPS |\n"
+        "**Reasoning for Slowdown:** stub\n**Resolution:** stub\n",
+        encoding="utf-8",
+    )
+    assert tlr.parse_analysis_md(md, top_k=10) == []
