@@ -218,11 +218,19 @@ def test_5xx_then_success_recovers(make_client):
 def test_cli_resolves_cortex_client_from_cortex_kb_url(monkeypatch):
     from runtime.cli import _resolve_kb_client
 
+    # Resolve ``CortexKBClient`` from the same ``runtime.cortex_kb_client``
+    # module object that ``runtime.cli`` binds at call time. Sibling suites
+    # (e.g. the orchestrator's CriticAgentBackend tests) intentionally evict
+    # the cached ``runtime.*`` modules when a backend points at a different
+    # critic root, which rebuilds these classes; a module-level import here
+    # would capture a stale class and make the ``isinstance`` check spurious.
+    from runtime.cortex_kb_client import CortexKBClient as _CortexKBClient
+
     monkeypatch.setenv("CRITIC_KB_CLIENT_MODE", "cortex")
     monkeypatch.setenv("CORTEX_KB_URL", "http://kb-service.test")
     monkeypatch.delenv("KB_BASE_URL", raising=False)
     client = _resolve_kb_client()
-    assert isinstance(client, CortexKBClient)
+    assert isinstance(client, _CortexKBClient)
     assert client.base_url == "http://kb-service.test"
 
 
