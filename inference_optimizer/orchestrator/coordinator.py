@@ -4350,26 +4350,30 @@ class Coordinator:
         return verdict_row
 
     async def _maybe_reprofile_for_kernel(self) -> None:
-        """Re-run profile+TraceLens inline on any change in projected tput vs the last profiled snapshot, so GEAK targets the current bottleneck."""
-        last_rl = float(getattr(self.shared_state, "last_roofline_tput", 0.0) or 0.0)
+        """Reprofile inline when projected tput diverges from the last measured trace, so GEAK targets the live bottleneck."""
+        before = self._last_measured_roofline_tput()
         cur = self._current_tput_from_validated_gain()
-        if last_rl <= 0 or cur <= 0:
+        if cur <= 0:
             return
-        # Reprofile on ANY material change (rise or fall) since the last roofline;
-        # a stack revert can lower validated tput, which must also re-target GEAK.
-        if abs(cur - last_rl) / last_rl < self._REPROFILE_CHANGE_TOL:
+        # With a measured trace, reprofile only on a material change; with none,
+        # fall through so GEAK still gets a real trace.
+        if before > 0 and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL:
             return
-        # State-version the idempotency reason on the validated-gain stack so a
-        # genuine change re-runs (new key) while an unchanged state dedupes.
         stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
         try:
             await self.sub.run_task(
                 await self._enqueue_internal_analysis_task(reason=f"kernel_entry_g{stack_len}")
             )
-            self.shared_state.last_roofline_tput = self._current_tput_from_validated_gain()
-            self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
             log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
+            return
+        # Advance the anchor only when a new snapshot actually landed.
+        after = self._last_measured_roofline_tput()
+        if after > 0 and after != before:
+            self.shared_state.last_roofline_tput = after
+            self.shared_state.save(self.session_dir)
+        else:
+            log.warning("kernel-entry reprofile produced no new snapshot; GEAK targets existing trace")
 
     def _perfskills_enabled(self) -> bool:
         """Whether the KERNEL phase is delegated to the PerfSkills e2e optimizer.
@@ -5565,6 +5569,20 @@ class Coordinator:
         except (TypeError, ValueError):
             gain = 0.0
         return base * (1.0 + gain / 100.0)
+
+    def _last_measured_roofline_tput(self) -> float:
+        """Measured tok/s of the most recent roofline snapshot; 0.0 when none."""
+        snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
+        for snap in reversed(snaps):
+            if not isinstance(snap, dict):
+                continue
+            try:
+                tput = float(snap.get("achieved_tok_per_sec") or 0.0)
+            except (TypeError, ValueError):
+                tput = 0.0
+            if tput > 0:
+                return tput
+        return 0.0
 
     def _needs_roofline_for_watermark(self) -> bool:
         """True iff projected tput crossed the 10% watermark over ``last_roofline_tput`` (bootstrap guard: False until PRELUDE roofline ran; re-arm guard: False while auto_roofline_pending_task_id is in-flight).
