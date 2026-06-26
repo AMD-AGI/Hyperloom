@@ -925,7 +925,7 @@ def collect_workload(
 ) -> dict[str, Any]:
     """Collect the §2 workload-description section.
 
-    Merges framework / model / GPU / parallelism fields from ``state`` and
+    Merges framework name / model / GPU / parallelism fields from ``state`` and
     ``manifest`` (state preferred) plus the workload knobs (``conc`` / ``isl``
     / ``osl`` / ``max_model_len`` / ``precision``) nested under
     ``manifest.workload``, and the optimization objective.
@@ -942,7 +942,7 @@ def collect_workload(
     """
     wl = manifest.get("workload") or {}
     return {
-        "framework": str(state.get("framework") or manifest.get("framework") or ""),
+        "framework_name": str(state.get("framework") or manifest.get("framework") or ""),
         "framework_version": str(manifest.get("framework_version") or ""),
         "model_name": str(state.get("model_name") or manifest.get("model_name") or ""),
         "model_path": str(state.get("model_path") or manifest.get("model_path") or ""),

@@ -89,13 +89,13 @@ class WorkloadObjective(TypedDict, total=False):
 
 
 class Workload(TypedDict, total=False):
-    """Model, framework, and serving configuration under optimization.
+    """Model, framework name, and serving configuration under optimization.
 
-    Describes the inference workload (model + framework + parallelism + shape)
+    Describes the inference workload (model + framework name + parallelism + shape)
     plus the objective that defines success for the run.
 
     Attributes:
-        framework (str): Serving framework (``sglang`` / ``vllm`` / ``atom``).
+        framework_name (str): Serving framework name (``sglang`` / ``vllm`` / ``atom``).
         framework_version (str): Version string of the framework.
         model_name (str): Human-readable model name.
         model_path (str): Filesystem or registry path to the model weights.
@@ -110,7 +110,7 @@ class Workload(TypedDict, total=False):
         objective (WorkloadObjective): The optimization goal for the run.
     """
 
-    framework: str  # sglang / vllm / atom
+    framework_name: str  # sglang / vllm / atom
     framework_version: str
     model_name: str
     model_path: str

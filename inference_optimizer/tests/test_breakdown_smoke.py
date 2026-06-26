@@ -418,6 +418,8 @@ def test_envelope(fixture_session: Path) -> None:
         "source_files",
     ):
         assert key in b, f"missing top-level: {key}"
+    assert b["workload"]["framework_name"] == "sglang"
+    assert "framework" not in b["workload"]
 
 
 def test_write_breakdown_json_atomic(fixture_session: Path) -> None:
