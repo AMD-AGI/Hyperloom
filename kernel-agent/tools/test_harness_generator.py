@@ -266,6 +266,26 @@ def test_build_configs_unparseable_shapes_fallback():
     assert hg._build_configs(candidate) == hg._default_configs()
 
 
+def test_is_heterogeneous_multi_tensor():
+    # Paged-attention style: distinct ranks across tensors -> True.
+    attn = {"input_shapes": [
+        {"shape": "(64, 32, 128) bf16"},
+        {"shape": "(2181038080,) fp8"},
+        {"shape": "(1177697, 1, 8, 128) bf16"},
+        {"shape": "(65,) int"},
+    ]}
+    assert hg._is_heterogeneous_multi_tensor(attn) is True
+    # Normal shape sweep (all same rank) -> False.
+    gemm = {"input_shapes": [
+        {"shape": "(256, 4096) bf16"},
+        {"shape": "(1024, 4096) bf16"},
+    ]}
+    assert hg._is_heterogeneous_multi_tensor(gemm) is False
+    # Single tensor / empty -> False.
+    assert hg._is_heterogeneous_multi_tensor({"input_shapes": [{"shape": "(256, 4096) bf16"}]}) is False
+    assert hg._is_heterogeneous_multi_tensor({}) is False
+
+
 # ---- predicates ----
 
 
