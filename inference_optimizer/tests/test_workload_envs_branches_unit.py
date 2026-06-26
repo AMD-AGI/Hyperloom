@@ -36,6 +36,8 @@ def _clear_env(monkeypatch):
         "PROFILE_OSL",
         "INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT",
         "INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP",
+        "XDIT_QUALITY_REF",
+        "XDIT_QUALITY_REF_WRITE",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -419,3 +421,75 @@ def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog)
         bench = _materialize(src, tmp_path / "out")
     assert _profile_num_steps(bench) == 2000  # honored verbatim
     assert any("exceeds the serialization-safe cap" in r.message for r in caplog.records)
+
+
+# ---- scriptable quality-reference wiring (xDiT fail-open fix) --------------
+def test_quality_ref_variant_compares(monkeypatch, tmp_path):
+    # A non-baseline scriptable variant must COMPARE against the operator
+    # reference (re-injected over the YAML's empty default) and must NOT write.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
+    src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={"XDIT_QUALITY_REF": ""})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["XDIT_QUALITY_REF"] == "/ref/q.png"
+    assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == ""
+
+
+def test_quality_ref_baseline_establishes(monkeypatch, tmp_path):
+    # The baseline ESTABLISHES the reference: compare off (so a stale file can't
+    # mis-gate the baseline) and write the fresh reference.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
+    src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={"XDIT_QUALITY_REF": ""})
+    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    assert bench["envs"]["XDIT_QUALITY_REF"] == ""
+    assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == "/ref/q.png"
+
+
+def test_quality_ref_baseline_write_env_override(monkeypatch, tmp_path):
+    # An explicit XDIT_QUALITY_REF_WRITE wins over the derived path on baseline.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
+    monkeypatch.setenv("XDIT_QUALITY_REF_WRITE", "/ref/write.png")
+    src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={"XDIT_QUALITY_REF": ""})
+    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == "/ref/write.png"
+
+
+def test_quality_ref_profile_disabled_and_no_write(monkeypatch, tmp_path):
+    # Profiling/roofline must never gate AND never write (an inherited write
+    # path could clobber the baseline reference with a reduced-step image).
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
+    monkeypatch.setenv("XDIT_QUALITY_REF_WRITE", "/ref/q.png")
+    src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={"PROFILE": "1"})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["XDIT_QUALITY_REF"] == ""
+    assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == ""
+
+
+def test_quality_ref_untouched_for_serving_framework(monkeypatch, tmp_path):
+    # Serving frameworks (non-scriptable) are unaffected: no XDIT_QUALITY_* keys
+    # are injected even when the env is set.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
+    src = _write(tmp_path / "cfg.yaml", framework="sglang", envs={})
+    bench = _materialize(src, tmp_path / "out")
+    assert "XDIT_QUALITY_REF" not in bench["envs"]
+    assert "XDIT_QUALITY_REF_WRITE" not in bench["envs"]
+
+
+def test_quality_ref_no_operator_ref_leaves_default(monkeypatch, tmp_path):
+    # Scriptable but no operator reference configured: keys are not forced
+    # (gate stays at the YAML default = disabled), preserving legacy behavior.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={})
+    bench = _materialize(src, tmp_path / "out")
+    assert "XDIT_QUALITY_REF" not in bench["envs"]
+    assert "XDIT_QUALITY_REF_WRITE" not in bench["envs"]

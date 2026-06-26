@@ -70,6 +70,9 @@ inference_optimizer = [
     "benches/README.md",
     "orchestrator/system_prompts/*.md",
     "scripts/*",
+    "scripts/configs/*.yaml",
+    "kb/framework/*.md",
+    "kb/recipes/*.json",
 ]
 
 [tool.pytest.ini_options]
