@@ -399,6 +399,41 @@ def _compute_explore_variant_timeout(
     return int(max(floor_sec, min(ceiling_sec, derived)))
 
 
+def _compute_decision_deadline_sec(
+    *,
+    decision_anchor_sec: float,
+    overtime_kill_ratio: float,
+    use_warm_decision: bool,
+    baseline_warm_runtime_sec: float,
+    baseline_runtime_sec: float,
+) -> float | None:
+    """Overtime soft-deadline for an explore decision round.
+
+    The warm anchor (client-only measure time) excludes server boot + cuda-graph
+    capture. Config-changing variants (cuda-graph / attention-backend /
+    quantization / kv-cache-dtype ...) cannot reuse the warm server, so their
+    decision round re-boots and re-captures, paying a one-time cost the warm
+    anchor never charged the baseline. Charging it against the warm anchor killed
+    throughput-positive variants outright (observed: 95% of small-model overtime
+    kills were >= baseline, median +35%).
+
+    Add the baseline's own cold-minus-warm overhead as a conservative,
+    data-driven boot+capture allowance so the candidate gets the full time it
+    needs. The hard ``variant_timeout_sec`` cap still bounds genuine runaways.
+    Returns ``None`` (no soft kill) when the anchor or ratio is non-positive.
+    """
+    if not (decision_anchor_sec > 0 and overtime_kill_ratio > 0):
+        return None
+    boot_capture_allowance_sec = 0.0
+    if (
+        use_warm_decision
+        and baseline_warm_runtime_sec > 0
+        and baseline_runtime_sec > baseline_warm_runtime_sec
+    ):
+        boot_capture_allowance_sec = baseline_runtime_sec - baseline_warm_runtime_sec
+    return decision_anchor_sec * overtime_kill_ratio + boot_capture_allowance_sec
+
+
 def _join_args(*parts: str) -> str:
     """Join non-empty, stripped argument fragments with single spaces.
 
@@ -902,10 +937,16 @@ class ExploreExecutor:
             if (use_warm_decision and baseline_warm_runtime_sec > 0)
             else baseline_runtime_sec
         )
-        if decision_anchor_sec > 0 and overtime_kill_ratio > 0:
-            decision_deadline_sec: float | None = decision_anchor_sec * overtime_kill_ratio
-        else:
-            decision_deadline_sec = None
+        # Add a one-time boot+capture allowance so config-changing variants that
+        # must re-capture cuda graphs are not killed for paying capture they
+        # cannot avoid (see _compute_decision_deadline_sec).
+        decision_deadline_sec: float | None = _compute_decision_deadline_sec(
+            decision_anchor_sec=decision_anchor_sec,
+            overtime_kill_ratio=overtime_kill_ratio,
+            use_warm_decision=use_warm_decision,
+            baseline_warm_runtime_sec=baseline_warm_runtime_sec,
+            baseline_runtime_sec=baseline_runtime_sec,
+        )
 
         if runnable:
             for idx, gv in enumerate(runnable):
