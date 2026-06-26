@@ -82,17 +82,21 @@ def scheduled_slot(now: datetime, *, max_hours: float | None = None,
 
 def resolve_batch_index(count: int, batch_size: int, *, event: str,
                         batch_index: str | None, now: datetime | None = None,
-                        max_hours: float | None = None) -> int:
+                        max_hours: float | None = None,
+                        anchor: datetime = ROTATE_ANCHOR_UTC) -> int:
     """Resolve the batch index to run.
 
     On ``schedule`` (or when no explicit index is given) the index auto-rotates
     from the max_hours-paced slot; on manual dispatch the provided index is used.
-    The result is always wrapped into ``[0, batches)``.
+    The result is always wrapped into ``[0, batches)``. ``anchor`` lets a caller
+    (e.g. a second dispatcher) start its own sweep at batch 0 from a different
+    instant without disturbing the shared default.
     """
     batches = num_batches(count, batch_size)
     raw = (batch_index or "").strip()
     if event == "schedule" or not raw:
-        slot = scheduled_slot(now or datetime.now(timezone.utc), max_hours=max_hours)
+        slot = scheduled_slot(now or datetime.now(timezone.utc),
+                              max_hours=max_hours, anchor=anchor)
         return slot % batches
     return int(raw) % batches
 
@@ -112,13 +116,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--event", default="workflow_dispatch")
     p.add_argument("--now-iso", default="")
     p.add_argument("--max-hours", default="", help="Rotation step size in hours (default 12)")
+    p.add_argument("--anchor", default="", help="ISO-8601 UTC anchor instant for batch 0 "
+                   "(default: the shared ROTATE_ANCHOR_UTC). Lets a second dispatcher "
+                   "restart its own sweep without touching the shared default.")
     args = p.parse_args(argv)
 
     now = datetime.fromisoformat(args.now_iso) if args.now_iso else None
     max_hours = float(args.max_hours) if args.max_hours else None
+    anchor = datetime.fromisoformat(args.anchor) if args.anchor else ROTATE_ANCHOR_UTC
     bi = resolve_batch_index(args.count, args.batch_size, event=args.event,
                              batch_index=args.batch_index, now=now,
-                             max_hours=max_hours)
+                             max_hours=max_hours, anchor=anchor)
     batches = num_batches(args.count, args.batch_size)
     start, end = slice_bounds(bi, args.batch_size, args.count)
     print(f"{bi}\t{args.count}\t{batches}\t{start}\t{end}")
