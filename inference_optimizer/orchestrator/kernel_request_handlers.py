@@ -1595,13 +1595,21 @@ def _resolve_fp8_quant_type(model_path: str) -> str:
     data = _read_model_config(model_path)
     if data is None:
         return "auto"
-    qc = data.get("quantization_config")
-    if isinstance(qc, dict):
-        if qc.get("weight_block_size"):
-            return "blockscale"
-        method = str(qc.get("quant_method") or qc.get("fmt") or "").lower()
-        if "block" in method:
-            return "blockscale"
+    # Check both the top-level config and a nested ``text_config`` (multimodal
+    # checkpoints sometimes carry the quantization_config there), mirroring
+    # ``_model_hidden_size``.
+    candidates: list[dict] = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg_dict in candidates:
+        qc = cfg_dict.get("quantization_config")
+        if isinstance(qc, dict):
+            if qc.get("weight_block_size"):
+                return "blockscale"
+            method = str(qc.get("quant_method") or qc.get("fmt") or "").lower()
+            if "block" in method:
+                return "blockscale"
     return "per_token"
 
 

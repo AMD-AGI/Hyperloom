@@ -106,6 +106,12 @@ class TestForgeGemmHelperCoverage:
         assert krh._resolve_fp8_quant_type(block) == "blockscale"
         assert krh._resolve_fp8_quant_type(method_block) == "blockscale"
         assert krh._resolve_fp8_quant_type(plain) == "per_token"
+        # Multimodal: quantization_config nested under text_config is detected.
+        nested_block = self._write_cfg(
+            tmp_path / "nblock",
+            {"text_config": {"quantization_config": {"weight_block_size": [128, 128]}}},
+        )
+        assert krh._resolve_fp8_quant_type(nested_block) == "blockscale"
         # Unreadable / missing config -> auto (forge sniffs the runtime log).
         assert krh._resolve_fp8_quant_type(str(tmp_path / "missing")) == "auto"
         assert krh._resolve_fp8_quant_type("") == "auto"
