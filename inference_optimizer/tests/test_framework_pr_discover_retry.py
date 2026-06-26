@@ -51,6 +51,8 @@ class _CoordinatorStub:
     call (the per-batch failure-counter semantics under test).
     """
 
+    _unprocessed_framework_pr_candidates = Coordinator._unprocessed_framework_pr_candidates
+
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub()

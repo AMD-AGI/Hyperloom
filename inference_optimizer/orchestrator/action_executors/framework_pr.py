@@ -65,7 +65,12 @@ from pathlib import Path
 from typing import Any
 
 from ...session_paths import runs_dir
-from ._accuracy_gate import accuracy_passed, parse_eval_results
+from ._accuracy_gate import (
+    accuracy_keep_block,
+    accuracy_passed,
+    parse_eval_results,
+    require_framework_accuracy_default,
+)
 from ._git import _run_git, _run_git_cp
 from ._grid_runner import (
     GridVariant,
@@ -809,9 +814,23 @@ class FrameworkPrExecutor:
             delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
 
         accuracy_pass = gate_evidence.get("accuracy_pass")
-        gate_pass = (
-            delta_pct is not None and delta_pct >= keep_threshold_pct and (accuracy_pass is None or accuracy_pass)
+        # Step 4 / Q5: source patches require the accuracy gate for a KEEP. A
+        # measured regression always blocks; a missing verdict blocks only when
+        # a baseline accuracy was available (else degrade to throughput-only).
+        acc_required = bool(params.get("require_accuracy_for_keep", require_framework_accuracy_default()))
+        acc_block, acc_reason, acc_degraded = accuracy_keep_block(
+            accuracy_pass,
+            required=acc_required,
+            baseline_accuracy=params.get("accuracy_baseline"),
         )
+        if acc_degraded:
+            log.warning(
+                "framework_pr: accuracy gate required but no baseline accuracy; "
+                "KEEP allowed on throughput only (candidate=%s)",
+                slug,
+            )
+        tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
+        gate_pass = tput_ok and not acc_block
 
         if not gate_pass:
             reverted = self._revert_patches(
@@ -824,8 +843,13 @@ class FrameworkPrExecutor:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
-            if accuracy_pass is False:
-                reasons.append("accuracy regression detected")
+            if acc_block and acc_reason:
+                reasons.append(acc_reason)
+            # G8: distinguish "accuracy required but unevaluated" (None, not a
+            # measured regression) from a throughput/regression revert.
+            revert_status = (
+                "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and tput_ok) else "reverted"
+            )
             await self._write_kb_record(
                 candidate=candidate,
                 outcome=OUTCOME_REVERTED_SMOKE_FAIL,
@@ -834,7 +858,7 @@ class FrameworkPrExecutor:
                 extra=extra,
             )
             return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "reverted",
+                "status": revert_status,
                 "candidate": candidate,
                 "batch_id": batch_id,
                 "patches_applied": [],
@@ -1022,12 +1046,24 @@ class FrameworkPrExecutor:
         )
         override_script = sanitize_script_name(params.get("benchmark_script"))
         override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        # G2: when the accuracy gate is required and a baseline accuracy exists,
+        # force RUN_EVAL=true so a stale config / process env can't silently
+        # disable eval and leave the gate unable to produce a verdict.
+        bench_extra_envs: dict[str, Any] = {}
+        acc_required = bool(params.get("require_accuracy_for_keep", require_framework_accuracy_default()))
+        try:
+            _acc_base = float(params.get("accuracy_baseline") or 0.0)
+        except (TypeError, ValueError):
+            _acc_base = 0.0
+        if acc_required and _acc_base > 0:
+            bench_extra_envs["RUN_EVAL"] = "true"
         config_path = materialize_config_with_envs(
             config_path,
             output_root,
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
+            extra_envs=bench_extra_envs or None,
             out_name="framework_pr.with_envs.yaml",
         )
 
@@ -1077,10 +1113,16 @@ class FrameworkPrExecutor:
         ):
             try:
                 eval_results = parse_eval_results(bench["result_dir"])
-                if eval_results.get("score") is not None:
+                # parse_eval_results returns {"accuracy": float, ...}; the prior
+                # ``score`` key never existed so this gate silently no-op'd
+                # (accuracy_pass stayed None -> KEEP always allowed). Mirror
+                # integrate_patch._grade_accuracy: read ``accuracy`` and pass
+                # (baseline, new) in the order accuracy_passed expects.
+                new_accuracy = eval_results.get("accuracy")
+                if new_accuracy is not None:
                     accuracy_pass = accuracy_passed(
-                        eval_results["score"],
                         float(baseline_accuracy),
+                        float(new_accuracy),
                     )
             except Exception:  # noqa: BLE001
                 log.exception("framework_pr: accuracy gate parse failed; treating as None (gate skipped)")
