@@ -23,14 +23,13 @@ Output:
 
 from __future__ import annotations
 
-import bisect
 import concurrent.futures
 import json
 import os
 import re
 import sys
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Reuse HuggingFaceClient for the pool-then-filter logic.
@@ -426,6 +425,29 @@ def _apply_exclusions_to_entries(entries: list[dict | str]) -> list[dict | str]:
     return out
 
 
+def _filter_top_entries(entries: list[dict | str]) -> list[dict | str]:
+    """Keep only top-pool entries when INPUT_TOP_ONLY is enabled.
+
+    The fixed daily pool can carry supplementary rows for ad-hoc manual runs.
+    Scheduled daily CI should not submit those unless explicitly requested via
+    INPUT_MODELS, so missing ``is_top`` remains backwards-compatible while
+    ``is_top: false`` is filtered out.
+    """
+    if not _truthy(os.environ.get("INPUT_TOP_ONLY")):
+        return entries
+    out = [
+        entry
+        for entry in entries
+        if not (isinstance(entry, dict) and entry.get("is_top") is False)
+    ]
+    skipped = len(entries) - len(out)
+    print(
+        f"top-only filter skipped {skipped}; returning {len(out)} repos",
+        file=sys.stderr,
+    )
+    return out
+
+
 def _apply_exclusions(repos: list[str]) -> list[str]:
     """Apply the exclusion filters to a list of bare repo ids.
 
@@ -472,9 +494,18 @@ def _load_candidate_entries(cands_path: Path) -> list[dict]:
 def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
     """Determine which batch slice to dispatch for this run.
 
-    Honors an explicit ``INPUT_BATCH_INDEX``; otherwise derives the index from
-    the sequential scheduled-fire counter (schedule events, see
-    ``_cron_batch_index``) or the GitHub run number (manual dispatch).
+    Priority:
+      1. Explicit ``INPUT_BATCH_INDEX`` (manual override of a specific slice).
+      2. Otherwise the max_hours-paced rotation (``_cron_batch_index``), keyed
+         off ``INPUT_CRON_NOW`` (or the real clock when unset).
+
+    Anti-footgun for manual backfills: on a manual dispatch (``GITHUB_EVENT_NAME``
+    != ``schedule``) where BOTH ``INPUT_BATCH_INDEX`` and ``INPUT_CRON_NOW`` are
+    empty, the rotation at the real clock returns the SAME slice the next
+    schedule fire will pick — i.e. a guaranteed duplicate. We refuse that case so
+    a backfill must explicitly choose a slice (``batch_index``) or a past instant
+    (``cron_now``) and never silently re-runs the current batch. Schedule fires
+    are unaffected (they intentionally use the real clock).
 
     Args:
         pool_size (int): Total number of candidate entries.
@@ -482,6 +513,10 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
 
     Returns:
         int: The 0-based batch index.
+
+    Raises:
+        SystemExit: Manual dispatch with neither ``INPUT_BATCH_INDEX`` nor
+            ``INPUT_CRON_NOW`` set (would duplicate the current schedule slice).
     """
     raw = (os.environ.get("INPUT_BATCH_INDEX") or "").strip()
     if raw:
@@ -491,68 +526,72 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
             return 0
     if batch_size <= 0 or pool_size <= 0:
         return 0
-    if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
-        return _cron_batch_index(pool_size, batch_size)
-    run_number = (os.environ.get("GITHUB_RUN_NUMBER") or "").strip()
-    try:
-        rn = int(run_number)
-    except ValueError:
-        return 0
-    batches = max((pool_size + batch_size - 1) // batch_size, 1)
-    # GITHUB_RUN_NUMBER is 1-based; subtract one so run 1 maps to slice 0.
-    return (rn - 1) % batches
+    is_schedule = os.environ.get("GITHUB_EVENT_NAME") == "schedule"
+    cron_now = (os.environ.get("INPUT_CRON_NOW") or "").strip()
+    if not is_schedule and not cron_now:
+        raise SystemExit(
+            "ERROR: manual dispatch with empty batch_index AND empty cron_now "
+            "would re-run the current schedule slice (duplicate). Pass batch_index "
+            "to target a specific slice, or cron_now (a past UTC instant) to "
+            "backfill an already-skipped slice."
+        )
+    return _cron_batch_index(pool_size, batch_size)
 
-
-# UTC hours at which the schedule cron fires (keep in sync with the
-# ``schedule: cron`` expression at the top of optimize-submit.yml).
-# 2026-06-15: dropped to twice a day (UTC 04:00 / 16:00 = Beijing 12:00 / 00:00).
-_CRON_FIRE_HOURS_UTC = (4, 16)
 
 # Anchor fire: the first scheduled run at/after this instant maps to batch 0.
 # The rotation pool is ordered not-run-first, so batch 0 hits the not-yet-run
 # head. Merge the candidate-pool change before this fire so the very next cron
 # starts at batch 0; bump this if the merge slips to a later fire.
-# 2026-06-15: re-anchored to the next 16:00 UTC fire so the freshly front-loaded
-# 449 >12B multimodal NOT-run models are swept starting at batch 0.
-_CRON_ANCHOR_UTC = datetime(2026, 6, 15, 16, 0, tzinfo=timezone.utc)
+# 2026-06-26: reset to restart the rotation at batch 0 on the new
+# hf_sub100_part1_20260626.json pool. The next scheduled fire (12:07 UTC) is the
+# first at/after this anchor -> batch 0.
+_CRON_ANCHOR_UTC = datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc)
+
+# Fallback optimizer budget (hours) used as the rotation step size when
+# INPUT_MAX_HOURS is unset/invalid. Keep in sync with the optimize-submit
+# max_hours default.
+_DEFAULT_MAX_HOURS = 6.0
 
 
-def _cron_fire_counter(now_utc: datetime) -> int:
-    """Map a UTC instant to a strictly increasing scheduled-fire counter.
+def _rotation_step_hours() -> float:
+    """Return the rotation step size in hours, driven by ``INPUT_MAX_HOURS``.
 
-    Each scheduled cron fire (UTC 4/16) advances the counter by exactly one,
-    so consecutive cron runs step through batch 0, 1, 2, ... in order (unlike a
-    half-day slot, which would collapse multiple fires onto one index).
-
-    Args:
-        now_utc: The UTC instant to map.
+    One batch is advanced per ``max_hours`` of wall-clock time, so a run that
+    optimizes for N hours moves to the next slice exactly when the previous
+    slice's budget elapses — independent of how many times (or at which hours)
+    the cron actually fires. Falls back to ``_DEFAULT_MAX_HOURS`` when the env
+    var is missing or non-positive.
 
     Returns:
-        A strictly increasing per-fire counter for ``now_utc``.
+        float: Hours per batch step (always > 0).
     """
-    idx = bisect.bisect_right(_CRON_FIRE_HOURS_UTC, now_utc.hour) - 1
-    if idx < 0:
-        # Before the day's first fire — count as the last fire of the prior day.
-        base_date = now_utc.date() - timedelta(days=1)
-        idx = len(_CRON_FIRE_HOURS_UTC) - 1
-    else:
-        base_date = now_utc.date()
-    return base_date.toordinal() * len(_CRON_FIRE_HOURS_UTC) + idx
+    raw = (os.environ.get("INPUT_MAX_HOURS") or "").strip()
+    try:
+        hours = float(raw)
+    except ValueError:
+        hours = 0.0
+    return hours if hours > 0 else _DEFAULT_MAX_HOURS
 
 
 def _cron_batch_index(pool_size: int, batch_size: int) -> int:
-    """Sequential production-pool rotation for the twice-daily cron.
+    """Sequential production-pool rotation paced by ``max_hours``.
 
-    Each scheduled fire advances the batch index by one (0, 1, 2, ... wrapping
-    at the batch count), so the cron marches the whole pool in order and then
-    repeats — independent of ad-hoc manual dispatches (which would otherwise
-    perturb a ``GITHUB_RUN_NUMBER``-based scheme). The index is anchored to
-    ``_CRON_ANCHOR_UTC`` so the first fire at/after the anchor is batch 0.
+    The batch index advances by one every ``max_hours`` of elapsed wall-clock
+    time since ``_CRON_ANCHOR_UTC`` (0, 1, 2, ... wrapping at the batch count),
+    so the pool is marched in order then repeated. It is independent of ad-hoc
+    manual dispatches (which would otherwise perturb a run-number scheme).
+
+    INVARIANT (must hold): the schedule cron PERIOD must equal ``max_hours``.
+    ``steps = floor(elapsed / max_hours)`` advances exactly one batch per fire
+    ONLY when fires are ``max_hours`` apart. If the cron fires FASTER than
+    max_hours, consecutive fires resolve to the same step -> the same batch is
+    dispatched twice; if SLOWER, some batches are skipped. optimize-submit pairs
+    a 6h cron with max_hours=6 on purpose; change one and you must change the
+    other. (Schedule sets exclude_active_workflows=true, so a transient mismatch
+    is de-duped against in-flight jobs, but the pairing must still be kept.)
 
     Fires strictly before the anchor are clamped to batch 0 (the not-run head)
-    instead of wrapping to the pool tail: a negative ``steps % batches`` would
-    otherwise land on the last batch, silently skipping the not-run backlog the
-    anchor is meant to drain first.
+    rather than wrapping to the tail, so the not-run backlog is drained first.
 
     Args:
         pool_size: Total number of candidate entries.
@@ -571,12 +610,15 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
     else:
         now_utc = datetime.now(timezone.utc)
     now_utc = now_utc.astimezone(timezone.utc)
-    steps = max(_cron_fire_counter(now_utc) - _cron_fire_counter(_CRON_ANCHOR_UTC), 0)
+    step_hours = _rotation_step_hours()
+    elapsed_h = (now_utc - _CRON_ANCHOR_UTC).total_seconds() / 3600.0
+    steps = max(int(elapsed_h // step_hours), 0)
     batch_index = steps % batches
     print(
-        "cron rotation (sequential): "
+        "cron rotation (max_hours-paced): "
         f"utc_time={now_utc.isoformat()} anchor={_CRON_ANCHOR_UTC.isoformat()} "
-        f"steps={steps} batches={batches} batch_index={batch_index}",
+        f"step_hours={step_hours} elapsed_h={elapsed_h:.2f} steps={steps} "
+        f"batches={batches} batch_index={batch_index}",
         file=sys.stderr,
     )
     return batch_index
@@ -752,6 +794,7 @@ def collect_entries() -> list[dict | str]:
         if explicit_repos:
             entries = _filter_entries_by_explicit_models(entries, explicit_repos)
             return _apply_exclusions_to_entries(entries)
+        entries = _filter_top_entries(entries)
         exclude_leaderboard = _truthy(os.environ.get("INPUT_EXCLUDE_LEADERBOARD"))
         exclude_active = _truthy(os.environ.get("INPUT_EXCLUDE_ACTIVE_WORKFLOWS"))
         if exclude_leaderboard:
@@ -817,6 +860,8 @@ def _matrix_entry(entry: dict | str) -> dict:
             "created_at",
             "nodes",
             "rayjob_image",
+            "is_top",
+            "params_b",
         ):
             if entry.get(key) is not None:
                 out[key] = entry[key]

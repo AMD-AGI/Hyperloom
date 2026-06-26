@@ -280,7 +280,8 @@ def _build_failure_summary(
                 from ._subprocess_kill import server_log_death_excerpt
 
                 excerpt = server_log_death_excerpt(str(server_log_abs))
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 — excerpt enrichment is best-effort
+                log.debug("server_log_death_excerpt failed", exc_info=True)
                 excerpt = None
             if excerpt:
                 error_text = excerpt.strip()
@@ -349,12 +350,12 @@ def _build_summary_dict(
         "stop_reason": state.stop_reason,
         "baseline_tput": state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
-        # steward verdict + history (report §9.1 reads the rationale verbatim).
+        # Remaining-gaps assessment verdict + history.
         "remaining_gaps_assessment": dict(state.last_remaining_gaps_assessment or {}),
         "remaining_gaps_assessments_history": list(state.remaining_gaps_assessments or []),
         "current_best": state.current_best,
         "cumulative_gain": state.cumulative_gain,
-        # Per-round-sum gain (back-compat) vs the validated gain (what the
+        # Per-round-sum gain vs the validated gain (what the
         # run actually delivered).
         "cumulative_gain_validated": state.cumulative_gain_validated,
         "cumulative_gain_validated_ts": state.cumulative_gain_validated_ts,
@@ -378,7 +379,7 @@ def _build_summary_dict(
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
-    # Roofline Comparison (PR #321): walk the append-only
+    # Roofline Comparison: walk the append-only
     # ``state.roofline_snapshots`` (entry[0] baseline, entry[-1] latest);
     # emit only when at least one snapshot exists.
     from ..roofline_snapshot import build_roofline_comparison_from_history
@@ -449,6 +450,11 @@ def _format_md(summary: dict[str, Any]) -> str:
         stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
         lines.append(
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts={val_ts}){stale}"
+        )
+    elif val_gain or val_len:
+        stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
+        lines.append(
+            f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts=<missing>){stale}"
         )
     else:
         lines.append("- cumulative_gain_val : `0.00%` ⚠ never validated — no full-stack rebench ran in this session")
@@ -562,10 +568,10 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
 
 
 def _format_steward_section(summary: dict[str, Any]) -> list[str]:
-    """Render any legacy session_steward verdict + history.
+    """Render the remaining-gaps assessment verdict + history when present.
 
-    Steward was retired; kept for back-compat with older state.json
-    carrying a populated ``last_remaining_gaps_assessment``.
+    Reads ``last_remaining_gaps_assessment`` from older state.json files that
+    carry a populated assessment.
 
     Args:
         summary: The summary payload built by :func:`_build_summary_dict`.
@@ -904,8 +910,8 @@ def _write_kernel_opt_summary(
                 summary,
                 producer="coordinator",
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — author-time capture must never break the report
+            log.debug("kernel_optimization_summary capture failed", exc_info=True)
         return out_path
     except Exception as exc:  # noqa: BLE001
         log.warning(

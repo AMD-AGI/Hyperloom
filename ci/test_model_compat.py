@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import urllib.error
 from pathlib import Path
@@ -22,6 +23,7 @@ if str(_CI_DIR) not in sys.path:
     sys.path.insert(0, str(_CI_DIR))
 
 import model_compat  # noqa: E402
+import filter_candidates  # noqa: E402
 
 
 # ── unrunnable_reason: per-rule hits ────────────────────────────────────────
@@ -45,6 +47,139 @@ def test_multimodal_by_model_type():
 def test_multimodal_by_vision_config():
     assert _reason({"architectures": ["FooForCausalLM"], "vision_config": {"x": 1},
                     "max_position_embeddings": 4096}) == "multimodal"
+
+
+def test_non_llm_diffusers_repo_filtered_without_config():
+    assert _reason(None, repo="black-forest-labs/FLUX.1-dev") == "non_text_generation"
+
+
+def test_filter_candidates_repo_gate_without_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(filter_candidates, "MODELS_DIR", str(tmp_path))
+
+    r = filter_candidates.classify_local("black-forest-labs/FLUX.1-dev")
+
+    assert r is not None
+    assert r[0] == "non_text_generation"
+
+
+def test_filter_candidates_classify_local_config_and_bad_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(filter_candidates, "MODELS_DIR", str(tmp_path))
+    short_dir = tmp_path / "org-short"
+    short_dir.mkdir()
+    (short_dir / "config.json").write_text(
+        json.dumps({
+            "architectures": ["LlamaForCausalLM"],
+            "max_position_embeddings": 2048,
+        }),
+        encoding="utf-8",
+    )
+    bad_dir = tmp_path / "org-bad-json"
+    bad_dir.mkdir()
+    (bad_dir / "config.json").write_text("{", encoding="utf-8")
+
+    assert filter_candidates.classify_local("org/short")[0] == "short_ctx"
+    assert filter_candidates.classify_local("org/bad-json") is None
+
+
+def test_filter_candidates_tokens_slug_and_gated_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKENS", "hf_a, hf_b")
+    monkeypatch.setenv("HF_TOKEN", "hf_b")
+    monkeypatch.setenv("HF_TOKEN_2", "hf_c")
+    monkeypatch.setattr(
+        filter_candidates,
+        "GATED_CACHE",
+        str(tmp_path / "gated_cache.tsv"),
+    )
+    (tmp_path / "gated_cache.tsv").write_text(
+        "cached/repo\tgated\nmalformed\n",
+        encoding="utf-8",
+    )
+
+    assert filter_candidates.hf_tokens() == ["hf_a", "hf_b", "hf_c"]
+    assert filter_candidates.slug("org/model") == "org-model"
+    assert filter_candidates.load_gated_cache() == {"cached/repo": "gated"}
+
+
+def test_filter_candidates_gated_check_all_appends_uncached(tmp_path, monkeypatch):
+    cache_path = tmp_path / "gated_cache.tsv"
+    cache_path.write_text("cached/repo\tok\n", encoding="utf-8")
+    monkeypatch.setattr(filter_candidates, "GATED_CACHE", str(cache_path))
+    monkeypatch.setattr(
+        filter_candidates,
+        "hf_gated",
+        lambda repo: "gated" if repo == "new/gated" else None,
+    )
+    monkeypatch.setattr(filter_candidates.time, "sleep", lambda _seconds: None)
+
+    cache = filter_candidates.gated_check_all(["cached/repo", "new/gated", "new/ok"])
+
+    assert cache == {
+        "cached/repo": "ok",
+        "new/gated": "gated",
+        "new/ok": "ok",
+    }
+    assert "new/gated\tgated" in cache_path.read_text(encoding="utf-8")
+
+
+def test_filter_candidates_main_filters_local_and_gated(tmp_path, monkeypatch):
+    models_dir = tmp_path / "models"
+    out_dir = tmp_path / "out"
+    pool_path = tmp_path / "daily.json"
+    pool_path.write_text(
+        json.dumps({
+            "candidates": [
+                {"repo_id": "black-forest-labs/FLUX.1-dev"},
+                {"repo_id": "org/ok"},
+                {"repo_id": "org/gated"},
+                {"repo_id": "org/whitelist"},
+            ]
+        }),
+        encoding="utf-8",
+    )
+    ok_dir = models_dir / "org-ok"
+    ok_dir.mkdir(parents=True)
+    (ok_dir / "config.json").write_text(
+        json.dumps({
+            "architectures": ["LlamaForCausalLM"],
+            "max_position_embeddings": 8192,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(filter_candidates, "MODELS_DIR", str(models_dir))
+    monkeypatch.setattr(filter_candidates, "OUT_DIR", str(out_dir))
+    monkeypatch.setattr(
+        filter_candidates,
+        "GATED_CACHE",
+        str(out_dir / "gated_cache.tsv"),
+    )
+    monkeypatch.setattr(
+        filter_candidates.model_compat,
+        "load_whitelist",
+        lambda: {"org/whitelist"},
+    )
+    monkeypatch.setattr(
+        filter_candidates,
+        "gated_check_all",
+        lambda repos: {"org/ok": "ok", "org/gated": "gated"},
+    )
+
+    filter_candidates.main([str(pool_path)])
+
+    filtered = json.loads((out_dir / "daily_filtered.json").read_text(encoding="utf-8"))
+    assert [c["repo_id"] for c in filtered["candidates"]] == [
+        "org/ok",
+        "org/whitelist",
+    ]
+    report = (out_dir / "pool_filter_report.tsv").read_text(encoding="utf-8")
+    assert "black-forest-labs/FLUX.1-dev\tnon_text_generation" in report
+    assert "org/gated\tgated\tHF API" in report
+
+
+def test_diffusion_substring_text_repo_is_kept():
+    assert _reason({"architectures": ["LlamaForCausalLM"],
+                    "model_type": "llama",
+                    "max_position_embeddings": 8192},
+                   repo="org/diffusion-language-model") is None
 
 
 def test_bare_for_conditional_generation_without_vision_is_kept():
@@ -123,6 +258,19 @@ def test_unsupported_arch_deepseek_v32_by_model_type():
                     "quantization_config": {"quant_method": "fp8"}}) == "unsupported_arch"
 
 
+def test_unsupported_arch_gemma4_by_model_type():
+    assert _reason({"architectures": ["Gemma4ForCausalLM"],
+                    "model_type": "gemma4",
+                    "max_position_embeddings": 32768}) == "unsupported_arch"
+
+
+def test_empty_quant_method_filtered():
+    assert _reason({"architectures": ["LlamaForCausalLM"],
+                    "model_type": "llama",
+                    "max_position_embeddings": 4096,
+                    "quantization_config": {"quant_method": ""}}) == "quant_empty_method"
+
+
 def test_unsupported_arch_qwen3_5_moe_text_via_text_config():
     # Qwen3.6 MoE carries qwen3_5_moe_text as text_config.model_type; top-level
     # model_type is qwen3_5_moe. The rule must catch it via text_config.
@@ -143,6 +291,23 @@ def test_qwen3_5_moe_without_text_subtype_is_kept():
 def test_unsupported_arch_matched_by_architecture_fallback():
     # No/blank model_type -> architecture fallback still catches it.
     assert _reason({"architectures": ["GlmMoeDsaForCausalLM"],
+                    "max_position_embeddings": 131072}) == "unsupported_arch"
+
+
+def test_unsupported_arch_qrwkv6_hybrid_is_filtered():
+    assert _reason({"architectures": ["RWKV6Qwen2ForCausalLM"],
+                    "model_type": "rwkv6qwen2",
+                    "max_position_embeddings": 131072}) == "unsupported_arch"
+
+
+def test_unsupported_arch_qrwkv6_hybrid_matched_by_model_type():
+    assert _reason({"model_type": "rwkv6qwen2",
+                    "max_position_embeddings": 131072}) == "unsupported_arch"
+
+
+def test_unsupported_arch_qrwkv6_hybrid_matched_by_text_config_model_type():
+    assert _reason({"model_type": "wrapper",
+                    "text_config": {"model_type": "rwkv6qwen2"},
                     "max_position_embeddings": 131072}) == "unsupported_arch"
 
 
@@ -285,6 +450,23 @@ def test_tokenizer_present_is_kept(tmp_path):
                     "max_position_embeddings": 32768}, model_dir=mdir) is None
 
 
+def test_llama_sentencepiece_without_metadata_filtered(tmp_path):
+    mdir = _mk_dir(tmp_path, ["config.json", "pytorch_model.bin", "tokenizer.model"])
+    assert _reason({"architectures": ["LlamaForCausalLM"],
+                    "model_type": "llama",
+                    "max_position_embeddings": 4096}, model_dir=mdir) == "tokenizer_metadata_gap"
+
+
+def test_llama_sentencepiece_with_tokenizer_config_kept(tmp_path):
+    mdir = _mk_dir(
+        tmp_path,
+        ["config.json", "pytorch_model.bin", "tokenizer.model", "tokenizer_config.json"],
+    )
+    assert _reason({"architectures": ["LlamaForCausalLM"],
+                    "model_type": "llama",
+                    "max_position_embeddings": 4096}, model_dir=mdir) is None
+
+
 def test_no_weights_does_not_flag_missing_tokenizer(tmp_path):
     # Partial cache (no weights yet) must not be flagged as missing_tokenizer.
     mdir = _mk_dir(tmp_path, ["config.json"])
@@ -334,3 +516,66 @@ def test_hf_gated_not_found(monkeypatch):
     err = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
     _patch_urlopen(monkeypatch, error=err)
     assert model_compat.hf_gated("org/model", ["hf_x"]) == "not_found"
+
+
+# ── hf_missing_tokenizer (network probe, mocked) ─────────────────────────────
+
+
+def _siblings(*names):
+    return {"siblings": [{"rfilename": n} for n in names]}
+
+
+def test_hf_missing_tokenizer_no_tokens_returns_none():
+    assert model_compat.hf_missing_tokenizer("org/model", []) is None
+
+
+def test_hf_missing_tokenizer_weights_without_tokenizer(monkeypatch):
+    # Weights present, no tokenizer.* -> missing_tokenizer.
+    _patch_urlopen(monkeypatch, payload=_siblings(
+        "config.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) == "missing_tokenizer"
+
+
+def test_hf_missing_tokenizer_weights_with_tokenizer_kept(monkeypatch):
+    _patch_urlopen(monkeypatch, payload=_siblings(
+        "config.json", "model.safetensors", "tokenizer.json"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
+
+
+def test_hf_missing_tokenizer_bin_weights_detected(monkeypatch):
+    # .bin shards also count as weights.
+    _patch_urlopen(monkeypatch, payload=_siblings("config.json", "pytorch_model.bin"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) == "missing_tokenizer"
+
+
+def test_hf_missing_tokenizer_no_weights_kept(monkeypatch):
+    # No weight shards at all -> cannot judge -> keep (None).
+    _patch_urlopen(monkeypatch, payload=_siblings("config.json", "README.md"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
+
+
+def test_hf_missing_tokenizer_empty_siblings_kept(monkeypatch):
+    _patch_urlopen(monkeypatch, payload={"siblings": []})
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
+
+
+def test_hf_missing_tokenizer_alt_tokenizer_file_kept(monkeypatch):
+    # tokenizer.model (sentencepiece) counts as a tokenizer too.
+    _patch_urlopen(monkeypatch, payload=_siblings("model.safetensors", "tokenizer.model"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+def test_hf_missing_tokenizer_gated_or_notfound_defers(monkeypatch, code):
+    # 401/403 (gated) and 404 -> fail-open None (let hf_gated own that signal).
+    err = urllib.error.HTTPError("u", code, "x", {}, None)
+    _patch_urlopen(monkeypatch, error=err)
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
+
+
+def test_hf_missing_tokenizer_fail_open_on_error(monkeypatch):
+    # Any non-HTTP fetch error -> fail-open None (never drop on a network hiccup).
+    # Patch sleep so the retry loop does not actually wait.
+    monkeypatch.setattr(model_compat.time, "sleep", lambda *_a, **_k: None)
+    _patch_urlopen(monkeypatch, error=urllib.error.URLError("boom"))
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None

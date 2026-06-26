@@ -66,6 +66,52 @@ def test_detect_healthy_config_returns_none(tmp_path):
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
+def test_detect_diffusers_pipeline_blocks_without_config_json(tmp_path):
+    m = tmp_path / "flux"
+    m.mkdir()
+    (m / "model_index.json").write_text(
+        json.dumps({"_class_name": "FluxPipeline"}),
+        encoding="utf-8",
+    )
+
+    reason = cli._detect_incompatible_model_config(str(m))
+
+    assert reason is not None
+    assert "Diffusers pipeline" in reason
+    assert "causal LM" in reason
+
+
+def test_detect_null_use_cache_blocks_strict_config_validation(tmp_path):
+    m = tmp_path / "null_use_cache"
+    _write_config(
+        m,
+        model_type="qwen2",
+        max_position_embeddings=4096,
+        use_cache=None,
+    )
+
+    reason = cli._detect_incompatible_model_config(str(m))
+
+    assert reason is not None
+    assert "use_cache" in reason
+    assert "StrictDataclassFieldValidationError" in reason
+
+
+def test_detect_null_use_cache_in_text_config_blocks(tmp_path):
+    m = tmp_path / "nested_null_use_cache"
+    _write_config(
+        m,
+        model_type="wrapper",
+        max_position_embeddings=4096,
+        text_config={"model_type": "qwen2", "use_cache": None},
+    )
+
+    reason = cli._detect_incompatible_model_config(str(m))
+
+    assert reason is not None
+    assert "text_config.use_cache" in reason
+
+
 def test_detect_rope_with_maxpos_ok(tmp_path):
     m = tmp_path / "rope_ok"
     _write_config(
@@ -100,6 +146,39 @@ def test_detect_with_tokenizer_ok(tmp_path):
         max_position_embeddings=32768,
     )
     (m / "tokenizer.json").write_text("{}", encoding="utf-8")
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_mistral_tokenizer_json_without_common_files_blocks(tmp_path):
+    m = tmp_path / "mistral_json_only"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="mistral",
+        architectures=["MistralForCausalLM"],
+        max_position_embeddings=32768,
+    )
+    (m / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    reason = cli._detect_incompatible_model_config(str(m))
+
+    assert reason is not None
+    assert "MistralCommonBackend" in reason
+    assert "No tokenizer file found" in reason
+
+
+def test_detect_mistral_tokenizer_model_file_ok(tmp_path):
+    m = tmp_path / "mistral_tokenizer_model"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="mistral",
+        architectures=["MistralForCausalLM"],
+        max_position_embeddings=32768,
+    )
+    (m / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
+
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
@@ -197,6 +276,23 @@ def test_detect_glm_moe_dsa_unrecognized_blocked(tmp_path):
     assert reason is not None and "not recognized" in reason
 
 
+def test_detect_gemma4_now_recognized(tmp_path):
+    # google-gemma-4-26B-A4B-it: the current pinned stack (transformers 5.5.0 +
+    # vLLM 0.18.2rc1) registers gemma4 (CONFIG_MAPPING has "gemma4", AutoConfig
+    # resolves Gemma4Config, vLLM ModelConfig resolves Gemma4ForCausalLM). It was
+    # removed from the unrecognized blocklist, so a plain text Gemma4 config is no
+    # longer fail-fasted by the model-config gate.
+    m = tmp_path / "gemma4"
+    _write_config(
+        m,
+        model_type="gemma4",
+        architectures=["Gemma4ForCausalLM"],
+        max_position_embeddings=32768,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is None
+
+
 def test_detect_bailing_ling_left_to_runtime_scope(tmp_path):
     # #649 does not add Bailing filters; keep these out of the fail-fast gate.
     for model_type, arch in (
@@ -264,6 +360,38 @@ def test_detect_pure_nested_ministral3_blocked(tmp_path):
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None and "ministral3" in reason
+
+
+def test_detect_nested_qwen3_5_moe_text_unrecognized_blocked(tmp_path):
+    # Qwen3.6 wrapper exposes text_config.model_type=qwen3_5_moe_text; vLLM/
+    # Transformers rejects that nested type during ModelConfig validation.
+    m = tmp_path / "wrapper_nested_qwen3_5_moe_text"
+    _write_config(
+        m,
+        model_type="qwen3_5_moe",
+        architectures=["Qwen3_5MoeForConditionalGeneration"],
+        text_config={
+            "model_type": "qwen3_5_moe_text",
+            "max_position_embeddings": 262144,
+            "vocab_size": 151936,
+        },
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "qwen3_5_moe_text" in reason
+
+
+def test_detect_top_level_qwen3_5_moe_not_blocked(tmp_path):
+    # Bare top-level qwen3_5_moe remains in the text-coercible runtime path; only
+    # the nested text_config subtype has a confirmed registry failure.
+    m = tmp_path / "bare_qwen3_5_moe"
+    _write_config(
+        m,
+        model_type="qwen3_5_moe",
+        architectures=["Qwen3_5MoeForConditionalGeneration"],
+        max_position_embeddings=262144,
+        vocab_size=151936,
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_top_level_ministral3_not_blocked(tmp_path):
@@ -937,6 +1065,19 @@ def test_private_quant_mxtq_blocks(tmp_path):
     assert reason is not None and "mxtq" in reason
 
 
+def test_private_quant_empty_method_blocks(tmp_path):
+    m = tmp_path / "empty_quant_method"
+    _write_config(
+        m,
+        model_type="llama",
+        architectures=["LlamaForCausalLM"],
+        max_position_embeddings=4096,
+        quantization_config={"quant_method": ""},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "quant_method is empty" in reason
+
+
 def test_private_quant_mlx_weights_index_blocks(tmp_path):
     # JANG/MLX often declares no quant config; the tell is '.biases'/'.scales'.
     m = tmp_path / "mlx_weights"
@@ -958,6 +1099,48 @@ def test_private_quant_gguf_only_blocks(tmp_path):
     (m / "model-TQ3_4S.gguf").write_text("dummy", encoding="utf-8")
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None and "GGUF" in reason
+
+
+def test_peft_adapter_only_checkpoint_blocks(tmp_path):
+    m = tmp_path / "adapter_only"
+    _write_config(m, model_type="qwen2", max_position_embeddings=32768)
+    (m / "adapter_config.json").write_text(
+        json.dumps({"peft_type": "LORA", "base_model_name_or_path": "Qwen/Qwen2-7B"}),
+        encoding="utf-8",
+    )
+    (m / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {
+            "base_model.model.lm_head.lora_A.default.weight": "adapter_model.safetensors",
+            "base_model.model.lm_head.lora_B.default.weight": "adapter_model.safetensors",
+            "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight": (
+                "adapter_model.safetensors"
+            ),
+        }}),
+        encoding="utf-8",
+    )
+
+    reason = cli._detect_incompatible_model_config(str(m))
+
+    assert reason is not None
+    assert "PEFT/LoRA adapter" in reason
+    assert "base_model.model.lm_head.base_layer.weight" in reason
+
+
+def test_merged_peft_like_checkpoint_with_base_weights_not_blocked(tmp_path):
+    m = tmp_path / "merged_adapter"
+    _write_config(m, model_type="qwen2", max_position_embeddings=32768)
+    (m / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {
+            "model.embed_tokens.weight": "model-00001.safetensors",
+            "lm_head.weight": "model-00001.safetensors",
+            "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight": (
+                "model-00001.safetensors"
+            ),
+        }}),
+        encoding="utf-8",
+    )
+
+    assert cli._detect_incompatible_model_config(str(m)) is None
 
 
 def test_standard_quant_fp8_not_blocked(tmp_path):
@@ -1003,6 +1186,38 @@ def test_gguf_with_pytorch_model_bin_not_blocked(tmp_path):
     m = tmp_path / "gguf_plus_hf_bin"
     _write_config(m, model_type="qwen3", max_position_embeddings=32768)
     (m / "model.gguf").write_text("dummy", encoding="utf-8")
+    (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_llama_sentencepiece_without_metadata_blocks(tmp_path):
+    m = tmp_path / "llama_sentencepiece_gap"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="llama",
+        architectures=["LlamaForCausalLM"],
+        max_position_embeddings=4096,
+    )
+    (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
+    (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "tokenizer_config.json" in reason
+    assert "HFValidationError" in reason
+
+
+def test_llama_sentencepiece_with_tokenizer_config_ok(tmp_path):
+    m = tmp_path / "llama_sentencepiece_ok"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="llama",
+        architectures=["LlamaForCausalLM"],
+        max_position_embeddings=4096,
+    )
+    (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
+    (m / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
     assert cli._detect_incompatible_model_config(str(m)) is None
 

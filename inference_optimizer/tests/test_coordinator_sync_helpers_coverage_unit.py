@@ -445,16 +445,22 @@ def test_skip_gemm_tuning_env(coord: Coordinator, monkeypatch) -> None:
 
 def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", raising=False)
+    monkeypatch.delenv("GEMM_TUNING_BACKEND", raising=False)  # default: forge
     ss = coord.shared_state
-    # non fp8/sglang -> not required
-    ss.precision = "fp16"
-    ss.framework = "sglang"
-    assert coord._gemm_tuning_required_before_kernel_opt() is False
-    # fp8 + sglang + no terminal status -> required
-    ss.precision = "fp8"
     ss.last_gemm_tuning = {}
+    # forge backend: any precision on a supported framework is eligible — bf16/
+    # fp16 dense must NOT be pre-filtered out (real e2e KEEPs include them).
+    ss.framework = "sglang"
+    ss.precision = "fp16"
     assert coord._gemm_tuning_required_before_kernel_opt() is True
-    # terminal status -> not required
+    ss.precision = "bf16"
+    assert coord._gemm_tuning_required_before_kernel_opt() is True
+    # Unsupported framework -> not eligible.
+    ss.framework = "trt-llm"
+    assert coord._gemm_tuning_required_before_kernel_opt() is False
+    # Supported framework + terminal status -> not required (already done).
+    ss.framework = "sglang"
+    ss.precision = "fp8"
     ss.last_gemm_tuning = {"status": "succeeded"}
     assert coord._gemm_tuning_required_before_kernel_opt() is False
 

@@ -613,7 +613,16 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     if not user_backends:
         env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
         if env_order:
-            user_backends = parse_backends(env_order)
+            # 'perfskills' is a phase-level delegate owned by the coordinator,
+            # not a per-kernel backend; drop it so a perfskills-only order does
+            # not crash parse_backends here (this subprocess only runs on the
+            # native per-kernel path, which the coordinator skips for
+            # PerfSkills). An empty remainder falls back to the default ladder.
+            env_tokens = ",".join(
+                t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() != "perfskills"
+            )
+            if env_tokens:
+                user_backends = parse_backends(env_tokens)
     benchmark_available = has_benchmark(args, candidate)
     source_type = str(candidate.get("source_type") or "unknown")
     # Skip cursor from auto-selected defaults when CURSOR_API_KEY is unset (explicit --backends still wins).
@@ -638,12 +647,14 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
         return [], notes
 
     # Unified ladder: forge FIRST (Kernel-Forge autonomous loop; falls through to
-    # geak when forge skips a non-triton candidate or misses a KEEP), then GEAK.
-    # claude/codex are NOT auto-selected anymore — enable them only via explicit
-    # --backends or KERNEL_OPT_BACKEND_ORDER/KERNEL_OPT_BACKENDS env (handled
-    # above). Without a benchmark GEAK still attempts but flags
-    # geak_without_benchmark=True so KEEP gates know confidence is reduced.
-    selected = ["forge", "geak"]
+    # geak when forge skips a non-triton candidate or misses a KEEP), then GEAK,
+    # then the OOB backends (claude, codex, cursor). Cursor is dropped here when
+    # CURSOR_API_KEY is unset (explicit --backends / env still wins). Without a
+    # benchmark GEAK still attempts but flags geak_without_benchmark=True so KEEP
+    # gates know confidence is reduced.
+    selected = ["forge", "geak", "claude", "codex"]
+    if cursor_key_present:
+        selected.append("cursor")
     if not benchmark_available:
         notes["geak_without_benchmark"] = True
     return selected, notes
@@ -1029,7 +1040,63 @@ def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
         f"- args: {rendered}\n"
         "Correctness golden: the ORIGINAL kernel's output on these shapes "
         "(baseline / `fn=` injection); do not hand-derive a reference from scratch.\n"
+        + _build_kernel_contract_block(candidate)
     )
+
+
+def _build_kernel_contract_block(candidate: dict[str, Any]) -> str:
+    """Render the kernel-class CONTRACT (collective / attention) into the prompt.
+
+    TraceLens enrichment (``_enrich_kernel_contract``) attaches a
+    ``kernel_contract`` dict for non-MoE kernel classes that need extra info to
+    build a FAITHFUL harness (a real reference + correct execution model).
+    Surfacing it here makes the harness-generator's rule-1 USER TASK CONTEXT
+    authoritative for these kernels too, not just MoE. Returns "" when absent so
+    the prompt stays byte-identical for kernels without a contract.
+    """
+    c = candidate.get("kernel_contract")
+    if not isinstance(c, dict) or not c:
+        return ""
+    kind = c.get("kind", "")
+    # Lead with the literal ``USER TASK CONTEXT`` marker: the GEAK harness-generator
+    # subagent's shape-source priority rule-1 keys on exactly this header to use the
+    # supplied shapes/reference VERBATIM and write ``user_task:production``. Without
+    # it, when a benchmark file was discovered the subagent hits rule-2 and inherits
+    # that file's synthetic sweep + self-ref (observed for qr_all_reduce). This makes
+    # the contract authoritative over the discovered file for non-MoE kernels too.
+    rendered = _format_shapes_for_case(candidate.get("shapes") or candidate.get("kernel_shapes"))
+    lines = [
+        "\n## USER TASK CONTEXT (authoritative — overrides any discovered benchmark/test file)\n",
+        "Build the harness to EXACTLY this contract. Use these shapes verbatim (do NOT\n",
+        "sweep/scale them, do NOT read shapes from a discovered benchmark file), build the\n",
+        "stated reference, and write `user_task:production` to harness_shapes_source.txt.\n",
+    ]
+    if rendered:
+        lines.append(f"- Exact serving shapes: {rendered}\n")
+    if kind == "collective":
+        lines.append(
+            f"- This is a COLLECTIVE ({c.get('collective_op')}). The shapes above are the\n"
+            f"  per-rank tensor. Correctness reference MUST be `{c.get('reference')}` "
+            f"(reduce_op={c.get('reduce_op', 'sum')}, world_size={c.get('world_size', '?')})\n"
+            "  computed independently -- NEVER `return run_kernel(inputs)` (a self-compare is\n"
+            "  a tautology). Initialize the process group and shard inputs per rank.\n"
+            f"- NOTE: {c.get('e2e_note', '')}\n"
+        )
+    elif kind == "attention":
+        extra = ", ".join(
+            f"{k}={c[k]}"
+            for k in ("head_dim", "num_heads", "num_kv_heads", "kv_layout", "seqlen_regime")
+            if c.get(k) is not None
+        )
+        lines.append(
+            f"- This is ATTENTION (causal={c.get('causal', True)}). Correctness reference MUST be\n"
+            f"  `{c.get('reference')}` with is_causal={c.get('causal', True)} -- NEVER a self-compare.\n"
+            f"- Serving contract: {extra}. Benchmark the '{c.get('seqlen_regime', 'mixed')}' regime\n"
+            "  (decode=seqlen 1 per step vs prefill=full); do not mix regimes in one config.\n"
+        )
+    else:
+        return ""
+    return "".join(lines)
 
 
 def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
@@ -1126,7 +1193,11 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
             f"flops_per_byte={flops_per_byte if flops_per_byte is not None else '-'}; "
             f"efficiency={efficiency}; bound={bound}"
         )
-    return "\n".join(lines)
+    # Also surface the kernel-class contract on the task_group path (the
+    # captured-shapes fallback above isn't reached when a task_group exists), so
+    # collectives/attention get their authoritative reference + execution-model
+    # contract regardless of which branch rendered the cases.
+    return "\n".join(lines) + _build_kernel_contract_block(candidate)
 
 
 # PR-B §3: ordered optimization directions keyed by bound type so the first lever
@@ -1730,10 +1801,7 @@ def build_prompt(
     # kernel symbol so the rewrite targets the right __global__ in a multi-kernel file.
     device_symbol_block = ""
     device_kernel_name = str(candidate.get("device_kernel_name", "") or "").strip()
-    if (
-        candidate.get("source_resolution_method") == "op_to_source"
-        and device_kernel_name
-    ):
+    if candidate.get("source_resolution_method") == "op_to_source" and device_kernel_name:
         device_symbol_block = (
             "\n>>> DEVICE KERNEL FOCUS <<<\n"
             f"This op (`{kernel_name}`) dispatches to the device kernel symbol:\n"
@@ -2709,22 +2777,32 @@ def _update_kernel_roofline_sidecar(
 def _apply_geak_env_overrides(
     args: argparse.Namespace,
     prompt_file: Path,
+    candidate: dict[str, Any] | None = None,
 ) -> dict[str, str | None]:
     """Temporarily tune GEAK env for this attempt; caller must restore.
 
-    Sets ``GEAK_CONFIG`` (and disables the knowledge base when requested)
-    for the duration of one attempt, returning the prior values so the
-    caller can restore them via :func:`_restore_env`.
+    Sets ``GEAK_CONFIG`` (and disables the knowledge base when requested) for the
+    duration of one attempt, returning the prior values so the caller can restore
+    them via :func:`_restore_env`. When ``candidate`` carries the trace-captured
+    argument signature, also exports ``GEAK_RAW_ARG_SPEC_JSON`` so GEAK's harness
+    builder can reconstruct the exact call (tensors + scalar args, in order).
+    Additive: unset when the candidate lacks it.
 
     Args:
         args (argparse.Namespace): Parsed CLI args (e.g. ``disable_xs_memory``).
         prompt_file (Path): Prompt file used to derive any per-run config.
+        candidate (dict | None): The hot-kernel candidate (with raw_arg_spec).
 
     Returns:
         dict[str, str | None]: The previous values of the mutated env vars
             (None for vars that were previously unset).
     """
-    keys = ("GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE")
+    keys = (
+        "GEAK_CONFIG",
+        "GEAK_USE_KNOWLEDGE_BASE",
+        "GEAK_SAVE_TO_KNOWLEDGE_BASE",
+        "GEAK_RAW_ARG_SPEC_JSON",
+    )
     previous = {key: os.environ.get(key) for key in keys}
     config = _geak_config_for_run(args, prompt_file)
     if config:
@@ -2732,6 +2810,14 @@ def _apply_geak_env_overrides(
     if getattr(args, "disable_xs_memory", False):
         os.environ["GEAK_USE_KNOWLEDGE_BASE"] = "0"
         os.environ["GEAK_SAVE_TO_KNOWLEDGE_BASE"] = "0"
+    # Full ordered arg metadata (tensors + scalars, verbatim from the trace) so
+    # GEAK can reconstruct the exact call signature.
+    raw_arg_spec = candidate.get("raw_arg_spec") if isinstance(candidate, dict) else None
+    if raw_arg_spec:
+        try:
+            os.environ["GEAK_RAW_ARG_SPEC_JSON"] = json.dumps(raw_arg_spec)
+        except (TypeError, ValueError):
+            os.environ.pop("GEAK_RAW_ARG_SPEC_JSON", None)
     return previous
 
 
@@ -2888,7 +2974,21 @@ def invoke_backend(
     # OOB backends don't accept --test-command but we still want the rocprof
     # snapshot, so we compute it here unconditionally.
     common_test_command = getattr(args, "test_command", "").strip()
-    if not common_test_command:
+    # When TraceLens attached an authoritative kernel_contract (collective /
+    # attention) AND we have the exact traced shapes, do NOT hand GEAK a
+    # discovered benchmark file: the harness-generator subagent would prefer that
+    # file (shape-source rule-2) and inherit its synthetic sweep + self-ref,
+    # overriding our USER TASK CONTEXT. Letting GEAK build from the prompt is the
+    # path that produced a faithful harness (verified: mha with no bench file got
+    # a single traced-shape config + user_task:production; qr WITH a bench file
+    # stayed an 11-config sweep + self-ref). MoE/other kernels are unaffected.
+    _contract = candidate.get("kernel_contract")
+    _has_contract = (
+        isinstance(_contract, dict)
+        and _contract.get("kind") in ("collective", "attention")
+        and bool(candidate.get("shapes") or candidate.get("kernel_shapes"))
+    )
+    if not common_test_command and not _has_contract:
         common_test_command = _render_geak_test_command(
             kernel_name=cand_name,
             bench_files=bench_files,
@@ -2949,7 +3049,11 @@ def invoke_backend(
             # only interface. (common_test_command is still computed above solely
             # for the rocprof before-snapshot, never handed to GEAK.)
             is_multigpu = is_multigpu_common
-            previous_env = _apply_geak_env_overrides(args, prompt_file)
+            # Prompt-only: do NOT copy a test_command/op_test into the workspace (the
+            # block main had here is intentionally dropped — GEAK builds its own harness
+            # from the prompt). Keep main's updated _apply_geak_env_overrides signature
+            # (now takes `candidate`).
+            previous_env = _apply_geak_env_overrides(args, prompt_file, candidate)
             try:
                 result = geak.submit(
                     prompt_file=prompt_file,
@@ -2977,8 +3081,41 @@ def invoke_backend(
             final_report = out_dir / "final_report.json"
             if final_report.is_file():
                 result["geak_final_report"] = str(final_report)
+                # Primary salvage: final_report.json already carries the verified
+                # best speedup + patch (best_speedup / best_patch / best_task).
+                # Read it directly — one small file — so a real win survives even
+                # when the results/ rglob below is SIGKILLed mid-scan on a huge
+                # worktree (the round-2 timeout that lost a verified 4.33x).
+                try:
+                    _fr = json.loads(final_report.read_text(encoding="utf-8"))
+                    _fr_sp = float(_fr.get("best_speedup_verified") or _fr.get("best_speedup") or 0.0)
+                    if _fr_sp > 0:
+                        result["geak_per_task_best_speedup"] = _fr_sp
+                        if _fr.get("best_task"):
+                            result["geak_per_task_best_task"] = str(_fr["best_task"])
+                        _fr_patch = str(_fr.get("best_patch") or "")
+                        if _fr_patch:
+                            result["geak_per_task_best_patch"] = _fr_patch
+                            _fr_wt = _geak_best_worktree(_fr_patch)
+                            if _fr_wt:
+                                result["geak_per_task_best_worktree"] = str(_fr_wt)
+                except (ValueError, OSError, TypeError) as exc:
+                    # Non-fatal: final_report.json salvage is best-effort. Fall
+                    # through to the results/ rglob below, but record why the
+                    # fast-path parse failed so a silent miss is debuggable.
+                    if log_path is not None:
+                        append_log(
+                            log_path,
+                            f"[geak] final_report salvage parse failed "
+                            f"({type(exc).__name__}: {exc}); falling back to results/ scan",
+                        )
             results_dir = out_dir / "results"
-            if results_dir.is_dir():
+            # The results/ rglobs walk the per-round worktrees, which can hold
+            # 100k+ JIT/cache files — on a SIGTERM'd run the scan itself can be
+            # SIGKILLed before it returns. Skip it entirely when final_report.json
+            # already gave us the verified best speedup + patch above; only fall
+            # back to scanning when that primary salvage was absent.
+            if results_dir.is_dir() and not result.get("geak_per_task_best_speedup"):
                 # Any *.patch under results/ is evidence of partial work.
                 patches = sorted(results_dir.rglob("*.patch"))
                 if patches:
@@ -2996,7 +3133,9 @@ def invoke_backend(
                         try:
                             d = json.loads(bj.read_text(encoding="utf-8"))
                             sp = float(d.get("best_patch_speedup") or 0.0)
-                        except Exception:
+                        except (ValueError, OSError, TypeError):
+                            # Skip an unreadable/corrupt per-task best_results.json;
+                            # other tasks' files may still carry a valid speedup.
                             continue
                         if sp > best_speedup:
                             best_speedup = sp
@@ -3831,6 +3970,303 @@ def _candidate_artifact_paths(
     return deduped
 
 
+_BACKUP_SUFFIXES = {".orig", ".rej", ".bak"}
+
+
+def _unquote_diff_path(raw: str) -> str:
+    """Decode a git diff header path, handling C-style quoting.
+
+    Git emits paths with special characters as C-quoted strings (e.g.
+    ``"b/\\303\\251.py"``). A naive ``..``/absolute check on the still-quoted
+    string can be bypassed, so decode it first.
+
+    Args:
+        raw (str): The raw token following ``+++ `` / ``--- `` (already
+            whitespace-trimmed of a trailing tab-timestamp by the caller).
+
+    Returns:
+        str: The decoded path, or the input unchanged when it is not quoted.
+    """
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        try:
+            return raw[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape")
+        except (UnicodeDecodeError, ValueError):
+            return raw[1:-1]
+    return raw
+
+
+def _strip_diff_prefix(path: str, strip: int) -> str:
+    """Drop the first ``strip`` path components, mirroring ``-p<N>``.
+
+    Empty components (from ``//`` or a leading ``/``) are dropped first so the
+    strip count operates on real path segments and cannot resurrect an absolute
+    path via an empty component.
+
+    Args:
+        path (str): A diff target path (e.g. ``b/dir/file.py``).
+        strip (int): Number of leading components to remove.
+
+    Returns:
+        str: The post-strip relative path, or ``""`` when nothing remains.
+    """
+    parts = [p for p in path.split("/") if p]
+    return "/".join(parts[strip:]) if len(parts) > strip else ""
+
+
+def _select_patch_section(patch_text: str, target_file: str) -> tuple[str, str] | None:
+    """Slice out the per-file diff section that targets ``target_file``.
+
+    Real kernel patches are frequently multi-file, but reconstruction only has
+    the single original kernel on disk, so the whole patch cannot apply in an
+    isolated dir. Extract just the matched file's section and reject anything
+    unsafe or unusable.
+
+    Args:
+        patch_text (str): The full unified diff.
+        target_file (str): Original kernel path the section must target.
+
+    Returns:
+        tuple[str, str] | None: ``(section_text, raw_target_path)`` for the
+            matched file, or ``None`` when no usable/safe section matches.
+    """
+    if not patch_text.strip():
+        return None
+    # Split into per-file blocks. Prefer git's ``diff --git`` boundaries; fall
+    # back to ``--- ``/``+++ `` pairs for plain unified diffs.
+    if re.search(r"(?m)^diff --git ", patch_text):
+        blocks = [b for b in re.split(r"(?m)^(?=diff --git )", patch_text) if b.strip()]
+    else:
+        blocks = [b for b in re.split(r"(?m)^(?=--- )", patch_text) if b.strip()]
+
+    want = Path(target_file).name
+    want_parts = Path(target_file).parts
+    matches: list[tuple[int, str, str]] = []  # (tail_len, raw_path, block)
+    for block in blocks:
+        m = re.search(r"(?m)^\+\+\+ (.+)$", block)
+        if not m:
+            continue
+        raw = _unquote_diff_path(m.group(1).split("\t", 1)[0].strip())
+        if raw == "/dev/null":
+            continue
+        # Strip a leading a/ or b/ for tail comparison only.
+        cmp_path = re.sub(r"^[ab]/", "", raw)
+        cmp_parts = Path(cmp_path).parts
+        if not cmp_parts or Path(cmp_path).name != want:
+            continue
+        if Path(cmp_path).suffix.lower() in _BACKUP_SUFFIXES:
+            continue
+        # Longest common path-tail length (basename match is the floor).
+        tail = 0
+        for a, b in zip(reversed(cmp_parts), reversed(want_parts)):
+            if a != b:
+                break
+            tail += 1
+        matches.append((tail, raw, block))
+
+    if not matches:
+        return None
+    best_tail = max(t for t, _, _ in matches)
+    best = [(r, b) for t, r, b in matches if t == best_tail]
+    if len(best) != 1:
+        return None  # genuine ambiguity: two distinct targets share the tail
+    raw, block = best[0]
+    if "\n@@" not in ("\n" + block):
+        return None  # rename/mode-only/binary section: no hunk to apply
+    # Validate the path that the apply loop actually writes to (after the same
+    # empty-component-aware strip), at every strip level it will try — not a
+    # separately-derived cmp_path. Reject if any usable strip yields an absolute
+    # or ``..``-containing path.
+    stripped = [_strip_diff_prefix(raw, s) for s in (1, 0, 2)]
+    if not any(stripped):
+        return None
+    if any(rel and (os.path.isabs(rel) or ".." in Path(rel).parts) for rel in stripped):
+        return None
+    return block, raw
+
+
+def _reconstruct_source_from_patch(
+    patch_path: Path,
+    target_file: str,
+    output_path: Path,
+) -> str:
+    """Reconstruct a complete source file by applying a unified diff.
+
+    A backend's best artifact is frequently a unified ``.patch``/``.diff``
+    (a diff, not a complete file). When no full-source artifact is found, the
+    original kernel at ``target_file`` plus the patch deterministically
+    reconstruct the optimized source. The matched file's section is applied
+    inside an isolated temp dir (so an untrusted patch header cannot escape it),
+    via ``git apply`` then ``patch`` across the usual strip levels.
+
+    Args:
+        patch_path (Path): Unified diff produced by the backend.
+        target_file (str): Original (pre-patch) kernel source path.
+        output_path (Path): Where the reconstructed source is written.
+
+    Returns:
+        str: The string path of the reconstructed source, or empty string when
+            the original is missing or the patch does not apply cleanly.
+    """
+    original = Path(target_file)
+    if not patch_path.is_file() or not original.is_file():
+        return ""
+    try:
+        original_text = original.read_text(encoding="utf-8", errors="replace")
+        patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    selected = _select_patch_section(patch_text, target_file)
+    if selected is None:
+        return ""
+    section_text, raw_target = selected
+
+    for strip in (1, 0, 2):
+        rel = _strip_diff_prefix(raw_target, strip)
+        if not rel or os.path.isabs(rel) or ".." in Path(rel).parts:
+            continue
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            work = tmp / rel
+            section = tmp / "section.patch"
+            # Containment guard: confirm the resolved write path stays inside the
+            # temp dir after all path arithmetic, before writing anything.
+            try:
+                work.resolve().relative_to(tmp.resolve())
+            except ValueError:
+                continue
+            try:
+                work.parent.mkdir(parents=True, exist_ok=True)
+                work.write_text(original_text, encoding="utf-8")
+                section.write_text(section_text, encoding="utf-8")
+            except OSError:
+                continue
+            applied = False
+            # git apply (honours rename/strip semantics), contained to tmp; no
+            # --unsafe-paths/--directory, so git refuses any path escape itself.
+            try:
+                rc = subprocess.run(
+                    ["git", "apply", f"-p{strip}", "section.patch"],
+                    capture_output=True, text=True, cwd=str(tmp), check=False,
+                )
+                applied = rc.returncode == 0 and work.is_file()
+            except (OSError, ValueError):
+                applied = False
+            if not applied:
+                # patch with an explicit file arg ignores the header path and
+                # only writes ``work`` (any .rej stays in the temp dir).
+                try:
+                    with section.open(encoding="utf-8", errors="replace") as pf:
+                        rc = subprocess.run(
+                            ["patch", f"-p{strip}", "--force", "--no-backup-if-mismatch",
+                             str(work)],
+                            stdin=pf, capture_output=True, text=True, check=False,
+                        )
+                    applied = rc.returncode == 0
+                except (OSError, ValueError):
+                    applied = False
+            if not applied:
+                continue
+            try:
+                patched_text = work.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if patched_text and patched_text != original_text and _source_text_looks_complete(
+                patched_text, output_path.suffix.lower()
+            ):
+                try:
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(patched_text, encoding="utf-8")
+                except OSError:
+                    return ""
+                return str(output_path)
+    return ""
+
+
+def build_patch_snapshot(
+    patch_path: str,
+    *,
+    worktree: Path | None,
+    kernel_repo: str,
+    clean_base: str,
+    out_dir: Path,
+) -> dict[str, Any] | None:
+    """Stage byte-exact final contents for every file a patch writes.
+
+    Implements the content-addressed deploy capture: parse the patch as a
+    manifest, then for each non-deleted path materialise its exact final bytes
+    into ``out_dir`` (mirrored at the same repo-relative path). Content is
+    sourced, in priority order, from the backend's ``worktree`` (ground-truth
+    written files) and, failing that, by reconstructing from ``clean_base`` +
+    the patch in a contained temp dir. Only manifest paths are staged — never
+    the whole worktree — so scratch the backend left outside the patch never
+    deploys.
+
+    Args:
+        patch_path (str): The winning unified diff.
+        worktree (Path | None): The backend worktree of final files, if any.
+        kernel_repo (str): Repo root, for worktree-relative resolution.
+        clean_base (str): Repo root holding pristine pre-patch sources, used to
+            reconstruct content when the worktree lacks a path.
+        out_dir (Path): Snapshot staging dir to populate.
+
+    Returns:
+        dict[str, Any] | None: ``{"snapshot_dir", "descriptors", "patch_path"}``
+            when every write path was materialised byte-exact, else ``None``
+            (caller treats this as non-deployable -> hard fail downstream).
+    """
+    import apply_kernel_patch as _akp
+
+    try:
+        patch_text = Path(patch_path).read_text(encoding="utf-8", errors="replace")
+        descriptors = _akp.parse_patch_manifest(patch_text)
+    except (OSError, ValueError):
+        return None
+    if not descriptors:
+        return None
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for desc in descriptors:
+        if desc["op"] != "write":
+            continue
+        rel = desc["path"]
+        dst = out_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        sourced = False
+        # 1) worktree ground-truth file at the same relative path.
+        if worktree is not None and kernel_repo:
+            cand = worktree / rel
+            if cand.is_file() or cand.is_symlink():
+                try:
+                    import shutil as _shutil
+                    _shutil.copy2(cand, dst, follow_symlinks=False)
+                    sourced = True
+                except OSError:
+                    sourced = False
+        # 2) reconstruct from clean base + patch (single-file slice).
+        if not sourced and clean_base:
+            base_file = Path(clean_base) / rel
+            reconstructed = _reconstruct_source_from_patch(
+                Path(patch_path), str(base_file), dst.with_suffix(dst.suffix + ".recon")
+            ) if base_file.is_file() else ""
+            if reconstructed:
+                try:
+                    Path(reconstructed).replace(dst)
+                    sourced = True
+                except OSError:
+                    sourced = False
+        if not sourced:
+            # Cannot guarantee byte-exact final content for this path -> the
+            # whole attempt is non-deployable (hard fail, never partial).
+            return None
+
+    return {
+        "snapshot_dir": str(out_dir),
+        "descriptors": descriptors,
+        "patch_path": str(patch_path),
+        "repo_root": str(kernel_repo or ""),
+    }
+
+
 def _select_source_artifact(
     attempt: dict[str, Any],
     *,
@@ -3885,6 +4321,22 @@ def _select_source_artifact(
         )
         if extracted:
             return extracted, "extracted_code_block", ""
+
+    # Final fallback: a backend's best artifact is often a unified diff with no
+    # complete-source counterpart (and a diff can't be scraped as a full file).
+    # The original kernel + the patch reconstruct the optimized source
+    # deterministically — universal across backends/strategies/suffixes and
+    # independent of worktree/optimized_versions layout.
+    for path in candidates:
+        if path.suffix.lower() not in {".patch", ".diff"}:
+            continue
+        reconstructed = _reconstruct_source_from_patch(
+            path,
+            target_file,
+            extraction_root / f"{attempt.get('attempt_id', 'attempt')}_patched{target_suffix}",
+        )
+        if reconstructed:
+            return reconstructed, "reconstructed_from_patch", ""
 
     tried = ", ".join(str(p) for p in candidates[:6])
     return "", "missing", f"no complete {target_suffix} source artifact found; tried: {tried}"
@@ -3955,6 +4407,36 @@ def build_verification(
             kernel_repo=kernel_repo,
         )
     artifact_valid = bool(best_artifact_path)
+
+    # Content-addressed deploy capture: when the winning attempt produced a
+    # unified diff, stage byte-exact final contents for the WHOLE patch now
+    # (clean base + worktree are in hand). Deploy then lands all files atomically.
+    deploy_snapshot_dir = ""
+    deploy_patch_path = ""
+    deploy_repo_root = ""
+    if best is not None and artifact_valid:
+        bp = best.get("backend_paths") or {}
+        winning_patch = str(bp.get("geak_per_task_best_patch") or "")
+        if not winning_patch:
+            for key in ("partial_report", "report"):
+                cand = str(bp.get(key) or "")
+                if cand.endswith((".patch", ".diff")):
+                    winning_patch = cand
+                    break
+        if winning_patch and Path(winning_patch).is_file():
+            worktree = _geak_best_worktree(winning_patch)
+            snap_out = (run_dir or Path(winning_patch).parent) / f"{best.get('attempt_id', 'attempt')}_deploy_snapshot"
+            snap = build_patch_snapshot(
+                winning_patch,
+                worktree=worktree,
+                kernel_repo=kernel_repo,
+                clean_base=kernel_repo,
+                out_dir=snap_out,
+            )
+            if snap is not None:
+                deploy_snapshot_dir = snap["snapshot_dir"]
+                deploy_patch_path = snap["patch_path"]
+                deploy_repo_root = snap.get("repo_root", "")
     correctness_signal = getattr(args, "correctness_passed", None)
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
     if correctness_signal is None and best is not None:
@@ -4026,6 +4508,9 @@ def build_verification(
         "artifact_valid": artifact_valid,
         "artifact_source": artifact_source,
         "artifact_error": "" if artifact_valid else artifact_error,
+        "deploy_snapshot_dir": deploy_snapshot_dir,
+        "deploy_patch_path": deploy_patch_path,
+        "deploy_repo_root": deploy_repo_root,
     }
 
 
@@ -4122,14 +4607,17 @@ def main() -> int:
         default=60.0,
         help="Per-attempt wall-clock budget for claude/codex OOB backends. GEAK uses --geak-budget-min.",
     )
-    # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 130 min.
-    _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
+    # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 180 min (3h).
+    # 180 matches GEAK's OWN full-mode budget (config budgets.full.total_s=10800s);
+    # the prior 130 killed GEAK ~50 min before its own deadline, mid round-2, and
+    # the on-disk partial wins were lost. No new knob: GEAK_RUN_MODE is the switch.
+    _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 180.0
     parser.add_argument(
         "--geak-budget-min",
         type=float,
         default=_geak_budget_default,
         help="Per-attempt wall-clock budget for GEAK only "
-        "(default tracks $GEAK_RUN_MODE: full -> 130, "
+        "(default tracks $GEAK_RUN_MODE: full -> 180, "
         "quick -> 70; both aligned with yaml "
         "run.budgets.<mode>.total_s + finalize_grace + "
         "kill_buffer + safety so the prompt-quoted "

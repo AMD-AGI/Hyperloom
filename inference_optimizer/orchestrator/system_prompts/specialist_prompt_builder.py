@@ -502,7 +502,10 @@ class SpecialistPromptInputs:
     max_model_len: int = 0
     # Runtime fingerprint so the specialist can judge lesson applicability;
     # ``framework_version`` is the precise install version. Empty => no
-    # version annotation.
+# version annotation. ``framework`` is the active server framework
+    # (``sglang`` / ``vllm`` / ``atom``); empty falls back to the canonical
+    # sglang/vllm hint blocks, and switches "what to read first" bullets to
+    # atom paths when ``framework == 'atom'``.
     framework: str = ""
     framework_version: str = ""
 
@@ -519,6 +522,17 @@ class SpecialistPromptInputs:
     # empty dict renders a placeholder.
     roofline_evidence: dict[str, Any] = field(default_factory=dict)
 
+    # Substrate directional lever priors (cortex ``/v2/reasoning/levers``):
+    # ``{focus, seed, summary, levers:[{knob, direction, confidence, ...}]}``.
+    # Empty dict renders a placeholder; advisory, never a gate.
+    substrate_levers: dict[str, Any] = field(default_factory=dict)
+
+    # Substrate↔gbrain dual-read cross-check (see ``substrate_dual_read``):
+    # the substrate's verdict on the gbrain warm recipe's champion config —
+    # ``{verdict, selected_source, conflicts:[...], confirmations:[...], ...}``.
+    # Empty dict renders nothing; advisory, never a gate.
+    substrate_dual_read: dict[str, Any] = field(default_factory=dict)
+
     # Recipe summary from T0 ``find-recipe``
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
@@ -534,11 +548,6 @@ class SpecialistPromptInputs:
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 
-    # Active server framework (``sglang`` / ``vllm`` / ``atom``); empty falls
-    # back to the canonical sglang/vllm hint blocks. Switches "what to read
-    # first" bullets to atom paths when ``framework == 'atom'``.
-    framework: str = ""
-
     # Local source navigation hint
     framework_source_roots: tuple[str, ...] = ()
     source_hint_directories: tuple[str, ...] = ()
@@ -549,9 +558,8 @@ class SpecialistPromptInputs:
     # Free-form notes from Orchestration (e.g. previous-round resid_qs)
     notes: str = ""
 
-    # Dispatch profile dials (see orchestrator.specialist_profile). Defaults
-    # preserve the legacy single-domain patch-authoring behaviour; later phases
-    # consume these to shape cross-domain / freeform / bench prompting.
+    # Dispatch profile dials (see orchestrator.specialist_profile) that shape
+    # single-domain / cross-domain / freeform / bench prompting.
     scope: str = "domain"
     mode: str = "patch"
     bench: bool = False
@@ -643,8 +651,8 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         body.extend(_cross_domain_block(inp))
     elif inp.scope == "freeform":
         body.extend(_freeform_block(inp))
-    if inp.bench and inp.mode == "patch":
-        body.extend(_bench_block(inp))
+    if inp.allocated_gpu_ids:
+        body.extend(_gpu_autonomy_block(inp))
     if inp.auto_retry_reason.strip():
         body.extend(_auto_retry_note_block(inp))
     return body
@@ -678,51 +686,64 @@ def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
-def _bench_block(inp: SpecialistPromptInputs) -> list[str]:
-    """In-loop micro-bench mandate appended for bench-enabled specialists
-    (``mode=patch`` & ``bench=true``). Lists the whitelisted ``bench_id``s and
-    the worktree-scoped contract; the ``run_bench`` tool executes them.
+def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
+    """On-GPU autonomy block appended for GPU specialists (those with a card
+    allocation). Frames the broad capabilities the specialist has on its own
+    leased cards and surfaces the *optional* ``rebench`` helper — none of it is
+    a mandate; the Coordinator's ``integrate_patch`` E2E gate stays the single
+    authoritative measure of truth.
 
     Args:
         inp: The specialist prompt inputs.
 
     Returns:
-        The rendered micro-bench mandate lines, or ``[]`` when no benches are
-        registered.
+        The rendered on-GPU autonomy lines.
     """
-    from ..specialist_bench import BENCH_REGISTRY, MAX_BENCH_WALL_CLOCK_SEC
-
-    if not BENCH_REGISTRY:
-        return []
-    lines = [
+    cards = ", ".join(str(g) for g in inp.allocated_gpu_ids)
+    return [
         "",
-        "### In-loop micro-bench (run_bench)",
+        "### On-GPU autonomy (your leased cards)",
         "",
-        "You have the worktree-scoped ``run_bench`` tool to micro-measure the "
-        "impact of a patch BEFORE you finalize it. Each bench runs a "
-        "whitelisted probe inside your worktree, writes under "
-        "``scratch/bench/<bench_id>/`` (destroyed with the worktree), and is "
-        f"hard-capped at {int(MAX_BENCH_WALL_CLOCK_SEC)}s. Benches never start "
-        "a serving process and never write outside the worktree.",
+        f"You exclusively own GPU card(s) [{cards}] for this task. On those "
+        "cards you are free to do whatever converges on a benched win:",
+        "- For kernel/config autotune, search the installed framework/source "
+        "first for maintained benchmark/tuning entrypoints, config lookup "
+        "paths, and nearby config families; prefer those.",
+        "- If the built-in path is missing or incomplete, write a small "
+        "source-derived harness around the framework primitive/config override "
+        "API. Use warmups, true-default/current/candidate baselines, "
+        "median/min-of-reps, and an accuracy guard.",
+        "- Write and run arbitrary scripts — autotune harnesses, "
+        "microbenchmarks, profilers (rocprof / torch.profiler / your own "
+        "breakdown).",
+        "- Start / restart a real server on your own cards (any port that is "
+        "NOT the production serving port 8888) and benchmark it however you "
+        "see fit.",
+        "- Profile freely to get a fresh trace after a change — don't rely only "
+        "on the static roofline snapshot you were handed.",
+        "- Tune the framework's config-file levers (e.g. MoE/GEMM/attention "
+        "Triton config JSONs) — a missing/untuned config is often the single "
+        "biggest lever.",
+        "- Self-check accuracy (advisory ``max_abs_err`` / gsm8k) when you want "
+        "to — the Coordinator gate stays authoritative, so this is guidance, "
+        "not a requirement.",
         "",
-        "Allowed bench_ids:",
+        "Optional helper: a ``rebench`` convenience reuses the real Magpie "
+        "serving + benchmark path on your leased cards + a non-8888 port, so "
+        "you can get numbers directly comparable to the ``integrate_patch`` "
+        "gate in one call:",
+        "    python -m inference_optimizer.orchestrator.specialist_rebench \\",
+        "        --config <magpie.yaml> --output ./scratch/rebench "
+        "[--extra-args '<server args>']",
+        "  It prints a JSON result with ``output_throughput``. It is OPTIONAL "
+        "— you may instead write your own bench/autotune script. Throughput "
+        "does NOT have to come from rebench.",
     ]
-    for spec in BENCH_REGISTRY.values():
-        lines.append(f"- ``{spec.bench_id}`` — {spec.description}")
-    lines.extend(
-        [
-            "",
-            "run_bench is advisory: the Coordinator still owns the authoritative "
-            + "E2E benchmark and the KEEP/REVERT decision. Never self-report numeric "
-            + "speedups in ``specialist_done`` based on a micro-bench.",
-        ]
-    )
-    return lines
 
 
 def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
-    """Free-form mandate appended when ``scope == 'freeform'`` (absorbed from
-    the retired dynamic_specialist wave channel). The specialist is NOT bound
+    """Free-form mandate appended when ``scope == 'freeform'``. The
+    specialist is NOT bound
     to the domain catalogue — the Orchestration ``task_description`` is the
     whole mandate. The single deliverable is still ONE ``specialist_done``.
 
@@ -754,8 +775,8 @@ def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
-    """Cross-domain mandate appended when ``scope == 'domains'`` (absorbed
-    from the retired dynamic_action channel). The single deliverable is still
+    """Cross-domain mandate appended when ``scope == 'domains'``. The
+    single deliverable is still
     ONE ``specialist_done``; the difference is the patch may span every domain
     in scope and the Critic will hold it to the cross-domain rules.
 
@@ -810,10 +831,6 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- gpu_type: {_NONE_PLACEHOLDER}")
     if inp.allocated_gpu_ids:
         rows.append("- allocated specialist GPU ids: " + ", ".join(str(g) for g in inp.allocated_gpu_ids))
-        rows.append(
-            "- GPU specialist scope: short experiments / microbenchmarks only; "
-            "do not launch a persistent serving server or Magpie benchmark loop."
-        )
     if inp.tp > 0:
         rows.append(f"- TP: {inp.tp}")
     else:
@@ -922,8 +939,9 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 4 — optional KB context
 def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
-    """Issue-J: all prior sources empty, so inject a cold-start directive
-    instead of letting specialists return an empty proposal_set.
+    """Return True when every prior KB/PR/research source is empty, so a
+    cold-start directive is injected instead of letting specialists return
+    an empty proposal_set.
 
     Args:
         inp: The specialist prompt inputs.
@@ -1024,6 +1042,172 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # Section 4a — Roofline / TraceLens evidence
+def _section_substrate_levers(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the SUBSTRATE EVIDENCE section from ``inp.substrate_levers``.
+
+    Surfaces the cortex substrate's directional lever priors for this focus so
+    the specialist steers toward measured-beneficial knobs and away from
+    measured-harmful ones *before* spending a trial. Advisory only; the Critic
+    still gates the final answer. Empty digest renders ``(none)``.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``substrate_levers``).
+
+    Returns:
+        The rendered substrate-evidence section lines.
+    """
+    rows = ["## 4b. SUBSTRATE EVIDENCE (advisory)", ""]
+    dig = inp.substrate_levers or {}
+    levers = dig.get("levers") if isinstance(dig, dict) else None
+    if not isinstance(dig, dict) or not isinstance(levers, list) or not levers:
+        rows.append(
+            "(none — the cortex knowledge substrate has no calibrated or "
+            "aggregate lever priors for this model-class yet, or the KB is not "
+            "wired this session.)"
+        )
+        return rows
+
+    summary = dig.get("summary") if isinstance(dig.get("summary"), dict) else {}
+    seed = str(dig.get("seed") or "")
+    head = (
+        "Directional lever priors mined from the fleet's measured knob trials "
+        "(Phase-2 aggregate) and confirmed by calibration (Phase-3) where "
+        "available. Treat **beneficial** as a steer-toward prior and "
+        "**harmful** as a steer-away prior; **neutral** had no measurable "
+        "effect. These are advisory — justify deviations, and the Critic still "
+        "gates the final answer."
+    )
+    rows.append(head)
+    if seed:
+        rows.append("")
+        rows.append(f"Resolved subject: `{seed}`")
+    if summary:
+        rows.append("")
+        rows.append(
+            "Summary: "
+            f"beneficial={int(summary.get('beneficial', 0))}, "
+            f"neutral={int(summary.get('neutral', 0))}, "
+            f"harmful={int(summary.get('harmful', 0))}, "
+            f"calibrated={int(summary.get('calibrated', 0))}"
+        )
+    rows.append("")
+    rows.append("| knob | direction | confidence | basis | evidence |")
+    rows.append("|---|---|---:|---|---|")
+
+    _ORDER = {"beneficial": 0, "harmful": 1, "neutral": 2}
+
+    def _sort_key(lv: dict[str, Any]) -> tuple[int, float]:
+        conf = lv.get("confidence")
+        conf_f = float(conf) if isinstance(conf, (int, float)) else 0.0
+        return (_ORDER.get(str(lv.get("direction")), 3), -conf_f)
+
+    shown = sorted(
+        (lv for lv in levers if isinstance(lv, dict)), key=_sort_key
+    )[:20]
+    for lv in shown:
+        knob = str(lv.get("knob") or "")
+        direction = str(lv.get("direction") or "")
+        conf = lv.get("confidence")
+        conf_str = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "—"
+        calibrated = bool(lv.get("calibrated"))
+        verdict = str(lv.get("verdict") or "")
+        scope = str(lv.get("scope") or "")
+        basis = "calibrated" if calibrated else (f"agg:{verdict}" if verdict else "grounded")
+        if scope == "global":
+            basis += " (global)"
+        confirmed = int(lv.get("confirmed") or 0)
+        deviated = int(lv.get("deviated") or 0)
+        n = int(lv.get("evidence_count") or 0)
+        if confirmed or deviated:
+            evidence = f"+{confirmed}/-{deviated}"
+        else:
+            evidence = f"n={n}" if n else "—"
+        rows.append(f"| `{knob}` | {direction} | {conf_str} | {basis} | {evidence} |")
+    if len(levers) > len(shown):
+        rows.append("")
+        rows.append(f"(+{len(levers) - len(shown)} more lever(s) not shown)")
+    return rows
+
+
+def _section_substrate_dual_read(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the SUBSTRATE × WARM-RECIPE CROSS-CHECK from ``substrate_dual_read``.
+
+    Two knowledge sources steer this specialist: the cortex substrate (§4b
+    directional priors) and the gbrain warm-start recipe (§5 champion config).
+    This block reports the substrate's verdict on that recipe — where they
+    agree, and (more importantly) where the substrate's measured evidence flags
+    a recipe lever as harmful. Conflicts are a steer-away signal; agreements
+    reinforce. Advisory only — the Critic still gates the final answer.
+
+    Empty / no-signal digests render nothing (the section is dropped).
+
+    Args:
+        inp: The specialist prompt inputs (reads ``substrate_dual_read``).
+
+    Returns:
+        The rendered cross-check section lines, or ``[]`` to omit the section.
+    """
+    dig = inp.substrate_dual_read or {}
+    if not isinstance(dig, dict) or not dig:
+        return []
+    verdict = str(dig.get("verdict") or "")
+    # Only worth showing when the two sources were actually compared.
+    if verdict in ("", "no_data", "substrate_only"):
+        return []
+
+    rows = ["## 4c. SUBSTRATE × WARM-RECIPE CROSS-CHECK (advisory)", ""]
+    selected = str(dig.get("selected_source") or "")
+    headline = {
+        "conflict": (
+            "**The cortex substrate's measured evidence CONFLICTS with the "
+            "gbrain warm-start recipe below.** Treat the flagged levers as a "
+            "steer-away signal and justify keeping them if you do."
+        ),
+        "agree": (
+            "The cortex substrate **confirms** the gbrain warm-start recipe's "
+            "levers — the two knowledge sources agree."
+        ),
+        "gbrain_only": (
+            "The gbrain warm-start recipe proposes levers the cortex substrate "
+            "has no measured basis for — use the recipe, but it is unverified."
+        ),
+        "no_basis": (
+            "The cortex substrate has no measured basis to judge the gbrain "
+            "warm-start recipe's levers."
+        ),
+    }.get(verdict, "")
+    if headline:
+        rows.append(headline)
+    rows.append("")
+    rows.append(f"Cross-check verdict: **{verdict}** (selected source: `{selected or 'none'}`)")
+
+    conflicts = dig.get("conflicts") if isinstance(dig.get("conflicts"), list) else []
+    if conflicts:
+        rows.append("")
+        rows.append("Conflicting recipe levers (substrate evidence disagrees):")
+        rows.append("")
+        rows.append("| lever | knob | status | note |")
+        rows.append("|---|---|---|---|")
+        for c in conflicts[:12]:
+            if not isinstance(c, dict):
+                continue
+            lever = str(c.get("lever") or "")
+            knob = str(c.get("knob") or "")
+            status = str(c.get("status") or "")
+            note = str(c.get("note") or "").replace("|", "/")
+            rows.append(f"| `{lever}` | `{knob}` | {status} | {note} |")
+
+    confirmations = dig.get("confirmations") if isinstance(dig.get("confirmations"), list) else []
+    if confirmations and not conflicts:
+        rows.append("")
+        confirmed_levers = ", ".join(
+            f"`{c.get('lever')}`" for c in confirmations[:8] if isinstance(c, dict) and c.get("lever")
+        )
+        if confirmed_levers:
+            rows.append(f"Substrate-confirmed recipe levers: {confirmed_levers}")
+    return rows
+
+
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -1225,7 +1409,7 @@ def _format_version_note(
     inp: SpecialistPromptInputs,
     lesson_attrs: dict[str, Any],
 ) -> str:
-    """GAP 8 — render a ``[from sglang@X.Y, you're on A.B]`` annotation when
+    """Render a ``[from sglang@X.Y, you're on A.B]`` annotation when
     the lesson's framework_version differs; empty when either side is
     unknown or they match.
 
@@ -1458,6 +1642,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                             "extra_args": "--example-flag value",
                             "extra_envs": {"EXAMPLE_ENV": "1"},
                             "reason": "why this might help the gap",
+                            "atomic": False,
                             "kb_evidence": [],
                             "pr_evidence": [],
                             "source_evidence": [],
@@ -1480,6 +1665,18 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "- ``proposal_set`` items reuse the §3.4 explore variant schema.",
         (
+            "- ``atomic`` (bool, default false): set ``true`` when this "
+            "proposal's ``extra_args`` / ``extra_envs`` are a **coupled set "
+            "that only works together** and MUST be benched as one variant "
+            "(e.g. enabling MTP/speculative decoding REQUIRES a paired "
+            "``--gpu-memory-utilization`` reduction so the draft model has "
+            "headroom — split them and each half OOMs or shows no gain). "
+            "Orchestration is instructed to dispatch an ``atomic`` proposal "
+            "verbatim, without splitting, dropping, or re-deriving its flags. "
+            "Put every co-required flag in THIS one entry; do not scatter a "
+            "coupling across several proposals."
+        ),
+        (
             f"- ``proposal_set`` MUST contain AT MOST **{inp.max_proposals}** "
             "entries. You are a curator, not a brainstormer: rank candidates "
             "by expected gain x your confidence, drop everything that "
@@ -1497,6 +1694,12 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "  workspace or worktree) of any unified-diff patch files you",
         "  authored this round. Empty list = no patches; downstream",
         "  ``integrate_patch`` action skips when empty.",
+        "- ``artifacts_written`` lists any non-diff tuned artifacts to install",
+        "  (e.g. an autotuned config JSON) as objects ``{source, target, kind,",
+        "  description}``: ``source`` is a path inside your worktree, ``target``",
+        "  is the framework-relative install path. ``integrate_patch`` backs up",
+        "  the target, installs the artifact, runs the same E2E gate, and",
+        "  restores the backup on REVERT.",
         "- ``empty=true`` is legitimate when you have no actionable proposals;",
         "  in that case ``proposal_set=[]`` and you must put the reason in",
         "  ``summary``.",
@@ -1522,9 +1725,10 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 9 (iron rules) of the specialist prompt.
 
-    Emits the immutable capability boundary (no serving-GPU control,
-    worktree-only patches, no KB writes, allowed intents, turn cap, and
-    workspace confinement).
+    Emits the immutable capability boundary (full autonomy on the
+    specialist's own leased cards with the single production-serving boundary,
+    worktree-only patch/artifact staging, no KB writes, allowed intents, turn
+    cap, and workspace confinement).
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs (source
@@ -1535,38 +1739,46 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
     """
     workspace = inp.workspace_path or "<runs/specialist/<task_id>/>"
     if inp.allocated_gpu_ids:
+        cards = ", ".join(str(g) for g in inp.allocated_gpu_ids)
         gpu_rule = [
-            "1. You have an explicit GPU specialist allocation for this task.",
-            "   You MAY run short GPU experiments or microbenchmarks on the",
-            "   allocated visible devices only. You MUST NOT launch persistent",
-            "   serving servers, run Magpie benchmark loops, restart vLLM/SGLang,",
-            "   or control the production serving process.",
+            f"1. You EXCLUSIVELY own GPU card(s) [{cards}] for this task. On",
+            "   those cards do whatever you want: edit code, build, start/stop",
+            "   your own servers (on any port that is NOT 8888), profile,",
+            "   autotune, install tuned artifacts, run real benchmark loops.",
+            "   The ONE thing you must NOT do: touch the production serving",
+            "   process, its cards, or port 8888 — co-residing on them would",
+            "   corrupt both your measurement and production. Manage only",
+            "   processes YOU started, by their own PID/PGID.",
         ]
     else:
         gpu_rule = [
-            "1. **NEVER** touch the serving GPU (no Magpie / no benchmark / no",
-            "   server restart / no vllm or sglang process control). The",
-            "   Coordinator runs benchmarks; you only propose what to try and",
-            "   optionally author patches.",
+            "1. You have no GPU allocation for this task, so do not run GPU",
+            "   benchmarks or start servers. The ONE hard boundary that always",
+            "   holds: never touch the production serving process / its cards /",
+            "   port 8888. The Coordinator runs benchmarks; you propose what to",
+            "   try and optionally author patches.",
         ]
     return [
         "## 9. IRON RULES (Inv-5.1 / Inv-5.2 / Inv-5.3)",
         "",
         *gpu_rule,
-        "2. **You MAY** write source patches, but ONLY into your own",
-        f"   worktree at ``{workspace}/`` (a git checkout branched off",
-        "   the framework HEAD just for this task). Concretely:",
-        "   - Edit files inside the worktree.",
-        "   - ``git diff > patches/NNN_<slug>.patch`` from inside the",
-        "     worktree to produce a unified-diff patch file.",
-        "   - List patch paths in ``patches_written`` in your",
-        "     ``specialist_done`` payload (relative to the worktree).",
-        "   You **MUST NEVER** ``git apply``, ``git commit``, restart a",
-        "   server, or otherwise mutate the main ``framework_source_roots``",
-        "   directly — the orchestrator's ``integrate_patch`` action is",
-        "   the single integration point that applies your patches with",
-        "   the throughput + accuracy gate. (PR-A2, Arbor-into-Hyperloom:",
-        "   Inv-5.1 updated.)",
+        "2. **You MAY** produce changes for integration, but stage them ONLY",
+        f"   inside your own worktree at ``{workspace}/`` (a git checkout",
+        "   branched off the framework HEAD just for this task). Two output",
+        "   kinds are accepted by the orchestrator's ``integrate_patch`` gate:",
+        "   - Unified-diff patches: ``git diff > patches/NNN_<slug>.patch``",
+        "     from inside the worktree; list paths in ``patches_written``.",
+        "   - Tuned non-diff artifacts (e.g. an autotuned config JSON): write",
+        "     the file under your worktree and list it in ``artifacts_written``",
+        "     as ``{source, target, kind, description}`` (``source`` relative to",
+        "     the worktree, ``target`` the framework-relative install path).",
+        "   You **MUST NEVER** ``git apply`` / ``git commit`` against or",
+        "   otherwise mutate the main ``framework_source_roots`` directly —",
+        "   the orchestrator's ``integrate_patch`` action is the single",
+        "   integration point that applies your patches/artifacts with the",
+        "   throughput + accuracy gate. (Starting/stopping YOUR OWN servers on",
+        "   YOUR OWN leased cards per rule 1 is fine; the prohibition here is",
+        "   only about mutating the shared framework tree directly.)",
         "3. **NEVER** call ``cortex-kb`` write endpoints (propose-point /",
         "   propose-edge / propose-lesson / propose-pitfall / update-recipe)",
         "   directly. The Coordinator owns KB writes (PolicyGate R4). KB",
@@ -1620,7 +1832,9 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_gap(inp),  # 1: § 2-3
         _section_kb_subgraph(inp),  # 2: § 4
         _section_roofline_evidence(inp),  # 3: § 4a
+        _section_substrate_levers(inp),  # 3a: § 4b
         _section_recipe(inp),  # 4: § 5
+        _section_substrate_dual_read(inp),  # 4a: § 4c (substrate × recipe cross-check)
         _section_lessons(inp),  # 5: § 5b
         _section_pitfalls(inp),  # 6: § 5c
         _section_pr_feed(inp),  # 7: § 6

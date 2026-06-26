@@ -1226,24 +1226,45 @@ def _try_generate_aiter_harness(
     )
     log(f"aiter idiom: reusing @benchmark fn {test_fn.name!r}")
 
-    # Map the candidate's shapes to the test fn's leading int params (commonly
-    # m, n, k). dtype defaults to bf16; unknown params fall back to the fn's own
-    # defaults by being omitted from kwargs.
+    # Map the candidate's traced shapes to the test fn's int params so the
+    # harness pins the EXACT serving shape (user_task:production), never the
+    # test's own synthetic sweep. Two mapping layers:
+    #  (1) NAME-aware: pin params whose name matches a known dim role (token /
+    #      model_dim / inter_dim / m / n / k / seqlen / batch). This is what
+    #      lets MoE fns like test_fmoe(dtype, token, model_dim, inter_dim, ...)
+    #      bind correctly — previously `token`/`model_dim` were unrecognized and
+    #      the harness fell back to a CSV token sweep (wrong shapes).
+    #  (2) POSITIONAL fallback for the classic (m, n, k) GEMM idiom.
     shape = _aiter_shape_from_candidate(candidate)
     kwargs: dict[str, object] = {}
-    int_param_order = ["m", "n", "k", "b", "batch", "num_tokens", "seqlen", "dim"]
-    shape_values = [shape.get(k) for k in ("M", "N", "K") if shape.get(k)]
+    # Role -> value from the traced operands.
+    role_value = {
+        "m": shape.get("M"), "token": shape.get("M"), "tokens": shape.get("M"),
+        "tokennum": shape.get("M"), "num_tokens": shape.get("M"),
+        "numtokens": shape.get("M"), "seqlen": shape.get("M"), "batch": shape.get("M"),
+        "n": shape.get("N"), "model_dim": shape.get("N"), "dim": shape.get("N"),
+        "hidden": shape.get("N"), "hidden_size": shape.get("N"),
+        "k": shape.get("K"), "inter_dim": shape.get("K"),
+        "intermediate": shape.get("K"), "inter": shape.get("K"),
+    }
+    positional = [shape.get(k) for k in ("M", "N", "K") if shape.get(k)]
     si = 0
     for p in test_fn.params:
         pl = p.lower()
         if pl in ("dtype", "input_dtype"):
             kwargs[p] = "__DTYPE__"
-        elif pl in int_param_order and si < len(shape_values):
-            kwargs[p] = shape_values[si]
+        elif pl in role_value and role_value[pl] is not None:
+            kwargs[p] = role_value[pl]
+        elif pl in ("m", "n", "k", "b", "batch", "num_tokens", "seqlen", "dim") and si < len(positional):
+            kwargs[p] = positional[si]
             si += 1
-    if not kwargs:
+    # Require that we pinned at least the leading dim (token/M); otherwise the
+    # harness would benchmark unfaithful shapes — refuse rather than mislead.
+    pinned_dims = [v for k, v in kwargs.items() if v != "__DTYPE__"]
+    if not pinned_dims:
         log("aiter idiom: could not map any candidate shape to fn params")
         return None
+    log(f"aiter idiom: pinned traced shape params {[(k,v) for k,v in kwargs.items() if v!='__DTYPE__']}")
 
     # Render kwargs dict; dtype placeholder becomes a torch dtype literal.
     dtype_literal = _aiter_torch_dtype(candidate)
@@ -1290,6 +1311,35 @@ def _try_generate_aiter_harness(
     )
 
 
+def _parse_traced_operand_dims(candidate: dict) -> list[tuple[int, ...]]:
+    """Parse the candidate's traced operand shapes into a list of int-tuples.
+
+    Handles both the dict ``{M,N,K}`` form and the TraceLens list form where
+    each entry is a string (or ``{"shape": str}``) of ``<br>``-joined operand
+    shapes, e.g. ``"(64,2048) bf16<br>(128,1536,2048) bf16<br>..."``. Returns
+    the operand dim-tuples in call order so callers can pin exact serving shapes
+    (token=first 2D operand's leading dim, etc.) rather than a synthetic sweep.
+    """
+    import re as _re
+
+    raw = candidate.get("input_shapes") or candidate.get("shapes") or []
+    text = ""
+    if isinstance(raw, list) and raw:
+        first = raw[0]
+        text = first.get("shape", "") if isinstance(first, dict) else str(first)
+    elif isinstance(raw, str):
+        text = raw
+    dims: list[tuple[int, ...]] = []
+    for tok in text.split("<br>"):
+        m = _re.search(r"\(([\d,\s]+)\)", tok)
+        if not m:
+            continue
+        nums = [int(x) for x in m.group(1).split(",") if x.strip().isdigit()]
+        if nums:
+            dims.append(tuple(nums))
+    return dims
+
+
 def _aiter_shape_from_candidate(candidate: dict) -> dict:
     """Best-effort {M,N,K} extraction from a candidate's input_shapes."""
     out: dict[str, int] = {}
@@ -1299,6 +1349,31 @@ def _aiter_shape_from_candidate(candidate: dict) -> dict:
             v = shapes.get(k) or shapes.get(k.lower())
             if isinstance(v, int):
                 out[k] = v
+    # List/string TraceLens form: derive M/N from the FIRST 2-D operand (the
+    # activation, e.g. (token, model_dim)), and the reduction/inter dim from the
+    # expert-weight tensors. For MoE the weights are 3-D (E, *, *):
+    #   w1 = (E, 2*inter_dim, model_dim), w2 = (E, model_dim, inter_dim).
+    # inter_dim is therefore w2's LAST axis (NOT a middle axis — that earlier
+    # heuristic mis-read topk/2*inter and pinned an unfaithful shape). We detect
+    # w2 as the 3-D weight whose middle dim == model_dim (N).
+    if not out:
+        dims = _parse_traced_operand_dims(candidate)
+        first_2d = next((d for d in dims if len(d) == 2), None)
+        if first_2d:
+            out["M"], out["N"] = first_2d[0], first_2d[1]
+        weights_3d = [d for d in dims if len(d) == 3]
+        model_dim = out.get("N")
+        inter = None
+        if model_dim is not None:
+            # w2 = (E, model_dim, inter_dim): match middle axis to model_dim.
+            w2 = next((d for d in weights_3d if d[1] == model_dim), None)
+            if w2 is not None:
+                inter = w2[2]
+        if inter is None and weights_3d:
+            # Fallback: smallest trailing dim among 3-D weights.
+            inter = min(d[2] for d in weights_3d)
+        if inter is not None:
+            out["K"] = inter
     return out
 
 

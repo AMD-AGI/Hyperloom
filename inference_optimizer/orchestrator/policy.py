@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .framework_paths import resolve_source_file_allowlist
+from .gpu_pool import resolve_gpu_specialist_devices
 from ..protocol.intent import Intent, IntentType
 from ..protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
@@ -43,6 +45,9 @@ from .specialist_profile import (
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from .agent_role import AgentRole
+
+
+log = logging.getLogger(__name__)
 
 
 def _value_is_present(value: Any) -> bool:
@@ -113,9 +118,6 @@ class PolicyDenied(RuntimeError):
 
 
 _GEMM_TUNING_ACTIONS: frozenset[str] = frozenset({"gemm_tuning", "run_gemm_tuning"})
-
-# Legacy constant kept for backward compat; dynamic check in _validate_fp8_only_action.
-FP8_ONLY_ACTIONS: frozenset[str] = _GEMM_TUNING_ACTIONS
 
 
 # Per-action delegate source allowlist (action_name → source roles); unlisted actions fall through to the general delegate rules.
@@ -235,11 +237,38 @@ def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
         return 0
 
 
-# Ceiling snapshot at import for callers needing a plain int; recomputed lazily by :func:`research_lane_ceiling`.
-MAX_RESEARCH_LANE_CAPACITY: int = research_lane_ceiling()
+def _serving_tp_for_policy(shared_state: Any | None = None) -> int:
+    """Resolve serving TP for policy-time specialist GPU validation.
 
-# Canonical name of the LLM-sub-agent resource lane shared by specialists.
-RESEARCH_LANE_NAME: str = "research_lane"
+    Mirrors ``Coordinator._resolve_serving_tp`` so PolicyGate rejects requests
+    that the dispatcher would later materialize into an unschedulable GPU lease.
+    """
+    if shared_state is not None:
+        try:
+            tp = int(getattr(shared_state, "tp", 0) or 0)
+        except (TypeError, ValueError):
+            tp = 0
+        if tp > 0:
+            return tp
+    try:
+        return max(0, int(os.environ.get("TP", "0") or 0))
+    except ValueError:
+        return 0
+
+
+def _effective_gpu_specialist_pool_size(shared_state: Any | None = None) -> int:
+    """Actual policy-time GPU specialist pool size after serving carve."""
+    ceiling = gpu_specialist_ceiling(shared_state)
+    if ceiling <= 0:
+        return 0
+    return len(
+        resolve_gpu_specialist_devices(
+            ceiling,
+            serving_tp=_serving_tp_for_policy(shared_state),
+        ),
+    )
+
+
 DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 12
 
 # Verdicts that allow ``integrate_patch`` without an operator override (``advise`` = soft approval, ``approve`` = green light).
@@ -253,10 +282,9 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
 # Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
 SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration"})
 
-# Free-form (``scope='freeform'``) sanity-gate limits (absorbed from the
-# retired dynamic_specialist wave channel).
-# WS3: relaxed from 8 → 16; the real ceiling is the ``research_lane`` capacity
-# (2×GPU) and the GPU specialist pool, so this is just a coarse sanity tripwire.
+# Free-form (``scope='freeform'``) sanity-gate limits. Coarse sanity tripwire on
+# free-form specialist wave size; the real ceiling is the ``research_lane``
+# capacity (2×GPU) and the GPU specialist pool.
 SPECIALIST_FREEFORM_WAVE_MAX: int = 16
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 # Lightweight mechanical red-line tripwire over free-form task descriptions:
@@ -529,14 +557,14 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "saturated_directions",
         "bottleneck_shift",
         "cycle_strategy_log",
-        # operator-facing lifecycle event log (#266). Coordinator-only writer
+        # operator-facing lifecycle event log. Coordinator-only writer
         # (SharedState.record_lifecycle_event); LLM update_state must not be
         # able to forge "phase X finished, outputs at <path>" events.
         "lifecycle",
         # specialist sub-agent ledger; LLM cannot inject entries (proposals go via the R3 path).
         "specialist_rounds",
         "specialist_domain_empty_streak",
-        # per-kb_anchor coverage counters (point 1); Coordinator-only writers.
+        # per-kb_anchor coverage counters; Coordinator-only writers.
         "rounds_since_last_specialist",
         "rounds_since_last_keep",
         "last_specialist",
@@ -791,7 +819,7 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
-        # Plan A — kernel-owned actions are not directly delegatable.
+        # Kernel-owned actions are not directly delegatable; require a REQUEST to the kernel agent.
         if action_name in KERNEL_OWNED_ACTIONS:
             raise PolicyDenied(
                 f"action={action_name!r} is owned by the kernel agent; "
@@ -810,7 +838,7 @@ class PolicyGate:
         # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed (concurrent sweeps crash both vllm engines).
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        # conc_sweep_phase_singleton (Bug #11): block duplicate conc_sweep proposals.
+        # conc_sweep_phase_singleton: block duplicate conc_sweep proposals.
         if action_name == CONC_SWEEP_ACTION_NAME:
             self._validate_conc_sweep_singleton(payload, intent_kind="delegate")
         self._validate_fp8_only_action(action_name, intent_kind="delegate")
@@ -913,7 +941,7 @@ class PolicyGate:
                 payload,
                 intent_kind="propose_action",
             )
-        # conc_sweep_phase_singleton (Bug #11) on propose_action.
+        # conc_sweep_phase_singleton on propose_action.
         if action_name == CONC_SWEEP_ACTION_NAME:
             self._validate_conc_sweep_singleton(
                 payload,
@@ -1251,8 +1279,8 @@ class PolicyGate:
                     tick=int(getattr(state, "tick", 0) or 0),
                     intent_payload={"phase": phase},
                 )
-            except Exception:  # noqa: BLE001 — best-effort audit
-                pass
+            except Exception:  # noqa: BLE001 — best-effort audit, must not block the run
+                log.debug("record_policy_denial (phase_incompatible) failed", exc_info=True)
             return
         raise PolicyDenied(
             f"action {action_name!r} not allowed in phase={phase}",
@@ -1451,32 +1479,17 @@ class PolicyGate:
             PolicyDenied: when the SWEEP phase already carries an auto-enqueued
                 sweep task and no bypass flag is set.
         """
-        params = payload.get("params") or {}
-        if isinstance(params, dict) and params.get("bypass_sweep_singleton"):
-            return
-        ss = getattr(self, "shared_state", None)
-        if ss is None:
-            return
-        history = getattr(ss, "phase_history", None) or []
-        if not history:
-            return
-        latest = history[-1]
-        if not isinstance(latest, dict):
-            return
-        if str(latest.get("to_phase") or "").strip() != PHASE_SWEEP:
-            return
-        evidence = latest.get("evidence")
-        if not isinstance(evidence, dict):
-            return
-        auto_id = str(evidence.get("auto_sweep_task_id") or "").strip()
-        if not auto_id:
-            return
-        raise PolicyDenied(
-            f"sweep: SWEEP phase already has an auto-enqueued sweep "
-            f"task (auto_sweep_task_id={auto_id!r}); concurrent "
-            f"sweep proposals would race for the same GPUs and "
-            f"port and crash both vllm engines on init.",
+        self._validate_sweep_family_singleton(
+            payload,
+            bypass_key="bypass_sweep_singleton",
+            evidence_key="auto_sweep_task_id",
             rule="sweep_phase_singleton",
+            message_fn=lambda auto_id: (
+                f"sweep: SWEEP phase already has an auto-enqueued sweep "
+                f"task (auto_sweep_task_id={auto_id!r}); concurrent "
+                f"sweep proposals would race for the same GPUs and "
+                f"port and crash both vllm engines on init."
+            ),
             hint=(
                 "The Coordinator's SWEEP-entry hook already covers "
                 "the SKILL.md default grid plus the Cortex "
@@ -1490,14 +1503,14 @@ class PolicyGate:
             ),
         )
 
-    # ``conc_sweep_phase_singleton`` (Bug #11)
+    # ``conc_sweep_phase_singleton``
     def _validate_conc_sweep_singleton(
         self,
         payload: dict[str, Any],
         *,
         intent_kind: str,
     ) -> None:
-        """Enforce one conc_sweep per SWEEP phase (Bug #11); re-proposals burn GPU for no new data. Escape: ``params.bypass_conc_sweep_singleton=True``.
+        """Enforce one conc_sweep per SWEEP phase; re-proposals burn GPU for no new data. Escape: ``params.bypass_conc_sweep_singleton=True``.
 
         Args:
             payload (dict[str, Any]): the intent payload;
@@ -1510,8 +1523,58 @@ class PolicyGate:
             PolicyDenied: when the SWEEP phase already carries an auto-enqueued
                 conc_sweep task and no bypass flag is set.
         """
+        self._validate_sweep_family_singleton(
+            payload,
+            bypass_key="bypass_conc_sweep_singleton",
+            evidence_key="auto_conc_sweep_task_id",
+            rule="conc_sweep_phase_singleton",
+            message_fn=lambda auto_id: (
+                f"conc_sweep: SWEEP phase already has an auto-enqueued "
+                f"conc_sweep task (auto_conc_sweep_task_id={auto_id!r}); "
+                f"duplicate runs reproduce the same baseline + current_best "
+                f"comparison and add no new data while burning 30-150 min "
+                f"of GPU time."
+            ),
+            hint=(
+                "Coordinator's post-sweep hook already dispatched "
+                "conc_sweep — wait for SWEEP→CLOSE. If you need a "
+                "second run for debug, set "
+                f"params.bypass_conc_sweep_singleton=True on the "
+                f"{intent_kind} payload (recorded on the audit trail)."
+            ),
+        )
+
+    def _validate_sweep_family_singleton(
+        self,
+        payload: dict[str, Any],
+        *,
+        bypass_key: str,
+        evidence_key: str,
+        rule: str,
+        message_fn: Callable[[str], str],
+        hint: str,
+    ) -> None:
+        """Shared SWEEP-phase singleton guard for the sweep / conc_sweep family.
+
+        Walks the latest ``phase_history`` entry and denies when the SWEEP phase
+        already carries an auto-enqueued task under *evidence_key* (unless the
+        per-family *bypass_key* is set on ``params``).
+
+        Args:
+            payload: The intent payload (``params.<bypass_key>`` opts out).
+            bypass_key: ``params`` flag that bypasses this guard.
+            evidence_key: ``phase_history[-1].evidence`` key holding the
+                auto-enqueued task id.
+            rule: PolicyDenied rule id raised on conflict.
+            message_fn: Builds the deny message from the resolved auto-task id.
+            hint: PolicyDenied remediation hint.
+
+        Raises:
+            PolicyDenied: when the SWEEP phase already carries the auto-enqueued
+                task and no bypass flag is set.
+        """
         params = payload.get("params") or {}
-        if isinstance(params, dict) and params.get("bypass_conc_sweep_singleton"):
+        if isinstance(params, dict) and params.get(bypass_key):
             return
         ss = getattr(self, "shared_state", None)
         if ss is None:
@@ -1527,24 +1590,10 @@ class PolicyGate:
         evidence = latest.get("evidence")
         if not isinstance(evidence, dict):
             return
-        auto_id = str(evidence.get("auto_conc_sweep_task_id") or "").strip()
+        auto_id = str(evidence.get(evidence_key) or "").strip()
         if not auto_id:
             return
-        raise PolicyDenied(
-            f"conc_sweep: SWEEP phase already has an auto-enqueued "
-            f"conc_sweep task (auto_conc_sweep_task_id={auto_id!r}); "
-            f"duplicate runs reproduce the same baseline + current_best "
-            f"comparison and add no new data while burning 30-150 min "
-            f"of GPU time.",
-            rule="conc_sweep_phase_singleton",
-            hint=(
-                "Coordinator's post-sweep hook already dispatched "
-                "conc_sweep — wait for SWEEP→CLOSE. If you need a "
-                "second run for debug, set "
-                f"params.bypass_conc_sweep_singleton=True on the "
-                f"{intent_kind} payload (recorded on the audit trail)."
-            ),
-        )
+        raise PolicyDenied(message_fn(auto_id), rule=rule, hint=hint)
 
     def _validate_integrate_patch_critic_gate(
         self,
@@ -1660,7 +1709,7 @@ class PolicyGate:
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
 
-        # scope='freeform' (absorbed dynamic_specialist) has no domain anchor:
+        # scope='freeform' has no domain anchor:
         # it skips the tag / gap vocabulary checks and runs a lightweight
         # mechanical sanity gate instead.
         scope_raw = str(params.get("scope") or "").strip().lower()
@@ -1668,7 +1717,7 @@ class PolicyGate:
             self._validate_freeform_specialist_dispatch(params)
             return
 
-        # ``params.tags`` is canonical; a single ``params.domain`` is a backward-compatible alias.
+        # ``params.tags`` is canonical; ``params.domain`` is accepted as a single-tag alias.
         tags = normalize_dispatch_tags(params)
         # A *bare* dispatch — no explicit scope and no domain/tag anchor —
         # defaults to the cheap, read-only freeform lane (point 3: safe & cheap
@@ -1696,9 +1745,9 @@ class PolicyGate:
             )
 
         # ``scope`` dial (domain | domains | freeform). Absent => legacy
-        # single-domain default. ``domains`` is the cross-domain channel that
-        # absorbed the retired dynamic_action worker and requires >1 distinct
-        # tag; ``domain`` is single-tag. (``freeform`` has its own gate.)
+        # single-domain default. ``domains`` is the cross-domain channel and
+        # requires >1 distinct tag; ``domain`` is single-tag. (``freeform`` has
+        # its own gate.)
         scope = str(params.get("scope") or "").strip().lower()
         if scope and scope not in SPECIALIST_SCOPE_VALUES:
             raise PolicyDenied(
@@ -1754,8 +1803,8 @@ class PolicyGate:
                     f"delegate{{action='specialist'}}: max_turns must be int, got {max_turns_raw!r}",
                     rule="specialist_dispatch_source",
                 ) from exc
-            # WS1: turns are no longer the stop signal — depth is bounded by the
-            # wall-clock budget. ``max_turns=0`` is accepted as "unbounded" (run
+            # Depth is bounded by the wall-clock budget rather than a turn count.
+            # ``max_turns=0`` is accepted as "unbounded" (run
             # to a deliverable conclusion); negatives and values above the
             # effectively-unbounded hard cap are still rejected.
             if max_turns < 0 or max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
@@ -1813,11 +1862,15 @@ class PolicyGate:
         if not needs_gpu:
             from .specialist_profile import resolve_specialist_profile
 
-            if resolve_specialist_profile(params).grants_bench_tool:
+            if resolve_specialist_profile(params).reserves_benchmark_lane:
                 needs_gpu = True
         if not needs_gpu:
             return
-        gpu_count_raw = params.get("gpu_count", 1)
+        serving_tp = _serving_tp_for_policy(self.shared_state)
+        default_gpu_count = serving_tp or 1
+        gpu_count_raw = params.get("gpu_count", default_gpu_count)
+        if gpu_count_raw is None or (isinstance(gpu_count_raw, str) and not gpu_count_raw.strip()):
+            gpu_count_raw = default_gpu_count
         try:
             gpu_count = int(gpu_count_raw)
         except (TypeError, ValueError) as exc:
@@ -1841,11 +1894,24 @@ class PolicyGate:
                     "before dispatching GPU specialists."
                 ),
             )
-        if gpu_count > ceiling:
+        from .specialist_profile import resolve_specialist_profile
+
+        if resolve_specialist_profile(params).reserves_benchmark_lane and serving_tp > 0 and gpu_count < serving_tp:
+            gpu_count = serving_tp
+        effective_pool_size = _effective_gpu_specialist_pool_size(self.shared_state)
+        if gpu_count > effective_pool_size:
             raise PolicyDenied(
-                f"delegate{{action='specialist'}}: gpu_count={gpu_count} exceeds GPU specialist capacity={ceiling}",
+                "delegate{action='specialist'}: "
+                f"effective gpu_count={gpu_count} exceeds serving-disjoint "
+                f"GPU specialist pool size={effective_pool_size} "
+                f"(configured capacity={ceiling}, serving_tp={serving_tp})",
                 rule="specialist_gpu_request_exceeds_capacity",
-                hint=("Lower params.gpu_count or start a session with a larger GPU specialist pool."),
+                hint=(
+                    "Lower params.gpu_count for non-bench probes, omit it for "
+                    "bench specialists only when the specialist pool has at "
+                    "least serving TP free cards, or start a session with a "
+                    "larger/disjoint GPU specialist pool."
+                ),
             )
 
     def _autofill_gap_from_ledger(
@@ -1935,8 +2001,7 @@ class PolicyGate:
         params: dict[str, Any],
     ) -> None:
         """Lightweight mechanical sanity gate for ``scope='freeform'``
-        specialists (absorbed from the retired dynamic_specialist wave
-        channel). Free-form dispatches carry no domain/tag/gap anchor, so this
+        specialists. Free-form dispatches carry no domain/tag/gap anchor, so this
         validates only structural shape: a single ``task_description`` or a
         ``tasks=[...]`` wave (bounded by SPECIALIST_FREEFORM_WAVE_MAX), each
         with a non-empty, length-bounded description that survives the
@@ -1954,8 +2019,7 @@ class PolicyGate:
         # Freeform deliberately skips the domain-anchored max_turns gate: a
         # free-form investigation has no domain/gap to bound its depth, so it is
         # constrained by the task TIMEOUT (lease TTL / wall-clock) rather than a
-        # turn cap. This is by design, NOT an oversight — do not re-add a
-        # max_turns bound here (see Issue 5b review). A GPU request must still
+        # turn cap, by design — no max_turns bound applies here. A GPU request must still
         # clear the same pool ceiling as a domain specialist, otherwise
         # scope='freeform' would be a hole around the GPU accounting.
         self._validate_specialist_gpu_request(params)
@@ -2385,11 +2449,10 @@ class PolicyGate:
 
 
 # ---------------------------------------------------------------------------
-# Policy-denial write-owner functions (folded back from the former
-# shared_state_policy.py satellite; phase 6A). They take ``state`` first and
-# own the PolicyGate denial-streak bookkeeping + its prompt summary, which
-# belongs to this decision domain. ``SharedState`` keeps forwarding shims so
-# existing callers (``state.record_policy_denial`` etc.) are unchanged.
+# Policy-denial write-owner functions. They take ``state`` first and own the
+# PolicyGate denial-streak bookkeeping + its prompt summary, which belongs to
+# this decision domain. ``SharedState`` exposes forwarding shims so existing
+# callers (``state.record_policy_denial`` etc.) reach these.
 # ---------------------------------------------------------------------------
 def record_policy_denial(
     state,

@@ -102,6 +102,7 @@ from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
 )
 from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     _model_is_gemma2,
+    summarize_model_config,
 )
 from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _default_target_summary,
@@ -721,138 +722,6 @@ def _resume_safe_numeric(
         except (TypeError, ValueError):
             pass
     return default
-
-
-
-
-
-
-
-
-
-
-# Unsupported-model (multimodal / vision) preflight gate
-# Hyperloom only supports text-generation (decoder-only causal LM). Multimodal models leak past upstream
-# and fail ~5min in with a cryptic image-processor error; these constants drive a fail-fast whitelist classifier.
-
-# Supported text-generation architecture markers (decoder-only causal LM); ForCausalLM is an infix
-# because some variants append a suffix (e.g. DeepseekV3ForCausalLMNextN / LlamaForCausalLMEagle3).
-
-# Explicit allowlist of supported model_type values (fallback when architectures is empty/missing).
-
-# Explicit multimodal / vision signals that win even if an architecture ends with ForCausalLM (e.g. Phi3VForCausalLM).
-
-
-
-
-
-# Three-way model verdicts returned by ``_detect_unsupported_model``:
-#   text           — plain decoder-only causal LM; ``_detect`` returns None.
-#   text_coercible — config carries a multimodal signal (vision_config key or a
-#                    *ConditionalGeneration arch whose model_type is text-MoE)
-#                    but a usable text decoder exists. Not fail-fast: the run
-#                    proceeds on the text path with a loud degraded-mode warning
-#                    (gated by --allow-mm-text-fallback, default on).
-#   vision_only    — positively-identified VLM with no meaningful text-only path
-#                    (Llava / PaliGemma / Qwen-VL / Phi3V / …) or an
-#                    unclassifiable config. Always fail-fast.
-
-# model_type values that ship a vision_config for the VLM checkpoint but whose
-# text MoE path is benchmark-compatible. Used to route a vision-config hit to
-# text_coercible instead of fail-fast. Matched on model_type so a whole family
-# is covered without re-listing every per-checkpoint arch name.
-
-
-
-
-
-
-
-
-# config.json keys carrying max sequence length, priority order (legacy/alt configs use aliases).
-
-# Safety headroom (tokens) above ISL+OSL: covers BOS/chat-template tokens and dataset length jitter.
-
-# Extra context budget on top of ISL+OSL for server-facing MAX_MODEL_LEN; always clamped to native
-# window by _resolve_max_model_len (vllm wires it into --max-model-len, so an unclamped value crashes).
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# RoPE-config signals: their presence means the model uses extended/scaled
-# positions, so transformers/vLLM read a max-position field during rope init.
-# A config that ships these but no max-position key crashes with
-# "'PreTrainedConfig' object has no attribute 'max_position_embeddings'" deep
-# in engine init.
-
-# Architectures whose runtime path is not adapted to AMD/ROCm yet.
-# Matched case-insensitively against model_type and architectures.
-
-# model_type values that ship a custom AutoConfig (auto_map) but aren't
-# registered in sglang/vLLM's config mapping. sglang falls back to
-# PreTrainedConfig (base class), which lacks max_position_embeddings etc.,
-# causing AttributeError deep in engine init.
-
-# Phi-3 su/longrope rope_scaling: Phi3Config._rope_scaling_validation() requires
-# rope_scaling to be a dict of EXACTLY 3 keys (type/short_factor/long_factor).
-# These 128k checkpoints ship a top-level rope_theta that transformers folds
-# into the rope_scaling dict during config load, so the validator sees 4 keys
-# and raises ValueError at AutoConfig.from_pretrained() — before SGLang's
-# --json-model-override-args can apply, so the override cannot recover the run.
-
-# Gemma2 missing hidden_act: sglang's gemma2 runtime reads config.hidden_act
-# unconditionally. Some checkpoints ship only hidden_activation (the HF field
-# name), so config.hidden_act is absent and the model crashes with
-# AttributeError in engine init. Hardware-agnostic.
-
-# Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
-# use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
-# CUDA-only kernels; NVFP4/FP4 need Blackwell hardware. AMD-native fp8 (Quark /
-# compressed-tensors), gptq, awq are NOT listed so they keep running.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # Legacy local auth-proxy endpoint. The component was removed; any leftover
@@ -3060,6 +2929,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if state.model_path:
             os.environ["MODEL_PATH"] = state.model_path
             print(f"  re-exported MODEL_PATH: {state.model_path}")
+            # Backfill model_info for sessions created before the field existed
+            # (or whose config was unreadable at launch); fail-soft to {}.
+            if not state.model_info:
+                state.model_info = summarize_model_config(state.model_path)
+                if state.model_info:
+                    state.save(session_dir)
+                    print("  backfilled model_info (from config.json)")
         if state.framework:
             os.environ["FRAMEWORK"] = state.framework
             print(f"  re-exported FRAMEWORK : {state.framework}")
@@ -3073,6 +2949,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Re-export workload metadata from SharedState so resume sees the same workload contract (not YAML defaults).
         for state_attr, env_name in (
             ("tp", "TP"),
+            # ``ep`` mirrors EP so single-node vLLM MoE resume still injects
+            # --enable-expert-parallel (#569); lost EP would silently drop it.
+            ("ep", "EP"),
             ("conc", "CONC"),
             ("isl", "ISL"),
             ("osl", "OSL"),
@@ -3082,6 +2961,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             if val:
                 os.environ[env_name] = str(val)
                 print(f"  re-exported {env_name:<14s}: {val}")
+        # Profile-scoped OSL: an explicit --profile-osl on this resume wins;
+        # otherwise re-export the value persisted from the original run so the
+        # profile phase doesn't silently revert to its default (and re-trigger
+        # the oversized-trace / EngineCore-timeout failure this guards against).
+        _resume_profile_osl = getattr(args, "profile_osl", None) or getattr(state, "profile_osl", 0)
+        if _resume_profile_osl:
+            os.environ["PROFILE_OSL"] = str(int(_resume_profile_osl))
+            state.profile_osl = int(_resume_profile_osl)
+            print(f"  re-exported PROFILE_OSL   : {int(_resume_profile_osl)}")
         if state.precision:
             os.environ["PRECISION"] = state.precision
             print(f"  re-exported PRECISION     : {state.precision}")
@@ -3269,6 +3157,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["MAX_MODEL_LEN"] = str(max_model_len)
         os.environ["ISL"] = str(args.isl)
         os.environ["OSL"] = str(args.osl)
+        # Profile-scoped OSL (issue #571): exported only when explicitly set, so
+        # the profile/roofline materializer can decouple its OSL from the served
+        # workload. Unset leaves the profile phase on the global --osl.
+        if getattr(args, "profile_osl", None) is not None:
+            os.environ["PROFILE_OSL"] = str(args.profile_osl)
         os.environ["PRECISION"] = args.precision
         # Mirror resolved framework_version into env (explicit > auto-detect > unset; see _resolve_framework_version).
         _fw_version_for_env = (getattr(args, "framework_version", None) or "").strip() or (
@@ -3763,6 +3656,27 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 
+        # Safety-net artifact package -> /workspace. The CLOSE phase
+        # sequencer normally packages at step 2.6, but the wall-clock
+        # deadline path (_enter_closing_phase) and crash paths leave
+        # close_sequence_done False and never run the sequencer, so the
+        # bundle would be missing without this. Best-effort: failures
+        # must not mask stop_reason. Runs after the SBD/final.md +
+        # Langfuse flush above so the freshest products are bundled.
+        try:
+            from .breakdown import package_session_artifacts
+
+            pkg_path = package_session_artifacts(
+                session_dir,
+                session_id=str(
+                    getattr(coordinator.shared_state, "session_id", "") or "",
+                ),
+            )
+            if pkg_path is not None:
+                print(f"Artifact package  : {pkg_path}")
+        except Exception:  # noqa: BLE001
+            log.exception("session artifact package failed (non-fatal)")
+
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
@@ -4082,6 +3996,24 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Input sequence length (default $ISL or 256)")
     opt.add_argument("--osl", type=int, default=int(os.environ.get("OSL", "256")),
                       help="Output sequence length (default $OSL or 256)")
+    opt.add_argument(
+        "--profile-osl",
+        dest="profile_osl",
+        type=int,
+        default=(
+            int(os.environ["PROFILE_OSL"])
+            if os.environ.get("PROFILE_OSL", "").strip().isdigit()
+            else None
+        ),
+        help=(
+            "Profiling-phase output sequence length. When set, it overrides "
+            "--osl for the roofline/profile server ONLY, so its torch-profiler "
+            "trace stays serializable; baseline/optimize phases still run at "
+            "--osl. Default $PROFILE_OSL; when unset the profile phase uses "
+            "min(--osl, 1024) and is auto-lowered further if needed to keep the "
+            "capture window within the serialization cap."
+        ),
+    )
     opt.add_argument(
         "--reference-script",
         dest="reference_script",
@@ -4875,7 +4807,11 @@ def _build_parser() -> argparse.ArgumentParser:
         )
 
     # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio).
-    # Default 1.10: kill a single-variant run once wall-clock exceeds baseline by +10% (outcome=KILLED_OVERTIME).
+    # Default 2.0: kill the decision (warm) run once its warm hot-client benchmark phase exceeds
+    # the baseline warm measure time by 2x (outcome=KILLED_OVERTIME). The decision round reuses a
+    # pre-warmed server (client-only) and the kill clock starts at the server-ready marker, so the
+    # measured runtime and the anchor are both the warm client-only phase (apples-to-apples) and
+    # one-time cold-boot / aiter recompile no longer trips the kill.
     # 0 disables (legacy variant_timeout_sec hard cap still applies); overtime kills skip stack rebench.
     def _env_float_or(default: float, env_var: str) -> float:
         """Resolve a float CLI default from an environment variable.
@@ -4918,16 +4854,18 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="explore_overtime_kill_ratio",
         type=float,
         default=_env_float_or(
-            1.10,
+            2.0,
             "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO",
         ),
         help="Per-variant explore overtime kill: each single-variant "
-        "Magpie run in the explore loop is reaped once its "
-        "wall-clock exceeds ``baseline_runtime_sec * RATIO``. The "
-        "variant is recorded with outcome=KILLED_OVERTIME + "
-        "runtime_sec + wall_clock_ratio_vs_baseline (no tput) so "
-        "the LLM can distinguish it from a hard timeout / crash. "
-        "Default 1.10 (kill at +10%% over baseline wall-clock). "
+        "Magpie run in the explore loop is reaped once its warm "
+        "hot-client benchmark phase (measured from the server-ready "
+        "marker, excluding cold boot / warmup) exceeds "
+        "``baseline_warm_runtime_sec * RATIO``. The variant is "
+        "recorded with outcome=KILLED_OVERTIME + runtime_sec + "
+        "wall_clock_ratio_vs_baseline (no tput) so the LLM can "
+        "distinguish it from a hard timeout / crash. Default 2.0 "
+        "(kill at 2x the warm baseline client-phase wall-clock). "
         "Pass 0 to disable. Env: "
         "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
     )
@@ -5298,6 +5236,16 @@ def _run_recover_session(args: argparse.Namespace) -> int:
             print(f"  trace backfill    : rc={rc}")
         except Exception:  # noqa: BLE001
             log.exception("recover-session: trace backfill failed (non-fatal)")
+
+    # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
+    try:
+        from .breakdown import package_session_artifacts
+
+        pkg_path = package_session_artifacts(session_dir)
+        if pkg_path is not None:
+            print(f"  artifact package  : {pkg_path}")
+    except Exception:  # noqa: BLE001
+        log.exception("recover-session: artifact package failed (non-fatal)")
 
     return 0
 

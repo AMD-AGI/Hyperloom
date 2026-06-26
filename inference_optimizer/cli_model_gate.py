@@ -166,6 +166,9 @@ _SUPPORTED_MODEL_TYPES = frozenset({
 })
 
 _UNSUPPORTED_MODEL_TYPES = frozenset({
+    # RWKV6/Qwen2 hybrid can also be identified by model_type alone in some
+    # checkpoints; keep this aligned with CI submit filtering.
+    "rwkv6qwen2",
     "gemma3",
     "mllama",
     "llava",
@@ -225,12 +228,6 @@ _VERDICT_VISION_ONLY = "vision_only"
 _TEXT_COERCIBLE_MODEL_TYPES = frozenset({
     "kimi_k25",
     "qwen3_5_moe",
-    # Gemma-4 ships a vision_config (Gemma4ForConditionalGeneration) but its
-    # text decoder (text_config / gemma4_text) is a standard dense causal LM
-    # that vLLM serves text-only (both Gemma4ForCausalLM and
-    # Gemma4ForConditionalGeneration are registered). Text benchmarks never
-    # exercise the vision tower, so route to the degraded text path.
-    "gemma4",
 })
 
 _MAXPOS_CONFIG_KEYS = (
@@ -268,6 +265,13 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # glm_moe_dsa: confirmed from zai-org-GLM-5.1 server.log ("model type
 # `glm_moe_dsa` but Transformers does not recognize this architecture" →
 # ModelConfig ValidationError in engine init).
+# gemma4: removed from the blocklist. The original entry assumed the framework
+# did not recognize gemma4, but the current runtime (transformers 5.5.0 +
+# vLLM 0.18.2rc1 rocm721) registers it: CONFIG_MAPPING contains "gemma4",
+# AutoConfig resolves Gemma4Config, and vLLM ModelConfig resolves
+# "Gemma4ForConditionalGeneration" (runner_type=generate) without a
+# validation/registry error. The wrapper carries vision_config, so it now
+# falls through to the text_coercible degraded-mode path instead.
 _UNRECOGNIZED_MODEL_TYPES = frozenset({
     "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash", "glm_moe_dsa",
 })
@@ -275,13 +279,22 @@ _UNRECOGNIZED_ARCHITECTURES = frozenset({
     "deepseekv4forcausallm", "glm4moeliteforcausallm",
     "mimov2flashforcausallm", "glmmoedsaforcausallm",
 })
-# ministral3 only fails inside a Mistral3 multimodal wrapper (Surpem-Supertron2
-# server.log: vLLM registry raises KeyError('ministral3') for text_config.
-# model_type). A bare top-level ministral3 is left to the framework to judge, so
-# this is checked only against the nested text_config scope.
-_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({"ministral3"})
+# Some model_type values only appear inside nested decoder configs carried by a
+# wrapper. A bare top-level type is left to the framework unless we have a direct
+# repro, so these are checked only against the nested text_config scope.
+#
+# ministral3: Mistral3 multimodal wrapper (Surpem-Supertron2 server.log: vLLM
+# registry raises KeyError('ministral3') for text_config.model_type).
+# qwen3_5_moe_text: Qwen3.6 text decoder wrapper; vLLM/Transformers rejects it
+# with "model type `qwen3_5_moe_text` but Transformers does not recognize this
+# architecture".
+_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({
+    "ministral3",
+    "qwen3_5_moe_text",
+})
 
 _PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
+_STRICT_BOOL_CONFIG_KEYS = ("use_cache",)
 
 # ``_GEMMA2_ARCHITECTURES`` is imported from model_config_utils (single source
 # of truth) at module top.
@@ -485,6 +498,17 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
                 architectures.append(a)
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
+    nested_model_type = ""
+    nested_model_type_l = ""
+    if isinstance(nested, dict):
+        nested_model_type = str(nested.get("model_type") or "").strip()
+        nested_model_type_l = nested_model_type.lower()
+
+    # Registry/config incompatibilities are handled by the model-config gate so
+    # they get the precise model_config_incompatible stop reason. Do not emit a
+    # misleading multimodal text-fallback warning for wrappers such as Gemma4.
+    if _detect_unrecognized_architecture(config) is not None:
+        return None
 
     # Hard denylist wins first: explicit VLM arch / model_type is vision_only
     # even if it also carries a ForCausalLM marker (e.g. Phi3VForCausalLM).
@@ -501,6 +525,13 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
             "architecture": architectures[0] if architectures else "",
             "model_type": model_type,
             "signal": f"unsupported model_type '{model_type}'",
+            "verdict": _VERDICT_VISION_ONLY,
+        }
+    if nested_model_type_l in _UNSUPPORTED_MODEL_TYPES:
+        return {
+            "architecture": architectures[0] if architectures else "",
+            "model_type": model_type,
+            "signal": f"unsupported text_config.model_type '{nested_model_type}'",
             "verdict": _VERDICT_VISION_ONLY,
         }
 
@@ -766,7 +797,14 @@ def _detect_private_quant(model_path: str, data: dict) -> str | None:
     qc = data.get("quantization_config")
     declared_supported = False
     if isinstance(qc, dict):
-        method = str(qc.get("quant_method") or "").strip().lower()
+        raw_method = qc.get("quant_method")
+        method = str(raw_method or "").strip().lower()
+        if "quant_method" in qc and not method:
+            return (
+                "quantization_config.quant_method is empty; sglang/vLLM treats "
+                "the checkpoint as quantized but cannot select a loader and "
+                "fails engine init with \"Unknown quantization method: ''\"."
+            )
         if method and method not in _SUPPORTED_QUANT_METHODS:
             return (
                 f"quantization_config.quant_method '{method}' is a private/"
@@ -877,6 +915,59 @@ def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
         "in engine init."
     )
 
+
+def _detect_diffusers_pipeline_model(model_path: str) -> str | None:
+    """Return a reason when the directory is a Diffusers pipeline, not an LLM.
+
+    Diffusers repos such as FLUX.1-dev ship ``model_index.json`` at the root and
+    no causal-LM ``config.json``. Without this guard they can reach baseline and
+    fail only after server health checks time out.
+    """
+    idx = Path(model_path) / "model_index.json"
+    if not idx.is_file():
+        return None
+    try:
+        data = json.loads(idx.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    class_name = str(data.get("_class_name") or "").strip()
+    if class_name.endswith("Pipeline") or class_name in {
+        "FluxPipeline",
+        "StableDiffusionPipeline",
+        "DiffusionPipeline",
+    }:
+        return (
+            f"model_index.json declares Diffusers pipeline '{class_name or '?'}', "
+            "not a decoder-only causal LM; Hyperloom text-generation benchmarks "
+            "cannot serve this model."
+        )
+    return None
+
+
+def _detect_null_strict_bool_config(data: dict) -> str | None:
+    """Return a reason for config fields that strict HF validators require bool.
+
+    Some checkpoints serialize ``use_cache: null``. The loader path then fails
+    before useful work with ``StrictDataclassFieldValidationError: field
+    'use_cache' expected bool, got NoneType``.
+    """
+    scopes = [("config", data)]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        scopes.append(("text_config", nested))
+    for scope_name, scope in scopes:
+        for key in _STRICT_BOOL_CONFIG_KEYS:
+            if key in scope and scope.get(key) is None:
+                return (
+                    f"{scope_name}.{key} is null, but HuggingFace/vLLM strict "
+                    "config validation expects a bool and raises "
+                    "StrictDataclassFieldValidationError before server init."
+                )
+    return None
+
+
 # Local tokenizer artifacts sglang/HF need to build a real tokenizer. A
 # checkpoint shipping only weights + config (no tokenizer) loads a degraded
 # fallback whose warmup encodes an empty prompt → empty (M=0) batch → aiter
@@ -936,6 +1027,22 @@ _VOCAB_WEIGHT_NAMES = (
     "wte.weight",
     "word_embeddings.weight",
     "lm_head.weight",
+)
+_FULL_BASE_WEIGHT_NAMES = (
+    "model.embed_tokens.weight",
+    "embed_tokens.weight",
+    "transformer.wte.weight",
+    "wte.weight",
+    "word_embeddings.weight",
+    "lm_head.weight",
+)
+_PEFT_ADAPTER_WEIGHT_MARKERS = (
+    ".lora_A.",
+    ".lora_B.",
+    ".lora_embedding_A",
+    ".lora_embedding_B",
+    ".modules_to_save.",
+    ".base_layer.",
 )
 _SAFETENSORS_HEADER_LIMIT = 64 * 1024 * 1024
 
@@ -1033,6 +1140,58 @@ def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | No
     return None
 
 
+def _detect_peft_adapter_only_checkpoint(model_path: str, data: dict) -> str | None:
+    """Return a reason when a checkpoint looks like an unmerged PEFT adapter.
+
+    Some repos ship ``config.json`` plus LoRA/PEFT adapter tensors but not the
+    corresponding base-model weights. The default vLLM/sglang loaders then try
+    to resolve base tensors such as ``base_model.model.lm_head.base_layer.weight``
+    and fail during engine init. Keep this conservative: only block when the
+    safetensors index explicitly carries adapter-shaped tensor names and lacks
+    normal base embedding / LM-head weights.
+    """
+    mdir = Path(model_path)
+    idx = mdir / "model.safetensors.index.json"
+    if not idx.is_file():
+        return None
+    try:
+        weight_map = (json.loads(idx.read_text(encoding="utf-8")) or {}).get(
+            "weight_map",
+        ) or {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(weight_map, dict) or not weight_map:
+        return None
+
+    keys = {str(k) for k in weight_map}
+    has_adapter_tensors = any(
+        marker in key for key in keys for marker in _PEFT_ADAPTER_WEIGHT_MARKERS
+    )
+    has_adapter_manifest = (
+        (mdir / "adapter_config.json").is_file()
+        or any("adapter" in str(v).lower() for v in weight_map.values())
+    )
+    if not has_adapter_tensors and not has_adapter_manifest:
+        return None
+
+    has_base_weights = any(
+        key.endswith(suffix)
+        for key in keys
+        for suffix in _FULL_BASE_WEIGHT_NAMES
+    )
+    if has_base_weights:
+        return None
+
+    return (
+        "checkpoint appears to be an unmerged PEFT/LoRA adapter: "
+        "model.safetensors.index.json contains adapter/base_layer tensor names "
+        "but no full base embedding or lm_head weights. The default "
+        "vLLM/sglang loader cannot reconstruct missing base tensors such as "
+        "base_model.model.lm_head.base_layer.weight; merge the adapter into the "
+        "base model before running Hyperloom."
+    )
+
+
 def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
     """Return a reason when a local checkpoint ships no tokenizer artifacts.
 
@@ -1060,6 +1219,72 @@ def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
         "fallback tokenizer whose warmup encodes an empty prompt, producing an "
         "empty (M=0) batch that crashes the aiter rotary_embedding kernel with "
         "SIGFPE on MI300X (Gensyn-Swarm fine-tune class)."
+    )
+
+
+def _detect_mistral_common_tokenizer_gap(model_path: str, data: dict) -> str | None:
+    """Return a reason for Mistral checkpoints missing Mistral tokenizer files.
+
+    Some Mistral fine-tunes ship ``tokenizer.json`` but omit the files that
+    Transformers' MistralCommonBackend accepts. SGLang then fails during server
+    init with ``ValueError: No tokenizer file found`` even though the generic
+    missing-tokenizer check sees a tokenizer artifact.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {str(a or "").strip() for a in _config_architectures(data)}
+    if model_type != "mistral" and "MistralForCausalLM" not in arches:
+        return None
+
+    auto_map = data.get("auto_map")
+    if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
+        return None
+
+    mdir = Path(model_path)
+    if not (mdir / "tokenizer.json").is_file():
+        return None
+    mistral_files = (
+        "tokenizer.model",
+        "tokenizer.model.v3",
+        "tekken.json",
+        "tokenizer_config.json",
+    )
+    if any((mdir / f).is_file() for f in mistral_files):
+        return None
+    return (
+        "Mistral checkpoint ships tokenizer.json but none of the tokenizer "
+        "metadata/files accepted by Transformers MistralCommonBackend "
+        f"({', '.join(mistral_files)}); sglang server init fails with "
+        "\"No tokenizer file found\"."
+    )
+
+
+def _detect_llama_sentencepiece_metadata_gap(model_path: str, data: dict) -> str | None:
+    """Return a reason for Llama checkpoints with bare SentencePiece tokenizer.
+
+    Some local Llama fine-tunes ship ``tokenizer.model`` but omit
+    ``tokenizer_config.json`` / ``tokenizer.json``. SGLang first loads a generic
+    tokenizer backend, then retries the declared-class path with the local
+    absolute model path. The HF Hub validator rejects that path with
+    ``HFValidationError: Repo id must be in the form ...`` before serving starts.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {str(a or "").strip() for a in _config_architectures(data)}
+    if model_type != "llama" and "LlamaForCausalLM" not in arches:
+        return None
+
+    auto_map = data.get("auto_map")
+    if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
+        return None
+
+    mdir = Path(model_path)
+    if not (mdir / "tokenizer.model").is_file():
+        return None
+    if (mdir / "tokenizer_config.json").is_file() or (mdir / "tokenizer.json").is_file():
+        return None
+    return (
+        "Llama checkpoint ships tokenizer.model but lacks tokenizer_config.json "
+        "or tokenizer.json; sglang falls back through a local-path tokenizer "
+        "resolution path that raises HFValidationError before server init."
     )
 
 
@@ -1093,6 +1318,9 @@ def _detect_incompatible_model_config(
     """
     if not model_path:
         return None
+    pipeline_reason = _detect_diffusers_pipeline_model(model_path)
+    if pipeline_reason is not None:
+        return pipeline_reason
     cfg_path = Path(model_path) / "config.json"
     if not cfg_path.is_file():
         return None
@@ -1127,6 +1355,9 @@ def _detect_incompatible_model_config(
     nested = data.get("text_config")
     if isinstance(nested, dict):
         scopes.append(nested)
+    null_bool_reason = _detect_null_strict_bool_config(data)
+    if null_bool_reason is not None:
+        return null_bool_reason
     has_rope = any(
         s.get(k) for s in scopes for k in _ROPE_CONFIG_KEYS
     )
@@ -1162,6 +1393,9 @@ def _detect_incompatible_model_config(
     private_quant_reason = _detect_private_quant(model_path, data)
     if private_quant_reason is not None:
         return private_quant_reason
+    peft_adapter_reason = _detect_peft_adapter_only_checkpoint(model_path, data)
+    if peft_adapter_reason is not None:
+        return peft_adapter_reason
     vocab_shape_reason = _detect_vocab_weight_shape_mismatch(model_path, data)
     if vocab_shape_reason is not None:
         return vocab_shape_reason
@@ -1170,6 +1404,12 @@ def _detect_incompatible_model_config(
     tokenizer_reason = _detect_missing_tokenizer_files(model_path, data)
     if tokenizer_reason is not None:
         return tokenizer_reason
+    mistral_tokenizer_reason = _detect_mistral_common_tokenizer_gap(model_path, data)
+    if mistral_tokenizer_reason is not None:
+        return mistral_tokenizer_reason
+    llama_tokenizer_reason = _detect_llama_sentencepiece_metadata_gap(model_path, data)
+    if llama_tokenizer_reason is not None:
+        return llama_tokenizer_reason
     # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
     # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
     auto_map = data.get("auto_map")

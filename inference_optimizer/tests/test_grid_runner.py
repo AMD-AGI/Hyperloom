@@ -25,7 +25,6 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
     _build_variant_yaml,
     _parse_skip_spec,
     _run_magpie,
-    annotate_multi_node_cuda_graph_max_bs,
     apply_runtime_benchmark_overrides,
     apply_user_skip_list,
     coerce_extra_envs,
@@ -191,32 +190,6 @@ class TestParseSkipSpec:
 
     def test_empty_input_returns_empty_list(self):
         assert _parse_skip_spec("") == []
-
-
-class TestMultiNodeCudaGraphMaxBsAdvisory:
-    def test_no_notes_in_single_node(self, monkeypatch):
-        grid = [
-            GridVariant(name="a", extra_server_args="--cuda-graph-max-bs 8"),
-        ]
-        notes = annotate_multi_node_cuda_graph_max_bs(grid)
-        assert notes == []
-
-    def test_emits_advisory_in_multi_node_without_dropping(self, monkeypatch):
-        from inference_optimizer.orchestrator.action_executors import (
-            _multi_node_env as mne,
-        )
-
-        monkeypatch.setattr(mne, "is_multi_node", lambda: True)
-        monkeypatch.setenv("CONC", "64")
-        grid = [
-            GridVariant(name="bad", extra_server_args="--cuda-graph-max-bs 8"),
-            GridVariant(name="ok", extra_server_args="--max-num-seqs 128"),
-        ]
-        notes = annotate_multi_node_cuda_graph_max_bs(grid)
-        assert [n["name"] for n in notes] == ["bad"]
-        assert "CONC=64" in notes[0]["reason"]
-        # Grid itself is unchanged: nothing is dropped.
-        assert [v.name for v in grid] == ["bad", "ok"]
 
 
 class TestReorderGridForMultiNode:

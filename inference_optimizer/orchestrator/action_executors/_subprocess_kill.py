@@ -1,15 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Reliable subprocess-tree teardown for Magpie-launched servers
-(Hyperloom ``bugs.md`` §B).
+"""Reliable subprocess-tree teardown for Magpie-launched servers.
 
 Magpie's shell wrappers ``trap``/``setsid``/``nohup`` the vLLM/SGLang server,
-so on a Hyperloom-side timeout or error the server child survives, holds GPU
-memory, and keeps a ``bash`` alive that later re-sources a script mid-copy
-(bugs.md §C #1). Fix: launch Magpie in its own POSIX session
-(``start_new_session=True``) so ``os.killpg`` reaps the whole tree, and call
-:func:`kill_my_spawned_server` from every exit path (idempotent, never raises).
-Scoped strictly to the tree we created, so it's safe on every benchmark call.
+so on a Hyperloom-side timeout or error the server child can survive, holding
+GPU memory and keeping a ``bash`` alive that may later re-source a script
+mid-copy. To prevent that, Magpie is launched in its own POSIX session
+(``start_new_session=True``) so ``os.killpg`` reaps the whole tree, and
+:func:`kill_my_spawned_server` is called from every exit path (idempotent,
+never raises). Scoped strictly to the tree we created, so it's safe on every
+benchmark call.
 """
 
 from __future__ import annotations
@@ -180,7 +180,7 @@ def kill_my_spawned_server(
 # Sentinel ``returncode`` when ``run_with_session_kill`` reaps a child for an
 # elapsed ``soft_deadline_sec`` (vs the ``timeout=`` hard cap, which still
 # raises ``TimeoutExpired``). Chosen not to collide with a real signal-based
-# ``-N`` returncode; the ExploreExecutor maps it to ``KILLED_OVERTIME``.
+# ``-N`` returncode.
 OVERTIME_KILL_RETURNCODE: int = -909
 
 # Sentinel ``returncode`` when the server-liveness watchdog reaps a child
@@ -204,11 +204,10 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
     "Engine process failed to start",
     "AsyncEngineDeadError",
     "raise EngineDeadError",
-    # vLLM v1 engine-core bootstrap failure tail (#524): the APIServer logs
+    # vLLM v1 engine-core bootstrap failure tail: the APIServer logs
     # ``RuntimeError: Engine core initialization failed`` (already matched
-    # above) followed by ``Failed core proc(s): {...}``. Add the latter as a
-    # second, equally terminal anchor — both only appear once the engine core
-    # is unrecoverable, never on a merely slow cold start.
+    # above) followed by ``Failed core proc(s): {...}``. Both only appear once
+    # the engine core is unrecoverable, never on a merely slow cold start.
     "Failed core proc(s)",
 )
 
@@ -217,6 +216,56 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
 # never trips the watchdog); far below the ~2h hard timeout. Overridable via
 # ``INFERENCE_OPTIMIZER_SERVER_DEAD_GRACE_SEC``.
 _SERVER_DEAD_GRACE_SEC_DEFAULT: float = 120.0
+
+
+# Sentinel ``returncode`` when the detokenizer-stall watchdog reaps a child
+# because the inference server came up healthy (``/health`` 200, startup
+# complete) but then produced NO generation progress — the classic
+# "detokenizer / output processor stall" where the engine accepts the request
+# and the benchmark client blocks forever waiting for tokens that never
+# detokenize. The ``_SERVER_DEAD_MARKERS`` watchdog can't catch this (the
+# server never crashes — it logs a clean startup and then goes quiet), so
+# without this gate a stalled variant burns the full ~2h hard ``timeout``
+# before failing, wasting the explore budget. Distinct from the other
+# sentinels so callers can label it ``error_class="detokenizer_stall"`` and
+# fast-prune the offending variant.
+DETOKENIZER_STALL_RETURNCODE: int = -911
+
+# Server-ready markers: their appearance in ``server.log`` means the HTTP/API
+# server has finished startup and is accepting traffic. Only AFTER one of these
+# is observed does the detokenizer-stall clock start — a model still loading
+# weights is "slow", not "stalled", and must never trip this gate. Covers both
+# the uvicorn frontend (vLLM and sglang both serve via uvicorn) and sglang's
+# own ready banner.
+_SERVER_READY_MARKERS: tuple[str, ...] = (
+    "Application startup complete",          # uvicorn (vLLM + sglang frontends)
+    "Uvicorn running on",                    # uvicorn bind line
+    "The server is fired up and ready to roll",  # sglang ready banner
+)
+
+# Generation-progress markers: the periodic decode-throughput lines (same ones
+# ``benchmark_result.py`` parses). Reported by the scanner for diagnostics, but
+# the stall gate itself keys on RAW LOG ACTIVITY (any new bytes), not these
+# markers — see :func:`_communicate_with_soft_deadline`. Keying on "is the
+# server still writing ANYTHING" rather than "is it decoding" is deliberate: a
+# huge model can sit between ready and its first token for many minutes while
+# aiter/torch.compile JITs the first request, emitting compile logs the whole
+# time. Those keep the clock alive; only a server that goes COMPLETELY silent
+# after ready (a true hung engine / detokenizer wedge) trips the gate.
+_SERVER_PROGRESS_MARKERS: tuple[str, ...] = (
+    "gen throughput (token/s):",   # sglang
+    "Avg generation throughput:",  # vLLM
+)
+
+# Default grace: how long after the server reports ready it may emit NO log
+# output at all before the watchdog declares a hang / detokenizer stall.
+# Measured from the ready marker, so the (arbitrarily long) cold start — weight
+# load + CUDA-graph capture, all of which precede "ready" — is never counted.
+# Set generous (30 min) so a quiet post-ready first-request JIT/compile on a
+# very large model is not mistaken for a stall, yet still far below the ~2h hard
+# timeout. ``<= 0`` disables the gate. Overridable via
+# ``INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC``.
+_DETOK_STALL_GRACE_SEC_DEFAULT: float = 1800.0
 
 
 class _StreamCapture:
@@ -328,8 +377,8 @@ class _StreamCapture:
 _SERVER_LOG_TAIL_BYTES: int = 65536
 
 
-def _server_log_shows_death(path: str) -> bool:
-    """Return True iff ``server.log`` tail contains a terminal-init marker.
+def _server_log_shows_death(path: str) -> str | None:
+    """Return the terminal-init marker present in ``server.log`` tail, else None.
 
     Best-effort and never raises: a missing / unreadable log (server hasn't
     written yet) reads as "not dead" so a slow cold start is never misjudged.
@@ -338,8 +387,10 @@ def _server_log_shows_death(path: str) -> bool:
         path: Filesystem path to the server's ``server.log``.
 
     Returns:
-        True if the log tail contains a terminal engine/worker-init marker,
-        False otherwise (including when the log is missing or unreadable).
+        The first matched terminal engine/worker-init marker string if the log
+        tail contains one, otherwise None (including when the log is missing or
+        unreadable). Returning the marker (rather than a bare bool) lets the
+        watchdog report which fatal line tripped it instead of a placeholder.
     """
     try:
         with open(path, "rb") as fh:
@@ -349,8 +400,11 @@ def _server_log_shows_death(path: str) -> bool:
                 fh.seek(0)
             tail = fh.read().decode("utf-8", "ignore")
     except (OSError, ValueError):
-        return False
-    return any(marker in tail for marker in _SERVER_DEAD_MARKERS)
+        return None
+    for marker in _SERVER_DEAD_MARKERS:
+        if marker in tail:
+            return marker
+    return None
 
 
 def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
@@ -394,6 +448,49 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     return None
 
 
+def _scan_server_log_increment(
+    path: str, from_offset: int
+) -> tuple[int, bool, bool]:
+    """Incrementally scan the bytes appended to ``server.log`` since
+    ``from_offset`` for ready / generation-progress markers.
+
+    Reading only the NEW tail (not the whole file) keeps the per-poll cost flat
+    and — crucially — makes "progress" mean *fresh* progress: a throughput line
+    written ten minutes ago that still sits in the file is read exactly once,
+    so a wedged server that stops appending lines correctly reads as "no new
+    progress" on subsequent polls. Handles truncation/rotation (size shrank
+    below the offset) by rescanning from the start. Best-effort: a missing /
+    unreadable log reads as "no new markers" and leaves the offset unchanged so
+    a slow cold start is never misjudged.
+
+    Args:
+        path: Filesystem path to the server's ``server.log``.
+        from_offset: Byte offset already consumed by a prior scan.
+
+    Returns:
+        ``(new_offset, saw_ready, saw_progress)`` — the advanced offset plus
+        whether a ready / progress marker appeared in the newly read bytes.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return from_offset, False, False
+    start = from_offset
+    if size < start:  # truncated / rotated — rescan from the top.
+        start = 0
+    if size <= start:  # nothing new appended.
+        return start, False, False
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            chunk = fh.read().decode("utf-8", "ignore")
+    except (OSError, ValueError):
+        return from_offset, False, False
+    saw_ready = any(marker in chunk for marker in _SERVER_READY_MARKERS)
+    saw_progress = any(marker in chunk for marker in _SERVER_PROGRESS_MARKERS)
+    return size, saw_ready, saw_progress
+
+
 def run_with_session_kill(
     cmd: list[str],
     *,
@@ -404,6 +501,7 @@ def run_with_session_kill(
     soft_deadline_sec: float | None = None,
     server_log_path: str | None = None,
     server_dead_grace_sec: float | None = None,
+    detok_stall_grace_sec: float | None = None,
 ) -> subprocess.CompletedProcess:
     """``subprocess.run``-compatible call that ALSO tears down the entire
     descendant tree on every exit path.
@@ -414,7 +512,7 @@ def run_with_session_kill(
     Returns a ``CompletedProcess`` and re-raises ``TimeoutExpired`` like
     ``subprocess.run``.
 
-    ``soft_deadline_sec`` (Fix E): an optional deadline firing before the
+    ``soft_deadline_sec``: an optional deadline firing before the
     ``timeout=`` hard cap; on elapse the tree is reaped and a
     ``CompletedProcess`` with ``returncode = OVERTIME_KILL_RETURNCODE`` is
     returned (does NOT raise). ``None`` / ≤ 0 keeps legacy behaviour. Tests
@@ -429,6 +527,19 @@ def run_with_session_kill(
     turns a crashed-but-hung server (parent never exits, ``/health`` polled
     forever) into a fast fail instead of a ~2h hard-timeout stall.
 
+    ``server_log_path`` (detokenizer-stall watchdog): when set, ``server.log``
+    is ALSO watched for the ready-then-silent pattern — the server logs a clean
+    startup (``/health`` 200) and then stops writing to the log entirely for
+    ``detok_stall_grace_sec`` (default
+    ``INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC`` or 1800s). The clock is
+    measured from the ready marker, so the cold start (weight load + CUDA-graph
+    capture, all before "ready") is never counted, and ANY new log line —
+    decode throughput or a slow first-request JIT/compile — resets it. On trip
+    the tree is reaped and a ``CompletedProcess`` with
+    ``returncode = DETOKENIZER_STALL_RETURNCODE`` is returned (does NOT raise),
+    so a variant whose engine hangs fails in minutes instead of burning the
+    full hard timeout.
+
     Args:
         cmd: The command and arguments to execute.
         env: Optional environment mapping for the child process.
@@ -440,10 +551,15 @@ def run_with_session_kill(
             elapse the tree is reaped and ``OVERTIME_KILL_RETURNCODE`` is
             returned without raising.
         server_log_path: Optional path to the spawned server's ``server.log``
-            to enable the server-liveness watchdog.
+            to enable the server-liveness + detokenizer-stall watchdogs.
         server_dead_grace_sec: Grace period a terminal init marker must persist
             before the watchdog reaps the tree; defaults to the
             ``INFERENCE_OPTIMIZER_SERVER_DEAD_GRACE_SEC`` env value or 120s.
+        detok_stall_grace_sec: Grace period a ready server may produce no
+            generation progress before the stall watchdog reaps the tree;
+            defaults to the ``INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC`` env
+            value or ``_DETOK_STALL_GRACE_SEC_DEFAULT`` (1800s). ``≤ 0``
+            disables the stall gate.
 
     Returns:
         A ``CompletedProcess`` carrying the child's returncode (or one of the
@@ -463,6 +579,16 @@ def run_with_session_kill(
             )
         except (TypeError, ValueError):
             server_dead_grace_sec = _SERVER_DEAD_GRACE_SEC_DEFAULT
+    if detok_stall_grace_sec is None:
+        try:
+            detok_stall_grace_sec = float(
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC",
+                    _DETOK_STALL_GRACE_SEC_DEFAULT,
+                )
+            )
+        except (TypeError, ValueError):
+            detok_stall_grace_sec = _DETOK_STALL_GRACE_SEC_DEFAULT
     proc: subprocess.Popen | None = None
     capture: _StreamCapture | None = None
     try:
@@ -484,6 +610,7 @@ def run_with_session_kill(
                 soft_deadline_sec=soft_deadline_sec,
                 server_log_path=server_log_path,
                 server_dead_grace_sec=server_dead_grace_sec,
+                detok_stall_grace_sec=detok_stall_grace_sec,
                 capture=capture,
             )
         except subprocess.TimeoutExpired:
@@ -509,6 +636,25 @@ def run_with_session_kill(
             return subprocess.CompletedProcess(
                 args=cmd,
                 returncode=SERVER_DEAD_RETURNCODE,
+                stdout=stdout if stdout is not None else ("" if text else b""),
+                stderr=stderr if stderr is not None else ("" if text else b""),
+            )
+        except _ServerStalledDetected as exc:
+            kill_my_spawned_server(proc)
+            stdout, stderr = (
+                capture.finish(timeout=2.0) if capture is not None else ("" if text else b"", "" if text else b"")
+            )
+            log.warning(
+                "_subprocess_kill: detokenizer-stall watchdog reaped tree — "
+                "server reported ready but emitted no log output (grace=%.1fs, "
+                "elapsed=%.1fs); returncode=%d.",
+                exc.grace_sec,
+                exc.elapsed_sec,
+                DETOKENIZER_STALL_RETURNCODE,
+            )
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=DETOKENIZER_STALL_RETURNCODE,
                 stdout=stdout if stdout is not None else ("" if text else b""),
                 stderr=stderr if stderr is not None else ("" if text else b""),
             )
@@ -541,7 +687,7 @@ def run_with_session_kill(
 
 
 class _SoftDeadlineExceeded(Exception):
-    """Internal sentinel for an elapsed soft (Fix-E) deadline. Never bubbles
+    """Internal sentinel for an elapsed soft deadline. Never bubbles
     past :func:`run_with_session_kill` (converted to a ``CompletedProcess``).
     """
 
@@ -587,6 +733,35 @@ class _ServerDeadDetected(Exception):
         self.elapsed_sec = float(elapsed_sec)
 
 
+class _ServerStalledDetected(Exception):
+    """Internal sentinel: the detokenizer-stall watchdog saw the server report
+    ready and then produce no generation progress for the grace window. Never
+    bubbles past :func:`run_with_session_kill` (converted to a
+    ``CompletedProcess`` carrying ``DETOKENIZER_STALL_RETURNCODE``).
+    """
+
+    def __init__(
+        self,
+        *,
+        grace_sec: float,
+        elapsed_sec: float,
+    ) -> None:
+        """Build the error message describing the ready-but-no-progress stall.
+
+        Args:
+            grace_sec: How long the ready server was allowed to produce no
+                generation progress before the watchdog tripped.
+            elapsed_sec: Actual wall-clock elapsed at trip time.
+        """
+        super().__init__(
+            f"server reported ready but emitted no log output for "
+            f"{grace_sec:.1f}s (hung engine / detokenizer stall; "
+            f"elapsed={elapsed_sec:.1f}s)"
+        )
+        self.grace_sec = float(grace_sec)
+        self.elapsed_sec = float(elapsed_sec)
+
+
 def _communicate_with_soft_deadline(
     proc: subprocess.Popen,
     *,
@@ -594,6 +769,7 @@ def _communicate_with_soft_deadline(
     soft_deadline_sec: float | None,
     server_log_path: str | None = None,
     server_dead_grace_sec: float | None = None,
+    detok_stall_grace_sec: float | None = None,
     capture: _StreamCapture | None = None,
 ) -> tuple[str | bytes, str | bytes]:
     """``proc.communicate`` shim enforcing the soft deadline + server watchdog.
@@ -603,10 +779,14 @@ def _communicate_with_soft_deadline(
     polls in 0.5s slices, enforcing:
 
     * ``soft_deadline_sec`` — raise :class:`_SoftDeadlineExceeded` once passed;
-    * ``server_log_path`` watchdog — once a terminal init marker
+    * ``server_log_path`` death watchdog — once a terminal init marker
       (:data:`_SERVER_DEAD_MARKERS`) is observed AND it persists for
       ``server_dead_grace_sec`` without the child exiting on its own, raise
       :class:`_ServerDeadDetected`.
+    * ``server_log_path`` detokenizer-stall watchdog — once a ready marker
+      (:data:`_SERVER_READY_MARKERS`) is observed, require the log to keep
+      growing; if NO new bytes are appended for ``detok_stall_grace_sec``
+      (a hung engine / detokenizer wedge), raise :class:`_ServerStalledDetected`.
 
     The ``hard_timeout`` is always honoured so a stuck child can't dodge the
     gates.
@@ -617,9 +797,12 @@ def _communicate_with_soft_deadline(
         soft_deadline_sec: Optional soft deadline that trips before the hard
             timeout.
         server_log_path: Optional path to the server's ``server.log`` enabling
-            the liveness watchdog.
+            the liveness + stall watchdogs.
         server_dead_grace_sec: Grace period a terminal init marker must persist
-            before the watchdog trips.
+            before the death watchdog trips.
+        detok_stall_grace_sec: Grace period a ready server may emit no log
+            output at all before the stall watchdog trips. ``None`` / ≤ 0
+            disables the stall gate.
         capture: Optional stream capture whose threads are joined to assemble
             the returned output.
 
@@ -631,48 +814,107 @@ def _communicate_with_soft_deadline(
         _SoftDeadlineExceeded: When the soft deadline elapses.
         _ServerDeadDetected: When a terminal init marker persists past the
             grace window.
+        _ServerStalledDetected: When a ready server produces no generation
+            progress past the stall grace window.
         subprocess.TimeoutExpired: When the hard timeout elapses.
     """
     watchdog_active = bool(server_log_path) and (
         server_dead_grace_sec is not None and float(server_dead_grace_sec) > 0.0
     )
+    stall_active = bool(server_log_path) and (
+        detok_stall_grace_sec is not None and float(detok_stall_grace_sec) > 0.0
+    )
     soft_active = soft_deadline_sec is not None and float(soft_deadline_sec) > 0.0
-    if capture is None and not soft_active and not watchdog_active:
+    # The soft deadline measures the warm "hot-client" benchmark phase only, so
+    # its anchor is apples-to-apples with the warm client-only baseline anchor
+    # the caller derives the deadline from. When ``server_log_path`` is set we
+    # scan for the server-ready marker and only start the soft-deadline clock
+    # once the server is ready, excluding the (arbitrarily long) cold boot /
+    # warmup / aiter recompile that precedes "ready". Without a server log to
+    # scan we fall back to measuring from subprocess launch.
+    soft_anchor_on_ready = soft_active and bool(server_log_path)
+    if capture is None and not soft_active and not watchdog_active and not stall_active:
         return proc.communicate(timeout=hard_timeout)
-    if capture is not None and not soft_active and not watchdog_active:
+    if capture is not None and not soft_active and not watchdog_active and not stall_active:
         proc.wait(timeout=hard_timeout)
         return capture.finish()
 
     deadline_sec = float(soft_deadline_sec) if soft_active else None
     grace_sec = float(server_dead_grace_sec) if watchdog_active else None
+    stall_grace_sec = float(detok_stall_grace_sec) if stall_active else None
     poll_interval = 0.5
     start = time.monotonic()
     dead_marker_since: float | None = None
+    # Detokenizer-stall watchdog state: byte offset consumed from server.log,
+    # whether a ready marker has been seen, and the last time the log showed
+    # ANY new output (seeded to the ready time so the silence clock starts the
+    # moment the server is ready). Cold-start logging before "ready" is ignored
+    # because the gate only arms once ``server_ready_since`` is set.
+    stall_log_offset = 0
+    server_ready_since: float | None = None
+    last_activity_at: float | None = None
     while True:
         elapsed = time.monotonic() - start
-        if soft_active and deadline_sec is not None:
-            if deadline_sec - elapsed <= 0.0:
+        # Soft-deadline elapsed: measured from the server-ready marker (the warm
+        # hot-client phase) when anchoring on ready, else from subprocess launch.
+        # Before the server is ready the soft gate is dormant so the cold boot /
+        # warmup never trips it; only the hard ``hard_timeout`` cap gates pre-ready.
+        if soft_anchor_on_ready:
+            soft_elapsed = (time.monotonic() - server_ready_since) if server_ready_since is not None else None
+        else:
+            soft_elapsed = elapsed
+        if soft_active and deadline_sec is not None and soft_elapsed is not None:
+            if deadline_sec - soft_elapsed <= 0.0:
                 raise _SoftDeadlineExceeded(
                     deadline_sec=deadline_sec,
-                    elapsed_sec=elapsed,
+                    elapsed_sec=soft_elapsed,
                 )
         if watchdog_active and grace_sec is not None:
-            if _server_log_shows_death(server_log_path):  # type: ignore[arg-type]
+            death_marker = _server_log_shows_death(server_log_path)  # type: ignore[arg-type]
+            if death_marker is not None:
                 if dead_marker_since is None:
                     dead_marker_since = time.monotonic()
                 elif time.monotonic() - dead_marker_since >= grace_sec:
                     raise _ServerDeadDetected(
-                        marker="server_init_failed",
+                        marker=death_marker,
                         grace_sec=grace_sec,
                         elapsed_sec=elapsed,
                     )
             else:
                 dead_marker_since = None
+        # Scan server.log for the ready marker when either the stall watchdog
+        # or the ready-anchored soft deadline needs it. ``server_ready_since``
+        # is the shared anchor for both gates.
+        if (stall_active and stall_grace_sec is not None) or soft_anchor_on_ready:
+            prev_offset = stall_log_offset
+            stall_log_offset, saw_ready, _saw_progress = _scan_server_log_increment(
+                server_log_path,  # type: ignore[arg-type]
+                stall_log_offset,
+            )
+            now = time.monotonic()
+            if saw_ready and server_ready_since is None:
+                server_ready_since = now
+                last_activity_at = now  # start the silence clock at ready
+            # ANY new bytes in server.log count as liveness — decode throughput,
+            # but also cold-path / JIT / compile logs that a huge model emits
+            # between ready and its first token. Only total silence trips the
+            # gate, so a slow-but-logging first request is never killed.
+            if stall_log_offset > prev_offset:
+                last_activity_at = now
+            # Armed only once the server is ready; pre-ready weight loading is
+            # slow, not stalled, and must never trip this gate.
+            if stall_active and stall_grace_sec is not None:
+                if server_ready_since is not None and last_activity_at is not None:
+                    if now - last_activity_at >= stall_grace_sec:
+                        raise _ServerStalledDetected(
+                            grace_sec=stall_grace_sec,
+                            elapsed_sec=elapsed,
+                        )
         # Slice bounded by every active remaining window so the right gate
         # fires first; the child can still finish inside any slice.
         slice_sec = poll_interval
-        if soft_active and deadline_sec is not None:
-            slice_sec = min(slice_sec, deadline_sec - elapsed)
+        if soft_active and deadline_sec is not None and soft_elapsed is not None:
+            slice_sec = min(slice_sec, deadline_sec - soft_elapsed)
         if hard_timeout is not None:
             hard_remaining = float(hard_timeout) - elapsed
             if hard_remaining <= 0.0:
@@ -690,6 +932,7 @@ def _communicate_with_soft_deadline(
 
 
 __all__ = [
+    "DETOKENIZER_STALL_RETURNCODE",
     "OVERTIME_KILL_RETURNCODE",
     "SERVER_DEAD_RETURNCODE",
     "kill_my_spawned_server",

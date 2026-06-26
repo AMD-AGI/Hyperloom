@@ -32,6 +32,9 @@ rules.
 
 ## Resources
 
+- [Arbor (arXiv:2606.12563)](https://arxiv.org/abs/2606.12563) — the paper
+  describing Hyperloom's tree-search orchestration and its
+  Orchestrator / Specialist / Critic architecture.
 - [Hyperloom repository](https://github.com/AMD-AGI/Hyperloom)
 - [Hyperloom UI (PrimusClaw)](https://core42.primus-safe.amd.com/hyperloom/)
 - [Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX) — full

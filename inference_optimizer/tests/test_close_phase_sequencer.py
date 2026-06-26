@@ -314,14 +314,15 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     await coord._on_enter_close(from_phase="SWEEP")
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
-    # Step sequence post T2/T3 retirement (cortex_commit removed) and post
-    # /workspace artifact-package removal (moving artifacts is now the
-    # collector's job, not the optimizer's).
+    # Step sequence post T2/T3 retirement (cortex_commit removed); the
+    # artifact_package bundle (step 2.6) sits between session_breakdown and
+    # fact_finalize.
     steps = [r["step"] for r in rows]
     assert steps == [
         "sequencer_started",
         "report",
         "session_breakdown",
+        "artifact_package",
         "fact_finalize",
         "ndjson_drain",
         "done",
@@ -331,6 +332,9 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     by_step = {r["step"]: r for r in rows}
     assert by_step["report"]["status"] == "done"
     assert by_step["session_breakdown"]["status"] == "done"
+    # tmp_path session dir holds no curated artifacts, so packaging matches
+    # nothing and records "skipped" (best-effort; never blocks close).
+    assert by_step["artifact_package"]["status"] == "skipped"
     assert by_step["fact_finalize"]["status"] == "done"
     # ndjson_drain retired with the v1 cortex_kb_client; stub-emits "skipped".
     assert by_step["ndjson_drain"]["status"] == "skipped"

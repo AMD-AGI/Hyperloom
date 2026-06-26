@@ -113,18 +113,17 @@
     "patchable": true,
     "vllm": {
       "void vllm::moe::moe_align_block_size_kernel<int>(int const*, int*, int*, int*, int*, int, int, int, int, unsigned long, ": {
-        "kernel_source_path": "",
-        "kernel_source_line": "",
-        "kernel_kind": "vllm_hip",
-        "patchable": true,
-        "note": "vLLM csrc is still not shipped in the container, not editable inside the container."
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/moe_align_block_size_kernels.cu",
+        "kernel_source_line": "39",
+        "kernel_kind": "aiter_hip",
+        "patchable": true
       },
       "void vllm::moe::count_and_sort_expert_tokens_kernel<int>(int const*, int*, int*, int*, unsigned long, int, int, int, boo": {
         "kernel_source_path": "",
         "kernel_source_line": "",
         "kernel_kind": "vllm_hip",
-        "patchable": true,
-        "note": "vLLM csrc is still not shipped in the container, not editable inside the container."
+        "patchable": false,
+        "note": "Source not shipped in vLLM 0.21.0 aiter_meta/csrc (only compiled into _moe_C.abi3.so); not editable inside the container."
       }
     },
     "sglang": {}
@@ -362,8 +361,8 @@
     "patchable": true,
     "vllm": {
       "vllm::initializeScale(float*, int, float) [clone .kd]": {
-        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/include/quant_common.cuh",
-        "kernel_source_line": "56",
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quant_kernels.cu",
+        "kernel_source_line": "135",
         "kernel_kind": "aiter_hip",
         "patchable": true
       },
@@ -2550,5 +2549,69 @@
         "patchable": true
       }
     }
+  },
+  "sglang::inplace_fused_experts": {
+    "kind": "composite",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(87): inplace_fused_experts"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "fused_moe_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
+        "kernel_source_line": "702",
+        "kernel_kind": "triton",
+        "patchable": true
+      }
+    }
+  },
+  "inplace_fused_experts": {
+    "kind": "composite",
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(87): inplace_fused_experts"
+    ],
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "fused_moe_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
+        "kernel_source_line": "702",
+        "kernel_kind": "triton",
+        "patchable": true
+      }
+    }
+  },
+  "sglang::outplace_fused_experts": {
+    "kind": "composite",
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "fused_moe_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
+        "kernel_source_line": "702",
+        "kernel_kind": "triton",
+        "patchable": true
+      }
+    },
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(149): outplace_fused_experts"
+    ]
+  },
+  "outplace_fused_experts": {
+    "kind": "composite",
+    "patchable": true,
+    "vllm": {},
+    "sglang": {
+      "fused_moe_kernel": {
+        "kernel_source_path": "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py",
+        "kernel_source_line": "702",
+        "kernel_kind": "triton",
+        "patchable": true
+      }
+    },
+    "python_launcher_path": [
+      "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(149): outplace_fused_experts"
+    ]
   }
 }

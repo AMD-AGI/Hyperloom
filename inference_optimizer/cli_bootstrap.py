@@ -22,6 +22,7 @@ from .orchestrator.shared_state import SharedState
 from .paths import _SESSION_SKELETON, workspace_root as _workspace_root_resolve
 from .session_paths import agent_prompt_snapshot
 from .cli_model_gate import _load_model_arch, _load_model_config_tags
+from .model_config_utils import summarize_model_config
 
 log = logging.getLogger(__name__)
 
@@ -143,10 +144,10 @@ def _seed_shared_state(
     try:
         explore_overtime_kill_ratio = (
             float(explore_overtime_kill_ratio_raw)
-            if explore_overtime_kill_ratio_raw is not None else 1.10
+            if explore_overtime_kill_ratio_raw is not None else 2.0
         )
     except (TypeError, ValueError):
-        explore_overtime_kill_ratio = 1.10
+        explore_overtime_kill_ratio = 2.0
 
     # --explore-variant-timeout-sec mirror; 0 (default) auto-derives the cap, positive pins it.
     explore_variant_timeout_raw = getattr(
@@ -177,6 +178,23 @@ def _seed_shared_state(
     # KB architecture tags from config.json (architectures + model_type); fresh-launch only (resume rehydrates).
     _cfg_tags = _load_model_config_tags(str(args.model))
 
+    # Single control plane for the KERNEL phase: the kernel backend order env
+    # (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``), set by the
+    # launcher / CI submit layer. The per-kernel ladder and the phase-level
+    # PerfSkills check read it directly; here we derive the persisted
+    # ``kernel_optimizer`` record from the resolved order so resume/breakdown
+    # stay correct even if the env var is not re-exported in a fresh shell.
+    _resolved_kernel_order = [
+        t.strip().lower()
+        for t in str(
+            os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+            or os.environ.get("KERNEL_OPT_BACKENDS")
+            or ""
+        ).split(",")
+        if t.strip()
+    ]
+    _kernel_optimizer_record = "perfskills" if "perfskills" in _resolved_kernel_order else "native"
+
     # Reference launch recipe (fresh-launch only): explicit --reference-script
     # wins; else auto-discover an exact-match InferenceX single-node recipe.
     # Lowest-priority base for the baseline server args; fully fail-soft.
@@ -196,6 +214,8 @@ def _seed_shared_state(
         # Architecture-identity tags from config.json stamped into recipe-snapshot extras (fine-tune carries base identity).
         model_architectures=_cfg_tags.get("architectures", []),
         model_type=_cfg_tags.get("model_type", ""),
+        # config.json structural summary (attention_type / heads / MoE / quant); persisted for downstream collectors.
+        model_info=summarize_model_config(str(args.model)),
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env so downstream prompts see real values (else TP defaults to 1).
@@ -209,8 +229,11 @@ def _seed_shared_state(
         conc=_int_env_or_arg("conc", "CONC"),
         isl=_int_env_or_arg("isl", "ISL"),
         osl=_int_env_or_arg("osl", "OSL"),
+        # Persist the explicit profile OSL so a fresh-shell resume keeps it.
+        profile_osl=_int_env_or_arg("profile_osl", "PROFILE_OSL"),
         max_model_len=_int_env_or_arg("max_model_len", "MAX_MODEL_LEN"),
         kernel_enabled=not getattr(args, "no_kernel", False),
+        kernel_optimizer=_kernel_optimizer_record,
         continue_kernel_after_gemm=bool(
             getattr(args, "continue_kernel_after_gemm", True)
         ),

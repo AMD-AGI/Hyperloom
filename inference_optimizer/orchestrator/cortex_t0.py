@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 
 from ..recipe_kb import RecipeKB, recipe_canonical_id
 from ..recipe_snapshot_constants import detect_framework_version
+from ..session_paths import cortex_lessons_json, cortex_pitfalls_json, cortex_warm_json
 
 
 log = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class T0Result:
-    """Outcome of one :func:`run_t0_anchor` invocation. ``status`` ∈ {ok, resumed, skipped_disabled, skipped_already}."""
+    """Outcome of one :func:`run_t0_anchor` invocation. ``status`` ∈ {ok, resumed, skipped_already}."""
 
     status: str
     session_id: str = ""
@@ -30,7 +31,6 @@ class T0Result:
     warm_present: bool = False
     pitfalls_present: bool = False
     lessons_present: bool = False
-    error: str = ""
 
 
 def _default_status_emitter(line: str) -> None:
@@ -127,9 +127,9 @@ def _warm_recipe_source(
     """Resolve which KB path actually supplied the applied warm recipe.
 
     Under the composite remote, a merged row carries ``_field_sources`` /
-    ``_sources`` recording which backend supplied each field. When config-donor
-    decoupling (#587) borrows the replayable champion from a same-architecture
-    sibling, the FINAL applied config comes from the donor's path — so prefer
+    ``_sources`` recording which backend supplied each field. When the
+    replayable champion is borrowed from a same-architecture sibling, the
+    FINAL applied config comes from the donor's path — so prefer
     the donor's ``best_config`` source whenever a separate donor (tier other
     than ``self``) supplied it. Otherwise attribute to the identity match's
     ``best_config`` backend, then its first contributing source, and finally
@@ -334,6 +334,7 @@ def _build_warm_start_context(
     config_donor: Mapping[str, Any] | None = None,
     config_donor_tier: str = "",
     config_donor_confidence: float = 0.0,
+    model_architectures: "list[str] | None" = None,
 ) -> dict[str, Any]:
     """Build the model-facing WarmStartContext from a KB recipe row.
 
@@ -400,12 +401,80 @@ def _build_warm_start_context(
                 "extra_envs": envs,
                 "expected_gain_pct": expected_gain,
                 "best_throughput": best_tput,
-                # Provenance: where the borrowed champion config came from.
                 "config_source": str(donor.get("canonical_id") or ""),
                 "config_tier": config_donor_tier or "self",
                 "config_confidence": float(config_donor_confidence or confidence),
             }
+    # Extract replayable code patches from prs_tested (positive + negative).
+    _extract_patches_from_prs_tested(ctx, recipe, model_architectures)
     return ctx
+
+
+def _extract_patches_from_prs_tested(
+    ctx: dict,
+    recipe: "Mapping[str, Any] | None",
+    model_architectures: "list[str] | None" = None,
+) -> None:
+    """Populate ctx with replayable patches and blocked patches from prs_tested."""
+    if not isinstance(recipe, Mapping):
+        return
+    prs = recipe.get("prs_tested")
+    if not isinstance(prs, list) or not prs:
+        return
+
+    patches: list[dict] = []
+    blocked: list[dict] = []
+    arch_set = set(model_architectures or [])
+
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        patch_content = pr.get("patch_content", "")
+        if not patch_content:
+            continue
+        outcome = str(pr.get("outcome", "")).upper()
+        applicable_arch = pr.get("applicable_arch") or []
+
+        # Architecture match: if applicable_arch specified, at least one must match
+        if applicable_arch and arch_set:
+            if not any(a in arch_set for a in applicable_arch):
+                continue
+
+        if outcome == "KEEP":
+            try:
+                gain = float(pr.get("measured_gain_pct") or 0.0)
+            except (TypeError, ValueError):
+                gain = 0.0
+            if gain > 0:
+                # Limit patch_content to 50KB to avoid state.json bloat.
+                pc = patch_content if len(patch_content) <= 50_000 else ""
+                patches.append({
+                    "patch_file": str(pr.get("patch_file") or ""),
+                    "patch_content": pc,
+                    "patch_ref": str(pr.get("patch_ref") or ""),
+                    "measured_gain_pct": gain,
+                    "repo": str(pr.get("repo") or ""),
+                })
+        elif outcome in ("REVERT", "FAILED"):
+            # Only block when applicable_arch is specified; a REVERT with
+            # no arch constraint is too broad to block all models.
+            if not applicable_arch:
+                continue
+            blocked.append({
+                "patch_file": str(pr.get("patch_file") or ""),
+                "reason": f"{outcome} on {', '.join(applicable_arch)} ({pr.get('measured_gain_pct', '?')}%)",
+                "blocked_arch": list(applicable_arch),
+                "error_class": str(pr.get("error_class") or ""),
+            })
+
+    if patches:
+        patches.sort(key=lambda p: -(p.get("measured_gain_pct") or 0))
+        replay = ctx.setdefault("recommended_replay", {})
+        replay.setdefault("extra_server_args", "")
+        replay.setdefault("extra_envs", {})
+        replay["patches"] = patches
+    if blocked:
+        ctx["blocked_patches"] = blocked
 
 
 def run_t0_anchor(
@@ -418,7 +487,6 @@ def run_t0_anchor(
     stack_fingerprint: Mapping[str, str] | None = None,
     extra_attrs: Mapping[str, Any] | None = None,
     resume: bool = False,
-    fail_fast: bool = False,
     on_status: Callable[[str], None] | None = None,
     session_dir: Path | None = None,
     save_state: bool = True,
@@ -439,7 +507,6 @@ def run_t0_anchor(
         extra_attrs: Optional extra identity/trace attributes (model_class,
             framework, session ids).
         resume: When ``True``, re-anchor even if already anchored.
-        fail_fast: Reserved flag for fail-fast behavior.
         on_status: Optional status-line callback; defaults to INFO logging.
         session_dir: The session directory (required).
         save_state: When ``True``, persist the mutated SharedState.
@@ -743,8 +810,8 @@ def run_t0_anchor(
         warm_conf = 0.0
 
     # Config-donor decoupling: the identity match (warm_point) supplies priors
-    # and the 7-tuple anchor; if it carries no replayable champion config
-    # (the ~47% empty-best_config / seed-only rows), borrow one from the
+    # and the 7-tuple anchor; if it carries no replayable champion config,
+    # borrow one from the
     # nearest same-architecture sibling so the active warm-replay can still
     # fire. The donor's cross-model transfer confidence — not the identity
     # match's confidence — governs the downstream replay gate.
@@ -777,7 +844,7 @@ def run_t0_anchor(
         sort_keys=True,
     )
     try:
-        warm_path = sd / "runtime" / "cortex" / ".kb_warm.json"
+        warm_path = cortex_warm_json(sd)
         warm_path.parent.mkdir(parents=True, exist_ok=True)
         warm_path.write_text(
             json.dumps(
@@ -828,6 +895,7 @@ def run_t0_anchor(
             canonical_id=cid,
             source=warm_source,
             recipe=warm_point or None,
+            model_architectures=_architectures_val if isinstance(_architectures_val, list) else None,
         )
     except Exception:  # noqa: BLE001 — defensive; context is advisory
         log.exception("warm_start_context build failed")
@@ -836,7 +904,7 @@ def run_t0_anchor(
     pitfalls_list: list[dict[str, Any]] = list(warm_point.get("pitfalls") or [])
     lessons_list: list[dict[str, Any]] = list(warm_point.get("lessons") or [])
     try:
-        pit_path = sd / "runtime" / "cortex" / ".kb_pitfalls.json"
+        pit_path = cortex_pitfalls_json(sd)
         pit_path.parent.mkdir(parents=True, exist_ok=True)
         pit_path.write_text(
             json.dumps(
@@ -855,7 +923,7 @@ def run_t0_anchor(
     except OSError as exc:
         log.warning("warm_start_pitfalls snapshot write failed: %s", exc)
     try:
-        les_path = sd / "runtime" / "cortex" / ".kb_lessons.json"
+        les_path = cortex_lessons_json(sd)
         les_path.parent.mkdir(parents=True, exist_ok=True)
         les_path.write_text(
             json.dumps(

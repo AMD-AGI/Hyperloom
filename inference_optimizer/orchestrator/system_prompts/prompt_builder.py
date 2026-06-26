@@ -24,6 +24,7 @@ from ...protocol.action_surfaces import (
     KERNEL_OWNED_ACTIONS,
     NO_KERNEL_ENABLED_ACTIONS,
 )
+from . import read_rules_fragment as _read_rules_fragment
 
 
 # Phase ordering for the catalogue; unknown phases appended at the end.
@@ -165,9 +166,8 @@ def _section_phase_semantics(
         Markdown lines for the phase-contract section.
     """
     from ..phase_state import (
-        PHASE_NAMES,
         is_phase_interleave_enabled,
-        llm_proposable_actions_for_with_interleave,
+        render_phase_proposable_bullets,
     )
 
     # phase name -> the flag that disabled it (None => always enabled).
@@ -192,19 +192,13 @@ def _section_phase_semantics(
         skipped = ", ".join(f"{ph} ({flag})" for ph, flag in disabled_suffix.items())
         lines.append(f"Phases SKIPPED this run (never entered): {skipped}.")
         lines.append("")
-    for phase in PHASE_NAMES:
-        proposable = sorted(
-            llm_proposable_actions_for_with_interleave(
-                phase,
-                interleave=interleave,
-                explore_enabled=explore_enabled if interleave else None,
-            )
+    lines.extend(
+        render_phase_proposable_bullets(
+            interleave=interleave,
+            explore_enabled=explore_enabled,
+            disabled_suffix=disabled_suffix,
         )
-        flag = disabled_suffix.get(phase)
-        if flag:
-            lines.append(f"- **{phase}**: {', '.join(proposable)} (DISABLED: {flag} — phase skipped)")
-        else:
-            lines.append(f"- **{phase}**: {', '.join(proposable)}")
+    )
     lines.extend([
         "",
         "roofline, profile, replay_warm_recipe and framework_pr are never",
@@ -228,24 +222,6 @@ def _section_phase_semantics(
         "the sweep cannot run at all) — it stamps `robustness_escalated`,",
         "so emitting it on a normal finish mislabels the run.",
     ])
-    if interleave:
-        lines.extend([
-            "",
-            "roofline, profile, replay_warm_recipe and framework_pr are never",
-            "in the sets above: the Coordinator auto-manages them and PolicyGate",
-            "denies any attempt to propose them.",
-            "",
-            "Phase transitions are Coordinator-owned. The hard advance gates",
-            "are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit, the per-",
-            "phase budget cap, or a terminal stop_reason exit EXPLORE / KERNEL",
-            "/ SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
-            "You may also emit `escalate_strategy_change{next_action_hint=",
-            "'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}` directly",
-            "(no longer robustness-only) when you judge the current phase",
-            "exhausted; the Coordinator validates the hint vocab and routes",
-            "the transition on the next tick.",
-        ]
-    )
     if interleave:
         lines.extend(
             [
@@ -292,6 +268,49 @@ def _filter_actions(
             continue
         out.append(meta)
     return out
+
+
+def _resolve_prompt_prelude(
+    action_registry: ActionRegistry,
+    enabled_actions: Iterable[str],
+    framework: str,
+    kernel_enabled: bool | None,
+    rules_fragment_path: Path | None,
+) -> tuple[list[ActionMetadata], bool, str, str]:
+    """Resolve the shared prelude for the orchestration / critic prompt builders.
+
+    Args:
+        action_registry (ActionRegistry): The loaded action registry.
+        enabled_actions (Iterable[str]): Action names enabled for this run.
+        framework (str): The framework name; normalised to lower-case (default
+            ``sglang``).
+        kernel_enabled (bool | None): Explicit override; ``None`` derives from
+            whether any KERNEL_OWNED action is enabled.
+        rules_fragment_path (Path | None): Path to the rules fragment.
+
+    Returns:
+        tuple[list[ActionMetadata], bool, str, str]: ``(actions, kernel_enabled,
+        framework_norm, rules_md)``.
+    """
+    actions = _filter_actions(action_registry, enabled_actions)
+    if kernel_enabled is None:
+        kernel_enabled = any(a.name in KERNEL_OWNED_ACTIONS for a in actions)
+    framework_norm = (framework or "sglang").strip().lower() or "sglang"
+    rules_md = _read_rules_fragment(rules_fragment_path)
+    return actions, kernel_enabled, framework_norm, rules_md
+
+
+def join_sections(sections: list[list[str]]) -> str:
+    """Join prompt sections into the final prompt string (shared epilogue).
+
+    Args:
+        sections (list[list[str]]): Per-section line lists.
+
+    Returns:
+        str: The sections joined (lines by ``\\n``, sections by blank line),
+        right-stripped with a trailing newline.
+    """
+    return "\n\n".join("\n".join(s) for s in sections).rstrip() + "\n"
 
 
 def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, list[str]]]:
@@ -768,8 +787,9 @@ rewrite (each with a `skip_reason`); they are off-limits, not targets.
                    budget_minutes: 60}}
 
   Backend auto-pick: DO NOT add a `backends` field. The kernel-agent's
-  `choose_backends()` auto-picks per kernel (hip_cpp+bench→GEAK;
-  triton+bench→GEAK then Claude/Codex; python/unknown→Claude/Codex).
+  `choose_backends()` auto-picks the Forge-GEAK-OOB ladder per kernel
+  (forge → geak → claude → codex → cursor; cursor is dropped when
+  CURSOR_API_KEY is unset).
   Pinning a backend forces every kernel through it even where GEAK is
   the only one that can KEEP — the exact #144 last comment Layer 2
   regression. Read `kernel_opt_attempts` + `pending_keep_kernels` to
@@ -804,24 +824,6 @@ Only rewrite reusable native sources in the trace. NEVER optimize
 kernels — they're tied to one compile cache and not reusable."""
 
 
-def _read_rules_fragment(path: Path | None) -> str:
-    """Read the ``orchestration.md`` rules fragment, tolerating absence.
-
-    Args:
-        path (Path | None): Path to the rules fragment, or ``None`` to skip.
-
-    Returns:
-        str: The stripped fragment text, or an empty string when the path is
-        ``None`` or unreadable.
-    """
-    if path is None:
-        return ""
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
 def _section_rules(rules_md: str) -> list[str]:
     """Build the RULES & OUTPUT PROTOCOL section wrapping the rules fragment.
 
@@ -838,7 +840,42 @@ def _section_rules(rules_md: str) -> list[str]:
     return ["## 7. RULES & OUTPUT PROTOCOL", "", body]
 
 
-# Public API.
+def _section_macro_posture(macro_cycle: int = 0) -> list[str]:
+    """Build the advisory long-run MACRO POSTURE section.
+
+    Informs Orchestration of the breadth→depth arc that the run's machinery
+    already drives (per-cycle KEEP-threshold decay + specialist wall-budget
+    amplification), so it can plan for it. Purely advisory — it forbids
+    nothing. The LIVE cycle number is carried every tick in the ``cycle`` line
+    of the ``=== Phase ===`` block; this section explains how to use it.
+
+    Args:
+        macro_cycle: The macro-cycle the prompt was assembled at (starting
+            posture hint; the live value is in the per-tick phase block).
+
+    Returns:
+        list[str]: Markdown lines for the macro-posture section.
+    """
+    return [
+        "## MACRO POSTURE (advisory — breadth→depth across the long run)",
+        "",
+        f"This run was assembled at macro_cycle={int(macro_cycle)}. The live",
+        "cycle number is in the ``cycle`` line of the per-tick ``=== Phase ===``",
+        "block. As the cycle grows, the machinery already (a) decays the KEEP",
+        "acceptance threshold so late cycles can still capture small wins, and",
+        "(b) amplifies each specialist's wall budget so deeper / longer-running",
+        "tasks become affordable.",
+        "",
+        "Plan with that arc (this is guidance, not a constraint):",
+        "- Early cycles (≈0-2): cast WIDE. Prefer many cheap config/env levers",
+        "  and several specialists in parallel to map the space fast.",
+        "- Later cycles: commit to FEWER, DEEPER, longer-running specialist",
+        "  tasks — short-horizon wins are largely exhausted, so spend the",
+        "  amplified budget on autotune / kernel / profiling-driven work that",
+        "  needs a long measure→edit→measure loop.",
+    ]
+
+
 def build_orchestration_prompt(
     *,
     action_registry: ActionRegistry,
@@ -850,6 +887,7 @@ def build_orchestration_prompt(
     objective_kind: str = "time_only",
     objective_value: float | str | None = None,
     max_minutes: int = 0,
+    macro_cycle: int = 0,
     rules_fragment_path: Path | None = None,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> str:
@@ -871,6 +909,9 @@ def build_orchestration_prompt(
         objective_kind: :mod:`objective` kind string, printed verbatim.
         objective_value: :mod:`objective` target value, printed verbatim.
         max_minutes: wall-clock budget for the run.
+        macro_cycle: macro-cycle the prompt is assembled at; seeds the advisory
+            MACRO POSTURE section (the live value rides the per-tick phase
+            block).
         rules_fragment_path: path to ``orchestration.md``; placeholder if
             unreadable.
         framework_source_roots: optional framework source roots passed through
@@ -879,12 +920,13 @@ def build_orchestration_prompt(
     Returns:
         The composed Orchestration system prompt text.
     """
-    actions = _filter_actions(action_registry, enabled_actions)
-    if kernel_enabled is None:
-        kernel_enabled = any(a.name in KERNEL_OWNED_ACTIONS for a in actions)
-    framework_norm = (framework or "sglang").strip().lower() or "sglang"
-
-    rules_md = _read_rules_fragment(rules_fragment_path)
+    actions, kernel_enabled, framework_norm, rules_md = _resolve_prompt_prelude(
+        action_registry,
+        enabled_actions,
+        framework,
+        kernel_enabled,
+        rules_fragment_path,
+    )
 
     sections: list[list[str]] = [
         _section_mission(),
@@ -906,15 +948,13 @@ def build_orchestration_prompt(
         ),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
+        _section_macro_posture(macro_cycle),
     ]
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
     sections.append(_section_rules(rules_md))
 
-    parts: list[str] = []
-    for sect in sections:
-        parts.append("\n".join(sect))
-    return "\n\n".join(parts).rstrip() + "\n"
+    return join_sections(sections)
 
 
 def default_enabled_actions(

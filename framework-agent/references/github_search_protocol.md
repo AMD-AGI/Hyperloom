@@ -1,8 +1,9 @@
 # GitHub Search protocol used by framework-agent
 
 > Technical reference for the anonymous GitHub Search backend in
-> `framework_agent.sources.github`. Distilled from Arbor's
-> `github_search.py` plus the live framework-agent implementation.
+> `framework_agent.sources.github`. Distilled from the original Hyperloom
+> (Arbor, arXiv:2606.12563) `github_search.py` plus the live framework-agent
+> implementation.
 
 ## Endpoint
 

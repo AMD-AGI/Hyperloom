@@ -2,11 +2,9 @@
 
 """Shared workload-env materialization (single source of truth).
 
-Two YAML-rendering paths used to diverge — baseline injected the full process-
-env workload contract while the grid runner dropped it — so downstream variants
-ran at YAML smoke defaults and every one looked like a regression (SKILL Lesson
-4 "Benchmark fairness"). This module is the single source of truth for rendering
-a Magpie YAML with the user's actual workload contract:
+This module is the single source of truth for rendering a Magpie YAML with the
+user's actual process-env workload contract, so the baseline and grid-runner
+paths render identical YAML:
 
 * :func:`materialize_config_with_envs` — write a per-run YAML honoring process
   env (+ optional caller overrides).
@@ -19,6 +17,7 @@ Used by ``baseline.py`` (materializes once, surfaces the path) and the
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import shutil
@@ -39,14 +38,34 @@ from ._grid_runner import (
     server_args_env_name,
 )
 from ._server_patcher import (
+    ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
 )
-from ...model_config_utils import _load_model_config_dict, _model_is_gemma2
+from ...model_config_utils import (
+    _fp8_is_per_channel_per_token,
+    _load_model_config_dict,
+    _model_is_gemma2,
+)
 
 log = logging.getLogger(__name__)
 
+# gfx942 / CDNA3 dies (MI300X and its MI308X/MI325X siblings) that ship the
+# aiter CK gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
+_GFX942_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x"})
+
 _MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:[=\s]+)\S+")
+
+# Profile-phase capture defaults (issue #571 / #570). Trace size scales with
+# captured decode steps; an oversized capture serializes too slowly and kills
+# the engine (EngineCore RPC timeout). 128 captured steps was measured
+# serialization-safe (~160 MB/rank, ~29s) on a large TP=8 MoE, so smaller
+# models stay within budget. Tunable via HYPERLOOM_PROFILE_MAX_STEPS_CAP.
+_DEFAULT_PROFILE_MAX_STEPS = 128
+# Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
+# profile reuses min(served OSL, this) so its trace stays light without
+# distorting the served workload more than necessary.
+_PROFILE_DEFAULT_OSL = 1024
 
 
 def _remove_moe_runner_backend_arg(args: str) -> str:
@@ -58,6 +77,26 @@ _RUN_EVAL_DISABLED_WARN_EMITTED = False
 
 # Truthy-false spellings that disable the accuracy gate.
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
+
+
+def inject_vllm_expert_parallel(
+    server_args: str | None,
+    framework: Any,
+    ep: Any,
+) -> str:
+    """Append vLLM expert-parallel flag when EP is enabled."""
+    args = str(server_args or "").strip()
+    if "vllm" not in str(framework or "").lower():
+        return args
+    try:
+        ep_int = int(ep if ep not in (None, "") else 1)
+    except (TypeError, ValueError):
+        return args
+    if ep_int <= 1:
+        return args
+    if re.search(r"(?:^|\s)--enable-expert-parallel(?:\s|$)", args):
+        return args
+    return f"{args} --enable-expert-parallel".strip()
 
 
 class FrameworkScriptMismatchError(ValueError):
@@ -335,10 +374,13 @@ def materialize_config_with_envs(
     conc_val = int(envs.get("CONC") or 8)
 
     # Steady-state window for profiling configs (detected by PROFILE env or
-    # ``profiler.torch_profiler.enabled``). Formulas match the TraceLens
-    # profiling skill (RANDOM_RANGE_RATIO defaults to 1.0):
-    #   max_iters   = min(1024, max(256, OSL * 16 / CONC))
-    #   delay_iters = OSL * (R + 1) * 3 - max_iters / 2
+    # ``profiler.torch_profiler.enabled``). The captured-step count is capped at
+    # a serialization-safe budget; the profile OSL is resolved (and lowered if
+    # needed) so the steady-state floor fits that cap (RANDOM_RANGE_RATIO
+    # defaults to 1.0):
+    #   max_iters    = HYPERLOOM_PROFILE_MAX_STEPS_CAP (default 128)
+    #   steady_floor = ceil(OSL * (1 + R) / (2 * CONC))   # must be <= max_iters
+    #   delay_iters  = OSL * (R + 1) * 3 - max_iters / 2
     is_profile = str(envs.get("PROFILE", "")).strip() == "1" or (
         bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True
     )
@@ -349,17 +391,81 @@ def materialize_config_with_envs(
         except (TypeError, ValueError):
             r_val = 1.0
         safe_conc = max(conc_val, 1)
+        # --- Profile capture window cap (issue #571 / #570) ----------------
+        # Cap captured decode steps at a serialization-safe default so the
+        # torch-profiler trace can be written without starving the engine RPC
+        # (the EngineCore timeout crash). Operator-tunable.
+        try:
+            cap = int(
+                os.environ.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "").strip()
+                or _DEFAULT_PROFILE_MAX_STEPS
+            )
+        except (TypeError, ValueError):
+            cap = _DEFAULT_PROFILE_MAX_STEPS
+        if cap < 1:
+            cap = _DEFAULT_PROFILE_MAX_STEPS
+
+        # --- Resolve the profile-scoped OSL --------------------------------
+        # The profile/roofline phase may run a lighter OSL than the served
+        # workload so its trace stays serializable; baseline/optimize keep the
+        # global OSL. PROFILE_OSL (via --profile-osl) is an explicit operator
+        # choice and is honored as-is; otherwise default to
+        # min(served OSL, _PROFILE_DEFAULT_OSL). Scoped to is_profile so
+        # baseline/optimize configs are never affected.
+        _profile_osl_raw = os.environ.get("PROFILE_OSL", "").strip()
+        profile_osl_explicit = _profile_osl_raw.isdigit() and int(_profile_osl_raw) > 0
+        if profile_osl_explicit:
+            osl_val = int(_profile_osl_raw)
+        else:
+            osl_val = min(osl_val, _PROFILE_DEFAULT_OSL)
         safe_osl = max(osl_val, 1)
-        max_iters = min(1024, max(256, (osl_val * 16) // safe_conc))
+
+        # Steady-state floor: minimum captured decode steps for the splitter to
+        # isolate a steady-state window (mirrors TraceLens
+        # find_steady_state_window). The capture must be >= this or the splitter
+        # reports trace_split_no_steady_state.
+        steady_floor = math.ceil(safe_osl * (1.0 + r_val) / (2.0 * safe_conc))
+        if steady_floor > cap:
+            if profile_osl_explicit:
+                # Honor the operator's explicit OSL; warn that the window may
+                # not contain a steady-state segment at this OSL + cap.
+                log.warning(
+                    "PROFILE_OSL=%d needs %d captured steps to reach steady "
+                    "state, above the profile cap of %d; the trace may lack a "
+                    "steady-state window (trace_split_no_steady_state). Lower "
+                    "--profile-osl or raise HYPERLOOM_PROFILE_MAX_STEPS_CAP.",
+                    osl_val, steady_floor, cap,
+                )
+            else:
+                # Auto path: lower the profile OSL so the floor fits the cap
+                # (largest OSL whose steady floor stays <= cap).
+                fitted_osl = max(1, int(cap * 2 * safe_conc / (1.0 + r_val)))
+                log.warning(
+                    "profile OSL %d would need %d captured steps to reach "
+                    "steady state (> cap %d); lowering profile OSL to %d so the "
+                    "capture stays serializable. Baseline/optimize unaffected.",
+                    osl_val, steady_floor, cap, fitted_osl,
+                )
+                osl_val = fitted_osl
+                safe_osl = max(osl_val, 1)
+                steady_floor = math.ceil(safe_osl * (1.0 + r_val) / (2.0 * safe_conc))
+
+        # Profile server runs at the resolved (possibly reduced) profile OSL,
+        # decoupled from the served --osl.
+        envs["OSL"] = osl_val
+
+        # Capture up to the cap (>= steady_floor in the auto path). delay_iters
+        # keeps the established warmup formula.
+        max_iters = cap
         delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
         # Clamp >= 0 (tiny OSL / huge R can produce a negative delay).
         if delay_iters < 0:
             delay_iters = 0
-        # Operator override for a small eager FlyDSL profile: the default
-        # >=256-step capture is unsavable in eager mode for a 30B MoE, but
-        # eager is the only mode recording the flydsl_moe frames PR#668 keys
-        # on. Set HYPERLOOM_PROFILE_MAX_ITERS small (e.g. 8) with the eager
-        # profile patch.
+        # Operator hard-override of captured steps for a small eager FlyDSL
+        # profile (e.g. 8), which is unsavable in eager mode at the default
+        # capture but is the only mode recording the flydsl_moe frames PR#668
+        # keys on. Honored verbatim; warn when outside the safe band rather
+        # than silently clamping.
         _ovr = os.environ.get("HYPERLOOM_PROFILE_MAX_ITERS", "").strip()
         if _ovr.isdigit() and int(_ovr) > 0:
             max_iters = int(_ovr)
@@ -369,7 +475,21 @@ def materialize_config_with_envs(
                 delay_iters = 8
             if delay_iters < 0:
                 delay_iters = 0
-        # TraceLens #194 §2: NUM_PROMPTS must let the engine reach
+            if max_iters < steady_floor:
+                log.warning(
+                    "HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state "
+                    "floor of %d; the trace may lack a steady-state window "
+                    "(trace_split_no_steady_state).",
+                    max_iters, steady_floor,
+                )
+            elif max_iters > cap:
+                log.warning(
+                    "HYPERLOOM_PROFILE_MAX_ITERS=%d exceeds the serialization-"
+                    "safe cap of %d; the trace may be too large to serialize "
+                    "(EngineCore RPC timeout).",
+                    max_iters, cap,
+                )
+        # NUM_PROMPTS must let the engine reach
         # ``delay_iters + max_iters`` decode steps before running out of
         # prompts (N prompts ≈ N * OSL / CONC iters; invert + 2x buffer).
         # Hyperloom owns this under PROFILE; a caller value is ignored.
@@ -558,23 +678,8 @@ def materialize_config_with_envs(
         # pipeline keeps the configured tp8 + the clean aiter MLA path.
         # Verified on MI300X: capture passes, decode correct.
         envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
-        # Kimi's client-side tokenizer lives behind custom model code. The
-        # server path already passes --trust-remote-code; mirror that on
-        # Magpie's remote benchmark client without changing other models.
-        envs.setdefault("MAGPIE_TRUST_REMOTE_CODE", "1")
-    if "qwen3.6-35b-a3b" in _model_basename or ("qwen3-6-35b-a3b" in _model_basename):
-        # Qwen3.6 MoE also uses a custom text-generation implementation behind
-        # a config that advertises vision_config. Keep trust scoped to this
-        # exact daily candidate family instead of enabling it globally.
-        envs.setdefault("MAGPIE_TRUST_REMOTE_CODE", "1")
-        _qwen_fw_env = server_args_env_name(bench.get("framework"))
-        _qwen_existing = str(envs.get(_qwen_fw_env, "")).strip()
-        if "trust-remote-code" not in _qwen_existing:
-            from ._grid_runner import merge_server_args
-
-            envs[_qwen_fw_env] = (
-                merge_server_args(_qwen_existing, "--trust-remote-code") if _qwen_existing else "--trust-remote-code"
-            )
+        # Client trust-remote-code is handled model-agnostically by the
+        # "Client trust-remote-code" block after the server-arg guards below.
     if "mimo-v2" in _model_basename:
         # MiMo-V2.x (moe_swa) loads MiMoV2ForCausalLM fine but its DEFAULT
         # aiter attention backend SIGABRTs during CUDA-graph capture on
@@ -679,6 +784,11 @@ def materialize_config_with_envs(
         bench.get("model"),
         gpu_type=gpu_type or bench.get("runner_type"),
     )
+    resolved_server_args = inject_vllm_expert_parallel(
+        resolved_server_args,
+        bench.get("framework"),
+        os.environ.get("EP", "").strip() or envs.get("EP"),
+    )
     # 5. vLLM/atom argparse dedup (#520): the YAML EXTRA_VLLM_ARGS base and a
     #    sweep/kernel variant can each inject --attention-backend, and
     #    merge_server_args keeps both. vLLM v0.21.0 crashes EngineCoreProc on a
@@ -701,6 +811,40 @@ def materialize_config_with_envs(
     )
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
+    # ── Client trust-remote-code (model-agnostic) ─────────────────────────
+    # The MI300X bench scripts (vllm_mi300x.sh / sglang_mi300x.sh) always
+    # launch the SERVER with --trust-remote-code, so a custom-tokenizer model's
+    # measurement CLIENT must load the same remote code to tokenize prompts —
+    # otherwise transformers raises ValueError mid-warmup and the variant fails
+    # (seen on Kimi-K2 / Qwen3.6 / any custom-code model). Mirror it onto every
+    # client-trust env so custom-code models work WITHOUT per-model special-
+    # casing. This is the single choke point every bench path (baseline /
+    # profile / sweep / explore / framework_pr / conc_sweep) funnels through.
+    # setdefault never overrides an operator's deliberate opt-out (e.g.
+    # extra_envs={"BENCH_TRUST_REMOTE_CODE": "0"}).
+    for _trust_key in (
+        "MAGPIE_TRUST_REMOTE_CODE",  # Magpie sglang remote-direct client
+        "BENCH_TRUST_REMOTE_CODE",  # GEAK bench_e2e.sh inferencex client
+        "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
+    ):
+        envs.setdefault(_trust_key, "1")
+    # Server-side trust-remote-code for custom-code models (Qwen3.6 MoE): the
+    # checkpoint ships a custom text-generation implementation behind a config
+    # that advertises vision_config, so the SERVER must also load remote code
+    # or it refuses the arch at boot. Scoped to this exact daily-candidate
+    # family so other models' server args are untouched; the client side is
+    # already covered model-agnostically above. Merge (never overwrite) so an
+    # operator pin survives, and skip when --trust-remote-code is already set.
+    if "qwen3.6-35b-a3b" in _model_basename or "qwen3-6-35b-a3b" in _model_basename:
+        _trust_existing = str(envs.get(framework_env, "")).strip()
+        if "trust-remote-code" not in _trust_existing:
+            from ._grid_runner import merge_server_args
+
+            envs[framework_env] = (
+                merge_server_args(_trust_existing, "--trust-remote-code")
+                if _trust_existing
+                else "--trust-remote-code"
+            )
     # Accuracy eval (GSM8K) is ON by default; env / extra_envs may override.
     # Disabling it removes the per-variant accuracy gate, so accuracy-
     # destroying changes can pass on throughput alone — warn loudly, never
@@ -717,6 +861,46 @@ def materialize_config_with_envs(
                 "to restore the gate. This warning fires once per process."
             )
             _RUN_EVAL_DISABLED_WARN_EMITTED = True
+    # KernelForge fp8 block-scale CK backend switch: when the coordinator
+    # promoted an fp8-blockscale gemm_tuning KEEP it injects
+    # SGLANG_FP8_BLOCKSCALE_CK_MAX_M into the serving envs. That env only takes
+    # effect on a KernelForge-patched sglang fp8_utils.py (M-aware CK routing);
+    # the unpatched tree ignores it. Ensure the patch here, strictly scoped to
+    # sglang + an active CK optimization (env present) — there is no point
+    # patching otherwise. Fail-soft: a failed patch just leaves the env a no-op,
+    # so the serving run still proceeds (never hard-fail). Honors the
+    # HYPERLOOM_ENABLE_PATCH kill switch like the TraceLens hook above.
+    _fw = str(bench.get("framework") or "").lower()
+    if (
+        _tracelens_patch_enabled()
+        and "sglang" in _fw
+        and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs
+    ):
+        if not ensure_sglang_patched_for_ck_blockscale():
+            log.warning(
+                "CK fp8 block-scale patch could not be applied; "
+                "SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched "
+                "sglang fp8_utils.py (serving run continues unaffected)."
+            )
+    # sglang FP8 per-channel/per-token CK fast path: a dense FP8 checkpoint
+    # with per-channel weight + per-token (dynamic) activation falls into the
+    # slow unfused _apply_fallback_scaled_mm in sglang's apply_fp8_linear
+    # unless SGLANG_USE_AITER_FP8_PER_TOKEN=1 flips use_per_token_if_dynamic on
+    # and routes the GEMM to aiter's CK gemm_a8w8_bpreshuffle. Inject it from
+    # Hyperloom, strictly scoped to sglang + fp8 + gfx942 + that exact quant
+    # scheme so per-tensor and block-scale FP8 are never touched. setdefault so
+    # an operator-set value (YAML / extra_envs) always wins.
+    from ...cli import _resolve_amd_gpu_type
+
+    _model_for_quant = str(model_path or os.environ.get("MODEL_PATH", ""))
+    if (
+        "sglang" in _fw
+        and str(bench.get("precision") or "").strip().lower() == "fp8"
+        and _resolve_amd_gpu_type(gpu_type or bench.get("runner_type"))
+        in _GFX942_GPU_TYPES
+        and _fp8_is_per_channel_per_token(_model_for_quant)
+    ):
+        envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:

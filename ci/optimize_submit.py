@@ -38,7 +38,6 @@ Usage:
 Env vars (all optional, CLI flags take precedence):
   CLAW_API_KEY | SAFE_API_KEY        bearer token (ak-xxx)
   SAFE_BASE_URL | SAFE_API_URL       base URL (default: https://core42.primus-safe.amd.com)
-  HARBOR_PREFIX                      image registry prefix
   HF_TOKEN                           HuggingFace token (gated models)
   SAFE_OPTIMIZE_WORKSPACE            override default 'core42-hyperloom'
   SAFE_OPTIMIZE_VOLUME               override default '/wekafs'
@@ -79,7 +78,6 @@ DEFAULT_API_URL = "https://core42.primus-safe.amd.com"
 DEFAULT_REGISTER_WORKSPACE = "core42-hyperloom"
 DEFAULT_SUBMIT_WORKSPACE = "core42-sandbox"
 DEFAULT_VOLUME = "/wekafs"
-DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 # core42 is MI300X; override the Claw prompt-builder's wrong MI355X default so
 # the prompt and TP policy use the right arch. Tool source paths are
 # deliberately NOT pinned: install.sh clones writable per-session copies, and
@@ -88,7 +86,7 @@ DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
-DEFAULT_MAX_HOURS = 12.0
+DEFAULT_MAX_HOURS = 6.0
 DEFAULT_TARGET_GAIN = 500.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16
@@ -297,9 +295,9 @@ SGLANG_ARCHS: set[str] = {
     "GPTBigCodeForCausalLM",
     "FalconForCausalLM",
     "ChatGLMModel",
-    # New architectures natively supported by sglang v0.5.11 (transformers 5.x)
+    # New architectures natively supported by sglang v0.5.12 (transformers 5.x)
     # in the current sandbox image. Without these, detect_framework falls back
-    # to vLLM and the old proxy/vllm/vllm-openai-rocm:v0.19.0 image (transformers
+    # to vLLM and the vllm-openai-rocm:v0.21.0 image (transformers
     # <5) crashes at baseline ("does not recognize this architecture" /
     # "TokenizersBackend does not exist"). Verified against the failing models'
     # config.architectures.
@@ -347,15 +345,6 @@ def is_generative_arch(arch: str) -> bool:
     return any(arch.endswith(s) for s in GENERATIVE_ARCH_SUFFIXES)
 
 
-def _proxy() -> str:
-    """Return the container registry proxy prefix.
-
-    Returns:
-        str: ``$HARBOR_PREFIX`` when set, otherwise the default proxy prefix.
-    """
-    return os.environ.get("HARBOR_PREFIX", DEFAULT_PROXY)
-
-
 def _default_sglang_image() -> str:
     """Return the default SGLang server image.
 
@@ -366,19 +355,17 @@ def _default_sglang_image() -> str:
     """
     # profilerfix: patched libamdhip64/libroctracer so rocprofiler captures
     # kernels under HipGraphLaunch (issue #352). Pre-profilerfix image (revert):
-    # lmsysorg/sglang:v0.5.11-rocm720-mi30x
-    return "primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
+    # lmsysorg/sglang:v0.5.12-rocm720-mi30x
+    return "harbor.core42.primus-safe.amd.com/sync/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix"
 
 
 def _default_vllm_image() -> str:
     """Return the default vLLM server image.
 
     Returns:
-        The proxy-qualified vLLM image (v0.19.0, one minor ahead of the
-        InferenceX baseline to avoid v0.20 breakage).
+        The sync-registry vLLM image (v0.21.0).
     """
-    # v0.19.0: one minor ahead of InferenceX baseline v0.17.0, avoiding v0.20 breakage.
-    return f"{_proxy()}/vllm/vllm-openai-rocm:v0.19.0"
+    return "harbor.core42.primus-safe.amd.com/sync/vllm/vllm-openai-rocm:v0.21.0"
 
 
 # ── HuggingFace client ──────────────────────────────────────────────────────────
@@ -786,6 +773,27 @@ def _sglang_image_for(repo_id: str = "") -> str:
     return _default_sglang_image()
 
 
+def _vllm_image_for(repo_id: str = "") -> str:
+    """Pick the vLLM image, honoring per-model baseline-arch needs.
+
+    Default is the standard vLLM image. Gemma-4 (e.g. google/gemma-4-26B-A4B-it)
+    is the exception: the stock vLLM build does not serve the gemma-4 arch, so it
+    needs the dedicated gemma4 image. Matched on the repo basename so it fires
+    for the HF repo id regardless of org casing. Only consulted on the vLLM path
+    (sglang is unaffected).
+
+    Args:
+        repo_id (str): Model repo id, matched on its basename for overrides.
+
+    Returns:
+        str: The gemma4 vLLM image for gemma-4 repos, else the default vLLM image.
+    """
+    basename = (repo_id or "").split("/")[-1].lower()
+    if "gemma-4" in basename or "gemma4" in basename:
+        return "harbor.core42.primus-safe.amd.com/sync/vllm-openai-rocm:gemma4"
+    return _default_vllm_image()
+
+
 def detect_image(framework: str, repo_id: str = "") -> str:
     """Select the server image for a framework and model.
 
@@ -794,10 +802,11 @@ def detect_image(framework: str, repo_id: str = "") -> str:
         repo_id: Model repo id, used to honor per-model image overrides.
 
     Returns:
-        The default vLLM image for ``vllm``; otherwise the SGLang image chosen
-        by :func:`_sglang_image_for`.
+        The vLLM image chosen by :func:`_vllm_image_for` for ``vllm`` (gemma-4
+        gets a dedicated image); otherwise the SGLang image chosen by
+        :func:`_sglang_image_for`.
     """
-    return _default_vllm_image() if framework == "vllm" else _sglang_image_for(repo_id)
+    return _vllm_image_for(repo_id) if framework == "vllm" else _sglang_image_for(repo_id)
 
 
 def auto_detect(hf: HuggingFaceClient, repo_id: str, gpu_type: str | None = None) -> DetectedConfig | None:
@@ -1839,6 +1848,22 @@ def process_model(
                 detected.max_position_embeddings or "?",
                 detected.framework,
             )
+            return rec
+
+        # Online fallback for missing_tokenizer: the local rule above only fires
+        # once the model dir is populated with weights. Not-yet-cached repos that
+        # ship weights but omit tokenizer.* files would otherwise slip through and
+        # fail to serve. Probe the HF file listing directly (HF_TOKEN/HF_TOKEN_2)
+        # so they are skipped before a Claw session is created.
+        hf_tokens = [t for t in (os.environ.get("HF_TOKEN", ""),
+                                  os.environ.get("HF_TOKEN_2", "")) if t]
+        tok_reason = model_compat.hf_missing_tokenizer(repo_id, hf_tokens)
+        if tok_reason:
+            rec.status = "skipped"
+            rec.error = f"{tok_reason}: weights present on HF but no tokenizer files"
+            log.warning(
+                "[%s] PRE-FLIGHT FILTERED — rule=%s — skipping: NOT submitting, "
+                "no Claw session created", repo_id, tok_reason)
             return rec
 
     framework = overrides.get("framework") or (detected.framework if detected else "")
@@ -4078,7 +4103,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-hours",
         type=float,
         default=float(os.environ.get("SAFE_OPTIMIZE_MAX_HOURS", DEFAULT_MAX_HOURS)),
-        help="Max hours passed to the Hyperloom optimizer prompt (default: 12).",
+        help="Max hours passed to the Hyperloom optimizer prompt (default: 6).",
     )
     parser.add_argument(
         "--target-gain",
@@ -4160,7 +4185,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Local directory where per-task artifacts land (default: ./task-artifacts)",
     )
     parser.add_argument(
-        "--task-timeout-min", type=int, default=720, help="Per-task wait timeout in minutes (default: 720 = 12h)"
+        "--task-timeout-min", type=int, default=420, help="Per-task wait timeout in minutes (default: 420 = 7h)"
     )
     parser.add_argument(
         "--poll-interval-s", type=int, default=60, help="How often to poll task status, seconds (default: 60)"

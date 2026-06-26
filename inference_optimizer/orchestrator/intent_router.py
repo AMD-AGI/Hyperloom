@@ -1,28 +1,20 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Intent routing collaborator extracted from :class:`Coordinator`.
+"""Intent routing collaborator for :class:`Coordinator`.
 
-The ``Coordinator`` God-object historically owned both the orchestration
-spine (tick/run/dispatcher) *and* the per-intent handlers. This module hosts
-the latter: :meth:`IntentRouter.handle_intent` validates an emitted intent
-through ``PolicyGate`` and dispatches to the matching ``_handle_*`` method,
-exactly as ``Coordinator._handle_intent`` did before.
+:meth:`IntentRouter.handle_intent` validates an emitted intent through
+``PolicyGate`` and dispatches it to the matching ``_handle_*`` method.
 
-Design (transitional collaborator)
-----------------------------------
 ``IntentRouter`` holds a back-reference to its owning ``Coordinator`` and
 delegates every attribute it does not define itself to that coordinator via
-``__getattr__``. The handler bodies were moved here *verbatim* — they read and
-call ``self.shared_state`` / ``self.bus`` / ``self._refresh_gaps(...)`` etc.,
-which transparently resolve back onto the coordinator. This is safe because the
-extracted handlers perform **no** ``self.<attr> = ...`` rebinding (verified by
-AST before extraction): all coordinator state mutation happens through method
+``__getattr__``. The handlers read and call ``self.shared_state`` /
+``self.bus`` / ``self._refresh_gaps(...)`` etc., which transparently resolve
+back onto the coordinator. Coordinator state is mutated only through method
 calls and mutable-object access, both of which route correctly through the
-back-reference. The two-way ``coordinator <-> router`` reference is a known,
-documented transitional coupling; later passes narrow the router's surface.
+back-reference; the handlers never rebind ``self.<attr>`` directly.
 
-``Coordinator`` keeps thin forwarding shims (``_handle_intent`` etc.) so the
-~45 existing tests that call ``coord._handle_intent(...)`` keep working unchanged.
+``Coordinator`` keeps thin forwarding shims (``_handle_intent`` etc.) that
+delegate to the router.
 """
 
 from __future__ import annotations
@@ -35,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..protocol.intent import Intent, IntentType
+from .coordinator_helpers import format_exc_brief
 from .message_bus import Message
 from .policy import PolicyDenied
 from .task_registry import Task
@@ -134,7 +127,7 @@ class IntentRouter:
                         "kind": "handle_intent_exception",
                         "agent": source,
                         "intent_type": intent.type.value,
-                        "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                        "error": format_exc_brief(exc, limit=500),
                     },
                 )
             except Exception:  # noqa: BLE001
@@ -192,11 +185,11 @@ class IntentRouter:
             predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
             payload=dict(intent.payload),
         )
-        # KB hypothesize/verify retired; proposals enter the queue directly, facts written after task lands.
+        # Proposals enter the queue directly; facts are written after the task lands.
         self.state.pending_proposals[msg.msg_id] = pending
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
-        """Apply a Critic ``review_verdict`` to its target proposal; legacy verdict_map collapsed (approve > reject > needs_review).
+        """Apply a Critic ``review_verdict`` to its target proposal; verdicts collapse by priority (approve > reject > needs_review).
 
         Args:
             source: The agent (Critic) emitting the verdict.
@@ -240,11 +233,11 @@ class IntentRouter:
         self,
         *,
         source: str,
-        pending: "PendingProposal",
+        pending: "PendingProposal",  # noqa: F821 - deferred ref; imported lazily in handlers to avoid import cycle.
         verdict: str,
         reasoning: str,
     ) -> None:
-        """Legacy v0.6 single-verdict handler (approve materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate.
+        """Single-verdict handler (approve materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate.
 
         Args:
             source: The agent emitting the verdict.
@@ -277,7 +270,11 @@ class IntentRouter:
             ).strip()
         elif pending.action_name == "specialist":
             # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
-            sid_candidate = str(pending.task_id or "").strip()
+            # PendingProposal has no task_id field, so fall back to the params
+            # payload and use getattr defensively rather than raising AttributeError.
+            sid_candidate = str(
+                getattr(pending, "task_id", None) or pa_params.get("task_id") or ""
+            ).strip()
         if sid_candidate and verdict:
             try:
                 self.shared_state.record_specialist_patch_verdict(
@@ -393,14 +390,14 @@ class IntentRouter:
             # alone conflicts with nothing).
             if action_name == "specialist":
                 from .specialist_profile import resolve_specialist_profile
-                if resolve_specialist_profile(params).grants_bench_tool:
+                if resolve_specialist_profile(params).reserves_benchmark_lane:
                     lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
-                # WS2: any GPU-holding specialist (not just bench-enabled) must
+                # Any GPU-holding specialist (not just bench-enabled) must
                 # serialize against serving via gpu_research_lane, else its
                 # cards (range(cap) = the serving cards) would be over-
                 # subscribed against a live server. research_lane is kept for
-                # LLM-concurrency accounting. The lane lease TTL is re-sourced
-                # to the WS1 wall budget (×grace) so it never expires mid-run
+                # LLM-concurrency accounting. The lane lease TTL is sourced
+                # from the agent wall budget (×grace) so it never expires mid-run
                 # and lets serving grab the cards (iron law:
                 # kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL).
                 needs_gpu_raw = params.get("needs_gpu", False)
@@ -559,13 +556,13 @@ class IntentRouter:
                     )
                     if cached_candidates_path:
                         merged_payload["candidates_path"] = cached_candidates_path
-                # Commit 1cd9f7d's roofline_json auto-inject is omitted here: Roofline-v2 caches under last_trace_analyze instead.
+                # Roofline data is read from the last_trace_analyze cache rather than auto-injected here.
                 cache_hit_source = None
                 cached_result = self._cached_kernel_request(kind, merged_payload)
                 if cached_result is not None:
                     result = cached_result
                     cache_hit_source = "shared_state_cache"
-                    # #266: a cache hit produces a response but never runs the
+                    # A cache hit produces a response but never runs the
                     # handler, so emit a single END (no paired START). Without
                     # this the lifecycle log would show no record at all for a
                     # cache-served step, leaving an operator unsure whether it
@@ -597,7 +594,7 @@ class IntentRouter:
                             "reason": rejected.get("reason"),
                         }
                         cache_hit_source = "shared_state_kernel_rejection"
-                        # #266: a short-circuited integrate (patch already
+                        # A short-circuited integrate (patch already
                         # exhausted) also never runs the handler; emit a lone
                         # END so the log records the step was resolved as a
                         # rejection rather than silently missing.
@@ -627,7 +624,7 @@ class IntentRouter:
                             handler_kwargs["record_partial"] = (
                                 self._record_kernel_opt_partial
                             )
-                        # #266: bracket the programmatic kernel step with
+                        # Bracket the programmatic kernel step with
                         # START / END lifecycle events so operators see the
                         # step ran, how long it took, and where its outputs
                         # landed. ``kind`` is the machine step name
@@ -723,7 +720,7 @@ class IntentRouter:
                                 result["gap_canonical_id"] = payload_gap
                         await self._record_integrate_keep(result)
                     self.shared_state.save(self.session_dir)
-                # Bug B: advance the kernel cursor past this request seq so the LLM kernel agent doesn't re-answer it next tick.
+                # Advance the kernel cursor past this request seq so the LLM kernel agent doesn't re-answer it next tick.
                 await self.cursors.advance(
                     target_agent,
                     seq=request_msg.seq,
@@ -805,14 +802,13 @@ class IntentRouter:
     async def _handle_force_dispatch(self, source: str, intent: Intent) -> None:
         """Handle a ``force_dispatch`` intent by emitting an event.
 
-        Currently a P0-3 stub: it broadcasts a ``force_dispatch`` event;
-        real dispatcher reordering arrives in P0-5 with the priority queue.
+        Currently this only broadcasts a ``force_dispatch`` event; dispatcher
+        reordering is not yet implemented.
 
         Args:
             source: Identifier of the intent's originating agent.
             intent: The ``force_dispatch`` intent carrying ``task_id``.
         """
-        # P0-3 stub: emit an event; real dispatcher reordering lands in P0-5 with the priority queue.
         await self.bus.append_and_seq(Message.new(
             source, "*", "event",
             {"kind": "force_dispatch", "task_id": intent.payload["task_id"],
@@ -820,7 +816,7 @@ class IntentRouter:
         ))
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        """Process ``escalate_strategy_change`` (KB_design §3.8 §7.3 + §3.13 M7 §5.3); broadcasts strategy_change, acts on closed-vocab hints, drops unknown (Inv-8.2).
+        """Process ``escalate_strategy_change``: broadcast strategy_change, act on closed-vocab hints, drop unknown hints.
 
         Args:
             source: The agent issuing the escalation.
