@@ -773,6 +773,27 @@ def _sglang_image_for(repo_id: str = "") -> str:
     return _default_sglang_image()
 
 
+def _vllm_image_for(repo_id: str = "") -> str:
+    """Pick the vLLM image, honoring per-model baseline-arch needs.
+
+    Default is the standard vLLM image. Gemma-4 (e.g. google/gemma-4-26B-A4B-it)
+    is the exception: the stock vLLM build does not serve the gemma-4 arch, so it
+    needs the dedicated gemma4 image. Matched on the repo basename so it fires
+    for the HF repo id regardless of org casing. Only consulted on the vLLM path
+    (sglang is unaffected).
+
+    Args:
+        repo_id (str): Model repo id, matched on its basename for overrides.
+
+    Returns:
+        str: The gemma4 vLLM image for gemma-4 repos, else the default vLLM image.
+    """
+    basename = (repo_id or "").split("/")[-1].lower()
+    if "gemma-4" in basename or "gemma4" in basename:
+        return "harbor.core42.example-internal-host.invalid/sync/vllm-openai-rocm:gemma4"
+    return _default_vllm_image()
+
+
 def detect_image(framework: str, repo_id: str = "") -> str:
     """Select the server image for a framework and model.
 
@@ -781,10 +802,11 @@ def detect_image(framework: str, repo_id: str = "") -> str:
         repo_id: Model repo id, used to honor per-model image overrides.
 
     Returns:
-        The default vLLM image for ``vllm``; otherwise the SGLang image chosen
-        by :func:`_sglang_image_for`.
+        The vLLM image chosen by :func:`_vllm_image_for` for ``vllm`` (gemma-4
+        gets a dedicated image); otherwise the SGLang image chosen by
+        :func:`_sglang_image_for`.
     """
-    return _default_vllm_image() if framework == "vllm" else _sglang_image_for(repo_id)
+    return _vllm_image_for(repo_id) if framework == "vllm" else _sglang_image_for(repo_id)
 
 
 def auto_detect(hf: HuggingFaceClient, repo_id: str, gpu_type: str | None = None) -> DetectedConfig | None:
