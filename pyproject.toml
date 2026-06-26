@@ -159,6 +159,12 @@ omit = [
     "kernel-agent/tools/parallel_e2e_runner.py",
     "kernel-agent/tools/apply_kernel_patch.py",
     "kernel-agent/tools/geak_prompt_patcher.py",
+    # Serve/bench/apply CLI primitives — subprocess + live-serving plumbing that
+    # can't be unit-tested without reimplementing a server; same class as the
+    # apply_kernel_patch / parallel_e2e_runner tools above. Their pure helpers
+    # (e.g. _diff_unsupported_ops, _spread) ARE covered by test_apply_and_bench.py.
+    "kernel-agent/tools/apply_and_bench.py",
+    "kernel-agent/tools/geak_vs_forge_driver.py",
     # Backends within kernel-agent tools (subprocess submit).
     "kernel-agent/tools/backends/*",
     # Stand-alone in-tree CLI test scripts (live next to the tool they
