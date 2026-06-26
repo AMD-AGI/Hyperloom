@@ -15,15 +15,20 @@ name: SaFE Optimize gte100 (filtered pool)
 # (each fire advances one batch, wrapping at the pool end); on manual dispatch
 # the batch_index input is used.
 #
-# Cadence: twice a day at Beijing 00:00 / 12:00 (UTC 16:00 / 04:00), using
-# minute :07 (not :00) because GitHub heavily delays cron at the top of the
-# hour. max_hours=12 is the per-model optimizer budget. Scheduled runs only
-# fire from the DEFAULT branch.
+# Cadence: twice a day (every 12h) at Beijing 11:07 / 23:07 (UTC 03:07 / 15:07),
+# using minute :07 (not :00) because GitHub heavily delays cron at the top of the
+# hour. The batch rotation is paced by max_hours=12 (one batch per 12h of
+# wall-clock time since the anchor, in batch_rotate.py) — same scheme as
+# optimize-submit. INVARIANT: the cron PERIOD must equal max_hours (here 12h);
+# if you change this cron's frequency, change MAX_HOURS to match, otherwise the
+# rotation double-submits (cron faster) or skips batches (cron slower). gte100
+# sends exclude_active_workflows=false, so there is no de-dup safety net.
+# Scheduled runs only fire from the DEFAULT branch.
 
 on:
-  # Beijing 12:07 (UTC 04:07) and Beijing 00:07 (UTC 16:07) — twice a day.
+  # Beijing 11:07 (UTC 03:07) and Beijing 23:07 (UTC 15:07) — twice a day.
   schedule:
-    - cron: '7 4,16 * * *'
+    - cron: '7 3,15 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
@@ -84,6 +89,7 @@ jobs:
             --count "${n}" \
             --batch-size "${BATCH_SIZE}" \
             --batch-index "${INPUT_BATCH_INDEX:-}" \
+            --max-hours "${MAX_HOURS}" \
             --event "${EVENT}")
           bi=$(echo "$out" | cut -f1); n=$(echo "$out" | cut -f2)
           batches=$(echo "$out" | cut -f3); start=$(echo "$out" | cut -f4); end=$(echo "$out" | cut -f5)
@@ -113,11 +119,11 @@ jobs:
                   "exclude_active_workflows": "false",
                   "max_parallel": os.environ["MAX_PARALLEL"],
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
-                  # max_hours=12h optimizer budget. wait timeout 780 (=13h) and
-                  # GitHub job timeout 840 (=14h) both sit above 12h so neither
-                  # the wait loop nor the job is killed before the optimizer ends.
-                  "task_timeout_min": "780",
-                  "job_timeout_min": "840",
+                  # max_hours=12h optimizer budget. optimize-submit derives the
+                  # per-task wait timeout (12h+30m = 750m) and the GitHub job
+                  # timeout (12h+60m = 780m) from max_hours in its prepare job,
+                  # so no task_timeout_min/job_timeout_min inputs are sent (GitHub
+                  # caps dispatch inputs at 25).
                   "max_hours": os.environ["MAX_HOURS"],
                   "all_artifacts": "true",
                   "dry_run": os.environ.get("DRY_RUN") or "false",

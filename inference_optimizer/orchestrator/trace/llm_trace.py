@@ -7,7 +7,7 @@ every producer — the orchestration/kernel reactor, specialist sub-agents,
 and the Codex/critic/scorer inference steps — emits rows that the collector
 can join without guessing.
 
-Design contract (FULL_TRACE_DESIGN §3.1, §4):
+Design contract:
 
 * **Closed schema**: a row carrying an unknown field — or missing a
   required one — fails fast (:class:`LLMTraceRowError`) so a buggy call
@@ -31,10 +31,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, fields
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .._time import now_iso
 from ...session_paths import llm_calls_path
 
 log = logging.getLogger(__name__)
@@ -42,9 +42,8 @@ log = logging.getLogger(__name__)
 
 # Components that may legitimately appear in a trace row. Kept as a closed
 # vocabulary so a typo'd ``component=`` at a call site is caught instead of
-# fragmenting the per-component rollup. Extend this set deliberately when a
-# new producer lands (P1/P2 add specialist subprocess parsing, geak, oob,
-# robustness, tracelens, breakdown).
+# fragmenting the per-component rollup. Add a new producer label here
+# deliberately when one lands.
 VALID_COMPONENTS: frozenset[str] = frozenset(
     {
         "orchestration",
@@ -91,13 +90,8 @@ class LLMTraceRowError(ValueError):
     """Raised when an LLM-call row violates the closed schema."""
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as a microsecond-precision ISO string.
-
-    Returns:
-        ISO 8601 timestamp in UTC.
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
+_now_iso = now_iso
 
 
 @dataclass
@@ -204,8 +198,8 @@ class LLMCallRecord:
 
         Both :class:`ClaudeBackend` and :class:`CodexBackend` put ``model``
         and the four token counters on ``metadata`` under identical keys, so
-        this one constructor covers every in-process backend call site (A1
-        orchestration/kernel, A2 dynamic_action, A3 specialist fallback).
+        this one constructor covers every in-process backend call site
+        (orchestration/kernel, dynamic_action, specialist fallback).
         Missing token keys degrade to ``None`` rather than ``0`` so the
         collector can distinguish "unreported" from "reported zero".
 
@@ -341,7 +335,7 @@ def append_llm_call(
 
     In-process producers append directly into the parent's
     ``llm_calls.jsonl``. Out-of-process children instead write their own
-    ``reports/trace/ext/<component>-<pid>.jsonl`` shard (legacy/compat path);
+    ``reports/trace/ext/<component>-<pid>.jsonl`` shard;
     the collector and Langfuse emitter backfill those shards at read time, so
     this function intentionally has no shard-target override.
 
@@ -377,15 +371,6 @@ def append_llm_call(
         log.debug("llm_trace: langfuse mirror failed", exc_info=True)
 
 
-def row_field_set() -> frozenset[str]:
-    """Public accessor for the closed row schema (used by the collector).
-
-    Returns:
-        The frozenset of canonical row field names.
-    """
-    return _ROW_FIELDS
-
-
 # Sanity guard: the dataclass fields (minus the write-time ``ts``) must
 # stay in lockstep with the on-disk row schema. A drift here means a new
 # field was added to one side only — caught at import, not at runtime.
@@ -400,5 +385,4 @@ __all__ = [
     "LLMTraceRowError",
     "VALID_COMPONENTS",
     "append_llm_call",
-    "row_field_set",
 ]

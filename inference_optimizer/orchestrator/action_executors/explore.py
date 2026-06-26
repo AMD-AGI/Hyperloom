@@ -1,9 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""ExploreExecutor — v0.8 M3.
+"""ExploreExecutor.
 
-Merges the legacy ``backends`` / ``params`` / ``validate_stack`` actions
-into one unified ``explore`` action (one yaml meta, one
+The unified ``explore`` action (one yaml meta, one
 ``SharedState.explore_search`` ledger, one executor).
 
 Per-variant flow:
@@ -17,10 +16,9 @@ Per-variant flow:
    the threshold (default baseline_tput * 1.005) the variant is evicted
    (``KEEP_UNSTABLE`` → REVERT).
 
-Follows the TBO "one change at a time" rule (KB_design §3.4 "Inv-3
-serving GPU single tenant" + §3 "iron rules"), unlike v0.6's
-run-batch-then-pick-best. ``provenance`` passes through to the ledger
-unchanged so the M5 specialist path can fill ``'specialist:<domain>'``.
+Follows the "one change at a time" rule (single-tenant serving GPU).
+``provenance`` passes through to the ledger unchanged so the specialist
+path can fill ``'specialist:<domain>'``.
 
 Result schema (returned to the bus):
 
@@ -37,15 +35,17 @@ Result schema (returned to the bus):
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from .._time import now_iso
 from ...session_paths import runs_dir
+from ..gain_math import gain_pct
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
@@ -90,17 +90,12 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 DEFAULT_STACK_STABLE_PCT = 0.5
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as an ISO 8601 string.
-
-    Returns:
-        str: The current UTC timestamp in ISO 8601 format.
-    """
-    return datetime.now(timezone.utc).isoformat()
+# bare ``isoformat()`` (auto timespec) + ``+00:00`` (canonical helper; kept importable).
+_now_iso = functools.partial(now_iso, "auto")
 
 
 def _initial_explore_search_state() -> dict[str, Any]:
-    """Empty :attr:`SharedState.explore_search` ledger (M3 schema v1).
+    """Empty :attr:`SharedState.explore_search` ledger.
 
     Returns:
         dict[str, Any]: A fresh explore-search ledger with all sections
@@ -149,7 +144,7 @@ def _coerce_args_str(value: Any) -> str:
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     """Convert the LLM/specialist grid payload into GridVariant objects.
 
-    Variant dict shape (M3, KB_design §3.4 §5.1):
+    Variant dict shape:
 
         {
           "name": str (required, unique-in-round),
@@ -342,6 +337,9 @@ def _default_grid_for_framework(
 def _gain_pct(tput: float | None, base_tput: float) -> float | None:
     """Compute the percentage throughput gain over a baseline.
 
+    Thin alias for :func:`gain_math.gain_pct` (the canonical None-on-non-positive
+    contract), kept as a module-private name so existing call sites are unchanged.
+
     Args:
         tput (float | None): The variant's throughput.
         base_tput (float): The baseline throughput to compare against.
@@ -350,9 +348,7 @@ def _gain_pct(tput: float | None, base_tput: float) -> float | None:
         float | None: The gain as a percentage, or ``None`` when either
         input is non-positive or ``tput`` is not numeric.
     """
-    if not isinstance(tput, (int, float)) or tput <= 0 or base_tput <= 0:
-        return None
-    return (float(tput) - base_tput) / base_tput * 100.0
+    return gain_pct(tput, base_tput)
 
 
 # Auto-derived per-variant hard timeout: rather than a universal constant
@@ -397,50 +393,6 @@ def _compute_explore_variant_timeout(
     effective_kill_ratio = max(1.0, float(kill_ratio))
     derived = float(baseline_runtime_sec) * (effective_kill_ratio + float(safety_margin))
     return int(max(floor_sec, min(ceiling_sec, derived)))
-
-
-# Soft-kill budget multiplier applied to the COLD baseline wall-clock. The cold
-# baseline already includes one server boot + cuda-graph capture + a full
-# benchmark, so a config-changing variant (which must re-boot and re-capture)
-# comfortably fits within 2x. This is robust against variants whose capture is
-# somewhat heavier than the baseline's, while the hard ``variant_timeout_sec``
-# cap still bounds genuine runaways.
-DECISION_DEADLINE_COLD_BASELINE_MULT = 2.0
-
-
-def _compute_decision_deadline_sec(
-    *,
-    decision_anchor_sec: float,
-    overtime_kill_ratio: float,
-    use_warm_decision: bool,
-    baseline_warm_runtime_sec: float,
-    baseline_runtime_sec: float,
-) -> float | None:
-    """Overtime soft-deadline for an explore decision round.
-
-    A config-changing variant (cuda-graph / attention-backend / quantization /
-    kv-cache-dtype ...) cannot reuse the warm server, so its decision round
-    re-boots and re-captures cuda graphs. Anchoring the soft kill on the WARM
-    (client-only) baseline time excluded that one-time cost and killed
-    throughput-positive variants outright (observed: 95% of small-model overtime
-    kills were >= baseline, median +35%).
-
-    Anchor instead on the COLD baseline wall-clock -- which itself includes a
-    boot + capture + benchmark -- and allow ``DECISION_DEADLINE_COLD_BASELINE_MULT``
-    times that. This gives the candidate the full time it needs with conservative
-    headroom; the hard ``variant_timeout_sec`` cap still bounds runaways. Falls
-    back to the warm anchor x kill_ratio only when the cold baseline is unknown.
-    Returns ``None`` (no soft kill) when the operator disabled it
-    (``overtime_kill_ratio <= 0``) or no usable anchor is available.
-    """
-    if overtime_kill_ratio <= 0:
-        # Operator disabled the soft overtime kill; only the hard cap gates.
-        return None
-    if baseline_runtime_sec > 0:
-        return baseline_runtime_sec * DECISION_DEADLINE_COLD_BASELINE_MULT
-    if decision_anchor_sec > 0:
-        return decision_anchor_sec * overtime_kill_ratio
-    return None
 
 
 def _join_args(*parts: str) -> str:
@@ -616,7 +568,7 @@ class ExploreExecutor:
             overtime_kill_ratio = float(overtime_kill_ratio_raw) if overtime_kill_ratio_raw is not None else 0.0
         except (TypeError, ValueError):
             overtime_kill_ratio = 0.0
-        # Q4: WARM measure-round anchor (client-only, no boot). When warm-decision
+        # WARM measure-round anchor (client-only, no boot). When warm-decision
         # is active the overtime kill anchors on this so a one-time cold boot /
         # aiter recompile no longer trips it; falls back to the cold baseline.
         baseline_warm_runtime_sec_raw = params.get("baseline_warm_runtime_sec")
@@ -666,7 +618,8 @@ class ExploreExecutor:
             # Pull CONC so the seed grid's cudagraph-bracket variant brackets
             # the live decode concurrency.
             _yaml_envs = (_cfg.get("benchmark") or {}).get("envs") or {}
-        except Exception:  # noqa: BLE001
+        except (OSError, yaml.YAMLError) as exc:
+            log.warning("explore: could not resolve framework from %s: %s", config_path, exc)
             framework = ""
             _yaml_envs = {}
 
@@ -928,11 +881,11 @@ class ExploreExecutor:
         lifecycle_framework = str(lifecycle.get("framework") or "")
         lifecycle_port = int(lifecycle.get("port") or 0)
 
-        # Q4-a: warm-decision mode. Run a discarded cold *warmup* round first so
+        # Warm-decision mode. Run a discarded cold *warmup* round first so
         # the decision round reuses the hot server (client-only) and is measured
         # warm — apples-to-apples with how ``baseline_tput`` is measured (its own
         # warmup+measure double-run). Requires server_lifecycle reuse; otherwise
-        # we cannot keep a server hot between rounds, so fall back to the legacy
+        # we cannot keep a server hot between rounds, so fall back to a
         # single cold-decision run. Opt out with
         # INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION=0.
         warm_decision_enabled = os.environ.get(
@@ -946,16 +899,14 @@ class ExploreExecutor:
             if (use_warm_decision and baseline_warm_runtime_sec > 0)
             else baseline_runtime_sec
         )
-        # Add a one-time boot+capture allowance so config-changing variants that
-        # must re-capture cuda graphs are not killed for paying capture they
-        # cannot avoid (see _compute_decision_deadline_sec).
-        decision_deadline_sec: float | None = _compute_decision_deadline_sec(
-            decision_anchor_sec=decision_anchor_sec,
-            overtime_kill_ratio=overtime_kill_ratio,
-            use_warm_decision=use_warm_decision,
-            baseline_warm_runtime_sec=baseline_warm_runtime_sec,
-            baseline_runtime_sec=baseline_runtime_sec,
-        )
+        # The soft deadline is anchored on the warm client-only measure time and
+        # is enforced from the server-ready marker (see run_with_session_kill), so
+        # the measured runtime and this anchor are both the warm client phase —
+        # apples-to-apples, with cold boot / warmup excluded from both sides.
+        if decision_anchor_sec > 0 and overtime_kill_ratio > 0:
+            decision_deadline_sec: float | None = decision_anchor_sec * overtime_kill_ratio
+        else:
+            decision_deadline_sec = None
 
         if runnable:
             for idx, gv in enumerate(runnable):
@@ -971,7 +922,7 @@ class ExploreExecutor:
                     {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
                 try:
-                    # Q4-a: warm-decision warmup round. Boot the variant's server
+                    # Warm-decision warmup round. Boot the variant's server
                     # once and DISCARD the (cold) measurement so the decision
                     # round below runs warm / client-only — apples-to-apples with
                     # baseline_tput. cleanup=false keeps the server hot; NO
@@ -1081,7 +1032,7 @@ class ExploreExecutor:
                     r = results[0]
 
                     # Overtime gate fired: record a ``KILLED_OVERTIME`` row with
-                    # runtime_sec + wall_clock_ratio (no faked tput/gain, per Q3),
+                    # runtime_sec + wall_clock_ratio (no faked tput/gain),
                     # skip all downstream gates + dedup, leave the stack unadvanced.
                     if getattr(r, "killed_overtime", False):
                         variant_runtime = float(r.runtime_sec or 0.0)
@@ -1268,8 +1219,7 @@ class ExploreExecutor:
                             # reuse round 1's hot server (cleanup=true tears it
                             # down) so the measurement is warm and baseline-
                             # comparable; otherwise a fresh cold boot. No
-                            # ``soft_deadline_sec`` (parity with the legacy
-                            # rebench).
+                            # ``soft_deadline_sec`` is applied for the rebench.
                             rebench_variant = GridVariant(
                                 name=f"{gv.name}__stack_rebench",
                                 extra_server_args=gv.extra_server_args,
@@ -1303,8 +1253,8 @@ class ExploreExecutor:
                             stack_rebench_workspace = rebench.workspace
                             stack_rebench_warnings = rebench.warnings
                             stable_floor = rebench.stable_floor
-                            # KEEP_UNSTABLE: rebench missed the stability floor —
-                            # evict the KEEP and treat as REVERT.
+                            # Rebench missed the stability floor: evict the
+                            # KEEP and treat as REVERT.
                             if not rebench.stable:
                                 log.warning(
                                     "explore: variant %s KEEP -> KEEP_UNSTABLE "
@@ -1444,7 +1394,7 @@ class ExploreExecutor:
 
         # Flat per-variant outcomes for the Coordinator's per-variant
         # fact-write hook (KEEP / REVERT / FAILED / KEEP_UNSTABLE /
-        # SKIPPED_DEDUP from this round). JSON-friendly for older readers.
+        # SKIPPED_DEDUP from this round). Serialized as plain JSON.
         reasons_by_fp: dict[str, str] = {
             str(r.get("fingerprint") or ""): str(r.get("reason") or "")
             for r in rejected_update
@@ -1494,9 +1444,9 @@ class ExploreExecutor:
                     "scope": str(te.get("scope") or ""),
                     "metrics": metrics,
                     "reason": reasons_by_fp.get(fp_key, ""),
-                    # Carry the variant knobs so the journal can classify the change
-                    # kind (backend / param / env) at decision-write time -- without
-                    # this dict ``classify_change_kind`` always falls back to OTHER.
+                    # Carry the variant knobs so the journal's
+                    # ``classify_change_kind`` can classify the change kind
+                    # (backend / param / env) at decision-write time.
                     "variant": {
                         "name": str(te.get("name") or ""),
                         "extra_server_args": str(te.get("extra_server_args") or ""),

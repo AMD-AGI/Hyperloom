@@ -3,7 +3,7 @@
 """Real ``sweep`` ActionRunner — full ISL/OSL/CONC Pareto sweep.
 
 Relaunches one Magpie bench per (CONC, ISL, OSL) combo with the optimized
-server config (a single-server mode is a future follow-up).
+server config.
 
 Inputs (task.params):
 
@@ -343,9 +343,8 @@ class SweepExecutor:
         # the Pareto-front computation downstream.
         grid, _ = apply_multi_node_invalid_variants(grid)
 
-        # `resolved_model` / `resolved_gpu` were resolved above for the
-        # materialization step; reuse them here. See baseline.py /
-        # _grid_runner.py for the rationale on why both must flow through.
+        # Pass `resolved_model` / `resolved_gpu` through so variant servers
+        # inherit the resolved TP/precision.
         results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args="",  # sweep variants carry args themselves

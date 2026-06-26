@@ -276,6 +276,23 @@ def test_detect_glm_moe_dsa_unrecognized_blocked(tmp_path):
     assert reason is not None and "not recognized" in reason
 
 
+def test_detect_gemma4_now_recognized(tmp_path):
+    # google-gemma-4-26B-A4B-it: the current pinned stack (transformers 5.5.0 +
+    # vLLM 0.18.2rc1) registers gemma4 (CONFIG_MAPPING has "gemma4", AutoConfig
+    # resolves Gemma4Config, vLLM ModelConfig resolves Gemma4ForCausalLM). It was
+    # removed from the unrecognized blocklist, so a plain text Gemma4 config is no
+    # longer fail-fasted by the model-config gate.
+    m = tmp_path / "gemma4"
+    _write_config(
+        m,
+        model_type="gemma4",
+        architectures=["Gemma4ForCausalLM"],
+        max_position_embeddings=32768,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is None
+
+
 def test_detect_bailing_ling_left_to_runtime_scope(tmp_path):
     # #649 does not add Bailing filters; keep these out of the fail-fast gate.
     for model_type, arch in (
@@ -1048,6 +1065,19 @@ def test_private_quant_mxtq_blocks(tmp_path):
     assert reason is not None and "mxtq" in reason
 
 
+def test_private_quant_empty_method_blocks(tmp_path):
+    m = tmp_path / "empty_quant_method"
+    _write_config(
+        m,
+        model_type="llama",
+        architectures=["LlamaForCausalLM"],
+        max_position_embeddings=4096,
+        quantization_config={"quant_method": ""},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "quant_method is empty" in reason
+
+
 def test_private_quant_mlx_weights_index_blocks(tmp_path):
     # JANG/MLX often declares no quant config; the tell is '.biases'/'.scales'.
     m = tmp_path / "mlx_weights"
@@ -1156,6 +1186,38 @@ def test_gguf_with_pytorch_model_bin_not_blocked(tmp_path):
     m = tmp_path / "gguf_plus_hf_bin"
     _write_config(m, model_type="qwen3", max_position_embeddings=32768)
     (m / "model.gguf").write_text("dummy", encoding="utf-8")
+    (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_llama_sentencepiece_without_metadata_blocks(tmp_path):
+    m = tmp_path / "llama_sentencepiece_gap"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="llama",
+        architectures=["LlamaForCausalLM"],
+        max_position_embeddings=4096,
+    )
+    (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
+    (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "tokenizer_config.json" in reason
+    assert "HFValidationError" in reason
+
+
+def test_llama_sentencepiece_with_tokenizer_config_ok(tmp_path):
+    m = tmp_path / "llama_sentencepiece_ok"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="llama",
+        architectures=["LlamaForCausalLM"],
+        max_position_embeddings=4096,
+    )
+    (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
+    (m / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
     assert cli._detect_incompatible_model_config(str(m)) is None
 

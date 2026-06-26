@@ -7,8 +7,10 @@ from __future__ import annotations
 import io
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 _CI_DIR = Path(__file__).resolve().parent
 if str(_CI_DIR) not in sys.path:
@@ -117,12 +119,34 @@ def test_resolve_batch_index_explicit_invalid(monkeypatch):
     assert gm._resolve_batch_index(100, 10) == 0
 
 
-def test_resolve_batch_index_run_number(monkeypatch):
+def test_resolve_batch_index_empty_uses_rotation(monkeypatch):
+    # Empty batch_index + a cron_now -> max_hours-paced rotation at that instant.
     monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
-    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
-    monkeypatch.setenv("GITHUB_RUN_NUMBER", "3")
-    # pool 100 / batch 10 => 10 batches; run 3 -> (3-1)%10 = 2
-    assert gm._resolve_batch_index(100, 10) == 2
+    monkeypatch.setenv("INPUT_MAX_HOURS", "6")
+    # anchor + 6h -> exactly one batch advanced (relative to the live anchor so
+    # this test survives future anchor moves).
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=6)).isoformat())
+    assert gm._resolve_batch_index(100, 10) == 1
+
+
+def test_resolve_batch_index_schedule_empty_ok(monkeypatch):
+    # Schedule fire with empty batch_index/cron_now uses the real-clock rotation
+    # (no guard) — INPUT_CRON_NOW just pins the instant for the test.
+    monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
+    monkeypatch.setenv("INPUT_MAX_HOURS", "6")
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=6)).isoformat())
+    assert gm._resolve_batch_index(100, 10) == 1
+
+
+def test_resolve_batch_index_manual_no_index_no_cron_raises(monkeypatch):
+    # Anti-footgun: manual dispatch with neither batch_index nor cron_now would
+    # duplicate the current schedule slice -> refuse.
+    monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
+    monkeypatch.delenv("INPUT_CRON_NOW", raising=False)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    with pytest.raises(SystemExit):
+        gm._resolve_batch_index(100, 10)
 
 
 def test_resolve_batch_index_zero_batch(monkeypatch):
@@ -130,41 +154,51 @@ def test_resolve_batch_index_zero_batch(monkeypatch):
     assert gm._resolve_batch_index(0, 0) == 0
 
 
-def test_resolve_batch_index_run_number_invalid(monkeypatch):
-    monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
-    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
-    monkeypatch.setenv("GITHUB_RUN_NUMBER", "notint")
-    assert gm._resolve_batch_index(100, 10) == 0
-
-
 # ── cron rotation ──
 
 
-def test_cron_fire_counter_monotonic():
-    a = gm._cron_fire_counter(datetime(2026, 6, 15, 16, 0, tzinfo=timezone.utc))
-    b = gm._cron_fire_counter(datetime(2026, 6, 16, 4, 0, tzinfo=timezone.utc))
-    assert b > a
+def test_rotation_step_hours_from_env(monkeypatch):
+    monkeypatch.setenv("INPUT_MAX_HOURS", "12")
+    assert gm._rotation_step_hours() == 12.0
 
 
-def test_cron_fire_counter_before_first_fire():
-    # 02:00 UTC is before the 04:00 fire -> counted as prior day's last fire.
-    c = gm._cron_fire_counter(datetime(2026, 6, 15, 2, 0, tzinfo=timezone.utc))
-    assert isinstance(c, int)
+def test_rotation_step_hours_fallback(monkeypatch):
+    # unset / invalid / non-positive all fall back to the 6h default
+    monkeypatch.delenv("INPUT_MAX_HOURS", raising=False)
+    assert gm._rotation_step_hours() == gm._DEFAULT_MAX_HOURS
+    monkeypatch.setenv("INPUT_MAX_HOURS", "nan-ish")
+    assert gm._rotation_step_hours() == gm._DEFAULT_MAX_HOURS
+    monkeypatch.setenv("INPUT_MAX_HOURS", "0")
+    assert gm._rotation_step_hours() == gm._DEFAULT_MAX_HOURS
 
 
 def test_cron_batch_index_anchor_is_zero(monkeypatch):
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-15T16:00:00+00:00")
+    monkeypatch.setenv("INPUT_CRON_NOW", gm._CRON_ANCHOR_UTC.isoformat())
+    monkeypatch.delenv("INPUT_MAX_HOURS", raising=False)  # 6h step
     assert gm._cron_batch_index(100, 10) == 0
 
 
-def test_cron_batch_index_advances(monkeypatch):
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-16T04:00:00Z")
-    # one fire after anchor -> batch 1
+def test_cron_batch_index_advances_by_max_hours(monkeypatch):
+    # 6h step: 6h after the anchor -> exactly one batch advanced.
+    monkeypatch.setenv("INPUT_MAX_HOURS", "6")
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=6)).isoformat())
     assert gm._cron_batch_index(100, 10) == 1
+    # within the same 6h window -> still batch 0.
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=5, minutes=59)).isoformat())
+    assert gm._cron_batch_index(100, 10) == 0
+
+
+def test_cron_batch_index_step_scales_with_max_hours(monkeypatch):
+    # 12h step: 12h after the anchor -> one batch; 24h -> two batches.
+    monkeypatch.setenv("INPUT_MAX_HOURS", "12")
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=12)).isoformat())  # +12h
+    assert gm._cron_batch_index(100, 10) == 1
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=24)).isoformat())  # +24h
+    assert gm._cron_batch_index(100, 10) == 2
 
 
 def test_cron_batch_index_before_anchor_clamped(monkeypatch):
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-14T16:00:00+00:00")
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC - timedelta(days=1)).isoformat())
     assert gm._cron_batch_index(100, 10) == 0
 
 
@@ -528,8 +562,11 @@ def test_apply_exclusions_to_entries_with_active(monkeypatch):
 def test_resolve_batch_index_schedule(monkeypatch):
     monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-16T04:00:00Z")
-    assert gm._resolve_batch_index(100, 10) == 1
+    # max_hours-paced: anchor + 12h at the 6h default step is two batches
+    # advanced (relative to the live anchor so this survives anchor moves).
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=12)).isoformat())
+    monkeypatch.delenv("INPUT_MAX_HOURS", raising=False)
+    assert gm._resolve_batch_index(100, 10) == 2
 
 
 def test_cron_batch_index_uses_now_when_unset(monkeypatch):

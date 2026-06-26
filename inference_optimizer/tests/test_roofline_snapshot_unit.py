@@ -182,13 +182,7 @@ def test_build_roofline_snapshot_with_analysis(tmp_path):
     assert snap["top_kernel"]["name"] == "k"
 
 
-# ---- _snapshot_id_from_meta / _num_delta ----
-
-
-def test_snapshot_id_from_meta():
-    assert rs._snapshot_id_from_meta({"snapshot_id": 3}) == 3
-    assert rs._snapshot_id_from_meta({"roofline_snapshot_id": 4}) == 4
-    assert rs._snapshot_id_from_meta({"snapshot_id": "x"}) is None
+# ---- _num_delta ----
 
 
 def test_num_delta():

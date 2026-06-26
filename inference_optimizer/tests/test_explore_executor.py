@@ -18,7 +18,6 @@ from inference_optimizer.orchestrator.action_executors import (
 from inference_optimizer.orchestrator.action_executors.explore import (
     DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC,
     DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC,
-    _compute_decision_deadline_sec,
     _compute_explore_variant_timeout,
 )
 from inference_optimizer.orchestrator.action_executors._canonical_fingerprint import (
@@ -242,75 +241,6 @@ def test_compute_explore_variant_timeout_safety_margin_override():
     # safety_margin=0.0 (no headroom) → 4140 × 1.10 = 4554 s, equal to soft kill.
     tight = _compute_explore_variant_timeout(4140.0, 1.10, safety_margin=0.0)
     assert tight == 4554
-
-
-def test_decision_deadline_uses_2x_cold_baseline():
-    """Repro: a small model warm anchor (84s) × 1.2 = 101s killed a candidate
-    whose decision round (108s) includes a one-time cuda-graph re-capture, even
-    though its steady-state throughput beat baseline. Anchoring on 2x the COLD
-    baseline (which itself includes boot+capture) lifts the deadline well past
-    108s so the candidate survives to be measured."""
-    deadline = _compute_decision_deadline_sec(
-        decision_anchor_sec=84.0,
-        overtime_kill_ratio=1.2,
-        use_warm_decision=True,
-        baseline_warm_runtime_sec=84.0,
-        baseline_runtime_sec=400.0,
-    )
-    assert deadline == pytest.approx(800.0)  # 400 * 2.0
-    assert deadline > 108.0  # the previously-killed candidate now survives
-
-
-def test_decision_deadline_cold_anchor_in_legacy_mode():
-    """Legacy cold mode also anchors on 2x the cold baseline."""
-    deadline = _compute_decision_deadline_sec(
-        decision_anchor_sec=400.0,
-        overtime_kill_ratio=1.2,
-        use_warm_decision=False,
-        baseline_warm_runtime_sec=0.0,
-        baseline_runtime_sec=400.0,
-    )
-    assert deadline == pytest.approx(800.0)
-
-
-def test_decision_deadline_warm_fallback_when_no_cold():
-    """When the cold baseline is unknown, fall back to warm anchor x kill_ratio."""
-    deadline = _compute_decision_deadline_sec(
-        decision_anchor_sec=84.0,
-        overtime_kill_ratio=1.2,
-        use_warm_decision=True,
-        baseline_warm_runtime_sec=84.0,
-        baseline_runtime_sec=0.0,
-    )
-    assert deadline == pytest.approx(100.8)  # 84 * 1.2
-
-
-def test_decision_deadline_none_when_ratio_zero_disables():
-    """Operator disables the soft kill with kill_ratio <= 0, even if a baseline
-    is known (only the hard variant_timeout_sec cap then gates)."""
-    assert (
-        _compute_decision_deadline_sec(
-            decision_anchor_sec=84.0,
-            overtime_kill_ratio=0.0,
-            use_warm_decision=True,
-            baseline_warm_runtime_sec=84.0,
-            baseline_runtime_sec=400.0,
-        )
-        is None
-    )
-
-
-def test_decision_deadline_none_when_no_anchor():
-    assert (
-        _compute_decision_deadline_sec(
-            decision_anchor_sec=0.0,
-            overtime_kill_ratio=1.2,
-            use_warm_decision=True,
-            baseline_warm_runtime_sec=0.0,
-            baseline_runtime_sec=0.0,
-        )
-        is None
-    )
 
 
 # ExploreExecutor wires the auto-derived timeout through run_grid

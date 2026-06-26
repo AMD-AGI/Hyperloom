@@ -5,9 +5,9 @@
 Receives ``delegate{action_name, params}`` intents (after PolicyGate),
 materializes them into ``tasks`` rows, and dispatches the work.
 
-v0.6 §15.2 distinguishes two sub-agent forms: deterministic Python
+Dispatches to one of two sub-agent forms: deterministic Python
 ``ActionRunner`` executors (looked up via ``EXECUTOR_REGISTRY[task.kind]``)
-and the LLM OOB sub-agent fallback (``backend.run()``).
+or the LLM OOB sub-agent fallback (``backend.run()``).
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class SubAgentRunner:
     """Routes ``delegate`` work to the matching ActionRunner + holds leases.
 
     ``executor_registry`` maps ``task.kind`` → :data:`ExecutorFn` (tests
-    register stubs; production registers shell-wrapping executors, P0-6).
+    register stubs; production registers shell-wrapping executors).
     """
 
     def __init__(
@@ -143,7 +143,7 @@ class SubAgentRunner:
     ) -> bool:
         """Transition a task to ``new_state`` but tolerate ``TaskNotFound``.
 
-        Bug-fix N34: a long-running task's row can vanish before its terminal
+        A long-running task's row can vanish before its terminal
         transition; swallowing TaskNotFound keeps the pipeline running.
         Returns True on success, False on the swallowed-TaskNotFound branch.
 

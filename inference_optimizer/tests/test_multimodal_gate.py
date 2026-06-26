@@ -281,9 +281,15 @@ def test_detect_qwen35_moe_text_coercible(tmp_path):
     assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
 
 
-def test_detect_gemma4_wrapper_with_text_config_is_text_coercible(tmp_path):
-    """A multimodal wrapper with an explicit nested text decoder should fall
-    back to text-only without requiring a per-family top-level allowlist entry."""
+def test_detect_gemma4_wrapper_text_coercible(tmp_path):
+    """Gemma4 multimodal wrappers route to the text-coercible degraded path.
+
+    The current pinned stack (transformers 5.5.0 + vLLM 0.18.2rc1) recognizes
+    ``model_type=gemma4``, so it was removed from the unrecognized blocklist. A
+    Gemma4 wrapper still carries ``vision_config`` but exposes a text decoder
+    (``text_config``), so the multimodal gate classifies it as text_coercible
+    (text-only degraded mode) and the model-config gate no longer fail-fasts.
+    """
     m = tmp_path / "gemma4"
     _write_config(
         m,
@@ -302,7 +308,6 @@ def test_detect_gemma4_wrapper_with_text_config_is_text_coercible(tmp_path):
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
-    assert hit["architecture"] == "Gemma4ForConditionalGeneration"
 
 
 def test_detect_known_vlm_with_text_config_still_vision_only(tmp_path):

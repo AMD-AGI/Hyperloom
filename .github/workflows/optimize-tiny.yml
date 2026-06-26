@@ -21,13 +21,13 @@ name: SaFE Optimize Tiny (count-filler)
 # instead of the git repo, so the large pool never bloats git history.
 
 on:
-  # Four times a day (every 6 hours, UTC) at 05:07/11:07/17:07/23:07 UTC
-  # (Beijing 13/19/01/07). Phase-shifted off 0/6/12/18 so tiny never starts in
-  # the same hour as optimize-submit's own cron (04/10/16/22 UTC); the 1h offset
-  # also leaves room for a 6h batch to fully drain before the next one starts.
-  # Minute :07 (not :00) dodges GitHub's congested top-of-hour scheduling queue.
+  # Four times a day (every 6 hours, UTC) at 01:07/07:07/13:07/19:07 UTC
+  # (Beijing 09:07 / 15:07 / 21:07 / 03:07). optimize-submit fires 1h earlier
+  # (Beijing 08/14/20/02) and optimize-gte100 1h later (Beijing 10/22), so no
+  # two start in the same hour. Minute :07 (not :00) dodges GitHub's congested
+  # top-of-hour scheduling queue.
   schedule:
-    - cron: '7 5,11,17,23 * * *'
+    - cron: '7 1,7,13,19 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
@@ -57,9 +57,13 @@ jobs:
       # Off-repo pool on /wekafs (the /wekafs root lives in the WEKAFS_CHENYI_DIR
       # secret; generate_hf_matrix reads the absolute path as-is, and the
       # hyperloom runners RO-mount /wekafs).
-      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
-      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun.json', secrets.WEKAFS_CHENYI_DIR) }}
+      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/hf_sub100_part2_20260626.json', secrets.WEKAFS_CHENYI_DIR) }}
+      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/hf_sub100_part2_20260626.json', secrets.WEKAFS_CHENYI_DIR) }}
       BATCH_SIZE: '240'
+      # Rotation step (hours). MUST equal the cron PERIOD (this cron fires every
+      # 6h: 1/7/13/19 UTC), same invariant as optimize-submit/gte100. Also the
+      # per-task optimizer budget forwarded below.
+      MAX_HOURS: '6'
       # Count-filler runs go to the hyperloom workspace only.
       SUBMIT_WORKSPACES: 'core42-hyperloom'
     steps:
@@ -69,42 +73,35 @@ jobs:
         id: batch
         env:
           INPUT_BATCH_INDEX: ${{ github.event.inputs.batch_index }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          import math
-          import os
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          raw = (os.environ.get("INPUT_BATCH_INDEX") or "").strip()
-          batch_size = int(os.environ["BATCH_SIZE"])
-          data = json.loads(Path(os.environ["CANDIDATES_PATH"]).read_text(encoding="utf-8"))
-          pool_size = len(data.get("candidates") or [])
-          batches = max(math.ceil(pool_size / batch_size), 1)
-
-          if raw:
-              try:
-                  batch_index = max(int(raw), 0) % batches
-              except ValueError:
-                  batch_index = 0
-          else:
-              # 4 runs/day -> one of 4 six-hour slots; advance each day so the
-              # whole pool is swept over ~ceil(batches/4) days.
-              epoch = datetime(2026, 6, 23, tzinfo=timezone.utc)
-              now = datetime.now(timezone.utc)
-              days = max((now.date() - epoch.date()).days, 0)
-              slot = days * 4 + (now.hour // 6)
-              batch_index = slot % batches
-
-          start = batch_index * batch_size
-          end = min(start + batch_size, pool_size)
-          print(f"batch_index={batch_index}")
-          print(f"pool_size={pool_size}")
-          print(f"batches={batches}")
-          print(f"slice={start}:{end}")
-          PY
+          if [ ! -f "${CANDIDATES_PATH}" ]; then
+            echo "::error::candidates pool not found: ${CANDIDATES_PATH}"
+            exit 1
+          fi
+          # Same max_hours-paced rotation as optimize-submit/gte100 (ci/batch_rotate.py,
+          # unit-tested): one batch advances per MAX_HOURS of wall-clock time since the
+          # anchor, auto-rotating on schedule and honoring an explicit batch_index on
+          # manual dispatch. ANCHOR 2026-06-26 13:00Z restarts THIS pool's sweep at
+          # batch 0 on the next fire (13:07Z), independent of gte100's shared anchor.
+          n=$(python3 -c "import json,os;print(len(json.load(open(os.environ['CANDIDATES_PATH'])).get('candidates') or []))")
+          out=$(python3 ci/batch_rotate.py \
+            --count "${n}" \
+            --batch-size "${BATCH_SIZE}" \
+            --batch-index "${INPUT_BATCH_INDEX:-}" \
+            --max-hours "${MAX_HOURS}" \
+            --anchor "2026-06-26T13:00:00+00:00" \
+            --event "${EVENT}")
+          bi=$(echo "$out" | cut -f1); pool=$(echo "$out" | cut -f2)
+          batches=$(echo "$out" | cut -f3); start=$(echo "$out" | cut -f4); end=$(echo "$out" | cut -f5)
+          {
+            echo "batch_index=${bi}"
+            echo "pool_size=${pool}"
+            echo "batches=${batches}"
+            echo "slice=${start}:${end}"
+          } >> "$GITHUB_OUTPUT"
+          echo "### tiny pool: ${pool} models; batch ${bi}/${batches}; slice ${start}:${end}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Dispatch SaFE Optimize Submit
         run: |
@@ -132,7 +129,8 @@ jobs:
                   "exclude_active_workflows": "true",
                   "max_parallel": "240",
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
-                  "task_timeout_min": "420",
+                  # task wait + job timeout are derived from max_hours in
+                  # optimize-submit's prepare job (max_hours+30m / +60m).
                   "max_hours": "6",
                   "all_artifacts": "true",
                   "dry_run": os.environ.get("DRY_RUN") or "false",

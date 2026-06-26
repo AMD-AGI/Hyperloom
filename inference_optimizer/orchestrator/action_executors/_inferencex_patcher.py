@@ -17,13 +17,14 @@ missing so callers can decide whether to fail-loud.
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
-import tempfile
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Callable
+
+from ._file_lock import best_effort_file_lock
+from ._magpie_patcher import atomic_write_text
+from ._patch_sentinel import file_contains_sentinel
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +111,30 @@ def _discover_inferencex_roots(
     return roots
 
 
+def _resolve_inferencex_files(
+    inferencex_path: Path | str | None,
+    *rel_parts: str,
+) -> list[Path]:
+    """Return every existing ``<root>/<*rel_parts>`` across discovered roots.
+
+    One entry per :func:`_discover_inferencex_roots` root whose joined relative
+    path is an existing file. ``[]`` = skip patching.
+
+    Args:
+        inferencex_path: Caller-provided override root to include in the scan.
+        *rel_parts: Relative path components joined onto each discovered root.
+
+    Returns:
+        A list of existing files, or ``[]`` when none exist.
+    """
+    out: list[Path] = []
+    for root in _discover_inferencex_roots(inferencex_path):
+        candidate = root.joinpath(*rel_parts)
+        if candidate.is_file():
+            out.append(candidate)
+    return out
+
+
 def _resolve_benchmark_lib_paths(
     inferencex_path: Path | str | None,
 ) -> list[Path]:
@@ -123,64 +148,7 @@ def _resolve_benchmark_lib_paths(
         A list of existing ``benchmark_lib.sh`` paths, or ``[]`` when none
         exist.
     """
-    out: list[Path] = []
-    for root in _discover_inferencex_roots(inferencex_path):
-        candidate = root / "benchmarks" / "benchmark_lib.sh"
-        if candidate.is_file():
-            out.append(candidate)
-    return out
-
-
-# Back-compat single-path helper; new code uses
-# :func:`_resolve_benchmark_lib_paths` to patch every root.
-def _resolve_benchmark_lib_path(
-    inferencex_path: Path | str | None,
-) -> Path | None:
-    """Single-path back-compat shim for :func:`_resolve_benchmark_lib_paths`.
-
-    Args:
-        inferencex_path (Path | str | None): Caller-provided override
-            root.
-
-    Returns:
-        Path | None: The first resolved ``benchmark_lib.sh`` path, or
-        ``None`` when none exist.
-    """
-    paths = _resolve_benchmark_lib_paths(inferencex_path)
-    return paths[0] if paths else None
-
-
-@contextmanager
-def _file_lock(lock_path: str) -> Iterator[None]:
-    """Best-effort cross-process mutex via ``fcntl.flock``.
-
-    Falls through without exclusion if the lock file can't be opened; the
-    atomic-replace path still guarantees no torn writes (idempotent).
-
-    Args:
-        lock_path: Filesystem path of the lock file to acquire exclusively.
-
-    Yields:
-        Control while the exclusive lock is held; the lock is released on exit.
-    """
-    try:
-        fp = open(lock_path, "w")
-    except OSError as e:
-        log.warning(
-            "_inferencex_patcher: cannot open lock file %s (%s); proceeding without exclusion",
-            lock_path,
-            e,
-        )
-        yield
-        return
-    try:
-        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
-        finally:
-            fp.close()
+    return _resolve_inferencex_files(inferencex_path, "benchmarks", "benchmark_lib.sh")
 
 
 def _is_patched(src: Path) -> bool:
@@ -193,11 +161,7 @@ def _is_patched(src: Path) -> bool:
         bool: ``True`` if the patch sentinel is present; ``False`` on a
         miss or read error.
     """
-    try:
-        return _PATCH_SENTINEL in src.read_text(encoding="utf-8")
-    except OSError as e:
-        log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
-        return False
+    return file_contains_sentinel(src, _PATCH_SENTINEL, log, "_inferencex_patcher")
 
 
 def _apply_patch_atomic(src: Path) -> bool:
@@ -231,37 +195,13 @@ def _apply_patch_atomic(src: Path) -> bool:
     if patched == original:
         return False
 
-    tmp_dir = src.parent
-    try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".benchmark_lib.sh.hyperloom_",
-            dir=str(tmp_dir),
-        )
-    except OSError as e:
-        log.warning(
-            "_inferencex_patcher: cannot create temp file in %s: %s",
-            tmp_dir,
-            e,
-        )
-        return False
-
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(patched)
-        # Preserve perms so the patched file stays runnable as a sourced lib.
-        os.chmod(tmp_name, src.stat().st_mode)
-        os.replace(tmp_name, src)
-    except OSError as e:
-        log.warning("_inferencex_patcher: cannot write %s: %s", src, e)
-        try:
-            os.unlink(tmp_name)
-        except OSError as cleanup_err:
-            # Best-effort temp cleanup; main write already failed.
-            log.debug(
-                "_inferencex_patcher: best-effort cleanup failed for temp file %s: %s",
-                tmp_name,
-                cleanup_err,
-            )
+    # Preserve perms so the patched file stays runnable as a sourced lib.
+    if not atomic_write_text(
+        src,
+        patched,
+        tmp_prefix=".benchmark_lib.sh.hyperloom_",
+        log_prefix="_inferencex_patcher",
+    ):
         return False
 
     log.info(
@@ -269,6 +209,56 @@ def _apply_patch_atomic(src: Path) -> bool:
         src,
     )
     return True
+
+
+def _ensure_patched(
+    sources: list[Path],
+    is_patched: Callable[[Path], bool],
+    apply_patch: Callable[[Path], bool],
+    lock_path: str,
+    *,
+    empty_msg: str,
+    failure_msg: str,
+) -> bool:
+    """Drive a set of discovered files to patched state (#210 multi-root).
+
+    Empty fast-path: ``log.info(empty_msg)`` + ``False``. All-already-patched
+    fast-path skips the lock. Otherwise, under the lock, each source is
+    re-checked and patched; a failed apply emits ``log.warning(failure_msg,
+    src)`` and the remaining roots are still attempted.
+
+    Args:
+        sources: Discovered files to patch.
+        is_patched: "Already patched?" predicate for one file.
+        apply_patch: In-place atomic patcher for one file (True on success).
+        lock_path: Cross-process lock file path.
+        empty_msg: Info message logged when ``sources`` is empty.
+        failure_msg: Warning message (one ``%s`` for ``src``) on apply failure.
+
+    Returns:
+        True when at least one source is patched (or already patched), False
+        when none could be patched.
+    """
+    if not sources:
+        log.info(empty_msg)
+        return False
+
+    # #210 fix: patch every discovered InferenceX root, not just the first.
+    if all(is_patched(s) for s in sources):
+        return True  # all paths already patched, fast-path no lock
+
+    any_patched = False
+    with best_effort_file_lock(lock_path, label="_inferencex_patcher"):
+        for src in sources:
+            # Re-check under the lock (another process may have patched).
+            if is_patched(src):
+                any_patched = True
+                continue
+            if apply_patch(src):
+                any_patched = True
+            else:
+                log.warning(failure_msg, src)
+    return any_patched
 
 
 def ensure_benchmark_lib_patched(
@@ -288,36 +278,21 @@ def ensure_benchmark_lib_patched(
         True when at least one discovered ``benchmark_lib.sh`` is patched (or
         already patched), False when none could be patched.
     """
-    sources = _resolve_benchmark_lib_paths(inferencex_path)
-    if not sources:
-        log.info(
+    return _ensure_patched(
+        _resolve_benchmark_lib_paths(inferencex_path),
+        _is_patched,
+        _apply_patch_atomic,
+        _LOCK_PATH,
+        empty_msg=(
             "_inferencex_patcher: no InferenceX root discovered "
             "(checked $INFERENCEX_PATH, $MAGPIE_DIR/InferenceX) or "
             "benchmark_lib.sh missing — skipping patch (this is fine "
-            "for tests and dry-runs without a real InferenceX tree)",
-        )
-        return False
-
-    # #210 fix: patch every discovered InferenceX root, not just the first.
-    any_patched = False
-    pre_patched = [src for src in sources if _is_patched(src)]
-    if len(pre_patched) == len(sources):
-        return True  # all paths already patched, fast-path no lock
-
-    with _file_lock(_LOCK_PATH):
-        for src in sources:
-            # Re-check under the lock (another process may have patched).
-            if _is_patched(src):
-                any_patched = True
-                continue
-            if _apply_patch_atomic(src):
-                any_patched = True
-            else:
-                log.warning(
-                    "_inferencex_patcher: failed to patch %s; other discovered roots will still be attempted",
-                    src,
-                )
-    return any_patched
+            "for tests and dry-runs without a real InferenceX tree)"
+        ),
+        failure_msg=(
+            "_inferencex_patcher: failed to patch %s; other discovered roots will still be attempted"
+        ),
+    )
 
 
 # =====================================================================
@@ -338,29 +313,9 @@ def _resolve_benchmark_serving_paths(
         A list of existing ``benchmark_serving.py`` paths, or ``[]`` when none
         exist.
     """
-    out: list[Path] = []
-    for root in _discover_inferencex_roots(inferencex_path):
-        candidate = root / "utils" / "bench_serving" / "benchmark_serving.py"
-        if candidate.is_file():
-            out.append(candidate)
-    return out
-
-
-def _resolve_benchmark_serving_path(
-    inferencex_path: Path | str | None,
-) -> Path | None:
-    """Single-path back-compat shim for :func:`_resolve_benchmark_serving_paths`.
-
-    Args:
-        inferencex_path (Path | str | None): Caller-provided override
-            root.
-
-    Returns:
-        Path | None: The first resolved ``benchmark_serving.py`` path,
-        or ``None`` when none exist.
-    """
-    paths = _resolve_benchmark_serving_paths(inferencex_path)
-    return paths[0] if paths else None
+    return _resolve_inferencex_files(
+        inferencex_path, "utils", "bench_serving", "benchmark_serving.py"
+    )
 
 
 def _is_benchmark_serving_patched(src: Path) -> bool:
@@ -373,11 +328,7 @@ def _is_benchmark_serving_patched(src: Path) -> bool:
         bool: ``True`` if the ``PROFILE_EXTRA_BODY`` sentinel is present;
         ``False`` on a miss or read error.
     """
-    try:
-        return _BENCH_SERVING_SENTINEL in src.read_text(encoding="utf-8")
-    except OSError as e:
-        log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
-        return False
+    return file_contains_sentinel(src, _BENCH_SERVING_SENTINEL, log, "_inferencex_patcher")
 
 
 def _apply_benchmark_serving_patch_atomic(src: Path) -> bool:
@@ -417,35 +368,12 @@ def _apply_benchmark_serving_patch_atomic(src: Path) -> bool:
     if patched == original:
         return False
 
-    tmp_dir = src.parent
-    try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".benchmark_serving.py.hyperloom_",
-            dir=str(tmp_dir),
-        )
-    except OSError as e:
-        log.warning(
-            "_inferencex_patcher: cannot create temp file in %s: %s",
-            tmp_dir,
-            e,
-        )
-        return False
-
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(patched)
-        os.chmod(tmp_name, src.stat().st_mode)
-        os.replace(tmp_name, src)
-    except OSError as e:
-        log.warning("_inferencex_patcher: cannot write %s: %s", src, e)
-        try:
-            os.unlink(tmp_name)
-        except OSError as cleanup_err:
-            log.debug(
-                "_inferencex_patcher: best-effort cleanup failed for temp file %s: %s",
-                tmp_name,
-                cleanup_err,
-            )
+    if not atomic_write_text(
+        src,
+        patched,
+        tmp_prefix=".benchmark_serving.py.hyperloom_",
+        log_prefix="_inferencex_patcher",
+    ):
         return False
 
     log.info(
@@ -476,37 +404,24 @@ def ensure_benchmark_serving_patched(
         True when at least one discovered ``benchmark_serving.py`` is patched
         (or already patched), False when none could be patched.
     """
-    sources = _resolve_benchmark_serving_paths(inferencex_path)
-    if not sources:
-        log.info(
+    return _ensure_patched(
+        _resolve_benchmark_serving_paths(inferencex_path),
+        _is_benchmark_serving_patched,
+        _apply_benchmark_serving_patch_atomic,
+        _BENCH_SERVING_LOCK_PATH,
+        empty_msg=(
             "_inferencex_patcher: no InferenceX root discovered "
             "(checked $INFERENCEX_PATH, $MAGPIE_DIR/InferenceX) or "
             "benchmark_serving.py missing — skipping PROFILE_EXTRA_BODY "
             "patch (this is fine for tests and dry-runs without a real "
-            "InferenceX tree)",
-        )
-        return False
-
-    # #210 fix: patch every discovered InferenceX root, not just the first.
-    if all(_is_benchmark_serving_patched(src) for src in sources):
-        return True  # all paths already patched, fast-path no lock
-
-    any_patched = False
-    with _file_lock(_BENCH_SERVING_LOCK_PATH):
-        for src in sources:
-            if _is_benchmark_serving_patched(src):
-                any_patched = True
-                continue
-            if _apply_benchmark_serving_patch_atomic(src):
-                any_patched = True
-            else:
-                log.warning(
-                    "_inferencex_patcher: failed to PROFILE_EXTRA_BODY-"
-                    "patch %s; other discovered roots will still be "
-                    "attempted",
-                    src,
-                )
-    return any_patched
+            "InferenceX tree)"
+        ),
+        failure_msg=(
+            "_inferencex_patcher: failed to PROFILE_EXTRA_BODY-"
+            "patch %s; other discovered roots will still be "
+            "attempted"
+        ),
+    )
 
 
 __all__ = ["ensure_benchmark_lib_patched", "ensure_benchmark_serving_patched"]
