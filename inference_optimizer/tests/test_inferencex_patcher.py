@@ -22,9 +22,9 @@ from inference_optimizer.orchestrator.action_executors._inferencex_patcher impor
 
 @pytest.fixture(autouse=True)
 def _isolate_inferencex_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make every test hermetic w.r.t. the #210 discovery env: clear ``$INFERENCEX_PATH`` / ``$MAGPIE_DIR`` so a synthetic ``tmp_path`` test never discovers a real on-pod checkout (tests that exercise the fallback re-set them)."""
+    """Make every test hermetic w.r.t. the #210 discovery env: clear ``$INFERENCEX_PATH`` / ``$MAGPIE_PATH`` so a synthetic ``tmp_path`` test never discovers a real on-pod checkout (tests that exercise the fallback re-set them)."""
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
 
 
 # Verbatim upstream shape (incl. the 8-space indent the patcher matches on).
@@ -338,7 +338,7 @@ def test_benchmark_serving_patched_line_is_executable_python(
 
 
 # #210 fix (Deval comments 4 + 6): patch every InferenceX root, not just
-# $INFERENCEX_PATH — Magpie loads its bundled $MAGPIE_DIR/InferenceX at runtime.
+# $INFERENCEX_PATH — Magpie loads its bundled $MAGPIE_PATH/InferenceX at runtime.
 def _make_inferencex_tree_with_serving(
     root: Path,
     profile_by_stage: bool = True,
@@ -373,7 +373,7 @@ def test_discover_inferencex_roots_dedupes_when_paths_resolve_same(
     magpie.mkdir()
     (magpie / "InferenceX").symlink_to(inferencex)
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
-    monkeypatch.setenv("MAGPIE_DIR", str(magpie))
+    monkeypatch.setenv("MAGPIE_PATH", str(magpie))
     roots = _inferencex_patcher._discover_inferencex_roots(None)
     assert len(roots) == 1, f"expected dedup to one root, got {roots}"
     assert roots[0] == inferencex.resolve()
@@ -383,13 +383,13 @@ def test_discover_inferencex_roots_includes_both_when_paths_differ(
     tmp_path,
     monkeypatch,
 ):
-    """The #210 case: distinct ``$INFERENCEX_PATH`` and ``$MAGPIE_DIR/InferenceX`` both show up so both get patched."""
+    """The #210 case: distinct ``$INFERENCEX_PATH`` and ``$MAGPIE_PATH/InferenceX`` both show up so both get patched."""
     inferencex_external = tmp_path / "external" / "InferenceX"
     inferencex_external.mkdir(parents=True)
     magpie_dir = tmp_path / "workspace" / "Magpie"
     (magpie_dir / "InferenceX").mkdir(parents=True)
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_external))
-    monkeypatch.setenv("MAGPIE_DIR", str(magpie_dir))
+    monkeypatch.setenv("MAGPIE_PATH", str(magpie_dir))
     roots = _inferencex_patcher._discover_inferencex_roots(None)
     assert len(roots) == 2, f"expected 2 distinct roots, got {roots}"
     resolved = {p.resolve() for p in roots}
@@ -401,11 +401,11 @@ def test_discover_inferencex_roots_when_only_magpie_dir_set(
     tmp_path,
     monkeypatch,
 ):
-    """With only ``$MAGPIE_DIR`` set, Magpie's bundled InferenceX is still discovered."""
+    """With only ``$MAGPIE_PATH`` set, Magpie's bundled InferenceX is still discovered."""
     magpie_dir = tmp_path / "Magpie"
     (magpie_dir / "InferenceX").mkdir(parents=True)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    monkeypatch.setenv("MAGPIE_DIR", str(magpie_dir))
+    monkeypatch.setenv("MAGPIE_PATH", str(magpie_dir))
     roots = _inferencex_patcher._discover_inferencex_roots(None)
     assert len(roots) == 1
     assert roots[0] == (magpie_dir / "InferenceX").resolve()
@@ -414,7 +414,7 @@ def test_discover_inferencex_roots_when_only_magpie_dir_set(
 def test_discover_inferencex_roots_returns_empty_when_nothing_set(monkeypatch):
     """No env, no caller arg → empty list (caller fail-softs)."""
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     assert _inferencex_patcher._discover_inferencex_roots(None) == []
 
 
@@ -430,14 +430,14 @@ def test_ensure_benchmark_serving_patched_patches_both_roots_when_they_differ(
     f_external = _make_inferencex_tree_with_serving(external)
     f_magpie = _make_inferencex_tree_with_serving(magpie / "InferenceX")
     monkeypatch.setenv("INFERENCEX_PATH", str(external))
-    monkeypatch.setenv("MAGPIE_DIR", str(magpie))
+    monkeypatch.setenv("MAGPIE_PATH", str(magpie))
 
     rc = ensure_benchmark_serving_patched()
     assert rc is True
     text_external = f_external.read_text(encoding="utf-8")
     text_magpie = f_magpie.read_text(encoding="utf-8")
     assert "PROFILE_EXTRA_BODY" in text_external, "$INFERENCEX_PATH file must be patched"
-    assert "PROFILE_EXTRA_BODY" in text_magpie, "$MAGPIE_DIR/InferenceX file must ALSO be patched (the #210 fix)"
+    assert "PROFILE_EXTRA_BODY" in text_magpie, "$MAGPIE_PATH/InferenceX file must ALSO be patched (the #210 fix)"
 
 
 def test_ensure_benchmark_serving_patched_returns_true_when_only_magpie_path_present(
@@ -451,7 +451,7 @@ def test_ensure_benchmark_serving_patched_returns_true_when_only_magpie_path_pre
     (magpie / "InferenceX").mkdir(parents=True)
     f_magpie = _make_inferencex_tree_with_serving(magpie / "InferenceX")
     monkeypatch.setenv("INFERENCEX_PATH", str(external))
-    monkeypatch.setenv("MAGPIE_DIR", str(magpie))
+    monkeypatch.setenv("MAGPIE_PATH", str(magpie))
 
     rc = ensure_benchmark_serving_patched()
     assert rc is True
@@ -482,7 +482,7 @@ def test_ensure_benchmark_lib_patched_patches_both_roots_when_they_differ(
     f_magpie = magpie / "InferenceX" / "benchmarks" / "benchmark_lib.sh"
     f_magpie.write_text(legacy, encoding="utf-8")
     monkeypatch.setenv("INFERENCEX_PATH", str(external))
-    monkeypatch.setenv("MAGPIE_DIR", str(magpie))
+    monkeypatch.setenv("MAGPIE_PATH", str(magpie))
 
     rc = ensure_benchmark_lib_patched()
     assert rc is True

@@ -300,6 +300,63 @@ def _atom_default_grid(
     return variants
 
 
+def _xdit_default_grid(
+    *,
+    model_class: str,
+    conc: int = 0,
+    isl: int = 0,
+    osl: int = 0,
+) -> list[GridVariant]:
+    """xDiT (diffusion) EXPLORE default grid, seeded from the empirical KB.
+
+    Only BF16-safe knobs are emitted (precision is locked: a precision change
+    is a different model). Known-regression / crash knobs are intentionally
+    omitted here and additionally enforced by ``xdit_blacklist_reason`` in
+    ``_grid_runner.py`` (defense in depth). Variant names are ``xdit_``-prefixed
+    for cross-session disambiguation.
+
+    Args:
+        model_class: Model-class label (reserved for future DiT gating).
+        conc: Live concurrency (unused for diffusion; kept for signature parity).
+        isl: Input sequence length (unused; signature parity).
+        osl: Output sequence length (unused; signature parity).
+
+    Returns:
+        The curated list of xDiT ``GridVariant`` seeds.
+    """
+    variants: list[GridVariant] = []
+
+    def _add(name: str, *, envs: dict[str, str]) -> None:
+        """Append a ``default_grid``-provenance env-only variant.
+
+        Args:
+            name (str): Unique variant name (``xdit_`` prefixed).
+            envs (dict[str, str]): The per-variant env overrides.
+
+        Returns:
+            None: Appends to the enclosing ``variants`` list.
+        """
+        gv = GridVariant(
+            name=name,
+            extra_server_args="",
+            extra_envs=dict(envs),
+            note="default_grid",
+        )
+        gv.provenance = "default_grid"  # type: ignore[attr-defined]
+        variants.append(gv)
+
+    # AMD buffer load/store instructions — directionally correct, BF16-safe.
+    _add("xdit_buffer_ops", envs={"AMDGCN_USE_BUFFER_OPS": "1"})
+    # torch.compile reduce-overhead (cudagraph) is the proven big win; expose an
+    # explicit on/off contrast so the loop can A/B against the YAML default.
+    _add("xdit_compile_reduce_overhead", envs={"XDIT_USE_TORCH_COMPILE": "1"})
+    _add("xdit_no_compile", envs={"XDIT_USE_TORCH_COMPILE": "0"})
+    # Confirm the safe attention backend (aiter) — quantized backends are
+    # blacklisted, not seeded.
+    _add("xdit_attn_aiter", envs={"XDIT_ATTENTION_BACKEND": "aiter"})
+    return variants
+
+
 def _default_grid_for_framework(
     framework: str,
     *,
@@ -310,8 +367,9 @@ def _default_grid_for_framework(
 ) -> list[GridVariant]:
     """Framework-keyed default grid dispatch.
 
-    Atom returns a curated seed grid; sglang / vllm / unknown return ``[]``
-    ("no programmatic seed") and rely on LLM-emitted ``default_grid`` variants.
+    Atom and xDiT return curated seed grids; sglang / vllm / unknown return
+    ``[]`` ("no programmatic seed") and rely on LLM-emitted ``default_grid``
+    variants.
 
     Args:
         framework: Inference framework name to dispatch on.
@@ -326,6 +384,13 @@ def _default_grid_for_framework(
     fw = (framework or "").strip().lower()
     if fw == "atom":
         return _atom_default_grid(
+            model_class=model_class,
+            conc=conc,
+            isl=isl,
+            osl=osl,
+        )
+    if fw == "xdit":
+        return _xdit_default_grid(
             model_class=model_class,
             conc=conc,
             isl=isl,
@@ -1138,25 +1203,45 @@ class ExploreExecutor:
                         outcome = "REVERT"
                         reason = "gain_below_threshold"
                     else:
-                        # Accuracy gate (only for high-risk variants), on round 1.
+                        # Accuracy gate. For serving it runs only for high-risk
+                        # variants (precision/compute-path changes). For
+                        # scriptable frameworks (xDiT diffusion) the image-quality
+                        # gate is the sole correctness signal, so EVERY variant is
+                        # gated and a missing gate fails closed.
+                        from ... import framework_registry
+
+                        scriptable = framework_registry.is_scriptable(framework)
                         accuracy_ok = True
                         accuracy_value: float | None = None
-                        if baseline_accuracy > 0 and is_high_accuracy_risk(
-                            extra_args=gv.extra_server_args,
-                            extra_envs=gv.extra_envs,
+                        # Scriptable: the image-quality gate is absolute (vs a
+                        # fixed reference), so gate EVERY variant regardless of
+                        # baseline_accuracy. Serving: only high-risk variants,
+                        # and only when a baseline accuracy was recorded.
+                        if scriptable or (
+                            baseline_accuracy > 0
+                            and is_high_accuracy_risk(
+                                extra_args=gv.extra_server_args,
+                                extra_envs=gv.extra_envs,
+                            )
                         ):
-                            eval_out = parse_eval_results(slot)
+                            eval_out = parse_eval_results(slot, framework=framework)
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):
+                                # Scriptable maps gate pass→1.0 / fail→0.0, so
+                                # compare against a perfect reference (1.0) to
+                                # revert a failed gate; serving compares vs the
+                                # measured baseline.
+                                reference = 1.0 if scriptable else baseline_accuracy
                                 accuracy_ok = accuracy_passed(
-                                    baseline_accuracy,
+                                    reference,
                                     float(accuracy_value),
                                 )
                             else:
-                                # No eval result: follow the legacy "no accuracy
-                                # data => skip the gate" convention so high-risk
-                                # flags aren't auto-rejected on a benign gap.
-                                accuracy_ok = True
+                                # No eval result. Serving: follow the legacy "no
+                                # accuracy data => skip the gate" convention so
+                                # high-risk flags aren't auto-rejected on a benign
+                                # gap. Scriptable: fail closed (gate is required).
+                                accuracy_ok = not scriptable
                         if not accuracy_ok:
                             outcome = "REVERT"
                             reason = "accuracy_drop"
