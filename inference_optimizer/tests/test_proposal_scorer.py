@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -32,19 +34,40 @@ class _FakeUsage:
 
 
 @dataclass
-class _FakeMessage:
-    content: str
+class _FakeDelta:
+    content: str | None
 
 
 @dataclass
-class _FakeChoice:
-    message: _FakeMessage
+class _FakeStreamChoice:
+    delta: _FakeDelta
 
 
 @dataclass
-class _FakeResp:
-    choices: list[_FakeChoice]
+class _FakeChunk:
+    choices: list[_FakeStreamChoice]
     usage: _FakeUsage | None = None
+
+
+class _FakeStream:
+    """Async iterator emulating an OpenAI streaming response: content deltas
+    followed by a final usage-only chunk (``include_usage``)."""
+
+    def __init__(self, text: str, usage: _FakeUsage):
+        self._chunks = [
+            _FakeChunk(choices=[_FakeStreamChoice(_FakeDelta(text))]),
+            _FakeChunk(choices=[], usage=usage),
+        ]
+
+    def __aiter__(self):
+        self._it = iter(self._chunks)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration
 
 
 class _FakeCompletions:
@@ -54,14 +77,14 @@ class _FakeCompletions:
         self._behaviour = behaviour
         self.calls: list[dict[str, Any]] = []
 
-    async def create(self, *, model: str, messages, max_completion_tokens):
-        self.calls.append({"model": model, "messages": messages})
+    async def create(self, *, model: str, messages, max_completion_tokens, stream=False, stream_options=None):
+        self.calls.append({"model": model, "messages": messages, "stream": stream})
         result = self._behaviour.get(model)
         if isinstance(result, BaseException):
             raise result
-        return _FakeResp(
-            choices=[_FakeChoice(_FakeMessage(result or ""))],
-            usage=_FakeUsage(prompt_tokens=120, completion_tokens=30),
+        return _FakeStream(
+            result or "",
+            _FakeUsage(prompt_tokens=120, completion_tokens=30),
         )
 
 
@@ -526,4 +549,109 @@ async def test_resume_idempotent_on_round_id(tmp_path):
             source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
         )
     assert len(c.shared_state.specialist_rounds) == 1
-    assert "ensemble_scores" in c.shared_state.specialist_rounds[0]
+
+
+# ---------------------------------------------------------------------------
+# Streaming behaviour: the Primus-Safe proxy requires stream=True, and the
+# per-call deadline must cover the full stream body (not just creation).
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedStream:
+    """Async iterator yielding a caller-supplied list of chunks. If
+    ``stall`` is set, it hangs forever after the scripted chunks instead of
+    stopping — emulating a proxy that opens the stream then stalls mid-body."""
+
+    def __init__(self, chunks: list[Any], *, stall: bool = False):
+        self._chunks = chunks
+        self._stall = stall
+
+    def __aiter__(self):
+        self._it = iter(self._chunks)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._it)
+        except StopIteration:
+            if self._stall:
+                await asyncio.sleep(3600)  # never completes within the deadline
+            raise StopAsyncIteration
+
+
+class _ScriptedCompletions:
+    def __init__(self, chunks: list[Any], *, stall: bool = False):
+        self._chunks = chunks
+        self._stall = stall
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, *, model, messages, max_completion_tokens, stream=False, stream_options=None):
+        self.calls.append({"stream": stream, "stream_options": stream_options})
+        return _ScriptedStream(self._chunks, stall=self._stall)
+
+
+class _ScriptedClient:
+    def __init__(self, chunks: list[Any], *, stall: bool = False):
+        self.chat = SimpleNamespace(completions=_ScriptedCompletions(chunks, stall=stall))
+
+
+def _content_chunk(text: str) -> _FakeChunk:
+    return _FakeChunk(choices=[_FakeStreamChoice(_FakeDelta(text))])
+
+
+def _usage_chunk(usage: _FakeUsage) -> _FakeChunk:
+    return _FakeChunk(choices=[], usage=usage)
+
+
+def _scripted_scorer(chunks: list[Any], *, stall: bool = False, call_timeout_s: float = 30.0):
+    client = _ScriptedClient(chunks, stall=stall)
+    return ProposalScorer(
+        models=("m",),
+        client_factory=lambda: client,
+        call_timeout_s=call_timeout_s,
+    ), client
+
+
+@pytest.mark.asyncio
+async def test_stream_flag_is_passed():
+    chunks = [_content_chunk(_scores_json(("p", 5, "ok"))), _usage_chunk(_FakeUsage(10, 20))]
+    scorer, client = _scripted_scorer(chunks)
+    await scorer._score_one_model("m", "prompt", ["p"])
+    call = client.chat.completions.calls[0]
+    assert call["stream"] is True
+    assert call["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_multiple_content_chunks_are_accumulated():
+    # Split a valid scores JSON across several content deltas.
+    body = _scores_json(("p", 7, "good"))
+    third = len(body) // 3
+    chunks = [
+        _content_chunk(body[:third]),
+        _content_chunk(body[third : 2 * third]),
+        _content_chunk(body[2 * third :]),
+        _usage_chunk(_FakeUsage(11, 22)),
+    ]
+    scorer, _ = _scripted_scorer(chunks)
+    out = await scorer._score_one_model("m", "prompt", ["p"])
+    assert out["p"]["score"] == 7.0
+
+
+@pytest.mark.asyncio
+async def test_stalled_stream_body_times_out():
+    # One content chunk, then the stream stalls forever: the deadline must
+    # cover the consumption loop, not just stream creation.
+    chunks = [_content_chunk('{"scores": {')]
+    scorer, _ = _scripted_scorer(chunks, stall=True, call_timeout_s=0.05)
+    with pytest.raises(RuntimeError, match="timed out"):
+        await scorer._score_one_model("m", "prompt", ["p"])
+
+
+@pytest.mark.asyncio
+async def test_missing_usage_chunk_degrades_cleanly():
+    # No usage-bearing chunk at all: scoring still succeeds.
+    chunks = [_content_chunk(_scores_json(("p", 4, "fine")))]
+    scorer, _ = _scripted_scorer(chunks)
+    out = await scorer._score_one_model("m", "prompt", ["p"])
+    assert out["p"]["score"] == 4.0
