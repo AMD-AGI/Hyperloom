@@ -123,10 +123,8 @@ def _reset_diff_paths(diff_path: Path, repo_root: Path) -> None:
         return
     for p in paths:
         # tracked -> restore committed version; untracked -> remove. One of these is a no-op.
-        subprocess.run(["git", "-C", str(repo_root), "checkout", "--", p],
-                       capture_output=True, text=True)
-        subprocess.run(["git", "-C", str(repo_root), "clean", "-fq", "--", p],
-                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(repo_root), "checkout", "--", p], capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(repo_root), "clean", "-fq", "--", p], capture_output=True, text=True)
 
 
 def _git_apply_diff(diff_path: Path, repo_root: Path, out_dir: Path, target: Path | None = None) -> dict[str, Any]:
@@ -147,17 +145,23 @@ def _git_apply_diff(diff_path: Path, repo_root: Path, out_dir: Path, target: Pat
     # (never touches unrelated files), so the apply surface matches what the diff expects.
     _reset_diff_paths(diff_path, repo_root)
     for lvl in (1, 0, 2):
-        chk = subprocess.run(["git", "-C", str(repo_root), "apply", f"-p{lvl}", "--check", str(diff_path)],
-                             capture_output=True, text=True)
+        chk = subprocess.run(
+            ["git", "-C", str(repo_root), "apply", f"-p{lvl}", "--check", str(diff_path)],
+            capture_output=True,
+            text=True,
+        )
         if chk.returncode == 0:
-            ap = subprocess.run(["git", "-C", str(repo_root), "apply", f"-p{lvl}", str(diff_path)],
-                                capture_output=True, text=True)
+            ap = subprocess.run(
+                ["git", "-C", str(repo_root), "apply", f"-p{lvl}", str(diff_path)], capture_output=True, text=True
+            )
             if ap.returncode != 0:
                 return {"status": "failed", "error": f"git apply -p{lvl}: {ap.stderr[:200]}"}
             # record touched paths for a precise revert
             touched = subprocess.run(
                 ["git", "-C", str(repo_root), "apply", f"-p{lvl}", "--numstat", str(diff_path)],
-                capture_output=True, text=True).stdout
+                capture_output=True,
+                text=True,
+            ).stdout
             paths = [ln.split("\t")[-1] for ln in touched.splitlines() if "\t" in ln]
             _log(out_dir, f"git apply -p{lvl} OK ({len(paths)} files): {', '.join(p.split('/')[-1] for p in paths)}")
             return {"status": "ok", "touched": paths, "p_level": lvl, "manifest": None, "repo_root": str(repo_root)}
@@ -182,25 +186,46 @@ def _aiter_prebuilt_so(aiter_root: Path) -> list[Path]:
     return list(aiter_root.rglob("module_aiter_core*.so"))
 
 
-def _launch_server(backend: str, model: str, tp: int, port: int, gpu: str,
-                   extra_env: dict[str, str], log_path: Path) -> subprocess.Popen:
+def _launch_server(
+    backend: str, model: str, tp: int, port: int, gpu: str, extra_env: dict[str, str], log_path: Path
+) -> subprocess.Popen:
     env = dict(os.environ)
     env.update(extra_env)
     env["ROCR_VISIBLE_DEVICES"] = gpu
     env["HIP_VISIBLE_DEVICES"] = gpu
     if backend == "sglang":
         cmd = [
-            sys.executable, "-m", "sglang.launch_server", f"--model-path={model}",
-            "--host=0.0.0.0", f"--port={port}", "--trust-remote-code",
-            f"--tensor-parallel-size={tp}", "--mem-fraction-static=0.8",
-            "--context-length", "8192", "--watchdog-timeout", "1800",
+            sys.executable,
+            "-m",
+            "sglang.launch_server",
+            f"--model-path={model}",
+            "--host=0.0.0.0",
+            f"--port={port}",
+            "--trust-remote-code",
+            f"--tensor-parallel-size={tp}",
+            "--mem-fraction-static=0.8",
+            "--context-length",
+            "8192",
+            "--watchdog-timeout",
+            "1800",
         ]
         cwd = "/sgl-workspace/sglang"
     elif backend == "vllm":
         cmd = [
-            sys.executable, "-m", "vllm.entrypoints.openai.api_server", "--model", model,
-            "--host", "0.0.0.0", "--port", str(port), "--trust-remote-code",
-            "--tensor-parallel-size", str(tp), "--gpu-memory-utilization", "0.8",
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            model,
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+            "--trust-remote-code",
+            "--tensor-parallel-size",
+            str(tp),
+            "--gpu-memory-utilization",
+            "0.8",
         ]
         cwd = None
     else:
@@ -211,6 +236,7 @@ def _launch_server(backend: str, model: str, tp: int, port: int, gpu: str,
 
 def _wait_health(proc: subprocess.Popen, port: int, out_dir: Path, tries: int = 70) -> bool:
     import urllib.request
+
     for _ in range(tries):
         time.sleep(12)
         if proc.poll() is not None:
@@ -230,20 +256,56 @@ def _wait_health(proc: subprocess.Popen, port: int, out_dir: Path, tries: int = 
     return False
 
 
-def _bench_once(bs: str, model: str, port: int, isl: int, osl: int, conc: int,
-                num_prompts: int, arm: str, rep: int, out_dir: Path,
-                seed: int) -> dict[str, float] | None:
+def _bench_once(
+    bs: str,
+    model: str,
+    port: int,
+    isl: int,
+    osl: int,
+    conc: int,
+    num_prompts: int,
+    arm: str,
+    rep: int,
+    out_dir: Path,
+    seed: int,
+) -> dict[str, float] | None:
     # Fixed --seed so BOTH arms benchmark the IDENTICAL random prompt set: removes
     # dataset-draw variance from the A/B so the delta reflects the kernel, not the prompts.
     cmd = [
-        sys.executable, bs, "--model", model, "--backend", "vllm",
-        "--base-url", f"http://0.0.0.0:{port}", "--dataset-name", "random",
-        "--random-input-len", str(isl), "--random-output-len", str(osl),
-        "--random-range-ratio", "1", "--num-prompts", str(num_prompts),
-        "--max-concurrency", str(conc), "--request-rate", "inf", "--ignore-eos",
-        "--save-result", "--num-warmups", "8", "--seed", str(seed),
-        "--percentile-metrics", "ttft,tpot,itl,e2el",
-        "--result-dir", str(out_dir), "--result-filename", f"{arm}_rep{rep}.json",
+        sys.executable,
+        bs,
+        "--model",
+        model,
+        "--backend",
+        "vllm",
+        "--base-url",
+        f"http://0.0.0.0:{port}",
+        "--dataset-name",
+        "random",
+        "--random-input-len",
+        str(isl),
+        "--random-output-len",
+        str(osl),
+        "--random-range-ratio",
+        "1",
+        "--num-prompts",
+        str(num_prompts),
+        "--max-concurrency",
+        str(conc),
+        "--request-rate",
+        "inf",
+        "--ignore-eos",
+        "--save-result",
+        "--num-warmups",
+        "8",
+        "--seed",
+        str(seed),
+        "--percentile-metrics",
+        "ttft,tpot,itl,e2el",
+        "--result-dir",
+        str(out_dir),
+        "--result-filename",
+        f"{arm}_rep{rep}.json",
     ]
     blog = (out_dir / f"bench_{arm}_rep{rep}.log").open("w", encoding="utf-8")
     subprocess.run(cmd, cwd=str(Path(bs).parent), stdout=blog, stderr=subprocess.STDOUT)
@@ -283,16 +345,30 @@ def _spread(xs: list[float]) -> dict[str, float | None]:
     q = statistics.quantiles(s, n=4) if len(s) >= 2 else [s[0], s[0], s[0]]
     return {
         "median": statistics.median(s),
-        "p25": q[0], "p75": q[2],
+        "p25": q[0],
+        "p75": q[2],
         "stdev": statistics.stdev(s) if len(s) >= 2 else 0.0,
         "n": len(s),
     }
 
 
-def _serve_and_bench(arm: str, backend: str, model: str, tp: int, port: int, gpu: str,
-                     isl: int, osl: int, conc: int, num_prompts: int, reps: int,
-                     extra_env: dict[str, str], bs: str, out_dir: Path,
-                     seed: int) -> dict[str, Any]:
+def _serve_and_bench(
+    arm: str,
+    backend: str,
+    model: str,
+    tp: int,
+    port: int,
+    gpu: str,
+    isl: int,
+    osl: int,
+    conc: int,
+    num_prompts: int,
+    reps: int,
+    extra_env: dict[str, str],
+    bs: str,
+    out_dir: Path,
+    seed: int,
+) -> dict[str, Any]:
     _log(out_dir, f"=== {arm.upper()} arm: launch server ===")
     proc = _launch_server(backend, model, tp, port, gpu, extra_env, out_dir / f"server_{arm}.log")
     if not _wait_health(proc, port, out_dir):
@@ -303,8 +379,8 @@ def _serve_and_bench(arm: str, backend: str, model: str, tp: int, port: int, gpu
     # full benchmark and DISCARD it before the timed reps (open-source-standard warmup).
     _bench_once(bs, model, port, isl, osl, conc, num_prompts, arm, 0, out_dir, seed)
     _log(out_dir, f"{arm} warmup pass done (discarded)")
-    reps_out: list[float] = []           # output_throughput per timed rep
-    tpot_out: list[float] = []           # median_tpot_ms per timed rep (decode latency)
+    reps_out: list[float] = []  # output_throughput per timed rep
+    tpot_out: list[float] = []  # median_tpot_ms per timed rep (decode latency)
     for r in range(1, reps + 1):
         m = _bench_once(bs, model, port, isl, osl, conc, num_prompts, arm, r, out_dir, seed)
         tput = m.get("output_throughput") if m else None
@@ -316,9 +392,12 @@ def _serve_and_bench(arm: str, backend: str, model: str, tp: int, port: int, gpu
     _kill_servers(proc, backend)
     tput_spread = _spread(reps_out)
     return {
-        "arm": arm, "status": "ok" if reps_out else "no_results",
-        "reps": reps_out, "median": tput_spread["median"],
-        "tput_spread": tput_spread, "tpot_reps_ms": tpot_out,
+        "arm": arm,
+        "status": "ok" if reps_out else "no_results",
+        "reps": reps_out,
+        "median": tput_spread["median"],
+        "tput_spread": tput_spread,
+        "tpot_reps_ms": tpot_out,
         "tpot_spread_ms": _spread(tpot_out),
     }
 
@@ -354,24 +433,46 @@ def _engagement_proof(server_log: Path, target: Path, is_aiter_cu: bool) -> dict
     if stem and stem in text:
         markers.append(f"source_stem:{stem}")
     tuned_hits = text.count("is tuned on cu_num")
-    engaged = bool(markers) and (not is_aiter_cu or any(m.startswith("jit_build") or "tuned_hits" in m for m in markers))
-    out.update({
-        "engaged": engaged,
-        "reason": ("rebuild/tune markers present" if engaged else
-                   "no rebuild/tune marker in server log — patch may not have engaged"),
-        "markers": markers, "aiter_db_tuned_hits": tuned_hits,
-    })
+    engaged = bool(markers) and (
+        not is_aiter_cu or any(m.startswith("jit_build") or "tuned_hits" in m for m in markers)
+    )
+    out.update(
+        {
+            "engaged": engaged,
+            "reason": (
+                "rebuild/tune markers present"
+                if engaged
+                else "no rebuild/tune marker in server log — patch may not have engaged"
+            ),
+            "markers": markers,
+            "aiter_db_tuned_hits": tuned_hits,
+        }
+    )
     return out
 
 
 def apply_and_bench(
-    *, pairs: list[tuple[str, str]] | None = None,
-    patch_path: str | None = None, target_file: str | None = None,
-    backup_root: str, model: str, backend: str = "sglang",
-    tp: int = 1, port: int = 8890, gpu: str = "0",
-    isl: int = 1024, osl: int = 1024, conc: int = 64, num_prompts: int = 320, reps: int = 5,
-    out_dir: str, kernel_id: str = "", rebuild_command: str | None = None,
-    aiter_rebuild: bool = False, skip_rebuild: bool = False, seed: int = 1234,
+    *,
+    pairs: list[tuple[str, str]] | None = None,
+    patch_path: str | None = None,
+    target_file: str | None = None,
+    backup_root: str,
+    model: str,
+    backend: str = "sglang",
+    tp: int = 1,
+    port: int = 8890,
+    gpu: str = "0",
+    isl: int = 1024,
+    osl: int = 1024,
+    conc: int = 64,
+    num_prompts: int = 320,
+    reps: int = 5,
+    out_dir: str,
+    kernel_id: str = "",
+    rebuild_command: str | None = None,
+    aiter_rebuild: bool = False,
+    skip_rebuild: bool = False,
+    seed: int = 1234,
 ) -> dict[str, Any]:
     """Apply ONE OR MORE kernel patches together and measure E2E throughput A/B — NO gate.
 
@@ -399,8 +500,9 @@ def apply_and_bench(
         patched_env["AITER_REBUILD"] = "1"
 
     # ---- BASELINE (pristine) ----
-    base = _serve_and_bench("baseline", backend, model, tp, port, gpu, isl, osl, conc,
-                            num_prompts, reps, {}, bs, out, seed)
+    base = _serve_and_bench(
+        "baseline", backend, model, tp, port, gpu, isl, osl, conc, num_prompts, reps, {}, bs, out, seed
+    )
     if base["status"] != "ok":
         return {"status": "baseline_failed", "baseline": base}
 
@@ -408,7 +510,7 @@ def apply_and_bench(
     # backup + aiter .cu rebuild + cache invalidation) OR a unified DIFF/.patch (git apply,
     # multi-file). We auto-detect so the primitive handles patch/diff/full-source uniformly. ----
     _log(out, f"=== APPLY {len(pairs)} patch(es) (no keep/revert/needs-review gate) ===")
-    manifests: list[str] = []          # full-source applies -> revert via revert_kernel_patch
+    manifests: list[str] = []  # full-source applies -> revert via revert_kernel_patch
     diff_applies: list[dict[str, Any]] = []  # diff applies -> revert via git checkout of touched paths
     applied: list[dict[str, Any]] = []
 
@@ -435,12 +537,18 @@ def apply_and_bench(
             diff_applies.append(res)
         else:
             res = apply_kernel_patch(
-                patch_path=pp, target_file=tf, backup_root=backup_root,
-                kernel_id=f"{kernel_id or 'apply_and_bench'}_{i}", rebuild_command=rebuild_command,
-                skip_rebuild=skip_rebuild, allow_unknown_target=True,
+                patch_path=pp,
+                target_file=tf,
+                backup_root=backup_root,
+                kernel_id=f"{kernel_id or 'apply_and_bench'}_{i}",
+                rebuild_command=rebuild_command,
+                skip_rebuild=skip_rebuild,
+                allow_unknown_target=True,
             )
             _log(out, f"apply[{i}] {Path(tf).name} (full-source) status={res.get('status')}")
-            applied.append({"target": tf, "mode": "full_source", "status": res.get("status"), "manifest": res.get("manifest_path")})
+            applied.append(
+                {"target": tf, "mode": "full_source", "status": res.get("status"), "manifest": res.get("manifest_path")}
+            )
             if res.get("status") != "ok":
                 _revert_all()
                 return {"status": "apply_failed", "baseline": base, "applied": applied, "error": res.get("error")}
@@ -451,7 +559,8 @@ def apply_and_bench(
     if aiter_rebuild or any_aiter_cu:
         for so in _aiter_prebuilt_so(Path("/sgl-workspace/aiter")):
             try:
-                so.unlink(); removed_so.append(str(so))
+                so.unlink()
+                removed_so.append(str(so))
             except OSError:
                 # A prebuilt .so we can't remove (already gone / perms) just means aiter may
                 # reuse it; AITER_REBUILD=1 + the jit cache invalidation in apply_kernel_patch
@@ -462,16 +571,19 @@ def apply_and_bench(
 
     # ---- PATCHED (all patches live) ----
     try:
-        patched = _serve_and_bench("patched", backend, model, tp, port, gpu, isl, osl, conc,
-                                   num_prompts, reps, patched_env, bs, out, seed)
+        patched = _serve_and_bench(
+            "patched", backend, model, tp, port, gpu, isl, osl, conc, num_prompts, reps, patched_env, bs, out, seed
+        )
         # ---- ENGAGEMENT PROOF (trust, not policy): were the patched kernels on the live path?
         # Reported per target so a ~0% delta is distinguishable from "patch(es) didn't engage".
         engagement = [
-            dict(target=str(t), **_engagement_proof(out / "server_patched.log", t,
-                 "/aiter/" in str(t) and t.suffix in {".cu", ".cuh"}))
+            dict(
+                target=str(t),
+                **_engagement_proof(out / "server_patched.log", t, "/aiter/" in str(t) and t.suffix in {".cu", ".cuh"}),
+            )
             for t in targets
         ]
-        _log(out, f"engagement_proof: {[ (e['target'].split('/')[-1], e['engaged']) for e in engagement ]}")
+        _log(out, f"engagement_proof: {[(e['target'].split('/')[-1], e['engaged']) for e in engagement]}")
     finally:
         # ---- REVERT every patched source (full-source manifests + diff touched-paths). Keep patch files. ----
         _revert_all()
@@ -484,8 +596,7 @@ def apply_and_bench(
     # not a real regression/win. Avoids over-reading a sub-% delta as signal.
     bs_sp, ps_sp = base.get("tput_spread", {}), patched.get("tput_spread", {})
     significant = None
-    if all(bs_sp.get(k) is not None for k in ("p25", "p75")) and \
-       all(ps_sp.get(k) is not None for k in ("p25", "p75")):
+    if all(bs_sp.get(k) is not None for k in ("p25", "p75")) and all(ps_sp.get(k) is not None for k in ("p25", "p75")):
         # non-overlapping IQRs => significant
         significant = (ps_sp["p25"] > bs_sp["p75"]) or (ps_sp["p75"] < bs_sp["p25"])
     # TPOT (decode latency, lower=better): delta on the decode-bound-sensitive signal.
@@ -496,32 +607,48 @@ def apply_and_bench(
         "status": "ok" if (b_med and p_med) else "patched_failed",
         "gate": "none (straightforward apply + remeasure; KEEP/REVERT/NEEDS_REVIEW bypassed; policy is the caller's job)",
         "combined": len(pairs) > 1,
-        "baseline_median_tok_s": b_med, "patched_median_tok_s": p_med,
+        "baseline_median_tok_s": b_med,
+        "patched_median_tok_s": p_med,
         "delta_pct": delta_pct,
-        "significant": significant,            # None=insufficient reps; False=within noise (flat); True=clears IQR
-        "seed": seed, "reps": reps, "warmup_discarded": True,
-        "baseline_tput_spread": bs_sp, "patched_tput_spread": ps_sp,
-        "tpot_delta_pct": tpot_delta_pct,      # negative = faster decode (good)
+        "significant": significant,  # None=insufficient reps; False=within noise (flat); True=clears IQR
+        "seed": seed,
+        "reps": reps,
+        "warmup_discarded": True,
+        "baseline_tput_spread": bs_sp,
+        "patched_tput_spread": ps_sp,
+        "tpot_delta_pct": tpot_delta_pct,  # negative = faster decode (good)
         "baseline_tpot_spread_ms": base.get("tpot_spread_ms"),
         "patched_tpot_spread_ms": patched.get("tpot_spread_ms"),
         "baseline_reps": base.get("reps"),
-        "patched_reps": patched.get("reps"), "removed_prebuilt_so": removed_so,
-        "engagement_proof": engagement, "applied": applied,
+        "patched_reps": patched.get("reps"),
+        "removed_prebuilt_so": removed_so,
+        "engagement_proof": engagement,
+        "applied": applied,
         "targets": [str(t) for t in targets],
     }
     (out / "apply_and_bench_result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
-    _log(out, f"RESULT baseline={b_med} patched={p_med} delta={delta_pct}% "
-              f"significant={significant} tpot_delta={tpot_delta_pct}% (combined={len(pairs)>1})")
+    _log(
+        out,
+        f"RESULT baseline={b_med} patched={p_med} delta={delta_pct}% "
+        f"significant={significant} tpot_delta={tpot_delta_pct}% (combined={len(pairs) > 1})",
+    )
     return result
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Apply one or more kernel patches + warm-serve E2E remeasure (no decision gate)")
+    ap = argparse.ArgumentParser(
+        description="Apply one or more kernel patches + warm-serve E2E remeasure (no decision gate)"
+    )
     ap.add_argument("--patch-path", help="single-patch mode: full optimized source (or complete-file patch)")
     ap.add_argument("--target-file", help="single-patch mode: file to replace")
-    ap.add_argument("--pair", action="append", default=[], metavar="PATCH:TARGET",
-                    help="multi-patch mode (repeatable): 'patch_path:target_file'. Apply ALL together "
-                         "to one patched server -> COMBINED E2E (the 'apply all optimized patches' number).")
+    ap.add_argument(
+        "--pair",
+        action="append",
+        default=[],
+        metavar="PATCH:TARGET",
+        help="multi-patch mode (repeatable): 'patch_path:target_file'. Apply ALL together "
+        "to one patched server -> COMBINED E2E (the 'apply all optimized patches' number).",
+    )
     ap.add_argument("--backup-root", required=True)
     ap.add_argument("--model", required=True)
     ap.add_argument("--backend", default="sglang", choices=["sglang", "vllm"])
@@ -532,10 +659,18 @@ def main() -> int:
     ap.add_argument("--osl", type=int, default=1024)
     ap.add_argument("--conc", type=int, default=64)
     ap.add_argument("--num-prompts", type=int, default=320)
-    ap.add_argument("--reps", type=int, default=5,
-                    help="timed reps per arm (a separate untimed warmup pass is always discarded first)")
-    ap.add_argument("--seed", type=int, default=1234,
-                    help="random-dataset seed; both arms use it so they benchmark identical prompts")
+    ap.add_argument(
+        "--reps",
+        type=int,
+        default=5,
+        help="timed reps per arm (a separate untimed warmup pass is always discarded first)",
+    )
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=1234,
+        help="random-dataset seed; both arms use it so they benchmark identical prompts",
+    )
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--kernel-id", default="")
     ap.add_argument("--rebuild-command", default="")
@@ -555,11 +690,24 @@ def main() -> int:
     if not pairs:
         raise SystemExit("need --pair PATCH:TARGET (repeatable) or --patch-path + --target-file")
     res = apply_and_bench(
-        pairs=pairs, backup_root=a.backup_root,
-        model=a.model, backend=a.backend, tp=a.tp, port=a.port, gpu=a.gpu, isl=a.isl,
-        osl=a.osl, conc=a.conc, num_prompts=a.num_prompts, reps=a.reps, out_dir=a.out_dir,
-        kernel_id=a.kernel_id, rebuild_command=a.rebuild_command or None,
-        aiter_rebuild=a.aiter_rebuild, skip_rebuild=a.skip_rebuild, seed=a.seed,
+        pairs=pairs,
+        backup_root=a.backup_root,
+        model=a.model,
+        backend=a.backend,
+        tp=a.tp,
+        port=a.port,
+        gpu=a.gpu,
+        isl=a.isl,
+        osl=a.osl,
+        conc=a.conc,
+        num_prompts=a.num_prompts,
+        reps=a.reps,
+        out_dir=a.out_dir,
+        kernel_id=a.kernel_id,
+        rebuild_command=a.rebuild_command or None,
+        aiter_rebuild=a.aiter_rebuild,
+        skip_rebuild=a.skip_rebuild,
+        seed=a.seed,
     )
     print(json.dumps(res, indent=2))
     return 0 if res.get("status") == "ok" else 1

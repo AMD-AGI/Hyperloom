@@ -10,20 +10,31 @@ Usage:
                           --framework <sglang|vllm> --backend <geak|forge>
                           --session-dir <out> --model <name> [--top-k 10]
 """
-import argparse, asyncio, json, os, sys
+
+import argparse
+import asyncio
+import json
+import os
+import sys
 from argparse import Namespace
 from pathlib import Path
 
 # This file lives at <HL repo>/kernel-agent/tools/geak_vs_forge_driver.py, so the repo
 # root is two parents up. Derive it (instead of hardcoding) for portability across clones;
 # override with $HYPERLOOM_REPO_ROOT if importing HL from elsewhere.
-REPO = Path(os.environ["HYPERLOOM_REPO_ROOT"]) if os.environ.get("HYPERLOOM_REPO_ROOT") else Path(__file__).resolve().parents[2]
+REPO = (
+    Path(os.environ["HYPERLOOM_REPO_ROOT"])
+    if os.environ.get("HYPERLOOM_REPO_ROOT")
+    else Path(__file__).resolve().parents[2]
+)
 sys.path.insert(0, str(REPO / "kernel-agent" / "tools"))
 sys.path.insert(0, str(REPO))
 
-import tracelens_skill_runner as tlr           # HL
-import tracelens_analysis as tla               # HL
-from inference_optimizer.orchestrator import kernel_request_handlers as krh  # HL
+# These imports MUST follow the sys.path setup above (HL repo + tools dir), so they
+# are intentionally not at module top -> E402 suppressed.
+import tracelens_skill_runner as tlr  # noqa: E402  # HL
+import tracelens_analysis as tla  # noqa: E402  # HL
+from inference_optimizer.orchestrator import kernel_request_handlers as krh  # noqa: E402  # HL
 
 
 def _load_fusion_cues(analysis_dir: Path) -> str:
@@ -103,8 +114,11 @@ def _build_workload_context(c: dict, a, all_cands: list, fusion: str) -> str:
             seen.add(nm)
             sibs.append(nm)
     if sibs:
-        lines.append("Neighbouring hot kernels in this workload (consider cross-op fusion, not just in-kernel tuning): "
-                     + ", ".join(sibs[:8]) + ".")
+        lines.append(
+            "Neighbouring hot kernels in this workload (consider cross-op fusion, not just in-kernel tuning): "
+            + ", ".join(sibs[:8])
+            + "."
+        )
     if fusion:
         lines.append(f"TraceLens fusion candidates: {fusion}.")
 
@@ -124,24 +138,37 @@ def main() -> int:
     ap.add_argument("--model", required=True)
     ap.add_argument("--top-k", type=int, default=10)
     ap.add_argument("--target-platform", default="MI300X")
-    ap.add_argument("--only-op", default="", help="substring filter: keep only candidates whose op name matches (e.g. 'attention')")
-    ap.add_argument("--enrich", action="store_true", help="append authoritative WORKLOAD CONTEXT (serving config + Amdahl + fusion + roofline) to each kernel's dispatch prompt")
-    ap.add_argument("--serving-config", default="", help="free-form serving config string (e.g. 'framework=vllm, TP=8, ISL=1024, OSL=1024, conc=64'); injected verbatim when --enrich")
+    ap.add_argument(
+        "--only-op", default="", help="substring filter: keep only candidates whose op name matches (e.g. 'attention')"
+    )
+    ap.add_argument(
+        "--enrich",
+        action="store_true",
+        help="append authoritative WORKLOAD CONTEXT (serving config + Amdahl + fusion + roofline) to each kernel's dispatch prompt",
+    )
+    ap.add_argument(
+        "--serving-config",
+        default="",
+        help="free-form serving config string (e.g. 'framework=vllm, TP=8, ISL=1024, OSL=1024, conc=64'); injected verbatim when --enrich",
+    )
     a = ap.parse_args()
 
-    session = Path(a.session_dir); session.mkdir(parents=True, exist_ok=True)
+    session = Path(a.session_dir)
+    session.mkdir(parents=True, exist_ok=True)
     # Pin workspace + backend so HL's run-dir resolution + _backend_order agree.
     os.environ["USER_DATA_PATH"] = str(session)
     os.environ["HYPERLOOM_RUNTIME_DIR"] = str(session / "runtime")
     os.environ["KERNEL_OPT_BACKENDS"] = a.backend
-    run_dir = session / "kernel-agent-run"; run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = session / "kernel-agent-run"
+    run_dir.mkdir(parents=True, exist_ok=True)
     md = Path(a.analysis)
     csv_dir = Path(a.csv_dir) if a.csv_dir else None
 
     # 1) HL: analysis.md -> candidates (parse + finalize with CSV-resolved shapes/source)
     parsed = tlr.parse_analysis_md(md, top_k=a.top_k)
     cands = tla._finalize_candidates(
-        parsed, total_dur=None,
+        parsed,
+        total_dur=None,
         perf_report_csv_dir=(csv_dir if (csv_dir and csv_dir.exists()) else None),
         framework=a.framework,
     )
@@ -164,13 +191,23 @@ def main() -> int:
 
     # 2) HL: write kernel_candidates.json (the dispatch payload artifact)
     wr_args = Namespace(
-        model_name=a.model, framework=a.framework, target_platform=a.target_platform,
-        analysis_mode="default", runtime_env="local", dry_run=False, source_root=None,
-        trace_input=str(md), roofline_json="",
+        model_name=a.model,
+        framework=a.framework,
+        target_platform=a.target_platform,
+        analysis_mode="default",
+        runtime_env="local",
+        dry_run=False,
+        source_root=None,
+        trace_input=str(md),
+        roofline_json="",
     )
     artifacts = tla.write_reports(
-        run_dir, trace_input_type="file", trace_files=[md],
-        candidates=cands, args=wr_args, existing_report_path=md,
+        run_dir,
+        trace_input_type="file",
+        trace_files=[md],
+        candidates=cands,
+        args=wr_args,
+        existing_report_path=md,
     )
     cand_path = artifacts.get("kernel_candidates") or str(run_dir / "kernel_candidates.json")
     print(f"[driver] kernel_candidates -> {cand_path}", flush=True)
@@ -194,7 +231,8 @@ def main() -> int:
             if "=" not in tok:
                 continue
             k, v = tok.split("=", 1)
-            k = k.strip().lower(); v = v.strip()
+            k = k.strip().lower()
+            v = v.strip()
             if k == "tp":
                 sc["tp"] = int(v)
             elif k == "isl":
@@ -212,13 +250,19 @@ def main() -> int:
     out = session / f"result_{a.backend}.json"
     out.write_text(json.dumps(res, indent=1, default=str), encoding="utf-8")
     print(f"[driver] DONE backend={a.backend} -> {out}", flush=True)
-    print(f"[driver] status={res.get('status')} best_speedup={res.get('best_speedup') or res.get('best_speedup_verified')}", flush=True)
+    print(
+        f"[driver] status={res.get('status')} best_speedup={res.get('best_speedup') or res.get('best_speedup_verified')}",
+        flush=True,
+    )
     ce = res.get("combined_e2e")
     if isinstance(ce, dict):
         if ce.get("status") == "ok" or "delta_pct" in ce:
-            print(f"[driver] combined_e2e: baseline={ce.get('baseline_median_tok_s')} "
-                  f"patched={ce.get('patched_median_tok_s')} delta={ce.get('delta_pct')}% "
-                  f"(applied all best patches together)", flush=True)
+            print(
+                f"[driver] combined_e2e: baseline={ce.get('baseline_median_tok_s')} "
+                f"patched={ce.get('patched_median_tok_s')} delta={ce.get('delta_pct')}% "
+                f"(applied all best patches together)",
+                flush=True,
+            )
         else:
             print(f"[driver] combined_e2e: {ce.get('status')} - {ce.get('error')}", flush=True)
     return 0
