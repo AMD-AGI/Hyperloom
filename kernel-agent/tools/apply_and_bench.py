@@ -73,6 +73,30 @@ def _looks_like_diff(path: Path) -> bool:
     return ("diff --git " in head) or ("\n--- " in head and "\n+++ " in head and "\n@@ " in head)
 
 
+def _diff_unsupported_ops(diff_text: str) -> list[str]:
+    """Detect patch operations that full-source replacement (apply_kernel_patch) CANNOT represent.
+
+    apply_and_bench deploys each touched file as a complete-source replace, which faithfully
+    expresses modify + add (the only ops a kernel-optimization patch should contain). It cannot
+    express delete / rename / copy / mode-only / binary changes — so rather than silently
+    mis-applying (e.g. leaving a file the patch deleted), we detect those headers and the caller
+    fails loudly. Returns a list of human-readable unsupported-op descriptions (empty = all good).
+    """
+    bad: list[str] = []
+    for ln in diff_text.splitlines():
+        if ln.startswith("deleted file mode "):
+            bad.append("delete")
+        elif ln.startswith("rename from ") or ln.startswith("rename to "):
+            bad.append("rename")
+        elif ln.startswith("copy from ") or ln.startswith("copy to "):
+            bad.append("copy")
+        elif ln.startswith("old mode ") or ln.startswith("new mode "):
+            bad.append("mode-change")
+        elif ln.startswith("GIT binary patch") or ln.startswith("Binary files "):
+            bad.append("binary")
+    return sorted(set(bad))
+
+
 def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Path) -> dict[str, Any]:
     """Reconstruct the BYTE-EXACT optimized source for EVERY file a diff touches.
 
@@ -83,9 +107,25 @@ def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Pa
     integration deploy in #681 uses). Two patch-deploy semantics collapse into one, and companion
     edits (generated drivers/headers/codegen shims) are preserved rather than filtered out.
 
+    SCOPE: full-source replacement represents modify + add faithfully. delete / rename / copy /
+    mode-only / binary ops cannot be expressed that way, so they are detected up front and the
+    function FAILS (no silent skip) — a kernel-optimization patch should never contain them, and
+    if one does the E2E must refuse rather than measure a half-applied tree.
+
     Done in an isolated ``git worktree`` of ``repo_root`` so the live tree is never mutated during
     reconstruction. Returns ``{status, files: {repo_rel_path: reconstructed_source_path}, error}``.
     """
+    try:
+        diff_text = diff_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return {"status": "failed", "error": f"cannot read diff: {exc}"}
+    unsupported = _diff_unsupported_ops(diff_text)
+    if unsupported:
+        return {
+            "status": "failed",
+            "error": f"diff contains unsupported op(s) for full-source deploy: {', '.join(unsupported)} "
+            f"— kernel patches must be modify/add only (use the integration snapshot path for these)",
+        }
     files: dict[str, str] = {}
     wt = out_dir / f"_recon_wt_{diff_path.stem}"
     # Use a detached worktree at HEAD so reconstruction is hermetic (live repo untouched).
@@ -119,9 +159,9 @@ def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Pa
                 recon_dir.mkdir(parents=True, exist_ok=True)
                 for rel in rels:
                     src = wt / rel
-                    if not src.is_file():  # a pure deletion — record so the caller can handle it
-                        files[rel] = ""
-                        continue
+                    if not src.is_file():
+                        # Unexpected (deletes are rejected up front) — fail rather than skip.
+                        return {"status": "failed", "error": f"reconstructed path missing after apply: {rel}"}
                     dst = recon_dir / rel.replace("/", "__")
                     dst.write_bytes(src.read_bytes())  # byte-exact
                     files[rel] = str(dst)
@@ -204,7 +244,12 @@ def _launch_server(
     else:
         raise SystemExit(f"unknown backend: {backend}")
     fh = log_path.open("w", encoding="utf-8")
-    return subprocess.Popen(cmd, cwd=cwd, env=env, stdout=fh, stderr=subprocess.STDOUT)
+    # start_new_session=True puts the server in its OWN process group so teardown can
+    # `killpg` exactly this server's tree (no global `pkill -f sglang` that would also
+    # kill other tenants' / the orchestrator's servers on a shared node). POSIX-only;
+    # the kwarg is a no-op elsewhere.
+    session_kwargs = {"start_new_session": True} if os.name == "posix" else {}
+    return subprocess.Popen(cmd, cwd=cwd, env=env, stdout=fh, stderr=subprocess.STDOUT, **session_kwargs)
 
 
 def _wait_health(proc: subprocess.Popen, port: int, out_dir: Path, tries: int = 70) -> bool:
@@ -297,17 +342,53 @@ def _bench_once(
 
 
 def _kill_servers(proc: subprocess.Popen | None, backend: str) -> None:
-    if proc is not None:
+    """Tear down ONLY the server we spawned (its process group) — never a global sweep.
+
+    The server was launched with start_new_session=True, so it leads its own process
+    group; ``killpg`` reaps the whole tree (server + its workers) without touching any
+    other tenant's sglang/vLLM on the node. SIGTERM, grace, then SIGKILL survivors.
+    A broad ``pkill -f sglang/vllm`` is intentionally NOT used (it is multi-tenant
+    unsafe, and this primitive runs in the autonomous combined_e2e path, not just a
+    single-tenant script). Opt back into a blunt sweep only via APPLY_BENCH_PKILL_SWEEP=1.
+    """
+    if proc is None:
+        return
+    if os.name == "posix":
         try:
-            proc.send_signal(signal.SIGTERM)
-            time.sleep(15)
+            pgid = os.getpgid(proc.pid)
         except (ProcessLookupError, OSError):
-            # The server may already be gone (crashed / reaped); the pkill sweep below is the
-            # authoritative teardown, so a failed SIGTERM here is non-fatal.
-            pass
-    pat = "sglang.launch_server" if backend == "sglang" else "vllm.entrypoints"
-    subprocess.run(["pkill", "-9", "-f", pat], check=False)
-    time.sleep(8)
+            pgid = None
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, OSError):
+                pass
+            for _ in range(15):  # up to ~15s grace for a clean shutdown
+                if proc.poll() is not None:
+                    break
+                time.sleep(1)
+            try:
+                os.killpg(pgid, signal.SIGKILL)  # reap any survivors in the group
+            except (ProcessLookupError, OSError):
+                pass
+    else:  # non-POSIX: best-effort single-process teardown
+        try:
+            proc.terminate()
+            proc.wait(timeout=15)
+        except (subprocess.TimeoutExpired, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    # Escape hatch: explicit single-tenant blunt sweep (off by default).
+    if os.environ.get("APPLY_BENCH_PKILL_SWEEP") == "1":
+        pat = "sglang.launch_server" if backend == "sglang" else "vllm.entrypoints"
+        subprocess.run(["pkill", "-9", "-f", pat], check=False)
+    time.sleep(5)
 
 
 def _spread(xs: list[float]) -> dict[str, float | None]:
@@ -525,9 +606,6 @@ def apply_and_bench(
                 _revert_all()
                 return {"status": "apply_failed", "baseline": base, "applied": applied, "error": rec.get("error")}
             for rel, src in rec["files"].items():
-                if not src:  # pure deletion in the diff — revert-safe skip (rare for kernel patches)
-                    _log(out, f"diff deletes {rel} — skipping deploy (not a source replacement)")
-                    continue
                 tgt = str(tf) if Path(rel).name == Path(tf).name else str(repo_root / rel)
                 if not _deploy_full_source(src, tgt, f"{i}_{Path(rel).name}"):
                     _revert_all()
