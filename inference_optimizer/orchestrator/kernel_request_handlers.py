@@ -1519,7 +1519,85 @@ def _csv_has_data_rows(path: Path) -> bool:
     return False
 
 
-def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: str) -> str:
+def _csv_k_values(path: Path) -> set[int]:
+    """Return the distinct integer ``K`` (contraction-dim) values in a CSV.
+
+    The aiter recorder writes a header containing ``M,N,K`` (optionally with
+    extra columns such as ``q_dtype_w``). ``K`` is the GEMM contraction dim,
+    which for a transformer layer equals its input dim (``hidden_size`` for
+    QKV/gate-up/o projections, ``intermediate_size`` for the down projection).
+    """
+    ks: set[int] = set()
+    try:
+        with path.open(encoding="utf-8", errors="replace") as f:
+            header = f.readline().strip().split(",")
+            cols = {name.strip().upper(): i for i, name in enumerate(header)}
+            kidx = cols.get("K")
+            if kidx is None:
+                return ks
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) <= kidx:
+                    continue
+                try:
+                    ks.add(int(float(parts[kidx])))
+                except ValueError:
+                    continue
+    except OSError:
+        return ks
+    return ks
+
+
+def _model_hidden_size(model_path: str) -> int | None:
+    """Read ``hidden_size`` from a HF ``config.json``; ``None`` when unavailable."""
+    if not model_path:
+        return None
+    cfg = Path(model_path) / "config.json"
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    candidates: list[dict] = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg_dict in candidates:
+        for key in ("hidden_size", "n_embd", "d_model", "hidden_dim"):
+            val = cfg_dict.get(key)
+            if isinstance(val, int) and val > 0:
+                return val
+    return None
+
+
+def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
+    """Return True when an untuned CSV plausibly belongs to ``model_path``.
+
+    A real per-model dense untuned CSV always contains GEMMs whose ``K`` equals
+    the model ``hidden_size`` (QKV / gate-up / o-proj are column-parallel, so
+    their contraction dim stays ``hidden_size`` regardless of TP). When the
+    model's ``hidden_size`` is known and absent from the CSV's ``K`` column, the
+    CSV was recorded for a different model (e.g. AITER's checked-in DeepSeek
+    default with ``K=7168``) and must be rejected so forge derives shapes from
+    the model config instead of "tuning" mismatched shapes to a 1.0x no-op.
+
+    Returns True when validation is not possible (``hidden_size`` unreadable or
+    the CSV exposes no ``K`` column) to preserve existing behaviour and avoid
+    false rejections.
+    """
+    hidden = _model_hidden_size(model_path)
+    if hidden is None:
+        return True
+    k_values = _csv_k_values(csv_path)
+    if not k_values:
+        return True
+    return hidden in k_values
+
+
+def _resolve_forge_untuned_csv(
+    session_dir: Path, precision: str, quant_type: str, model_path: str = ""
+) -> str:
     """Find an aiter untuned-GEMM CSV recorded by the specialist phase.
 
     Dense fp8/fp4 forge tuners (a8w8*/a4w4*) skip themselves unless real GEMM
@@ -1528,6 +1606,12 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
     forge's ``M,N,K`` format, but the orchestrator never wired them in -- so the
     overwhelming majority of fp8 sglang sessions were skipped. This resolver
     picks the newest non-empty CSV matching the resolved quant type.
+
+    When ``model_path`` is given, candidate CSVs whose GEMM shapes do not match
+    the model (the AITER repo default carries fixed DeepSeek shapes, ``K=7168``,
+    regardless of the model under test) are rejected. Returning "" then lets
+    forge derive correct per-model shapes from ``config.json`` rather than
+    tuning mismatched shapes that always yield ``improved=0/0, 1.0x``.
 
     Returns the CSV path, or "" when none is available (bf16 derives shapes from
     config.json and needs no CSV).
@@ -1552,6 +1636,8 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
     best_mtime = -1.0
     for csv_path in specialist_dir.glob(f"*/worktree/aiter/configs/{fname}"):
         if not _csv_has_data_rows(csv_path):
+            continue
+        if not _csv_matches_model(csv_path, model_path):
             continue
         try:
             mtime = csv_path.stat().st_mtime
@@ -1729,7 +1815,7 @@ async def _run_forge_gemm_tuning(
         # Guard against inline content / stale paths handed in as untuned_csv.
         untuned_csv = ""
     if not untuned_csv and not shapes_json:
-        untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type)
+        untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type, model_path)
 
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)

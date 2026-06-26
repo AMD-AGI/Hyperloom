@@ -216,6 +216,74 @@ class TestForgeGemmHelperCoverage:
     def test_resolve_forge_untuned_csv_no_specialist_dir(self, tmp_path):
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == ""
 
+    @staticmethod
+    def _write_model_config(model_dir: Path, hidden_size: int) -> str:
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "config.json").write_text(
+            json.dumps({"hidden_size": hidden_size}), encoding="utf-8"
+        )
+        return str(model_dir)
+
+    def test_resolve_forge_untuned_csv_rejects_model_mismatch(self, tmp_path):
+        # Repro: specialist CSV carries the AITER default DeepSeek shapes
+        # (K=7168) while the model under test has hidden_size=2048. The CSV must
+        # be rejected so forge derives correct per-model shapes from config.json.
+        self._write_aiter_csv(
+            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+        )
+        model_path = self._write_model_config(tmp_path / "model", hidden_size=2048)
+        assert (
+            krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", model_path) == ""
+        )
+
+    def test_resolve_forge_untuned_csv_accepts_model_match(self, tmp_path):
+        # A CSV whose K column includes the model hidden_size is the real
+        # per-model shape set and must be accepted.
+        expected = self._write_aiter_csv(
+            tmp_path,
+            "abc",
+            "a8w8_blockscale_untuned_gemm.csv",
+            "M,N,K\n16,6144,2048\n16,2048,8192\n",
+        )
+        model_path = self._write_model_config(tmp_path / "model", hidden_size=2048)
+        assert krh._resolve_forge_untuned_csv(
+            tmp_path, "fp8", "blockscale", model_path
+        ) == str(expected)
+
+    def test_resolve_forge_untuned_csv_no_model_path_keeps_legacy(self, tmp_path):
+        # Backward compatible: without a model_path the resolver cannot validate
+        # and keeps the legacy behaviour of returning the newest non-empty CSV.
+        expected = self._write_aiter_csv(
+            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+        )
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(expected)
+
+    def test_resolve_forge_untuned_csv_unreadable_config_keeps_csv(self, tmp_path):
+        # When config.json is missing/unreadable we cannot validate; preserve the
+        # legacy behaviour rather than dropping a possibly-valid CSV.
+        expected = self._write_aiter_csv(
+            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+        )
+        assert krh._resolve_forge_untuned_csv(
+            tmp_path, "fp8", "blockscale", str(tmp_path / "no_such_model")
+        ) == str(expected)
+
+    def test_csv_matches_model_helpers(self, tmp_path):
+        csv_mismatch = self._write_aiter_csv(
+            tmp_path, "h1", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+        )
+        csv_match = self._write_aiter_csv(
+            tmp_path, "h2", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,6144,2048\n"
+        )
+        model_path = self._write_model_config(tmp_path / "m", hidden_size=2048)
+        assert krh._model_hidden_size(model_path) == 2048
+        assert krh._csv_k_values(csv_mismatch) == {7168}
+        assert krh._csv_k_values(csv_match) == {2048}
+        assert krh._csv_matches_model(csv_mismatch, model_path) is False
+        assert krh._csv_matches_model(csv_match, model_path) is True
+        # No model_path / unreadable config -> cannot validate -> accept.
+        assert krh._csv_matches_model(csv_mismatch, "") is True
+
     def test_read_forge_result_json(self, tmp_path):
         (tmp_path / "result.json").write_text(
             json.dumps({"status": "skipped", "tuners_skipped": [{"tuner": "a8w8"}]}),
