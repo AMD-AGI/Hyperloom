@@ -37,6 +37,7 @@ fa schema                 # print the request schema summary (debug)
 fa candidates --request req.json [--out -]   # enumerate PR/ref candidates, no build/bench
 fa explore   --request req.json [--execute] [--out -]   # plan (default) or build/bench loop
 fa phase-discover --request req.json [--out -]   # Coordinator FRAMEWORK_PR phase entry point
+fa phase-audit --request req.json [--out -]   # static local-source judging of a discovered candidate
 fa kb list|show|search|contribute|synthesize ...   # knowledge-base ops
 ```
 
@@ -58,6 +59,33 @@ mirrors `critic-agent/runtime/cli.py`):
 #    output:  {batch_id, framework, repo_url, candidates: [...]}
 fa phase-discover --request req.json --out -
 ```
+
+## FRAMEWORK_PR semantic audit (`fa phase-audit`)
+
+Given a discovered candidate + the live framework source roots, decide whether
+the PR's change is already present locally so the Coordinator can skip
+already-merged PRs and seed the authoring specialist with evidence:
+
+```bash
+# request: {candidate, framework, framework_source_roots[],
+#           diff_text|patches_path|primus_cortex_url, work_dir?, use_llm?, model?}
+# output:  {candidate_id, semantic_status, applicability, confidence,
+#           evidence[], risks[], recommended_next_step, layer, metrics}
+fa phase-audit --request req.json --out -
+```
+
+- **static layer (default, hermetic)**: parse the diff, resolve each touched
+  file under `framework_source_roots`, measure added-line / symbol presence +
+  context-anchor presence.
+  - `semantic_status` ∈ `already_equivalent` / `already_superset` /
+    `partially_present` / `not_present` / `unknown`.
+  - `applicability` ∈ `direct_apply` / `needs_rewrite` / `not_applicable` /
+    `needs_human_review`; `recommended_next_step` ∈ `skip` /
+    `direct_framework_pr` / `author_via_specialist`.
+  - `already_*` is evidence-gated (downgraded to `unknown` without a concrete
+    symbol/line hit).
+- **llm layer (opt-in, `use_llm=true`)**: single chat-completion refine; needs
+  `SAFE_API_KEY` + `OPENAI_BASE_URL`; best-effort; never authors patches.
 
 ## KB partition (`fa kb`)
 
