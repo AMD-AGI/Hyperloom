@@ -276,8 +276,12 @@ def test_detect_glm_moe_dsa_unrecognized_blocked(tmp_path):
     assert reason is not None and "not recognized" in reason
 
 
-def test_detect_gemma4_unrecognized_blocked(tmp_path):
-    # google-gemma-4-26B-A4B-it: current vLLM/Transformers rejects model_type=gemma4.
+def test_detect_gemma4_now_recognized(tmp_path):
+    # google-gemma-4-26B-A4B-it: the current pinned stack (transformers 5.5.0 +
+    # vLLM 0.18.2rc1) registers gemma4 (CONFIG_MAPPING has "gemma4", AutoConfig
+    # resolves Gemma4Config, vLLM ModelConfig resolves Gemma4ForCausalLM). It was
+    # removed from the unrecognized blocklist, so a plain text Gemma4 config is no
+    # longer fail-fasted by the model-config gate.
     m = tmp_path / "gemma4"
     _write_config(
         m,
@@ -286,7 +290,7 @@ def test_detect_gemma4_unrecognized_blocked(tmp_path):
         max_position_embeddings=32768,
     )
     reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None and "gemma4" in reason
+    assert reason is None
 
 
 def test_detect_bailing_ling_left_to_runtime_scope(tmp_path):
