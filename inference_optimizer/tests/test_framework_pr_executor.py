@@ -947,6 +947,170 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
+# 3d. accuracy gate inside _bench_candidate (Step 0 regression)
+#
+# Regression for the framework_pr accuracy-gate bug: the gate read the
+# nonexistent ``score`` key from parse_eval_results (which returns
+# ``accuracy``) and passed (new, baseline) reversed into accuracy_passed,
+# so accuracy_pass was always None -> KEEP always allowed. These tests drive
+# the real _bench_candidate gate (the prior accuracy test mocked the whole
+# method, masking the bug).
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "new_accuracy, expected_pass",
+    [
+        (0.78, True),   # baseline 0.80, drop 0.02 <= 0.05 -> pass
+        (0.70, False),  # baseline 0.80, drop 0.10 >  0.05 -> fail
+    ],
+)
+async def test_bench_candidate_accuracy_gate_reads_accuracy_key(
+    tmp_path: Path,
+    new_accuracy: float,
+    expected_pass: bool,
+):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+
+    async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
+        return [_mk_variant_result(tput=1100.0, status="succeeded")]
+
+    import inference_optimizer.orchestrator.action_executors.framework_pr as fp_mod
+
+    with (
+        patch.object(fp_mod, "run_grid", new=fake_run_grid),
+        patch.object(fp_mod, "materialize_config_with_envs", return_value=config_path),
+        patch.object(fp_mod, "parse_eval_results", return_value={"accuracy": new_accuracy}),
+    ):
+        bench, gate = await executor._bench_candidate(
+            params={
+                "config_path": str(config_path),
+                "accuracy_baseline": 0.80,
+            },
+            output_root=tmp_path / "out",
+            slug="acc-gate",
+        )
+
+    assert bench["status"] == "succeeded"
+    # The core regression: a real accuracy verdict, never None when an eval
+    # result + positive baseline are present.
+    assert gate["accuracy_pass"] is expected_pass
+
+
+@pytest.mark.asyncio
+async def test_bench_candidate_accuracy_gate_skipped_without_baseline(tmp_path: Path):
+    """No positive accuracy_baseline -> gate is skipped (accuracy_pass None)."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+
+    async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
+        return [_mk_variant_result(tput=1100.0, status="succeeded")]
+
+    import inference_optimizer.orchestrator.action_executors.framework_pr as fp_mod
+
+    with (
+        patch.object(fp_mod, "run_grid", new=fake_run_grid),
+        patch.object(fp_mod, "materialize_config_with_envs", return_value=config_path),
+        patch.object(fp_mod, "parse_eval_results", return_value={"accuracy": 0.50}),
+    ):
+        _bench, gate = await executor._bench_candidate(
+            params={"config_path": str(config_path)},  # no accuracy_baseline
+            output_root=tmp_path / "out",
+            slug="acc-skip",
+        )
+
+    assert gate["accuracy_pass"] is None
+
+
+# 3e. accuracy-gate KEEP enforcement (Step 4)
+@pytest.mark.asyncio
+async def test_executor_require_accuracy_blocks_keep_when_unevaluated(tmp_path: Path):
+    """+gain but accuracy unevaluated (None) with a baseline present -> REVERT.
+
+    The accuracy gate is required for source patches; a missing verdict when a
+    baseline exists means eval should have run but didn't -> do not KEEP.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = _make_candidate()
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx(
+        "t-fp-acc-req",
+        {
+            "candidate": cand,
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+            "require_accuracy_for_keep": True,
+            "accuracy_baseline": 0.80,
+        },
+    )
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "accuracy_unavailable_reject"
+    assert "accuracy gate required" in result["reason"]
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_require_accuracy_degrades_without_baseline(tmp_path: Path):
+    """Required gate but no baseline accuracy -> degrade to throughput-only KEEP."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = _make_candidate()
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx(
+        "t-fp-acc-degrade",
+        {
+            "candidate": cand,
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+            "require_accuracy_for_keep": True,
+            # no accuracy_baseline -> cannot enforce -> degrade
+        },
+    )
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "kept"
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
 # 4. Registration / import surface
 def test_framework_pr_executor_imports_clean():
     from inference_optimizer.orchestrator.action_executors import (

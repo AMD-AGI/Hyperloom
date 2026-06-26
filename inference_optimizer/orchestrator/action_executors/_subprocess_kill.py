@@ -14,6 +14,7 @@ benchmark call.
 
 from __future__ import annotations
 
+import glob
 import logging
 import os
 import signal
@@ -376,12 +377,19 @@ class _StreamCapture:
 # the end of the bootstrap traceback).
 _SERVER_LOG_TAIL_BYTES: int = 65536
 
+# Glob (relative to the watched path's directory) for nested per-run server logs
+# Magpie writes when its wrapper ignores ``$SERVER_LOG`` and emits to a
+# ``benchmark_<framework>_<timestamp>/server.log`` subdir instead. Without this
+# the watchdog scans an empty/absent ``output_dir/server.log`` and never sees the
+# crash, so a hung-after-death server burns the full ~2h hard timeout.
+_NESTED_SERVER_LOG_GLOB: str = "benchmark_*/server.log"
 
-def _server_log_shows_death(path: str) -> str | None:
-    """Return the terminal-init marker present in ``server.log`` tail, else None.
+def _server_log_tail_has_marker(path: str) -> str | None:
+    """Return the death marker present in the tail of the single file ``path``,
+    else None.
 
-    Best-effort and never raises: a missing / unreadable log (server hasn't
-    written yet) reads as "not dead" so a slow cold start is never misjudged.
+    Best-effort and never raises: a missing / unreadable log reads as "not
+    dead" (returns None).
 
     Args:
         path: Filesystem path to the server's ``server.log``.
@@ -407,6 +415,43 @@ def _server_log_shows_death(path: str) -> str | None:
     return None
 
 
+def _server_log_shows_death(path: str) -> str | None:
+    """Return the terminal engine/worker-init marker present in a server log,
+    else None.
+
+    Scans the watched ``path`` AND any nested ``benchmark_*/server.log`` files in
+    the same directory. The nested fallback covers Magpie wrappers that ignore
+    ``$SERVER_LOG`` and write the real server log to a per-run subdir, which
+    otherwise leaves the watchdog reading an empty/absent file forever.
+
+    Best-effort and never raises: a missing / unreadable log (server hasn't
+    written yet) reads as "not dead" so a slow cold start is never misjudged.
+    Returning the marker (rather than a bare bool) lets the watchdog report
+    which fatal line tripped it instead of a placeholder.
+
+    Args:
+        path: Filesystem path to the server's ``server.log``.
+
+    Returns:
+        The first matched terminal engine/worker-init marker string from any
+        candidate log tail, or None when none is present (including when no log
+        is present or readable).
+    """
+    marker = _server_log_tail_has_marker(path)
+    if marker is not None:
+        return marker
+    try:
+        base_dir = os.path.dirname(path) or "."
+        for nested in glob.glob(os.path.join(base_dir, _NESTED_SERVER_LOG_GLOB)):
+            if nested != path:
+                nested_marker = _server_log_tail_has_marker(nested)
+                if nested_marker is not None:
+                    return nested_marker
+    except OSError:
+        return None
+    return None
+
+
 def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     """Return a short ``server.log`` excerpt around the first terminal
     engine/worker-init marker, or ``None`` when no fatal marker is present.
@@ -428,23 +473,34 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
         A short multi-line excerpt around the first terminal init marker, or
         ``None`` when no fatal marker is present.
     """
+    candidates = [path]
     try:
-        with open(path, "rb") as fh:
-            try:
-                fh.seek(-_SERVER_LOG_TAIL_BYTES, os.SEEK_END)
-            except OSError:
-                fh.seek(0)
-            tail = fh.read().decode("utf-8", "ignore")
-    except (OSError, ValueError):
-        return None
-    lines = tail.splitlines()
-    for idx, line in enumerate(lines):
-        if any(marker in line for marker in _SERVER_DEAD_MARKERS):
-            start = max(0, idx - 2)
-            excerpt = "\n".join(lines[start : idx + 3]).strip()
-            if not excerpt:
-                return None
-            return excerpt[-max_chars:]
+        base_dir = os.path.dirname(path) or "."
+        candidates.extend(
+            p
+            for p in glob.glob(os.path.join(base_dir, _NESTED_SERVER_LOG_GLOB))
+            if p != path
+        )
+    except OSError:
+        pass
+    for candidate in candidates:
+        try:
+            with open(candidate, "rb") as fh:
+                try:
+                    fh.seek(-_SERVER_LOG_TAIL_BYTES, os.SEEK_END)
+                except OSError:
+                    fh.seek(0)
+                tail = fh.read().decode("utf-8", "ignore")
+        except (OSError, ValueError):
+            continue
+        lines = tail.splitlines()
+        for idx, line in enumerate(lines):
+            if any(marker in line for marker in _SERVER_DEAD_MARKERS):
+                start = max(0, idx - 2)
+                excerpt = "\n".join(lines[start : idx + 3]).strip()
+                if not excerpt:
+                    continue
+                return excerpt[-max_chars:]
     return None
 
 
