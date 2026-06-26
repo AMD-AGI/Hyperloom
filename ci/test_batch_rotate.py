@@ -87,6 +87,28 @@ def test_slot_other_tz_is_normalized():
     assert br.scheduled_slot(datetime(2026, 6, 25, 11, 7, tzinfo=tz8), max_hours=12) == 0
 
 
+def test_slot_custom_anchor_overrides_default():
+    # A caller-supplied anchor restarts the sweep at that instant (slot 0),
+    # independent of the shared ROTATE_ANCHOR_UTC. Same `now` yields a different
+    # slot under the default vs the custom anchor.
+    anchor = _utc2(2026, 6, 26, 13, 0)
+    assert br.scheduled_slot(_utc2(2026, 6, 26, 13, 7), max_hours=6, anchor=anchor) == 0
+    assert br.scheduled_slot(_utc2(2026, 6, 26, 19, 7), max_hours=6, anchor=anchor) == 1
+    # Same instant under the default anchor is well past slot 0.
+    assert br.scheduled_slot(_utc2(2026, 6, 26, 13, 7), max_hours=6) > 0
+
+
+def test_resolve_batch_index_custom_anchor():
+    # tiny dispatcher use: anchor at the next fire -> batch 0 there, +6h -> 1.
+    anchor = _utc2(2026, 6, 26, 13, 0)
+    assert br.resolve_batch_index(2121, 240, event="schedule", batch_index=None,
+                                  now=_utc2(2026, 6, 26, 13, 7), max_hours=6,
+                                  anchor=anchor) == 0
+    assert br.resolve_batch_index(2121, 240, event="schedule", batch_index=None,
+                                  now=_utc2(2026, 6, 26, 19, 7), max_hours=6,
+                                  anchor=anchor) == 1
+
+
 # ── resolve_batch_index ─────────────────────────────────────────────────────
 
 
