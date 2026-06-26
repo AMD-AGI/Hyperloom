@@ -45,6 +45,9 @@ log = logging.getLogger(__name__)
 
 CRITIC_AGENT_RUNTIME_TIMEOUT_SEC = 30  # prepare-review / commit-review wall cap
 CRITIC_AGENT_MAX_COMPLETION_TOKENS = 2000
+# OpenAI HTTP client timeout defaults for critic review calls.
+CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC = 10.0
+CRITIC_AGENT_LLM_RW_TIMEOUT_SEC = 120.0
 
 # Cap on per-turn workdirs kept on disk; older ones are pruned each turn.
 CRITIC_AGENT_WORKDIR_KEEP_COUNT = 50
@@ -425,7 +428,14 @@ class CriticAgentBackend:
                 kwargs["base_url"] = base_url
             try:
                 import httpx
-
+            except ImportError:
+                # Keep best-effort fallback to SDK defaults if httpx isn't
+                # importable in this environment.
+                log.warning(
+                    "critic_agent_backend: httpx unavailable; "
+                    "falling back to AsyncOpenAI default timeouts"
+                )
+            else:
                 connect_timeout_s = parse_call_timeout_env(
                     "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
                     default=CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
@@ -434,16 +444,24 @@ class CriticAgentBackend:
                     "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
                     default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
                 )
-                kwargs["timeout"] = httpx.Timeout(
-                    connect=connect_timeout_s,
-                    read=rw_timeout_s,
-                    write=rw_timeout_s,
-                    pool=rw_timeout_s,
-                )
-            except Exception:
-                # Keep a best-effort fallback to SDK defaults when timeout wiring
-                # cannot be constructed (e.g., import edge cases).
-                pass                
+                try:
+                    kwargs["timeout"] = httpx.Timeout(
+                        connect=connect_timeout_s,
+                        read=rw_timeout_s,
+                        write=rw_timeout_s,
+                        pool=rw_timeout_s,
+                    )
+                except (TypeError, ValueError) as exc:
+                    # Keep best-effort fallback to SDK defaults when timeout
+                    # values are rejected by the local httpx version.
+                    log.warning(
+                        "critic_agent_backend: failed to build httpx.Timeout "
+                        "(connect=%s rw=%s): %r; falling back to AsyncOpenAI "
+                        "default timeouts",
+                        connect_timeout_s,
+                        rw_timeout_s,
+                        exc,
+                    )
             self._client = AsyncOpenAI(**kwargs)
 
         # Resolve static per-session context once; absent model/framework keys
