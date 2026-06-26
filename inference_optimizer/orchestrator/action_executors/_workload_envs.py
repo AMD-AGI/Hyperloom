@@ -79,6 +79,33 @@ _RUN_EVAL_DISABLED_WARN_EMITTED = False
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
 
+def _model_requires_remote_code(model_path: str | None) -> bool:
+    """Return whether benchmark server/client must trust custom HF code.
+
+    Kimi K2.6 exposes its tokenizer through custom model code
+    (``model_type=kimi_k25`` / ``KimiK25ForConditionalGeneration``). The
+    benchmark client and the server must both pass trust-remote-code or baseline
+    fails before producing a usable measurement. Generalize the guard to any
+    local config that advertises a custom AutoTokenizer so future custom-code
+    tokenizers do not need per-model special cases.
+    """
+    model = str(model_path or "").strip()
+    if not model:
+        return False
+    data = _load_model_config_dict(model)
+    basename = Path(model).name.lower()
+    if data is None:
+        # Fallback for mounted model dirs whose config is temporarily
+        # unreadable. Keep this narrow so ordinary models are untouched.
+        return "kimi-k2" in basename or "kimi_k2" in basename
+    model_type = str(data.get("model_type") or "").lower()
+    archs = {str(a).lower() for a in data.get("architectures") or []}
+    if model_type == "kimi_k25" or "kimik25forconditionalgeneration" in archs:
+        return True
+    auto_map = data.get("auto_map")
+    return isinstance(auto_map, dict) and bool(auto_map.get("AutoTokenizer"))
+
+
 def inject_vllm_expert_parallel(
     server_args: str | None,
     framework: Any,
@@ -686,10 +713,10 @@ def materialize_config_with_envs(
         # gfx942 (mimo_v2.py forward -> GPU coredump -> "Rank N scheduler
         # died during initialization (exit code: -6)"). Pin the triton
         # attention backend, which sidesteps the buggy aiter fused-attention
-        # path. Pairs with the mimo-profilerfix image (the undated v0.5.11
-        # profilerfix base does not register MiMoV2ForCausalLM at all; the
-        # image picked in optimize_submit._sglang_image_for carries the
-        # dated 20260508 arch). Merge (never overwrite) and skip when the
+        # path. Pairs with the default sglang image picked in
+        # optimize_submit._sglang_image_for (v0.5.12 profilerfix now registers
+        # MiMoV2ForCausalLM, so the old v0.5.11 mimo-profilerfix override was
+        # dropped). Merge (never overwrite) and skip when the
         # caller already pinned an --attention-backend so explore variants
         # can re-test the fused path once the model is known to load.
         from ._grid_runner import merge_server_args
@@ -828,6 +855,16 @@ def materialize_config_with_envs(
         "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
     ):
         envs.setdefault(_trust_key, "1")
+    if _model_requires_remote_code(model_path or bench.get("model")):
+        _remote_code_existing = str(envs.get(framework_env, "")).strip()
+        if "trust-remote-code" not in _remote_code_existing:
+            from ._grid_runner import merge_server_args
+
+            envs[framework_env] = (
+                merge_server_args(_remote_code_existing, "--trust-remote-code")
+                if _remote_code_existing
+                else "--trust-remote-code"
+            )
     # Server-side trust-remote-code for custom-code models (Qwen3.6 MoE): the
     # checkpoint ships a custom text-generation implementation behind a config
     # that advertises vision_config, so the SERVER must also load remote code
