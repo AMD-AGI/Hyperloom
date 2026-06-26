@@ -23,6 +23,7 @@ from inference_optimizer.recipe_snapshot_constants import (
     F_LABEL_PRECISION,
     canonical_labels,
     detect_framework_version,
+    format_recipe_path,
     recipe_canonical_id,
 )
 
@@ -171,6 +172,20 @@ def test_canonical_id_partial_defaults_keep_explicit_components() -> None:
     ]
 
 
+def test_canonical_id_defaults_empty_architecture_list() -> None:
+    from inference_optimizer.recipe_snapshot_constants import DEFAULT_ARCHITECTURES_SLUG
+
+    cid = recipe_canonical_id(
+        model="m",
+        hardware="h",
+        framework_name="sglang",
+        architectures=[],
+        framework_version="v",
+        precision="p",
+    )
+    assert cid.split(":")[5] == DEFAULT_ARCHITECTURES_SLUG
+
+
 # canonical_labels — 7-key dict mirroring the canonical_id
 def test_canonical_labels_keys_match_documented_constants() -> None:
     from inference_optimizer.recipe_snapshot_constants import (
@@ -305,3 +320,8 @@ def test_detect_framework_version_strips_dunder_version_whitespace(
     fake.__version__ = "  0.6.0\n"  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "vllm", fake)
     assert detect_framework_version("vllm") == "0.6.0"
+
+
+def test_format_recipe_path_preserves_raw_canonical_id() -> None:
+    cid = "inference:m:hw:framework:mt:arch:v:p"
+    assert format_recipe_path("/recipes/{canonical_id}/history", cid) == f"/recipes/{cid}/history"

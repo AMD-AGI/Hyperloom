@@ -54,6 +54,12 @@ def test_cid_to_path_components_rejects_legacy_4_segment_id() -> None:
         cid_to_path_components("inference:m:fw:hw")
 
 
+def test_cid_to_path_components_rejects_empty_id() -> None:
+    with pytest.raises(InvalidCanonicalIdError) as ei:
+        cid_to_path_components("")
+    assert "empty string" in ei.value.reason
+
+
 def test_cid_to_path_components_rejects_legacy_6_segment() -> None:
     """Legacy 5-tuple (6-segment) ids are no longer accepted."""
     with pytest.raises(InvalidCanonicalIdError):
@@ -79,6 +85,19 @@ def test_canonical_id_for_path_inverse_of_cid_decomposition(
     recipe_dir = tmp_path.joinpath(*parts)
     recipe_dir.mkdir(parents=True)
     assert canonical_id_for_path(root=tmp_path, recipe_dir=recipe_dir) == cid
+
+
+def test_canonical_id_for_path_rejects_path_outside_root(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside" / "recipe"
+    with pytest.raises(InvalidCanonicalIdError) as ei:
+        canonical_id_for_path(root=tmp_path, recipe_dir=outside)
+    assert "not under store root" in ei.value.reason
+
+
+def test_canonical_id_for_path_rejects_unexpected_depth(tmp_path: Path) -> None:
+    with pytest.raises(InvalidCanonicalIdError) as ei:
+        canonical_id_for_path(root=tmp_path, recipe_dir=tmp_path / "too" / "shallow")
+    assert "expected" in ei.value.reason
 
 
 # put_recipe — happy path + history archival
