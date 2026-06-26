@@ -8217,14 +8217,11 @@ class Coordinator:
     def _sequence_denial_for_action(
         self,
         action_name: str,
-        proposed_params: dict[str, Any] | None = None,
     ) -> PolicyDenied | None:
-        """Reject orchestration action/delegate attempts before baseline. Only invariant: nothing runs until baseline_tput > 0 (a data-dependency). proposed_params kept for signature compat.
+        """Reject orchestration action/delegate attempts before baseline. Only invariant: nothing runs until baseline_tput > 0 (a data-dependency).
 
         Args:
             action_name: The proposed/delegated action name.
-            proposed_params: Optional action params; kept for signature
-                compatibility and not currently inspected.
 
         Returns:
             A :class:`PolicyDenied` when the action must wait for baseline, else
