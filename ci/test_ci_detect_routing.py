@@ -25,8 +25,11 @@ if str(_CI_DIR) not in sys.path:
 from optimize_submit import (  # noqa: E402
     detect_concurrency,
     detect_framework,
+    detect_image,
     detect_tp,
 )
+
+_GEMMA4_VLLM_IMAGE = "harbor.core42.primus-safe.amd.com/sync/vllm-openai-rocm:gemma4"
 
 # Architectures added so detect_framework stops routing them to the old
 # vLLM image (transformers <5) that crashes them at baseline.
@@ -97,3 +100,31 @@ def test_detect_tp_mi300x_thresholds(params_b: float, expected_tp: int) -> None:
 )
 def test_detect_concurrency_is_fixed_64(tp: int, framework: str) -> None:
     assert detect_concurrency(tp, framework) == 64
+
+
+# ── detect_image: gemma-4 gets a dedicated vLLM image (vLLM path only) ───────
+
+
+@pytest.mark.parametrize(
+    "repo_id",
+    [
+        "google/gemma-4-26B-A4B-it",
+        "google-gemma-4-26B-A4B-it",   # slug form (org joined by '-')
+        "someorg/Gemma4-mini",          # 'gemma4' (no hyphen) also matches
+    ],
+)
+def test_gemma4_vllm_uses_dedicated_image(repo_id: str) -> None:
+    assert detect_image("vllm", repo_id) == _GEMMA4_VLLM_IMAGE
+
+
+def test_gemma4_sglang_unaffected() -> None:
+    # The gemma4 override is vLLM-only; the sglang path must NOT return it.
+    img = detect_image("sglang", "google/gemma-4-26B-A4B-it")
+    assert img != _GEMMA4_VLLM_IMAGE
+    assert "sglang" in img
+
+
+def test_non_gemma4_vllm_uses_default_image() -> None:
+    img = detect_image("vllm", "Qwen/Qwen3-32B")
+    assert img != _GEMMA4_VLLM_IMAGE
+    assert "vllm-openai-rocm" in img
