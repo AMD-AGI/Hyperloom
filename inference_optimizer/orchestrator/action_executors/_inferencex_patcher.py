@@ -65,10 +65,10 @@ def _discover_inferencex_roots(
 ) -> list[Path]:
     """Return every InferenceX checkout root Hyperloom should patch.
 
-    #210: Magpie loads its bundled ``$MAGPIE_DIR/InferenceX`` at runtime, not
+    #210: Magpie loads its bundled ``$MAGPIE_PATH/InferenceX`` at runtime, not
     ``$INFERENCEX_PATH``; patching only the latter leaves Magpie's actual copy
     unpatched. Patches ALL discovered roots (deduped by resolved path):
-    ``inferencex_path`` arg, ``$INFERENCEX_PATH``, ``$MAGPIE_DIR/InferenceX``.
+    ``inferencex_path`` arg, ``$INFERENCEX_PATH``, ``$MAGPIE_PATH/InferenceX``.
     Returns ``[]`` when none resolve (callers fail-soft).
 
     Args:
@@ -105,7 +105,7 @@ def _discover_inferencex_roots(
 
     _add(inferencex_path)
     _add(os.environ.get("INFERENCEX_PATH", "").strip() or None)
-    magpie_dir = (os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or "").strip()
+    magpie_dir = (os.environ.get("MAGPIE_PATH") or "").strip()
     if magpie_dir:
         _add(Path(magpie_dir) / "InferenceX")
     return roots
@@ -285,7 +285,7 @@ def ensure_benchmark_lib_patched(
         _LOCK_PATH,
         empty_msg=(
             "_inferencex_patcher: no InferenceX root discovered "
-            "(checked $INFERENCEX_PATH, $MAGPIE_DIR/InferenceX) or "
+            "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
             "benchmark_lib.sh missing — skipping patch (this is fine "
             "for tests and dry-runs without a real InferenceX tree)"
         ),
@@ -411,7 +411,7 @@ def ensure_benchmark_serving_patched(
         _BENCH_SERVING_LOCK_PATH,
         empty_msg=(
             "_inferencex_patcher: no InferenceX root discovered "
-            "(checked $INFERENCEX_PATH, $MAGPIE_DIR/InferenceX) or "
+            "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
             "benchmark_serving.py missing — skipping PROFILE_EXTRA_BODY "
             "patch (this is fine for tests and dry-runs without a real "
             "InferenceX tree)"

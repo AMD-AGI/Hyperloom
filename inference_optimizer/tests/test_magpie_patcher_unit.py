@@ -38,13 +38,13 @@ def _make_magpie(root: Path, *, benchmarker: str | None = _LEGACY_SRC, sglang: s
 
 # ---- path resolution ------------------------------------------------------
 def test_resolve_benchmarker_none(monkeypatch):
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     assert mp._resolve_benchmarker_path(None) is None
 
 
 def test_resolve_benchmarker_env(monkeypatch, tmp_path):
     _make_magpie(tmp_path)
-    monkeypatch.setenv("MAGPIE_DIR", str(tmp_path))
+    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path))
     p = mp._resolve_benchmarker_path(None)
     assert p is not None and p.name == "benchmarker.py"
 
@@ -57,13 +57,13 @@ def test_resolve_benchmarker_missing_file(tmp_path):
 def test_resolve_sglang(monkeypatch, tmp_path):
     _make_magpie(tmp_path)
     assert mp._resolve_sglang_mi300x_script_path(tmp_path) is not None
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     assert mp._resolve_sglang_mi300x_script_path(None) is None
 
 
 def test_resolve_sglang_env(monkeypatch, tmp_path):
     _make_magpie(tmp_path)
-    monkeypatch.setenv("MAGPIE_DIR", str(tmp_path))
+    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path))
     assert mp._resolve_sglang_mi300x_script_path(None) is not None
 
 
@@ -252,7 +252,7 @@ def test_status_properties():
 
 # ---- top-level orchestration ----------------------------------------------
 def test_patch_status_missing(monkeypatch):
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     s = mp.magpie_scripts_patch_status(None)
     assert s.atomic_ok is False
     assert s.atomic_reason == mp._ATOMIC_REASON_MISSING
