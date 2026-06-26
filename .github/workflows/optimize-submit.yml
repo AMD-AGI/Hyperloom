@@ -34,23 +34,11 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Rolling downloads>100 pool: 240 models every 6 hours, firing at UTC
-  # 00:07 / 06:07 / 12:07 / 18:07 (Beijing 08:07 / 14:07 / 20:07 / 02:07).
-  # Minute is :07 (not :00) on purpose — GitHub delays cron heavily at the top
-  # of the hour when many repos fire at once; an off-peak minute reduces the lag.
-  # Each fire submits the NEXT sequential 240-model slice of the rotate pool,
-  # now hosted off-repo at
-  # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate.json
-  # (a date-less symlink that always points at the latest filtered pool;
-  # ordered not-run first; the 449 >12B multimodal models are front-loaded),
-  # stepping batch 0,1,2,... and wrapping at the pool end. Both
-  # exclude_leaderboard is OFF on schedule so the whole pool keeps cycling
-  # (re-running finished models too). exclude_active is ON to skip models
-  # already queued/running in other SaFE Optimize Submit runs.
-  # The tail batch is short (not head-wrapped) so consecutive fires never
-  # double-submit the head models. Manual workflow_dispatch is unaffected.
-  schedule:
-    - cron: '7 0,6,12,18 * * *'
+  # No schedule of its own: this is the shared EXECUTION ENGINE. The per-pool
+  # scheduler shells (optimize-sub100-part1 / -part2 / -part3) own the cron
+  # schedules and trigger this workflow via the GitHub API with their pool file,
+  # batch slice, batch_size (= max_parallel) and max_hours. Manual runs go
+  # straight through workflow_dispatch.
   workflow_dispatch:
     # ⚠️ HARD LIMIT: GitHub allows at most 25 top-level `inputs` for a
     # workflow_dispatch event (raised from 10 on 2025-12-04). Exceeding it makes

@@ -1,33 +1,32 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-name: SaFE Optimize Tiny (count-filler)
+name: optimize-sub100-part3
 
-# Scheduled/manual entrypoint for the count-filler pool, hosted off-repo at
-#   $WEKAFS_CHENYI_DIR/ci-candidates/sub100_lt12b_pulse_notrun.json
-#   (a date-less symlink that always points at the latest filtered pool)
-#   = HF text-generation models with <12B params AND <100 downloads that pulse
-#     has NOT run yet. The goal is breadth -- sweep the long tail.
+# Scheduled/manual entrypoint for the sub100 part3 pool, hosted off-repo at
+#   $WEKAFS_CHENYI_DIR/ci-candidates/hf_sub100_part3_20260626.json
 #
-# It intentionally delegates to `SaFE Optimize Submit` so submission, waiting,
-# artifact collection, summary rendering, webhook, and perf publishing stay
-# byte-for-byte on the same path as the regular SaFE submit workflow. It runs
-# INDEPENDENTLY of the large-B production cron (optimize-submit.yml's own
-# schedule, which sweeps the gt100 rotate pool twice a day).
+# It delegates to `SaFE Optimize Submit` (optimize-submit.yml) so submission,
+# waiting, artifact collection, summary rendering, webhook, and perf publishing
+# stay byte-for-byte on the regular SaFE submit path.
 #
-# Cadence: 240 models per batch, 6h optimizer budget each, 4 runs/day (every
-# 6h), all submitted to the sandbox workspace.
+# Sizing: part1/part2/part3 were carved so the three sub100 sweeps finish at
+# about the same wall-clock time. A full sweep takes pool_size / batch_size
+# batches: part1=1608/240, part2=1608/240, part3=671/100 -> all ~6.7 batches.
+# A batch always runs fully in parallel, so BATCH_SIZE doubles as max_parallel.
+#
+# Cadence: four times a day (every 6h, UTC) at 05:07/11:07/17:07/23:07 UTC
+# (Beijing 13:07 / 19:07 / 01:07 / 07:07). The sibling pools fire on different
+# hours (part1 01/07/13/19 UTC, part2 03/09/15/21 UTC) so no two start in the
+# same hour. Minute :07 (not :00) dodges GitHub's congested top-of-hour queue.
+# INVARIANT: the cron PERIOD must equal MAX_HOURS (6h); changing one without the
+# other makes the rotation double-submit (cron faster) or skip batches (slower).
 #
 # The candidates JSON lives on /wekafs (RO-mounted on the hyperloom runners)
 # instead of the git repo, so the large pool never bloats git history.
 
 on:
-  # Four times a day (every 6 hours, UTC) at 01:07/07:07/13:07/19:07 UTC
-  # (Beijing 09:07 / 15:07 / 21:07 / 03:07). optimize-submit fires 1h earlier
-  # (Beijing 08/14/20/02) and optimize-gte100 1h later (Beijing 10/22), so no
-  # two start in the same hour. Minute :07 (not :00) dodges GitHub's congested
-  # top-of-hour scheduling queue.
   schedule:
-    - cron: '7 1,7,13,19 * * *'
+    - cron: '7 5,11,17,23 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
@@ -45,31 +44,32 @@ permissions:
   actions: write
 
 concurrency:
-  group: optimize-tiny-dispatch
+  group: optimize-part3-dispatch
   cancel-in-progress: false
 
 jobs:
   dispatch-submit:
-    name: Dispatch 240-model count-filler submit
+    name: Dispatch sub100 part3 submit
     runs-on: hyperloom-mh826
     timeout-minutes: 10
     env:
       # Off-repo pool on /wekafs (the /wekafs root lives in the WEKAFS_CHENYI_DIR
       # secret; generate_hf_matrix reads the absolute path as-is, and the
       # hyperloom runners RO-mount /wekafs).
-      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/hf_sub100_part2_20260626.json', secrets.WEKAFS_CHENYI_DIR) }}
-      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/hf_sub100_part2_20260626.json', secrets.WEKAFS_CHENYI_DIR) }}
-      BATCH_SIZE: '240'
+      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/hf_sub100_part3_20260626.json', secrets.WEKAFS_CHENYI_DIR) }}
+      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/hf_sub100_part3_20260626.json', secrets.WEKAFS_CHENYI_DIR) }}
+      # One batch = 100 models, all run concurrently. BATCH_SIZE doubles as the
+      # max_parallel (a batch always runs fully in parallel).
+      BATCH_SIZE: '100'
       # Rotation step (hours). MUST equal the cron PERIOD (this cron fires every
-      # 6h: 1/7/13/19 UTC), same invariant as optimize-submit/gte100. Also the
-      # per-task optimizer budget forwarded below.
+      # 6h: 5/11/17/23 UTC), same invariant as the other pools. Also the per-task
+      # optimizer budget forwarded below.
       MAX_HOURS: '6'
-      # Count-filler runs go to the hyperloom workspace only.
       SUBMIT_WORKSPACES: 'core42-hyperloom'
     steps:
       - uses: actions/checkout@v7
 
-      - name: Resolve count-filler batch
+      - name: Resolve part3 batch
         id: batch
         env:
           INPUT_BATCH_INDEX: ${{ github.event.inputs.batch_index }}
@@ -80,18 +80,18 @@ jobs:
             echo "::error::candidates pool not found: ${CANDIDATES_PATH}"
             exit 1
           fi
-          # Same max_hours-paced rotation as optimize-submit/gte100 (ci/batch_rotate.py,
-          # unit-tested): one batch advances per MAX_HOURS of wall-clock time since the
-          # anchor, auto-rotating on schedule and honoring an explicit batch_index on
-          # manual dispatch. ANCHOR 2026-06-26 13:00Z restarts THIS pool's sweep at
-          # batch 0 on the next fire (13:07Z), independent of gte100's shared anchor.
+          # Same max_hours-paced rotation as the sibling pools (ci/batch_rotate.py,
+          # unit-tested): one batch advances per MAX_HOURS of wall-clock time since
+          # the anchor, auto-rotating on schedule and honoring an explicit
+          # batch_index on manual dispatch. ANCHOR 2026-06-26 23:00Z aligns batch 0
+          # with the next fire (23:07Z), independent of the other pools' anchors.
           n=$(python3 -c "import json,os;print(len(json.load(open(os.environ['CANDIDATES_PATH'])).get('candidates') or []))")
           out=$(python3 ci/batch_rotate.py \
             --count "${n}" \
             --batch-size "${BATCH_SIZE}" \
             --batch-index "${INPUT_BATCH_INDEX:-}" \
             --max-hours "${MAX_HOURS}" \
-            --anchor "2026-06-26T13:00:00+00:00" \
+            --anchor "2026-06-26T23:00:00+00:00" \
             --event "${EVENT}")
           bi=$(echo "$out" | cut -f1); pool=$(echo "$out" | cut -f2)
           batches=$(echo "$out" | cut -f3); start=$(echo "$out" | cut -f4); end=$(echo "$out" | cut -f5)
@@ -101,7 +101,7 @@ jobs:
             echo "batches=${batches}"
             echo "slice=${start}:${end}"
           } >> "$GITHUB_OUTPUT"
-          echo "### tiny pool: ${pool} models; batch ${bi}/${batches}; slice ${start}:${end}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### part3 pool: ${pool} models; batch ${bi}/${batches}; slice ${start}:${end}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Dispatch SaFE Optimize Submit
         run: |
@@ -111,8 +111,8 @@ jobs:
           batch_index="${{ steps.batch.outputs.batch_index }}"
 
           echo "Dispatching optimize-submit.yml on ref=${ref}"
-          echo "Count-filler pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
-          echo "Batch size: ${BATCH_SIZE}; max_parallel=240; submit_workspaces=${SUBMIT_WORKSPACES}"
+          echo "part3 pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
+          echo "Batch size: ${BATCH_SIZE}; max_parallel=${BATCH_SIZE}; submit_workspaces=${SUBMIT_WORKSPACES}"
 
           payload=$(python3 - <<'PY'
           import json
@@ -127,11 +127,12 @@ jobs:
                   "batch_size": os.environ["BATCH_SIZE"],
                   "exclude_leaderboard": "false",
                   "exclude_active_workflows": "true",
-                  "max_parallel": "240",
+                  # A batch always runs fully in parallel, so max_parallel == batch_size.
+                  "max_parallel": os.environ["BATCH_SIZE"],
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
                   # task wait + job timeout are derived from max_hours in
                   # optimize-submit's prepare job (max_hours+30m / +60m).
-                  "max_hours": "6",
+                  "max_hours": os.environ["MAX_HOURS"],
                   "all_artifacts": "true",
                   "dry_run": os.environ.get("DRY_RUN") or "false",
               },
