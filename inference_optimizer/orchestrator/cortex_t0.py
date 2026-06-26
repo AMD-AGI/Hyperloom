@@ -488,7 +488,7 @@ def run_t0_anchor(
     # Backfill operator-tracing metadata; T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
     _extra: Mapping[str, Any] = extra_attrs if isinstance(extra_attrs, Mapping) else {}
     _model_class = str(_extra.get("model_class") or "").strip()
-    _framework = str(_extra.get("framework") or "").strip()
+    _framework = str(_extra.get("framework_name") or "").strip()
     _precision = str(getattr(shared_state, "precision", "") or "").strip()
     fp: Mapping[str, Any] = stack_fingerprint if isinstance(stack_fingerprint, Mapping) else {}
     # framework_version: SharedState > stack_fingerprint > importlib auto-detect.
@@ -558,7 +558,7 @@ def run_t0_anchor(
     cid = recipe_canonical_id(
         model=workload,
         hardware=hw,
-        framework=_framework or "",
+        framework_name=_framework or "",
         framework_version=_fw_version or "",
         precision=_precision or "",
         model_type=_model_type_val,
@@ -627,7 +627,7 @@ def run_t0_anchor(
             canonical_id=cid,
             model=workload,
             hardware=hw,
-            framework=_framework or "",
+            framework_name=_framework or "",
             framework_version=_fw_version or "",
             precision=_precision or "",
             best_config=dict(live.get("best_config") or {}),

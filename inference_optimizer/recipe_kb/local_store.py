@@ -19,7 +19,7 @@ Layout (one directory per identity dimension; cid → 5-level path):
 ::
 
     <root>/
-      <model>/<hardware>/<framework>/<framework_version>/<precision>/
+      <model>/<hardware>/<framework_name>/<framework_version>/<precision>/
         recipe.json              # current live row
         history/
           v1.json
@@ -495,7 +495,7 @@ class LocalRecipeStore:
         # ``model`` / ``hardware`` as top-level fields).
         model: str = "",
         hardware: str = "",
-        framework: str = "",
+        framework_name: str = "",
         framework_version: str = "",
         precision: str = "",
         # Arbor-aligned payload. Each list entry can be either an
@@ -550,7 +550,7 @@ class LocalRecipeStore:
             model (str): Model identity slot, stamped top-level for
                 arbor-compat.
             hardware (str): Hardware identity slot.
-            framework (str): Framework identity slot.
+            framework_name (str): Framework identity slot.
             framework_version (str): Framework version identity slot.
             precision (str): Precision identity slot.
             best_config (dict[str, str] | None): Best-known config
@@ -627,7 +627,7 @@ class LocalRecipeStore:
                 "updated_at": now,
                 "model": model,
                 "hardware": hardware,
-                "framework": framework,
+                "framework_name": framework_name,
                 "framework_version": framework_version,
                 "precision": precision,
                 "best_config": dict(best_config or {}),
@@ -1143,7 +1143,7 @@ def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> boo
 
     Recognised label keys map to top-level fields:
 
-    * ``model`` / ``hardware`` / ``framework`` /
+    * ``model`` / ``hardware`` / ``framework_name`` /
       ``framework_version`` / ``precision`` / ``model_type`` /
       ``architectures`` → the 7-tuple identity slots.
 

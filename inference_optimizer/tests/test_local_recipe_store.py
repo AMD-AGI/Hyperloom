@@ -29,14 +29,14 @@ def _cid(
     *,
     model: str = "deepseek-r1",
     hardware: str = "mi300x",
-    framework: str = "sglang",
+    framework_name: str = "sglang",
     framework_version: str = "0.4.5",
     precision: str = "fp8",
 ) -> str:
     return recipe_canonical_id(
         model=model,
         hardware=hardware,
-        framework=framework,
+        framework_name=framework_name,
         framework_version=framework_version,
         precision=precision,
     )
@@ -91,7 +91,7 @@ def test_put_recipe_first_call_creates_live_at_version_1(
         canonical_id=cid,
         model="deepseek-r1",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         best_config={"tp": "8"},
@@ -282,21 +282,21 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
     cid_a = recipe_canonical_id(
         model="m-a",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
     cid_b = recipe_canonical_id(
         model="m-b",
         hardware="mi300x",
-        framework="vllm",
+        framework_name="vllm",
         framework_version="0.6.0",
         precision="bf16",
     )
     cid_c = recipe_canonical_id(
         model="m-c",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.0",
         precision="fp8",
     )
@@ -306,7 +306,7 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
         canonical_id=cid_a,
         model="m-a",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         best_throughput=10000.0,
@@ -317,7 +317,7 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
         canonical_id=cid_b,
         model="m-b",
         hardware="mi300x",
-        framework="vllm",
+        framework_name="vllm",
         framework_version="0.6.0",
         precision="bf16",
         best_throughput=25000.0,
@@ -328,7 +328,7 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
         canonical_id=cid_c,
         model="m-c",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.0",
         precision="fp8",
         best_throughput=5000.0,

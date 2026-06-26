@@ -46,9 +46,9 @@ def _client(pages: dict[str, dict[str, Any]]) -> GbrainRemoteRecipeClient:
 
 
 def _recipe_page(
-    model: str, hw: str, framework: str = "sglang", precision: str = "", args: str = "", gain: float = 0.0
+    model: str, hw: str, framework_name: str = "sglang", precision: str = "", args: str = "", gain: float = 0.0
 ) -> dict[str, Any]:
-    attrs: dict[str, Any] = {"model": model, "hardware": hw, "framework": framework}
+    attrs: dict[str, Any] = {"model": model, "hardware": hw, "framework_name": framework_name}
     if precision:
         attrs["precision"] = precision
     if args:
@@ -128,7 +128,7 @@ def _hw(row: dict[str, Any]) -> str:
 
 
 def _fw(row: dict[str, Any]) -> str:
-    return str((row.get("labels") or {}).get("framework") or "")
+    return str((row.get("labels") or {}).get("framework_name") or "")
 
 
 def _model(row: dict[str, Any]) -> str:
@@ -150,8 +150,8 @@ def test_search_filters_by_label_match() -> None:
     # model + hardware → exactly one
     rows = c.search(label_match={"model": "Qwen3-32B", "hardware": "mi300x"})
     assert len(rows) == 1 and _fw(rows[0]) == "sglang"
-    # framework filter
-    rows = c.search(label_match={"framework": "vllm"})
+    # framework_name filter
+    rows = c.search(label_match={"framework_name": "vllm"})
     assert len(rows) == 1 and _model(rows[0]) == "llama-3-70b"
 
 
@@ -167,7 +167,7 @@ def test_search_reuses_scan_cache() -> None:
     first_call_count = len(c._mcp.calls)  # type: ignore[union-attr]
     assert any(tool == "list_pages" for tool, _ in c._mcp.calls)  # type: ignore[union-attr]
 
-    assert len(c.search(label_match={"framework": "vllm"})) == 1
+    assert len(c.search(label_match={"framework_name": "vllm"})) == 1
     # Second search should reuse the process-local scan cache; no extra MCP
     # calls are needed.
     assert len(c._mcp.calls) == first_call_count  # type: ignore[union-attr]

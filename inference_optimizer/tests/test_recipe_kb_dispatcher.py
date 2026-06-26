@@ -36,7 +36,7 @@ def _cid(model: str = "m") -> str:
     return recipe_canonical_id(
         model=model,
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
@@ -160,7 +160,7 @@ def test_v2_framework_version_label_is_read(kb: RecipeKB) -> None:
         "labels": {
             "model": "remote-model",
             "hardware": "mi300x",
-            "framework": "sglang",
+            "framework_name": "sglang",
             "framework_version": "0.4.5",
             "precision": "fp8",
         },
@@ -186,7 +186,7 @@ def test_v2_legacy_version_label_is_not_read(kb: RecipeKB) -> None:
         "labels": {
             "model": "remote-model",
             "hardware": "mi300x",
-            "framework": "sglang",
+            "framework_name": "sglang",
             "version": "0.4.5",
             "precision": "fp8",
         },
@@ -271,7 +271,7 @@ def test_get_recipe_remote_sends_5tuple_label_match(kb: RecipeKB) -> None:
     assert set(label_match) == {
         "model",
         "hardware",
-        "framework",
+        "framework_name",
         "framework_version",
         "precision",
         "model_type",

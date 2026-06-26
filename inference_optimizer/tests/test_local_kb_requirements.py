@@ -56,7 +56,7 @@ def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
     cid = recipe_canonical_id(
         model="DeepSeek-R1",
         hardware="MI300X",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
@@ -108,7 +108,7 @@ def test_item3_no_central_url_reads_and_writes_go_local(
     cid = recipe_canonical_id(
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
@@ -116,7 +116,7 @@ def test_item3_no_central_url_reads_and_writes_go_local(
         canonical_id=cid,
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         best_throughput=12345.0,
@@ -145,7 +145,7 @@ def test_item4_central_kb_reads_central_writes_local(
     cid = recipe_canonical_id(
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
@@ -169,7 +169,7 @@ def test_item4_central_kb_reads_central_writes_local(
             canonical_id=cid,
             model="m",
             hardware="mi300x",
-            framework="sglang",
+            framework_name="sglang",
             framework_version="0.4.5",
             precision="fp8",
             best_throughput=11111.0,
@@ -202,7 +202,7 @@ def test_item5_unreachable_central_falls_back_to_local(
     cid = recipe_canonical_id(
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
@@ -212,7 +212,7 @@ def test_item5_unreachable_central_falls_back_to_local(
         canonical_id=cid,
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         best_throughput=22222.0,
@@ -228,7 +228,7 @@ def test_item5_unreachable_central_falls_back_to_local(
             canonical_id=cid,
             model="m",
             hardware="mi300x",
-            framework="sglang",
+            framework_name="sglang",
             framework_version="0.4.5",
             precision="fp8",
             best_throughput=33333.0,
@@ -246,14 +246,14 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
     cid_v1 = recipe_canonical_id(
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
     cid_v2 = recipe_canonical_id(
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.0",
         precision="fp8",
     )
@@ -261,7 +261,7 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
         canonical_id=cid_v1,
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         best_throughput=1.0,
@@ -270,7 +270,7 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
         canonical_id=cid_v2,
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.0",
         precision="fp8",
         best_throughput=2.0,
@@ -294,7 +294,7 @@ def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="ver",
         precision="prec",
     )
@@ -302,7 +302,7 @@ def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="ver",
         precision="prec",
     )
@@ -317,7 +317,7 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="/hyperloom/models/Qwen-Qwen3-30B-A3B-Base",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="bf16",
     )
@@ -327,7 +327,7 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
         canonical_id=cid,
         model="/hyperloom/models/Qwen-Qwen3-30B-A3B-Base",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="bf16",
         best_throughput=42.0,
@@ -353,7 +353,7 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="/some/path/MyModel/",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
     )
@@ -362,7 +362,7 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
         canonical_id=cid,
         model="/some/path/MyModel/",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
     )
@@ -379,7 +379,7 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
     cid = recipe_canonical_id(
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
     )
@@ -387,7 +387,7 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
         what_worked=[
@@ -409,7 +409,7 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
         what_worked=list(live.get("what_worked") or []),
@@ -439,7 +439,7 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
     )
@@ -447,7 +447,7 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
         best_throughput=1.0,
@@ -456,7 +456,7 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
         best_throughput=2.0,
@@ -474,7 +474,7 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
     )
@@ -482,7 +482,7 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
         best_config={"tp": "8"},

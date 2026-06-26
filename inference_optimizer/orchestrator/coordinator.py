@@ -2115,7 +2115,7 @@ class Coordinator:
         # marathon_dispatch_id mirrors the cli path: the hyperloom-internal manifest session id.
         extra_attrs = {
             "marathon_dispatch_id": getattr(state, "session_id", "") or "",
-            "framework": getattr(state, "framework", "") or "",
+            "framework_name": getattr(state, "framework", "") or "",
             "model_class": getattr(state, "model_class", "") or "",
             "claw_session_id": getattr(state, "claw_session_id", "") or "",
             "sandbox_user_id": getattr(state, "sandbox_user_id", "") or "",
@@ -8177,7 +8177,7 @@ class Coordinator:
         return recipe_canonical_id(
             model=workload,
             hardware=hw,
-            framework=framework,
+            framework_name=framework,
             framework_version=framework_version,
             precision=precision,
             model_type=model_type,
@@ -8342,7 +8342,7 @@ class Coordinator:
             "updated_at",
             "model",
             "hardware",
-            "framework",
+            "framework_name",
             "framework_version",
             "precision",
             "best_config",
@@ -8376,7 +8376,7 @@ class Coordinator:
             "canonical_id": cid,
             "model": ss.model_name or "unknown_model",
             "hardware": ss.gpu_type or "unknown_gpu",
-            "framework": framework,
+            "framework_name": framework,
             "framework_version": framework_version,
             "precision": precision,
             "best_config": overrides.get("best_config")

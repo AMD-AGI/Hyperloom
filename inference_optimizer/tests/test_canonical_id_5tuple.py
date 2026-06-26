@@ -16,7 +16,7 @@ from inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_HARDWARE_SLUG,
     DEFAULT_MODEL_SLUG,
     DEFAULT_PRECISION_SLUG,
-    F_LABEL_FRAMEWORK,
+    F_LABEL_FRAMEWORK_NAME,
     F_LABEL_FRAMEWORK_VERSION,
     F_LABEL_HARDWARE,
     F_LABEL_MODEL,
@@ -33,7 +33,7 @@ def test_canonical_id_shape_is_mhfvp_with_inference_prefix() -> None:
     cid = recipe_canonical_id(
         model="Qwen3-30B-A3B",
         hardware="MI355X",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
@@ -54,7 +54,7 @@ def test_canonical_id_lowercases_every_component() -> None:
     cid = recipe_canonical_id(
         model="DEEPSEEK-R1",
         hardware="MI300X",
-        framework="VLLM",
+        framework_name="VLLM",
         framework_version="0.6.0+ROCM",
         precision="BF16",
     )
@@ -69,14 +69,14 @@ def test_canonical_id_basenames_path_style_model() -> None:
     cid_path = recipe_canonical_id(
         model="/wekafs/models/Qwen3-30B-A3B",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
     cid_bare = recipe_canonical_id(
         model="Qwen3-30B-A3B",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
@@ -97,7 +97,7 @@ def test_canonical_id_normalises_whitespace_and_slashes() -> None:
     cid = recipe_canonical_id(
         model="A B",
         hardware="mi 355x",
-        framework="sg lang",
+        framework_name="sg lang",
         framework_version="0.4 5",
         precision="fp 8",
     )
@@ -114,7 +114,7 @@ def test_canonical_id_substitutes_defaults_for_each_empty_component() -> None:
     cid = recipe_canonical_id(
         model="",
         hardware="",
-        framework="",
+        framework_name="",
         framework_version="",
         precision="",
     )
@@ -135,7 +135,7 @@ def test_canonical_id_treats_whitespace_only_as_empty() -> None:
     cid = recipe_canonical_id(
         model="   ",
         hardware="\t",
-        framework="",
+        framework_name="",
         framework_version="\n",
         precision="",
     )
@@ -154,7 +154,7 @@ def test_canonical_id_partial_defaults_keep_explicit_components() -> None:
     cid = recipe_canonical_id(
         model="m",
         hardware="",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="",
         precision="fp8",
     )
@@ -181,14 +181,14 @@ def test_canonical_labels_keys_match_documented_constants() -> None:
     labels = canonical_labels(
         model="m",
         hardware="h",
-        framework="f",
+        framework_name="f",
         framework_version="v",
         precision="p",
     )
     assert set(labels.keys()) == {
         F_LABEL_MODEL,
         F_LABEL_HARDWARE,
-        F_LABEL_FRAMEWORK,
+        F_LABEL_FRAMEWORK_NAME,
         F_LABEL_FRAMEWORK_VERSION,
         F_LABEL_PRECISION,
         F_LABEL_MODEL_TYPE,
@@ -201,21 +201,21 @@ def test_canonical_labels_values_match_canonical_id_components() -> None:
     cid = recipe_canonical_id(
         model="DeepSeek-R1",
         hardware="MI300X",
-        framework="vLLM",
+        framework_name="vLLM",
         framework_version="0.6.0",
         precision="bf16",
     )
     labels = canonical_labels(
         model="DeepSeek-R1",
         hardware="MI300X",
-        framework="vLLM",
+        framework_name="vLLM",
         framework_version="0.6.0",
         precision="bf16",
     )
     parts = cid.split(":")[1:]  # drop ``inference``
     assert labels[F_LABEL_MODEL] == parts[0]
     assert labels[F_LABEL_HARDWARE] == parts[1]
-    assert labels[F_LABEL_FRAMEWORK] == parts[2]
+    assert labels[F_LABEL_FRAMEWORK_NAME] == parts[2]
     assert labels[F_LABEL_FRAMEWORK_VERSION] == parts[5]
     assert labels[F_LABEL_PRECISION] == parts[6]
 
@@ -231,14 +231,14 @@ def test_canonical_labels_substitutes_defaults_for_empty() -> None:
     labels = canonical_labels(
         model="",
         hardware="",
-        framework="",
+        framework_name="",
         framework_version="",
         precision="",
     )
     assert labels == {
         F_LABEL_MODEL: DEFAULT_MODEL_SLUG,
         F_LABEL_HARDWARE: DEFAULT_HARDWARE_SLUG,
-        F_LABEL_FRAMEWORK: DEFAULT_FRAMEWORK_SLUG,
+        F_LABEL_FRAMEWORK_NAME: DEFAULT_FRAMEWORK_SLUG,
         F_LABEL_FRAMEWORK_VERSION: DEFAULT_FRAMEWORK_VERSION_SLUG,
         F_LABEL_PRECISION: DEFAULT_PRECISION_SLUG,
         F_LABEL_MODEL_TYPE: DEFAULT_MODEL_TYPE_SLUG,
@@ -247,14 +247,14 @@ def test_canonical_labels_substitutes_defaults_for_empty() -> None:
 
 
 # detect_framework_version — auto-detect via importing __version__
-def test_detect_framework_version_returns_default_for_blank_framework() -> None:
+def test_detect_framework_version_returns_default_for_blank_framework_name() -> None:
     assert detect_framework_version("") == DEFAULT_FRAMEWORK_VERSION_SLUG
     assert detect_framework_version("   ") == DEFAULT_FRAMEWORK_VERSION_SLUG
 
 
-def test_detect_framework_version_returns_default_for_unknown_framework() -> None:
+def test_detect_framework_version_returns_default_for_unknown_framework_name() -> None:
     """Frameworks not in the allow-list never trigger an import."""
-    assert detect_framework_version("not-a-real-framework") == (DEFAULT_FRAMEWORK_VERSION_SLUG)
+    assert detect_framework_version("not-a-real-framework_name") == (DEFAULT_FRAMEWORK_VERSION_SLUG)
 
 
 def test_detect_framework_version_reads_dunder_version(

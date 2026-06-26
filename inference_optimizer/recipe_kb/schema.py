@@ -23,7 +23,7 @@ We keep a small superset of arbor fields:
   ``updated_at`` — store-managed metadata for the atomic-archive
   contract (arbor has no version concept; we need it for
   ``history/v{N}.json`` rollbacks).
-* ``framework`` / ``framework_version`` / ``precision`` — the
+* ``framework_name`` / ``framework_version`` / ``precision`` — the
   three identity dimensions arbor doesn't have (it's a 2-tuple
   ``model``+``hardware`` while we're a 5-tuple).
 * ``lessons`` / ``authority`` / ``confidence`` / ``evidence_refs`` /
@@ -292,7 +292,7 @@ class Recipe:
     # ----- 5-tuple identity (arbor 2-tuple is model + hardware) -----
     model: str = ""
     hardware: str = ""
-    framework: str = ""
+    framework_name: str = ""
     framework_version: str = ""
     precision: str = ""
 
@@ -346,7 +346,7 @@ class Recipe:
             "updated_at": str(self.updated_at),
             "model": str(self.model),
             "hardware": str(self.hardware),
-            "framework": str(self.framework),
+            "framework_name": str(self.framework_name),
             "framework_version": str(self.framework_version),
             "precision": str(self.precision),
             "best_config": dict(self.best_config),
@@ -416,7 +416,7 @@ class Recipe:
             "updated_at",
             "model",
             "hardware",
-            "framework",
+            "framework_name",
             "framework_version",
             "precision",
             "best_config",
@@ -444,7 +444,7 @@ class Recipe:
             updated_at=str(d.get("updated_at") or ""),
             model=str(d.get("model") or ""),
             hardware=str(d.get("hardware") or ""),
-            framework=str(d.get("framework") or ""),
+            framework_name=str(d.get("framework_name") or ""),
             framework_version=str(d.get("framework_version") or ""),
             precision=str(d.get("precision") or ""),
             best_config=dict(d.get("best_config") or {}),

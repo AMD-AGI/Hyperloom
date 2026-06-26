@@ -16,9 +16,9 @@ writes still go local-only through the dispatcher; gbrain is consulted
 for READS only.
 
 Schema adaptation (read-time): gbrain stores recipes as better-landing
-pages (``type: recipe`` + ``tags: model:/gpu:/framework:`` + flat
+pages (``type: recipe`` + ``tags: model:/gpu:/framework_name:`` + flat
 ``attrs``). On read we re-derive the 5-tuple identity
-(``inference:model:hardware:framework:framework_version:precision``)
+(``inference:model:hardware:framework_name:framework_version:precision``)
 from the page attrs, fall back to the ``unknown_*`` default slugs for
 dimensions gbrain never recorded, and project the page into the unified
 nested KB-interface envelope. The recipe corpus is small
@@ -267,7 +267,7 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
     hardware = str(attrs.get("hardware") or "").strip()
     if not model or not hardware:
         return None
-    framework = str(attrs.get("framework") or "").strip()
+    framework_name = str(attrs.get("framework_name") or "").strip()
     framework_version = str(attrs.get("framework_version") or "").strip()
     precision = str(attrs.get("precision") or "").strip()
     model_type = str(attrs.get("model_type") or "").strip()
@@ -275,7 +275,7 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
     canonical = recipe_canonical_id(
         model=model,
         hardware=hardware,
-        framework=framework,
+        framework_name=framework_name,
         model_type=model_type,
         architectures=architectures,
         framework_version=framework_version,
@@ -295,7 +295,7 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
         "labels": C.canonical_labels(
             model=model,
             hardware=hardware,
-            framework=framework,
+            framework_name=framework_name,
             model_type=model_type,
             architectures=architectures,
             framework_version=framework_version,
@@ -329,7 +329,7 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
 def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> bool:
     """True when every provided label matches the recipe's value.
 
-    For scalar labels (model, hardware, framework, framework_version,
+    For scalar labels (model, hardware, framework_name, framework_version,
     precision, model_type) equality is required. For ``architectures``
     the semantics are *contains*: the recipe's architectures list must
     include all queried architecture(s).
@@ -356,7 +356,7 @@ def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> 
     want = C.canonical_labels(
         model=str(label_match.get(C.F_LABEL_MODEL, "") or recipe_labels.get(C.F_LABEL_MODEL, "")),
         hardware=str(label_match.get(C.F_LABEL_HARDWARE, "") or recipe_labels.get(C.F_LABEL_HARDWARE, "")),
-        framework=str(label_match.get(C.F_LABEL_FRAMEWORK, "") or recipe_labels.get(C.F_LABEL_FRAMEWORK, "")),
+        framework_name=str(label_match.get(C.F_LABEL_FRAMEWORK_NAME, "") or recipe_labels.get(C.F_LABEL_FRAMEWORK_NAME, "")),
         framework_version=str(
             label_match.get(C.F_LABEL_FRAMEWORK_VERSION, "") or recipe_labels.get(C.F_LABEL_FRAMEWORK_VERSION, "")
         ),
@@ -572,7 +572,7 @@ class GbrainRemoteRecipeClient:
         try:
             from .canonical_id import cid_to_path_components
 
-            model, hardware, framework, model_type, architectures, framework_version, precision = (
+            model, hardware, framework_name, model_type, architectures, framework_version, precision = (
                 cid_to_path_components(canonical_id)
             )
         except Exception:  # noqa: BLE001 - malformed id -> remote miss
@@ -580,7 +580,7 @@ class GbrainRemoteRecipeClient:
         label_match = {
             C.F_LABEL_MODEL: model,
             C.F_LABEL_HARDWARE: hardware,
-            C.F_LABEL_FRAMEWORK: framework,
+            C.F_LABEL_FRAMEWORK_NAME: framework_name,
             C.F_LABEL_FRAMEWORK_VERSION: framework_version,
             C.F_LABEL_PRECISION: precision,
             C.F_LABEL_MODEL_TYPE: model_type,
