@@ -1399,7 +1399,17 @@ class IntegratePatchExecutor:
                 specialist_task_id=specialist_task_id,
                 base_tput=base_tput,
             )
-            if not confirm["stable"] or confirm["accuracy_pass"] is False:
+            # Re-apply the SAME accuracy gate to the authoritative rebench (its
+            # tput becomes the headline below): the confirmation run must clear
+            # stability AND accuracy. A missing verdict blocks when accuracy is
+            # required and a baseline exists (mirrors the first-bench gate), so a
+            # silently eval-less rebench can't KEEP on a stale first-bench pass.
+            rb_acc_block, rb_acc_reason, _rb_degraded = accuracy_keep_block(
+                confirm["accuracy_pass"],
+                required=acc_required,
+                baseline_accuracy=acc_baseline,
+            )
+            if not confirm["stable"] or rb_acc_block:
                 artifacts_reverted = self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
                 reasons = []
@@ -1409,6 +1419,15 @@ class IntegratePatchExecutor:
                     )
                 if confirm["accuracy_pass"] is False:
                     reasons.append("accuracy regression on rebench")
+                elif rb_acc_block and rb_acc_reason:
+                    reasons.append(rb_acc_reason)
+                # G8 parity: distinguish "accuracy required but unevaluated on the
+                # stable rebench" from a measured regression / stability revert.
+                rb_revert_status = (
+                    "accuracy_unavailable_reject"
+                    if (rb_acc_block and confirm["accuracy_pass"] is None and confirm["stable"])
+                    else "reverted"
+                )
                 await self._maybe_write_framework_pr_kb_record(
                     done_payload=done_payload,
                     outcome="reverted_smoke_fail",
@@ -1416,7 +1435,7 @@ class IntegratePatchExecutor:
                     extra=extra,
                 )
                 return _with_stash_restore(framework_root, stash_state, stash_note, {
-                    "status": "reverted",
+                    "status": rb_revert_status,
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
