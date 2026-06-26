@@ -432,7 +432,7 @@ def _focus_research_scout_specialist(
         "3. **Cross-framework / NVIDIA research** — survey PRs, blogs, and",
         "   MLPerf results across frameworks and NVIDIA/TRT-LLM via",
         "   ``WebSearch`` / ``mcp__pr_monitor__*`` for proven wins. Avoid",
-        "   re-listing PRs the FRAMEWORK_PR phase already covered (the",
+        "   re-listing PRs the FRAMEWORK phase already covered (the",
         "   Coordinator dedups by PR id, but skip obvious repeats).",
         "",
         "**Gap computation** — where you find a reference throughput,",

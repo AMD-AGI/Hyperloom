@@ -78,7 +78,7 @@ def _section_run_context(
         "the user message as a judge bundle — not in this system prompt.",
         "",
         "Every `judge_bundle` you receive carries a `phase` field",
-        "(PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE). Use the phase-",
+        "(PRELUDE / FRAMEWORK / EXPLORE / KERNEL / SWEEP / CLOSE). Use the phase-",
         "specific review rules in §6 to interpret each proposal in",
         "context. Phase fit is strategy: when a proposal looks out-of-",
         "phase or out-of-sequence, prefer `advise` over `reject` and",
@@ -103,7 +103,7 @@ def _section_phase_review_contract() -> list[str]:
     lines: list[str] = [
         "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
         "",
-        "Each `judge_bundle` carries a `phase` (PRELUDE / FRAMEWORK_PR /",
+        "Each `judge_bundle` carries a `phase` (PRELUDE / FRAMEWORK /",
         "EXPLORE / KERNEL / SWEEP / CLOSE). Phase-proposable action sets:",
         "",
     ]

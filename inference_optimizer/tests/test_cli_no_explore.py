@@ -58,7 +58,7 @@ def _apply_resume_writeback(state: _ResumeStateStub, args: _ArgsStub) -> str:
         msg = "DISABLED_PERSISTED"
     elif bool(getattr(args, "no_explore", False)):
         cur_phase = (getattr(state, "phase", "") or "").strip().upper()
-        if cur_phase in ("", "PRELUDE", "FRAMEWORK_PR"):
+        if cur_phase in ("", "PRELUDE", "FRAMEWORK"):
             state.explore_enabled = False
             msg = "DISABLING_RESUME"
         else:
@@ -73,8 +73,8 @@ def test_resume_writeback_disables_state_when_prelude_and_flag_passed():
     assert state.explore_enabled is False
 
 
-def test_resume_writeback_allows_disable_in_framework_pr():
-    state = _ResumeStateStub(explore_enabled=True, phase="FRAMEWORK_PR")
+def test_resume_writeback_allows_disable_in_framework():
+    state = _ResumeStateStub(explore_enabled=True, phase="FRAMEWORK")
     args = _ArgsStub(no_explore=True)
     assert _apply_resume_writeback(state, args) == "DISABLING_RESUME"
     assert state.explore_enabled is False

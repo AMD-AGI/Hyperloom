@@ -54,7 +54,7 @@ _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # Floor on the per-repo framework-PR discover timeout so a slow repo still gets a
 # usable budget even when the phase timeout is spread thin across many repos.
-_FRAMEWORK_PR_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
+_FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
 _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # Default resume-drift floor (%): a re-measured current_best below this fraction
@@ -130,8 +130,8 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
     }
 )
 
-# Default per-repo candidate cap for ``fa phase-discover`` (FRAMEWORK_PR).
-DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES: int = 8
+# Default per-repo candidate cap for ``fa phase-discover`` (FRAMEWORK).
+DEFAULT_FRAMEWORK_MAX_CANDIDATES: int = 8
 
 # Hard-trigger thresholds: EXPLORE rounds a domain may go without a
 # specialist dispatch / a KEEP before the Coordinator force-dispatches one (a
@@ -1746,7 +1746,7 @@ class Coordinator:
 
         Args:
             kind: The originating action kind (``integrate_patch`` / ``explore``
-                / ``framework_pr``).
+                / ``framework``).
             result: The recorded delegated result payload for that KEEP.
 
         Returns:
@@ -1878,7 +1878,7 @@ class Coordinator:
         single-variant bench + accuracy gate passed and the patch was committed),
         so a kept-but-absent one is a crash before the append landed → replay it
         (idempotent), unless its run workspace is gone → discard + alert. ``explore``
-        / ``framework_pr`` KEEPs are ambiguous (KEEP_UNSTABLE eviction can drop a
+        / ``framework`` KEEPs are ambiguous (KEEP_UNSTABLE eviction can drop a
         kept explore variant from the stack), so they are surfaced as a
         ``medium`` alert rather than resurrected. Whatever the stack ends up as
         is re-validated by the Gap A full-stack rebench.
@@ -1902,7 +1902,7 @@ class Coordinator:
                     continue
                 if kind == "integrate_patch":
                     variant = str(res.get("specialist_task_id") or "")
-                elif kind == "framework_pr":
+                elif kind == "framework":
                     cand = res.get("candidate") or {}
                     variant = str(
                         (cand.get("candidate_id") if isinstance(cand, dict) else "")
@@ -1950,7 +1950,7 @@ class Coordinator:
                             {"kind": "orphaned_keep_replay_noop", "orphan_kind": kind, "variant": variant}
                         )
                 else:
-                    # explore / framework_pr: ambiguous vs eviction — never
+                    # explore / framework: ambiguous vs eviction — never
                     # resurrect; surface for the operator.
                     report["warnings"].append(
                         {
@@ -2449,10 +2449,10 @@ class Coordinator:
         return "\n".join(lines)
 
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
-        """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK_PR or EXPLORE).
+        """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK or EXPLORE).
 
         Increments ``macro_cycle``, persists the no-gain streak + the per-cycle
-        gain anchor, resets per-cycle counters (including re-opening FRAMEWORK_PR)
+        gain anchor, resets per-cycle counters (including re-opening FRAMEWORK)
         so the new cycle gets a fresh budget / plateau evaluation. The explore
         ledger is preserved; its already-KEEP entries stay blocked while
         sub-threshold ones may unblock as the KEEP bar decays.
@@ -2490,14 +2490,14 @@ class Coordinator:
             state.reset_explore_plateau_proxy()
         except Exception:  # noqa: BLE001 — resets are best-effort
             log.exception("Coordinator: per-cycle reset failed on reloop")
-        # Re-open FRAMEWORK_PR for the new cycle so the loopback target does not
+        # Re-open FRAMEWORK for the new cycle so the loopback target does not
         # instantly self-skip as "already done". Already-tested PRs are still
-        # skipped: framework_pr_batches (and the per-candidate progress rows that
+        # skipped: framework_batches (and the per-candidate progress rows that
         # dedup within them) are preserved, so a fresh discover only surfaces PRs
         # merged upstream since, and fast-exits via
         # ``discover_returned_no_new_candidates`` when there are none.
-        state.framework_pr_phase_done = False
-        state.framework_pr_discover_failures = 0
+        state.framework_phase_done = False
+        state.framework_discover_failures = 0
         # Clear the per-cycle SWEEP completion markers: exit_normal_sweep keys off
         # last_sweep / last_conc_sweep status, so a stale "succeeded" from the
         # prior cycle would make the next cycle's SWEEP exit instantly without
@@ -2658,8 +2658,8 @@ class Coordinator:
             log.exception("Coordinator: phase-boundary checkpoint failed")
 
         target = (to_phase or "").upper()
-        if target == _phase_state.PHASE_FRAMEWORK_PR:
-            await self._on_enter_framework_pr(from_phase=from_phase)
+        if target == _phase_state.PHASE_FRAMEWORK:
+            await self._on_enter_framework(from_phase=from_phase)
         elif target == _phase_state.PHASE_EXPLORE:
             await self._on_enter_explore(from_phase=from_phase)
         elif target == _phase_state.PHASE_KERNEL:
@@ -2717,61 +2717,61 @@ class Coordinator:
                 exc,
             )
 
-    async def _on_enter_framework_pr(self, *, from_phase: str) -> None:
-        """FRAMEWORK_PR entry hook: trigger the per-batch pump once on entry (best-effort; later batches driven from the main tick).
+    async def _on_enter_framework(self, *, from_phase: str) -> None:
+        """FRAMEWORK entry hook: trigger the per-batch pump once on entry (best-effort; later batches driven from the main tick).
 
         Args:
             from_phase: The phase being left, used only for logging.
         """
         log.info(
-            "FRAMEWORK_PR entry (from=%s): pumping initial batch",
+            "FRAMEWORK entry (from=%s): pumping initial batch",
             from_phase or "<unknown>",
         )
         try:
-            await self._pump_framework_pr_phase()
+            await self._pump_framework_phase()
         except Exception as exc:  # noqa: BLE001 — defensive
-            log.warning("FRAMEWORK_PR entry pump failed: %r", exc)
+            log.warning("FRAMEWORK entry pump failed: %r", exc)
 
-    async def _pump_framework_pr_phase(self) -> None:
-        """Drive the FRAMEWORK_PR phase: enqueue the next candidate. Idempotent; a discover failure flips framework_pr_phase_done so the phase advances rather than wedging."""
+    async def _pump_framework_phase(self) -> None:
+        """Drive the FRAMEWORK phase: enqueue the next candidate. Idempotent; a discover failure flips framework_phase_done so the phase advances rather than wedging."""
         state = self.shared_state
-        if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_PR:
+        if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK:
             return
-        if bool(getattr(state, "framework_pr_phase_done", False)):
+        if bool(getattr(state, "framework_phase_done", False)):
             return
-        # Skip if a framework_pr task is already queued or running.
+        # Skip if a framework task is already queued or running.
         try:
             queued = await self.tasks.queued()
             running = await self.tasks.running()
         except Exception:  # noqa: BLE001 — defensive
             queued, running = [], []
         for t in (*queued, *running):
-            if getattr(t, "kind", "") == "framework_pr":
+            if getattr(t, "kind", "") == "framework":
                 return
         # Find the next un-dispatched candidate, or request a new batch if exhausted.
-        next_candidate = self._select_next_framework_pr_candidate()
+        next_candidate = self._select_next_framework_candidate()
         if next_candidate is None:
             # Hold the phase open while authored patches are still benched/critic-reviewed (gains must land before plateau judge); gated by authoring flag.
             # Only wait when the pump itself discovered a PR batch to author against:
             # an empty batch list means no pump-initiated authoring is outstanding, so
-            # an LLM-proposed integrate_patch must NOT keep FRAMEWORK_PR open (else the
+            # an LLM-proposed integrate_patch must NOT keep FRAMEWORK open (else the
             # phase livelocks under a large budget — no discover, no done, no advance).
-            discovered_batch = bool(getattr(self.shared_state, "framework_pr_batches", None) or [])
+            discovered_batch = bool(getattr(self.shared_state, "framework_batches", None) or [])
             if (
                 discovered_batch
-                and getattr(self.shared_state, "framework_pr_authoring_enabled", False)
-                and await self._framework_pr_authoring_inflight()
+                and getattr(self.shared_state, "framework_authoring_enabled", False)
+                and await self._framework_authoring_inflight()
             ):
                 return
             # Discover a fresh batch; only DISCOVER_FAILURE_RETRY_LIMIT consecutive failures or an empty-but-valid payload mark the phase done.
             from . import framework_agent_client as _fa_client
 
-            ok = await self._discover_next_framework_pr_batch()
+            ok = await self._discover_next_framework_batch()
             if not ok:
-                failures = int(getattr(state, "framework_pr_discover_failures", 0) or 0)
+                failures = int(getattr(state, "framework_discover_failures", 0) or 0)
                 if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT or failures == 0:
                     # Retries exhausted or clean empty payload — both real exits; stamp a summary row.
-                    self._record_framework_pr_phase_done(
+                    self._record_framework_phase_done(
                         reason=(
                             "discover_retries_exhausted"
                             if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
@@ -2779,30 +2779,30 @@ class Coordinator:
                         ),
                         failure_count=failures,
                     )
-                    state.framework_pr_phase_done = True
+                    state.framework_phase_done = True
                     state.save(self.session_dir)
                 return
-            next_candidate = self._select_next_framework_pr_candidate()
+            next_candidate = self._select_next_framework_candidate()
             if next_candidate is None:
-                self._record_framework_pr_phase_done(
+                self._record_framework_phase_done(
                     reason="discover_returned_no_new_candidates",
                     failure_count=int(
-                        getattr(state, "framework_pr_discover_failures", 0) or 0,
+                        getattr(state, "framework_discover_failures", 0) or 0,
                     ),
                 )
-                state.framework_pr_phase_done = True
+                state.framework_phase_done = True
                 state.save(self.session_dir)
                 return
         # Critic gate before apply: reject short-circuits with a critic_denied row; approve/abstain enqueues.
-        verdict = await self._critic_review_framework_pr_candidate(next_candidate)
+        verdict = await self._critic_review_framework_candidate(next_candidate)
         if verdict.get("verdict") == "reject":
             cand_id = str(
                 next_candidate.get("candidate_id") or next_candidate.get("pr_url") or "",
             )
-            progress = getattr(state, "framework_pr_phase_progress", None)
+            progress = getattr(state, "framework_phase_progress", None)
             if not isinstance(progress, list):
                 progress = []
-                state.framework_pr_phase_progress = progress
+                state.framework_phase_progress = progress
             progress.append(
                 {
                     "candidate_id": cand_id,
@@ -2815,27 +2815,27 @@ class Coordinator:
             )
             state.save(self.session_dir)
             log.info(
-                "FRAMEWORK_PR: critic rejected candidate=%s batch=%s rationale=%r",
+                "FRAMEWORK: critic rejected candidate=%s batch=%s rationale=%r",
                 cand_id,
                 next_candidate.get("batch_id") or "",
                 str(verdict.get("rationale") or "")[:200],
             )
             return
-        await self._enqueue_framework_pr_task(next_candidate)
+        await self._enqueue_framework_task(next_candidate)
         # Authoring track: also hand the PR to a write-capable specialist to author its own patch.
-        if getattr(state, "framework_pr_authoring_enabled", False):
+        if getattr(state, "framework_authoring_enabled", False):
             try:
-                await self._enqueue_framework_pr_authoring_specialist(
+                await self._enqueue_framework_authoring_specialist(
                     next_candidate,
                 )
             except Exception as exc:  # noqa: BLE001 — never wedge the pump
                 log.warning(
-                    "FRAMEWORK_PR: authoring specialist dispatch failed: %r",
+                    "FRAMEWORK: authoring specialist dispatch failed: %r",
                     exc,
                 )
 
-    async def _framework_pr_authoring_inflight(self) -> bool:
-        """True while a FRAMEWORK_PR-authored patch is still in flight (specialist/integrate_patch task or pending integrate_patch proposal); pump waits before advancing.
+    async def _framework_authoring_inflight(self) -> bool:
+        """True while a FRAMEWORK-authored patch is still in flight (specialist/integrate_patch task or pending integrate_patch proposal); pump waits before advancing.
 
         Returns:
             ``True`` if a specialist/integrate_patch task is queued or running,
@@ -2859,27 +2859,27 @@ class Coordinator:
             pass
         return False
 
-    async def _enqueue_framework_pr_authoring_specialist(
+    async def _enqueue_framework_authoring_specialist(
         self,
         candidate: dict[str, Any],
     ) -> None:
         """Dispatch a write-capable specialist seeded with ``candidate`` (flows through autosubmit → Critic → integrate_patch → bench → KEEP/REVERT).
 
         Args:
-            candidate: The discovered FRAMEWORK_PR candidate (PR url, title,
+            candidate: The discovered FRAMEWORK candidate (PR url, title,
                 diff url, batch/candidate ids) used to seed the specialist's
                 authoring task and provenance markers.
         """
         state = self.shared_state
         cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
         batch_id = str(candidate.get("batch_id") or "")
-        gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework_pr.{cand_id}"
+        gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.{cand_id}"
         title = str(candidate.get("title") or "").strip()
         pr_url = str(candidate.get("pr_url") or "").strip()
         diff_url = str(candidate.get("diff_url") or "").strip()
         notes = "\n".join(
             [
-                "FRAMEWORK_PR AUTHORING TASK.",
+                "FRAMEWORK AUTHORING TASK.",
                 "",
                 "A candidate upstream PR was discovered as a lead for this gap.",
                 "Study it as INSPIRATION, then author your OWN source patch into",
@@ -2905,10 +2905,10 @@ class Coordinator:
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
             "gap_layer": "framework",
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
-            # Provenance markers so the dispatcher-side bridge recognises an authored FRAMEWORK_PR patch.
-            "framework_pr_authoring": True,
-            "framework_pr_candidate_id": cand_id,
-            "framework_pr_batch_id": batch_id,
+            # Provenance markers so the dispatcher-side bridge recognises an authored FRAMEWORK patch.
+            "framework_authoring": True,
+            "framework_candidate_id": cand_id,
+            "framework_batch_id": batch_id,
             "source": "coordinator_internal",
             "readonly": False,
             "notes": notes,
@@ -2917,10 +2917,10 @@ class Coordinator:
             await self._warm_specialist_params(params)
         except Exception:  # noqa: BLE001 — best-effort warmup
             log.debug(
-                "FRAMEWORK_PR authoring: warm specialist params failed",
+                "FRAMEWORK authoring: warm specialist params failed",
                 exc_info=True,
             )
-        idem = f"framework_pr_authoring:{batch_id}:{cand_id}"
+        idem = f"framework_authoring:{batch_id}:{cand_id}"
         await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -2940,13 +2940,13 @@ class Coordinator:
             lease_ttl_sec=3600,
         )
         log.info(
-            "FRAMEWORK_PR: dispatched authoring specialist candidate=%s batch=%s gap=%s",
+            "FRAMEWORK: dispatched authoring specialist candidate=%s batch=%s gap=%s",
             cand_id,
             batch_id,
             gap_cid,
         )
 
-    def _select_next_framework_pr_candidate(self) -> dict[str, Any] | None:
+    def _select_next_framework_candidate(self) -> dict[str, Any] | None:
         """Return the next unprocessed candidate in the latest batch (processed = has progress entry).
 
         Returns:
@@ -2954,7 +2954,7 @@ class Coordinator:
             ``None`` when no batch exists or all are processed.
         """
         state = self.shared_state
-        batches = getattr(state, "framework_pr_batches", None) or []
+        batches = getattr(state, "framework_batches", None) or []
         if not batches:
             return None
         latest = batches[-1]
@@ -2965,7 +2965,7 @@ class Coordinator:
             return None
         processed = {
             str(p.get("candidate_id") or "")
-            for p in (getattr(state, "framework_pr_phase_progress", None) or [])
+            for p in (getattr(state, "framework_phase_progress", None) or [])
             if isinstance(p, dict)
         }
         for cand in candidates:
@@ -2976,7 +2976,7 @@ class Coordinator:
                 return cand
         return None
 
-    def _framework_pr_known_candidate_ids(self) -> set[str]:
+    def _framework_known_candidate_ids(self) -> set[str]:
         """All candidate ids already discovered into any prior batch (dedup for new batches).
 
         Returns:
@@ -2985,7 +2985,7 @@ class Coordinator:
         """
         state = self.shared_state
         ids: set[str] = set()
-        batches = getattr(state, "framework_pr_batches", None) or []
+        batches = getattr(state, "framework_batches", None) or []
         if not isinstance(batches, list):
             return ids
         for batch in batches:
@@ -3009,20 +3009,20 @@ class Coordinator:
                 ids.add(pid)
         return ids
 
-    def _framework_pr_tried_refs(self) -> list[str]:
+    def _framework_tried_refs(self) -> list[str]:
         """Refs already discovered this phase (fed to compose_gap to bias away from prior PR categories).
 
         Returns:
             A list of already-known candidate id refs.
         """
         refs: list[str] = []
-        for cid in self._framework_pr_known_candidate_ids():
+        for cid in self._framework_known_candidate_ids():
             if cid:
                 refs.append(cid)
         return refs
 
-    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
-        """Repo URLs to query for the FRAMEWORK_PR batch: framework's own repo + pr_intel_specialist cross-repo set, dedup preserving order.
+    def _framework_discover_repo_urls(self, framework: str) -> list[str]:
+        """Repo URLs to query for the FRAMEWORK batch: framework's own repo + pr_intel_specialist cross-repo set, dedup preserving order.
 
         Args:
             framework: The framework name whose own repo seeds the query.
@@ -3068,13 +3068,13 @@ class Coordinator:
             _add(_fa_client.repo_url_for_framework(framework or "sglang"))
         return urls
 
-    def _record_framework_pr_phase_done(
+    def _record_framework_phase_done(
         self,
         *,
         reason: str,
         failure_count: int,
     ) -> None:
-        """Append a framework_pr_phase_done row to phase_history describing why the pump gave up.
+        """Append a framework_phase_done row to phase_history describing why the pump gave up.
 
         Args:
             reason: Human-readable reason the phase ended.
@@ -3089,18 +3089,18 @@ class Coordinator:
 
             history.append(
                 {
-                    "event": "framework_pr_phase_done",
+                    "event": "framework_phase_done",
                     "reason": reason,
                     "failure_count": int(failure_count),
                     "retry_limit": int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
-                    "batches_discovered": len(getattr(state, "framework_pr_batches", None) or []),
+                    "batches_discovered": len(getattr(state, "framework_batches", None) or []),
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
             )
         except Exception:  # noqa: BLE001 — defensive
             pass
 
-    async def _discover_next_framework_pr_batch(self) -> bool:
+    async def _discover_next_framework_batch(self) -> bool:
         """Call ``fa phase-discover`` and append a batch to SharedState. Returns True iff a non-empty batch was appended; transient failures return False (see DISCOVER_FAILURE_RETRY_LIMIT).
 
         Returns:
@@ -3164,13 +3164,13 @@ class Coordinator:
         if not gaps:
             gaps = [{"gap_canonical_id": "", "gap_description": ""}]
         timeout_sec = float(
-            getattr(self, "framework_pr_discover_timeout_sec", 0.0) or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
+            getattr(self, "framework_discover_timeout_sec", 0.0) or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
         )
         max_candidates = (
-            int(getattr(state, "framework_pr_max_candidates", 0) or 0) or DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES
+            int(getattr(state, "framework_max_candidates", 0) or 0) or DEFAULT_FRAMEWORK_MAX_CANDIDATES
         )
         # Cross-repo: query every pr_intel_specialist repo so discovery isn't confined to one framework repo.
-        repo_urls = self._framework_pr_discover_repo_urls(framework)
+        repo_urls = self._framework_discover_repo_urls(framework)
         payload: dict[str, Any] | None = None
         merged_candidates: list[dict[str, Any]] = []
         batch_id = ""
@@ -3178,7 +3178,7 @@ class Coordinator:
         last_exc: Exception | None = None
         # Spread the phase timeout across repos so one slow repo can't blow the whole budget.
         per_repo_timeout = timeout_sec / float(len(repo_urls)) if repo_urls else timeout_sec
-        per_repo_timeout = max(per_repo_timeout, _FRAMEWORK_PR_MIN_PER_REPO_TIMEOUT_SEC)
+        per_repo_timeout = max(per_repo_timeout, _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC)
         for repo_url in repo_urls:
             try:
                 repo_payload = await _fa_client.phase_discover(
@@ -3209,8 +3209,8 @@ class Coordinator:
             if isinstance(repo_cands, list):
                 merged_candidates.extend(c for c in repo_cands if isinstance(c, dict))
         if not any_call_ok:
-            failures = int(getattr(state, "framework_pr_discover_failures", 0) or 0) + 1
-            state.framework_pr_discover_failures = failures
+            failures = int(getattr(state, "framework_discover_failures", 0) or 0) + 1
+            state.framework_discover_failures = failures
             log.warning(
                 "fa phase-discover failed across all %d repo(s) (attempt %d/%d): %r",
                 len(repo_urls),
@@ -3223,7 +3223,7 @@ class Coordinator:
                 if isinstance(history, list):
                     history.append(
                         {
-                            "event": "framework_pr_discover_failed",
+                            "event": "framework_discover_failed",
                             "attempt": failures,
                             "limit": _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
                             "error": repr(last_exc),
@@ -3236,13 +3236,13 @@ class Coordinator:
             return False
         # Successful call — reset failure counter regardless of whether
         # the payload contained candidates.
-        if int(getattr(state, "framework_pr_discover_failures", 0) or 0) != 0:
-            state.framework_pr_discover_failures = 0
+        if int(getattr(state, "framework_discover_failures", 0) or 0) != 0:
+            state.framework_discover_failures = 0
         if not merged_candidates:
             return False
         batch_id = str((payload or {}).get("batch_id") or "")
         # Cross-batch + cross-repo de-dup so the new batch only carries genuinely new PRs.
-        seen_ids = self._framework_pr_known_candidate_ids()
+        seen_ids = self._framework_known_candidate_ids()
         primary_repo_url = repo_urls[0] if repo_urls else ""
         # Normalise each candidate for consistent executor fields + a stable progress-ledger id.
         norm: list[dict[str, Any]] = []
@@ -3272,22 +3272,22 @@ class Coordinator:
             "candidates": norm,
             "max_gain_pct_observed_in_batch": 0.0,
         }
-        if not isinstance(state.framework_pr_batches, list):
-            state.framework_pr_batches = []
-        state.framework_pr_batches.append(batch_entry)
+        if not isinstance(state.framework_batches, list):
+            state.framework_batches = []
+        state.framework_batches.append(batch_entry)
         state.save(self.session_dir)
         log.info(
-            "FRAMEWORK_PR: discovered batch=%s with %d candidates",
+            "FRAMEWORK: discovered batch=%s with %d candidates",
             batch_id or "<unset>",
             len(norm),
         )
         return True
 
-    async def _enqueue_framework_pr_task(self, candidate: dict[str, Any]) -> None:
-        """Enqueue a single ``framework_pr`` task for ``candidate``.
+    async def _enqueue_framework_task(self, candidate: dict[str, Any]) -> None:
+        """Enqueue a single ``framework`` task for ``candidate``.
 
         Builds the task params (candidate, batch id, baseline throughput,
-        framework) and creates an idempotent ``framework_pr`` task holding the
+        framework) and creates an idempotent ``framework`` task holding the
         server / workspace / benchmark lanes. On enqueue failure, records an
         ``enqueue_failed`` progress row so the pump skips the candidate next
         tick instead of spinning.
@@ -3304,10 +3304,10 @@ class Coordinator:
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
         }
         cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or "")
-        idem = f"framework_pr:{candidate.get('batch_id', '')}:{cand_id}"
+        idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
         try:
             await self.tasks.create_or_return_existing(
-                kind="framework_pr",
+                kind="framework",
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=[
@@ -3317,21 +3317,21 @@ class Coordinator:
                 ],
             )
             log.info(
-                "FRAMEWORK_PR: enqueued candidate=%s batch=%s",
+                "FRAMEWORK: enqueued candidate=%s batch=%s",
                 cand_id,
                 candidate.get("batch_id") or "",
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.warning(
-                "FRAMEWORK_PR: failed to enqueue candidate=%s: %r",
+                "FRAMEWORK: failed to enqueue candidate=%s: %r",
                 cand_id,
                 exc,
             )
             # Record enqueue_failed progress row so the candidate is skipped next tick (else the loop spins).
-            progress = getattr(state, "framework_pr_phase_progress", None)
+            progress = getattr(state, "framework_phase_progress", None)
             if not isinstance(progress, list):
                 progress = []
-                state.framework_pr_phase_progress = progress
+                state.framework_phase_progress = progress
             progress.append(
                 {
                     "candidate_id": cand_id,
@@ -3347,7 +3347,7 @@ class Coordinator:
     _CRITIC_PRIORS_DECISION_TAIL: int = 5
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
 
-    def _collect_framework_pr_priors(self) -> dict[str, Any]:
+    def _collect_framework_candidate_priors(self) -> dict[str, Any]:
         """Return compact session-local priors for the Critic gate (recent_decisions + recent_outcomes); best-effort.
 
         Returns:
@@ -3358,7 +3358,7 @@ class Coordinator:
         state = self.shared_state
         decisions: list[dict[str, Any]] = []
         try:
-            raw_decisions = getattr(state, "framework_pr_critic_decisions", None) or []
+            raw_decisions = getattr(state, "framework_critic_decisions", None) or []
             for row in raw_decisions[-self._CRITIC_PRIORS_DECISION_TAIL :]:
                 if not isinstance(row, dict):
                     continue
@@ -3373,7 +3373,7 @@ class Coordinator:
             decisions = []
         outcomes: list[dict[str, Any]] = []
         try:
-            raw_progress = getattr(state, "framework_pr_phase_progress", None) or []
+            raw_progress = getattr(state, "framework_phase_progress", None) or []
             terminal = {"kept", "reverted", "no_patch", "enqueue_failed", "critic_denied"}
             tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
             for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
@@ -3391,14 +3391,14 @@ class Coordinator:
             "recent_outcomes": outcomes,
         }
 
-    async def _critic_review_framework_pr_candidate(
+    async def _critic_review_framework_candidate(
         self,
         candidate: dict[str, Any],
     ) -> dict[str, str]:
         """Ask the Critic backend whether to apply ``candidate``.
 
         Returns {"verdict": "approve"|"reject"|"abstain", "rationale": str}. abstain is the safe degraded
-        path (treated as approve by caller); decisions cached in framework_pr_critic_decisions for resume.
+        path (treated as approve by caller); decisions cached in framework_critic_decisions for resume.
 
         Args:
             candidate: The discovered PR candidate to review.
@@ -3413,7 +3413,7 @@ class Coordinator:
             candidate.get("candidate_id") or candidate.get("pr_url") or "",
         )
         # Resume-safe cache lookup.
-        cached = getattr(state, "framework_pr_critic_decisions", None)
+        cached = getattr(state, "framework_critic_decisions", None)
         if isinstance(cached, list):
             for row in cached:
                 if not isinstance(row, dict):
@@ -3429,10 +3429,10 @@ class Coordinator:
         # Proposal-formatted prompt for both Mock + Agent critic backends; deterministic all-hex msg_id
         # from candidate id so MockCriticBackend's [a-f0-9]+ regex + dedupe set stay consistent.
         msg_id = hashlib.md5(
-            f"framework_pr:{cand_id}".encode(),
+            f"framework:{cand_id}".encode(),
         ).hexdigest()
         payload = {
-            "action": "framework_pr",
+            "action": "framework",
             "candidate": {
                 "candidate_id": cand_id,
                 "pr_url": str(candidate.get("pr_url") or ""),
@@ -3446,7 +3446,7 @@ class Coordinator:
             },
             "batch_id": candidate.get("batch_id") or "",
             # Session-local priors (classified candidates + apply/bench outcomes); bounded to keep prompt compact.
-            "priors": self._collect_framework_pr_priors(),
+            "priors": self._collect_framework_candidate_priors(),
         }
         prompt = f"seq=1 msg_id={msg_id} from=coordinator topic=proposal payload={json.dumps(payload, sort_keys=True)}"
         verdict_row: dict[str, str] = {
@@ -3462,7 +3462,7 @@ class Coordinator:
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.warning(
-                "FRAMEWORK_PR: critic call failed for candidate=%s: %r",
+                "FRAMEWORK: critic call failed for candidate=%s: %r",
                 cand_id,
                 exc,
             )
@@ -3496,10 +3496,10 @@ class Coordinator:
                     ),
                 }
                 break
-        decisions = getattr(state, "framework_pr_critic_decisions", None)
+        decisions = getattr(state, "framework_critic_decisions", None)
         if not isinstance(decisions, list):
             decisions = []
-            state.framework_pr_critic_decisions = decisions
+            state.framework_critic_decisions = decisions
         decisions.append(
             {
                 "candidate_id": cand_id,
@@ -6545,7 +6545,7 @@ class Coordinator:
             return None
         idempotency_key = f"internal-research-scout-round{int(round_id)}"
         try:
-            seen = sorted(self._framework_pr_known_candidate_ids())
+            seen = sorted(self._framework_known_candidate_ids())
         except Exception:  # noqa: BLE001 — defensive
             seen = list(getattr(self.shared_state, "research_scout_seen_pr_ids", []) or [])
         params: dict[str, Any] = {
@@ -6989,17 +6989,17 @@ class Coordinator:
         await self.replay_for_resume()
         await self._resume_consistency_pass()
 
-    async def _pump_framework_pr_phase_safely(self, *, caller: str) -> None:
-        """Best-effort FRAMEWORK_PR pump wrapper shared by tick and run.
+    async def _pump_framework_phase_safely(self, *, caller: str) -> None:
+        """Best-effort FRAMEWORK pump wrapper shared by tick and run.
 
         Args:
             caller: Label identifying the caller ("tick" / "run"), used only in
                 the failure log.
         """
         try:
-            await self._pump_framework_pr_phase()
+            await self._pump_framework_phase()
         except Exception:  # noqa: BLE001 — defensive
-            log.exception("FRAMEWORK_PR pump (%s) failed", caller)
+            log.exception("FRAMEWORK pump (%s) failed", caller)
 
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for every agent (P0-3/P0-5/P1-4 tests); dispatcher pumps at pass end, lazy resume replay on tick 1.
@@ -7013,8 +7013,8 @@ class Coordinator:
             for name in self._tick_roles:
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
-            # FRAMEWORK_PR phase pump: enqueue next candidate / fetch next batch. Best-effort.
-            await self._pump_framework_pr_phase_safely(caller="tick")
+            # FRAMEWORK phase pump: enqueue next candidate / fetch next batch. Best-effort.
+            await self._pump_framework_phase_safely(caller="tick")
             # phase machine advance at tick boundary.
             await self._advance_phase_if_needed()
 
@@ -7148,9 +7148,9 @@ class Coordinator:
                                 log.exception("Coordinator.run: orchestration checkpoint raised")
                     if not self._stop.is_set():
                         await self._pump_dispatcher_once()
-                    # FRAMEWORK_PR phase pump: see ``tick()`` for rationale.
+                    # FRAMEWORK phase pump: see ``tick()`` for rationale.
                     if not in_closing:
-                        await self._pump_framework_pr_phase_safely(caller="run")
+                        await self._pump_framework_phase_safely(caller="run")
                     # phase machine advance at tick boundary; runs even in_closing so CLOSE is recorded.
                     try:
                         await self._advance_phase_if_needed()
@@ -8687,16 +8687,16 @@ class Coordinator:
         """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
         return await self.router._handle_delegate(source, intent)
 
-    def _record_framework_pr_authored_outcome(
+    def _record_framework_authored_outcome(
         self,
         *,
         task: "Task",
         result: Any,
     ) -> None:
-        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK_PR progress ledger (else the gain is invisible). Attributed to the latest batch; only kept/reverted rows.
+        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger (else the gain is invisible). Attributed to the latest batch; only kept/reverted rows.
 
         Args:
-            task: The integrate_patch task carrying the FRAMEWORK_PR authoring
+            task: The integrate_patch task carrying the FRAMEWORK authoring
                 provenance markers.
             result: The task result; only ``kept``/``reverted`` statuses are
                 recorded.
@@ -8709,14 +8709,14 @@ class Coordinator:
             return
         params = getattr(task, "params", None) or {}
         cand_id = str(
-            params.get("framework_pr_candidate_id")
+            params.get("framework_candidate_id")
             or params.get("specialist_task_id")
             or getattr(task, "task_id", "")
             or ""
         )
-        batch_id = str(params.get("framework_pr_batch_id") or "")
+        batch_id = str(params.get("framework_batch_id") or "")
         if not batch_id:
-            batches = getattr(self.shared_state, "framework_pr_batches", None) or []
+            batches = getattr(self.shared_state, "framework_batches", None) or []
             if isinstance(batches, list) and batches and isinstance(batches[-1], dict):
                 batch_id = str(batches[-1].get("batch_id") or "")
         delta_pct = res.get("delta_pct")
@@ -8734,11 +8734,11 @@ class Coordinator:
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
-        if not isinstance(self.shared_state.framework_pr_phase_progress, list):
-            self.shared_state.framework_pr_phase_progress = []
-        self.shared_state.framework_pr_phase_progress.append(progress_entry)
+        if not isinstance(self.shared_state.framework_phase_progress, list):
+            self.shared_state.framework_phase_progress = []
+        self.shared_state.framework_phase_progress.append(progress_entry)
         # Roll the batch max-gain stat the plateau judge reads.
-        batches = getattr(self.shared_state, "framework_pr_batches", None) or []
+        batches = getattr(self.shared_state, "framework_batches", None) or []
         if isinstance(batches, list) and batch_id:
             for entry in reversed(batches):
                 if isinstance(entry, dict) and str(entry.get("batch_id") or "") == batch_id:
@@ -8750,11 +8750,11 @@ class Coordinator:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
-                "FRAMEWORK_PR authored-outcome: save failed for task=%s",
+                "FRAMEWORK authored-outcome: save failed for task=%s",
                 getattr(task, "task_id", "?"),
             )
         log.info(
-            "FRAMEWORK_PR: authored patch outcome candidate=%s batch=%s status=%s gain=%.2f%%",
+            "FRAMEWORK: authored patch outcome candidate=%s batch=%s status=%s gain=%.2f%%",
             cand_id,
             batch_id,
             status,
@@ -9124,7 +9124,7 @@ class Coordinator:
                 "hot_kernels_top15": hot_kernels,
             }
 
-        # PR discovery lives in the FRAMEWORK_PR phase pump.
+        # PR discovery lives in the FRAMEWORK phase pump.
 
         # proposal_set cap into params so SpecialistRunner reads it; setdefault lets a delegate shrink it.
         from inference_optimizer.orchestrator.policy import (
@@ -9518,9 +9518,9 @@ class Coordinator:
         return await self.recorder._record_specialist_result(task=task, done_payload=done_payload, source=source)
 
     def _plateau_advisory_block(self) -> str:
-        """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK_PR). Returns "" when no plateau signal is active.
+        """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK). Returns "" when no plateau signal is active.
 
-        KERNEL / FRAMEWORK_PR plateaus are advisory only (never auto-exit the
+        KERNEL / FRAMEWORK plateaus are advisory only (never auto-exit the
         phase). An EXPLORE plateau is advisory in non-cyclic mode, but in cyclic
         mode (default) it deterministically advances EXPLORE → KERNEL via
         ``explore_no_more_leverage`` (a non-terminal lever switch); the rendered
@@ -9598,24 +9598,24 @@ class Coordinator:
                     f"recent_keep_gain_pct={evidence.get('recent_keep_gain_pct', 0.0)} "
                     f"keep_gain_threshold_pct={evidence.get('keep_gain_threshold_pct', 0.0)}"
                 )
-        elif phase == _phase_state.PHASE_FRAMEWORK_PR:
-            triggered, evidence = _phase_state.compute_plateau_framework_pr(
+        elif phase == _phase_state.PHASE_FRAMEWORK:
+            triggered, evidence = _phase_state.compute_plateau_framework(
                 state,
                 lookback=int(
                     overrides.get(
-                        "framework_pr_lookback",
-                        _phase_state.DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
+                        "framework_lookback",
+                        _phase_state.DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK,
                     )
                 ),
                 keep_gain_threshold_pct=float(
                     overrides.get(
-                        "framework_pr_keep_gain_pct",
-                        _phase_state.DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
+                        "framework_keep_gain_pct",
+                        _phase_state.DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT,
                     )
                 ),
             )
             if triggered:
-                lines.append("FRAMEWORK_PR plateau detected: recent batches all below keep-gain threshold.")
+                lines.append("FRAMEWORK plateau detected: recent batches all below keep-gain threshold.")
                 lines.append(
                     "  lookback="
                     f"{evidence.get('lookback', 0)} "
@@ -11011,23 +11011,23 @@ class Coordinator:
                     )
             # integrate_patch completion handling.
             if task.kind == "integrate_patch":
-                # FRAMEWORK_PR authoring bridge: record authored-patch KEEP/REVERT into framework_pr_phase_progress.
+                # FRAMEWORK authoring bridge: record authored-patch KEEP/REVERT into framework_phase_progress.
                 if (
                     getattr(
                         self.shared_state,
-                        "framework_pr_authoring_enabled",
+                        "framework_authoring_enabled",
                         False,
                     )
-                    and (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_PR
+                    and (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK
                 ):
                     try:
-                        self._record_framework_pr_authored_outcome(
+                        self._record_framework_authored_outcome(
                             task=task,
                             result=result,
                         )
                     except Exception:  # noqa: BLE001 — defensive
                         log.exception(
-                            "FRAMEWORK_PR authored-outcome bridge failed for task=%s",
+                            "FRAMEWORK authored-outcome bridge failed for task=%s",
                             task.task_id,
                         )
             # Auto-promote succeeded results into CORE_STATE_FIELDS (Coordinator-only writer); promotion needs task-specific invariants beyond no-throw.
@@ -11995,8 +11995,8 @@ class Coordinator:
                 "patches_applied": result.get("patches_applied") or [],
                 "patches_reverted": result.get("patches_reverted") or [],
             }
-        elif task_kind == "framework_pr":
-            # FRAMEWORK_PR per-candidate result: append a progress row, update the batch max-gain stat, and on
+        elif task_kind == "framework":
+            # FRAMEWORK per-candidate result: append a progress row, update the batch max-gain stat, and on
             # KEEP lift to current_best + optimization_stack + cumulative_gain_validated + watermark roofline.
             status = str(result.get("status") or "")
             candidate = result.get("candidate") or {}
@@ -12016,11 +12016,11 @@ class Coordinator:
                 "batch_id": batch_id,
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
-            if not isinstance(self.shared_state.framework_pr_phase_progress, list):
-                self.shared_state.framework_pr_phase_progress = []
-            self.shared_state.framework_pr_phase_progress.append(progress_entry)
+            if not isinstance(self.shared_state.framework_phase_progress, list):
+                self.shared_state.framework_phase_progress = []
+            self.shared_state.framework_phase_progress.append(progress_entry)
             # Update batch max-gain rolling stat (for the plateau judge).
-            batches = getattr(self.shared_state, "framework_pr_batches", None) or []
+            batches = getattr(self.shared_state, "framework_batches", None) or []
             if isinstance(batches, list) and batches:
                 for entry in reversed(batches):
                     if isinstance(entry, dict) and str(entry.get("batch_id") or "") == batch_id:
@@ -12032,13 +12032,13 @@ class Coordinator:
             changed = True
             if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
                 lift = {
-                    "name": f"framework-pr:{cand_id}",
+                    "name": f"framework:{cand_id}",
                     "variant_name": cand_id,
                     "candidate_extra_server_args": "",
                     "extra_envs": {},
                     "workspace": result.get("workspace"),
                 }
-                self._lift_to_current_best("framework_pr", float(new_tput), lift)
+                self._lift_to_current_best("framework", float(new_tput), lift)
                 if self.shared_state.baseline_tput > 0:
                     validated_gain = (
                         (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
@@ -12047,7 +12047,7 @@ class Coordinator:
                     self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
                     self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
                     await self._maybe_enqueue_watermark_roofline(
-                        reason="framework_pr_keep_watermark",
+                        reason="framework_keep_watermark",
                     )
             audit_decision = "promoted" if kept_flag else "discarded"
             audit_extras = {

@@ -111,7 +111,7 @@ def _append_record_sync(record: dict) -> Path:
     return path
 
 
-async def write_framework_pr_record(
+async def write_framework_record(
     *,
     pr_url: str,
     pr_sha: str,
@@ -131,7 +131,7 @@ async def write_framework_pr_record(
     * ``session_id`` — orchestrator session id.
     """
     if outcome not in ALLOWED_OUTCOMES:
-        raise ValueError(f"write_framework_pr_record: outcome={outcome!r} must be one of {sorted(ALLOWED_OUTCOMES)!r}")
+        raise ValueError(f"write_framework_record: outcome={outcome!r} must be one of {sorted(ALLOWED_OUTCOMES)!r}")
     record = _record(
         pr_url=pr_url,
         pr_sha=pr_sha,
@@ -150,5 +150,5 @@ __all__ = [
     "OUTCOME_INTEGRATED",
     "OUTCOME_REJECTED_APPLY_FAIL",
     "OUTCOME_REVERTED_SMOKE_FAIL",
-    "write_framework_pr_record",
+    "write_framework_record",
 ]

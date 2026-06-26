@@ -83,7 +83,7 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset(
         "explore",
         "specialist",
         "integrate_patch",
-        "framework_pr",
+        "framework",
         "integrate",
         "kernel_opt",
         "deep_kernel_analysis",

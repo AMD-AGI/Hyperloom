@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Pure-function tests for FRAMEWORK_PR phase routing and exit conditions."""
+"""Pure-function tests for FRAMEWORK phase routing and exit conditions."""
 
 from __future__ import annotations
 
@@ -16,19 +16,19 @@ class _State:
     def __init__(
         self,
         *,
-        phase: str = phase_state.PHASE_FRAMEWORK_PR,
+        phase: str = phase_state.PHASE_FRAMEWORK,
         baseline_tput: float | None = 1500.0,
-        framework_pr_batches: list[dict[str, Any]] | None = None,
-        framework_pr_phase_done: bool = False,
-        framework_pr_phase_progress: list[dict[str, Any]] | None = None,
+        framework_batches: list[dict[str, Any]] | None = None,
+        framework_phase_done: bool = False,
+        framework_phase_progress: list[dict[str, Any]] | None = None,
         remaining_minutes_value: float = 9999.0,
         phase_history: list[dict[str, Any]] | None = None,
     ) -> None:
         self.phase = phase
         self.baseline_tput = baseline_tput
-        self.framework_pr_batches = framework_pr_batches or []
-        self.framework_pr_phase_done = framework_pr_phase_done
-        self.framework_pr_phase_progress = framework_pr_phase_progress or []
+        self.framework_batches = framework_batches or []
+        self.framework_phase_done = framework_phase_done
+        self.framework_phase_progress = framework_phase_progress or []
         self._rem_min = remaining_minutes_value
         self.phase_history = phase_history or []
         self.optimization_stack: list[dict[str, Any]] = []
@@ -43,33 +43,33 @@ class _State:
 
 
 # PHASE_NAMES + exit reason vocab presence
-def test_framework_pr_is_in_phase_names_between_prelude_and_explore():
+def test_framework_is_in_phase_names_between_prelude_and_explore():
     names = phase_state.PHASE_NAMES
-    i = names.index("FRAMEWORK_PR")
+    i = names.index("FRAMEWORK")
     assert i > 0
     assert names[i - 1] == "PRELUDE"
     assert names[i + 1] == "EXPLORE"
 
 
-def test_framework_pr_exit_reasons_registered():
+def test_framework_exit_reasons_registered():
     reasons = {
-        "framework_pr_phase_done",
-        "framework_pr_plateau",
-        "framework_pr_force_exit_low_budget",
+        "framework_phase_done",
+        "framework_plateau",
+        "framework_force_exit_low_budget",
     }
     assert reasons <= phase_state.PHASE_EXIT_REASONS
     assert reasons <= phase_state.STOP_REASON_VOCAB
 
 
-def test_framework_pr_skipped_is_not_a_registered_reason():
-    """``framework_pr_skipped`` is dead vocab — never emitted, must not be registered."""
-    assert "framework_pr_skipped" not in phase_state.PHASE_EXIT_REASONS
-    assert "framework_pr_skipped" not in phase_state.STOP_REASON_VOCAB
+def test_framework_skipped_is_not_a_registered_reason():
+    """``framework_skipped`` is dead vocab — never emitted, must not be registered."""
+    assert "framework_skipped" not in phase_state.PHASE_EXIT_REASONS
+    assert "framework_skipped" not in phase_state.STOP_REASON_VOCAB
 
 
-def test_framework_pr_action_allowlist():
-    allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase_state.PHASE_FRAMEWORK_PR]
-    assert "framework_pr" in allowed
+def test_framework_action_allowlist():
+    allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase_state.PHASE_FRAMEWORK]
+    assert "framework" in allowed
     assert "integrate_patch" in allowed
     assert "roofline" in allowed
     assert "profile" in allowed
@@ -78,31 +78,31 @@ def test_framework_pr_action_allowlist():
     assert "specialist" not in allowed
 
 
-# exit_normal_framework_pr
-def test_exit_normal_framework_pr_returns_none_when_nothing_to_do():
+# exit_normal_framework
+def test_exit_normal_framework_returns_none_when_nothing_to_do():
     state = _State()
-    assert phase_state.exit_normal_framework_pr(state) is None
+    assert phase_state.exit_normal_framework(state) is None
 
 
-def test_exit_normal_framework_pr_force_exit_when_remaining_below_ratio():
+def test_exit_normal_framework_force_exit_when_remaining_below_ratio():
     # remaining 30min < 0.6 × 2h × 60 = 72min → fires.
     state = _State(remaining_minutes_value=30.0)
-    out = phase_state.exit_normal_framework_pr(state, max_hours=2.0)
+    out = phase_state.exit_normal_framework(state, max_hours=2.0)
     assert out is not None
     reason, ev = out
-    assert reason == "framework_pr_force_exit_low_budget"
+    assert reason == "framework_force_exit_low_budget"
     assert ev["evidence"] == "force_exit"
     assert ev["remaining_minutes"] == 30.0
 
 
-def test_exit_normal_framework_pr_no_force_exit_when_remaining_above_ratio():
+def test_exit_normal_framework_no_force_exit_when_remaining_above_ratio():
     # remaining 80min > 0.6 × 2h × 60 = 72min → no force exit.
     state = _State(remaining_minutes_value=80.0)
-    assert phase_state.exit_normal_framework_pr(state, max_hours=2.0) is None
+    assert phase_state.exit_normal_framework(state, max_hours=2.0) is None
 
 
-def test_exit_normal_framework_pr_does_not_exit_on_plateau():
-    """FRAMEWORK_PR plateau is advisory only, never exits the phase."""
+def test_exit_normal_framework_does_not_exit_on_plateau():
+    """FRAMEWORK plateau is advisory only, never exits the phase."""
     batches = [
         {
             "batch_id": "b1",
@@ -126,14 +126,14 @@ def test_exit_normal_framework_pr_does_not_exit_on_plateau():
         {"batch_id": "b3", "candidate_id": "c3a", "status": "reject"},
     ]
     state = _State(
-        framework_pr_batches=batches,
-        framework_pr_phase_progress=progress,
+        framework_batches=batches,
+        framework_phase_progress=progress,
     )
-    assert phase_state.exit_normal_framework_pr(state) is None
+    assert phase_state.exit_normal_framework(state) is None
 
 
-def test_compute_plateau_framework_pr_returns_signal():
-    """compute_plateau_framework_pr remains as a pure advisory."""
+def test_compute_plateau_framework_returns_signal():
+    """compute_plateau_framework remains as a pure advisory."""
     batches = [
         {
             "batch_id": "b1",
@@ -157,15 +157,15 @@ def test_compute_plateau_framework_pr_returns_signal():
         {"batch_id": "b3", "candidate_id": "c3a", "status": "reject"},
     ]
     state = _State(
-        framework_pr_batches=batches,
-        framework_pr_phase_progress=progress,
+        framework_batches=batches,
+        framework_phase_progress=progress,
     )
-    triggered, ev = phase_state.compute_plateau_framework_pr(state)
+    triggered, ev = phase_state.compute_plateau_framework(state)
     assert triggered is True
     assert ev["lookback"] == 3
 
 
-def test_exit_normal_framework_pr_force_exit_evidence_carries_pending_count():
+def test_exit_normal_framework_force_exit_evidence_carries_pending_count():
     """Regression for P1.a — force-exit evidence surfaces ``pending_candidate_count``."""
     batches = [
         {
@@ -178,27 +178,27 @@ def test_exit_normal_framework_pr_force_exit_evidence_carries_pending_count():
         {"batch_id": "b1", "candidate_id": "c1a", "status": "reject"},
     ]
     state = _State(
-        framework_pr_batches=batches,
-        framework_pr_phase_progress=progress,
+        framework_batches=batches,
+        framework_phase_progress=progress,
         remaining_minutes_value=10.0,
     )
-    out = phase_state.exit_normal_framework_pr(state, max_hours=2.0)
+    out = phase_state.exit_normal_framework(state, max_hours=2.0)
     assert out is not None
     reason, ev = out
-    assert reason == "framework_pr_force_exit_low_budget"
+    assert reason == "framework_force_exit_low_budget"
     assert ev["pending_candidate_count"] == 2
 
 
-def test_exit_normal_framework_pr_phase_done_when_signalled():
-    state = _State(framework_pr_phase_done=True)
-    out = phase_state.exit_normal_framework_pr(state)
+def test_exit_normal_framework_phase_done_when_signalled():
+    state = _State(framework_phase_done=True)
+    out = phase_state.exit_normal_framework(state)
     assert out is not None
     reason, ev = out
-    assert reason == "framework_pr_phase_done"
+    assert reason == "framework_phase_done"
     assert ev["evidence"] == "no_more_candidates"
 
 
-def test_exit_normal_framework_pr_force_exit_beats_phase_done():
+def test_exit_normal_framework_force_exit_beats_phase_done():
     """Priority order: force-exit > phase_done."""
     batches = [
         {"max_gain_pct_observed_in_batch": 0.1},
@@ -206,22 +206,22 @@ def test_exit_normal_framework_pr_force_exit_beats_phase_done():
         {"max_gain_pct_observed_in_batch": 0.1},
     ]
     state = _State(
-        framework_pr_batches=batches,
-        framework_pr_phase_done=True,
+        framework_batches=batches,
+        framework_phase_done=True,
         remaining_minutes_value=10.0,
     )
-    out = phase_state.exit_normal_framework_pr(state, max_hours=2.0)
+    out = phase_state.exit_normal_framework(state, max_hours=2.0)
     assert out is not None
-    assert out[0] == "framework_pr_force_exit_low_budget"
+    assert out[0] == "framework_force_exit_low_budget"
 
 
 # compute_next_phase routing (with explicit framework_phase_enabled)
-def test_compute_next_phase_prelude_to_framework_pr_when_enabled():
+def test_compute_next_phase_prelude_to_framework_when_enabled():
     state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
     out = phase_state.compute_next_phase(state, framework_phase_enabled=True)
     assert out is not None
     next_phase, reason, _ev = out
-    assert next_phase == phase_state.PHASE_FRAMEWORK_PR
+    assert next_phase == phase_state.PHASE_FRAMEWORK
     assert reason == "prelude_done"
 
 
@@ -235,11 +235,11 @@ def test_compute_next_phase_prelude_to_explore_when_disabled_keeps_prelude_done_
     assert reason == "prelude_done"
 
 
-def test_compute_next_phase_framework_pr_does_not_advance_on_plateau():
-    """Plateau no longer drives FRAMEWORK_PR exit."""
+def test_compute_next_phase_framework_does_not_advance_on_plateau():
+    """Plateau no longer drives FRAMEWORK exit."""
     state = _State(
-        phase=phase_state.PHASE_FRAMEWORK_PR,
-        framework_pr_batches=[
+        phase=phase_state.PHASE_FRAMEWORK,
+        framework_batches=[
             {"max_gain_pct_observed_in_batch": 0.0},
             {"max_gain_pct_observed_in_batch": 0.5},
             {"max_gain_pct_observed_in_batch": 0.7},
@@ -248,9 +248,9 @@ def test_compute_next_phase_framework_pr_does_not_advance_on_plateau():
     assert phase_state.compute_next_phase(state, framework_phase_enabled=True) is None
 
 
-def test_compute_next_phase_framework_pr_force_exit_passes_max_hours_through():
+def test_compute_next_phase_framework_force_exit_passes_max_hours_through():
     state = _State(
-        phase=phase_state.PHASE_FRAMEWORK_PR,
+        phase=phase_state.PHASE_FRAMEWORK,
         remaining_minutes_value=30.0,
     )
     out = phase_state.compute_next_phase(
@@ -261,12 +261,12 @@ def test_compute_next_phase_framework_pr_force_exit_passes_max_hours_through():
     assert out is not None
     next_phase, reason, ev = out
     assert next_phase == phase_state.PHASE_EXPLORE
-    assert reason == "framework_pr_force_exit_low_budget"
+    assert reason == "framework_force_exit_low_budget"
     assert ev["max_hours"] == 2.0
 
 
-def test_compute_next_phase_framework_pr_stays_when_no_signal():
-    state = _State(phase=phase_state.PHASE_FRAMEWORK_PR)
+def test_compute_next_phase_framework_stays_when_no_signal():
+    state = _State(phase=phase_state.PHASE_FRAMEWORK)
     out = phase_state.compute_next_phase(
         state,
         framework_phase_enabled=True,
@@ -306,11 +306,11 @@ def test_compute_next_phase_prelude_skips_to_sweep_when_no_explore_no_kernel():
     assert ev.get("explore_skipped") is True
 
 
-def test_compute_next_phase_framework_pr_skips_explore_to_kernel():
-    """With explore disabled, FRAMEWORK_PR phase_done routes straight to KERNEL."""
+def test_compute_next_phase_framework_skips_explore_to_kernel():
+    """With explore disabled, FRAMEWORK phase_done routes straight to KERNEL."""
     state = _State(
-        phase=phase_state.PHASE_FRAMEWORK_PR,
-        framework_pr_phase_done=True,
+        phase=phase_state.PHASE_FRAMEWORK,
+        framework_phase_done=True,
     )
     out = phase_state.compute_next_phase(
         state,
@@ -321,7 +321,7 @@ def test_compute_next_phase_framework_pr_skips_explore_to_kernel():
     assert out is not None
     next_phase, reason, ev = out
     assert next_phase == phase_state.PHASE_KERNEL
-    assert reason == "framework_pr_phase_done"
+    assert reason == "framework_phase_done"
     assert ev.get("explore_skipped") is True
 
 

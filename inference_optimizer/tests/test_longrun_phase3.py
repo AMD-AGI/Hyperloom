@@ -168,8 +168,8 @@ async def test_soft_restart_runs_at_loopback(cyclic_coordinator):
 
     await c._advance_phase_if_needed()
 
-    # Reloop targets FRAMEWORK_PR (highest-leverage layer, enabled by default).
-    assert st.phase == ps.PHASE_FRAMEWORK_PR
+    # Reloop targets FRAMEWORK (highest-leverage layer, enabled by default).
+    assert st.phase == ps.PHASE_FRAMEWORK
     assert st.macro_cycle == 1
     # Conversation reset for the new cycle.
     assert c._orchestration_seeded is False

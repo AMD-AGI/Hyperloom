@@ -150,7 +150,7 @@ def test_specialist_web_tools_allowed_in_any_phase(
 
 def test_specialist_pr_monitor_allowed_in_any_phase():
     """PR Monitor read tools are usable in any phase."""
-    for phase in ("PRELUDE", "FRAMEWORK_PR", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
+    for phase in ("PRELUDE", "FRAMEWORK", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
         gate = _gate(_State(phase=phase))
         for tool in PR_MONITOR_TOOL_NAMES:
             gate.validate_tool_invocation(tool, source_role="specialist")

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Coverage for framework_pr git/subprocess helpers: rev-parse / reset-hard /
+"""Coverage for framework git/subprocess helpers: rev-parse / reset-hard /
 commit error+success branches, repo-id normalization, and same-repo gating."""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from inference_optimizer.orchestrator.action_executors import _git as gitmod
-from inference_optimizer.orchestrator.action_executors import framework_pr as fp
+from inference_optimizer.orchestrator.action_executors import framework as fp
 
 
 class _CP:

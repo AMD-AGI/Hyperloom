@@ -35,14 +35,14 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
 
 
 # Kept separate because PolicyGate emits a framework-specific denial hint.
-FRAMEWORK_PR_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset(
+FRAMEWORK_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset(
     {
-        "framework_pr",
+        "framework",
     }
 )
 
 
-COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES | FRAMEWORK_PR_INTERNAL_ACTION_NAMES
+COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES | FRAMEWORK_INTERNAL_ACTION_NAMES
 
 
 # Coordinator-internal actions that intentionally do not appear in
@@ -111,7 +111,7 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
 
 __all__ = [
     "COORDINATOR_INTERNAL_ACTIONS",
-    "FRAMEWORK_PR_INTERNAL_ACTION_NAMES",
+    "FRAMEWORK_INTERNAL_ACTION_NAMES",
     "FULL_ENABLED_ACTIONS",
     "GRID_INJECTABLE_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",

@@ -4,7 +4,7 @@
 ``fa phase-discover`` subcommand.
 
 The only framework-agent entry point wired into the Coordinator pump:
-returns a batch of candidate PRs; the Critic gate + ``FrameworkPrExecutor``
+returns a batch of candidate PRs; the Critic gate + ``FrameworkExecutor``
 handle the rest. Invoked via ``asyncio.to_thread`` so the reactor never
 blocks; failures degrade to empty / ``RuntimeError`` that the pump absorbs.
 """
@@ -189,7 +189,7 @@ async def phase_discover(
     batch_id: str = "",
     timeout_sec: float = DEFAULT_FA_PHASE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
-    """FRAMEWORK_PR-phase batch discovery shim.
+    """FRAMEWORK-phase batch discovery shim.
 
     Non-empty ``keywords`` is used verbatim for the primus-cortex AND-search
     (fa skips its own ``extract_keywords``); empty/``None`` keeps the legacy

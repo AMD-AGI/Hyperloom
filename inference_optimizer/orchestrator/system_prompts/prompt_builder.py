@@ -138,7 +138,7 @@ def _section_session_context(
         "block lists the exact set of actions you may propose this tick;",
         "anything outside that set returns `policy_denied` with rule",
         "`phase_incompatible`. The 6-phase chain is:",
-        "  PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE",
+        "  PRELUDE → FRAMEWORK → EXPLORE → KERNEL → SWEEP → CLOSE",
         "Disabled phases (see PHASE CONTRACT below) are skipped but keep their place in the chain. Transitions are Coordinator-owned (you cannot write phase).",
     ]
 
@@ -160,7 +160,7 @@ def _section_phase_semantics(
     Args:
         kernel_enabled: Whether kernel-owned actions are enabled.
         explore_enabled: Whether the EXPLORE phase is enabled.
-        framework_phase_enabled: Whether the FRAMEWORK_PR phase is enabled.
+        framework_phase_enabled: Whether the FRAMEWORK phase is enabled.
 
     Returns:
         Markdown lines for the phase-contract section.
@@ -173,7 +173,7 @@ def _section_phase_semantics(
     # phase name -> the flag that disabled it (None => always enabled).
     disabled_suffix: dict[str, str] = {}
     if not framework_phase_enabled:
-        disabled_suffix["FRAMEWORK_PR"] = "--no-framework"
+        disabled_suffix["FRAMEWORK"] = "--no-framework"
     if not explore_enabled:
         disabled_suffix["EXPLORE"] = "--no-explore"
     if not kernel_enabled:
@@ -201,7 +201,7 @@ def _section_phase_semantics(
     )
     lines.extend([
         "",
-        "roofline, profile, replay_warm_recipe and framework_pr are never",
+        "roofline, profile, replay_warm_recipe and framework are never",
         "in the sets above: the Coordinator auto-manages them and PolicyGate",
         "denies any attempt to propose them.",
         "",
@@ -905,7 +905,7 @@ def build_orchestration_prompt(
             skipped; the prompt annotates it as DISABLED so Orchestration's plan
             matches the real phase chain.
         framework_phase_enabled: when False (``--no-framework``) the
-            FRAMEWORK_PR phase is skipped; annotated DISABLED in the prompt.
+            FRAMEWORK phase is skipped; annotated DISABLED in the prompt.
         objective_kind: :mod:`objective` kind string, printed verbatim.
         objective_value: :mod:`objective` target value, printed verbatim.
         max_minutes: wall-clock budget for the run.
@@ -967,7 +967,7 @@ def default_enabled_actions(
     Filters :data:`FULL_ENABLED_ACTIONS` per flag so the flags compose: a
     ``--no-kernel --no-explore`` run drops both kernel-owned names and the
     ``explore`` grid-runner. ``--no-framework`` is intentionally absent — the
-    ``framework_pr`` action is Coordinator-internal and never appears in the
+    ``framework`` action is Coordinator-internal and never appears in the
     catalogue, so it has nothing to trim.
 
     Args:

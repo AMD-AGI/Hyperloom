@@ -31,7 +31,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
         "PRELUDE",
-        "FRAMEWORK_PR",
+        "FRAMEWORK",
         "EXPLORE",
         "KERNEL",
         "SWEEP",
@@ -84,14 +84,14 @@ def test_llm_proposable_set_drops_coordinator_internal_actions():
         # never LLM-proposable by Orchestration.
         assert "recover" in allowed
         assert "recover" not in proposable
-    # The advertised analysis / framework_pr names are never proposable.
+    # The advertised analysis / framework names are never proposable.
     explore = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["EXPLORE"]
     assert "roofline" not in explore
     assert "profile" not in explore
     assert "explore" in explore and "specialist" in explore
-    framework_pr = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["FRAMEWORK_PR"]
-    assert "framework_pr" not in framework_pr
-    assert "integrate_patch" in framework_pr
+    framework = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["FRAMEWORK"]
+    assert "framework" not in framework
+    assert "integrate_patch" in framework
 
 
 def test_is_action_llm_proposable_in_phase_handles_unknowns():
@@ -100,7 +100,7 @@ def test_is_action_llm_proposable_in_phase_handles_unknowns():
     # roofline lives in the allowlist but is never LLM-proposable.
     assert phase_state.is_action_allowed_in_phase("roofline", "EXPLORE")
     assert not phase_state.is_action_llm_proposable_in_phase("roofline", "EXPLORE")
-    assert not phase_state.is_action_llm_proposable_in_phase("framework_pr", "FRAMEWORK_PR")
+    assert not phase_state.is_action_llm_proposable_in_phase("framework", "FRAMEWORK")
     # Unknown phase / empty action → deny by default.
     assert not phase_state.is_action_llm_proposable_in_phase("baseline", "UNKNOWN")
     assert not phase_state.is_action_llm_proposable_in_phase("", "PRELUDE")
@@ -156,8 +156,8 @@ def test_phase_interleave_on_widens_explore_and_kernel():
     assert "specialist" in kernel
     assert "integrate_patch" in kernel
     assert "kernel_opt" in kernel  # native KERNEL actions still present
-    # SWEEP / CLOSE / PRELUDE / FRAMEWORK_PR are unchanged.
-    for phase in ("PRELUDE", "FRAMEWORK_PR", "SWEEP", "CLOSE"):
+    # SWEEP / CLOSE / PRELUDE / FRAMEWORK are unchanged.
+    for phase in ("PRELUDE", "FRAMEWORK", "SWEEP", "CLOSE"):
         base = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS.get(
             phase,
             frozenset(),
@@ -217,9 +217,9 @@ def test_phase_exit_reasons_includes_required_vocab():
         "explore_force_exit_low_budget",
         "explore_no_more_leverage",
         "kernel_no_more_leverage",
-        "framework_pr_phase_done",
-        "framework_pr_plateau",
-        "framework_pr_force_exit_low_budget",
+        "framework_phase_done",
+        "framework_plateau",
+        "framework_force_exit_low_budget",
         "cycle_reloop",
         "global_converged",
         "robustness_escalated",
@@ -297,7 +297,7 @@ def test_exit_normal_prelude_triggers_on_baseline_tput():
 
 
 def test_exit_normal_prelude_blocked_while_warm_replay_in_flight():
-    """PRELUDE must not advance to FRAMEWORK_PR until warm-replay settles."""
+    """PRELUDE must not advance to FRAMEWORK until warm-replay settles."""
     state = SimpleNamespace(
         baseline_tput=1234.5,
         warm_replay_outcome={"status": "in_flight", "replay_task_id": "abc"},
@@ -689,14 +689,14 @@ async def test_coordinator_advances_to_explore_when_baseline_present(
 ):
     c = coordinator_with_mocks
     try:
-        # Skip FRAMEWORK_PR so this exercises the legacy PRELUDE→EXPLORE contract.
+        # Skip FRAMEWORK so this exercises the legacy PRELUDE→EXPLORE contract.
         c.shared_state.framework_phase_enabled = False
         # Simulate baseline KEEP: write the event that triggers prelude_done.
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)
         assert c.shared_state.phase == "EXPLORE"
-        # 2 rows: PRELUDE entry + PRELUDE→EXPLORE (FRAMEWORK_PR skipped).
+        # 2 rows: PRELUDE entry + PRELUDE→EXPLORE (FRAMEWORK skipped).
         assert len(c.shared_state.phase_history) == 2
         last = c.shared_state.phase_history[-1]
         assert last["from_phase"] == "PRELUDE"

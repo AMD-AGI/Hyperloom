@@ -426,7 +426,7 @@ class SharedState:
     # Snapshot of the last PerfSkills e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
     perfskills_result: dict[str, Any] = field(default_factory=dict)
-    # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK_PR route to KERNEL (or SWEEP).
+    # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK route to KERNEL (or SWEEP).
     explore_enabled: bool = True
     # After FP8 GEMM tuning succeeds, continue into source-level kernel_opt by default.
     continue_kernel_after_gemm: bool = True
@@ -550,28 +550,28 @@ class SharedState:
     roofline_failure_streak: int = 0
 
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
-    # FRAMEWORK_PR phase toggle (PRELUDE → FRAMEWORK_PR → EXPLORE); ``--no-framework`` opts out. Absent from PHASE_LLM_PROPOSABLE_ACTIONS so PolicyGate R1 blocks LLM proposal.
+    # FRAMEWORK phase toggle (PRELUDE → FRAMEWORK → EXPLORE); ``--no-framework`` opts out. Absent from PHASE_LLM_PROPOSABLE_ACTIONS so PolicyGate R1 blocks LLM proposal.
     framework_phase_enabled: bool = True
-    # FRAMEWORK_PR progress: one entry per candidate benchmark; used by breakdown + plateau exit judgment.
-    framework_pr_phase_progress: list[dict[str, Any]] = field(
+    # FRAMEWORK progress: one entry per candidate benchmark; used by breakdown + plateau exit judgment.
+    framework_phase_progress: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # One row per phase-discover batch; read by exit_normal_framework_pr plateau gate (3 batches <1% => exit).
-    framework_pr_batches: list[dict[str, Any]] = field(
+    # One row per phase-discover batch; read by exit_normal_framework plateau gate (3 batches <1% => exit).
+    framework_batches: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # True when FRAMEWORK_PR loop has no more candidates; compute_next_phase uses it for framework_pr_phase_done exit.
-    framework_pr_phase_done: bool = False
+    # True when FRAMEWORK loop has no more candidates; compute_next_phase uses it for framework_phase_done exit.
+    framework_phase_done: bool = False
     # Consecutive ``fa phase-discover`` failures; phase marked done only after DISCOVER_FAILURE_RETRY_LIMIT (default 3).
-    framework_pr_discover_failures: int = 0
-    # Per-repo candidate cap for ``fa phase-discover``; 0 => DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES.
-    framework_pr_max_candidates: int = 0
-    # FRAMEWORK_PR Critic-gate decisions; cache lets resume avoid re-calling the Critic.
-    framework_pr_critic_decisions: list[dict[str, Any]] = field(
+    framework_discover_failures: int = 0
+    # Per-repo candidate cap for ``fa phase-discover``; 0 => DEFAULT_FRAMEWORK_MAX_CANDIDATES.
+    framework_max_candidates: int = 0
+    # FRAMEWORK Critic-gate decisions; cache lets resume avoid re-calling the Critic.
+    framework_critic_decisions: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # Default True: FRAMEWORK_PR pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
-    framework_pr_authoring_enabled: bool = True
+    # Default True: FRAMEWORK pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
+    framework_authoring_enabled: bool = True
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``. Absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposal).
     enable_roofline: bool = True
     # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM measure time when warm-decision is active, else the cold baseline; the kill clock starts at the server-ready marker so it measures the warm client-only phase (apples-to-apples with the anchor). Warmup + stack-rebench exempt. Default 2.0x.
@@ -644,7 +644,7 @@ class SharedState:
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
     # Current run of contiguous config KEEPs; resets when a code_patch KEEP lands.
     consecutive_config_only_rounds: int = 0
-    # Research scout bookkeeping; master switch ``--no-research-scout``; seen_pr_ids shared with FRAMEWORK_PR to avoid re-mining.
+    # Research scout bookkeeping; master switch ``--no-research-scout``; seen_pr_ids shared with FRAMEWORK to avoid re-mining.
     research_scout_enabled: bool = True
     research_scout_interval: int = 3
     # Master switch for advisory "External target gap" prompt block (``--no-target-advisory``); never gates Objective.
@@ -694,7 +694,7 @@ class SharedState:
     target_gap_pct: float = 0.0
 
     # Phase state machine fields
-    # ``phase`` — run-level pipeline phase (PRELUDE/FRAMEWORK_PR/EXPLORE/KERNEL/SWEEP/CLOSE); Coordinator-only (CORE_STATE_FIELDS). Empty => not yet initialised.
+    # ``phase`` — run-level pipeline phase (PRELUDE/FRAMEWORK/EXPLORE/KERNEL/SWEEP/CLOSE); Coordinator-only (CORE_STATE_FIELDS). Empty => not yet initialised.
     phase: str = ""
     # ISO UTC timestamp the current phase was entered (breakdown.phase_segments + budget judge).
     phase_started_ts: str = ""
@@ -2702,7 +2702,7 @@ class SharedState:
         return self.research_scout_runs
 
     def register_seen_pr_ids(self, pr_ids: Any) -> int:
-        """Add PR ids to the shared seen-set (scout + FRAMEWORK_PR dedup); returns count newly added.
+        """Add PR ids to the shared seen-set (scout + FRAMEWORK dedup); returns count newly added.
 
         Args:
             pr_ids (Any): An iterable of PR id values; blanks and duplicates
@@ -2726,7 +2726,7 @@ class SharedState:
         return added
 
     def has_seen_pr_id(self, pr_id: Any) -> bool:
-        """True iff ``pr_id`` was already surfaced by scout / FRAMEWORK_PR.
+        """True iff ``pr_id`` was already surfaced by scout / FRAMEWORK.
 
         Args:
             pr_id (Any): The PR id to check.

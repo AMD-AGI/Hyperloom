@@ -1253,13 +1253,13 @@ async def test_promote_explore_discovered_flags_and_bad_winner(
 
 
 @pytest.mark.asyncio
-async def test_promote_framework_pr_updates_batch_max_gain(coord: Coordinator) -> None:
+async def test_promote_framework_updates_batch_max_gain(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
-    coord.shared_state.framework_pr_batches = [
+    coord.shared_state.framework_batches = [
         {"batch_id": "b1", "max_gain_pct_observed_in_batch": 1.0},
     ]
     await coord._promote_to_shared_state(
-        "framework_pr",
+        "framework",
         {
             "status": "kept",
             "candidate": {"candidate_id": "c1", "pr_url": "http://x/1"},
@@ -1268,7 +1268,7 @@ async def test_promote_framework_pr_updates_batch_max_gain(coord: Coordinator) -
             "output_throughput": 856.0,
         },
     )
-    assert coord.shared_state.framework_pr_batches[0]["max_gain_pct_observed_in_batch"] == 7.0
+    assert coord.shared_state.framework_batches[0]["max_gain_pct_observed_in_batch"] == 7.0
 
 
 @pytest.mark.asyncio
@@ -1460,15 +1460,15 @@ async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_plateau_advisory_framework_pr_triggered(coord: Coordinator, monkeypatch) -> None:
+async def test_plateau_advisory_framework_triggered(coord: Coordinator, monkeypatch) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
 
-    coord.shared_state.phase = ps.PHASE_FRAMEWORK_PR
+    coord.shared_state.phase = ps.PHASE_FRAMEWORK
     monkeypatch.setattr(
-        ps, "compute_plateau_framework_pr", lambda *a, **k: (True, {"lookback": 3, "batch_max_gains": [0.1]})
+        ps, "compute_plateau_framework", lambda *a, **k: (True, {"lookback": 3, "batch_max_gains": [0.1]})
     )
     out = coord._plateau_advisory_block()
-    assert "FRAMEWORK_PR plateau detected" in out
+    assert "FRAMEWORK plateau detected" in out
 
 
 # -- _record_specialist_result ----------------------------------------------
@@ -1978,77 +1978,77 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
     assert coord.shared_state.stop_reason  # derived stop reason persisted
 
 
-# -- _pump_framework_pr_phase -----------------------------------------------
-def _enter_framework_pr(coord: Coordinator) -> None:
+# -- _pump_framework_phase -----------------------------------------------
+def _enter_framework(coord: Coordinator) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
 
-    coord.shared_state.phase = ps.PHASE_FRAMEWORK_PR
-    coord.shared_state.framework_pr_phase_done = False
+    coord.shared_state.phase = ps.PHASE_FRAMEWORK
+    coord.shared_state.framework_phase_done = False
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_wrong_phase_noop(coord: Coordinator) -> None:
+async def test_pump_framework_wrong_phase_noop(coord: Coordinator) -> None:
     coord.shared_state.phase = "EXPLORE"
-    await coord._pump_framework_pr_phase()  # early return
+    await coord._pump_framework_phase()  # early return
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_phase_done_noop(coord: Coordinator) -> None:
-    _enter_framework_pr(coord)
-    coord.shared_state.framework_pr_phase_done = True
-    await coord._pump_framework_pr_phase()  # early return
+async def test_pump_framework_phase_done_noop(coord: Coordinator) -> None:
+    _enter_framework(coord)
+    coord.shared_state.framework_phase_done = True
+    await coord._pump_framework_phase()  # early return
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_skips_when_task_inflight(coord: Coordinator) -> None:
-    _enter_framework_pr(coord)
-    await coord.tasks.create(kind="framework_pr", params={}, idempotency_key="fpr-inflight")
-    await coord._pump_framework_pr_phase()  # a framework_pr task exists -> return
+async def test_pump_framework_skips_when_task_inflight(coord: Coordinator) -> None:
+    _enter_framework(coord)
+    await coord.tasks.create(kind="framework", params={}, idempotency_key="fpr-inflight")
+    await coord._pump_framework_phase()  # a framework task exists -> return
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_discover_empty_marks_done(coord: Coordinator, monkeypatch) -> None:
-    _enter_framework_pr(coord)
-    coord.shared_state.framework_pr_discover_failures = 0
-    monkeypatch.setattr(coord, "_select_next_framework_pr_candidate", lambda: None)
+async def test_pump_framework_discover_empty_marks_done(coord: Coordinator, monkeypatch) -> None:
+    _enter_framework(coord)
+    coord.shared_state.framework_discover_failures = 0
+    monkeypatch.setattr(coord, "_select_next_framework_candidate", lambda: None)
 
     async def _disc():
         return False
 
-    monkeypatch.setattr(coord, "_discover_next_framework_pr_batch", _disc)
-    monkeypatch.setattr(coord, "_record_framework_pr_phase_done", lambda **k: None)
-    await coord._pump_framework_pr_phase()
-    assert coord.shared_state.framework_pr_phase_done is True
+    monkeypatch.setattr(coord, "_discover_next_framework_batch", _disc)
+    monkeypatch.setattr(coord, "_record_framework_phase_done", lambda **k: None)
+    await coord._pump_framework_phase()
+    assert coord.shared_state.framework_phase_done is True
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_critic_rejects(coord: Coordinator, monkeypatch) -> None:
-    _enter_framework_pr(coord)
-    monkeypatch.setattr(coord, "_select_next_framework_pr_candidate", lambda: {"candidate_id": "c1", "batch_id": "b1"})
+async def test_pump_framework_critic_rejects(coord: Coordinator, monkeypatch) -> None:
+    _enter_framework(coord)
+    monkeypatch.setattr(coord, "_select_next_framework_candidate", lambda: {"candidate_id": "c1", "batch_id": "b1"})
 
     async def _review(cand):
         return {"verdict": "reject", "rationale": "unsafe"}
 
-    monkeypatch.setattr(coord, "_critic_review_framework_pr_candidate", _review)
-    await coord._pump_framework_pr_phase()
-    prog = coord.shared_state.framework_pr_phase_progress
+    monkeypatch.setattr(coord, "_critic_review_framework_candidate", _review)
+    await coord._pump_framework_phase()
+    prog = coord.shared_state.framework_phase_progress
     assert any(p.get("status") == "critic_denied" for p in prog)
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_approve_enqueues(coord: Coordinator, monkeypatch) -> None:
-    _enter_framework_pr(coord)
-    monkeypatch.setattr(coord, "_select_next_framework_pr_candidate", lambda: {"candidate_id": "c2", "batch_id": "b2"})
+async def test_pump_framework_approve_enqueues(coord: Coordinator, monkeypatch) -> None:
+    _enter_framework(coord)
+    monkeypatch.setattr(coord, "_select_next_framework_candidate", lambda: {"candidate_id": "c2", "batch_id": "b2"})
 
     async def _review(cand):
         return {"verdict": "approve"}
 
-    monkeypatch.setattr(coord, "_critic_review_framework_pr_candidate", _review)
+    monkeypatch.setattr(coord, "_critic_review_framework_candidate", _review)
     enq: list = []
 
     async def _enqueue(cand):
         enq.append(cand)
 
-    monkeypatch.setattr(coord, "_enqueue_framework_pr_task", _enqueue)
-    await coord._pump_framework_pr_phase()
+    monkeypatch.setattr(coord, "_enqueue_framework_task", _enqueue)
+    await coord._pump_framework_phase()
     assert enq

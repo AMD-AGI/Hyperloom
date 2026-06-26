@@ -26,8 +26,8 @@ The four persistent agent roles and their permitted intents::
     │              │          │ + always-on tick                        │
     └──────────────┴──────────┴─────────────────────────────────────────┘
 
-The roster is exactly these four roles. Framework PR work runs as the
-Coordinator-owned FRAMEWORK_PR phase, not an agent role.
+The roster is exactly these four roles. Framework work runs as the
+Coordinator-owned FRAMEWORK phase, not an agent role.
 """
 
 from __future__ import annotations

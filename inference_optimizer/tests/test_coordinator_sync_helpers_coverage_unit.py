@@ -517,12 +517,12 @@ def test_kernel_opt_keep_pending(coord: Coordinator) -> None:
     assert coord._kernel_opt_keep_pending() == ""
 
 
-# -- framework_pr candidate selection -------------------------------------
-def test_select_next_framework_pr_candidate(coord: Coordinator) -> None:
+# -- framework candidate selection -------------------------------------
+def test_select_next_framework_candidate(coord: Coordinator) -> None:
     ss = coord.shared_state
-    ss.framework_pr_batches = []
-    assert coord._select_next_framework_pr_candidate() is None
-    ss.framework_pr_batches = [
+    ss.framework_batches = []
+    assert coord._select_next_framework_candidate() is None
+    ss.framework_batches = [
         {
             "candidates": [
                 {"candidate_id": "c1"},
@@ -530,21 +530,21 @@ def test_select_next_framework_pr_candidate(coord: Coordinator) -> None:
             ],
         }
     ]
-    ss.framework_pr_phase_progress = [{"candidate_id": "c1"}]
-    nxt = coord._select_next_framework_pr_candidate()
+    ss.framework_phase_progress = [{"candidate_id": "c1"}]
+    nxt = coord._select_next_framework_candidate()
     assert nxt == {"candidate_id": "c2"}
 
 
-def test_framework_pr_known_candidate_ids(coord: Coordinator) -> None:
+def test_framework_known_candidate_ids(coord: Coordinator) -> None:
     ss = coord.shared_state
-    ss.framework_pr_batches = [
+    ss.framework_batches = [
         {"candidates": [{"candidate_id": "c1"}, {"pr_url": "u2"}]},
     ]
     ss.research_scout_seen_pr_ids = ["p3"]
-    ids = coord._framework_pr_known_candidate_ids()
+    ids = coord._framework_known_candidate_ids()
     assert {"c1", "u2", "p3"}.issubset(ids)
     # tried refs reflects the same set
-    assert set(coord._framework_pr_tried_refs()) == ids
+    assert set(coord._framework_tried_refs()) == ids
 
 
 # -- module-level helpers --------------------------------------------------

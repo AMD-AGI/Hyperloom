@@ -13,7 +13,7 @@ from inference_optimizer.orchestrator.action_registry import (
 )
 from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 from inference_optimizer.protocol.action_surfaces import (
-    FRAMEWORK_PR_INTERNAL_ACTION_NAMES as SURFACE_FRAMEWORK_PR_INTERNAL_ACTION_NAMES,
+    FRAMEWORK_INTERNAL_ACTION_NAMES as SURFACE_FRAMEWORK_INTERNAL_ACTION_NAMES,
     FULL_ENABLED_ACTIONS as SURFACE_FULL_ENABLED_ACTIONS,
     GRID_INJECTABLE_ACTIONS as SURFACE_GRID_INJECTABLE_ACTIONS,
     INTERNAL_ONLY_ACTION_NAMES as SURFACE_INTERNAL_ONLY_ACTION_NAMES,
@@ -37,8 +37,8 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # shallow (5) — ``explore`` is the merged grid-runner entry.
     "explore": "shallow",
     "integrate_patch": "shallow",
-    # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor.
-    "framework_pr": "shallow",
+    # FRAMEWORK phase: per-candidate Coordinator-internal executor.
+    "framework": "shallow",
     "sweep": "shallow",
     # SWEEP-phase post-sweep concurrency comparison.
     "conc_sweep": "shallow",
@@ -133,7 +133,7 @@ def test_phase_allowlist_actions_are_live_registry_actions(registry):
 def test_action_surface_sets_are_phase_aligned():
     from inference_optimizer.orchestrator.phase_state import (
         PHASE_ALLOWED_ACTIONS,
-        PHASE_FRAMEWORK_PR,
+        PHASE_FRAMEWORK,
         PHASE_KERNEL,
     )
 
@@ -142,7 +142,7 @@ def test_action_surface_sets_are_phase_aligned():
     assert (SURFACE_INTERNAL_ONLY_ACTION_NAMES - SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS) <= all_phase_actions
     assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS <= SURFACE_INTERNAL_ONLY_ACTION_NAMES
     assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS.isdisjoint(all_phase_actions)
-    assert SURFACE_FRAMEWORK_PR_INTERNAL_ACTION_NAMES <= PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK_PR]
+    assert SURFACE_FRAMEWORK_INTERNAL_ACTION_NAMES <= PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK]
     assert SURFACE_GRID_INJECTABLE_ACTIONS <= all_phase_actions
 
 

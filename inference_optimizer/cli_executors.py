@@ -26,7 +26,7 @@ from .orchestrator.action_executors import (
     session_breakdown_executor,
     sweep_executor,
 )
-from .orchestrator.action_executors.framework_pr import FrameworkPrExecutor
+from .orchestrator.action_executors.framework import FrameworkExecutor
 from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
 from .orchestrator.action_executors.profile import profile_executor
 from .orchestrator.action_executors.roofline import make_roofline_executor
@@ -266,10 +266,10 @@ def _register_executors(
         IntegratePatchExecutor(session_dir=session_dir),
     )
 
-    # FRAMEWORK_PR per-candidate executor — Coordinator-internal only.
+    # FRAMEWORK per-candidate executor — Coordinator-internal only.
     coordinator.sub.register_executor(
-        "framework_pr",
-        FrameworkPrExecutor(session_dir=session_dir),
+        "framework",
+        FrameworkExecutor(session_dir=session_dir),
     )
 
     # roofline (profile + trace_analyze): auto-enqueued at PRELUDE + each 10%

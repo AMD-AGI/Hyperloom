@@ -897,20 +897,20 @@ def test_attribution_method_missing(tmp_path: Path) -> None:
     assert attr["method"] == "missing"
 
 
-# A1.0a: framework_pr surfaces in source_breakdown + phase_breakdown
-# Regression: framework_pr KEEPs used to fall into the legacy ``other`` bucket
+# A1.0a: framework surfaces in source_breakdown + phase_breakdown
+# Regression: framework KEEPs used to fall into the legacy ``other`` bucket
 # and disappear from ``source_breakdown``; these tests pin the new behaviour.
-def test_attribution_framework_pr_surfaces_in_source_breakdown(
+def test_attribution_framework_surfaces_in_source_breakdown(
     tmp_path: Path,
 ) -> None:
-    """A ``framework_pr`` KEEP contributes to ``framework_pr_pct_of_total`` instead of being lost."""
+    """A ``framework`` KEEP contributes to ``framework_pct_of_total`` instead of being lost."""
     sd = _attribution_fixture(
         tmp_path,
         {
             "cumulative_gain_validated": 22.85,
             "optimization_stack": [
                 {"action": "explore", "variant_name": "torch_compile_on", "gain_pct": 0.53},
-                {"action": "framework_pr", "variant_name": "PR:26311", "gain_pct": 22.43},
+                {"action": "framework", "variant_name": "PR:26311", "gain_pct": 22.43},
             ],
             "gain_per_stack_entry": [
                 {
@@ -924,7 +924,7 @@ def test_attribution_framework_pr_surfaces_in_source_breakdown(
                     "ts": "2026-05-29T11:00:00+00:00",
                 },
                 {
-                    "action": "framework_pr",
+                    "action": "framework",
                     "variant_name": "PR:26311",
                     "stack_len_before": 1,
                     "stack_len_after": 2,
@@ -937,7 +937,7 @@ def test_attribution_framework_pr_surfaces_in_source_breakdown(
         },
     )
     sb = build(sd)["attribution"]["source_breakdown"]
-    assert sb["framework_pr_pct_of_total"] == pytest.approx(22.32)
+    assert sb["framework_pct_of_total"] == pytest.approx(22.32)
     assert sb["explore_pct_of_total"] == pytest.approx(0.53)
     # Per-source rows reconcile to validated_total (no "other" black-hole).
     summed = (
@@ -945,15 +945,15 @@ def test_attribution_framework_pr_surfaces_in_source_breakdown(
         + sb["oob_pct_of_total"]
         + sb["explore_pct_of_total"]
         + sb["sweep_pct_of_total"]
-        + sb["framework_pr_pct_of_total"]
+        + sb["framework_pct_of_total"]
     )
     assert summed == pytest.approx(sb["validated_total_pct"], abs=0.05)
 
 
-def test_attribution_framework_pr_pct_emitted_even_when_zero(
+def test_attribution_framework_pct_emitted_even_when_zero(
     tmp_path: Path,
 ) -> None:
-    """``framework_pr_pct_of_total`` is always emitted (defaults to 0.0)."""
+    """``framework_pct_of_total`` is always emitted (defaults to 0.0)."""
     sd = _attribution_fixture(
         tmp_path,
         {
@@ -976,30 +976,30 @@ def test_attribution_framework_pr_pct_emitted_even_when_zero(
         },
     )
     sb = build(sd)["attribution"]["source_breakdown"]
-    assert "framework_pr_pct_of_total" in sb
-    assert sb["framework_pr_pct_of_total"] == 0.0
+    assert "framework_pct_of_total" in sb
+    assert sb["framework_pct_of_total"] == 0.0
 
 
-def test_attribution_phase_breakdown_framework_pr_by_pr(
+def test_attribution_phase_breakdown_framework_by_pr(
     tmp_path: Path,
 ) -> None:
-    """``phase_breakdown.framework_pr.by_pr`` aggregates per-PR gain keyed by variant_name verbatim."""
+    """``phase_breakdown.framework.by_pr`` aggregates per-PR gain keyed by variant_name verbatim."""
     sd = _attribution_fixture(
         tmp_path,
         {
             "cumulative_gain_validated": 30.0,
             "phase_history": [
                 {"to_phase": "PRELUDE", "ts_unix": 1000.0},
-                {"to_phase": "FRAMEWORK_PR", "ts_unix": 1100.0},
+                {"to_phase": "FRAMEWORK", "ts_unix": 1100.0},
                 {"to_phase": "EXPLORE", "ts_unix": 2000.0},
             ],
             "optimization_stack": [
-                {"action": "framework_pr", "variant_name": "PR:26311"},
-                {"action": "framework_pr", "variant_name": "PR:sgl#9912"},
+                {"action": "framework", "variant_name": "PR:26311"},
+                {"action": "framework", "variant_name": "PR:sgl#9912"},
             ],
             "gain_per_stack_entry": [
                 {
-                    "action": "framework_pr",
+                    "action": "framework",
                     "variant_name": "PR:26311",
                     "stack_len_before": 0,
                     "stack_len_after": 1,
@@ -1009,7 +1009,7 @@ def test_attribution_phase_breakdown_framework_pr_by_pr(
                     "ts_unix": 1200.0,
                 },
                 {
-                    "action": "framework_pr",
+                    "action": "framework",
                     "variant_name": "PR:sgl#9912",
                     "stack_len_before": 1,
                     "stack_len_after": 2,
@@ -1022,26 +1022,26 @@ def test_attribution_phase_breakdown_framework_pr_by_pr(
         },
     )
     pb = build(sd)["attribution"]["phase_breakdown"]
-    assert "framework_pr" in pb
-    assert pb["framework_pr"]["total_gain_pct"] == pytest.approx(30.0)
-    assert pb["framework_pr"]["by_pr"]["PR:26311"] == pytest.approx(18.0)
-    assert pb["framework_pr"]["by_pr"]["PR:sgl#9912"] == pytest.approx(12.0)
+    assert "framework" in pb
+    assert pb["framework"]["total_gain_pct"] == pytest.approx(30.0)
+    assert pb["framework"]["by_pr"]["PR:26311"] == pytest.approx(18.0)
+    assert pb["framework"]["by_pr"]["PR:sgl#9912"] == pytest.approx(12.0)
 
 
-def test_attribution_framework_pr_phase_fallback_when_no_phase_history(
+def test_attribution_framework_phase_fallback_when_no_phase_history(
     tmp_path: Path,
 ) -> None:
-    """Without ``phase_history`` the collector falls back to action family; ``framework_pr`` lands in its phase bucket, not ``unattributed``."""
+    """Without ``phase_history`` the collector falls back to action family; ``framework`` lands in its phase bucket, not ``unattributed``."""
     sd = _attribution_fixture(
         tmp_path,
         {
             "cumulative_gain_validated": 10.0,
             "optimization_stack": [
-                {"action": "framework_pr", "variant_name": "PR:42", "ts": "2026-05-29T11:00:00+00:00"},
+                {"action": "framework", "variant_name": "PR:42", "ts": "2026-05-29T11:00:00+00:00"},
             ],
             "gain_per_stack_entry": [
                 {
-                    "action": "framework_pr",
+                    "action": "framework",
                     "variant_name": "PR:42",
                     "stack_len_before": 0,
                     "stack_len_after": 1,
@@ -1054,14 +1054,14 @@ def test_attribution_framework_pr_phase_fallback_when_no_phase_history(
         },
     )
     pb = build(sd)["attribution"]["phase_breakdown"]
-    assert pb["framework_pr"]["total_gain_pct"] == pytest.approx(10.0)
-    assert pb["framework_pr"]["by_pr"]["PR:42"] == pytest.approx(10.0)
+    assert pb["framework"]["total_gain_pct"] == pytest.approx(10.0)
+    assert pb["framework"]["by_pr"]["PR:42"] == pytest.approx(10.0)
     assert "unattributed" not in pb or pb["unattributed"]["total_gain_pct"] == 0.0
 
 
 # A1.0d: gemm_tuning surfaces in source_breakdown + phase_breakdown
 # Regression: gemm_tuning KEEPs used to fall into ``"other"`` and disappear
-# from per-source totals (same shape of bug as framework_pr).
+# from per-source totals (same shape of bug as framework).
 def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
     tmp_path: Path,
 ) -> None:
@@ -1101,7 +1101,7 @@ def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
         + sb["oob_pct_of_total"]
         + sb["explore_pct_of_total"]
         + sb["sweep_pct_of_total"]
-        + sb["framework_pr_pct_of_total"]
+        + sb["framework_pct_of_total"]
         + sb["gemm_tuning_pct_of_total"]
     )
     assert summed == pytest.approx(sb["validated_total_pct"], abs=0.05)
@@ -1180,7 +1180,7 @@ def test_attribution_replay_warm_recipe_surfaces_in_source_breakdown(
         + sb["explore_pct_of_total"]
         + sb["replay_warm_recipe_pct_of_total"]
         + sb["sweep_pct_of_total"]
-        + sb["framework_pr_pct_of_total"]
+        + sb["framework_pct_of_total"]
         + sb["gemm_tuning_pct_of_total"]
     )
     assert summed == pytest.approx(sb["validated_total_pct"], abs=0.05)

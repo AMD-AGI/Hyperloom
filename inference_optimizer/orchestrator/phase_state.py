@@ -3,7 +3,7 @@
 """Phase state machine.
 
 Pure functions over a frozen SharedState; Coordinator is the only writer.
-Monotonic chain PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE
+Monotonic chain PRELUDE → FRAMEWORK → EXPLORE → KERNEL → SWEEP → CLOSE
 (any phase → CLOSE on terminal/abort); ``recover`` is phase-orthogonal.
 """
 
@@ -22,7 +22,7 @@ from ..protocol.action_surfaces import (
 
 # Phase identifiers + ordering (monotonic chain)
 PHASE_PRELUDE = "PRELUDE"
-PHASE_FRAMEWORK_PR = "FRAMEWORK_PR"
+PHASE_FRAMEWORK = "FRAMEWORK"
 PHASE_EXPLORE = "EXPLORE"
 PHASE_KERNEL = "KERNEL"
 PHASE_SWEEP = "SWEEP"
@@ -30,7 +30,7 @@ PHASE_CLOSE = "CLOSE"
 
 PHASE_NAMES: tuple[str, ...] = (
     PHASE_PRELUDE,
-    PHASE_FRAMEWORK_PR,
+    PHASE_FRAMEWORK,
     PHASE_EXPLORE,
     PHASE_KERNEL,
     PHASE_SWEEP,
@@ -63,10 +63,10 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "recover",
         }
     ),
-    PHASE_FRAMEWORK_PR: frozenset(
+    PHASE_FRAMEWORK: frozenset(
         {
             # Coordinator-internal; integrate_patch is the Critic-gated consume side.
-            "framework_pr",
+            "framework",
             "integrate_patch",
             "roofline",
             "profile",
@@ -344,12 +344,12 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "explore_force_exit_low_budget",  # EXPLORE → next phase below operator force-exit thresholds
         "explore_no_more_leverage",  # EXPLORE → KERNEL (non-terminal): plateau / skip_to_sweep exhausts the explore lever
         "kernel_no_more_leverage",  # KERNEL → SWEEP (non-terminal) via skip_to_sweep
-        # FRAMEWORK_PR phase transitions.
-        "framework_pr_phase_done",  # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
-        "framework_pr_plateau",  # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
-        "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
+        # FRAMEWORK phase transitions.
+        "framework_phase_done",  # FRAMEWORK → EXPLORE normal completion (no more candidates)
+        "framework_plateau",  # FRAMEWORK → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
+        "framework_force_exit_low_budget",  # FRAMEWORK → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
         # Cyclic phase machine back-edge reasons (transitions that reopen a macro-cycle).
-        "cycle_reloop",  # SWEEP → FRAMEWORK_PR/EXPLORE; opens a new macro-cycle while budget + leverage remain
+        "cycle_reloop",  # SWEEP → FRAMEWORK/EXPLORE; opens a new macro-cycle while budget + leverage remain
         "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
         # Terminal exits (any phase → CLOSE)
         "robustness_escalated",
@@ -404,9 +404,9 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "sweep_done",
         "conc_sweep_done",
         "explore_force_exit_low_budget",
-        "framework_pr_phase_done",
-        "framework_pr_plateau",
-        "framework_pr_force_exit_low_budget",
+        "framework_phase_done",
+        "framework_plateau",
+        "framework_force_exit_low_budget",
         # R7: cyclic phase machine exhausted leverage across macro-cycles.
         "global_converged",
         # Context-window preflight: max_position_embeddings can't hold ISL+OSL.
@@ -458,7 +458,7 @@ def is_valid_phase_exit_reason(value: str) -> bool:
     return (value or "").strip() in PHASE_EXIT_REASONS
 
 
-# Default phase budgets (% of wall-clock). IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK_PR uses a time wall.
+# Default phase budgets (% of wall-clock). IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK uses a time wall.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
     PHASE_EXPLORE: 0.45,
@@ -499,10 +499,10 @@ DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE: float = 1.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE: float = 0.0
 
-# FRAMEWORK_PR plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
-DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK: int = 3
-DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT: float = 1.0
-DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
+# FRAMEWORK plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
+DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 3
+DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
+DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
 
 
 # ---------------------------------------------------------------------------
@@ -1749,14 +1749,14 @@ def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     return dict(overrides) if isinstance(overrides, dict) else {}
 
 
-def _framework_pr_batch_is_complete(
+def _framework_batch_is_complete(
     batch: dict[str, Any],
     progress_by_batch: dict[str, int],
 ) -> bool:
-    """A FRAMEWORK_PR batch is complete iff every candidate has a terminal-status row in ``framework_pr_phase_progress`` (guards the plateau judge).
+    """A FRAMEWORK batch is complete iff every candidate has a terminal-status row in ``framework_phase_progress`` (guards the plateau judge).
 
     Args:
-        batch (dict[str, Any]): A FRAMEWORK_PR batch carrying ``candidates`` and
+        batch (dict[str, Any]): A FRAMEWORK batch carrying ``candidates`` and
             ``batch_id``.
         progress_by_batch (dict[str, int]): Per-batch count of recorded progress
             rows, keyed by batch id.
@@ -1776,20 +1776,20 @@ def _framework_pr_batch_is_complete(
     return processed >= total
 
 
-def compute_plateau_framework_pr(
+def compute_plateau_framework(
     state: Any,
     *,
-    lookback: int = DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
-    keep_gain_threshold_pct: float = DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
+    lookback: int = DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK,
+    keep_gain_threshold_pct: float = DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT,
 ) -> tuple[bool, dict[str, Any]]:
-    """Pure plateau judgment for FRAMEWORK_PR → ``(triggered, evidence)``.
+    """Pure plateau judgment for FRAMEWORK → ``(triggered, evidence)``.
 
     Triggers when the last ``lookback`` fully-processed batches each carry
     ``max_gain_pct_observed_in_batch < keep_gain_threshold_pct``. Advisory-only.
 
     Args:
-        state (Any): Frozen SharedState view exposing ``framework_pr_batches``
-            and ``framework_pr_phase_progress``.
+        state (Any): Frozen SharedState view exposing ``framework_batches``
+            and ``framework_phase_progress``.
         lookback (int): Number of fully-processed trailing batches to inspect;
             non-positive disables the judgment.
         keep_gain_threshold_pct (float): Per-batch max-gain floor each batch
@@ -1799,7 +1799,7 @@ def compute_plateau_framework_pr(
         tuple[bool, dict[str, Any]]: ``(triggered, evidence)`` — whether the
         plateau fired, and the supporting evidence map.
     """
-    batches = getattr(state, "framework_pr_batches", None) or []
+    batches = getattr(state, "framework_batches", None) or []
     lookback_int = int(lookback or 0)
     base_evidence = {
         "lookback": lookback_int,
@@ -1808,7 +1808,7 @@ def compute_plateau_framework_pr(
     }
     if not isinstance(batches, list) or lookback_int <= 0 or len(batches) < lookback_int:
         return False, base_evidence
-    progress = getattr(state, "framework_pr_phase_progress", None) or []
+    progress = getattr(state, "framework_phase_progress", None) or []
     progress_by_batch: dict[str, int] = {}
     for row in progress:
         if isinstance(row, dict):
@@ -1818,7 +1818,7 @@ def compute_plateau_framework_pr(
     for entry in reversed(batches):
         if not isinstance(entry, dict):
             continue
-        if _framework_pr_batch_is_complete(entry, progress_by_batch):
+        if _framework_batch_is_complete(entry, progress_by_batch):
             complete_tail.append(entry)
             if len(complete_tail) >= lookback_int:
                 break
@@ -1838,20 +1838,20 @@ def compute_plateau_framework_pr(
     }
 
 
-def _framework_pr_pending_candidate_count(state: Any) -> int:
+def _framework_pending_candidate_count(state: Any) -> int:
     """Count candidates discovered into a batch but missing a progress row.
 
     Args:
-        state (Any): Frozen SharedState view exposing ``framework_pr_batches``
-            and ``framework_pr_phase_progress``.
+        state (Any): Frozen SharedState view exposing ``framework_batches``
+            and ``framework_phase_progress``.
 
     Returns:
         int: Total candidates across all batches that lack a progress row.
     """
-    batches = getattr(state, "framework_pr_batches", None) or []
+    batches = getattr(state, "framework_batches", None) or []
     if not isinstance(batches, list) or not batches:
         return 0
-    progress = getattr(state, "framework_pr_phase_progress", None) or []
+    progress = getattr(state, "framework_phase_progress", None) or []
     progress_by_batch: dict[str, int] = {}
     for row in progress:
         if isinstance(row, dict):
@@ -1871,21 +1871,21 @@ def _framework_pr_pending_candidate_count(state: Any) -> int:
     return pending
 
 
-def exit_normal_framework_pr(
+def exit_normal_framework(
     state: Any,
     *,
     max_hours: float | None = None,
     now_unix: float | None = None,
-    force_exit_hours_remaining_ratio: float = (DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO),
+    force_exit_hours_remaining_ratio: float = (DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO),
 ) -> tuple[str, dict[str, Any]] | None:
-    """FRAMEWORK_PR normal exit.
+    """FRAMEWORK normal exit.
 
     Priority: 0. HARD force-exit when remaining < ratio*max_hours →
-    ``framework_pr_force_exit_low_budget``; 1. ``framework_pr_phase_done``; else ``None``.
+    ``framework_force_exit_low_budget``; 1. ``framework_phase_done``; else ``None``.
 
     Args:
         state (Any): Frozen SharedState view; may expose a ``remaining_minutes``
-            callable and ``framework_pr_phase_done`` flag.
+            callable and ``framework_phase_done`` flag.
         max_hours (float | None): Session wall-clock budget in hours; enables
             the force-exit gate when positive.
         now_unix (float | None): Override for the current time.
@@ -1894,7 +1894,7 @@ def exit_normal_framework_pr(
 
     Returns:
         tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the
-        FRAMEWORK_PR exit, or ``None`` when the phase should continue.
+        FRAMEWORK exit, or ``None`` when the phase should continue.
     """
     if max_hours and max_hours > 0:
         remaining_min_fn = getattr(state, "remaining_minutes", None)
@@ -1909,18 +1909,18 @@ def exit_normal_framework_pr(
             remaining_minutes = float("inf")
         threshold_minutes = float(force_exit_hours_remaining_ratio) * float(max_hours) * 60.0
         if remaining_minutes < threshold_minutes:
-            return "framework_pr_force_exit_low_budget", {
+            return "framework_force_exit_low_budget", {
                 "evidence": "force_exit",
                 "remaining_minutes": remaining_minutes,
                 "threshold_minutes": threshold_minutes,
                 "hours_remaining_ratio": float(force_exit_hours_remaining_ratio),
                 "max_hours": float(max_hours),
-                "pending_candidate_count": _framework_pr_pending_candidate_count(state),
+                "pending_candidate_count": _framework_pending_candidate_count(state),
             }
 
-    batches = getattr(state, "framework_pr_batches", None) or []
-    if bool(getattr(state, "framework_pr_phase_done", False)):
-        return "framework_pr_phase_done", {
+    batches = getattr(state, "framework_batches", None) or []
+    if bool(getattr(state, "framework_phase_done", False)):
+        return "framework_phase_done", {
             "evidence": "no_more_candidates",
             "batch_count": len(batches) if isinstance(batches, list) else 0,
         }
@@ -1929,7 +1929,7 @@ def exit_normal_framework_pr(
 
 
 def _post_prelude_target(*, explore_enabled: bool, kernel_enabled: bool) -> str:
-    """First active phase after PRELUDE / FRAMEWORK_PR: EXPLORE, else KERNEL,
+    """First active phase after PRELUDE / FRAMEWORK: EXPLORE, else KERNEL,
     else SWEEP (``--no-explore`` / ``--no-kernel`` collapse the chain).
 
     Args:
@@ -1967,11 +1967,11 @@ def compute_next_phase(
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
             to ``state.phase_budget_pct`` when None.
         now_unix (float | None): Override for the current time.
-        framework_phase_enabled (bool): Whether the FRAMEWORK_PR phase runs
+        framework_phase_enabled (bool): Whether the FRAMEWORK phase runs
             after PRELUDE.
         explore_enabled (bool): Whether the EXPLORE phase is enabled.
         max_hours (float | None): Session wall-clock budget in hours (used by
-            the FRAMEWORK_PR force-exit gate).
+            the FRAMEWORK force-exit gate).
 
     Returns:
         tuple[str, str, dict[str, Any]] | None: ``(next_phase, reason,
@@ -1996,7 +1996,7 @@ def compute_next_phase(
         norm = exit_normal_prelude(state)
         if norm is not None:
             if framework_phase_enabled:
-                return PHASE_FRAMEWORK_PR, norm[0], norm[1]
+                return PHASE_FRAMEWORK, norm[0], norm[1]
             # Framework off → first active phase; ``explore_skipped`` stamped
             # when EXPLORE is bypassed.
             target = _post_prelude_target(
@@ -2009,20 +2009,20 @@ def compute_next_phase(
             return target, norm[0], evidence
         return None
 
-    if current == PHASE_FRAMEWORK_PR:
-        norm = exit_normal_framework_pr(
+    if current == PHASE_FRAMEWORK:
+        norm = exit_normal_framework(
             state,
             max_hours=max_hours,
             now_unix=now_unix,
             force_exit_hours_remaining_ratio=float(
                 overrides.get(
-                    "framework_pr_force_exit_hours_ratio",
-                    DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO,
+                    "framework_force_exit_hours_ratio",
+                    DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO,
                 )
             ),
         )
         if norm is not None:
-            # FRAMEWORK_PR → EXPLORE (or KERNEL/SWEEP when collapsed).
+            # FRAMEWORK → EXPLORE (or KERNEL/SWEEP when collapsed).
             target = _post_prelude_target(
                 explore_enabled=explore_enabled,
                 kernel_enabled=kernel_enabled,
@@ -2085,11 +2085,11 @@ def compute_next_phase(
             # otherwise wind down to CLOSE (the monotonic-chain behaviour).
             reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
             if reloop and (framework_phase_enabled or explore_enabled):
-                # Reloop to the highest-leverage layer still available: FRAMEWORK_PR
+                # Reloop to the highest-leverage layer still available: FRAMEWORK
                 # (also picks up newly-merged upstream PRs) when enabled, else
                 # EXPLORE. The Coordinator resets that phase's per-cycle state so
                 # it does not instantly self-skip as "already done".
-                reloop_target = PHASE_FRAMEWORK_PR if framework_phase_enabled else PHASE_EXPLORE
+                reloop_target = PHASE_FRAMEWORK if framework_phase_enabled else PHASE_EXPLORE
                 return (
                     reloop_target,
                     "cycle_reloop",
@@ -2200,7 +2200,7 @@ LIFECYCLE_STATUSES: frozenset[str] = frozenset(
 # Human-friendly labels for the six coordinator phases.
 PHASE_HUMAN_LABELS: dict[str, str] = {
     PHASE_PRELUDE: "Prelude (baseline + roofline)",
-    PHASE_FRAMEWORK_PR: "Framework PR",
+    PHASE_FRAMEWORK: "Framework",
     PHASE_EXPLORE: "Explore (params / backends)",
     PHASE_KERNEL: "Kernel optimization",
     PHASE_SWEEP: "Concurrency sweep",
@@ -2468,7 +2468,7 @@ __all__ = [
     "PHASE_CLOSE",
     "PHASE_EXIT_REASONS",
     "PHASE_EXPLORE",
-    "PHASE_FRAMEWORK_PR",
+    "PHASE_FRAMEWORK",
     "PHASE_HUMAN_LABELS",
     "PHASE_INDEX",
     "PHASE_KERNEL",
@@ -2478,9 +2478,9 @@ __all__ = [
     "STOP_REASON_VOCAB",
     "lifecycle_label",
     "make_lifecycle_event",
-    "DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK",
-    "DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT",
-    "DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO",
+    "DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK",
+    "DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT",
+    "DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO",
     "DEFAULT_MAX_MACRO_CYCLES",
     "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
@@ -2495,10 +2495,10 @@ __all__ = [
     "apply_escalate_budget_bump",
     "compute_next_phase",
     "compute_plateau_explore",
-    "compute_plateau_framework_pr",
+    "compute_plateau_framework",
     "compute_plateau_kernel",
     "exit_normal_explore",
-    "exit_normal_framework_pr",
+    "exit_normal_framework",
     "exit_normal_kernel",
     "exit_normal_prelude",
     "exit_normal_sweep",

@@ -1,4 +1,4 @@
-"""Tests for the FRAMEWORK_PR authoring track."""
+"""Tests for the FRAMEWORK authoring track."""
 
 from __future__ import annotations
 
@@ -15,13 +15,13 @@ from inference_optimizer.orchestrator.coordinator import Coordinator
 
 class _StateStub:
     def __init__(self, *, authoring: bool = True) -> None:
-        self.phase = "FRAMEWORK_PR"
-        self.framework_pr_phase_done = False
-        self.framework_pr_discover_failures = 0
-        self.framework_pr_batches: list[dict[str, Any]] = []
-        self.framework_pr_phase_progress: list[dict[str, Any]] = []
-        self.framework_pr_critic_decisions: list[dict[str, Any]] = []
-        self.framework_pr_authoring_enabled = authoring
+        self.phase = "FRAMEWORK"
+        self.framework_phase_done = False
+        self.framework_discover_failures = 0
+        self.framework_batches: list[dict[str, Any]] = []
+        self.framework_phase_progress: list[dict[str, Any]] = []
+        self.framework_critic_decisions: list[dict[str, Any]] = []
+        self.framework_authoring_enabled = authoring
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
         self.model = "test-model"
@@ -91,22 +91,22 @@ class _Stub:
 
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
-    _collect_framework_pr_priors = Coordinator._collect_framework_pr_priors
-    _select_next_framework_pr_candidate = Coordinator._select_next_framework_pr_candidate
-    _record_framework_pr_phase_done = Coordinator._record_framework_pr_phase_done
-    _critic_review_framework_pr_candidate = Coordinator._critic_review_framework_pr_candidate
-    _discover_next_framework_pr_batch = Coordinator._discover_next_framework_pr_batch
-    _enqueue_framework_pr_task = Coordinator._enqueue_framework_pr_task
-    _enqueue_framework_pr_authoring_specialist = Coordinator._enqueue_framework_pr_authoring_specialist
-    _framework_pr_authoring_inflight = Coordinator._framework_pr_authoring_inflight
-    _record_framework_pr_authored_outcome = Coordinator._record_framework_pr_authored_outcome
-    _pump_framework_pr_phase = Coordinator._pump_framework_pr_phase
+    _collect_framework_candidate_priors = Coordinator._collect_framework_candidate_priors
+    _select_next_framework_candidate = Coordinator._select_next_framework_candidate
+    _record_framework_phase_done = Coordinator._record_framework_phase_done
+    _critic_review_framework_candidate = Coordinator._critic_review_framework_candidate
+    _discover_next_framework_batch = Coordinator._discover_next_framework_batch
+    _enqueue_framework_task = Coordinator._enqueue_framework_task
+    _enqueue_framework_authoring_specialist = Coordinator._enqueue_framework_authoring_specialist
+    _framework_authoring_inflight = Coordinator._framework_authoring_inflight
+    _record_framework_authored_outcome = Coordinator._record_framework_authored_outcome
+    _pump_framework_phase = Coordinator._pump_framework_phase
 
     def __init__(self, tmp_path: Path, *, authoring: bool = True) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub(authoring=authoring)
         self.tasks = _TasksStub()
-        self.framework_pr_discover_timeout_sec = 0.0
+        self.framework_discover_timeout_sec = 0.0
         self.backends: dict[str, Any] = {"critic": _ApproveCritic()}
         self.state = SimpleNamespace(pending_proposals={})
 
@@ -114,14 +114,14 @@ class _Stub:
         # No-op: avoid pulling in KnowledgePlane in the unit test.
         return None
 
-    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
+    def _framework_discover_repo_urls(self, framework: str) -> list[str]:
         return [_fa_client.repo_url_for_framework(framework or "sglang")]
 
-    def _framework_pr_known_candidate_ids(self) -> set[str]:
-        return Coordinator._framework_pr_known_candidate_ids(self)  # type: ignore[arg-type]
+    def _framework_known_candidate_ids(self) -> set[str]:
+        return Coordinator._framework_known_candidate_ids(self)  # type: ignore[arg-type]
 
-    def _framework_pr_tried_refs(self) -> list[str]:
-        return Coordinator._framework_pr_tried_refs(self)  # type: ignore[arg-type]
+    def _framework_tried_refs(self) -> list[str]:
+        return Coordinator._framework_tried_refs(self)  # type: ignore[arg-type]
 
 
 _CANDIDATE = {
@@ -135,7 +135,7 @@ _CANDIDATE = {
 
 
 def _pump(stub: _Stub) -> None:
-    asyncio.run(Coordinator._pump_framework_pr_phase(stub))  # type: ignore[arg-type]
+    asyncio.run(Coordinator._pump_framework_phase(stub))  # type: ignore[arg-type]
 
 
 def test_pump_dispatches_authoring_specialist_alongside_diff_track(
@@ -151,15 +151,15 @@ def test_pump_dispatches_authoring_specialist_alongside_diff_track(
     _pump(stub)
 
     kinds = [c["kind"] for c in stub.tasks.created]
-    assert kinds.count("framework_pr") == 1
+    assert kinds.count("framework") == 1
     assert kinds.count("specialist") == 1
 
     spec = next(c for c in stub.tasks.created if c["kind"] == "specialist")
     params = spec["params"]
-    assert params["framework_pr_authoring"] is True
+    assert params["framework_authoring"] is True
     assert params["domain"] == "serving_specialist"
     assert params["readonly"] is False
-    assert params["framework_pr_candidate_id"] == _CANDIDATE["pr_url"]
+    assert params["framework_candidate_id"] == _CANDIDATE["pr_url"]
     assert _CANDIDATE["pr_url"] in params["notes"]
     assert _CANDIDATE["diff_url"] in params["notes"]
     assert "Write" in spec["allowed_tools"]
@@ -181,7 +181,7 @@ def test_pump_authoring_disabled_runs_diff_track_only(
     _pump(stub)
 
     kinds = [c["kind"] for c in stub.tasks.created]
-    assert kinds == ["framework_pr"]
+    assert kinds == ["framework"]
 
 
 def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
@@ -190,7 +190,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     # Nothing in flight.
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is False
     )
@@ -199,7 +199,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub.tasks._running.append(SimpleNamespace(kind="specialist", task_id="s1"))
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is True
     )
@@ -211,7 +211,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     )
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is True
     )
@@ -223,7 +223,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     }
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is True
     )
@@ -233,14 +233,14 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
     tmp_path: Path,
 ):
     stub = _Stub(tmp_path, authoring=True)
-    stub.shared_state.framework_pr_batches = [
+    stub.shared_state.framework_batches = [
         {"batch_id": "b1", "max_gain_pct_observed_in_batch": 1.0},
     ]
     task = SimpleNamespace(
         task_id="i-1",
         params={
-            "framework_pr_candidate_id": "pr-42",
-            "framework_pr_batch_id": "b1",
+            "framework_candidate_id": "pr-42",
+            "framework_batch_id": "b1",
             "specialist_task_id": "s-1",
         },
     )
@@ -249,13 +249,13 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
         result={"status": "kept", "delta_pct": 6.5, "output_throughput": 1065.0},
     )
 
-    Coordinator._record_framework_pr_authored_outcome(  # type: ignore[arg-type]
+    Coordinator._record_framework_authored_outcome(  # type: ignore[arg-type]
         stub,
         task=task,
         result=result,
     )
 
-    progress = stub.shared_state.framework_pr_phase_progress
+    progress = stub.shared_state.framework_phase_progress
     assert len(progress) == 1
     row = progress[0]
     assert row["status"] == "kept"
@@ -263,21 +263,21 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
     assert row["provenance"] == "authored"
     assert row["candidate_id"] == "pr-42"
     assert row["gain_pct"] == pytest.approx(6.5)
-    assert stub.shared_state.framework_pr_batches[0]["max_gain_pct_observed_in_batch"] == pytest.approx(6.5)
+    assert stub.shared_state.framework_batches[0]["max_gain_pct_observed_in_batch"] == pytest.approx(6.5)
 
 
 def test_record_authored_outcome_ignores_non_terminal_status(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True)
-    task = SimpleNamespace(task_id="i-2", params={"framework_pr_batch_id": "b1"})
+    task = SimpleNamespace(task_id="i-2", params={"framework_batch_id": "b1"})
     result = SimpleNamespace(
         state="succeeded",
         result={"status": "apply_failed"},
     )
 
-    Coordinator._record_framework_pr_authored_outcome(  # type: ignore[arg-type]
+    Coordinator._record_framework_authored_outcome(  # type: ignore[arg-type]
         stub,
         task=task,
         result=result,
     )
 
-    assert stub.shared_state.framework_pr_phase_progress == []
+    assert stub.shared_state.framework_phase_progress == []

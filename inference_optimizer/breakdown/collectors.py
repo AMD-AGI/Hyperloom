@@ -3814,7 +3814,7 @@ def _action_family(action: str) -> str:
 
     Returns:
         str: One of ``kernel`` / ``backends`` / ``params`` / ``validate`` /
-        ``sweep`` / ``explore`` / ``replay_warm_recipe`` / ``framework_pr`` /
+        ``sweep`` / ``explore`` / ``replay_warm_recipe`` / ``framework`` /
         ``gemm_tuning``, or ``"other"`` when unrecognized.
     """
     s = (action or "").lower()
@@ -3838,10 +3838,10 @@ def _action_family(action: str) -> str:
     # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
     if s.split(":", 1)[0] == "replay_warm_recipe":
         return "replay_warm_recipe"
-    # FRAMEWORK_PR: own headline row so per-source totals reconcile against
+    # FRAMEWORK: own headline row so per-source totals reconcile against
     # validated_total_pct (else these KEEPs fell into ``other`` and vanished).
-    if s == "framework_pr":
-        return "framework_pr"
+    if s == "framework":
+        return "framework"
     # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
     # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
     if s == "gemm_tuning":
@@ -4029,8 +4029,8 @@ def collect_attribution(
         "validate": 0.0,
         # unified explore family (subsumes backends + params).
         "explore": 0.0,
-        # FRAMEWORK_PR family, kept apart from ``other`` for a dedicated row.
-        "framework_pr": 0.0,
+        # FRAMEWORK family, kept apart from ``other`` for a dedicated row.
+        "framework": 0.0,
         # REPLAY_WARM_RECIPE family: warm-recipe replay, kept apart from ``other``
         # so its gain gets a dedicated headline row.
         "replay_warm_recipe": 0.0,
@@ -4100,8 +4100,8 @@ def collect_attribution(
             "replay_warm_recipe_pct_of_total": round(
                 family_totals.get("replay_warm_recipe", 0.0), 2
             ),
-            # FRAMEWORK_PR row; always emitted (0.0 when disabled/empty).
-            "framework_pr_pct_of_total": round(family_totals.get("framework_pr", 0.0), 2),
+            # FRAMEWORK row; always emitted (0.0 when disabled/empty).
+            "framework_pct_of_total": round(family_totals.get("framework", 0.0), 2),
             # GEMM_TUNING row; always emitted (0.0 when non-FP8/skipped/no KEEP).
             "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
             # PerfSkills/GEAK-e2e row; always emitted (0.0 when native/no e2e win).
@@ -4135,7 +4135,7 @@ def _collect_phase_breakdown(
             ``phase_history`` is empty).
 
     Returns:
-        dict[str, Any]: Per-phase gain buckets (prelude / framework_pr /
+        dict[str, Any]: Per-phase gain buckets (prelude / framework /
         explore / kernel / gemm_tuning / sweep / close, plus a conditional
         ``unattributed``), each with a ``total_gain_pct`` and phase-specific
         sub-breakdowns.
@@ -4197,8 +4197,8 @@ def _collect_phase_breakdown(
 
     phase_buckets: dict[str, dict[str, Any]] = {
         "prelude": {"total_gain_pct": 0.0},
-        # FRAMEWORK_PR: upstream-PR bake-in phase; by_pr keyed per adopted PR.
-        "framework_pr": {"total_gain_pct": 0.0, "by_pr": {}},
+        # FRAMEWORK: upstream-PR bake-in phase; by_pr keyed per adopted PR.
+        "framework": {"total_gain_pct": 0.0, "by_pr": {}},
         "explore": {"total_gain_pct": 0.0, "by_domain": {}},
         "kernel": {"total_gain_pct": 0.0, "by_kernel_id": {}},
         # GEMM_TUNING: KERNEL-entry tuner, bucketed apart; by_tuned_file keyed on the produced CSV.
@@ -4243,8 +4243,8 @@ def _collect_phase_breakdown(
                 phase = "kernel"
             elif fam == "sweep":
                 phase = "sweep"
-            elif fam == "framework_pr":
-                phase = "framework_pr"
+            elif fam == "framework":
+                phase = "framework"
             else:
                 phase = "unattributed"
         bucket = phase_buckets[phase]
@@ -4278,7 +4278,7 @@ def _collect_phase_breakdown(
                 float(by_kid.get(kid, 0.0)) + float(delta),
                 2,
             )
-        elif phase == "framework_pr":
+        elif phase == "framework":
             # Key on the PR ref (variant_name), falling back to ``ref`` then ``?``.
             by_pr = bucket.setdefault("by_pr", {})
             pr_key = str(e.get("variant_name") or "").strip() or str(e.get("ref") or "").strip() or "?"

@@ -1,9 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Cover the P2.b fix — ``fa phase-discover`` retries before flipping ``framework_pr_phase_done``.
+"""Cover the P2.b fix — ``fa phase-discover`` retries before flipping ``framework_phase_done``.
 
-Tests ``_discover_next_framework_pr_batch`` (bumps the failure counter, resets
-on success) and ``_pump_framework_pr_phase`` (flips done after the retry limit
+Tests ``_discover_next_framework_batch`` (bumps the failure counter, resets
+on success) and ``_pump_framework_phase`` (flips done after the retry limit
 or a clean empty payload) by binding them to a minimal Coordinator stub.
 """
 
@@ -24,11 +24,11 @@ class _StateStub:
     """SharedState minimal stub for discover retry tests."""
 
     def __init__(self) -> None:
-        self.phase = "FRAMEWORK_PR"
-        self.framework_pr_phase_done = False
-        self.framework_pr_discover_failures = 0
-        self.framework_pr_batches: list[dict[str, Any]] = []
-        self.framework_pr_phase_progress: list[dict[str, Any]] = []
+        self.phase = "FRAMEWORK"
+        self.framework_phase_done = False
+        self.framework_discover_failures = 0
+        self.framework_batches: list[dict[str, Any]] = []
+        self.framework_phase_progress: list[dict[str, Any]] = []
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
         self.model = "test-model"
@@ -36,7 +36,7 @@ class _StateStub:
         self.gpu_type = "MI300X"
         self.model_class = "dense"
         self.precision = "fp8"
-        self.framework_pr_max_candidates = 0
+        self.framework_max_candidates = 0
         self.last_profile_kernel_breakdown = None
         self._saves = 0
 
@@ -54,27 +54,27 @@ class _CoordinatorStub:
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub()
-        self.framework_pr_discover_timeout_sec = 0.0
+        self.framework_discover_timeout_sec = 0.0
 
-    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
+    def _framework_discover_repo_urls(self, framework: str) -> list[str]:
         return ["https://github.com/sgl-project/sglang.git"]
 
-    def _framework_pr_known_candidate_ids(self) -> set[str]:
-        return Coordinator._framework_pr_known_candidate_ids(self)  # type: ignore[arg-type]
+    def _framework_known_candidate_ids(self) -> set[str]:
+        return Coordinator._framework_known_candidate_ids(self)  # type: ignore[arg-type]
 
-    def _framework_pr_tried_refs(self) -> list[str]:
-        return Coordinator._framework_pr_tried_refs(self)  # type: ignore[arg-type]
+    def _framework_tried_refs(self) -> list[str]:
+        return Coordinator._framework_tried_refs(self)  # type: ignore[arg-type]
 
 
 async def _call_discover(stub: _CoordinatorStub) -> bool:
-    return await Coordinator._discover_next_framework_pr_batch(stub)  # type: ignore[arg-type]
+    return await Coordinator._discover_next_framework_batch(stub)  # type: ignore[arg-type]
 
 
 def test_discover_failure_bumps_counter_without_flipping_phase_done(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A single failure increments the counter, leaves phase_done False, and logs a ``framework_pr_discover_failed`` row."""
+    """A single failure increments the counter, leaves phase_done False, and logs a ``framework_discover_failed`` row."""
 
     async def _raise(**_: Any) -> dict[str, Any]:
         raise RuntimeError("simulated timeout")
@@ -85,9 +85,9 @@ def test_discover_failure_bumps_counter_without_flipping_phase_done(
     out = asyncio.run(_call_discover(stub))
 
     assert out is False
-    assert stub.shared_state.framework_pr_discover_failures == 1
-    assert stub.shared_state.framework_pr_phase_done is False
-    failed = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_pr_discover_failed"]
+    assert stub.shared_state.framework_discover_failures == 1
+    assert stub.shared_state.framework_phase_done is False
+    failed = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_discover_failed"]
     assert len(failed) == 1
     assert failed[0]["attempt"] == 1
     assert failed[0]["limit"] == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
@@ -109,8 +109,8 @@ def test_discover_three_consecutive_failures_reach_retry_limit(
         ok = asyncio.run(_call_discover(stub))
         assert ok is False
 
-    assert stub.shared_state.framework_pr_discover_failures == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
-    assert stub.shared_state.framework_pr_phase_done is False
+    assert stub.shared_state.framework_discover_failures == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+    assert stub.shared_state.framework_phase_done is False
 
 
 def test_discover_success_resets_failure_counter(
@@ -137,11 +137,11 @@ def test_discover_success_resets_failure_counter(
 
     assert asyncio.run(_call_discover(stub)) is False
     assert asyncio.run(_call_discover(stub)) is False
-    assert stub.shared_state.framework_pr_discover_failures == 2
+    assert stub.shared_state.framework_discover_failures == 2
 
     assert asyncio.run(_call_discover(stub)) is True
-    assert stub.shared_state.framework_pr_discover_failures == 0
-    assert len(stub.shared_state.framework_pr_batches) == 1
+    assert stub.shared_state.framework_discover_failures == 0
+    assert len(stub.shared_state.framework_batches) == 1
 
 
 def test_discover_timeout_override_is_passed_through(
@@ -156,7 +156,7 @@ def test_discover_timeout_override_is_passed_through(
 
     monkeypatch.setattr(_fa_client, "phase_discover", _spy)
     stub = _CoordinatorStub(tmp_path)
-    stub.framework_pr_discover_timeout_sec = 42.0
+    stub.framework_discover_timeout_sec = 42.0
 
     asyncio.run(_call_discover(stub))
 
@@ -175,7 +175,7 @@ def test_discover_timeout_default_used_when_override_zero(
 
     monkeypatch.setattr(_fa_client, "phase_discover", _spy)
     stub = _CoordinatorStub(tmp_path)
-    stub.framework_pr_discover_timeout_sec = 0.0
+    stub.framework_discover_timeout_sec = 0.0
 
     asyncio.run(_call_discover(stub))
 
@@ -199,7 +199,7 @@ class _TasksStub:
 
 
 async def _call_enqueue(stub: _CoordinatorStub, cand: dict[str, Any]) -> None:
-    await Coordinator._enqueue_framework_pr_task(stub, cand)  # type: ignore[arg-type]
+    await Coordinator._enqueue_framework_task(stub, cand)  # type: ignore[arg-type]
 
 
 def test_enqueue_failure_appends_progress_row(tmp_path: Path):
@@ -214,7 +214,7 @@ def test_enqueue_failure_appends_progress_row(tmp_path: Path):
 
     asyncio.run(_call_enqueue(stub, cand))
 
-    rows = stub.shared_state.framework_pr_phase_progress
+    rows = stub.shared_state.framework_phase_progress
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == "pr-1"
     assert rows[0]["batch_id"] == "b-fail"
@@ -228,7 +228,7 @@ def test_enqueue_failed_candidate_skipped_by_selector(tmp_path: Path):
     stub.tasks = _TasksStub(fail=True)  # type: ignore[attr-defined]
     cand_bad = {"candidate_id": "pr-bad", "batch_id": "b1"}
     cand_good = {"candidate_id": "pr-good", "batch_id": "b1"}
-    stub.shared_state.framework_pr_batches = [
+    stub.shared_state.framework_batches = [
         {
             "batch_id": "b1",
             "candidates": [cand_bad, cand_good],
@@ -237,7 +237,7 @@ def test_enqueue_failed_candidate_skipped_by_selector(tmp_path: Path):
 
     asyncio.run(_call_enqueue(stub, cand_bad))
 
-    nxt = Coordinator._select_next_framework_pr_candidate(stub)  # type: ignore[arg-type]
+    nxt = Coordinator._select_next_framework_candidate(stub)  # type: ignore[arg-type]
     assert nxt is not None
     assert nxt["candidate_id"] == "pr-good"
 
@@ -250,25 +250,25 @@ def test_enqueue_success_does_not_append_progress_row(tmp_path: Path):
 
     asyncio.run(_call_enqueue(stub, cand))
 
-    assert stub.shared_state.framework_pr_phase_progress == []
+    assert stub.shared_state.framework_phase_progress == []
 
 
 # Gap 4 — phase_history summary row when the pump gives up on discover.
-def test_record_framework_pr_phase_done_appends_history_row(tmp_path: Path):
+def test_record_framework_phase_done_appends_history_row(tmp_path: Path):
     """The helper appends a phase_history summary row so the give-up decision is visible."""
     stub = _CoordinatorStub(tmp_path)
-    stub.shared_state.framework_pr_batches = [
+    stub.shared_state.framework_batches = [
         {"batch_id": "b1", "candidates": []},
         {"batch_id": "b2", "candidates": []},
     ]
 
-    Coordinator._record_framework_pr_phase_done(  # type: ignore[arg-type]
+    Coordinator._record_framework_phase_done(  # type: ignore[arg-type]
         stub,
         reason="discover_retries_exhausted",
         failure_count=3,
     )
 
-    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_pr_phase_done"]
+    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_phase_done"]
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_retries_exhausted"
     assert rows[0]["failure_count"] == 3
@@ -277,19 +277,19 @@ def test_record_framework_pr_phase_done_appends_history_row(tmp_path: Path):
     assert "ts" in rows[0]
 
 
-def test_record_framework_pr_phase_done_records_empty_payload_reason(
+def test_record_framework_phase_done_records_empty_payload_reason(
     tmp_path: Path,
 ):
     """The helper records ``discover_empty_payload`` when discover returned a clean empty payload."""
     stub = _CoordinatorStub(tmp_path)
 
-    Coordinator._record_framework_pr_phase_done(  # type: ignore[arg-type]
+    Coordinator._record_framework_phase_done(  # type: ignore[arg-type]
         stub,
         reason="discover_empty_payload",
         failure_count=0,
     )
 
-    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_pr_phase_done"]
+    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_phase_done"]
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_empty_payload"
     assert rows[0]["failure_count"] == 0

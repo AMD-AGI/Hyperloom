@@ -252,7 +252,7 @@ def _seed_shared_state(
         enable_roofline=bool(
             getattr(args, "enable_roofline", True),
         ),
-        # Standalone FRAMEWORK_PR phase; --no-framework skips it (mirrors --no-kernel/kernel_enabled).
+        # Standalone FRAMEWORK phase; --no-framework skips it (mirrors --no-kernel/kernel_enabled).
         framework_phase_enabled=not bool(getattr(args, "no_framework", False)),
         # --no-explore skips the EXPLORE phase entirely.
         explore_enabled=not bool(getattr(args, "no_explore", False)),

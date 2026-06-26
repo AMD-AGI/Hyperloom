@@ -296,7 +296,7 @@ def _build_orchestration_prompt(
         objective (Objective): The run objective summarised into the prompt.
         max_minutes (int): The wall-clock budget in minutes.
         no_explore (bool): When ``True`` the EXPLORE phase is disabled.
-        no_framework (bool): When ``True`` the FRAMEWORK_PR phase is disabled.
+        no_framework (bool): When ``True`` the FRAMEWORK phase is disabled.
         action_registry (ActionRegistry | None): The action registry to use;
             a fresh loaded registry is built when ``None``.
 
@@ -2980,12 +2980,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if not state.kernel_enabled:
             args.no_kernel = True
             print("  kernel agent          : DISABLED (persisted from original run)")
-        # Same persistence contract for the FRAMEWORK_PR phase toggle.
+        # Same persistence contract for the FRAMEWORK phase toggle.
         if not bool(getattr(state, "framework_phase_enabled", True)):
             args.no_framework = True
             print("  framework phase       : DISABLED (persisted from original run)")
         elif bool(getattr(args, "no_framework", False)):
-            # Inverse (P2.d): honour --no-framework on resume only before FRAMEWORK_PR is entered.
+            # Inverse (P2.d): honour --no-framework on resume only before FRAMEWORK is entered.
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
             if cur_phase in ("", "PRELUDE"):
                 state.framework_phase_enabled = False
@@ -3005,7 +3005,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         elif bool(getattr(args, "no_explore", False)):
             # Honour --no-explore on resume only before EXPLORE is entered.
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
-            if cur_phase in ("", "PRELUDE", "FRAMEWORK_PR"):
+            if cur_phase in ("", "PRELUDE", "FRAMEWORK"):
                 state.explore_enabled = False
                 print(f"  explore phase         : DISABLING for resume (--no-explore + phase={cur_phase or 'PRELUDE'})")
             else:
@@ -3519,11 +3519,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator.system_prompt_overrides = prompts
     # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
     try:
-        coordinator.framework_pr_discover_timeout_sec = float(
-            getattr(args, "framework_pr_discover_timeout_sec", 0.0) or 0.0
+        coordinator.framework_discover_timeout_sec = float(
+            getattr(args, "framework_discover_timeout_sec", 0.0) or 0.0
         )
     except (TypeError, ValueError):
-        coordinator.framework_pr_discover_timeout_sec = 0.0
+        coordinator.framework_discover_timeout_sec = 0.0
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
     specialist_executor: "Any" = None
@@ -4176,7 +4176,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Skip the EXPLORE phase entirely. PRELUDE (and "
-        "FRAMEWORK_PR, if enabled) route straight to KERNEL "
+        "FRAMEWORK, if enabled) route straight to KERNEL "
         "— or to SWEEP when --no-kernel is also set. Useful "
         "for a baseline -> kernel-only run, or to validate "
         "the current recipe via SWEEP without a serving-"
@@ -4195,7 +4195,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "stdout for stream-based parsers.",
     )
     opt.add_argument(
-        "--framework-pr-discover-timeout-sec",
+        "--framework-discover-timeout-sec",
         type=float,
         default=0.0,
         help="Override the per-call timeout for "
@@ -4203,7 +4203,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "framework_agent_client.DEFAULT_FA_PHASE_TIMEOUT_SEC "
         "(180s). The Coordinator retries discover up to "
         "DISCOVER_FAILURE_RETRY_LIMIT (3) consecutive "
-        "failures before marking FRAMEWORK_PR done.",
+        "failures before marking FRAMEWORK done.",
     )
     opt.add_argument(
         "--no-framework",
@@ -4213,7 +4213,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "0",
         ).strip()
         in ("1", "true", "True", "TRUE", "yes"),
-        help="Skip the FRAMEWORK_PR phase (PRELUDE → EXPLORE "
+        help="Skip the FRAMEWORK phase (PRELUDE → EXPLORE "
         "directly). The phase pre-scans upstream sglang/"
         "vllm PRs via framework-agent and lands KEPT "
         "patches before EXPLORE starts. Disable when "

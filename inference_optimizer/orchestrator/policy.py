@@ -588,8 +588,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # Coordinator-only writer (operator re-seed via env). Locked in lock-step
         # with its parent so the LLM can't forge/erase rollback snapshots.
         "orchestration_memory_history",
-        # FRAMEWORK_PR per-repo discovery budget; set once, locked against LLM inflation.
-        "framework_pr_max_candidates",
+        # FRAMEWORK per-repo discovery budget; set once, locked against LLM inflation.
+        "framework_max_candidates",
         # Advisory model-architecture profile from the SKILL launcher; locked as the sole source of truth.
         "model_arch",
         # Architecture-identity tags from config.json fanned into recipe-snapshot extras; locked against pollution.
@@ -1207,9 +1207,9 @@ class PolicyGate:
                 f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
                 rule="phase_incompatible",
                 hint=(
-                    "roofline / profile / replay_warm_recipe / framework_pr "
+                    "roofline / profile / replay_warm_recipe / framework "
                     "are driven by the Coordinator (PRELUDE bootstrap, +10% "
-                    "watermark refresh, warm-recipe replay, FRAMEWORK_PR "
+                    "watermark refresh, warm-recipe replay, FRAMEWORK "
                     "pump) and never appear in any phase's LLM-proposable "
                     "set. Propose ``specialist`` or ``explore`` instead."
                 ),

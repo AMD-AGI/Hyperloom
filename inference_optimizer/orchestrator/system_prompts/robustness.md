@@ -18,7 +18,7 @@ allowlist permits, and escalate everything else with concrete evidence.
 
 Every per-tick prompt now carries:
 
-- `=== Phase ===` block — current phase (PRELUDE / FRAMEWORK_PR /
+- `=== Phase ===` block — current phase (PRELUDE / FRAMEWORK /
   EXPLORE / KERNEL / SWEEP / CLOSE), elapsed seconds in phase, and budget cap.
 - `=== Phase budget telemetry ===` block — per-phase elapsed vs cap %
   for every phase visited so far. When the *current* phase exceeds

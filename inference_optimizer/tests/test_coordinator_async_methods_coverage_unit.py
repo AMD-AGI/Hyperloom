@@ -206,10 +206,10 @@ async def test_promote_explore_with_winner(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_promote_framework_pr_kept(coord: Coordinator) -> None:
+async def test_promote_framework_kept(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     await coord._promote_to_shared_state(
-        "framework_pr",
+        "framework",
         {
             "status": "kept",
             "candidate": {"candidate_id": "c1", "pr_url": "http://x/1"},
@@ -219,8 +219,8 @@ async def test_promote_framework_pr_kept(coord: Coordinator) -> None:
             "workspace": "/tmp/ws",
         },
     )
-    assert isinstance(coord.shared_state.framework_pr_phase_progress, list)
-    assert coord.shared_state.framework_pr_phase_progress[-1]["kept"] is True
+    assert isinstance(coord.shared_state.framework_phase_progress, list)
+    assert coord.shared_state.framework_phase_progress[-1]["kept"] is True
 
 
 # -- _compose_prompt -------------------------------------------------------

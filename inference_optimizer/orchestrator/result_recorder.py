@@ -235,7 +235,7 @@ class ResultRecorder:
                 )
 
         # Aggregate research evidence from any domain (e.g. pr_intel) that
-        # self-reports a ``research`` block, so FRAMEWORK_PR / explore lanes
+        # self-reports a ``research`` block, so FRAMEWORK / explore lanes
         # reuse the session-wide seen-set. Idempotent for research_scout
         # (already harvested above). Fail-soft.
         try:
@@ -1102,7 +1102,7 @@ class ResultRecorder:
         session-wide seen-set, de-duped across the session.
 
         Applies to every domain that self-reports a ``research`` block
-        (``pr_intel`` + ``research_scout``), so FRAMEWORK_PR / explore lanes do
+        (``pr_intel`` + ``research_scout``), so FRAMEWORK / explore lanes do
         not re-fetch the same references. Fail-soft: never raises (the caller
         also guards, but keep this self-contained so partial payloads degrade
         gracefully).
@@ -1160,7 +1160,7 @@ class ResultRecorder:
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: competitor_target write failed")
-        # Share inspected PR ids with the FRAMEWORK_PR dedup set.
+        # Share inspected PR ids with the FRAMEWORK dedup set.
         pr_ids: list[Any] = []
         for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
             vals = block.get(key)

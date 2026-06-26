@@ -94,7 +94,7 @@ def test_historical_rule_name_mention_is_documented_provenance_only():
 
 
 # Behavioural guards: the cross-framework LLM-proposability rule still covers
-# framework_pr under atom, keeping the LLM → framework_pr hole closed.
+# framework under atom, keeping the LLM → framework hole closed.
 class _BareSharedState:
     """Minimal SharedState surface for PolicyGate."""
 
@@ -127,16 +127,16 @@ def _propose(action_name: str, **extra) -> Intent:
 
 
 @pytest.mark.parametrize("channel", ["delegate", "propose_action"])
-def test_framework_pr_still_denied_via_phase_incompatible_under_atom(
+def test_framework_still_denied_via_phase_incompatible_under_atom(
     channel: str,
 ):
-    """LLM-proposed ``framework_pr`` under atom is still denied by R1 ``phase_incompatible``, not the removed atom rule."""
+    """LLM-proposed ``framework`` under atom is still denied by R1 ``phase_incompatible``, not the removed atom rule."""
     gate = _gate(_BareSharedState(framework="atom"))
-    intent = _delegate("framework_pr") if channel == "delegate" else _propose("framework_pr")
+    intent = _delegate("framework") if channel == "delegate" else _propose("framework")
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
     assert exc.value.rule == "phase_incompatible", (
-        f"expected R1 phase_incompatible to deny framework_pr under atom; got rule={exc.value.rule!r}"
+        f"expected R1 phase_incompatible to deny framework under atom; got rule={exc.value.rule!r}"
     )
 
 

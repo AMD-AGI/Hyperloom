@@ -69,9 +69,9 @@ intent and rationale in that summary, not raw numbers you can re-pull.
 
 The Coordinator owns a strict 6-phase pipeline:
 
-    PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE
+    PRELUDE → FRAMEWORK → EXPLORE → KERNEL → SWEEP → CLOSE
 
-(FRAMEWORK_PR is skipped when the operator passes `--no-framework`;
+(FRAMEWORK is skipped when the operator passes `--no-framework`;
 the chain then collapses to PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE.)
 
 It enters PRELUDE at session start and advances **only forward**. The
@@ -83,7 +83,7 @@ EXPLORE / KERNEL / SWEEP; the wall-clock deadline routes to CLOSE.
 
 **Cyclic macro-cycles (default on; `INFERENCE_OPTIMIZER_CYCLIC_PHASES`).**
 On long / unbounded runs the chain is *not* a single one-way pass: after
-SWEEP the Coordinator **loops back** to FRAMEWORK_PR / EXPLORE to open a
+SWEEP the Coordinator **loops back** to FRAMEWORK / EXPLORE to open a
 **new macro-cycle** (`reason=cycle_reloop`) while session budget and
 leverage remain, only winding down to CLOSE once the run globally
 converges (no per-cycle gain for several cycles) or the deadline hits.
@@ -273,7 +273,7 @@ grid-runner entry):
     `escalate_strategy_change` hint.) You may still request an earlier
     advance with an `escalate_strategy_change` hint
     (`skip_to_kernel` / `skip_to_sweep` / `skip_to_close`). KERNEL and
-    FRAMEWORK_PR plateaus remain advisory only.
+    FRAMEWORK plateaus remain advisory only.
   - **KERNEL**: the 5 KERNEL_OWNED_ACTIONS via REQUEST.
     Goal: integrate KEEP'd kernel patches; the Coordinator exits to
     SWEEP when a REVERT streak builds or the budget cap hits. Roofline
