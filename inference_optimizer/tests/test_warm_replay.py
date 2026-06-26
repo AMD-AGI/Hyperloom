@@ -416,6 +416,79 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert coord.shared_state.current_best["tput"] == 738.0
 
 
+def test_promote_warm_replay_rejected_by_failed_quality_gate(tmp_path):
+    """R3 — a faster warm config that FAILS the image-quality gate vs the
+    baseline reference must NOT be promoted (no stack push, no current_best),
+    even though its throughput beats baseline. Mirrors the scriptable fail-open
+    fix: the warm recipe reuses the BaselineExecutor but is an optimization
+    candidate, so its output is gated against the pure baseline reference.
+    """
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "warm_recipe_tier": "exact",
+        "warm_recipe_conf": 0.85,
+        "expected_gain_pct": 25.0,
+        "replay_task_id": "task-warm-replay-prelude",
+    }
+    task = _StubTask(
+        params={
+            "extra_sglang_args": "--attention-backend AITER",
+            "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        }
+    )
+    # +23% throughput (600 → 738) but the gate compared against the baseline
+    # reference and FAILED (mse above the configured ceiling).
+    result = {
+        "status": "succeeded",
+        "output_throughput": 738.0,
+        "quality_gate": {
+            "passed": False,
+            "mse": 0.0295,
+            "mse_max": 0.002,
+            "ssim": 1.0,
+            "lpips": 0.0,
+        },
+    }
+    coord._promote_warm_replay(result, task=task)
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "quality_failed"
+    assert outcome["quality_gate"]["passed"] is False
+    # No promotion side effects.
+    assert coord.shared_state.optimization_stack == []
+    assert coord.shared_state.current_best == {}
+    assert coord.shared_state.cumulative_gain == 0.0
+
+
+def test_promote_warm_replay_passes_quality_gate_is_promoted(tmp_path):
+    """R3 — a warm config that beats baseline AND clears the quality gate
+    (mse within the ceiling) is promoted normally."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "replay_task_id": "task-warm-replay-prelude",
+    }
+    task = _StubTask(
+        params={
+            "extra_sglang_args": "--attention-backend AITER",
+            "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        }
+    )
+    result = {
+        "status": "succeeded",
+        "output_throughput": 738.0,
+        "quality_gate": {"passed": True, "mse": 0.0005, "mse_max": 0.002},
+    }
+    coord._promote_warm_replay(result, task=task)
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "reproduced"
+    assert len(coord.shared_state.optimization_stack) == 1
+    assert coord.shared_state.current_best["action"] == "warm_replay"
+
+
 def test_promote_warm_replay_double_run_uses_single_round_anchor(tmp_path):
     """Double-run replay: current_best.tput / stack.tput / gain MUST use the
     single-round (warmup) value, NOT the hot measure — so explore/sweep

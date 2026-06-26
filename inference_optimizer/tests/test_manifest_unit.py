@@ -128,48 +128,48 @@ def test_path_is_relative_to(tmp_path):
 def test_warn_if_dependency_escapes_no_user_data(monkeypatch):
     monkeypatch.delenv(mf._paths.ENV_USER_DATA_PATH, raising=False)
     # no USER_DATA_PATH -> early return, no raise
-    mf._warn_if_dependency_escapes_user_data("MAGPIE_DIR", "/workspace/x")
+    mf._warn_if_dependency_escapes_user_data("MAGPIE_PATH", "/workspace/x")
 
 
 def test_warn_if_dependency_inside_user_data(monkeypatch, tmp_path):
     monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, str(tmp_path))
-    mf._warn_if_dependency_escapes_user_data("MAGPIE_DIR", str(tmp_path / "dep"))
+    mf._warn_if_dependency_escapes_user_data("MAGPIE_PATH", str(tmp_path / "dep"))
 
 
 def test_warn_if_dependency_pod_local(monkeypatch):
     monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, "/data/persist")
     # /workspace is pod-local and outside user_data -> warns (no raise)
-    mf._warn_if_dependency_escapes_user_data("MAGPIE_DIR", "/workspace/dep")
+    mf._warn_if_dependency_escapes_user_data("MAGPIE_PATH", "/workspace/dep")
 
 
 def test_warn_if_dependency_shared_no_warn(monkeypatch):
     monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, "/data/persist")
-    mf._warn_if_dependency_escapes_user_data("MAGPIE_DIR", "/shared/mirror/dep")
+    mf._warn_if_dependency_escapes_user_data("MAGPIE_PATH", "/shared/mirror/dep")
 
 
 # ---- _describe_dep / _build_dependencies ----------------------------------
 def test_describe_dep_unset(monkeypatch):
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
-    assert mf._describe_dep("MAGPIE_DIR") == {"path": "", "commit": "", "remote": ""}
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    assert mf._describe_dep("MAGPIE_PATH") == {"path": "", "commit": "", "remote": ""}
 
 
 def test_describe_dep_not_a_dir(monkeypatch):
-    monkeypatch.setenv("MAGPIE_DIR", "/nonexistent/path/xyz")
-    out = mf._describe_dep("MAGPIE_DIR")
+    monkeypatch.setenv("MAGPIE_PATH", "/nonexistent/path/xyz")
+    out = mf._describe_dep("MAGPIE_PATH")
     assert out["path"] == "/nonexistent/path/xyz"
     assert out["commit"] == ""
 
 
 def test_describe_dep_real_dir(monkeypatch, tmp_path):
-    monkeypatch.setenv("MAGPIE_DIR", str(tmp_path))
+    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path))
     monkeypatch.setattr(mf, "_git_revision_at", lambda p: "deadbee")
     monkeypatch.setattr(mf, "_git_remote_at", lambda p: "http://r")
-    out = mf._describe_dep("MAGPIE_DIR")
+    out = mf._describe_dep("MAGPIE_PATH")
     assert out == {"path": str(tmp_path), "commit": "deadbee", "remote": "http://r"}
 
 
 def test_build_dependencies(monkeypatch):
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     deps = mf._build_dependencies()
     assert set(deps) == {"magpie", "inferencex"}

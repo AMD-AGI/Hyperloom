@@ -26,9 +26,11 @@ _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
     # atom's editable-install layout; site-packages path picked up via the
     # VIRTUAL_ENV glob in ``probe_framework_source_roots_for_env``.
     "/app/ATOM/atom/",
+    # xDiT editable install (pure-Python; git apply takes immediate effect).
+    "/app/xDiT/",
 )
 
-_FRAMEWORK_PACKAGES: tuple[str, ...] = ("aiter", "sglang", "vllm", "atom")
+_FRAMEWORK_PACKAGES: tuple[str, ...] = ("aiter", "sglang", "vllm", "atom", "xfuser")
 
 # Parents scanned for ``python*/{site,dist}-packages/<pkg>`` wheel layouts.
 _INSTALL_GLOB_PARENTS: tuple[Path, ...] = (
@@ -58,6 +60,7 @@ _STATIC_PATCH_FALLBACK_ROOTS: tuple[str, ...] = (
     "/usr/local/lib/python3.10/dist-packages/vllm/",
     "/usr/local/lib/python3.10/dist-packages/atom/",
     "/app/ATOM/atom/",
+    "/app/xDiT/",
     _AITER_META_CSRC_ROOT,
 )
 
@@ -134,10 +137,12 @@ def _glob_install_package_roots() -> tuple[str, ...]:
         "python*/dist-packages/sglang",
         "python*/dist-packages/vllm",
         "python*/dist-packages/atom",
+        "python*/dist-packages/xfuser",
         "python*/site-packages/aiter",
         "python*/site-packages/sglang",
         "python*/site-packages/vllm",
         "python*/site-packages/atom",
+        "python*/site-packages/xfuser",
     )
     found: list[str] = []
     seen: set[str] = set()
@@ -197,6 +202,7 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
                 "python*/site-packages/sglang",
                 "python*/site-packages/aiter",
                 "python*/site-packages/atom",
+                "python*/site-packages/xfuser",
             ):
                 for match in sorted(site.glob(pattern)):
                     if match.is_dir():
@@ -262,7 +268,7 @@ def probe_framework_source_roots_for_env() -> str:
 # Discovery summary — operator-facing log helper (install.sh greps; keep format stable).
 
 # Ordered for deterministic substring matching (atom before vllm/sglang).
-_FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter")
+_FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter", "xdit")
 
 
 def summarise_framework_root_discovery(roots: str) -> str:
