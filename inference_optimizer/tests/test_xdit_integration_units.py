@@ -113,6 +113,32 @@ class TestQualityGate:
             {"lpips": 0.01, "lpips_max": 0.05}, require=True
         ) is True
 
+    def test_quality_gate_passed_skipped_reference_established(self, monkeypatch):
+        # The baseline establishing the reference (skipped) is legitimate and
+        # must pass even when required and a reference is configured.
+        monkeypatch.setenv("XDIT_QUALITY_REF", "/tmp/ref.png")
+        gate = {"passed": True, "skipped": True, "reason": "reference_established"}
+        assert ag.quality_gate_passed(gate, require=True) is True
+
+    def test_quality_gate_passed_skipped_fails_closed_when_ref_configured(self, monkeypatch):
+        # A variant that SKIPPED the gate while a reference was configured did
+        # not actually compare -> fail closed (scriptable require=True), even
+        # though the bench wrapper stamped passed=True on the skip.
+        monkeypatch.setenv("XDIT_QUALITY_REF", "/tmp/ref.png")
+        for reason in ("no_reference_or_image", "reference_missing", "image_libs_unavailable"):
+            gate = {"passed": True, "skipped": True, "reason": reason}
+            assert ag.quality_gate_passed(gate, require=True) is False, reason
+
+    def test_quality_gate_passed_skipped_passes_when_no_ref_configured(self, monkeypatch):
+        # No reference configured: the gate is intentionally disabled, so a skip
+        # stays non-blocking (preserves the default no-reference behavior).
+        monkeypatch.delenv("XDIT_QUALITY_REF", raising=False)
+        gate = {"passed": True, "skipped": True, "reason": "no_reference_or_image"}
+        assert ag.quality_gate_passed(gate, require=True) is True
+        # Serving (require=False) never fails closed on a skip.
+        monkeypatch.setenv("XDIT_QUALITY_REF", "/tmp/ref.png")
+        assert ag.quality_gate_passed(gate, require=False) is True
+
     def test_quality_gate_passed_thresholds(self):
         ok = {"lpips": 0.01, "lpips_max": 0.05, "ssim": 0.99, "ssim_min": 0.95, "mse": 0.001, "mse_max": 0.002}
         bad = {"lpips": 0.10, "lpips_max": 0.05}

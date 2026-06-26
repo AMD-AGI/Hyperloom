@@ -251,6 +251,7 @@ def materialize_config_with_envs(
     reference_server_args: str = "",
     reference_envs: dict[str, Any] | None = None,
     out_name: str = "baseline_config.with_envs.yaml",
+    establish_quality_ref: bool = False,
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -279,6 +280,10 @@ def materialize_config_with_envs(
         inferencex_path: Explicit InferenceX checkout to pin into the YAML.
         benchmark_script: Pre-sanitized benchmark script name to re-pin.
         out_name: File name for the materialized YAML.
+        establish_quality_ref: When True (baseline only) the scriptable
+            image-quality reference is ESTABLISHED (written) by this run;
+            otherwise the run only COMPARES against it. See the quality-
+            reference wiring block below.
 
     Returns:
         The materialized YAML path (stable file name across calls).
@@ -692,6 +697,63 @@ def materialize_config_with_envs(
             envs[framework_env] = server_args
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
+    # ── Quality-reference wiring (scriptable / server-less workloads) ──────
+    # Magpie forwards ONLY ``benchmark.envs`` to the wrapper subprocess, so an
+    # operator's ``XDIT_QUALITY_REF`` set in the process env never reaches it:
+    # the shipped YAML default (``XDIT_QUALITY_REF: ""``) wins and the image-
+    # quality gate is silently SKIPPED on every variant (fail-open). Re-inject
+    # the reference here — the single choke point every scriptable bench path
+    # funnels through — so the wrapper actually compares. Authoritative over the
+    # YAML/caller because the empty YAML default is precisely the bug.
+    #   * BASELINE (establish_quality_ref=True): force COMPARE off + WRITE the
+    #     fresh reference, so a stale file from a previous session cannot make
+    #     the baseline gate against the wrong truth.
+    #   * Every other variant: COMPARE only and force the write path empty so a
+    #     degraded variant can never overwrite the baseline reference and pass
+    #     itself (benchmark.envs overrides the inherited process env).
+    #   * Profiling / roofline (is_profile): no correctness gate AND must never
+    #     write — an inherited write path would let a reduced-step profile image
+    #     clobber the baseline reference.
+    if framework_registry.is_scriptable(bench.get("framework")):
+        _qref = os.environ.get("XDIT_QUALITY_REF", "").strip()
+        if is_profile:
+            envs["XDIT_QUALITY_REF"] = ""
+            envs["XDIT_QUALITY_REF_WRITE"] = ""
+        elif _qref:
+            if establish_quality_ref:
+                envs["XDIT_QUALITY_REF"] = ""
+                envs["XDIT_QUALITY_REF_WRITE"] = (
+                    os.environ.get("XDIT_QUALITY_REF_WRITE", "").strip() or _qref
+                )
+            else:
+                envs["XDIT_QUALITY_REF"] = _qref
+                envs["XDIT_QUALITY_REF_WRITE"] = ""
+        # ── Model-arg wiring (scriptable xDiT registry resolution) ────────
+        # The xDiT runner resolves models via MODEL_REGISTRY keys (e.g.
+        # "Qwen-Image", "FLUX.1-dev"), NOT arbitrary filesystem paths. The
+        # bench wrapper's XDIT_MODEL_ARG selects whether it passes the model
+        # basename ("name", registry-correct) or the full path ("path", which
+        # fails registry lookup -> "Model <path> not found in registry"). The
+        # operator pins the correct mode in the process env; force it onto
+        # benchmark.envs here (the single scriptable choke point) so per-task
+        # agent overrides cannot silently break model resolution. Default to
+        # "name" because registry lookup keys on the basename.
+        envs["XDIT_MODEL_ARG"] = (
+            os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
+        )
+        # ── Baseline attention-backend guard (scriptable xDiT) ────────────
+        # The baseline must measure the clean, verified reference config. The
+        # orchestration agent sometimes injects experimental extra_envs while
+        # trying to escape a failure loop (e.g. XDIT_ATTENTION_BACKEND=torch,
+        # which xDiT rejects: "Invalid attention backend: torch"). For the
+        # baseline only, force the operator-pinned backend (default 'aiter',
+        # the MI300X-verified path) so an invalid agent override cannot
+        # poison the reference measurement. Explore/sweep variants keep their
+        # freedom to try alternative backends.
+        if establish_quality_ref:
+            envs["XDIT_ATTENTION_BACKEND"] = (
+                os.environ.get("XDIT_ATTENTION_BACKEND", "").strip() or "aiter"
+            )
     # ── Per-model MI300X baseline work-arounds ─────────────────────────
     # A handful of flagship models SIGABRT during CUDA-graph capture on the
     # sglang ROCm image because their DEFAULT fused kernels are buggy on

@@ -863,6 +863,57 @@ ensure_bench_serving_deps() {
   log "bench_serving deps installed OK"
 }
 
+# --- 4b. xDiT image-quality gate deps (SSIM + LPIPS) ---
+#
+# The scriptable xDiT bench wrapper computes an image-quality gate
+# (LPIPS / SSIM / MSE vs a BF16 reference). torch/torchvision/numpy ship
+# with the pytorch-xdit image, but scikit-image (SSIM) and lpips (LPIPS)
+# do NOT — so without this step the gate silently degrades to MSE-only
+# (the wrapper now reports ssim_available/lpips_available=false). These
+# are pip-name != import-name, so we map them explicitly.
+#
+# Fail-soft: lpips also pulls AlexNet weights on first use (network), so a
+# failed install must NOT abort the whole install — the wrapper degrades
+# gracefully (honest *_available=false) rather than crashing the run.
+_XDIT_QUALITY_DEPS=(
+  "scikit-image:skimage"
+  "lpips:lpips"
+)
+
+ensure_xdit_quality_deps() {
+  log "ensuring xDiT image-quality gate deps (SSIM/LPIPS) in $PYTHON"
+  local missing=()
+  local pair pip_name import_name
+  for pair in "${_XDIT_QUALITY_DEPS[@]}"; do
+    pip_name="${pair%%:*}"
+    import_name="${pair##*:}"
+    if ! "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1; then
+      missing+=("$pip_name")
+    fi
+  done
+  if [ ${#missing[@]} -eq 0 ]; then
+    log "xDiT quality deps already satisfied"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "check-only mode; would install xDiT quality deps: ${missing[*]}"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "dry-run; skipping xDiT quality dep install"
+    return 0
+  fi
+  log "installing missing xDiT quality deps: ${missing[*]}"
+  "$PYTHON" -m pip install --quiet --no-cache-dir \
+    "${PIP_EXTRA[@]}" "${missing[@]}" \
+    || warn "failed to install xDiT quality deps: ${missing[*]} (gate degrades to MSE-only)"
+  for pair in "${_XDIT_QUALITY_DEPS[@]}"; do
+    import_name="${pair##*:}"
+    "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1 \
+      || warn "xDiT quality dep '${import_name}' not importable after install (gate excludes it)"
+  done
+}
+
 # --- 4c. Langfuse SDK (opt-in live trace push) ---
 # The local reports/trace/*.jsonl ledger never needs this. Only the opt-in
 # live-Langfuse sink (HYPERLOOM_LANGFUSE_ENABLE=1) imports the SDK, and when
@@ -1122,6 +1173,7 @@ ensure_magpie
 ensure_magpie_atomic_scripts_patch
 ensure_inferencex
 ensure_bench_serving_deps
+ensure_xdit_quality_deps
 ensure_rocprof_compute
 chain_kernel_agent
 chain_framework_agent

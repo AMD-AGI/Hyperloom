@@ -187,6 +187,25 @@ def quality_gate_passed(
     """
     if not isinstance(quality_gate, dict) or not quality_gate:
         return not require
+    # A SKIPPED gate carries no correctness signal. For scriptable workloads
+    # (require=True) the image-quality gate is the ONLY correctness signal, so a
+    # skip must not silently pass (the original fail-open closed "missing gate"
+    # but left "present-but-skipped" open). Distinguish the two legitimate skips
+    # from a real miss:
+    #   * ``reference_established`` — the baseline writing the reference on its
+    #     first run; there is nothing to compare against yet -> pass.
+    #   * any other skip (``no_reference_or_image`` / ``reference_missing`` /
+    #     ``image_libs_unavailable`` / ...) -> pass ONLY when no reference was
+    #     configured (gate intentionally disabled); when a reference IS
+    #     configured the comparison was expected but did not happen -> fail
+    #     closed. ``XDIT_QUALITY_REF`` is read from the process env shared by
+    #     every executor task, mirroring what the bench wrapper was handed.
+    if require and quality_gate.get("skipped"):
+        if str(quality_gate.get("reason") or "") == "reference_established":
+            return True
+        if os.environ.get("XDIT_QUALITY_REF", "").strip():
+            return False
+        return True
     if "passed" in quality_gate:
         return bool(quality_gate["passed"])
     checks = (
