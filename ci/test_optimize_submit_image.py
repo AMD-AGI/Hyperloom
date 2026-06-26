@@ -14,3 +14,37 @@ def test_mimo_uses_current_sglang_profilerfix_image():
     assert image == opt._default_sglang_image()
     assert "v0.5.12-rocm720-mi30x-profilerfix" in image
     assert "v0.5.11" not in image
+
+
+class _FakeSafe:
+    def __init__(self, sid: str):
+        self.sid = sid
+
+    def _claw_session_id_for(self, task_id: str) -> str:
+        assert task_id == "opt-123"
+        return self.sid
+
+
+def test_claw_session_resolver_falls_back_to_task_get():
+    rec = opt.SubmissionRecord(model="org/model", status="submitted", task_id="opt-123")
+
+    sid = opt._resolve_record_claw_session_id(_FakeSafe("claw-abc"), rec, {})
+
+    assert sid == "claw-abc"
+
+
+def test_claw_session_resolver_prefers_terminal_payload():
+    rec = opt.SubmissionRecord(
+        model="org/model",
+        status="submitted",
+        task_id="opt-123",
+        claw_session_id="old-claw",
+    )
+
+    sid = opt._resolve_record_claw_session_id(
+        _FakeSafe("fallback-claw"),
+        rec,
+        {"clawSessionId": "fresh-claw"},
+    )
+
+    assert sid == "fresh-claw"

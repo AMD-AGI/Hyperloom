@@ -3210,6 +3210,35 @@ def _json_claw_session_id(data: dict) -> str:
     return ""
 
 
+def _resolve_record_claw_session_id(
+    safe: SafeOptimizeClient,
+    rec: SubmissionRecord,
+    last_task: dict | None = None,
+) -> str | None:
+    """Resolve a Claw session id for a submitted record.
+
+    SaFE's terminal task payload can occasionally omit ``clawSessionId`` even
+    though a subsequent task GET has it. Prefer the freshest terminal payload,
+    but fall back to the cached resolver before leaving the manifest without a
+    Claw id; otherwise Pulse classifies the dispatch as ``no_claw_session``.
+    """
+    for value in (
+        (last_task or {}).get("clawSessionId"),
+        rec.claw_session_id,
+    ):
+        sid = str(value or "").strip()
+        if sid:
+            return sid
+    if rec.task_id:
+        try:
+            sid = safe._claw_session_id_for(rec.task_id)
+            if sid:
+                return sid
+        except Exception as e:
+            log.debug("[task %s] clawSessionId fallback lookup failed: %s", rec.task_id, e)
+    return None
+
+
 def _env_truthy(name: str) -> bool:
     """Report whether an environment variable is set to a truthy value.
 
@@ -3429,6 +3458,9 @@ def _nfs_fallback_collect(
             if rec.claw_session_id != claw:
                 return
             score += 30
+        elif claw and not rec.claw_session_id:
+            rec.claw_session_id = claw
+            score += 20
         if _json_positive_perf(data):
             score += 10
         else:
@@ -3616,7 +3648,7 @@ def wait_and_collect_one(
     rec.final_status = final_status
     rec.final_phase = last_task.get("currentPhase")
     rec.final_message = (last_task.get("message") or "")[:500] or None
-    rec.claw_session_id = (last_task.get("clawSessionId") or "").strip() or None
+    rec.claw_session_id = _resolve_record_claw_session_id(safe, rec, last_task)
     rec.model_path = (last_task.get("modelPath") or "").strip() or rec.model_path
     rec.safe_user_id = (last_task.get("userId") or "").strip() or rec.safe_user_id
     rec.safe_started_at = (last_task.get("startedAt") or "").strip() or rec.safe_started_at

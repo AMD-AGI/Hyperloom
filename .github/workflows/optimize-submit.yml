@@ -905,6 +905,31 @@ jobs:
               session.setdefault("session_id", claw_session_id)
               session_meta.setdefault("session_id", claw_session_id)
 
+          def _float_value(value):
+              try:
+                  return float(value or 0)
+              except Exception:
+                  return 0.0
+
+          status = str(data.get("status") or data.get("stop_reason") or "").strip().lower()
+          gain = _float_value(
+              data.get("gain_pct_sum")
+              if data.get("gain_pct_sum") is not None
+              else data.get("gain")
+          )
+          # These terminal states can emit a structurally valid failure
+          # breakdown with gain=0. Keep them ingested for auditability, but do
+          # not let them surface as leaderboard successes.
+          if status in {
+              "failed",
+              "baseline_failed",
+              "signal",
+              "robustness_escalated",
+              "model_config_incompatible",
+          } and gain <= 0:
+              data["show_on_leaderboard"] = False
+              data["leaderboard_withheld_reason"] = status or "runtime_invalid"
+
           with open(dst, "w", encoding="utf-8") as f:
               json.dump(data, f)
           PY
