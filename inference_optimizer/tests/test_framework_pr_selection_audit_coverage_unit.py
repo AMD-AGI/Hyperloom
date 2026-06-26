@@ -344,14 +344,39 @@ def test_ranker_client_builds_from_env(coord: Coordinator, monkeypatch) -> None:
 # --------------------------------------------------------------------------
 # _select_best_framework_pr_candidate / _rank_framework_pr_candidates_llm
 # --------------------------------------------------------------------------
-class _FakeMessage:
-    def __init__(self, content: str) -> None:
-        self.message = type("_M", (), {"content": content})()
+class _FakeDelta:
+    def __init__(self, content: str | None) -> None:
+        self.content = content
 
 
-class _FakeResp:
+class _FakeChunkChoice:
+    def __init__(self, content: str | None) -> None:
+        self.delta = _FakeDelta(content)
+
+
+class _FakeChunk:
+    def __init__(self, content: str | None) -> None:
+        self.choices = [_FakeChunkChoice(content)] if content is not None else []
+        self.usage = None
+
+
+class _FakeStream:
+    """Async-iterable stream of completion chunks (mirrors the streaming proxy)."""
+
     def __init__(self, content: str) -> None:
-        self.choices = [_FakeMessage(content)]
+        # Split the content into a couple of deltas to exercise accumulation.
+        mid = max(1, len(content) // 2)
+        self._chunks = [_FakeChunk(content[:mid]), _FakeChunk(content[mid:])] if content else [_FakeChunk("")]
+
+    def __aiter__(self):
+        self._it = iter(self._chunks)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._it)
+        except StopIteration:  # noqa: PERF203
+            raise StopAsyncIteration from None
 
 
 class _FakeCompletions:
@@ -360,9 +385,11 @@ class _FakeCompletions:
         self._raise = raise_exc
 
     async def create(self, **kwargs):
+        # The ranker now streams; assert the streaming flags are set.
+        assert kwargs.get("stream") is True
         if self._raise:
             raise RuntimeError("llm down")
-        return _FakeResp(self._content)
+        return _FakeStream(self._content)
 
 
 class _FakeClient:

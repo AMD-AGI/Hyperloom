@@ -3590,23 +3590,37 @@ class Coordinator:
             'Reply with ONLY compact JSON: {"candidate_id": "<id>", "reason": "<short>"}.'
         )
         prompt = "\n".join(ctx_lines)
-        try:
-            resp = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_completion_tokens=400,
-                ),
-                timeout=float(
-                    getattr(self, "framework_pr_ranker_timeout_sec", 60.0) or 60.0
-                ),
+
+        # The Primus-Safe/Vertex proxy rejects non-streaming predictions with an
+        # opaque 400 INVALID_ARGUMENT; only streamed requests are accepted (same
+        # constraint ProposalScorer hit). Stream and accumulate the deltas. The
+        # deadline wraps BOTH stream creation and the chunk loop so a proxy that
+        # opens the stream then stalls mid-body can't hang the ranker.
+        async def _read_stream() -> str:
+            parts: list[str] = []
+            stream = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_completion_tokens=400,
+                stream=True,
+                stream_options={"include_usage": True},
             )
+            async for chunk in stream:
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta is not None and delta.content:
+                        parts.append(delta.content)
+            return "".join(parts)
+
+        try:
+            text = (
+                await asyncio.wait_for(
+                    _read_stream(),
+                    timeout=float(getattr(self, "framework_pr_ranker_timeout_sec", 60.0) or 60.0),
+                )
+            ).strip()
         except Exception as exc:  # noqa: BLE001 — degrade to fallback
             log.debug("FRAMEWORK_PR: ranker LLM call failed (%r)", exc)
-            return None
-        try:
-            text = (resp.choices[0].message.content or "").strip()
-        except Exception:  # noqa: BLE001
             return None
         if not text:
             return None
@@ -3798,6 +3812,56 @@ class Coordinator:
             # Last-ditch: let phase_discover resolve from framework itself.
             _add(_fa_client.repo_url_for_framework(framework or "sglang"))
         return urls
+
+    def _write_prs_tested_from_framework_pr(
+        self, *, task: "Task", result: Any, kept: bool,
+    ) -> None:
+        """Write framework-pr KEEP/REVERT patch into recipe.prs_tested for warm-replay reuse."""
+        if self.cortex_kb is None:
+            return
+        result_dict = result.result if hasattr(result, "result") else (result or {})
+        if not isinstance(result_dict, dict):
+            return
+        status = str(result_dict.get("status") or "")
+        if status not in ("kept", "reverted"):
+            return
+        # Extract patch info from result
+        patches_applied = result_dict.get("patches_applied") or []
+        patch_path = patches_applied[0] if patches_applied else ""
+        delta_pct = result_dict.get("delta_pct") or 0.0
+        candidate = result_dict.get("candidate") or {}
+        pr_url = candidate.get("pr_url") or candidate.get("url") or ""
+        repo = candidate.get("repo") or ""
+        error_class = result_dict.get("error_class") or ""
+        # Build prs_tested entry
+        outcome = "KEEP" if status == "kept" else "REVERT"
+        ss = self.shared_state
+        entry = {
+            "repo": repo or (pr_url.split("/")[3] + "/" + pr_url.split("/")[4] if pr_url and len(pr_url.split("/")) > 4 else "unknown"),
+            "number": int(candidate.get("pr_number") or candidate.get("number") or 0),
+            "outcome": outcome,
+            "patch_file": str(patch_path),
+            "measured_gain_pct": float(delta_pct or 0.0),
+            "applicable_arch": list(getattr(ss, "model_architectures", None) or []),
+            "applicable_precision": str(getattr(ss, "precision", "") or ""),
+            "applicable_platform": "rocm",
+            "error_class": error_class if outcome == "REVERT" else "",
+            "notes": f"{outcome}: {candidate.get('title', patch_path)} ({delta_pct:+.1f}%)",
+            "source_session_id": self._source_session_id(),
+            "tested_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        # Read-modify-write prs_tested
+        try:
+            live = self._read_local_recipe_row()
+            existing_prs = list(live.get("prs_tested") or [])
+            existing_prs.append(entry)
+            self._kb_amend_recipe(recipe_overrides={"prs_tested": existing_prs})
+            log.info(
+                "framework_pr: wrote prs_tested[%s] for %s (gain=%+.1f%%)",
+                outcome, patch_path, delta_pct,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("framework_pr: prs_tested write failed")
 
     def _record_framework_pr_phase_done(
         self,
@@ -5808,7 +5872,10 @@ class Coordinator:
             }
             state.warm_replay_attempted = True
             return None
-        if not bc_args and not bc_envs:
+        # Extract code patches from warm_start_context (populated by T0).
+        wsc_patches = (wsc.get("recommended_replay") or {}).get("patches") or [] if isinstance(wsc, dict) else []
+        wsc_blocked = wsc.get("blocked_patches") or [] if isinstance(wsc, dict) else []
+        if not bc_args and not bc_envs and not wsc_patches:
             state.warm_replay_outcome = {
                 "status": "skipped",
                 "reason": "best_config_empty",
@@ -5859,6 +5926,9 @@ class Coordinator:
             "config_donor_tier": config_tier,
             "config_source": config_source,
             "baseline_tput_anchor": float(baseline_tput),
+            # Code patches to apply before server launch (from prs_tested[KEEP]).
+            "patches": list(wsc_patches),
+            "blocked_patches": list(wsc_blocked),
         }
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="replay_warm_recipe",
@@ -12365,6 +12435,15 @@ class Coordinator:
                     self._record_coordinator_exception(
                         stage="dispatcher_fact_write",
                         exc=exc,
+                    )
+            # Framework-PR prs_tested write-back: record KEEP/REVERT patches into recipe.
+            if task.kind == "framework_pr":
+                try:
+                    self._write_prs_tested_from_framework_pr(task=task, result=result, kept=kept)
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "dispatcher: prs_tested write-back failed for task=%s",
+                        task.task_id,
                     )
                     continue
             # explore-round gap update: append per-variant KEEP/REVERT to the gap, then re-run the global refresh.
