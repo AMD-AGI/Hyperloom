@@ -293,7 +293,9 @@ def test_apply_then_revert_roundtrip_invalidates_and_restores_jit_cache(
     backup_root = tmp_path / "backups"
 
     # Make aiter resolve to the synthetic layout for _aiter_jit_build_dir().
-    fake_spec = types.SimpleNamespace(submodule_search_locations=[str(repo / "aiter")])
+    fake_spec = types.SimpleNamespace(
+        submodule_search_locations=[str(repo / "aiter")], origin=None
+    )
     fake_rebuild_ok = {
         "status": "ok",
         "returncode": 0,
@@ -339,7 +341,9 @@ def test_skip_rebuild_does_not_invalidate_jit_build(
     patch_file = tmp_path / "patched.cu"
     patch_file.write_text('#include <cstdio>\nnamespace aiter {\nvoid ck_moe_stage1(int x) { printf("v1\\n"); }\n}\n')
 
-    fake_spec = types.SimpleNamespace(submodule_search_locations=[str(repo / "aiter")])
+    fake_spec = types.SimpleNamespace(
+        submodule_search_locations=[str(repo / "aiter")], origin=None
+    )
     with patch.object(apply_tool.importlib.util, "find_spec", return_value=fake_spec):
         result = apply_tool.apply_kernel_patch(
             patch_path=patch_file,
