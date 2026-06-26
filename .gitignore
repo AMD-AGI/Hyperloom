@@ -72,3 +72,5 @@ ci/candidates/*.json
 GPU_optimization_plan.md
 GPU_optimization.md
 framework_enhance.MD
+reference_sessions
+advise_alter.MD
