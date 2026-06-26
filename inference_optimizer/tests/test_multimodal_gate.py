@@ -281,12 +281,14 @@ def test_detect_qwen35_moe_text_coercible(tmp_path):
     assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
 
 
-def test_detect_gemma4_wrapper_deferred_to_config_compat_gate(tmp_path):
-    """Gemma4 wrappers should not emit a degraded-mode warning before fail-fast.
+def test_detect_gemma4_wrapper_text_coercible(tmp_path):
+    """Gemma4 multimodal wrappers route to the text-coercible degraded path.
 
-    The current pinned framework stack does not recognize ``model_type=gemma4``;
-    the model-config gate should report the precise incompatibility instead of
-    the multimodal gate claiming the model can run in text-only degraded mode.
+    The current pinned stack (transformers 5.5.0 + vLLM 0.18.2rc1) recognizes
+    ``model_type=gemma4``, so it was removed from the unrecognized blocklist. A
+    Gemma4 wrapper still carries ``vision_config`` but exposes a text decoder
+    (``text_config``), so the multimodal gate classifies it as text_coercible
+    (text-only degraded mode) and the model-config gate no longer fail-fasts.
     """
     m = tmp_path / "gemma4"
     _write_config(
@@ -304,10 +306,8 @@ def test_detect_gemma4_wrapper_deferred_to_config_compat_gate(tmp_path):
         },
     )
     hit = cli._detect_unsupported_model(str(m))
-    assert hit is None
-    reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None
-    assert "gemma4" in reason
+    assert hit is not None
+    assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
 
 
 def test_detect_known_vlm_with_text_config_still_vision_only(tmp_path):
