@@ -3,7 +3,7 @@
 """Real ``sweep`` ActionRunner — full ISL/OSL/CONC Pareto sweep.
 
 Relaunches one Magpie bench per (CONC, ISL, OSL) combo with the optimized
-server config (a single-server mode is a future follow-up).
+server config.
 
 Inputs (task.params):
 
@@ -252,6 +252,30 @@ class SweepExecutor:
                 ``workspace``.
         """
         params = ctx.task.params or {}
+        # PerfSkills reuse path: when the KERNEL phase was delegated to
+        # PerfSkills, sweep the optimized server via PerfSkills' own bench_e2e.sh
+        # + the already-built overlay (no overlay reconstruction).
+        ps_result = params.get("perfskills_result") or {}
+        if ps_result.get("bench_script") and ps_result.get("status") == "ok":
+            extra = getattr(ctx, "extra", None) or {}
+            output_root = Path(
+                params.get("output_dir")
+                or extra.get("workspace")
+                or runs_dir(self.session_dir, "sweep", ctx.task.task_id)
+            )
+            from ._perfskills_sweep import sweep_via_perfskills
+            return await sweep_via_perfskills(
+                result=ps_result,
+                conc_values=list(params.get("conc_values") or self.default_conc_values),
+                isl_osl_configs=list(
+                    params.get("isl_osl_configs") or self.default_isl_osl_configs
+                ),
+                output_root=output_root,
+                variant_timeout_sec=int(
+                    params.get("variant_timeout_sec", self.variant_timeout_sec)
+                ),
+            )
+
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
             return {"status": "failed", "error_class": "missing_config", "error": f"config not found: {config_path}"}
@@ -319,9 +343,8 @@ class SweepExecutor:
         # the Pareto-front computation downstream.
         grid, _ = apply_multi_node_invalid_variants(grid)
 
-        # `resolved_model` / `resolved_gpu` were resolved above for the
-        # materialization step; reuse them here. See baseline.py /
-        # _grid_runner.py for the rationale on why both must flow through.
+        # Pass `resolved_model` / `resolved_gpu` through so variant servers
+        # inherit the resolved TP/precision.
         results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args="",  # sweep variants carry args themselves

@@ -18,8 +18,10 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer.orchestrator.action_executors._subprocess_kill import (
+    DETOKENIZER_STALL_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
+    _scan_server_log_increment,
     _server_log_shows_death,
     kill_my_spawned_server,
     new_session_kwargs,
@@ -287,13 +289,14 @@ def test_server_log_shows_death_detects_marker(tmp_path):
     """A ``server.log`` containing a terminal-init marker reads as dead;
     a healthy / missing log reads as alive."""
     log_path = tmp_path / "server.log"
-    assert _server_log_shows_death(str(log_path)) is False  # missing → alive
+    assert _server_log_shows_death(str(log_path)) is None  # missing → alive
     log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")
-    assert _server_log_shows_death(str(log_path)) is False  # healthy → alive
+    assert _server_log_shows_death(str(log_path)) is None  # healthy → alive
     log_path.write_text(
         "ERROR core.py Exception: WorkerProc initialization failed due to an exception in a background process.\n"
     )
-    assert _server_log_shows_death(str(log_path)) is True
+    # dead → returns the matched marker (truthy) rather than a bare bool
+    assert _server_log_shows_death(str(log_path)) is not None
 
 
 def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
@@ -307,7 +310,7 @@ def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
         "(APIServer pid=16160) RuntimeError: Engine core initialization failed. "
         "See root cause above. Failed core proc(s): {}\n"
     )
-    assert _server_log_shows_death(str(log_path)) is True
+    assert _server_log_shows_death(str(log_path)) is not None
 
 
 def test_server_log_shows_death_detects_nested_benchmark_log(tmp_path):
@@ -319,14 +322,14 @@ def test_server_log_shows_death_detects_nested_benchmark_log(tmp_path):
     nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
     nested_dir.mkdir()
     nested_log = nested_dir / "server.log"
-    assert _server_log_shows_death(str(watched)) is False  # nothing yet → alive
+    assert _server_log_shows_death(str(watched)) is None  # nothing yet → alive
     nested_log.write_text("INFO loading shards 50%\nINFO graph capture\n")
-    assert _server_log_shows_death(str(watched)) is False  # healthy nested → alive
+    assert _server_log_shows_death(str(watched)) is None  # healthy nested → alive
     nested_log.write_text(
         "(EngineCore pid=2581809) RuntimeError: Engine core initialization "
         "failed. See root cause above. Failed core proc(s): {}\n"
     )
-    assert _server_log_shows_death(str(watched)) is True
+    assert _server_log_shows_death(str(watched)) is not None
 
 
 def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
@@ -428,3 +431,124 @@ def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
     )
     assert cp.returncode == 0
     assert "ok" in (cp.stdout or "")
+
+
+# ── Detokenizer-stall watchdog ──
+def test_scan_server_log_increment_detects_ready_and_progress(tmp_path):
+    """The incremental scanner advances its offset and flags ready/progress
+    markers only in the newly appended bytes."""
+    log_path = tmp_path / "server.log"
+    log_path.write_text("INFO loading weights\nApplication startup complete\n")
+    off, ready, prog = _scan_server_log_increment(str(log_path), 0)
+    assert ready is True and prog is False and off == log_path.stat().st_size
+    # Re-scan from the advanced offset: nothing new, no re-trigger.
+    off2, ready2, prog2 = _scan_server_log_increment(str(log_path), off)
+    assert ready2 is False and prog2 is False and off2 == off
+    # Append a vLLM throughput line; only the new bytes are scanned.
+    with log_path.open("a") as f:
+        f.write("Avg generation throughput: 123.4 tokens/s, Running: 8\n")
+    off3, ready3, prog3 = _scan_server_log_increment(str(log_path), off2)
+    assert prog3 is True and ready3 is False and off3 == log_path.stat().st_size
+
+
+def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_path):
+    """A server that reports ready then produces no generation progress is
+    reaped with ``DETOKENIZER_STALL_RETURNCODE`` well before the hard timeout."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "open(sys.argv[1], 'w').write('Application startup complete\\n')\n"
+        "time.sleep(60)\n"  # ready, then silent — detokenizer stall
+    )
+    start = time.monotonic()
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        timeout=60,
+        server_log_path=str(log_path),
+        detok_stall_grace_sec=1.0,
+    )
+    elapsed = time.monotonic() - start
+    assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
+    assert elapsed < 15.0, f"stall watchdog took {elapsed:.2f}s (expected fast)"
+
+
+def test_run_with_session_kill_detok_stall_not_armed_before_ready(tmp_path):
+    """A server still loading weights (no ready marker) must NOT trip the stall
+    gate even past the grace window — slow is not stalled."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "open(sys.argv[1], 'w').write('INFO loading weights shard 1/8\\n')\n"
+        "time.sleep(2)\n"
+        "raise SystemExit(0)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        timeout=30,
+        server_log_path=str(log_path),
+        detok_stall_grace_sec=0.5,
+    )
+    assert cp.returncode == 0
+
+
+def test_run_with_session_kill_detok_stall_progress_keeps_it_alive(tmp_path):
+    """Continued generation-progress lines reset the stall clock so a healthy
+    (if slow) run finishes with its own returncode."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "f = open(sys.argv[1], 'w')\n"
+        "f.write('Application startup complete\\n'); f.flush()\n"
+        "for _ in range(6):\n"
+        "    time.sleep(0.3)\n"
+        "    f.write('gen throughput (token/s): 250.0, #queue-req: 0\\n'); f.flush()\n"
+        "raise SystemExit(0)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        timeout=30,
+        server_log_path=str(log_path),
+        detok_stall_grace_sec=1.0,
+    )
+    assert cp.returncode == 0
+
+
+def test_run_with_session_kill_detok_stall_compile_logs_keep_it_alive(tmp_path):
+    """A long, quiet first-request JIT/compile after ready must NOT trip the
+    gate: ANY new log line (not just throughput) is liveness, so a huge model
+    that logs compile progress between ready and its first token survives."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "f = open(sys.argv[1], 'w')\n"
+        "f.write('The server is fired up and ready to roll\\n'); f.flush()\n"
+        "for i in range(6):\n"  # non-throughput compile chatter, no tokens yet
+        "    time.sleep(0.3)\n"
+        "    f.write('aiter: JIT compiling kernel %d/6\\n' % i); f.flush()\n"
+        "raise SystemExit(0)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        timeout=30,
+        server_log_path=str(log_path),
+        detok_stall_grace_sec=1.0,
+    )
+    assert cp.returncode == 0
+
+
+def test_run_with_session_kill_detok_stall_disabled_when_grace_nonpositive(tmp_path):
+    """``detok_stall_grace_sec <= 0`` disables the gate entirely."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "open(sys.argv[1], 'w').write('Application startup complete\\n')\n"
+        "time.sleep(1)\n"
+        "raise SystemExit(0)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        timeout=30,
+        server_log_path=str(log_path),
+        detok_stall_grace_sec=0.0,
+    )
+    assert cp.returncode == 0

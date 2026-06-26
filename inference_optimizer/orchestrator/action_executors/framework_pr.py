@@ -9,7 +9,7 @@ the Critic, and dispatches this executor per approved candidate to::
   1. Fetch the unified diff (explicit ``params.patches`` or
      ``curl candidate.diff_url``; apply happens in the live source root).
   2. Snapshot pre-apply HEAD SHA so REVERT can ``git reset --hard`` back
-     without disturbing prior KEEP commits (PR-327 P1.c).
+     without disturbing prior KEEP commits.
   3. Apply via ``git apply`` (single integration channel).
   4. Bench the patched server (``run_grid([GridVariant])``, size=1).
   5. KEEP commits to the live tree (next candidate stacks); REVERT runs
@@ -30,7 +30,7 @@ Inputs (``ctx.task.params``)::
         the executor curls ``candidate.diff_url`` into the per-task
         workspace and applies that.
     keep_threshold_pct (float, optional) — default DEFAULT_KEEP_THRESHOLD_PCT
-        (1.0 after D1 alignment; imported from integrate_patch).
+        (1.0; imported from integrate_patch).
     base_tput (float, optional) — baseline throughput; falls back to
         ``SharedState.baseline_tput``.
     accuracy_baseline (float, optional) — forwarded to the accuracy gate.
@@ -71,6 +71,7 @@ from ._accuracy_gate import (
     parse_eval_results,
     require_framework_accuracy_default,
 )
+from ._git import _run_git, _run_git_cp
 from ._grid_runner import (
     GridVariant,
     VariantResult,
@@ -89,6 +90,7 @@ from .integrate_patch import (
     DEFAULT_VARIANT_TIMEOUT_SEC,
     _git_apply,
     _git_stash_if_dirty,
+    _with_stash_restore,
     _resolve_framework_root,
 )
 from ..kb_writeback import (
@@ -118,17 +120,9 @@ def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
         A ``(sha, stderr)`` tuple; ``sha`` is ``None`` on failure with the
         error text in ``stderr``.
     """
-    cmd = ["git", "-C", str(framework_root), "rev-parse", "HEAD"]
-    try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return None, f"git rev-parse spawn failed: {exc!r}"
+    cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
+    if cp is None:
+        return None, "git rev-parse spawn failed"
     if cp.returncode != 0:
         return None, cp.stderr.strip()
     return cp.stdout.strip() or None, ""
@@ -151,30 +145,14 @@ def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
         A ``(ok, stderr)`` tuple; ``ok`` is False on failure with the error
         text in ``stderr``.
     """
-    cmd = ["git", "-C", str(framework_root), "reset", "--hard", sha]
-    try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, f"git reset --hard spawn failed: {exc!r}"
+    cp = _run_git_cp(["-C", str(framework_root), "reset", "--hard", sha], timeout=60.0)
+    if cp is None:
+        return False, "git reset --hard spawn failed"
     if cp.returncode != 0:
         return False, cp.stderr.strip()
-    clean_cmd = ["git", "-C", str(framework_root), "clean", "-fd"]
-    try:
-        cp2 = subprocess.run(
-            clean_cmd,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, f"git clean -fd spawn failed: {exc!r}"
+    cp2 = _run_git_cp(["-C", str(framework_root), "clean", "-fd"], timeout=60.0)
+    if cp2 is None:
+        return False, "git clean -fd spawn failed"
     if cp2.returncode != 0:
         return False, (cp2.stderr or "").strip()
     return True, ""
@@ -197,41 +175,27 @@ def _git_commit_keep(
         A ``(new_sha, stderr)`` tuple; ``new_sha`` is ``None`` on failure with
         the error text in ``stderr``.
     """
-    add = ["git", "-C", str(framework_root), "add", "-A"]
-    try:
-        cp_add = subprocess.run(
-            add,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return None, f"git add -A spawn failed: {exc!r}"
+    cp_add = _run_git_cp(["-C", str(framework_root), "add", "-A"], timeout=60.0)
+    if cp_add is None:
+        return None, "git add -A spawn failed"
     if cp_add.returncode != 0:
         return None, cp_add.stderr.strip()
-    cmd = [
-        "git",
-        "-c",
-        "user.email=framework-pr@hyperloom.local",
-        "-c",
-        "user.name=hyperloom framework_pr",
-        "-C",
-        str(framework_root),
-        "commit",
-        "-m",
-        message,
-    ]
-    try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return None, f"git commit spawn failed: {exc!r}"
+    cp = _run_git_cp(
+        [
+            "-c",
+            "user.email=framework-pr@hyperloom.local",
+            "-c",
+            "user.name=hyperloom framework_pr",
+            "-C",
+            str(framework_root),
+            "commit",
+            "-m",
+            message,
+        ],
+        timeout=60.0,
+    )
+    if cp is None:
+        return None, "git commit spawn failed"
     if cp.returncode != 0:
         return None, cp.stderr.strip()
     new_sha, err = _git_head_sha(framework_root)
@@ -307,37 +271,6 @@ def _fetch_diff_to_path(
     if not dest.exists() or dest.stat().st_size == 0:
         return False, "curl wrote empty / missing file"
     return True, ""
-
-
-def _run_git(
-    args: list[str],
-    *,
-    timeout: float = 120.0,
-) -> tuple[bool, str, str]:
-    """Run ``git <args>`` capturing output. Returns ``(ok, stdout, stderr)``.
-    Never raises (spawn / timeout failures map to ``(False, "", reason)``).
-
-    Args:
-        args (list[str]): The git arguments (without the leading ``git``).
-        timeout (float): The subprocess timeout in seconds.
-
-    Returns:
-        tuple[bool, str, str]: ``(ok, stdout, stderr)`` where ``ok`` reflects a
-            zero return code.
-    """
-    try:
-        cp = subprocess.run(
-            ["git", *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, "", f"git spawn/timeout failed: {exc!r}"
-    if cp.returncode != 0:
-        return False, cp.stdout or "", (cp.stderr or "").strip()
-    return True, cp.stdout or "", cp.stderr or ""
 
 
 def _normalize_repo_id(url_or_slug: str) -> str:
@@ -766,7 +699,7 @@ class FrameworkPrExecutor:
         # prior KEEPs are committed past this sha and survive a reset.
         pre_apply_sha, sha_err = _git_head_sha(framework_root)
         if pre_apply_sha is None:
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "apply_failed",
                 "error_class": "no_pre_apply_sha",
                 "error": (f"could not capture HEAD sha in {framework_root}: {sha_err or 'unknown'}"),
@@ -775,7 +708,7 @@ class FrameworkPrExecutor:
                 "patches_applied": [],
                 "patches_reverted": [],
                 "workspace": str(output_root),
-            }
+            })
 
         # Stage 1: apply patches (with -3 fallback like integrate_patch).
         applied: list[Path] = []
@@ -799,7 +732,7 @@ class FrameworkPrExecutor:
                 applied,
                 pre_apply_sha=pre_apply_sha,
             )
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "apply_failed",
                 "error_class": "git_apply_failed",
                 "error": apply_errors,
@@ -810,10 +743,10 @@ class FrameworkPrExecutor:
                 "patch_source_mode": patch_source_mode,
                 "reason": "git apply failed (see error)",
                 "workspace": str(output_root),
-            }
+            })
 
         if params.get("apply_only"):
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "applied_no_bench",
                 "candidate": candidate,
                 "batch_id": batch_id,
@@ -822,7 +755,7 @@ class FrameworkPrExecutor:
                 "patch_source_mode": patch_source_mode,
                 "reason": "apply_only=True; benchmark skipped",
                 "workspace": str(output_root),
-            }
+            })
 
         # Stage 2: bench via run_grid (size=1).
         try:
@@ -837,7 +770,7 @@ class FrameworkPrExecutor:
                 applied,
                 pre_apply_sha=pre_apply_sha,
             )
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "reverted",
                 "error_class": "framework_script_mismatch",
                 "error": str(exc),
@@ -847,14 +780,14 @@ class FrameworkPrExecutor:
                 "patches_reverted": [str(p) for p in reverted],
                 "reason": str(exc),
                 "workspace": str(output_root),
-            }
+            })
         except Exception as exc:  # noqa: BLE001
             reverted = self._revert_patches(
                 framework_root,
                 applied,
                 pre_apply_sha=pre_apply_sha,
             )
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "reverted",
                 "error_class": "bench_exception",
                 "error": repr(exc),
@@ -864,7 +797,7 @@ class FrameworkPrExecutor:
                 "patches_reverted": [str(p) for p in reverted],
                 "reason": f"bench raised: {exc!r}",
                 "workspace": str(output_root),
-            }
+            })
 
         # Stage 3: KEEP / REVERT.
         base_tput = float(params.get("base_tput") or 0.0)
@@ -924,7 +857,7 @@ class FrameworkPrExecutor:
                 patch_path=str(applied[0]) if applied else "",
                 extra=extra,
             )
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": revert_status,
                 "candidate": candidate,
                 "batch_id": batch_id,
@@ -939,7 +872,7 @@ class FrameworkPrExecutor:
                 "reason": "; ".join(reasons) or "gate failed",
                 "bench_result": bench_result,
                 "workspace": str(output_root),
-            }
+            })
 
         # KEEP: commit the patches so they survive the next candidate's
         # REJECT (whose pre_apply_sha already includes this commit).
@@ -953,7 +886,7 @@ class FrameworkPrExecutor:
                 applied,
                 pre_apply_sha=pre_apply_sha,
             )
-            return {
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "apply_failed",
                 "error_class": "keep_commit_failed",
                 "error": commit_err or "git commit returned no sha",
@@ -969,7 +902,7 @@ class FrameworkPrExecutor:
                 "reason": f"KEEP commit failed: {commit_err}",
                 "bench_result": bench_result,
                 "workspace": str(output_root),
-            }
+            })
 
         await self._write_kb_record(
             candidate=candidate,
@@ -978,7 +911,7 @@ class FrameworkPrExecutor:
             patch_path=str(applied[0]) if applied else "",
             extra=extra,
         )
-        return {
+        return _with_stash_restore(framework_root, stash_state, stash_note, {
             "status": "kept",
             "candidate": candidate,
             "batch_id": batch_id,
@@ -994,9 +927,9 @@ class FrameworkPrExecutor:
             "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
             "bench_result": bench_result,
             "workspace": str(output_root),
-        }
+        })
 
-    # KB writeback (D2, Arbor-into-Hyperloom)
+    # KB writeback: append FRAMEWORK_PR outcome to lessons.jsonl
     async def _write_kb_record(
         self,
         *,

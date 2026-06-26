@@ -169,7 +169,7 @@
     "ep": 0,
     "explore_attempts": [],
     "explore_enabled": true,
-    "explore_overtime_kill_ratio": 1.2,
+    "explore_overtime_kill_ratio": 2.0,
     "explore_search": {},
     "explore_specialist_dispatched_count": 0,
     "explore_variant_timeout_safety_margin": 0.5,
@@ -195,6 +195,7 @@
     "kernel_enabled": true,
     "kernel_integrate_attempts": {},
     "kernel_opt_attempts": {},
+    "kernel_optimizer": "native",
     "last_action_failures": [
       {
         "action": "baseline",
@@ -291,6 +292,7 @@
     "pending_integrate": {},
     "pending_stack_validation_apply_results": [],
     "pending_stack_validation_result": {},
+    "perfskills_result": {},
     "phase": "PRELUDE",
     "phase_budget_pct": {
       "CLOSE": 0.02,

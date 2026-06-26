@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""F2-5 — KB writeback adapters for specialist outcomes.
+"""KB writeback adapters for specialist outcomes.
 
 Appends structured records as JSON-Lines under
 ``framework-agent/kb/framework_optimization/lessons.jsonl`` (the ``fa`` CLI
@@ -124,7 +124,7 @@ async def write_framework_pr_record(
     tps_delta_pct: float,
     session_id: str,
 ) -> Path:
-    """Append a framework-PR outcome record to ``lessons.jsonl`` (F2 design).
+    """Append a framework-PR outcome record to ``lessons.jsonl``.
 
     Parameters:
 

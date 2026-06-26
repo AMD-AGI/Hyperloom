@@ -1,15 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark (§16.1).
+"""Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark.
 
 Runs the Magpie CLI as a subprocess, parses ``benchmark_report.json``,
 and returns the result on the bus as a ``delegated_result`` event.
 
 RunnerContext.task.params keys (all optional; defaults from
-BASELINE_DEFAULT_CONFIG): ``config_path``, ``output_dir``, ``timeout_sec``.
+default_baseline_config()): ``config_path``, ``output_dir``, ``timeout_sec``.
 
 Returns ``error_class`` on failure so the coordinator can route to
-Robustness RCA later (P1-7).
+Robustness RCA later.
 """
 
 from __future__ import annotations
@@ -23,17 +23,16 @@ import shutil
 import subprocess
 import tempfile
 import time
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import yaml
 
 from ...compat.payload_aliases import read_extra_server_args
-from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
+from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
     AITER_JIT_PROBE_PATHS,
     COLD_START_KERNEL_THRESHOLD,
@@ -46,6 +45,7 @@ from ._grid_runner import (
     sanitize_script_name,
 )
 from ._subprocess_kill import (
+    DETOKENIZER_STALL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     run_with_session_kill,
     server_log_death_excerpt,
@@ -64,7 +64,7 @@ from .benchmark_result import (
 log = logging.getLogger(__name__)
 
 
-# #522: fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
+# Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
 # should not consume the slow-baseline retry budget.
 FAST_EXIT_THRESHOLD_SEC = 30.0
 _ARG_ERROR_PATTERNS = (
@@ -238,10 +238,6 @@ def _classify_subprocess_error(
     return "subprocess_nonzero"
 
 
-# Legacy module-level constant kept pointing at the sglang yaml for tests
-# that import it as a fixture path. Runtime sglang/vllm selection goes
-# through `default_baseline_config()`.
-BASELINE_DEFAULT_CONFIG = asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
 BASELINE_DEFAULT_TIMEOUT_SEC = (
     7800  # WARM-start cap, 130 min (raised for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 ~82 min workload)
 )
@@ -305,7 +301,7 @@ def _resolve_reference_base(
         return ("", {})
 
 
-# #523: filesystem types that can be revoked / unmounted mid-run (e.g. a
+# Filesystem types that can be revoked / unmounted mid-run (e.g. a
 # wekafs/NFS mount flap). A process whose cwd lives on such a mount sees its
 # working directory "vanish underneath it" and any RELATIVE-path write hits
 # ``FileNotFoundError``. SGLang's cuda-graph profiling
@@ -314,7 +310,8 @@ def _resolve_reference_base(
 # Magpie launches the server via ``cd <inferencex> && bash <script>`` — so
 # the server's cwd IS the InferenceX checkout. When that checkout is on
 # wekafs and the mount flaps, the dump ENOENTs and the scheduler sigquits
-# before any ``.trace.json.gz`` is produced (issue #523).
+# before any ``.trace.json.gz`` is produced. Such FS types trigger local
+# mirroring.
 _NETWORK_FS_TYPES = frozenset(
     {
         "nfs",
@@ -390,51 +387,6 @@ def _is_network_fs(path: str) -> bool:
         ``True`` when ``path`` lives on a known network filesystem type.
     """
     return _path_fstype(path).lower() in _NETWORK_FS_TYPES
-
-
-@contextmanager
-def _mirror_lock(lock_path: str) -> Iterator[None]:
-    """Best-effort cross-process exclusive lock around the InferenceX mirror
-    copy+swap (#523).
-
-    Two tasks (or two sandbox processes) that resolve the SAME network-mount
-    source to the same hash-keyed ``dest`` would otherwise ``rmtree`` /
-    ``os.replace`` the mirror under each other — corrupting a tree another
-    run's server may be ``cd``-ed into. Serializing the swap makes the loser
-    wait for the winner and then overwrite a consistent tree. Degrades to no
-    exclusion when ``fcntl`` is unavailable (non-Linux) or the lock file
-    cannot be opened — the unique staging dir still prevents torn copies.
-
-    Args:
-        lock_path: Path to the lock file used for cross-process exclusion.
-
-    Yields:
-        None: Control is yielded to the caller while the lock is held (or
-        immediately, when no exclusion could be acquired).
-    """
-    try:
-        import fcntl
-    except ImportError:
-        yield
-        return
-    try:
-        fp = open(lock_path, "w")
-    except OSError as exc:
-        log.warning(
-            "baseline_executor: cannot open InferenceX mirror lock %s (%s); proceeding without cross-process exclusion",
-            lock_path,
-            exc,
-        )
-        yield
-        return
-    try:
-        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
-        finally:
-            fp.close()
 
 
 def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
@@ -515,7 +467,7 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     lock_path = str(local_root / f".{dest.name}.lock")
     staging: Path | None = None
     try:
-        with _mirror_lock(lock_path):
+        with best_effort_file_lock(lock_path, label="baseline_executor: InferenceX mirror lock"):
             staging = Path(tempfile.mkdtemp(dir=str(local_root)))
             staged_ix = staging / "InferenceX"
             # Copy the tree fresh; re-copy every run because the per-task
@@ -1056,7 +1008,7 @@ class BaselineExecutor:
         # discovers round 1's server. Task root keeps it per-task isolated.
         pid_dir = output_dir
         try:
-            # #5: deep-clean zombie listeners + stale pid/meta BEFORE round 1
+            # Deep-clean zombie listeners + stale pid/meta BEFORE round 1
             # boots its server. Runs once here (not per round) so round 1's
             # persistent server survives for round 2's re-attach.
             self._pre_start_cleanup(
@@ -1259,7 +1211,7 @@ class BaselineExecutor:
         framework: str,
         port: int,
     ) -> None:
-        """#5: best-effort startup pre-clean for the double-run path.
+        """Best-effort startup pre-clean for the double-run path.
 
         Only acts when there is concrete evidence of a zombie: the reuse
         port responds to /health but the matching metadata file is absent
@@ -1389,7 +1341,7 @@ class BaselineExecutor:
         # Put the venv first in PATH so the benchmark script's `python3`
         # resolves to one with torch+rocm (defense in depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # #210/#523: pin Magpie's InferenceX resolution to the same per-task
+        # Pin Magpie's InferenceX resolution to the same per-task
         # checkout rendered into benchmark.inferencex_path and patched by
         # ProfileExecutor. Do not re-read process env here; the task-local
         # explicit value avoids cross-task races on $INFERENCEX_PATH.
@@ -1472,21 +1424,20 @@ class BaselineExecutor:
 
         # Magpie launched via ``run_with_session_kill`` (subprocess.run-like
         # but tears down the whole descendant tree on every exit path).
-        # Plain subprocess.run leaks daemonized server processes (bugs.md §B,
-        # root cause of the bash-source race in §C #1). See
+        # Plain subprocess.run leaks daemonized server processes. See
         # ``_subprocess_kill.py``.
         subprocess_started_unix = time.time()
         # Anchor the Magpie *parent* process cwd to the stable per-task
         # output_dir instead of the default ``/tmp`` (defence-in-depth for any
-        # relative-path writes Magpie itself makes). NOTE: this does NOT fix
-        # #523 on its own — Magpie re-roots the actual server via
-        # ``cd <inferencex>`` (see ``_build_local_command`` in Magpie), so the
-        # server's cwd (where SGLang dumps the cuda-graph pickle) is the
-        # InferenceX checkout, not this output_dir. The #523 fix is
-        # ``_ensure_local_inferencex`` above, which keeps that checkout on
-        # stable local disk.
+        # relative-path writes Magpie itself makes). NOTE: this does NOT keep
+        # the server's cuda-graph dump safe on its own — Magpie re-roots the
+        # actual server via ``cd <inferencex>`` (see ``_build_local_command``
+        # in Magpie), so the server's cwd (where SGLang dumps the cuda-graph
+        # pickle) is the InferenceX checkout, not this output_dir.
+        # ``_ensure_local_inferencex`` above keeps that checkout on stable
+        # local disk.
         output_dir.mkdir(parents=True, exist_ok=True)
-        # #524 hardening: a reused output_dir (explicit ``params['output_dir']``
+        # A reused output_dir (explicit ``params['output_dir']``
         # on a retry, or a re-run of the same task slot) may still hold a
         # PRIOR attempt's server.log. Its terminal engine/worker-init markers
         # would otherwise misclassify THIS attempt as ``server_init_dead`` even
@@ -1537,16 +1488,49 @@ class BaselineExecutor:
         proc_stdout = proc.stdout
         proc_stderr = proc.stderr
 
-        # #524: when the inference server's engine/worker bootstrap dies (e.g.
+        # Detokenizer-stall watchdog reap: the server came up healthy (ready
+        # marker logged) but then went completely silent for the stall grace
+        # window — a hung engine / wedged detokenizer. The clock runs from the
+        # ready marker, so a long cold start never trips it. Short-circuit here:
+        # a stall reap leaves no benchmark_* workspace, so without this it would
+        # misclassify as ``no_workspace``. Distinct ``error_class`` lets the
+        # coordinator fast-fail this baseline / variant instead of burning the
+        # full hard timeout. Harvest whatever the wrapper wrote first.
+        if proc_returncode == DETOKENIZER_STALL_RETURNCODE:
+            stall_candidates = sorted(output_dir.glob("benchmark_*"))
+            stall_destination = stall_candidates[-1] if stall_candidates else output_dir
+            stall_harvested = harvest_leaked_artifacts(
+                stall_destination,
+                subprocess_started_unix=subprocess_started_unix,
+            )
+            log.warning(
+                "baseline_executor: detokenizer-stall watchdog reaped run "
+                "(server ready but log went silent); error_class=detokenizer_stall."
+            )
+            return {
+                "status": "failed",
+                "error_class": "detokenizer_stall",
+                "returncode": proc_returncode,
+                "error": (
+                    "server reported ready but emitted no log output (hung "
+                    "engine / detokenizer stall); reaped by the "
+                    "detokenizer-stall watchdog. See server.log."
+                ),
+                "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
+                "output_dir": str(output_dir),
+                "harvested_artifacts": [str(dst) for _, dst in stall_harvested],
+                "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in stall_harvested],
+            }
+
+        # When the inference server's engine/worker bootstrap dies (e.g.
         # vLLM ``RuntimeError: Engine core initialization failed``), the real
         # root cause is in server.log, not in Magpie's stdout/stderr tail — and
         # the liveness watchdog may have reaped the hung parent with
         # ``SERVER_DEAD_RETURNCODE``. Detect that once here and reuse it across
         # the failure branches below so the failure is classified
-        # ``server_init_dead`` (parity with the explore/grid path) and the
-        # operator sees the actual server fault instead of a generic
-        # ``subprocess_nonzero``. Backend-agnostic: the markers cover both
-        # vLLM and SGLang engine/worker init failures.
+        # ``server_init_dead`` and the operator sees the actual server fault
+        # instead of a generic ``subprocess_nonzero``. Backend-agnostic: the
+        # markers cover both vLLM and SGLang engine/worker init failures.
         server_death_excerpt = server_log_death_excerpt(str(output_dir / "server.log"))
         server_init_dead = server_death_excerpt is not None or proc_returncode == SERVER_DEAD_RETURNCODE
         server_init_dead_error = server_death_excerpt or (
@@ -1759,7 +1743,6 @@ baseline_executor = BaselineExecutor()
 __all__ = [
     "AITER_JIT_PROBE_PATHS",
     "BASELINE_COLD_START_TIMEOUT_SEC",
-    "BASELINE_DEFAULT_CONFIG",
     "BASELINE_DEFAULT_TIMEOUT_SEC",
     "BaselineExecutor",
     "COLD_START_KERNEL_THRESHOLD",

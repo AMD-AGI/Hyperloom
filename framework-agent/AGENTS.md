@@ -9,9 +9,10 @@ Used by operators and CI pipelines. No host server needed:
 
     fa explore --request request.json --out summary.json --execute
 
-## Mode 2 - Library mode inside an Arbor/TBO specialist
+## Mode 2 - Library mode inside a Hyperloom specialist
 
-When Arbor's orchestrator dispatches a framework-related specialist, the
+When the Hyperloom Orchestrator (the system published as Arbor,
+arXiv:2606.12563) dispatches a framework-related specialist, the
 specialist prompt should include:
 
     """
@@ -58,7 +59,7 @@ implemented in current scope.
   the Hyperloom `specialist → integrate_patch` path, not this package.
 
 LLM credentials, if used by callers running in Library mode, are owned
-by the outer runtime (Arbor / TBO / etc.), not by this package.
+by the outer runtime (Hyperloom / TBO / etc.), not by this package.
 
 ### Optional LLM use (`fa phase-audit --request ... use_llm=true`)
 

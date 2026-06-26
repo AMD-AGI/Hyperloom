@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""DB retention / pruning for multi-day single-session runs (R4).
+"""DB retention / pruning for multi-day single-session runs.
 
 The ``events`` and ``tasks`` tables are otherwise append-only and would grow
 without bound over a multi-day run (no process restart clears them). These
@@ -76,7 +76,7 @@ async def _min_processed_seq(cursors: CursorStore) -> int | None:
 # proposals by exactly this join — a proposal is decided iff some verdict has a
 # non-empty ``target_proposal_msg_id`` equal to it (empty / missing targets are
 # skipped). Pruning a pending proposal's row would lose the only durable record,
-# so a late critic verdict arriving after resume would dangle (Issue 3). This
+# so a late critic verdict arriving after resume would dangle. This
 # helper is the single SQL source of truth for that set; keep it in lockstep
 # with ``replay_for_resume`` (a cross-check test guards against drift).
 #
@@ -142,7 +142,7 @@ async def prune_events(
     delete_below = min(min_cursor, max_seq - max(0, int(keep_recent)))
     if delete_below <= 0:
         return 0
-    # Content guard (Issue 3): never prune a ``proposal`` row that is still
+    # Content guard: never prune a ``proposal`` row that is still
     # semantically pending (no ``review_verdict`` targets it yet), even if every
     # cursor advanced past it — its row is the only durable record a post-resume
     # late verdict can attach to. The anti-join mirrors ``replay_for_resume``.

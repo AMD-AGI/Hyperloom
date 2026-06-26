@@ -210,8 +210,8 @@ def _bootstrap_cortex_kb(
     resume: bool,
 ):
     """Boot the recipe-snapshot KB integration, run the T0 anchor, and return
-    the dispatcher. KB unavailability never aborts the launch
-    (fail_fast=False); a hard T0 failure warns and continues warm-start-empty.
+    the dispatcher. KB unavailability never aborts the launch; a hard T0
+    failure warns and continues warm-start-empty.
 
     Args:
         args: Parsed CLI arguments.
@@ -264,9 +264,6 @@ def _bootstrap_cortex_kb(
             stack_fingerprint=stack_fp,
             extra_attrs=extra_attrs,
             resume=resume,
-            # KB unavailability must not abort the launch (remote absorbs read
-            # failures; local store is always writable).
-            fail_fast=False,
             on_status=print,
             session_dir=session_dir,
             save_state=True,
@@ -289,7 +286,7 @@ def _bootstrap_knowledge_plane(
     session_dir: Path | None = None,
 ) -> "KnowledgePlane":
     """Construct the :class:`KnowledgePlane` facade. Wires the optional PR
-    Monitor REST client (KB reads go through RecipeKB, so cortex_kb=None here).
+    Monitor REST client (KB reads go through RecipeKB, no Cortex KB client).
     Both backends fail-soft; --degraded-pr yields a disabled PRMonitorClient.
 
     Args:
@@ -367,9 +364,8 @@ def _bootstrap_knowledge_plane(
     else:
         print("Specialist KB MCP: DISABLED (no GBRAIN_* / HYPERLOOM_SPECIALIST_KB_MCP_URL)")
 
-    # cortex_kb=None per the local-kb design (KB reads go via RecipeKB).
+    # Local-kb design: KB reads go via RecipeKB, not a Cortex KB client.
     return KnowledgePlane.from_clients(
-        cortex_kb=None,
         pr_monitor=pr_client,
         domain_repos=load_domain_repos(),
         pr_feed_window_days=window_days,

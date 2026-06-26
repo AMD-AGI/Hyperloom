@@ -25,13 +25,14 @@ name: Inference Optimization Daily (fixed models)
 # --concurrency so nothing is auto-detected at run time.
 
 on:
-  # Every other day at 00:00 Beijing time (Asia/Shanghai, UTC+8). GitHub Actions
-  # cron runs in UTC, so 16:00 UTC == 00:00 next-day Beijing. `*/2` on the
+  # Every other day at 01:07 Beijing time (Asia/Shanghai, UTC+8). GitHub Actions
+  # cron runs in UTC, so 17:07 UTC == 01:07 next-day Beijing. Minute :07 (not :00)
+  # dodges GitHub's congested top-of-hour scheduling queue. `*/2` on the
   # day-of-month field fires on odd days (1,3,5,...,31); note month boundaries
   # reset the cycle, so the gap across a month end can be 1 day instead of 2.
   # Every run pins the sandbox to that moment's latest main commit.
   schedule:
-    - cron: '0 16 */2 * *'
+    - cron: '7 17 */2 * *'
   workflow_dispatch:
     inputs:
       models:
@@ -101,6 +102,9 @@ jobs:
       # Whole pool, every run — no rotation, no slicing.
       INPUT_BATCH_INDEX:     '0'
       INPUT_BATCH_SIZE:      '0'
+      # The JSON may include supplementary very-large rows for manual testing;
+      # scheduled daily CI should only submit the top fixed corpus.
+      INPUT_TOP_ONLY:        'true'
       # This is a curated re-run corpus: never drop a model just because it is
       # already on the leaderboard or running elsewhere.
       INPUT_EXCLUDE_LEADERBOARD:      'false'

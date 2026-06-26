@@ -35,7 +35,9 @@ name: SaFE Optimize Submit
 
 on:
   # Rolling downloads>100 pool: 240 models every 6 hours, firing at UTC
-  # 16:00 / 22:00 / 04:00 / 10:00 (Beijing 00:00 / 06:00 / 12:00 / 18:00).
+  # 00:07 / 06:07 / 12:07 / 18:07 (Beijing 08:07 / 14:07 / 20:07 / 02:07).
+  # Minute is :07 (not :00) on purpose — GitHub delays cron heavily at the top
+  # of the hour when many repos fire at once; an off-peak minute reduces the lag.
   # Each fire submits the NEXT sequential 240-model slice of the rotate pool,
   # now hosted off-repo at
   # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate.json
@@ -48,8 +50,17 @@ on:
   # The tail batch is short (not head-wrapped) so consecutive fires never
   # double-submit the head models. Manual workflow_dispatch is unaffected.
   schedule:
-    - cron: '0 4,10,16,22 * * *'
+    - cron: '7 0,6,12,18 * * *'
   workflow_dispatch:
+    # ⚠️ HARD LIMIT: GitHub allows at most 25 top-level `inputs` for a
+    # workflow_dispatch event (raised from 10 on 2025-12-04). Exceeding it makes
+    # the workflow fail to parse, so EVERY dispatch (optimize-tiny,
+    # optimize-gte100, manual, API) returns HTTP 422 and no models are submitted.
+    # This block currently defines exactly 25 inputs — DO NOT add a 26th. To add
+    # a new knob, drop/merge an existing input first (e.g. derive it from another
+    # input as the job timeout is derived from max_hours below). Refs:
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+    # https://github.blog/changelog/2025-12-04-actions-workflow-dispatch-workflows-now-support-25-inputs/
     inputs:
       # ── Model source (priority: models > candidates_file > legacy hf_top) ──────
       models:
@@ -61,9 +72,13 @@ on:
         required: false
         default: ''
       batch_index:
-        description: 'Batch index (0-based) into candidates_file. Ignored if batch_size is 0.'
+        description: 'Batch index (0-based) into candidates_file. Set a number to force a specific slice. On MANUAL dispatch you MUST set either this OR cron_now (leaving both empty is rejected, since the real-clock rotation would just re-run the current schedule slice). Ignored if batch_size is 0.'
         required: false
-        default: '0'
+        default: ''
+      cron_now:
+        description: 'Backfill an already-skipped slice: pass a PAST ISO-8601 UTC instant (e.g. 2026-06-25T01:00:00Z) and the max_hours-paced rotation picks that slice. Use instead of batch_index when you want to stay aligned with the schedule cycle. Empty + empty batch_index on manual dispatch is rejected.'
+        required: false
+        default: ''
       batch_size:
         description: 'Slice size for candidates_file. 0 = take all rows.'
         required: false
@@ -177,12 +192,8 @@ on:
         type: boolean
         required: false
         default: true
-      task_timeout_min:
-        description: 'Per-task wait timeout in minutes (default 420 = 7h)'
-        required: false
-        default: '420'
       max_hours:
-        description: 'Per-task optimizer budget in hours (default 6)'
+        description: 'Per-task optimizer budget in hours (default 6). The per-task wait timeout (max_hours+30m) and the GitHub job timeout (max_hours+60m) are derived from this in the prepare job.'
         required: false
         default: '6'
       all_artifacts:
@@ -209,6 +220,11 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       count:  ${{ steps.matrix.outputs.count }}
+      # Per-task wait timeout (max_hours + 30m) and GitHub job timeout
+      # (max_hours + 60m), computed here since Actions expressions can't do
+      # arithmetic. Both in minutes.
+      task_timeout: ${{ steps.jobtimeout.outputs.task_timeout }}
+      job_timeout:  ${{ steps.jobtimeout.outputs.job_timeout }}
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
       HF_TOKEN_2:            ${{ secrets.HF_TOKEN_2 }}
@@ -226,7 +242,12 @@ jobs:
       # 4/16) steps batch 0,1,2,... and wraps, marching the whole pool in
       # order then repeating. Anchored so the first fire at/after the anchor is
       # batch 0 (= not-run head, since the pool is ordered not-run-first).
+      # Empty on schedule (and when a manual dispatch leaves it blank) ->
+      # max_hours-paced rotation in generate_hf_matrix. A number forces a slice.
       INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '' || github.event.inputs.batch_index }}
+      # Optional "now" override for the rotation on manual backfills; empty on
+      # schedule so the real clock is used.
+      INPUT_CRON_NOW:        ${{ github.event_name == 'schedule' && '' || github.event.inputs.cron_now }}
       INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '240' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
@@ -236,6 +257,10 @@ jobs:
       # batch size at 240.
       INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
       INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
+      # max_hours paces the schedule batch rotation (one batch advances per
+      # max_hours of wall-clock time) in generate_hf_matrix. schedule has no
+      # inputs -> empty -> generate_hf_matrix falls back to its 6h default.
+      INPUT_MAX_HOURS:                ${{ github.event.inputs.max_hours }}
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
@@ -249,6 +274,22 @@ jobs:
         id: matrix
         working-directory: ci
         run: python3 generate_hf_matrix.py
+      - name: Compute optimize timeouts
+        id: jobtimeout
+        # Both timeouts derive from max_hours (Actions expressions can't do
+        # arithmetic, so compute in Python). Ascending so each layer has a 30m
+        # buffer over the one below: optimizer budget (max_hours) < task wait
+        # (max_hours + 30m) < GitHub job (max_hours + 60m). schedule has no
+        # inputs -> max_hours falls back to 6 -> task=390, job=420.
+        env:
+          INPUT_MAX_HOURS: ${{ github.event.inputs.max_hours }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          mh = float(os.environ.get("INPUT_MAX_HOURS") or 6)
+          print(f"task_timeout={int(mh * 60 + 30)}")
+          print(f"job_timeout={int(mh * 60 + 60)}")
+          PY
 
   # ── Stage 2: per-model optimization (parallel) ──────────────────────────────
   optimize:
@@ -256,8 +297,10 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.count != '0'
     runs-on: hyperloom-4hhzn
-    # 7h per-task wait timeout + buffer for register/wait/collect.
-    timeout-minutes: 480
+    # GitHub job timeout = max_hours + 1h (computed in the prepare job since
+    # Actions expressions can't do arithmetic). Covers register + wait + collect
+    # for the per-task optimizer budget. schedule/6h -> 420m; gte100/12h -> 780m.
+    timeout-minutes: ${{ fromJson(needs.prepare.outputs.job_timeout) }}
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(github.event_name == 'schedule' && '240' || github.event.inputs.max_parallel || '240') }}
@@ -328,7 +371,7 @@ jobs:
           SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom' || github.event.inputs.submit_workspaces || 'core42-hyperloom' }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
-          INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
+          INPUT_TASK_TIMEOUT_MIN: ${{ needs.prepare.outputs.task_timeout }}
           INPUT_MAX_HOURS:        ${{ github.event.inputs.max_hours }}
           # Cron rotates through the production pool — operators can't go
           # back and re-fetch sandbox state after the fact, so force
