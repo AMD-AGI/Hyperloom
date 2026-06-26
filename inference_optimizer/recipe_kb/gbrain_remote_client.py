@@ -143,17 +143,25 @@ class _GbrainMcp:
         # Non-SSE JSON with a declared length: read it whole (bounded by the
         # socket timeout already applied by urlopen).
         ctype = ""
+        clen = ""
         try:
-            ctype = (resp.headers.get("Content-Type") or "").lower()
+            headers = resp.headers
+            ctype = (headers.get("Content-Type") or "").lower()
+            clen = headers.get("Content-Length") or ""
         except Exception:  # noqa: BLE001 — header access is best-effort
             ctype = ""
-        if "text/event-stream" not in ctype and resp.headers.get("Content-Length"):
+            clen = ""
+        if "text/event-stream" not in ctype and clen:
             return resp.read().decode()
         while True:
             if time.monotonic() >= deadline:
                 break
             try:
                 piece = resp.read(4096)
+            except TypeError:
+                # Simple stand-ins (and some response shims) expose a
+                # zero-argument ``read()`` that returns the whole body.
+                piece = resp.read()
             except (OSError, ValueError):
                 break
             if not piece:
@@ -163,7 +171,13 @@ class _GbrainMcp:
             # For SSE, one complete ``data:`` record (blank-line terminated, or
             # at least one full line after a ``data:`` prefix) is all these MCP
             # calls ever return — stop as soon as we have it.
-            if b"\n\n" in buf or (b"data:" in buf and buf.rstrip().endswith(b"}")):
+            stripped = buf.strip()
+            if b"\n\n" in buf or (b"data:" in buf and stripped.endswith(b"}")):
+                break
+            # Plain (non-SSE) JSON body with no Content-Length: stop once we
+            # hold a complete top-level object so a non-closing / re-emitting
+            # stream cannot duplicate the payload.
+            if stripped.startswith(b"{") and stripped.endswith(b"}"):
                 break
         return b"".join(chunks).decode("utf-8", "replace")
 
