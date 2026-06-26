@@ -3,12 +3,12 @@
 Three groups, all offline (no Quark / Claude SDK / GPU):
 
 * Parser     — ``--quantize`` flag parses (default None / value when passed).
-* Adapter    — ``run_quantization_prelude_async`` maps QuantSkillRunResult
-               status -> decision (return dir vs SystemExit(3)).
+* Adapter    — ``run_quantization_prelude_async`` maps quark_quantizer's
+               QuarkRunResult status -> decision (return dir vs SystemExit(3)).
 * CLI hook   — ``cli._run_quantization_prelude`` is a no-op without the flag,
                skipped on --resume, and rewrites args.model otherwise.
 
-``quantize_via_prompt`` is monkeypatched so nothing real runs.
+``quark_quantizer.quantize`` is monkeypatched so nothing real runs.
 """
 
 from __future__ import annotations
@@ -30,28 +30,25 @@ from inference_optimizer.orchestrator import quantization_schemes as qs
 # ---------------------------------------------------------------------------
 
 
-def _fake_result(status: str, qdir: str | None, *, final="x", eval_gap=None):
-    """Build a stand-in for QuantSkillRunResult."""
-    assessment = types.SimpleNamespace(final=final, eval_gap=eval_gap)
+def _fake_result(status: str, output_dir: str | None, *, final="x", eval_gap=None, error=""):
+    """Build a stand-in for quark_quantizer.QuarkRunResult."""
     return types.SimpleNamespace(
-        status=status,
-        quantized_model_dir=Path(qdir) if qdir else None,
-        assessment=assessment,
+        status=status, output_dir=output_dir, final=final, eval_gap=eval_gap, error=error
     )
 
 
 def _patch_quantize(monkeypatch: pytest.MonkeyPatch, result):
-    """Replace quantization_agent.quantize_via_prompt with an async stub
-    that records its call and returns ``result``."""
-    import quantization_agent
+    """Replace quark_quantizer.quantize with an async stub that records its
+    call (prompt + enabled + kwargs) and returns ``result``."""
+    import quark_quantizer
 
     calls: list[dict] = []
 
-    async def _fake(prompt, **kwargs):
-        calls.append({"prompt": prompt, **kwargs})
+    async def _fake(prompt, *, enabled=False, **kwargs):
+        calls.append({"prompt": prompt, "enabled": enabled, **kwargs})
         return result
 
-    monkeypatch.setattr(quantization_agent, "quantize_via_prompt", _fake)
+    monkeypatch.setattr(quark_quantizer, "quantize", _fake)
     return calls
 
 
@@ -237,10 +234,13 @@ def test_adapter_success_returns_quantized_dir(tmp_path, monkeypatch):
     calls = _patch_quantize(monkeypatch, _fake_result("success", str(tmp_path / "q"), final=None, eval_gap=0.01))
     out = asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/models/src", workspace=tmp_path))
     assert out == str(tmp_path / "q")
-    # source model + export dir folded into the effective prompt
+    # source model + export dir folded into the effective prompt; NL request kept.
     assert "/models/src" in calls[0]["prompt"]
     assert str(tmp_path / "quantized") in calls[0]["prompt"]
-    assert calls[0]["interactive"] is False
+    assert "fp8" in calls[0]["prompt"]
+    # The prelude already gated on the flag, so the shell is enabled here.
+    assert calls[0]["enabled"] is True
+    assert calls[0]["workspace"] == tmp_path
 
 
 def test_adapter_partial_with_model_returns_dir(tmp_path, monkeypatch):

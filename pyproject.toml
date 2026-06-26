@@ -79,6 +79,7 @@ testpaths = [
     "robustness-agent/tests",
     "critic-agent/runtime/tests",
     "quantization_agent/tests",
+    "quark_quantizer/tests",
     "kernel-agent/tools/test_tracelens_arch_benchmark.py",
     "kernel-agent/tools/test_ray_fd_limit.py",
     "kernel-agent/tools/test_gemm_tuning.py",
@@ -131,6 +132,7 @@ source = [
     "framework-agent/src",
     "kernel-agent/tools",
     "quantization_agent",
+    "quark_quantizer",
     "OOB",
     "ci",
 ]
@@ -169,6 +171,8 @@ omit = [
     "kernel-agent/skills/unittest/validate_harness.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "quantization_agent/cli.py",
+    # quark_quantizer CLI driver (argparse entrypoint).
+    "quark_quantizer/cli.py",
     # OOB agent_mcp_server entrypoints / server-side runtime: CLI, HTTP
     # server, scheduler, auth proxy, and the subprocess agent backends are
     # network / long-running services exercised end-to-end, not by unit
