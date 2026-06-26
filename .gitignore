@@ -44,6 +44,13 @@ ci/claw-integration.md
 .DS_Store
 Thumbs.db
 
+# Test / coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+
 # Logs
 *.log
 

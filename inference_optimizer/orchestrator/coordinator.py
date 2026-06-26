@@ -3364,6 +3364,55 @@ class Coordinator:
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=3600,
         )
+        # Livelock break (cross-resume): if the authoring specialist for this
+        # candidate ALREADY exists in a TERMINAL state but the candidate still
+        # has no ``framework_pr_phase_progress`` row, its empty deliverable was
+        # never harvested into a terminal row (the dispatcher only harvests
+        # specialists that complete IN the current process — a specialist that
+        # finished before a resume is returned here by idempotency key without
+        # re-running, so the harvest hook never fires). Without a terminal row
+        # ``_select_best_framework_pr_candidate`` re-selects this candidate every
+        # tick and we re-log "dispatched" forever (observed: pull/1022 dispatched
+        # 30+ times across resumes). Stamp the terminal author_empty row now and
+        # skip the (no-op) re-dispatch so the pump advances to the next candidate.
+        from .task_registry import TERMINAL_STATES as _TERMINAL_STATES
+
+        if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
+            already_rows = {
+                str(p.get("candidate_id") or "")
+                for p in (getattr(state, "framework_pr_phase_progress", None) or [])
+                if isinstance(p, dict)
+            }
+            # Only stamp when the authored deliverable is genuinely NOT in flight.
+            # A specialist that produced a config-lever / patch deliverable routes
+            # it to an integrate_patch (often first as a pending Critic proposal,
+            # which the pump's task-only inflight guard does not see). That
+            # integrate_patch owns the terminal row — stamping author_empty here
+            # would prematurely mislabel a candidate that is actually being
+            # benchmarked. ``_framework_pr_authoring_inflight`` checks pending
+            # integrate_patch proposals too, so it distinguishes the true
+            # cross-resume harvest-miss (nothing in flight) from a deliverable
+            # still being benched.
+            authoring_inflight = await self._framework_pr_authoring_inflight()
+            if cand_id and cand_id not in already_rows and not authoring_inflight:
+                log.info(
+                    "FRAMEWORK_PR: authoring specialist already terminal w/o progress "
+                    "row (cross-resume harvest miss) candidate=%s state=%s — stamping "
+                    "author_empty to break re-dispatch livelock",
+                    cand_id,
+                    getattr(spec_task, "state", ""),
+                )
+                try:
+                    self._record_framework_pr_authoring_empty_outcome(
+                        task=spec_task,
+                        done_payload={},
+                    )
+                except Exception:  # noqa: BLE001 — never wedge the pump
+                    log.exception(
+                        "FRAMEWORK_PR: livelock-break empty-outcome stamp failed candidate=%s",
+                        cand_id,
+                    )
+                return
         # Remember which candidate this specialist task authors for. The
         # downstream integrate_patch task only carries ``specialist_task_id``,
         # so the authored-outcome bridge resolves the PR-URL candidate id from

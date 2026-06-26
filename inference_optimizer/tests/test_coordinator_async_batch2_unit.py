@@ -2024,7 +2024,11 @@ async def test_pump_framework_pr_discover_empty_marks_done(coord: Coordinator, m
 @pytest.mark.asyncio
 async def test_pump_framework_pr_critic_rejects(coord: Coordinator, monkeypatch) -> None:
     _enter_framework_pr(coord)
-    monkeypatch.setattr(coord, "_select_next_framework_pr_candidate", lambda: {"candidate_id": "c1", "batch_id": "b1"})
+
+    async def _select():
+        return {"candidate_id": "c1", "batch_id": "b1"}
+
+    monkeypatch.setattr(coord, "_select_best_framework_pr_candidate", _select)
 
     async def _audit(cand):
         return {"recommended_next_step": ""}  # unknown -> proceed to Critic
@@ -2043,13 +2047,20 @@ async def test_pump_framework_pr_critic_rejects(coord: Coordinator, monkeypatch)
 @pytest.mark.asyncio
 async def test_pump_framework_pr_approve_enqueues(coord: Coordinator, monkeypatch) -> None:
     _enter_framework_pr(coord)
-    monkeypatch.setattr(coord, "_select_next_framework_pr_candidate", lambda: {"candidate_id": "c2", "batch_id": "b2"})
+
+    async def _select():
+        return {"candidate_id": "c2", "batch_id": "b2"}
+
+    monkeypatch.setattr(coord, "_select_best_framework_pr_candidate", _select)
 
     async def _audit(cand):
         # direct_apply -> raw-diff executor only (keeps this test hermetic).
         return {"recommended_next_step": "direct_framework_pr"}
 
     monkeypatch.setattr(coord, "_audit_framework_pr_candidate", _audit)
+    # direct_apply requires a git checkout; force the preflight True so the
+    # candidate routes to the raw-diff executor instead of degrading to authoring.
+    monkeypatch.setattr(coord, "_framework_roots_have_git", lambda: True)
 
     async def _review(cand):
         return {"verdict": "approve"}
