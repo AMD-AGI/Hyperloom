@@ -156,12 +156,15 @@ _CAPTURE_ONLY = {
 
 @pytest.mark.asyncio
 async def test_capture_only_profile_retries_then_succeeds(tmp_path):
-    # First attempt is capture-only -> retry escalates to eager and the second
-    # attempt produces a real annotated trace, so the run proceeds.
+    # First attempt is capture-only -> plain re-profile (SAME graph-capture
+    # settings, NOT eager) and the second attempt produces a real annotated
+    # trace, so the run proceeds.
     seen = await _run(tmp_path, _CAPTURE_ONLY)
     assert len(seen) >= 2
-    # The retry boots eager so the steady-state window gets annotated.
-    assert "--disable-cuda-graph" in str(seen[1].get("base_extra_args", ""))
+    # The retry must NOT escalate to eager — graph-capture is the robust mode
+    # and eager would change the measured workload (#735).
+    assert "--disable-cuda-graph" not in str(seen[1].get("base_extra_args", ""))
+    assert "--enforce-eager" not in str(seen[1].get("base_extra_args", ""))
 
 
 @pytest.mark.asyncio
