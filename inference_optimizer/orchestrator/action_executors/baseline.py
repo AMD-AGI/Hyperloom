@@ -581,6 +581,140 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
         return info
 
 
+def _git_head_sha(repo_path: str) -> str:
+    """Return the current HEAD sha of a git repo, or empty string on failure."""
+    if not repo_path:
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_path, capture_output=True, timeout=5, check=True,
+        )
+        return result.stdout.decode().strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def _revert_patches(repo_path: str, pre_sha: str) -> None:
+    """Revert the repo to pre_sha after warm-replay patches were applied.
+
+    Prevents patch residue from leaking into subsequent tasks that reuse
+    the same InferenceX checkout mirror.
+    """
+    if not repo_path or not pre_sha:
+        return
+    try:
+        subprocess.run(
+            ["git", "reset", "--hard", pre_sha],
+            cwd=repo_path, capture_output=True, timeout=15, check=True,
+        )
+        subprocess.run(
+            ["git", "clean", "-fd"],
+            cwd=repo_path, capture_output=True, timeout=15, check=False,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("baseline_executor: patch revert failed: %s", exc)
+
+
+def _apply_warm_patches(
+    params: dict[str, Any],
+    target_repo: str,
+    output_dir: Path,
+) -> list[dict[str, str]]:
+    """Apply warm-replay code patches (Phase 0+1) to InferenceX checkout.
+
+    Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
+    patch_ref) and ``params["blocked_patches"]`` (blocklist). Applies each patch
+    via ``git apply`` in the target repo. Skips patches that appear in the
+    blocklist. Returns list of successfully applied patch metadata dicts.
+
+    If target_repo is empty or no patches are present, returns [].
+    """
+    patches = params.get("patches") or []
+    if not patches or not target_repo:
+        return []
+
+    blocked = {
+        p.get("patch_file", "") for p in (params.get("blocked_patches") or [])
+    }
+
+    applied: list[dict[str, str]] = []
+    patch_log_dir = output_dir / "warm_patches"
+    patch_log_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, patch in enumerate(patches):
+        patch_file = patch.get("patch_file") or ""
+        patch_content = patch.get("patch_content") or ""
+        patch_ref = patch.get("patch_ref") or ""
+
+        if patch_file in blocked:
+            log.info(
+                "baseline_executor: skipping blocked patch %s", patch_file,
+            )
+            continue
+
+        if not patch_content and not patch_ref:
+            log.warning(
+                "baseline_executor: patch entry has no content/ref, skipping: %s",
+                patch_file,
+            )
+            continue
+
+        # Resolve patch content: prefer inline content, fallback to patch_ref file.
+        if not patch_content and patch_ref:
+            ref_path = Path(patch_ref)
+            if ref_path.is_file():
+                try:
+                    patch_content = ref_path.read_text(encoding="utf-8", errors="replace")
+                except OSError as exc:
+                    log.warning(
+                        "baseline_executor: cannot read patch_ref %s: %s",
+                        patch_ref, exc,
+                    )
+                    continue
+            else:
+                log.warning(
+                    "baseline_executor: patch_ref not found: %s", patch_ref,
+                )
+                continue
+
+        # Write patch to temp file then apply.
+        patch_path = patch_log_dir / f"{idx:03d}_{Path(patch_file).stem or 'patch'}.diff"
+        patch_path.write_text(patch_content, encoding="utf-8")
+
+        try:
+            subprocess.run(
+                ["git", "apply", "--stat", "--check", str(patch_path)],
+                cwd=target_repo,
+                capture_output=True,
+                timeout=30,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "apply", str(patch_path)],
+                cwd=target_repo,
+                capture_output=True,
+                timeout=30,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            log.warning(
+                "baseline_executor: git apply failed for patch %s: %s",
+                patch_file, exc.stderr.decode(errors="replace")[:500] if exc.stderr else str(exc),
+            )
+            continue
+        except (subprocess.TimeoutExpired, OSError) as exc:  # pragma: no cover
+            log.warning(
+                "baseline_executor: patch apply error for %s: %s",
+                patch_file, exc,
+            )
+            continue
+
+        applied.append({"patch_file": patch_file, "idx": str(idx)})
+
+    return applied
+
+
 class BaselineExecutor:
     """Class form for tests / DI; ``baseline_executor`` is the bare callable.
 
@@ -896,6 +1030,19 @@ class BaselineExecutor:
         ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
         effective_inferencex_path = _ensure_local_inferencex(ix_env, mirror_key=str(output_dir)) if ix_env else ""
 
+        # Phase 0+1: apply warm-replay code patches before server launch.
+        # Record pre-apply HEAD so patches are reverted after the benchmark
+        # completes (or fails), preventing residue in the shared checkout.
+        patch_target = effective_inferencex_path or ix_env
+        _pre_patch_sha = _git_head_sha(patch_target)
+        applied_patches = _apply_warm_patches(params, patch_target, output_dir)
+        if applied_patches:
+            log.info(
+                "baseline_executor: applied %d warm-replay code patches (pre_sha=%s): %s",
+                len(applied_patches), _pre_patch_sha[:8],
+                [p["patch_file"] for p in applied_patches],
+            )
+
         timeout_sec = self._resolve_timeout(params)
         # Model path: task.params['model_path'] > $MODEL_PATH > SharedState;
         # if none, leave the YAML's hardcoded `model:` for fixture-based tests.
@@ -1111,6 +1258,10 @@ class BaselineExecutor:
                 framework=framework,
                 port=port,
             )
+            # Revert warm-replay patches to prevent state leakage into
+            # subsequent tasks that reuse the same InferenceX checkout.
+            if applied_patches and _pre_patch_sha:
+                _revert_patches(patch_target, _pre_patch_sha)
 
     @staticmethod
     def _double_run_enabled() -> bool:

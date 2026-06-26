@@ -271,7 +271,7 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     # dead knobs" priors. The minimal YAML emitter only handles scalar
     # lists, so structured list-of-dict fields are stored as JSON strings
     # (round-tripped by ``GbrainRemoteRecipeClient._json_list`` on read).
-    for _field in ("what_worked", "what_failed", "remaining_gaps", "pitfalls", "lessons"):
+    for _field in ("what_worked", "what_failed", "remaining_gaps", "pitfalls", "lessons", "prs_tested"):
         _value = recipe.get(_field)
         if _value:
             attrs[_field] = json.dumps(_value, ensure_ascii=False, default=str)
@@ -309,7 +309,7 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "attrs": attrs,
     }
     # Stable slug from the 7-tuple canonical (colons -> path levels).
-    slug = "recipe-snapshot/" + canonical.replace(":", "/")
+    slug = "hyperloom-recipe-kb/" + canonical.replace(":", "/")
     body_lines = [
         f"# Recipe {canonical}",
         "",
