@@ -169,6 +169,7 @@ __all__ = [
     "_reconcile_crash_count", "_resolve_reference_recipe", "_resolve_session_dir_for_summary",
     "_seed_shared_state", "_snapshot_system_prompts",
 ]
+from . import framework_registry
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
@@ -1125,6 +1126,27 @@ def _check_shm_disk() -> None:
 _TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_pytorch_inference",)
 
 
+def _tracelens_required_at_preflight(no_kernel: bool, enable_roofline: bool) -> bool:
+    """Return whether the TraceLens CLI must be present at preflight (hard-fail).
+
+    TraceLens is reached both by the kernel agent AND by the PRELUDE/auto
+    roofline (roofline -> trace_analyze -> TraceLens). ``enable_roofline``
+    defaults True and is NOT disabled by ``--no-kernel``, so under ``--no-kernel``
+    alone the PRELUDE roofline still invokes TraceLens. It is only truly unused
+    when the kernel role is off (``--no-kernel``) AND roofline is disabled; only
+    then may preflight degrade to WARN. Otherwise keep the hard-fail so a missing
+    CLI fails fast at preflight instead of mid-run at the first roofline.
+
+    Args:
+        no_kernel: Whether the run is started with ``--no-kernel``.
+        enable_roofline: Whether the auto/PRELUDE roofline is enabled.
+
+    Returns:
+        bool: ``True`` when TraceLens must hard-gate at preflight.
+    """
+    return not (no_kernel and not enable_roofline)
+
+
 def _check_tracelens_cli() -> None:
     """Hard-gate TraceLens CLI presence — abort before Coordinator starts (SKILL IR-2).
 
@@ -1761,15 +1783,13 @@ def _preflight(
         )
         print("Preflight: ray installed OK")
 
-    # 2. Magpie — the benchmark engine all executors shell out to ($MAGPIE_DIR override; auto-clones if missing).
+    # 2. Magpie — the benchmark engine all executors shell out to ($MAGPIE_PATH override; auto-clones if missing).
     check = subprocess.run(
         [magpie_python, "-c", "import Magpie"],
         capture_output=True,
     )
     if check.returncode != 0:
-        # MAGPIE_PATH is the preferred override; MAGPIE_DIR stays honoured as
-        # a backward-compatible fallback.
-        magpie_env = os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR")
+        magpie_env = os.environ.get("MAGPIE_PATH")
         magpie_env_explicit = bool(magpie_env)
         if magpie_env:
             magpie_dir = Path(magpie_env)
@@ -1779,17 +1799,17 @@ def _preflight(
             magpie_dir = _magpie_default(_session_dir_resolve())
         magpie_dir.parent.mkdir(parents=True, exist_ok=True)
         if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
-            # Refuse-to-clobber: don't clone Magpie main over an explicit $MAGPIE_DIR (would destroy local work).
+            # Refuse-to-clobber: don't clone Magpie main over an explicit $MAGPIE_PATH (would destroy local work).
             if magpie_env_explicit:
                 print(
-                    f"Preflight: ERROR — $MAGPIE_DIR={magpie_dir} has no "
+                    f"Preflight: ERROR — $MAGPIE_PATH={magpie_dir} has no "
                     f"setup.py/pyproject.toml; refusing to clone Magpie "
                     f"main on top of an operator-supplied path. Fix the "
-                    f"env or unset $MAGPIE_DIR to fall back to the "
+                    f"env or unset $MAGPIE_PATH to fall back to the "
                     f"session-default location.",
                     file=sys.stderr,
                 )
-                raise FileNotFoundError(f"$MAGPIE_DIR={magpie_dir} is not a valid Magpie checkout")
+                raise FileNotFoundError(f"$MAGPIE_PATH={magpie_dir} is not a valid Magpie checkout")
             print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
             subprocess.run(
                 ["git", "clone", "--depth", "1", "https://github.com/AMD-AGI/Magpie.git", str(magpie_dir)],
@@ -1811,7 +1831,7 @@ def _preflight(
         )
 
         open_source_root = _open_source_default()
-        _magpie_env = os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR")
+        _magpie_env = os.environ.get("MAGPIE_PATH")
         magpie_root = Path(_magpie_env) if _magpie_env else _magpie_default(_session_dir_resolve())
         # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
@@ -1867,9 +1887,19 @@ def _preflight(
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
 
-    # --- TraceLens CLI presence (HARD-FAIL; SKILL Step 2 step 8.5) ---
+    # --- TraceLens CLI presence (HARD-FAIL unless --no-kernel AND roofline off; SKILL Step 2 step 8.5) ---
     # Catches launchers that skip install.sh, else missing-CLI only surfaces at the tick ~6 robustness probe.
-    _check_tracelens_cli()
+    no_kernel = getattr(args, "no_kernel", False) if args else False
+    enable_roofline = getattr(args, "enable_roofline", True) if args else True
+    if _tracelens_required_at_preflight(no_kernel, enable_roofline):
+        _check_tracelens_cli()
+    else:
+        _missing_tl = [n for n in _TRACELENS_REQUIRED_CLIS if shutil.which(n) is None]
+        if _missing_tl:
+            print(
+                f"Preflight: WARNING — TraceLens CLI(s) not on PATH: {_missing_tl} "
+                f"(skipped; --no-kernel + roofline disabled)"
+            )
 
     # --- IR-3: Cortex KB + PR Monitor reachability (soft degrade) ---
     if args is not None:
@@ -3103,10 +3133,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         await _run_quantization_prelude(args)
 
         # Resolve framework: --framework > $FRAMEWORK > "sglang" (session-wide; no framework mixing).
-        framework = (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower() or "sglang"
-        if framework not in ("sglang", "vllm", "atom"):
+        framework = (
+            (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
+            or framework_registry.DEFAULT_FRAMEWORK
+        )
+        if not framework_registry.is_supported(framework):
             print(
-                f"ERROR: --framework must be sglang, vllm, or atom "
+                f"ERROR: --framework must be one of "
+                f"{', '.join(framework_registry.names())} "
                 f"(got {framework!r}); set $FRAMEWORK accordingly or pass "
                 "--framework",
                 file=sys.stderr,
@@ -3800,7 +3834,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--framework",
-        choices=["sglang", "vllm", "atom"],
+        choices=list(framework_registry.names()),
         default=None,
         help="Inference framework to benchmark / optimize. Resolution order: "
         "--framework > $FRAMEWORK env > sglang (default). Selection is "
@@ -3808,7 +3842,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "supported. NOTE: --framework atom is single-node-only "
         "(``--nodes>=2`` fails fast); profile / roofline, "
         "kernel-agent, and framework-agent are all enabled on atom. "
-        "The auto-tighten guard only enforces ``--nodes 1``.",
+        "The auto-tighten guard only enforces ``--nodes 1``. "
+        "--framework xdit is a server-less (scriptable) diffusion "
+        "workload (xDiT): no serving server, throughput is img/s, and "
+        "the accuracy gate is an image-quality gate (LPIPS/SSIM/MSE).",
     )
     opt.add_argument(
         "--nodes",

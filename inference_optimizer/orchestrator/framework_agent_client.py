@@ -39,6 +39,7 @@ except ImportError:  # pragma: no cover — exercised only in IO-only test envs
         "sglang": "https://github.com/sgl-project/sglang.git",
         "vllm": "https://github.com/ROCm/vllm.git",
         "atom": "https://github.com/ROCm/ATOM.git",
+        "xdit": "https://github.com/xdit-project/xDiT.git",
     }
 
     def repo_url_for_framework(framework: str) -> str:
