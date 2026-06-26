@@ -319,8 +319,8 @@ def test_detect_gemma4_wrapper_deferred_to_config_compat_gate(tmp_path):
     assert "gemma4" in reason
 
 
-def test_detect_known_vlm_with_text_config_still_vision_only(tmp_path):
-    """The hard denylist wins before text_config capability detection."""
+def test_detect_known_vlm_with_text_config_passes_gate(tmp_path):
+    """qwen2_vl is now an explicitly supported VL family: gate returns None."""
     m = tmp_path / "qwen_vl"
     _write_config(
         m,
@@ -337,9 +337,7 @@ def test_detect_known_vlm_with_text_config_still_vision_only(tmp_path):
         },
     )
     hit = cli._detect_unsupported_model(str(m))
-    assert hit is not None
-    assert hit["verdict"] == cli._VERDICT_VISION_ONLY
-    assert "unsupported architecture" in hit["signal"]
+    assert hit is None
 
 
 def test_detect_mislabeled_vlm_with_vision_config_is_vision_only(tmp_path):

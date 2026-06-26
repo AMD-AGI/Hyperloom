@@ -152,8 +152,16 @@ _SUPPORTED_ARCH_MARKERS = (
     "ForCausalLMWithValueHead",
 )
 
+_SUPPORTED_VL_MODEL_TYPES = frozenset({
+    # Qwen VL families: carry vision_config but expose a standard text decoder
+    # and are fully supported on the text path. Listed here so they bypass the
+    # vision_config degrade-signal check and reach _SUPPORTED_MODEL_TYPES cleanly.
+    "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe",
+})
+
 _SUPPORTED_MODEL_TYPES = frozenset({
     "llama", "mistral", "mixtral", "qwen2", "qwen2_moe", "qwen3", "qwen3_moe",
+    "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe",
     "gemma", "gemma2", "phi", "phi3", "phimoe",
     "starcoder2", "codellama", "deepseek_v2", "deepseek_v3",
     "falcon", "gpt_neox", "gpt2", "opt", "bloom",
@@ -173,8 +181,6 @@ _UNSUPPORTED_MODEL_TYPES = frozenset({
     "mllama",
     "llava",
     "llava_next",
-    "qwen2_vl",
-    "qwen2_5_vl",
     "idefics",
     "idefics2",
     "idefics3",
@@ -195,8 +201,6 @@ _UNSUPPORTED_ARCHITECTURES = frozenset({
     "LlavaNextForConditionalGeneration",
     "MllamaForConditionalGeneration",
     "PaliGemmaForConditionalGeneration",
-    "Qwen2VLForConditionalGeneration",
-    "Qwen2_5_VLForConditionalGeneration",
     "Idefics2ForConditionalGeneration",
     "Idefics3ForConditionalGeneration",
     "PixtralForConditionalGeneration",
@@ -528,6 +532,15 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
             "signal": f"unsupported text_config.model_type '{nested_model_type}'",
             "verdict": _VERDICT_VISION_ONLY,
         }
+
+    # Confirmed text-generation arch or explicitly supported VL model type: both
+    # bypass the vision_config degrade check below. A supported arch (ForCausalLM /
+    # LMHeadModel) or a known VL family (qwen2_vl / qwen3_vl_moe / …) that carries
+    # vision_config by design is fully viable on the text-serving path.
+    if any(_arch_is_supported_text_generation(a) for a in architectures):
+        return None
+    if model_type_l in _SUPPORTED_VL_MODEL_TYPES:
+        return None
 
     # A multimodal config key (vision_config, image_token_id, …) is only a
     # degrade signal, not a hard block: if a text decoder exists we coerce to
