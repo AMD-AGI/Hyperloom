@@ -229,14 +229,15 @@ jobs:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
       HF_TOKEN_2:            ${{ secrets.HF_TOKEN_2 }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
-      # Rolling cron cycles the downloads>100 pool (every size), ordered with
-      # not-yet-run models first so the front-anchored window picks them up
-      # before the already-run tail. With exclude_leaderboard=false (see below)
-      # the pool never drains — once the front models finish and are no longer
-      # active, the window wraps and the whole 2426-model pool keeps repeating.
-      # Schedule reads the rotate pool from /wekafs (off-repo, RO-mounted on the
+      # Rolling cron cycles the hf_sub100_part1_20260626 pool (1766 models with
+      # no prior session_breakdown, compat-filtered), ordered not-yet-run-first.
+      # The rotation anchor in generate_hf_matrix was reset to 2026-06-26 12:00Z
+      # so the cycle restarts at batch 0; with batch_size=240 the pool is 8
+      # batches and a full sweep takes 8 fires (~48h). With exclude_leaderboard=
+      # false the pool never drains — once a batch finishes it wraps and repeats.
+      # Schedule reads the pool from /wekafs (off-repo, RO-mounted on the
       # hyperloom runners) so the large candidates JSON never bloats the git repo.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_downloads_gt100_rotate.json', secrets.WEKAFS_CHENYI_DIR) || github.event.inputs.candidates_file }}
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_sub100_part1_20260626.json', secrets.WEKAFS_CHENYI_DIR) || github.event.inputs.candidates_file }}
       # Schedule leaves batch_index empty so generate_hf_matrix derives a
       # SEQUENTIAL index from the scheduled-fire counter: each cron (UTC
       # 4/16) steps batch 0,1,2,... and wraps, marching the whole pool in
