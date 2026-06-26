@@ -311,29 +311,37 @@ class ProposalScorer:
         full_prompt = f"{prompt}\n\n{_SCORING_INSTRUCTIONS}"
         messages = [{"role": "user", "content": full_prompt}]
         _t0 = time.perf_counter()
+
         # The Primus-Safe/Vertex proxy rejects non-streaming predictions with an
         # opaque 400 INVALID_ARGUMENT; only streamed requests are accepted. Stream
         # and accumulate the deltas, pulling usage from the final chunk.
-        text_parts: list[str] = []
-        usage = None
-        try:
-            stream = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    max_completion_tokens=self.max_completion_tokens,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                ),
-                timeout=self.call_timeout_s,
+        #
+        # The deadline must cover BOTH stream creation and the chunk-consumption
+        # loop: a proxy can establish the stream and then stall mid-body, so a
+        # timeout around creation alone would let this hang indefinitely. We wrap
+        # the whole read in a single ``asyncio.wait_for`` (``asyncio.timeout`` is
+        # 3.11+, and this project still targets 3.10).
+        async def _read_stream() -> tuple[list[str], Any]:
+            parts: list[str] = []
+            usage_obj = None
+            stream = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_completion_tokens=self.max_completion_tokens,
+                stream=True,
+                stream_options={"include_usage": True},
             )
             async for chunk in stream:
                 if getattr(chunk, "usage", None) is not None:
-                    usage = chunk.usage
+                    usage_obj = chunk.usage
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     if delta is not None and delta.content:
-                        text_parts.append(delta.content)
+                        parts.append(delta.content)
+            return parts, usage_obj
+
+        try:
+            text_parts, usage = await asyncio.wait_for(_read_stream(), timeout=self.call_timeout_s)
         except asyncio.TimeoutError as exc:
             raise RuntimeError(f"timed out after {self.call_timeout_s:.0f}s") from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
@@ -351,7 +359,12 @@ class ProposalScorer:
         # Persist the full (redacted) prompt + reply so the
         # scorer's conversation lines up with its token row.
         self._record_scorer_conversation(
-            model, full_prompt, text, task_id=task_id, tick=tick, phase=phase,
+            model,
+            full_prompt,
+            text,
+            task_id=task_id,
+            tick=tick,
+            phase=phase,
         )
         parsed = _extract_scores_json(text)
         if parsed is None:
@@ -359,9 +372,14 @@ class ProposalScorer:
         return _normalise_model_scores(parsed, proposal_names=proposal_names)
 
     def _trace_scorer_llm_call(
-        self, model: str, usage: Any, *,
-        latency_ms: int | None = None, task_id: str | None = None,
-        tick: int | None = None, phase: str | None = None,
+        self,
+        model: str,
+        usage: Any,
+        *,
+        latency_ms: int | None = None,
+        task_id: str | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a proposal-scoring call.
 
