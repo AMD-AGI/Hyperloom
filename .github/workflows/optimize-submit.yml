@@ -562,9 +562,11 @@ jobs:
           # final_status==Succeeded / ci_success / ci_status==Delivered here.
           # Any session_breakdown that was collected — even for Timeout / Failed
           # / Interrupted sessions — is pushed to the sbd-ingester so pulse never
-          # leaves a model stuck in `awaiting_collector`. The ingester still
-          # decides show_on_leaderboard from data quality (no-gain / non-final
-          # snapshots stay hidden), so this never pollutes the leaderboard.
+          # leaves a model stuck in `awaiting_collector`. Before publishing,
+          # ci/sbd_publish_relabel.py marks known failure/zero-gain terminal
+          # states with show_on_leaderboard=False so they never surface as
+          # leaderboard successes (assumes the ingester honors a client-provided
+          # show_on_leaderboard=False rather than recomputing it server-side).
           # The only remaining natural guard is "a breakdown file must exist":
           # the selection step below exits cleanly when there is nothing to send.
           # Select only within this matrix job's collected task directory. The
@@ -859,80 +861,10 @@ jobs:
           SBD_SEND="${BD%.json}.sbd.json"
           PERF_DIR=$(dirname "$BD")
           set +e
-          python3 - "$BD" "$SBD_SEND" task-artifacts/sbd_publish_selection.json <<'PY'
-          import json
-          import sys
-
-          src, dst, selection_path = sys.argv[1:4]
-          with open(src, encoding="utf-8") as f:
-              data = json.load(f)
-          with open(selection_path, encoding="utf-8") as f:
-              selection = json.load(f)
-
-          sys.path.insert(0, "ci")
-          try:
-              import import_session_breakdown as isb
-          except Exception:
-              isb = None
-
-          if isb is not None:
-              if isb.looks_like_v1_flat_schema(data):
-                  data = isb.migrate_v1_to_v2(data)
-              elif isb.looks_like_universal_schema(data) and not (
-                  isinstance(data.get("workload"), dict)
-                  and isinstance(data.get("baseline"), dict)
-                  and isinstance(data.get("final"), dict)
-              ):
-                  migrated = isb.migrate_universal_to_v2(data)
-                  if migrated:
-                      data = migrated
-
-          data["schema_version"] = "hyperloom.session_breakdown.v1.1"
-          task_id = selection.get("task_id") or ""
-          claw_session_id = selection.get("ci_claw_session_id") or ""
-          image = selection.get("ci_image") or ""
-
-          session_meta = data.setdefault("session_meta", {})
-          session = data.setdefault("session", {})
-          for obj in (data, session_meta, session):
-              if task_id:
-                  obj.setdefault("task_id", task_id)
-              if claw_session_id:
-                  obj.setdefault("claw_session_id", claw_session_id)
-              if image:
-                  obj.setdefault("image", image)
-          if claw_session_id:
-              session.setdefault("session_id", claw_session_id)
-              session_meta.setdefault("session_id", claw_session_id)
-
-          def _float_value(value):
-              try:
-                  return float(value or 0)
-              except Exception:
-                  return 0.0
-
-          status = str(data.get("status") or data.get("stop_reason") or "").strip().lower()
-          gain = _float_value(
-              data.get("gain_pct_sum")
-              if data.get("gain_pct_sum") is not None
-              else data.get("gain")
-          )
-          # These terminal states can emit a structurally valid failure
-          # breakdown with gain=0. Keep them ingested for auditability, but do
-          # not let them surface as leaderboard successes.
-          if status in {
-              "failed",
-              "baseline_failed",
-              "signal",
-              "robustness_escalated",
-              "model_config_incompatible",
-          } and gain <= 0:
-              data["show_on_leaderboard"] = False
-              data["leaderboard_withheld_reason"] = status or "runtime_invalid"
-
-          with open(dst, "w", encoding="utf-8") as f:
-              json.dump(data, f)
-          PY
+          # Migrate to v2, stamp identifiers, and withhold known failure/zero-gain
+          # breakdowns from the leaderboard. Logic lives in ci/sbd_publish_relabel.py
+          # so the v2 field paths and the withholding rule are unit-tested.
+          python3 ci/sbd_publish_relabel.py "$BD" "$SBD_SEND" task-artifacts/sbd_publish_selection.json
           RELABEL_RC=$?
           set -e
           if [ "$RELABEL_RC" -ne 0 ] || [ ! -s "$SBD_SEND" ]; then

@@ -760,8 +760,9 @@ def _sglang_image_for(repo_id: str = "") -> str:
         repo_id (str): Model repo id, matched on its basename for overrides.
 
     Returns:
-        str: The MiMo-V2 sglang image for MiMo-V2.x repos, else the default
-        sglang image.
+        str: The default sglang image. ``repo_id`` is accepted for backward
+        compatibility (and future per-model overrides) but no longer triggers a
+        MiMo-specific image; MiMo runs on the same default base.
     """
     return _default_sglang_image()
 

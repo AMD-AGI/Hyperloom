@@ -713,10 +713,10 @@ def materialize_config_with_envs(
         # gfx942 (mimo_v2.py forward -> GPU coredump -> "Rank N scheduler
         # died during initialization (exit code: -6)"). Pin the triton
         # attention backend, which sidesteps the buggy aiter fused-attention
-        # path. Pairs with the mimo-profilerfix image (the undated v0.5.11
-        # profilerfix base does not register MiMoV2ForCausalLM at all; the
-        # image picked in optimize_submit._sglang_image_for carries the
-        # dated 20260508 arch). Merge (never overwrite) and skip when the
+        # path. Pairs with the default sglang image picked in
+        # optimize_submit._sglang_image_for (v0.5.12 profilerfix now registers
+        # MiMoV2ForCausalLM, so the old v0.5.11 mimo-profilerfix override was
+        # dropped). Merge (never overwrite) and skip when the
         # caller already pinned an --attention-backend so explore variants
         # can re-test the fused path once the model is known to load.
         from ._grid_runner import merge_server_args
