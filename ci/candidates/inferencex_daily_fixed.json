@@ -171,7 +171,7 @@
       "repo_id": "google/gemma-4-26B-A4B-it",
       "framework": "vllm",
       "precision": "FP8",
-      "tp": 8,
+      "tp": 2,
       "conc": 64,
       "registered": false,
       "note": "Gemma4ForConditionalGeneration — MULTIMODAL (vision+audio+text), MoE ~26B total / ~4B active, BF16 native (no quantization_config), 256k (262144) context. Stock vLLM/sglang builds do not serve gemma-4; framework=vllm with dedicated image harbor.core42.example-internal-host.invalid/sync/vllm-openai-rocm:gemma4 (auto-selected by optimize_submit for gemma-4 repos). MI300X has no native FP4 -> dynamic FP8. Gated google repo (needs HF_TOKEN with gemma access). CAVEAT: multimodal head + 256k KV cache may need higher tp / context limiting; verify it serves for text-gen before relying on results.",

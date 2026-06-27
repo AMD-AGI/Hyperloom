@@ -1,21 +1,16 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-name: SaFE Optimize Tiny (count-filler)
+name: optimize-sub100-part2
 
-# Scheduled/manual entrypoint for the count-filler pool, hosted off-repo at
-#   $WEKAFS_CHENYI_DIR/ci-candidates/sub100_lt12b_pulse_notrun.json
-#   (a date-less symlink that always points at the latest filtered pool)
-#   = HF text-generation models with <12B params AND <100 downloads that pulse
-#     has NOT run yet. The goal is breadth -- sweep the long tail.
+# Thin scheduler shell for the sub100 part2 pool (formerly optimize-tiny). It
+# delegates to `SaFE Optimize Submit` (optimize-submit.yml) so submission,
+# waiting, artifact collection, summary rendering, webhook, and perf publishing
+# stay byte-for-byte on the regular SaFE submit path — same shape as
+# part1/part3.
 #
-# It intentionally delegates to `SaFE Optimize Submit` so submission, waiting,
-# artifact collection, summary rendering, webhook, and perf publishing stay
-# byte-for-byte on the same path as the regular SaFE submit workflow. It runs
-# INDEPENDENTLY of the large-B production cron (optimize-submit.yml's own
-# schedule, which sweeps the gt100 rotate pool twice a day).
-#
-# Cadence: 240 models per batch, 6h optimizer budget each, 4 runs/day (every
-# 6h), all submitted to the sandbox workspace.
+#   pool   = $WEKAFS_CHENYI_DIR/ci-candidates/hf_sub100_part2_20260626.json
+#   batch  = 240 (= max_parallel; a batch always runs fully in parallel)
+#   budget = max_hours 6 (== cron period)
 #
 # The candidates JSON lives on /wekafs (RO-mounted on the hyperloom runners)
 # instead of the git repo, so the large pool never bloats git history.
@@ -45,12 +40,12 @@ permissions:
   actions: write
 
 concurrency:
-  group: optimize-tiny-dispatch
+  group: optimize-sub100-part2-dispatch
   cancel-in-progress: false
 
 jobs:
   dispatch-submit:
-    name: Dispatch 240-model count-filler submit
+    name: Dispatch sub100 part2 submit
     runs-on: hyperloom-mh826
     timeout-minutes: 10
     env:
@@ -61,15 +56,14 @@ jobs:
       CANDIDATES_PATH: ${{ format('{0}/ci-candidates/hf_sub100_part2_20260626.json', secrets.WEKAFS_CHENYI_DIR) }}
       BATCH_SIZE: '240'
       # Rotation step (hours). MUST equal the cron PERIOD (this cron fires every
-      # 6h: 1/7/13/19 UTC), same invariant as optimize-submit/gte100. Also the
-      # per-task optimizer budget forwarded below.
+      # 6h: 1/7/13/19 UTC), same invariant as the other pools. Also the per-task
+      # optimizer budget forwarded below.
       MAX_HOURS: '6'
-      # Count-filler runs go to the hyperloom workspace only.
       SUBMIT_WORKSPACES: 'core42-hyperloom'
     steps:
       - uses: actions/checkout@v7
 
-      - name: Resolve count-filler batch
+      - name: Resolve part2 batch
         id: batch
         env:
           INPUT_BATCH_INDEX: ${{ github.event.inputs.batch_index }}
@@ -80,11 +74,11 @@ jobs:
             echo "::error::candidates pool not found: ${CANDIDATES_PATH}"
             exit 1
           fi
-          # Same max_hours-paced rotation as optimize-submit/gte100 (ci/batch_rotate.py,
-          # unit-tested): one batch advances per MAX_HOURS of wall-clock time since the
-          # anchor, auto-rotating on schedule and honoring an explicit batch_index on
-          # manual dispatch. ANCHOR 2026-06-26 13:00Z restarts THIS pool's sweep at
-          # batch 0 on the next fire (13:07Z), independent of gte100's shared anchor.
+          # Same max_hours-paced rotation as the sibling pools (ci/batch_rotate.py,
+          # unit-tested): one batch advances per MAX_HOURS of wall-clock time since
+          # the anchor, auto-rotating on schedule and honoring an explicit
+          # batch_index on manual dispatch. ANCHOR 2026-06-26 13:00Z aligns batch 0
+          # with the next fire (13:07Z), independent of the other pools' anchors.
           n=$(python3 -c "import json,os;print(len(json.load(open(os.environ['CANDIDATES_PATH'])).get('candidates') or []))")
           out=$(python3 ci/batch_rotate.py \
             --count "${n}" \
@@ -101,7 +95,7 @@ jobs:
             echo "batches=${batches}"
             echo "slice=${start}:${end}"
           } >> "$GITHUB_OUTPUT"
-          echo "### tiny pool: ${pool} models; batch ${bi}/${batches}; slice ${start}:${end}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### part2 pool: ${pool} models; batch ${bi}/${batches}; slice ${start}:${end}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Dispatch SaFE Optimize Submit
         run: |
@@ -111,8 +105,8 @@ jobs:
           batch_index="${{ steps.batch.outputs.batch_index }}"
 
           echo "Dispatching optimize-submit.yml on ref=${ref}"
-          echo "Count-filler pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
-          echo "Batch size: ${BATCH_SIZE}; max_parallel=240; submit_workspaces=${SUBMIT_WORKSPACES}"
+          echo "part2 pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
+          echo "Batch size: ${BATCH_SIZE}; max_parallel=${BATCH_SIZE}; submit_workspaces=${SUBMIT_WORKSPACES}"
 
           payload=$(python3 - <<'PY'
           import json
@@ -127,11 +121,12 @@ jobs:
                   "batch_size": os.environ["BATCH_SIZE"],
                   "exclude_leaderboard": "false",
                   "exclude_active_workflows": "true",
-                  "max_parallel": "240",
+                  # A batch always runs fully in parallel, so max_parallel == batch_size.
+                  "max_parallel": os.environ["BATCH_SIZE"],
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
                   # task wait + job timeout are derived from max_hours in
                   # optimize-submit's prepare job (max_hours+30m / +60m).
-                  "max_hours": "6",
+                  "max_hours": os.environ["MAX_HOURS"],
                   "all_artifacts": "true",
                   "dry_run": os.environ.get("DRY_RUN") or "false",
               },
