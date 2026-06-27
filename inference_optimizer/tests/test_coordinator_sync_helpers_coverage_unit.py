@@ -535,6 +535,80 @@ def test_select_next_framework_pr_candidate(coord: Coordinator) -> None:
     assert nxt == {"candidate_id": "c2"}
 
 
+def test_unprocessed_framework_pr_candidates(coord: Coordinator) -> None:
+    ss = coord.shared_state
+    ss.framework_pr_batches = [
+        {
+            "candidates": [
+                {"candidate_id": "c1"},
+                {"candidate_id": "c2"},
+                {"candidate_id": "c3"},
+            ],
+        }
+    ]
+    ss.framework_pr_phase_progress = [{"candidate_id": "c1"}]
+    out = coord._unprocessed_framework_pr_candidates()
+    assert [c["candidate_id"] for c in out] == ["c2", "c3"]
+
+
+def test_match_framework_pr_candidate_by_id_and_pr_number(coord: Coordinator) -> None:
+    cands = [
+        {"candidate_id": "https://github.com/o/r/pull/12", "pr_url": "https://github.com/o/r/pull/12", "pr_number": 12},
+        {"candidate_id": "https://github.com/o/r/pull/34", "ref": "PR:34", "pr_number": 34},
+    ]
+    # exact candidate_id
+    assert coord._match_framework_pr_candidate("https://github.com/o/r/pull/12", cands)["pr_number"] == 12
+    # ref match
+    assert coord._match_framework_pr_candidate("PR:34", cands)["pr_number"] == 34
+    # bare PR number fallback
+    assert coord._match_framework_pr_candidate("34", cands)["pr_number"] == 34
+    # unknown
+    assert coord._match_framework_pr_candidate("999", cands) is None
+    assert coord._match_framework_pr_candidate("", cands) is None
+
+
+async def test_select_best_framework_pr_candidate_falls_back_to_linear(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """With the ranker client unavailable, selection degrades to discovery order."""
+    ss = coord.shared_state
+    ss.framework_pr_batches = [
+        {"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}
+    ]
+    ss.framework_pr_phase_progress = []
+    # Force the ranker client to be unavailable.
+    monkeypatch.setattr(coord, "_framework_pr_ranker_client", lambda: None)
+    chosen = await coord._select_best_framework_pr_candidate()
+    assert chosen == {"candidate_id": "c1"}
+
+
+async def test_select_best_framework_pr_candidate_single(coord: Coordinator) -> None:
+    """A single unprocessed candidate is returned without invoking the ranker."""
+    ss = coord.shared_state
+    ss.framework_pr_batches = [{"candidates": [{"candidate_id": "only"}]}]
+    ss.framework_pr_phase_progress = []
+    chosen = await coord._select_best_framework_pr_candidate()
+    assert chosen == {"candidate_id": "only"}
+
+
+async def test_select_best_framework_pr_candidate_uses_ranker_choice(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """When the ranker returns a candidate, it is used over discovery order."""
+    ss = coord.shared_state
+    ss.framework_pr_batches = [
+        {"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}, {"candidate_id": "c3"}]}
+    ]
+    ss.framework_pr_phase_progress = []
+
+    async def _fake_rank(cands):
+        return cands[-1]  # pick the last → c3
+
+    monkeypatch.setattr(coord, "_rank_framework_pr_candidates_llm", _fake_rank)
+    chosen = await coord._select_best_framework_pr_candidate()
+    assert chosen == {"candidate_id": "c3"}
+
+
 def test_framework_pr_known_candidate_ids(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.framework_pr_batches = [

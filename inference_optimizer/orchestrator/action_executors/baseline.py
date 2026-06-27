@@ -287,6 +287,24 @@ _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
 
 
+def _should_establish_quality_ref(task_kind: str | None) -> bool:
+    """Only a genuine ``baseline`` task may establish/overwrite the quality reference.
+
+    ``replay_warm_recipe`` reuses this executor but is an optimization
+    candidate, so it must compare against the pure baseline reference rather
+    than redefine it (otherwise the gate would mask the warm recipe's own
+    deviation from the baseline output).
+
+    Args:
+        task_kind: The task kind (``ctx.task.kind``); ``None`` is treated as
+            "not a baseline".
+
+    Returns:
+        bool: ``True`` only when the task kind is exactly ``"baseline"``.
+    """
+    return str(task_kind or "") == "baseline"
+
+
 def _resolve_reference_base(
     session_dir: Path, *, model_path: str,
 ) -> tuple[str, dict[str, str]]:
@@ -1132,6 +1150,12 @@ class BaselineExecutor:
             FileNotFoundError: If the resolved baseline config does not exist.
         """
         params = ctx.task.params or {}
+        # Only a genuine ``baseline`` task may establish/overwrite the quality
+        # reference image. ``replay_warm_recipe`` reuses this executor but is an
+        # optimization candidate, so it must compare against the pure baseline
+        # reference rather than redefine it (otherwise the gate would mask the
+        # warm recipe's own deviation from the baseline output).
+        is_genuine_baseline = _should_establish_quality_ref(getattr(ctx.task, "kind", ""))
         config_path = Path(params.get("config_path") or self.default_config_path or self._resolve_default_config())
         if not config_path.exists():
             raise FileNotFoundError(f"baseline config not found: {config_path}")
@@ -1258,6 +1282,7 @@ class BaselineExecutor:
                 benchmark_script=override_script,
                 reference_server_args=ref_args,
                 reference_envs=ref_envs,
+                establish_quality_ref=is_genuine_baseline,
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override (e.g. sglang_*.sh on a vllm run):
@@ -2028,11 +2053,14 @@ class BaselineExecutor:
             "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
         }
 
-        # Parse accuracy eval results (GSM8K); RUN_EVAL=true ran lm-eval
-        # while the server was up.
+        # Parse accuracy eval results (GSM8K for serving, or the image-quality
+        # gate for scriptable frameworks); RUN_EVAL=true ran lm-eval while the
+        # server was up. Pass the framework so scriptable runs (xDiT) fail
+        # closed on a missing quality gate instead of falling back to GSM8K.
         from ._accuracy_gate import parse_eval_results
 
-        eval_data = parse_eval_results(workspace)
+        eval_framework = (report or {}).get("framework") or os.environ.get("FRAMEWORK") or None
+        eval_data = parse_eval_results(workspace, framework=eval_framework)
         if eval_data.get("accuracy") is not None:
             result["accuracy"] = eval_data["accuracy"]
             result["accuracy_task"] = eval_data.get("task", "gsm8k")

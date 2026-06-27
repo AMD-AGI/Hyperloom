@@ -488,12 +488,23 @@ def extract_benchmark_measurement(
         "reported_success": report.get("success") if report else None,
         "framework": report.get("framework"),
         "model": report.get("model"),
+        # Scriptable (server-less) workloads — e.g. xDiT diffusion — tag the
+        # report with workload_kind/unit and ship a quality_gate block instead
+        # of a GSM8K eval. Carried through so downstream gates/reporters can
+        # branch without re-reading the YAML.
+        "workload_kind": report.get("workload_kind"),
+        "throughput_unit": report.get("throughput_unit") or throughput.get("unit"),
+        "quality_gate": report.get("quality_gate"),
+        "latency_s": _first_float(report.get("latency_s"), throughput.get("latency_s")),
         "request_throughput": _to_float(throughput.get("request_throughput")),
         "output_throughput": _to_float(throughput.get("output_throughput")),
         "total_token_throughput": _to_float(throughput.get("total_token_throughput")),
         "completed_requests": _first_int(
             throughput.get("completed_requests"),
             throughput.get("completed"),
+            # Diffusion scripts report images produced under either key.
+            throughput.get("images_generated"),
+            throughput.get("num_images"),
         ),
         "duration_seconds": _to_float(throughput.get("duration_seconds")),
         "ttft_mean_ms": _to_float(ttft.get("mean_ms")),
@@ -603,24 +614,62 @@ def _resolve_osl(report: dict[str, Any] | None) -> int | None:
     return None
 
 
+def _is_scriptable_measurement(result: dict[str, Any]) -> bool:
+    """Return whether a measurement came from a scriptable (server-less) run.
+
+    Scriptable workloads (e.g. xDiT diffusion) carry a ``workload_kind`` tag or
+    a ``quality_gate`` block rather than serving-style request counters.
+
+    Args:
+        result (dict[str, Any]): The measurement dict to inspect.
+
+    Returns:
+        bool: ``True`` for scriptable measurements.
+    """
+    from ... import framework_registry
+
+    if str(result.get("workload_kind") or "").strip().lower() == framework_registry.SCRIPTABLE:
+        return True
+    if result.get("quality_gate") is not None:
+        return True
+    return framework_registry.is_scriptable(result.get("framework"))
+
+
 def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     """Return whether a measurement reflects a usable benchmark result.
 
-    A measurement is valid when it reports positive output throughput
-    and at least one completed request.
+    Serving measurements are valid with positive output throughput AND at
+    least one completed request. Scriptable measurements (e.g. xDiT diffusion)
+    have no serving request counter, so they are valid on positive output
+    throughput alone (images/sec); ``completed_requests`` is optional.
 
     Args:
         result (dict[str, Any] | None): The measurement dict to check.
 
     Returns:
-        bool: ``True`` if throughput and completed requests are both
-        positive; ``False`` otherwise.
+        bool: ``True`` if the measurement is usable for selection.
     """
     if not isinstance(result, dict):
         return False
     output_tput = _to_float(result.get("output_throughput"))
+    if output_tput is None or output_tput <= 0:
+        return False
+    if _is_scriptable_measurement(result):
+        # A scriptable run whose image-quality gate failed is not a selectable
+        # result, regardless of throughput. Reuse quality_gate_passed as the
+        # single source of truth so a gate that fails on thresholds (lpips/ssim/
+        # mse) — not just an explicit passed=False — is also rejected. require=
+        # False keeps a missing/empty gate non-blocking here (parity with the
+        # prior behavior); the gate is enforced as required upstream (Magpie
+        # result.py + parse_eval_results) for the accuracy contract.
+        from ._accuracy_gate import quality_gate_passed
+
+        qg = result.get("quality_gate")
+        if not quality_gate_passed(qg, require=False):
+            return False
+        return True
     completed = _to_int(result.get("completed_requests"))
-    return output_tput is not None and output_tput > 0 and completed is not None and completed > 0
+    return completed is not None and completed > 0
 
 
 # ── Approximate throughput for killed-overtime variants ──

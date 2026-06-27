@@ -202,19 +202,19 @@ def test_legacy_block_is_present_in_fixture():
 
 
 def test_missing_magpie_dir_returns_false(tmp_path: Path):
-    """No MAGPIE_DIR / no benchmarker.py → soft return False."""
+    """No MAGPIE_PATH / no benchmarker.py → soft return False."""
     empty = tmp_path / "no_magpie_here"
     empty.mkdir()
     assert ensure_magpie_atomic_scripts_patch(empty) is False
 
 
 def test_no_arg_and_no_env_returns_false(monkeypatch):
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     assert ensure_magpie_atomic_scripts_patch(None) is False
 
 
 def test_env_fallback_resolves_path(monkeypatch, fake_magpie: Path):
-    monkeypatch.setenv("MAGPIE_DIR", str(fake_magpie))
+    monkeypatch.setenv("MAGPIE_PATH", str(fake_magpie))
     assert ensure_magpie_atomic_scripts_patch(None) is True
 
 
@@ -635,11 +635,11 @@ class TestResolveBenchmarkerPath:
         assert mp._resolve_benchmarker_path(tmp_path) is None
 
     def test_returns_none_when_no_input_or_env(self, monkeypatch):
-        monkeypatch.delenv("MAGPIE_DIR", raising=False)
+        monkeypatch.delenv("MAGPIE_PATH", raising=False)
         assert mp._resolve_benchmarker_path(None) is None
 
     def test_env_fallback(self, monkeypatch, magpie_dir):
-        monkeypatch.setenv("MAGPIE_DIR", str(magpie_dir))
+        monkeypatch.setenv("MAGPIE_PATH", str(magpie_dir))
         out = mp._resolve_benchmarker_path(None)
         assert out is not None
 
@@ -692,7 +692,7 @@ class TestApplyPatchAtomic:
 # ensure_magpie_atomic_scripts_patch
 class TestEnsurePatch:
     def test_returns_false_without_magpie_tree(self, monkeypatch):
-        monkeypatch.delenv("MAGPIE_DIR", raising=False)
+        monkeypatch.delenv("MAGPIE_PATH", raising=False)
         assert mp.ensure_magpie_atomic_scripts_patch(None) is False
 
     def test_full_roundtrip_idempotent(self, magpie_dir):

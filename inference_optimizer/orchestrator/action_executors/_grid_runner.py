@@ -362,6 +362,74 @@ _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
 )
 
 
+# xDiT (diffusion) do-not-set blacklist — env knobs proven to crash or regress
+# on FLUX.2-class DiT models with Ulysses SP (source: arbor empirical KB /
+# flux2-dev recipe). Each entry maps an env key to the set of forbidden values
+# (``"*"`` = any truthy value) and a short reason. Precision keys are locked
+# OFF (a precision change is a different model). Enforced for the ``xdit``
+# framework only, in :func:`apply_compatibility_filter`.
+_XDIT_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
+    "XDIT_ATTENTION_BACKEND": (
+        frozenset({"aiter_fp8", "aiter_sage", "aiter_sage_v2"}),
+        "approximate/quantized attention regresses on Ulysses>=4 "
+        "(attention is ~2% of FLOPS at small tokens/GPU)",
+    ),
+    "XDIT_USE_FP4_GEMMS": (frozenset({"*"}), "precision locked to BF16 (FP4 = different model)"),
+    "XDIT_USE_FP8_GEMMS": (frozenset({"*"}), "precision locked to BF16 (FP8 = different model)"),
+    "RCCL_MSCCL_ENABLE": (frozenset({"*"}), "MSCCL overhead > savings for 2.53MB per-pair A2A"),
+    "PYTORCH_TUNABLEOP_TUNING": (frozenset({"*"}), "GPU memory fault when combined with torch.compile"),
+    "TRITON_HIP_USE_ASYNC_COPY": (frozenset({"*"}), "crashes on MI355X (gfx950)"),
+    "NCCL_PROTO": (frozenset({"ll", "LL"}), "NCCL_PROTO=LL regresses 10-22%; use LL128/SIMPLE"),
+}
+
+# Known crash combinations (all keys present + truthy → drop).
+_XDIT_ENV_COMBO_BLACKLIST: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("AMD_DIRECT_DISPATCH", "AMDGCN_USE_BUFFER_OPS"),
+        "AMD_DIRECT_DISPATCH=1 + AMDGCN_USE_BUFFER_OPS=1 is a known crash (-28.6%)",
+    ),
+)
+
+
+def _is_truthy_env(value: Any) -> bool:
+    """Return whether an env-string value is truthy (set and not 0/false/off).
+
+    Args:
+        value (Any): Candidate env value.
+
+    Returns:
+        bool: ``True`` when the value is set to a non-falsey token.
+    """
+    return str(value).strip().lower() not in ("", "0", "false", "off", "no")
+
+
+def xdit_blacklist_reason(
+    extra_envs: dict[str, str] | None,
+) -> str | None:
+    """Return a drop reason if a variant trips the xDiT do-not-set blacklist.
+
+    Args:
+        extra_envs (dict[str, str] | None): The variant's env overrides.
+
+    Returns:
+        str | None: A human-readable reason when blacklisted, else ``None``.
+    """
+    envs = {str(k): str(v) for k, v in (extra_envs or {}).items()}
+    for key, (bad_values, reason) in _XDIT_ENV_BLACKLIST.items():
+        if key not in envs:
+            continue
+        val = envs[key]
+        if "*" in bad_values:
+            if _is_truthy_env(val):
+                return f"{key}={val}: {reason}"
+        elif val.strip().lower() in {b.lower() for b in bad_values}:
+            return f"{key}={val}: {reason}"
+    for keys, reason in _XDIT_ENV_COMBO_BLACKLIST:
+        if all(k in envs and _is_truthy_env(envs[k]) for k in keys):
+            return reason
+    return None
+
+
 # Per-framework cache for ``_probe_server_help_text`` (avoids a subprocess per
 # variant). Empty results are NOT cached so a transient failure re-probes.
 _HELP_TEXT_CACHE: dict[str, str] = {}
@@ -503,11 +571,25 @@ def apply_compatibility_filter(
     help_text = _probe_server_help_text(fw)
     help_available = bool(help_text)
 
+    is_xdit = fw == "xdit"
+
     kept: list[GridVariant] = []
     dropped: list[dict] = []
     for v in grid:
         args = v.extra_server_args or ""
         skip_reason: str | None = None
+        # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
+        if is_xdit:
+            skip_reason = xdit_blacklist_reason(getattr(v, "extra_envs", None))
+        if skip_reason:
+            dropped.append(
+                {
+                    "name": v.name,
+                    "source": "xdit_blacklist",
+                    "reason": skip_reason,
+                }
+            )
+            continue
         for flag, required_class in _COMPATIBILITY_FLAG_RULES:
             if flag not in args:
                 continue
@@ -898,21 +980,28 @@ def sanitize_result_dir(value: Any) -> str | None:
 def server_args_env_name(framework: str | None) -> str:
     """Return the Magpie env var used to append backend server args.
 
+    Resolution is exact (registry-keyed) with a substring fallback so a
+    framework string carrying a version suffix (e.g. ``"vllm@0.21"``) still
+    maps correctly. Unknown names fall back to the default framework's env.
+
     Args:
         framework (str | None): Framework name; matched case-insensitively.
 
     Returns:
-        str: ``"EXTRA_ATOM_ARGS"`` for atom, ``"EXTRA_VLLM_ARGS"`` for vLLM,
-        otherwise ``"EXTRA_SGLANG_ARGS"`` (the sglang default).
+        str: The ``EXTRA_*_ARGS`` env name for the framework (e.g.
+        ``"EXTRA_XDIT_ARGS"`` for xDiT, ``"EXTRA_SGLANG_ARGS"`` default).
     """
+    from ... import framework_registry
+
     name = str(framework or "").strip().lower()
-    # atom checked first so a future overlapping-substring framework name
-    # cannot match the wrong branch.
-    if "atom" in name:
-        return "EXTRA_ATOM_ARGS"
-    if "vllm" in name:
-        return "EXTRA_VLLM_ARGS"
-    return "EXTRA_SGLANG_ARGS"
+    if framework_registry.is_supported(name):
+        return framework_registry.extra_args_env(name)
+    # Substring fallback for version-suffixed names; check longest/specific
+    # names first so an overlapping substring cannot match the wrong branch.
+    for fw in framework_registry.names():
+        if fw in name:
+            return framework_registry.extra_args_env(fw)
+    return framework_registry.extra_args_env(framework_registry.DEFAULT_FRAMEWORK)
 
 
 def merge_server_args(*parts: str | None) -> str:
@@ -1681,6 +1770,19 @@ def _build_variant_yaml(
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
 
+    # PATH guard: the xdit/scriptable wrapper needs BOTH `/venv/bin` (for the
+    # `xdit` console script) and `/opt/rocm/bin` (for `hipcc`, required by
+    # AITER's runtime JIT of module_fmha_v3_fwd). An Orchestration-supplied
+    # extra_envs.PATH can accidentally drop one of these; force-prepend both so
+    # a PATH experiment never breaks binary/hipcc resolution.
+    if str(bench.get("framework", "")).strip().lower() == "xdit":
+        _cur_path = str(envs.get("PATH", "") or "")
+        _parts = [p for p in _cur_path.split(":") if p]
+        for _essential in ("/opt/rocm/bin", "/venv/bin"):
+            if _essential not in _parts:
+                _parts.insert(0, _essential)
+        envs["PATH"] = ":".join(_parts)
+
     if server_lifecycle is not None:
         from ._server_lifecycle import inject_lifecycle
 
@@ -1882,7 +1984,7 @@ def _run_magpie(
 
     env = os.environ.copy()
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-    magpie_dir = os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or ""
+    magpie_dir = os.environ.get("MAGPIE_PATH") or ""
     if magpie_dir:
         env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
 

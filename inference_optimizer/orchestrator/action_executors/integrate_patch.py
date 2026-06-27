@@ -77,7 +77,7 @@ from ...session_paths import runs_dir
 from .._time import now_iso
 from ..framework_paths import resolve_source_file_allowlist
 from ..specialist_patch_safety import patch_file_targets, patch_targets_missing
-from ._accuracy_gate import accuracy_passed, parse_eval_results
+from ._accuracy_gate import accuracy_keep_block, accuracy_passed, parse_eval_results
 from ._git import _run_git_cp
 from ._grid_runner import (
     GridVariant,
@@ -1326,10 +1326,29 @@ class IntegratePatchExecutor:
             delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
-        # KEEP requires delta_pct ≥ keep_threshold AND accuracy_pass != False.
-        gate_pass = (
-            delta_pct is not None and delta_pct >= keep_threshold_pct and (accuracy_pass is None or accuracy_pass)
+        # KEEP requires delta_pct ≥ keep_threshold AND the accuracy gate.
+        # Step 4 / Q5: framework-authored source patches require the accuracy
+        # gate (gated on the framework_pr authoring markers so generic EXPLORE
+        # integrate_patch keeps its prior throughput-only behaviour).
+        fw_authored = bool(params.get("framework_pr_authoring") or params.get("framework_pr_candidate_id"))
+        acc_required = bool(params.get("require_accuracy_for_keep", fw_authored))
+        acc_baseline = params.get("accuracy_baseline")
+        if acc_required and not acc_baseline:
+            _ss = extra.get("shared_state") or extra.get("state")
+            if _ss is not None:
+                acc_baseline = getattr(_ss, "baseline_accuracy", None)
+        acc_block, acc_reason, acc_degraded = accuracy_keep_block(
+            accuracy_pass,
+            required=acc_required,
+            baseline_accuracy=acc_baseline,
         )
+        if acc_degraded:
+            log.warning(
+                "integrate_patch: accuracy gate required but no baseline accuracy; "
+                "KEEP allowed on throughput only (task=%s)",
+                specialist_task_id,
+            )
+        gate_pass = delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
 
         if not gate_pass:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -1339,8 +1358,14 @@ class IntegratePatchExecutor:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
-            if accuracy_pass is False:
-                reasons.append("accuracy regression detected")
+            if acc_block and acc_reason:
+                reasons.append(acc_reason)
+            # G8: distinguish "accuracy required but unevaluated" from a
+            # throughput/regression revert.
+            _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
+            revert_status = (
+                "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and _tput_ok) else "reverted"
+            )
             await self._maybe_write_framework_pr_kb_record(
                 done_payload=done_payload,
                 outcome="reverted_smoke_fail",
@@ -1348,7 +1373,7 @@ class IntegratePatchExecutor:
                 extra=extra,
             )
             return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "reverted",
+                "status": revert_status,
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [str(p) for p in reverted],
@@ -1374,7 +1399,17 @@ class IntegratePatchExecutor:
                 specialist_task_id=specialist_task_id,
                 base_tput=base_tput,
             )
-            if not confirm["stable"] or confirm["accuracy_pass"] is False:
+            # Re-apply the SAME accuracy gate to the authoritative rebench (its
+            # tput becomes the headline below): the confirmation run must clear
+            # stability AND accuracy. A missing verdict blocks when accuracy is
+            # required and a baseline exists (mirrors the first-bench gate), so a
+            # silently eval-less rebench can't KEEP on a stale first-bench pass.
+            rb_acc_block, rb_acc_reason, _rb_degraded = accuracy_keep_block(
+                confirm["accuracy_pass"],
+                required=acc_required,
+                baseline_accuracy=acc_baseline,
+            )
+            if not confirm["stable"] or rb_acc_block:
                 artifacts_reverted = self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
                 reasons = []
@@ -1384,6 +1419,15 @@ class IntegratePatchExecutor:
                     )
                 if confirm["accuracy_pass"] is False:
                     reasons.append("accuracy regression on rebench")
+                elif rb_acc_block and rb_acc_reason:
+                    reasons.append(rb_acc_reason)
+                # G8 parity: distinguish "accuracy required but unevaluated on the
+                # stable rebench" from a measured regression / stability revert.
+                rb_revert_status = (
+                    "accuracy_unavailable_reject"
+                    if (rb_acc_block and confirm["accuracy_pass"] is None and confirm["stable"])
+                    else "reverted"
+                )
                 await self._maybe_write_framework_pr_kb_record(
                     done_payload=done_payload,
                     outcome="reverted_smoke_fail",
@@ -1391,7 +1435,7 @@ class IntegratePatchExecutor:
                     extra=extra,
                 )
                 return _with_stash_restore(framework_root, stash_state, stash_note, {
-                    "status": "reverted",
+                    "status": rb_revert_status,
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
@@ -1702,6 +1746,7 @@ class IntegratePatchExecutor:
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
+            extra_envs=self._framework_run_eval_envs(params),
             out_name="integrate_patch.with_envs.yaml",
         )
 
@@ -1748,16 +1793,53 @@ class IntegratePatchExecutor:
 
         accuracy_pass: bool | None = None
         if bench.get("status") == "succeeded":
-            accuracy_pass = self._grade_accuracy(bench["workspace"], params.get("accuracy_baseline"))
+            accuracy_pass = self._grade_accuracy(
+                bench["workspace"],
+                params.get("accuracy_baseline"),
+                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+            )
 
         return bench, {"accuracy_pass": accuracy_pass}
 
     @staticmethod
-    def _grade_accuracy(result_dir: str, baseline_accuracy: Any) -> bool | None:
+    def _framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
+        """Force ``RUN_EVAL=true`` for framework-authored source patches (G2).
+
+        Only forces when a comparable baseline accuracy exists
+        (``accuracy_baseline > 0``): if the run never produced a baseline
+        accuracy (e.g. eval is globally disabled), there is nothing to gate
+        against, so we must NOT force eval on the candidate (don't override an
+        operator's ``RUN_EVAL=false`` nor add a needless eval-failure surface);
+        the materializer's default RUN_EVAL handling applies instead.
+
+        Generic EXPLORE integrate_patch is untouched (returns ``None``).
+
+        Args:
+            params: The integrate_patch task params.
+
+        Returns:
+            ``{"RUN_EVAL": "true"}`` for framework-authored patches that have a
+            positive baseline accuracy to compare against, else ``None``.
+        """
+        fw_authored = bool(params.get("framework_pr_authoring") or params.get("framework_pr_candidate_id"))
+        try:
+            baseline = float(params.get("accuracy_baseline") or 0.0)
+        except (TypeError, ValueError):
+            baseline = 0.0
+        return {"RUN_EVAL": "true"} if (fw_authored and baseline > 0) else None
+
+    @staticmethod
+    def _grade_accuracy(
+        result_dir: str,
+        baseline_accuracy: Any,
+        framework: str | None = None,
+    ) -> bool | None:
         """Grade a bench's accuracy against the baseline.
 
         With a recorded baseline the measured drop is enforced; without one
         (or no eval result) the check is skipped (``None``) and warned loudly.
+        For scriptable frameworks (xDiT) ``parse_eval_results`` fails closed on
+        a missing quality gate instead of falling back to GSM8K.
         """
         # Accept numeric strings (e.g. ``"0.85"``) in addition to int/float so a
         # baseline carried as text is not silently coerced to 0.0 (which would
@@ -1767,7 +1849,7 @@ class IntegratePatchExecutor:
         except (TypeError, ValueError):
             baseline_value = 0.0
         try:
-            eval_results = parse_eval_results(result_dir)
+            eval_results = parse_eval_results(result_dir, framework=framework)
             new_accuracy = eval_results.get("accuracy")
             if new_accuracy is not None and baseline_value > 0:
                 return accuracy_passed(baseline_value, float(new_accuracy))
@@ -1811,6 +1893,7 @@ class IntegratePatchExecutor:
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
+            extra_envs=self._framework_run_eval_envs(params),
             out_name="integrate_patch.rebench.yaml",
         )
         variant = GridVariant(

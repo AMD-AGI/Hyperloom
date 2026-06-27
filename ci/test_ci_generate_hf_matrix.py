@@ -7,7 +7,7 @@ from __future__ import annotations
 import io
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -123,7 +123,9 @@ def test_resolve_batch_index_empty_uses_rotation(monkeypatch):
     # Empty batch_index + a cron_now -> max_hours-paced rotation at that instant.
     monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
     monkeypatch.setenv("INPUT_MAX_HOURS", "6")
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-15T22:00:00Z")  # anchor + 6h
+    # anchor + 6h -> exactly one batch advanced (relative to the live anchor so
+    # this test survives future anchor moves).
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=6)).isoformat())
     assert gm._resolve_batch_index(100, 10) == 1
 
 
@@ -133,7 +135,7 @@ def test_resolve_batch_index_schedule_empty_ok(monkeypatch):
     monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
     monkeypatch.setenv("INPUT_MAX_HOURS", "6")
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-15T22:00:00Z")
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=6)).isoformat())
     assert gm._resolve_batch_index(100, 10) == 1
 
 
@@ -171,7 +173,7 @@ def test_rotation_step_hours_fallback(monkeypatch):
 
 
 def test_cron_batch_index_anchor_is_zero(monkeypatch):
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-15T16:00:00+00:00")
+    monkeypatch.setenv("INPUT_CRON_NOW", gm._CRON_ANCHOR_UTC.isoformat())
     monkeypatch.delenv("INPUT_MAX_HOURS", raising=False)  # 6h step
     assert gm._cron_batch_index(100, 10) == 0
 
@@ -179,24 +181,24 @@ def test_cron_batch_index_anchor_is_zero(monkeypatch):
 def test_cron_batch_index_advances_by_max_hours(monkeypatch):
     # 6h step: 6h after the anchor -> exactly one batch advanced.
     monkeypatch.setenv("INPUT_MAX_HOURS", "6")
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-15T22:00:00Z")
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=6)).isoformat())
     assert gm._cron_batch_index(100, 10) == 1
     # within the same 6h window -> still batch 0.
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-15T21:59:00Z")
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=5, minutes=59)).isoformat())
     assert gm._cron_batch_index(100, 10) == 0
 
 
 def test_cron_batch_index_step_scales_with_max_hours(monkeypatch):
     # 12h step: 12h after the anchor -> one batch; 24h -> two batches.
     monkeypatch.setenv("INPUT_MAX_HOURS", "12")
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-16T04:00:00Z")  # +12h
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=12)).isoformat())  # +12h
     assert gm._cron_batch_index(100, 10) == 1
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-16T16:00:00Z")  # +24h
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=24)).isoformat())  # +24h
     assert gm._cron_batch_index(100, 10) == 2
 
 
 def test_cron_batch_index_before_anchor_clamped(monkeypatch):
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-14T16:00:00+00:00")
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC - timedelta(days=1)).isoformat())
     assert gm._cron_batch_index(100, 10) == 0
 
 
@@ -560,9 +562,9 @@ def test_apply_exclusions_to_entries_with_active(monkeypatch):
 def test_resolve_batch_index_schedule(monkeypatch):
     monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
-    # max_hours-paced: anchor 06-15T16:00 -> 06-16T04:00 is +12h; at the 6h
-    # default step that is two batches advanced.
-    monkeypatch.setenv("INPUT_CRON_NOW", "2026-06-16T04:00:00Z")
+    # max_hours-paced: anchor + 12h at the 6h default step is two batches
+    # advanced (relative to the live anchor so this survives anchor moves).
+    monkeypatch.setenv("INPUT_CRON_NOW", (gm._CRON_ANCHOR_UTC + timedelta(hours=12)).isoformat())
     monkeypatch.delenv("INPUT_MAX_HOURS", raising=False)
     assert gm._resolve_batch_index(100, 10) == 2
 

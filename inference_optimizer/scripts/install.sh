@@ -36,6 +36,18 @@ set -euo pipefail
 # K8s-spawned child shell) still resolve git/apt/python3 when callers only
 # prepend /opt/venv/bin.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+# Re-assert the active virtualenv ahead of the system bins prepended above.
+# Callers may only put the venv on PATH (e.g. /venv/bin) or activate it via
+# $VIRTUAL_ENV; otherwise the system-bins prepend shadows the venv python3
+# with /usr/bin/python3, whose apt-managed packages (e.g. packaging) have no
+# RECORD file and break `pip install`/uninstall. Probe the activated venv
+# first, then the common ROCm image locations (/opt/venv, /venv).
+for _venv_bin in "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}" /opt/venv/bin /venv/bin; do
+  if [ -n "${_venv_bin}" ] && [ -x "${_venv_bin}/python" ]; then
+    export PATH="${_venv_bin}:$PATH"
+    break
+  fi
+done
 
 # Single artefact root: everything writable defaults to $USER_DATA_PATH so
 # operators can monitor a run end-to-end by tailing one directory. Magpie
@@ -111,7 +123,11 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # fail-soft below. Operators can re-pin with MAGPIE_REF=<tag|branch|sha>
 # (mirrors GEAK_REF in kernel-agent/scripts/install.sh).
 MAGPIE_REF="${MAGPIE_REF:-b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7}"
-MAGPIE_DIR="${MAGPIE_DIR:-${_open_source_root}/Magpie}"
+# MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
+# _grid_runner.py / manifest.py) at the same Magpie checkout. A single var keeps
+# the installer and runtime in lockstep; setting it never silently falls back to
+# cloning upstream Magpie.
+MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
 # Pin InferenceX to a current default-branch HEAD *commit SHA* so the
 # per-install clone is reproducible (same rationale as MAGPIE_REF). Operators
@@ -167,7 +183,7 @@ Env overrides:
   REPO_ROOT, KERNEL_AGENT_ROOT, FRAMEWORK_AGENT_ROOT, MAGPIE_REPO,
   MAGPIE_REF (commit SHA / tag / branch the Magpie clone is pinned to;
     default is a commit that already copies benchmark scripts atomically),
-  MAGPIE_DIR, INFERENCEX_REPO,
+  MAGPIE_PATH, INFERENCEX_REPO,
   INFERENCEX_REF (commit SHA / tag / branch the InferenceX clone is pinned
     to; default is a current upstream HEAD SHA),
   INFERENCEX_DEFAULT_DIR, INFERENCEX_PATH,
@@ -477,14 +493,14 @@ log "HYPERLOOM_ROOT=${HYPERLOOM_ROOT}"
 log "open_source_root=${_open_source_root}"
 log "KERNEL_AGENT_ROOT=${KERNEL_AGENT_ROOT}"
 log "KERNEL_AGENT_ENV=${KERNEL_AGENT_ENV}"
-log "MAGPIE_DIR=${MAGPIE_DIR}"
+log "MAGPIE_PATH=${MAGPIE_PATH}"
 log "INFERENCEX_REPO=${INFERENCEX_REPO}"
 log "INFERENCEX_DEFAULT_DIR=${INFERENCEX_DEFAULT_DIR}"
 export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
 export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 # Pre-create the writable runtime root so ensure_magpie / chain_kernel_agent
 # never race on missing parents (Magpie's pip install -e writes egg-info
-# under MAGPIE_DIR; install.sh of kernel-agent writes geak-config /
+# under MAGPIE_PATH; install.sh of kernel-agent writes geak-config /
 # kernel-agent.env.sh into HYPERLOOM_RUNTIME_DIR).
 if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
   mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
@@ -594,26 +610,26 @@ ensure_forge_gemm_tune() {
 }
 
 # --- 2. Magpie ---
-# The install state is the checkout under $MAGPIE_DIR (default:
+# The install state is the checkout under $MAGPIE_PATH (default:
 # the pod-local open-source repo tree), not whatever `import Magpie` resolves
 # from the driver Python. Editable installs from older sessions can stay
 # importable and otherwise mask a missing per-workspace checkout.
 ensure_magpie() {
-  log "ensuring Magpie at ${MAGPIE_DIR}"
+  log "ensuring Magpie at ${MAGPIE_PATH}"
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    if [ -f "$MAGPIE_DIR/setup.py" ] || [ -f "$MAGPIE_DIR/pyproject.toml" ]; then
-      log "Magpie checkout present at ${MAGPIE_DIR}"
+    if [ -f "$MAGPIE_PATH/setup.py" ] || [ -f "$MAGPIE_PATH/pyproject.toml" ]; then
+      log "Magpie checkout present at ${MAGPIE_PATH}"
     else
-      warn "Magpie checkout missing at ${MAGPIE_DIR} (check-only mode, skipping clone/install)"
+      warn "Magpie checkout missing at ${MAGPIE_PATH} (check-only mode, skipping clone/install)"
     fi
     return 0
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    mkdir -p "$(dirname "$MAGPIE_DIR")"
+    mkdir -p "$(dirname "$MAGPIE_PATH")"
   fi
-  if [ ! -f "$MAGPIE_DIR/setup.py" ] && [ ! -f "$MAGPIE_DIR/pyproject.toml" ]; then
+  if [ ! -f "$MAGPIE_PATH/setup.py" ] && [ ! -f "$MAGPIE_PATH/pyproject.toml" ]; then
     log "cloning Magpie from $MAGPIE_REPO pinned to ${MAGPIE_REF}"
-    git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_DIR" "$MAGPIE_REF" "Magpie"
+    git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_PATH" "$MAGPIE_REF" "Magpie"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     # Idempotent reinstall guard. Magpie is editable-installed into the
@@ -625,21 +641,21 @@ ensure_magpie() {
     # $HYPERLOOM_RUNTIME_DIR and does NOT cover the shared /opt/venv, so it
     # cannot serialize this. Mirror ensure_inferencex (preserve existing) +
     # ensure_bench_serving_deps (import-probe before pip): skip the reinstall
-    # only when the checkout exists under $MAGPIE_DIR AND `import Magpie`
+    # only when the checkout exists under $MAGPIE_PATH AND `import Magpie`
     # already resolves into it. The path check (not just import success)
     # preserves the original guard against a stale editable from an older
     # session masking a missing per-workspace checkout.
     local magpie_real resolved
-    magpie_real="$(realpath "$MAGPIE_DIR" 2>/dev/null || echo "$MAGPIE_DIR")"
+    magpie_real="$(realpath "$MAGPIE_PATH" 2>/dev/null || echo "$MAGPIE_PATH")"
     resolved="$("$PYTHON" -c 'import Magpie, os; print(os.path.realpath(os.path.dirname(Magpie.__file__)))' 2>/dev/null || true)"
-    if { [ -f "$MAGPIE_DIR/setup.py" ] || [ -f "$MAGPIE_DIR/pyproject.toml" ]; } \
+    if { [ -f "$MAGPIE_PATH/setup.py" ] || [ -f "$MAGPIE_PATH/pyproject.toml" ]; } \
        && [ -n "$resolved" ] \
        && case "$resolved" in "$magpie_real" | "$magpie_real"/*) true ;; *) false ;; esac; then
-      log "Magpie already installed from ${MAGPIE_DIR}; skipping editable reinstall (idempotent; avoids racing a shared /opt/venv reinstall)"
+      log "Magpie already installed from ${MAGPIE_PATH}; skipping editable reinstall (idempotent; avoids racing a shared /opt/venv reinstall)"
     else
-      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_DIR"
+      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_PATH"
       "$PYTHON" -c "import Magpie" >/dev/null
-      log "Magpie installed OK from ${MAGPIE_DIR}"
+      log "Magpie installed OK from ${MAGPIE_PATH}"
     fi
   fi
 }
@@ -669,18 +685,18 @@ ensure_magpie_atomic_scripts_patch() {
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would apply Hyperloom #C1 atomic-write patch to ${MAGPIE_DIR}/Magpie/modes/benchmark/benchmarker.py"
+    log "would apply Hyperloom #C1 atomic-write patch to ${MAGPIE_PATH}/Magpie/modes/benchmark/benchmarker.py"
     return 0
   fi
   log "applying Hyperloom #C1 atomic-write patch to Magpie._prepare_benchmark_scripts"
   # Exit-code contract (read below): 0 ok · 2 remote-trust drift only ·
   # 4 GENUINE atomic failure (race unmitigated) · 1 benign atomic no-op.
-  if MAGPIE_DIR="$MAGPIE_DIR" "$PYTHON" - <<'PY'
+  if MAGPIE_PATH="$MAGPIE_PATH" "$PYTHON" - <<'PY'
 import os, sys
 from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
     magpie_scripts_patch_status,
 )
-status = magpie_scripts_patch_status(os.environ["MAGPIE_DIR"])
+status = magpie_scripts_patch_status(os.environ["MAGPIE_PATH"])
 print(f"_magpie_patcher: atomic_reason={status.atomic_reason} "
       f"atomic_ok={status.atomic_ok} remote_trust_ok={status.remote_trust_ok} "
       f"eval_flag_ok={status.eval_flag_ok}",
@@ -727,11 +743,11 @@ PY
     elif [ "$rc" -eq 5 ]; then
       warn "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line). RUN_EVAL=true baselines may abort on InferenceX's 'Unknown parameter: --concurrent-requests'; the baseline executor falls back to RUN_EVAL=false (no accuracy gate) so the run still proceeds. Review _magpie_patcher.py if accuracy eval is required."
     else
-      # Benign no-op (rc=1): MAGPIE_DIR unset / benchmarker.py missing. With
+      # Benign no-op (rc=1): MAGPIE_PATH unset / benchmarker.py missing. With
       # MAGPIE_REF pinned to an upstream-atomic commit the patcher reports
       # ``upstream_atomic`` (exit 0) instead, so this branch is just the
       # missing-tree case — warn and continue. PATCH_MAGPIE=0 skips the step.
-      warn "Magpie atomic-write patch skipped (no benchmarker.py under MAGPIE_DIR). Fine for tests/dry-runs; otherwise check MAGPIE_DIR or set PATCH_MAGPIE=0."
+      warn "Magpie atomic-write patch skipped (no benchmarker.py under MAGPIE_PATH). Fine for tests/dry-runs; otherwise check MAGPIE_PATH or set PATCH_MAGPIE=0."
     fi
   fi
 }
@@ -855,6 +871,57 @@ ensure_bench_serving_deps() {
       || die "bench_serving dep ${m} still not importable after install"
   done
   log "bench_serving deps installed OK"
+}
+
+# --- 4b. xDiT image-quality gate deps (SSIM + LPIPS) ---
+#
+# The scriptable xDiT bench wrapper computes an image-quality gate
+# (LPIPS / SSIM / MSE vs a BF16 reference). torch/torchvision/numpy ship
+# with the pytorch-xdit image, but scikit-image (SSIM) and lpips (LPIPS)
+# do NOT — so without this step the gate silently degrades to MSE-only
+# (the wrapper now reports ssim_available/lpips_available=false). These
+# are pip-name != import-name, so we map them explicitly.
+#
+# Fail-soft: lpips also pulls AlexNet weights on first use (network), so a
+# failed install must NOT abort the whole install — the wrapper degrades
+# gracefully (honest *_available=false) rather than crashing the run.
+_XDIT_QUALITY_DEPS=(
+  "scikit-image:skimage"
+  "lpips:lpips"
+)
+
+ensure_xdit_quality_deps() {
+  log "ensuring xDiT image-quality gate deps (SSIM/LPIPS) in $PYTHON"
+  local missing=()
+  local pair pip_name import_name
+  for pair in "${_XDIT_QUALITY_DEPS[@]}"; do
+    pip_name="${pair%%:*}"
+    import_name="${pair##*:}"
+    if ! "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1; then
+      missing+=("$pip_name")
+    fi
+  done
+  if [ ${#missing[@]} -eq 0 ]; then
+    log "xDiT quality deps already satisfied"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "check-only mode; would install xDiT quality deps: ${missing[*]}"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "dry-run; skipping xDiT quality dep install"
+    return 0
+  fi
+  log "installing missing xDiT quality deps: ${missing[*]}"
+  "$PYTHON" -m pip install --quiet --no-cache-dir \
+    "${PIP_EXTRA[@]}" "${missing[@]}" \
+    || warn "failed to install xDiT quality deps: ${missing[*]} (gate degrades to MSE-only)"
+  for pair in "${_XDIT_QUALITY_DEPS[@]}"; do
+    import_name="${pair##*:}"
+    "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1 \
+      || warn "xDiT quality dep '${import_name}' not importable after install (gate excludes it)"
+  done
 }
 
 # --- 4c. Langfuse SDK (opt-in live trace push) ---
@@ -1057,7 +1124,7 @@ chain_kernel_agent() {
     return 0
   fi
   log "delegating ray + TraceLens + GEAK + OOB CLI auth to ${script}"
-  export REPO_ROOT KERNEL_AGENT_ROOT MAGPIE_DIR HYPERLOOM_ROOT
+  export REPO_ROOT KERNEL_AGENT_ROOT MAGPIE_PATH HYPERLOOM_ROOT
   export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
   # Forward the PerfSkills opt-in so --with-perfskills / INSTALL_PERFSKILLS=1
   # at this canonical entrypoint reaches kernel-agent's ensure_perfskills gate.
@@ -1116,6 +1183,7 @@ ensure_magpie
 ensure_magpie_atomic_scripts_patch
 ensure_inferencex
 ensure_bench_serving_deps
+ensure_xdit_quality_deps
 ensure_rocprof_compute
 chain_kernel_agent
 chain_framework_agent

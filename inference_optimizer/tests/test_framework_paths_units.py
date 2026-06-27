@@ -176,6 +176,66 @@ class TestProbeFrameworkSourceRootsForEnv:
         assert result == f"{shared}/"
 
 
+# xdit enablement
+
+
+class TestDefaultSourceRootsIncludesXdit:
+    def test_xdit_root_present_in_defaults(self):
+        """/app/xDiT/ must be in the PolicyGate source-file allowlist."""
+        assert any("/app/xDiT" in r for r in fp._DEFAULT_SOURCE_ROOTS), (
+            f"_DEFAULT_SOURCE_ROOTS missing xDiT entry: {fp._DEFAULT_SOURCE_ROOTS!r}"
+        )
+
+    def test_xdit_root_visible_in_resolve_allowlist(self):
+        """The public resolver must also surface the xDiT root."""
+        out = fp.resolve_source_file_allowlist()
+        assert any("/app/xDiT" in r for r in out)
+
+    def test_xfuser_in_framework_packages(self):
+        """xfuser must be in _FRAMEWORK_PACKAGES for importlib discovery."""
+        assert "xfuser" in fp._FRAMEWORK_PACKAGES
+
+    def test_xdit_in_framework_buckets(self):
+        """xdit must be in _FRAMEWORK_BUCKETS for summarise_framework_root_discovery."""
+        assert "xdit" in fp._FRAMEWORK_BUCKETS
+
+    def test_xdit_in_static_patch_fallback_roots(self):
+        """/app/xDiT/ must be in the static patch fallback roots."""
+        assert any("/app/xDiT" in r for r in fp._STATIC_PATCH_FALLBACK_ROOTS)
+
+
+class TestProbeIncludesXditWhenInstalled:
+    def test_xfuser_picked_up_via_find_spec(self, tmp_path, monkeypatch):
+        """A real ``find_spec('xfuser')`` origin is included."""
+        origin = tmp_path / "xfuser_pkg"
+        origin.mkdir()
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
+
+        spec_map = {"xfuser": origin}
+        monkeypatch.setattr(
+            fp,
+            "_find_spec_origin",
+            lambda name: spec_map.get(name),
+        )
+        result = fp.probe_framework_source_roots_for_env()
+        assert f"{origin}/" in result
+
+    def test_xfuser_picked_up_via_venv_site_packages(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A wheel-installed xfuser is picked up via the VIRTUAL_ENV glob."""
+        venv = tmp_path / "venv"
+        site = venv / "lib" / "python3.12" / "site-packages"
+        (site / "xfuser").mkdir(parents=True)
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        result = fp.probe_framework_source_roots_for_env()
+        assert "xfuser/" in result
+
+
 # atom enablement
 
 
@@ -235,6 +295,18 @@ class TestSummariseFrameworkRootDiscovery:
         assert "vllm=ok" in out
         assert "aiter=ok" in out
 
+    def test_buckets_xdit_ok(self):
+        """Reports xdit=ok when /app/xDiT/ appears in the discovery string."""
+        out = fp.summarise_framework_root_discovery(
+            "/sgl-workspace/aiter/:/app/xDiT/"
+        )
+        assert "xdit=ok" in out
+        assert "aiter=ok" in out
+
+    def test_buckets_xdit_missing_when_absent(self):
+        out = fp.summarise_framework_root_discovery("/sgl-workspace/aiter/:/sgl-workspace/sglang/")
+        assert "xdit=missing" in out
+
     def test_buckets_atom_missing_on_non_atom_box(self):
         out = fp.summarise_framework_root_discovery("/sgl-workspace/aiter/:/sgl-workspace/sglang/:/sgl-workspace/vllm/")
         assert "atom=missing" in out
@@ -246,11 +318,17 @@ class TestSummariseFrameworkRootDiscovery:
         assert "sglang=missing" in out
         assert "vllm=missing" in out
         assert "aiter=missing" in out
+        assert "xdit=missing" in out
 
     def test_does_not_substring_match_unrelated_paths(self):
         """Only paths whose last directory IS ``atom`` count; a substring like ``atomic_kernel`` must not."""
         out = fp.summarise_framework_root_discovery("/sgl-workspace/atomic_kernel/")
         assert "atom=missing" in out
+
+    def test_does_not_substring_match_xdit_unrelated(self):
+        """A path like ``/xdit_tools/`` must not match the ``xdit`` bucket."""
+        out = fp.summarise_framework_root_discovery("/sgl-workspace/xdit_tools/")
+        assert "xdit=missing" in out
 
 
 class TestAtomPathPresentInAllThreeLocations:

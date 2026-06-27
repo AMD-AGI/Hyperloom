@@ -58,8 +58,8 @@ def test_fallback_dict_has_atom_entry():
     assert fallback.get("atom") == "https://github.com/ROCm/ATOM.git", (
         f"IO fallback dict missing atom entry: {fallback!r}"
     )
-    # Pin all three keys so a future drift trips this guard.
-    assert set(fallback.keys()) == {"sglang", "vllm", "atom"}
+    # Pin all keys so a future drift trips this guard.
+    assert set(fallback.keys()) == {"sglang", "vllm", "atom", "xdit"}
 
 
 def test_resolve_fa_binary_prefers_env_var(tmp_path, monkeypatch):

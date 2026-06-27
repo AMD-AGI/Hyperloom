@@ -1289,7 +1289,7 @@ def _detect_llama_sentencepiece_metadata_gap(model_path: str, data: dict) -> str
 
 
 def _detect_incompatible_model_config(
-    model_path: str, gpu_type: str | None = None,
+    model_path: str, gpu_type: str | None = None, framework: str | None = None,
 ) -> str | None:
     """Detect a statically-knowable model-config incompatibility.
 
@@ -1311,6 +1311,11 @@ def _detect_incompatible_model_config(
         model_path (str): The local model directory containing ``config.json``.
         gpu_type (str | None): Optional GPU type; AMD-only checks fire when it
             resolves to a known AMD runner.
+        framework (str | None): The selected inference framework. Scriptable
+            diffusion frameworks (e.g. ``xdit``) legitimately serve Diffusers
+            pipeline repos (``model_index.json``), so the diffusers-pipeline
+            rejection — which exists to protect *text-generation* server
+            bring-up — is a false positive and is skipped for them.
 
     Returns:
         str | None: A human-readable reason when a statically-knowable config
@@ -1318,9 +1323,22 @@ def _detect_incompatible_model_config(
     """
     if not model_path:
         return None
-    pipeline_reason = _detect_diffusers_pipeline_model(model_path)
-    if pipeline_reason is not None:
-        return pipeline_reason
+    # The diffusers-pipeline guard blocks Diffusers repos from reaching the
+    # text-generation server path. Scriptable diffusion frameworks (xDiT) are
+    # server-less image workloads whose intended input *is* a Diffusers
+    # pipeline, so skip that specific check for them (all other config-corrupt /
+    # RoPE / AMD-quant checks below still apply).
+    skip_diffusers_check = False
+    try:
+        from . import framework_registry as _fr
+
+        skip_diffusers_check = _fr.is_scriptable(framework)
+    except Exception:  # noqa: BLE001 — registry import must never block the gate
+        skip_diffusers_check = str(framework or "").strip().lower() == "xdit"
+    if not skip_diffusers_check:
+        pipeline_reason = _detect_diffusers_pipeline_model(model_path)
+        if pipeline_reason is not None:
+            return pipeline_reason
     cfg_path = Path(model_path) / "config.json"
     if not cfg_path.is_file():
         return None
@@ -1626,8 +1644,13 @@ def _preflight_model_config_compat(
             ``False`` otherwise.
     """
     model = str(getattr(args, "model", "") or "")
+    framework = (
+        str(getattr(args, "framework", "") or "")
+        or os.environ.get("FRAMEWORK", "")
+    ).strip().lower() or None
     detail = _detect_incompatible_model_config(
         model, str(getattr(args, "gpu_type", "") or "") or None,
+        framework=framework,
     )
     if detail is None:
         return False

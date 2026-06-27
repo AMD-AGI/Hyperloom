@@ -39,6 +39,7 @@ except ImportError:  # pragma: no cover — exercised only in IO-only test envs
         "sglang": "https://github.com/sgl-project/sglang.git",
         "vllm": "https://github.com/ROCm/vllm.git",
         "atom": "https://github.com/ROCm/ATOM.git",
+        "xdit": "https://github.com/xdit-project/xDiT.git",
     }
 
     def repo_url_for_framework(framework: str) -> str:
@@ -187,6 +188,7 @@ async def phase_discover(
     keywords: list[str] | None = None,
     max_candidates: int = 5,
     batch_id: str = "",
+    pr_states: list[str] | None = None,
     timeout_sec: float = DEFAULT_FA_PHASE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     """FRAMEWORK_PR-phase batch discovery shim.
@@ -224,6 +226,15 @@ async def phase_discover(
         "max_search_candidates": int(max_candidates),
         "batch_id": batch_id,
     }
+    # Plumb the primus_cortex (PR-Monitor) base URL so the fa subprocess can
+    # query internal primus PRs; without it phase-discover falls back to
+    # GitHub-only. The PR-Monitor REST service IS the primus_cortex backend.
+    primus_url = (os.environ.get("PRIMUS_CORTEX_PR_API") or os.environ.get("PR_MONITOR_URL") or "").strip()
+    if primus_url:
+        request["primus_cortex_url"] = primus_url
+    ps = [str(s).strip().lower() for s in (pr_states or []) if str(s).strip()]
+    if ps:
+        request["pr_states"] = ps
     kw = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()]
     if kw:
         # Dedup preserving order for a deterministic request.
@@ -237,9 +248,76 @@ async def phase_discover(
     )
 
 
+async def phase_audit(
+    *,
+    candidate: dict[str, Any],
+    framework: str,
+    framework_source_roots: list[str],
+    session_dir: Path,
+    repo_url: str = "",
+    diff_url: str = "",
+    diff_text: str = "",
+    primus_cortex_url: str = "",
+    use_llm: bool = False,
+    model: str = "",
+    timeout_sec: float = DEFAULT_FA_PHASE_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    """FRAMEWORK_PR-phase semantic-audit shim (``fa phase-audit``).
+
+    Builds the request and runs the subcommand; returns the
+    ``semantic_audit`` verdict. The caller treats a missing binary / non-zero
+    exit / parse failure (raised as :class:`RuntimeError`) as ``unknown`` and
+    preserves legacy routing.
+
+    Args:
+        candidate: The discovered candidate row (carries repo / pr_number /
+            diff_url / pr_url / ref).
+        framework: The target framework.
+        framework_source_roots: Live source roots the audit reads to judge.
+        session_dir: Session dir for temp request staging + audit work_dir.
+        repo_url: Optional explicit repo URL (else from candidate / framework).
+        diff_url: Optional explicit unified-diff URL.
+        diff_text: Optional inline unified diff (skips any fetch).
+        primus_cortex_url: Optional Primus Cortex base URL for patch fetch.
+        use_llm: Opt-in single chat-completion refine (default off).
+        model: Optional LLM model slug for the refine layer.
+        timeout_sec: Subprocess wall-clock timeout in seconds.
+
+    Returns:
+        The ``fa phase-audit`` verdict dict.
+    """
+    request: dict[str, Any] = {
+        "candidate": candidate,
+        "framework": (framework or "sglang").strip().lower(),
+        "framework_source_roots": list(framework_source_roots or []),
+        "repo_url": (repo_url or str(candidate.get("repo") or "")).strip(),
+        "work_dir": str(session_dir / ".fa-tmp" / "phase-audit"),
+        "use_llm": bool(use_llm),
+    }
+    if diff_url or candidate.get("diff_url"):
+        request["diff_url"] = (diff_url or str(candidate.get("diff_url") or "")).strip()
+    if diff_text:
+        request["diff_text"] = diff_text
+    if primus_cortex_url:
+        request["primus_cortex_url"] = primus_cortex_url
+    if model:
+        request["model"] = model
+    return await _invoke_fa_phase(
+        subcommand="phase-audit",
+        request=request,
+        session_dir=session_dir,
+        timeout_sec=timeout_sec,
+    )
+
+
+# NOTE: ``phase_fetch`` / ``phase_emit_proposal`` shims were removed as dead
+# API (zero callers); re-add only when the Coordinator wires a new caller.
+
+
 __all__ = [
     "DEFAULT_FA_PHASE_TIMEOUT_SEC",
     "DISCOVER_FAILURE_RETRY_LIMIT",
+    "phase_audit",
     "phase_discover",
     "repo_url_for_framework",
 ]

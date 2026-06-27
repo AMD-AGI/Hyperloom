@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 _ATOMIC_REASON_APPLIED = "applied"  # legacy block rewritten this run
 _ATOMIC_REASON_ALREADY_PATCHED = "already_patched"  # sentinel already present
 _ATOMIC_REASON_UPSTREAM_ATOMIC = "upstream_atomic"  # Magpie already atomic
-_ATOMIC_REASON_MISSING = "missing"  # MAGPIE_DIR unset / file absent
+_ATOMIC_REASON_MISSING = "missing"  # MAGPIE_PATH unset / file absent
 _ATOMIC_REASON_UNRECOGNIZED_SHAPE = "unrecognized_shape"  # genuine: unpatched
 _ATOMIC_REASON_IO_ERROR = "io_error"  # read/write failed mid-patch
 
@@ -162,7 +162,7 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
     patching).
 
     Args:
-        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
             falsy.
 
     Returns:
@@ -173,7 +173,7 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
     if magpie_dir:
         root = Path(magpie_dir)
     else:
-        env = (os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or "").strip()
+        env = (os.environ.get("MAGPIE_PATH") or "").strip()
         if env:
             root = Path(env)
     if root is None:
@@ -188,7 +188,7 @@ def _resolve_sglang_mi300x_script_path(
     """Resolve Magpie's generic SGLang MI300X benchmark script when present.
 
     Args:
-        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
             falsy.
 
     Returns:
@@ -199,7 +199,7 @@ def _resolve_sglang_mi300x_script_path(
     if magpie_dir:
         root = Path(magpie_dir)
     else:
-        env = os.environ.get("MAGPIE_DIR", "").strip()
+        env = os.environ.get("MAGPIE_PATH", "").strip()
         if env:
             root = Path(env)
     if root is None:
@@ -214,7 +214,7 @@ def _resolve_benchmark_scripts_dir(
     """Resolve Magpie's ``scripts/benchmark`` directory when present.
 
     Args:
-        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
             falsy.
 
     Returns:
@@ -225,7 +225,7 @@ def _resolve_benchmark_scripts_dir(
     if magpie_dir:
         root = Path(magpie_dir)
     else:
-        env = os.environ.get("MAGPIE_DIR", "").strip()
+        env = os.environ.get("MAGPIE_PATH", "").strip()
         if env:
             root = Path(env)
     if root is None:
@@ -639,7 +639,7 @@ def magpie_scripts_patch_status(
     ``ensure_magpie_atomic_scripts_patch`` wrapper remains for compatibility.
 
     Args:
-        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
             falsy.
 
     Returns:
@@ -649,7 +649,7 @@ def magpie_scripts_patch_status(
     src = _resolve_benchmarker_path(magpie_dir)
     if src is None:
         log.info(
-            "_magpie_patcher: MAGPIE_DIR unset or benchmarker.py missing — skipping patch (fine for tests / dry-runs)",
+            "_magpie_patcher: MAGPIE_PATH unset or benchmarker.py missing — skipping patch (fine for tests / dry-runs)",
         )
         # remote_trust_ok=True here means "not applicable / not checked"
         # (no Magpie tree to inspect), NOT "trust patch verified". It is set
@@ -717,7 +717,7 @@ def ensure_magpie_atomic_scripts_patch(
     and check ``remote_trust_ok`` / ``ok`` (install.sh does this).
 
     Args:
-        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
             falsy.
 
     Returns:

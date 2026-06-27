@@ -192,6 +192,40 @@ async def test_factory_default_keeps_local_probe_fallback(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_factory_default_auto_probes_inference_server(tmp_path: Path):
+    """Default config appends the inference-server health URL to local probes."""
+    from robustness_agent.sources.local_probe import LocalProbeSource
+
+    config = Config(session_dir=tmp_path)
+    bundle = build_reactor_components(config)
+    try:
+        fallback = bundle.components.router._fallback  # type: ignore[attr-defined]
+        assert isinstance(fallback, LocalProbeSource)
+        targets = fallback._config.health_probe_targets  # type: ignore[attr-defined]
+        assert config.inference_server_health_url in targets
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_factory_scriptable_skips_inference_server_probe(tmp_path: Path):
+    """``auto_probe_inference_server=False`` (scriptable/server-less workloads)
+    drops the 8888/health target while keeping the LocalProbe (gpu/disk/fd)."""
+    from robustness_agent.sources.local_probe import LocalProbeSource
+
+    config = Config(session_dir=tmp_path, auto_probe_inference_server=False)
+    bundle = build_reactor_components(config)
+    try:
+        fallback = bundle.components.router._fallback  # type: ignore[attr-defined]
+        # LocalProbe is retained — only the server health probe is skipped.
+        assert isinstance(fallback, LocalProbeSource)
+        targets = fallback._config.health_probe_targets  # type: ignore[attr-defined]
+        assert config.inference_server_health_url not in targets
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
 async def test_factory_forwards_multi_node_options_to_server_source(tmp_path: Path):
     """``enable_cluster_pod_metrics`` / ``workload_uid`` reach the server source."""
 
