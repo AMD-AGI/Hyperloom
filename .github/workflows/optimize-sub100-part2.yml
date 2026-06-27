@@ -40,7 +40,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: optimize-tiny-dispatch
+  group: optimize-sub100-part2-dispatch
   cancel-in-progress: false
 
 jobs:
