@@ -3622,6 +3622,37 @@ def _trust_geak_correctness() -> bool:
     return True
 
 
+def _geak_round_correctness_passed(geak_report: dict[str, Any]) -> bool:
+    """True when a GEAK report carries an explicit verified-correctness record.
+
+    A SIGTERM'd GEAK run writes ``status="incremental_after_round_N"`` and
+    embeds the round's evaluation, including a ``correctness`` block of the form
+    ``{"returncode": 0, "success": true}`` (the kernel was compiled, run, and
+    correctness-checked before the timeout). The generic key-walker
+    :func:`_extract_correctness_from_geak` misses it because the value is a
+    nested dict (key ``success``), not a ``correct``/``valid`` bool. Read the
+    explicit nested record instead.
+
+    Args:
+        geak_report (dict[str, Any]): Parsed ``final_report.json`` contents.
+
+    Returns:
+        bool: True only when ``round_evaluation.correctness.success`` is True
+            (and no failing returncode); False otherwise.
+    """
+    if not isinstance(geak_report, dict):
+        return False
+    for key in ("round_evaluation", "best_round_evaluation"):
+        ev = geak_report.get(key)
+        if isinstance(ev, dict):
+            corr = ev.get("correctness")
+            if isinstance(corr, dict):
+                rc = corr.get("returncode")
+                if corr.get("success") is True and (rc is None or rc == 0):
+                    return True
+    return False
+
+
 def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None:
     """Read correctness from GEAK-style JSON reports when present.
 
@@ -4428,14 +4459,27 @@ def build_verification(
     ):
         bp_geak = (best.get("backend_paths") or {}).get("geak_final_report", "")
         geak_status = ""
+        geak_report: dict[str, Any] = {}
         if bp_geak and Path(bp_geak).is_file():
             try:
-                geak_status = str(json.loads(Path(bp_geak).read_text(encoding="utf-8")).get("status") or "").lower()
+                geak_report = json.loads(Path(bp_geak).read_text(encoding="utf-8"))
+                geak_status = str(geak_report.get("status") or "").lower()
             except Exception:  # noqa: BLE001
+                geak_report = {}
                 geak_status = ""
         if geak_status in {"complete", "succeeded", "ok"}:
             correctness_signal = True
             correctness_source = "geak_assumed_pass"
+        # A SIGTERM'd GEAK run finalizes status="incremental_after_round_N" (not
+        # "complete"), but its already-evaluated round still carries an EXPLICIT
+        # verified-correctness record (round_evaluation.correctness.success) plus
+        # a FULL_BENCHMARK-verified speedup. Trust that: the kernel was compiled,
+        # run, and correctness-checked before the timeout — it's a real win, not
+        # an unverified artifact. Without this a verified 2.6x partial is routed
+        # to NEEDS_REVIEW and never reaches integrate/E2E (#735-followup). GEAK-only.
+        elif geak_status.startswith("incremental_after_round") and _geak_round_correctness_passed(geak_report):
+            correctness_signal = True
+            correctness_source = "geak_partial_round_verified"
     if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
         correctness_signal = True
         correctness_source = "accuracy_override"
