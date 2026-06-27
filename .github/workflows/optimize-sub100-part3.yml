@@ -14,9 +14,9 @@ name: optimize-sub100-part3
 # batches: part1=1608/240, part2=1608/240, part3=671/100 -> all ~6.7 batches.
 # A batch always runs fully in parallel, so BATCH_SIZE doubles as max_parallel.
 #
-# Cadence: four times a day (every 6h, UTC) at 05:07/11:07/17:07/23:07 UTC
-# (Beijing 13:07 / 19:07 / 01:07 / 07:07). The sibling pools fire on different
-# hours (part1 01/07/13/19 UTC, part2 03/09/15/21 UTC) so no two start in the
+# Cadence: four times a day (every 6h, UTC) at 03:07/09:07/15:07/21:07 UTC
+# (Beijing 11:07 / 17:07 / 23:07 / 05:07). The sibling pools fire on different
+# hours (part1 00/06/12/18 UTC, part2 01/07/13/19 UTC) so no two start in the
 # same hour. Minute :07 (not :00) dodges GitHub's congested top-of-hour queue.
 # INVARIANT: the cron PERIOD must equal MAX_HOURS (6h); changing one without the
 # other makes the rotation double-submit (cron faster) or skip batches (slower).
@@ -26,7 +26,7 @@ name: optimize-sub100-part3
 
 on:
   schedule:
-    - cron: '7 5,11,17,23 * * *'
+    - cron: '7 3,9,15,21 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
@@ -62,7 +62,7 @@ jobs:
       # max_parallel (a batch always runs fully in parallel).
       BATCH_SIZE: '100'
       # Rotation step (hours). MUST equal the cron PERIOD (this cron fires every
-      # 6h: 5/11/17/23 UTC), same invariant as the other pools. Also the per-task
+      # 6h: 3/9/15/21 UTC), same invariant as the other pools. Also the per-task
       # optimizer budget forwarded below.
       MAX_HOURS: '6'
       SUBMIT_WORKSPACES: 'core42-hyperloom'
@@ -83,16 +83,16 @@ jobs:
           # Same max_hours-paced rotation as the sibling pools (ci/batch_rotate.py,
           # unit-tested): one batch advances per MAX_HOURS of wall-clock time since
           # the anchor, auto-rotating on schedule and honoring an explicit
-          # batch_index on manual dispatch. ANCHOR 2026-06-27 02:00Z (Beijing
-          # 2026-06-27 10:00) is the batch-0 start, independent of the other
-          # pools' anchors.
+          # batch_index on manual dispatch. ANCHOR 2026-06-27 03:00Z (Beijing
+          # 2026-06-27 11:00) is the batch-0 start: the 03:07Z (Beijing 11:07)
+          # fire is the first at/after it, independent of the other pools' anchors.
           n=$(python3 -c "import json,os;print(len(json.load(open(os.environ['CANDIDATES_PATH'])).get('candidates') or []))")
           out=$(python3 ci/batch_rotate.py \
             --count "${n}" \
             --batch-size "${BATCH_SIZE}" \
             --batch-index "${INPUT_BATCH_INDEX:-}" \
             --max-hours "${MAX_HOURS}" \
-            --anchor "2026-06-27T02:00:00+00:00" \
+            --anchor "2026-06-27T03:00:00+00:00" \
             --event "${EVENT}")
           bi=$(echo "$out" | cut -f1); pool=$(echo "$out" | cut -f2)
           batches=$(echo "$out" | cut -f3); start=$(echo "$out" | cut -f4); end=$(echo "$out" | cut -f5)
