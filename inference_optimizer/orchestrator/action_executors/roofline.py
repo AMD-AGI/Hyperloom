@@ -375,6 +375,32 @@ class RooflineExecutor:
                     _PROFILE_MAX_ATTEMPTS,
                 )
                 continue
+            # #735: a capture-only profile yielded only CUDA-graph capture
+            # sidecars (no annotated steady-state trace flushed). Feeding those
+            # to the steady-state splitter produces "0 execution steps" and the
+            # run dies downstream with the misleading trace_split_no_steady_state.
+            # This is transient (the annotated trace flush was cut short, not a
+            # config problem — a plain re-profile self-heals, observed on
+            # gpt-oss vLLM), so just re-do the profile + trace with the SAME
+            # graph-capture settings. Do NOT escalate to eager: graph-capture is
+            # the robust/correct profiling mode and eager changes the measured
+            # workload. If every attempt stays capture-only, fail with an
+            # accurate message instead.
+            if profile_result.get("profile_trace_selection_reason") == "capture_only_fallback":
+                last_phase = "profile_capture_only"
+                last_error = (
+                    "profile produced only CUDA-graph capture sidecars under "
+                    "capture_traces/ (no annotated steady-state trace); the "
+                    "steady-state splitter cannot use these — re-profile needed"
+                )
+                log.warning(
+                    "roofline profile attempt %d/%d: capture-only trace "
+                    "(%s); re-profiling (same graph-capture settings)",
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
+                    trace_path,
+                )
+                continue
             # Success
             if attempt > 1:
                 log.info(
