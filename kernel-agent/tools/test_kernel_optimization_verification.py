@@ -343,6 +343,92 @@ def test_geak_correctness_trust_requires_complete_status(tmp_path):
     assert verification["correctness_source"] == "missing"
 
 
+def _geak_partial_attempt(
+    tmp_path: Path,
+    *,
+    status: str = "incremental_after_round_1",
+    speedup: float = 2.6,
+    round_correctness: dict | None = None,
+):
+    """GEAK attempt whose run was SIGTERM'd mid-round: status=incremental_after_round_N,
+    final_report carries an explicit round_evaluation.correctness record."""
+    final = tmp_path / "geak_final_report.json"
+    report: dict = {
+        "status": status,
+        "best_patch": str(tmp_path / "patch_0.patch"),
+        "best_speedup": speedup,
+        "best_task": "tilelang-fp8-blockscale-rewrite",
+    }
+    if round_correctness is not None:
+        report["round_evaluation"] = {"round": 1, "correctness": round_correctness}
+    final.write_text(json.dumps(report), encoding="utf-8")
+    artifact = tmp_path / "worktree" / "gemm_op.py"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("import torch\ndef run_gemm(*a, **k): pass\n", encoding="utf-8")
+    return {
+        "status": "partial",
+        "attempt_id": "geak-partial",
+        "backend": "geak",
+        "optimized_path": str(artifact),
+        "backend_paths": {
+            "geak_final_report": str(final),
+            "geak_per_task_best_speedup": str(speedup),
+            "geak_per_task_best_patch": str(tmp_path / "patch_0.patch"),
+            "geak_per_task_best_worktree": str(artifact.parent.parent),
+        },
+    }
+
+
+def test_geak_partial_with_verified_round_correctness_keeps(tmp_path):
+    """#735-followup: a SIGTERM'd GEAK run (status=incremental_after_round_1) whose
+    round_evaluation shows correctness.success=True + a verified speedup must be
+    trusted and routed to KEEP — not discarded as NEEDS_REVIEW (which never reaches
+    integrate/E2E). This is the exact DeepSeek-R1 2.6x case."""
+    verification = ko.build_verification(
+        _args(source_file="/tmp/gemm_op.py"),
+        [_geak_partial_attempt(tmp_path, speedup=2.6, round_correctness={"returncode": 0, "success": True})],
+        benchmark_available=True,
+    )
+    assert verification["micro_speedup"] == 2.6
+    assert verification["correctness_passed"] is True
+    assert verification["correctness_source"] == "geak_partial_round_verified"
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "KEEP", proposal
+
+
+def test_geak_partial_without_round_correctness_stays_review(tmp_path):
+    """A partial GEAK run with NO explicit verified-correctness record must NOT be
+    trusted — stays conservative (NEEDS_REVIEW), preserving the safety gate."""
+    verification = ko.build_verification(
+        _args(source_file="/tmp/gemm_op.py"),
+        [_geak_partial_attempt(tmp_path, speedup=2.6, round_correctness=None)],
+        benchmark_available=True,
+    )
+    assert verification["correctness_passed"] is False
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "NEEDS_REVIEW"
+
+
+def test_geak_partial_with_failed_round_correctness_not_trusted(tmp_path):
+    """A partial GEAK run whose round correctness FAILED must never be trusted."""
+    verification = ko.build_verification(
+        _args(source_file="/tmp/gemm_op.py"),
+        [_geak_partial_attempt(tmp_path, speedup=2.6, round_correctness={"returncode": 1, "success": False})],
+        benchmark_available=True,
+    )
+    assert verification["correctness_passed"] is False
+
+
+def test_geak_round_correctness_passed_helper():
+    """Unit-cover the nested-record reader directly."""
+    assert ko._geak_round_correctness_passed({"round_evaluation": {"correctness": {"returncode": 0, "success": True}}})
+    assert ko._geak_round_correctness_passed({"best_round_evaluation": {"correctness": {"success": True}}})
+    assert not ko._geak_round_correctness_passed({"round_evaluation": {"correctness": {"success": False}}})
+    assert not ko._geak_round_correctness_passed({"round_evaluation": {"correctness": {"returncode": 1, "success": True}}})
+    assert not ko._geak_round_correctness_passed({"status": "incremental_after_round_1"})
+    assert not ko._geak_round_correctness_passed({})
+
+
 def test_report_correctness_passes_with_reference_language(tmp_path):
     report = tmp_path / "optimization_report.md"
     report.write_text(
