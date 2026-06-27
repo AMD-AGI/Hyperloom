@@ -363,9 +363,11 @@ def _default_vllm_image() -> str:
     """Return the default vLLM server image.
 
     Returns:
-        The sync-registry vLLM image (v0.21.0).
+        The pinned ``profilerfix`` vLLM image (v0.21.0 / rocm720) whose patched
+        libamdhip64/libroctracer let rocprofiler capture kernels under
+        HipGraphLaunch (same profilerfix rationale as the SGLang image).
     """
-    return "harbor.core42.example-internal-host.invalid/sync/vllm/vllm-openai-rocm:v0.21.0"
+    return "harbor.core42.example-internal-host.invalid/sync/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix-20260627"
 
 
 # ── HuggingFace client ──────────────────────────────────────────────────────────
