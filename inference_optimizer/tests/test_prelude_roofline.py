@@ -24,6 +24,7 @@ class _BareState:
     enable_roofline: bool = True
     current_best: dict[str, Any] = field(default_factory=dict)
     last_baseline: dict[str, Any] = field(default_factory=dict)
+    roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
 
     def save(self, _session_dir: Path | None) -> None:
         pass
@@ -163,22 +164,28 @@ async def test_enable_roofline_false_picks_profile_kind(coord: Coordinator):
 
 
 class _StubSub:
-    """Records tasks handed to ``run_task`` so the kernel-entry reprofile can assert it ran inline."""
+    """Records tasks handed to ``run_task``; optionally lands a fresh snapshot to simulate a completed reprofile."""
 
-    def __init__(self) -> None:
+    def __init__(self, state: Any = None, landed_tput: float | None = None) -> None:
         self.tasks_run: list[Any] = []
+        self._state = state
+        self._landed_tput = landed_tput
 
     async def run_task(self, task: Any) -> None:
         self.tasks_run.append(task)
+        if self._state is not None and self._landed_tput is not None:
+            self._state.roofline_snapshots.append(
+                {"achieved_tok_per_sec": self._landed_tput},
+            )
 
 
 @pytest.mark.asyncio
 async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypatch):
-    """KERNEL entry (no-GEMM path) reprofiles inline when projected tput changed since the last roofline (cur=120 vs last_rl=100), re-anchoring the watermark before GEAK."""
-    coord.sub = _StubSub()
+    """KERNEL entry (no-GEMM path) reprofiles inline when projected tput (120) diverges from the last measured trace (100), anchoring on the new snapshot."""
+    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.sub = _StubSub(coord.shared_state, landed_tput=120.0)
     monkeypatch.setattr(coord, "_kernel_enabled", lambda: True)
     monkeypatch.setattr(coord, "_gemm_tuning_required_before_kernel_opt", lambda: False)
-    coord.shared_state.last_roofline_tput = 100.0
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
     await coord._on_enter_kernel(from_phase="EXPLORE")
@@ -191,40 +198,41 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
 
 @pytest.mark.asyncio
 async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
-    """No material change vs the last roofline (cur == last_rl) skips the reprofile and leaves the anchor untouched."""
-    coord.sub = _StubSub()
-    coord.shared_state.last_roofline_tput = 100.0
-    coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == last_rl
+    """Projected tput matching the last measured trace (cur == measured) skips the reprofile."""
+    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.sub = _StubSub(coord.shared_state)
+    coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == measured
 
     await coord._maybe_reprofile_for_kernel()
 
     assert coord.sub.tasks_run == []
-    assert coord.shared_state.last_roofline_tput == 100.0
 
 
 @pytest.mark.asyncio
-async def test_kernel_entry_reprofile_skips_without_prior_roofline(coord: Coordinator):
-    """No prior roofline (last_roofline_tput == 0) means there is nothing to compare a change against; skip."""
-    coord.sub = _StubSub()
-    coord.shared_state.last_roofline_tput = 0.0
-    coord.shared_state.cumulative_gain_validated = 50.0
+async def test_kernel_entry_reprofile_runs_without_measured_trace(coord: Coordinator):
+    """No measured trace yet (no snapshot) but a non-zero projected gain still reprofiles so GEAK gets a real trace."""
+    coord.shared_state.roofline_snapshots = []
+    coord.sub = _StubSub(coord.shared_state, landed_tput=150.0)
+    coord.shared_state.cumulative_gain_validated = 50.0  # cur = 150
 
     await coord._maybe_reprofile_for_kernel()
 
-    assert coord.sub.tasks_run == []
+    assert len(coord.sub.tasks_run) == 1
+    assert coord.shared_state.last_roofline_tput == 150.0
 
 
 @pytest.mark.asyncio
 async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
-    """A reprofile failure is best-effort: it never propagates and the watermark anchor is left untouched."""
+    """A reprofile failure is best-effort: it never propagates and the anchor is left untouched."""
 
     class _RaisingSub:
         async def run_task(self, _task: Any) -> None:
             raise RuntimeError("profile crashed")
 
+    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.sub = _RaisingSub()
     coord.shared_state.last_roofline_tput = 100.0
-    coord.shared_state.cumulative_gain_validated = 20.0  # cur = 120 != 100 → would trigger
+    coord.shared_state.cumulative_gain_validated = 20.0  # cur = 120 != measured 100 → triggers
 
     await coord._maybe_reprofile_for_kernel()  # must not raise
 
