@@ -26,9 +26,12 @@ name: SaFE Optimize gte100 (filtered pool)
 # Scheduled runs only fire from the DEFAULT branch.
 
 on:
-  # Beijing 11:07 (UTC 03:07) and Beijing 23:07 (UTC 15:07) — twice a day.
-  schedule:
-    - cron: '7 3,15 * * *'
+  # TEMPORARILY DISABLED: scheduled auto-trigger is commented out so this
+  # workflow no longer fires on its own. Re-enable by uncommenting the schedule
+  # block below. Manual workflow_dispatch is kept so it can still be run on demand.
+  # # Beijing 11:07 (UTC 03:07) and Beijing 23:07 (UTC 15:07) — twice a day.
+  # schedule:
+  #   - cron: '7 3,15 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
