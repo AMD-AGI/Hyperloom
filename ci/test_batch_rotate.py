@@ -159,3 +159,40 @@ def test_slice_bounds_last_partial_batch():
     # 900 models, batch 14 -> 840..900 (full); 901 models -> batch 15 -> 900..901.
     assert br.slice_bounds(14, 60, 900) == (840, 900)
     assert br.slice_bounds(15, 60, 901) == (900, 901)
+
+
+# ── _step_hours error branch + main() CLI ───────────────────────────────────
+
+
+def test_step_hours_invalid_falls_back():
+    # Non-floatable input hits the except branch and falls back to the default.
+    assert br._step_hours("not-a-number") == br.DEFAULT_MAX_HOURS
+    assert br._step_hours(None) == br.DEFAULT_MAX_HOURS
+    assert br._step_hours(6) == 6.0
+
+
+def test_main_emits_tsv(capsys):
+    rc = br.main([
+        "--count", "900",
+        "--batch-size", "60",
+        "--event", "schedule",
+        "--now-iso", "2026-06-25T15:07:00+00:00",
+        "--max-hours", "12",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    # "<batch_index>\t<count>\t<batches>\t<start>\t<end>"
+    assert out == "1\t900\t15\t60\t120"
+
+
+def test_main_with_custom_anchor(capsys):
+    rc = br.main([
+        "--count", "120",
+        "--batch-size", "60",
+        "--event", "schedule",
+        "--now-iso", "2026-06-26T13:07:00+00:00",
+        "--max-hours", "6",
+        "--anchor", "2026-06-26T13:00:00+00:00",
+    ])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "0\t120\t2\t0\t60"

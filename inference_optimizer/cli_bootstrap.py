@@ -262,6 +262,7 @@ def _seed_shared_state(
         research_scout_interval=max(
             1, int(getattr(args, "research_scout_interval", 3) or 3)
         ),
+        static_recon_enabled=bool(getattr(args, "static_recon", True)),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
         # SWEEP-phase post-sweep concurrency sweep flags (on by default); see orchestrator/conc_sweep.py.

@@ -1790,7 +1790,7 @@ def _delegate(action_name: str, key: str, params=None) -> Intent:
 async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: True)
-    monkeypatch.setattr(coord, "_sequence_denial_for_action", lambda a, proposed_params=None: None)
+    monkeypatch.setattr(coord, "_sequence_denial_for_action", lambda a: None)
     await coord._handle_delegate("orchestration", _delegate("explore", "d-pruned"))
     # advisory observation recorded but the task is still queued
     assert await coord.tasks.queued()
@@ -1803,7 +1803,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
     monkeypatch.setattr(
         coord,
         "_sequence_denial_for_action",
-        lambda a, proposed_params=None: PolicyDenied(
+        lambda a: PolicyDenied(
             "blocked",
             rule="exec_order",
             hint="wait",
@@ -1822,7 +1822,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
 @pytest.mark.asyncio
 async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
-    monkeypatch.setattr(coord, "_sequence_denial_for_action", lambda a, proposed_params=None: None)
+    monkeypatch.setattr(coord, "_sequence_denial_for_action", lambda a: None)
     await coord._handle_delegate("orchestration", _delegate("explore", "d-same"))
     recorded: list = []
 
