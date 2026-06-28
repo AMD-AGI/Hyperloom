@@ -116,6 +116,7 @@ from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _resolve_session_dir_for_summary,
     _seed_shared_state,
     _snapshot_system_prompts,
+    resolve_model_display_name,
 )
 from .orchestrator.action_executors._aiter_jit import (
     AITER_LOCK_STALE_MINUTES,
@@ -167,7 +168,7 @@ __all__ = [
     "_default_target_summary", "_parse_conc_sweep_concs", "_print_final_summary",
     "_print_kernel_opt_summary_line", "_print_session_skeleton", "_read_failure_summary",
     "_reconcile_crash_count", "_resolve_reference_recipe", "_resolve_session_dir_for_summary",
-    "_seed_shared_state", "_snapshot_system_prompts",
+    "_seed_shared_state", "_snapshot_system_prompts", "resolve_model_display_name",
 ]
 from . import framework_registry
 from .manifest import load_manifest, write_manifest
@@ -2627,6 +2628,12 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
 
     args.model = Path(quantized_model_dir)
     os.environ["MODEL_PATH"] = str(quantized_model_dir)
+    # Preserve the SOURCE model identity for session naming / display. The export
+    # dir basename is always "quantized" (see quantization_request_handlers), so
+    # deriving the model name from args.model would collapse every quantized run
+    # to "quantized". Pin "<source>-quantized" so the session dir, SharedState,
+    # and manifest carry the real model name and quantized runs stay distinct.
+    args.model_display_name = f"{Path(source_model).name}-quantized"
     print(f"Quantization prelude: model -> {quantized_model_dir}")
 
 
@@ -3222,7 +3229,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
 
         # session_dir defaults to <workspace_root>/<model>/<UTC ts>/ (INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat for legacy).
-        session_dir = make_session_dir(model_name=args.model)
+        # Use the resolved identity so a quantized run is named after the source
+        # model (e.g. "<model>-quantized") instead of the generic export-dir
+        # basename "quantized".
+        session_dir = make_session_dir(model_name=resolve_model_display_name(args))
         # Single-optimizer guard (issue #592): a fresh per-session dir is
         # normally uncontended, but take the lock here too so the contract
         # ("one optimizer owns a session") holds uniformly and the owner pid is
