@@ -1907,6 +1907,15 @@ def _framework_pr_consecutive_no_keep(state: Any) -> int:
         if not isinstance(row, dict):
             continue
         status = str(row.get("status") or "").strip().lower()
+        # Macro-cycle boundary: framework_pr_phase_progress is preserved across
+        # cyclic reloops (for candidate dedup), but the consecutive-no-keep
+        # plateau gate must only see the CURRENT cycle's rows. A boundary marker
+        # appended at reloop (_apply_macro_cycle_reloop) stops the streak walk so
+        # a prior cycle's trailing no-KEEP rows cannot instantly re-plateau the
+        # next cycle's FRAMEWORK_PR (observed: cycle 1 plateaued the same tick it
+        # selected its first candidate).
+        if status == "cycle_boundary":
+            break
         is_keep = bool(row.get("kept")) or status == "kept"
         if is_keep:
             break

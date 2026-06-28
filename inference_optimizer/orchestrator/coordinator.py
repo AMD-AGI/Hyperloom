@@ -2573,6 +2573,32 @@ class Coordinator:
         # ``discover_returned_no_new_candidates`` when there are none.
         state.framework_pr_phase_done = False
         state.framework_pr_discover_failures = 0
+        # Mark a macro-cycle boundary in the preserved progress ledger so the
+        # consecutive-no-keep plateau gate (``_framework_pr_consecutive_no_keep``)
+        # does NOT carry the prior cycle's trailing no-KEEP streak into this
+        # cycle. Without this, FRAMEWORK_PR plateaus the instant it re-enters
+        # (the cycle-0 no-KEEP rows already satisfy the streak threshold), so the
+        # new cycle's candidate never gets a fair evaluation. The marker carries
+        # no candidate_id, so candidate dedup (_unprocessed_framework_pr_candidates)
+        # is unaffected; kept=False keeps KEEP-count reporting honest.
+        try:
+            progress = getattr(state, "framework_pr_phase_progress", None)
+            if not isinstance(progress, list):
+                progress = []
+                state.framework_pr_phase_progress = progress
+            if not (progress and isinstance(progress[-1], dict) and str(progress[-1].get("status") or "") == "cycle_boundary"):
+                progress.append(
+                    {
+                        "candidate_id": "",
+                        "status": "cycle_boundary",
+                        "kept": False,
+                        "gain_pct": 0.0,
+                        "cycle": int(getattr(state, "macro_cycle", 0) or 0),
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+        except Exception:  # noqa: BLE001 — plateau-reset marker is best-effort
+            log.exception("Coordinator: framework_pr cycle_boundary marker append failed")
         # Clear the per-cycle SWEEP completion markers: exit_normal_sweep keys off
         # last_sweep / last_conc_sweep status, so a stale "succeeded" from the
         # prior cycle would make the next cycle's SWEEP exit instantly without
