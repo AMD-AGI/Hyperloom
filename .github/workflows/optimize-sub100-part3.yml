@@ -25,8 +25,8 @@ name: optimize-sub100-part3
 # instead of the git repo, so the large pool never bloats git history.
 
 on:
-  schedule:
-    - cron: '7 3,9,15,21 * * *'
+  # schedule:
+  #   - cron: '7 3,9,15,21 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
