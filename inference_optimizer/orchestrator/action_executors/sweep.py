@@ -44,6 +44,7 @@ from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
+    sweep_run_eval_enabled,
 )
 
 
@@ -130,16 +131,24 @@ def _build_grid(
                     }
                 )
                 continue
+            variant_envs = {
+                "CONC": str(conc),
+                "ISL": str(isl),
+                "OSL": str(osl),
+                "NUM_PROMPTS": str(num_prompts),
+            }
+            # Accuracy eval is concurrency-invariant, so skip it per sweep point
+            # by default (a full GSM8K pass per point is pure waste and at low
+            # CONC blows the per-variant timeout). Opt back in via
+            # INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1. extra_envs wins in
+            # _build_variant_yaml, so this overrides the RUN_EVAL=true default.
+            if not sweep_run_eval_enabled():
+                variant_envs["RUN_EVAL"] = "false"
             out.append(
                 GridVariant(
                     name=name,
                     extra_server_args=base_extra_args,
-                    extra_envs={
-                        "CONC": str(conc),
-                        "ISL": str(isl),
-                        "OSL": str(osl),
-                        "NUM_PROMPTS": str(num_prompts),
-                    },
+                    extra_envs=variant_envs,
                     note=f"conc={conc} isl={isl} osl={osl}",
                 )
             )
