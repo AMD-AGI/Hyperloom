@@ -413,7 +413,14 @@ def build_manifest(
     if args is not None:
         if getattr(args, "model", None):
             model_path = str(args.model)
-            model_name = Path(model_path).name
+            # Prefer the quantize prelude's pinned source identity; the rewritten
+            # export-dir basename is the generic "quantized" (would collapse the
+            # name). Mirrors cli_bootstrap.resolve_model_display_name (kept inline
+            # to avoid a manifest -> cli_bootstrap import cycle).
+            model_name = (
+                (getattr(args, "model_display_name", "") or "").strip()
+                or Path(model_path).name
+            )
         if getattr(args, "framework", None):
             framework = str(args.framework)
         if getattr(args, "gpu_type", None):
