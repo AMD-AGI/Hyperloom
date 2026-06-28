@@ -1,19 +1,24 @@
-"""Adapter: drive the quantization-agent from inference_optimizer.
+"""Adapter: drive quantization from inference_optimizer via the quark_quantizer shell.
 
-Thin shim between ``cli._run_quantization_prelude`` and the standalone
-``quantization_agent`` package. It builds an effective prompt (source model
-path + export dir + the user's ``--quantize`` text), runs
-``quantize_via_prompt`` once, and maps its ``QuantSkillRunResult.status`` to a
-concrete decision:
+Thin shim between ``cli._run_quantization_prelude`` and the ``quark_quantizer``
+shell (which itself wraps the original ``quantization_agent``). The prelude
+position and order are unchanged (it still runs ONCE before the optimization
+loop, then the caller rewrites ``--model`` to the exported model). The only
+behavioral change vs. calling ``quantization_agent`` directly is that the trigger
+is now a parameter (``enabled``) rather than an implicit code path — here we are
+past the ``--quantize`` / ``--quantize-scheme`` gate, so we enable it.
 
-  * ``success``                    -> return ``quantized_model_dir``
-  * ``partial`` (model usable)     -> warn, then return ``quantized_model_dir``
+It builds an effective prompt (source model path + export dir + the user's
+``--quantize`` text), runs the shell once, and maps its status to a decision:
+
+  * ``success``                    -> return ``output_dir``
+  * ``partial`` (model usable)     -> warn, then return ``output_dir``
   * ``partial`` (no usable model)  -> ``SystemExit(3)``
-  * ``failed``                     -> ``SystemExit(3)``
+  * ``failed`` / other             -> ``SystemExit(3)``
 
 When the user explicitly asked for quantization we must never silently fall
-through and optimize the un-quantized source model — a quantization failure
-is a hard stop for the whole run.
+through and optimize the un-quantized source model — a quantization failure is
+a hard stop for the whole run.
 """
 
 from __future__ import annotations
@@ -30,7 +35,7 @@ async def run_quantization_prelude_async(
 ) -> str:
     """Quantize ``source_model`` per ``prompt``; return the exported dir.
 
-    Awaits the async ``quantize_via_prompt`` directly (the caller already
+    Awaits the async ``quark_quantizer.quantize`` directly (the caller already
     runs inside ``asyncio.run``). Raises ``SystemExit(3)`` when no usable
     quantized model was produced.
 
@@ -45,16 +50,16 @@ async def run_quantization_prelude_async(
     Raises:
         SystemExit: If quantization failed or produced no usable model.
     """
-    # quantization_agent is a top-level package (sibling of inference_optimizer);
+    # quark_quantizer is a top-level package (sibling of inference_optimizer);
     # imported lazily so this module loads even where its deps are absent.
-    from quantization_agent import quantize_via_prompt
+    from quark_quantizer import quantize
 
     workspace = Path(workspace)
     export_dir = workspace / "quantized"
 
-    # The agent is prompt-driven: fold the source model + export dir into the
-    # prompt so the user's --quantize text can be just the scheme
-    # (e.g. "fp8 with fp8 kv_cache, exclude lm_head").
+    # Fold the source model + export dir into the prompt so the user's
+    # --quantize text can be just the scheme (e.g. "fp8 with fp8 kv_cache,
+    # exclude lm_head"). The wrapped agent's LLM turns this into the Quark CLI.
     effective_prompt = (
         f"Quantize the model at {source_model}. "
         f"Export the HuggingFace-format quantized model to {export_dir}. "
@@ -65,29 +70,24 @@ async def run_quantization_prelude_async(
         f"{prompt}"
     )
 
-    result = await quantize_via_prompt(
-        effective_prompt,
-        workspace=workspace,
-        interactive=False,
-    )
-
-    final = result.assessment.final
-    qdir = result.quantized_model_dir
+    # Reaching the prelude already means quantization was explicitly requested
+    # (the --quantize / --quantize-scheme gate in cli), so enable it here.
+    result = await quantize(effective_prompt, enabled=True, workspace=workspace)
 
     if result.status == "success":
-        print(f"Quantization: success (final={final}, eval_gap={result.assessment.eval_gap}) -> {qdir}")
-        return str(qdir)
+        print(f"Quantization: success (final={result.final}, eval_gap={result.eval_gap}) -> {result.output_dir}")
+        return str(result.output_dir)
 
-    if result.status == "partial" and qdir is not None:
+    if result.status == "partial" and result.output_dir is not None:
         print(
-            f"Quantization: PARTIAL (final={final}); quantized model is loadable "
+            f"Quantization: PARTIAL (final={result.final}); quantized model is loadable "
             f"so continuing, but audit/eval was incomplete. Review {workspace}.",
             file=sys.stderr,
         )
-        return str(qdir)
+        return str(result.output_dir)
 
     print(
-        f"ERROR: quantization {result.status} (final={final}). Refusing to "
+        f"ERROR: quantization {result.status} (final={result.final}). Refusing to "
         f"optimize the un-quantized source model. See {workspace} for details.",
         file=sys.stderr,
     )
