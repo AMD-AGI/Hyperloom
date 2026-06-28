@@ -25,8 +25,11 @@ name: optimize-sub100-part3
 # instead of the git repo, so the large pool never bloats git history.
 
 on:
-  schedule:
-    - cron: '7 3,9,15,21 * * *'
+  # Schedule disabled 2026-06-28: part3 finished its first full sweep (batches
+  # 0-3) and we do NOT want it to roll into a second round. Re-enable by
+  # uncommenting; manual workflow_dispatch still works.
+  # schedule:
+  #   - cron: '7 3,9,15,21 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
