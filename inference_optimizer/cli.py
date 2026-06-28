@@ -4737,6 +4737,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "Ignored when ``--no-research-scout`` is set.",
     )
     opt.add_argument(
+        "--static-recon",
+        dest="static_recon",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_STATIC_RECON"),
+        help="Auto-dispatch a read-only static-recon specialist at PRELUDE "
+        "that greps the framework source for un-bridged capability "
+        "switches (predicates that silently disable a faster path for "
+        "this model/GPU/precision, e.g. a CUDA-only ``*_supported()`` "
+        "on ROCm) and seeds bridge candidates as gaps[]. Default on; "
+        "pass ``--no-static-recon`` to disable. Env: "
+        "INFERENCE_OPTIMIZER_STATIC_RECON=0.",
+    )
+    opt.add_argument(
         "--recipe-sediment",
         dest="recipe_sediment",
         action=argparse.BooleanOptionalAction,
@@ -4895,16 +4908,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO",
         ),
         help="Per-variant explore overtime kill: each single-variant "
-        "Magpie run in the explore loop is reaped once its warm "
-        "hot-client benchmark phase (measured from the server-ready "
-        "marker, excluding cold boot / warmup) exceeds "
-        "``baseline_warm_runtime_sec * RATIO``. The variant is "
+        "Magpie run in the explore loop is reaped once its "
+        "POST-READY (pure hot client) wall-clock exceeds "
+        "``decision_anchor_sec * RATIO`` (the warm-decision anchor is "
+        "``baseline_warm_runtime_sec``; pre-ready boot / weight load / "
+        "first-request recompile is excluded — see "
+        "INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY). The variant is "
         "recorded with outcome=KILLED_OVERTIME + runtime_sec + "
         "wall_clock_ratio_vs_baseline (no tput) so the LLM can "
-        "distinguish it from a hard timeout / crash. Default 2.0 "
-        "(kill at 2x the warm baseline client-phase wall-clock). "
-        "Pass 0 to disable. Env: "
-        "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
+        "distinguish it from a hard timeout / crash. Default 2.0 (kill "
+        "at +100%% over the warm client anchor). Pass 0 to disable. "
+        "Env: INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
     )
     # Explore variant hard timeout — operator override for the auto-derived cap.
     # ExploreExecutor auto-derives from baseline_runtime_sec*(kill_ratio+0.5); 0 (default) keeps auto-derive.
