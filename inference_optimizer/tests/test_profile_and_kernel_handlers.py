@@ -3015,7 +3015,12 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
 
     with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
         await krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy", "backend_order": "geak,claude,codex", "max_parallel": 3},
+            payload={
+                "candidates_path": "/dummy",
+                "backend_order": "geak,claude,codex",
+                "max_parallel": 3,
+                "parallel_backends": False,
+            },
             candidates=candidates,
             session_dir=session_dir,
             record_partial=record_partial,
