@@ -356,6 +356,8 @@
     "specialist_rounds": [],
     "stack_fingerprint_meta": {},
     "start_ts": "<volatile>",
+    "static_recon_enabled": true,
+    "static_recon_runs": 0,
     "steward_continuation_used": false,
     "steward_infra_failures_by_round": {},
     "stop_reason": "",
