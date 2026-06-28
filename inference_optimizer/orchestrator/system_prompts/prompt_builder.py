@@ -621,14 +621,9 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   advance the phase. When you judge the current phase exhausted,",
         "   emit ``escalate_strategy_change{next_action_hint=",
         "   'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}`` (no",
-        "   longer robustness-only). Otherwise the Coordinator advances",
-        "   only on IR-6 force-exit, phase-budget exhaustion, or a",
-        "   terminal stop_reason. EXCEPTION: after a normal sweep finish",
-        "   (sweep_done / conc_sweep_done) do NOT emit ``skip_to_close`` —",
-        "   let the Coordinator wind SWEEP → CLOSE with its own terminal",
-        "   stop_reason. Reserve ``skip_to_close`` for genuine early",
-        "   abandonment (infra dead, sweep cannot run); it stamps",
-        "   ``robustness_escalated`` and mislabels an otherwise clean run.",
+        "   longer robustness-only; see the `skip_to_close` exception in the",
+        "   PHASE CONTRACT). Otherwise the Coordinator advances only on IR-6",
+        "   force-exit, phase-budget exhaustion, or a terminal stop_reason.",
         "7. **Sweep / report tail**: once EXPLORE / KERNEL exit, the",
         "   Coordinator routes the run to SWEEP (or directly to it under",
         "   --no-kernel). When SWEEP completes, propose `report` for the",
@@ -761,11 +756,12 @@ you want to wind down sooner.
   Skip if `last_trace_analyze.trace_input` already equals
   `last_profile_trace` (cached). Explore/sweep/report are NEVER gated on it.
 
-### `gemm_tuning` — `run_gemm_tuning` (FP8 SGLang only)
+### `gemm_tuning` — `run_gemm_tuning`
 
   request{target_agent: 'kernel', kind: 'run_gemm_tuning', params={}}
 
-  Only when `precision='fp8'` SGLang and `last_gemm_tuning` is empty.
+  Only when `last_gemm_tuning` is empty (the Coordinator also auto-runs it at
+  KERNEL entry; eligibility is decided backend-side).
 
 ### `kernel_opt` — payload for `run_optimization`
 
