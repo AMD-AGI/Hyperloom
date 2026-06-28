@@ -3,12 +3,12 @@
 Three groups, all offline (no Quark / Claude SDK / GPU):
 
 * Parser     — ``--quantize`` flag parses (default None / value when passed).
-* Adapter    — ``run_quantization_prelude_async`` maps QuantSkillRunResult
-               status -> decision (return dir vs SystemExit(3)).
+* Adapter    — ``run_quantization_prelude_async`` maps quark_quantizer's
+               QuarkRunResult status -> decision (return dir vs SystemExit(3)).
 * CLI hook   — ``cli._run_quantization_prelude`` is a no-op without the flag,
                skipped on --resume, and rewrites args.model otherwise.
 
-``quantize_via_prompt`` is monkeypatched so nothing real runs.
+``quark_quantizer.quantize`` is monkeypatched so nothing real runs.
 """
 
 from __future__ import annotations
@@ -30,28 +30,25 @@ from inference_optimizer.orchestrator import quantization_schemes as qs
 # ---------------------------------------------------------------------------
 
 
-def _fake_result(status: str, qdir: str | None, *, final="x", eval_gap=None):
-    """Build a stand-in for QuantSkillRunResult."""
-    assessment = types.SimpleNamespace(final=final, eval_gap=eval_gap)
+def _fake_result(status: str, output_dir: str | None, *, final="x", eval_gap=None, error=""):
+    """Build a stand-in for quark_quantizer.QuarkRunResult."""
     return types.SimpleNamespace(
-        status=status,
-        quantized_model_dir=Path(qdir) if qdir else None,
-        assessment=assessment,
+        status=status, output_dir=output_dir, final=final, eval_gap=eval_gap, error=error
     )
 
 
 def _patch_quantize(monkeypatch: pytest.MonkeyPatch, result):
-    """Replace quantization_agent.quantize_via_prompt with an async stub
-    that records its call and returns ``result``."""
-    import quantization_agent
+    """Replace quark_quantizer.quantize with an async stub that records its
+    call (prompt + enabled + kwargs) and returns ``result``."""
+    import quark_quantizer
 
     calls: list[dict] = []
 
-    async def _fake(prompt, **kwargs):
-        calls.append({"prompt": prompt, **kwargs})
+    async def _fake(prompt, *, enabled=False, **kwargs):
+        calls.append({"prompt": prompt, "enabled": enabled, **kwargs})
         return result
 
-    monkeypatch.setattr(quantization_agent, "quantize_via_prompt", _fake)
+    monkeypatch.setattr(quark_quantizer, "quantize", _fake)
     return calls
 
 
@@ -237,10 +234,13 @@ def test_adapter_success_returns_quantized_dir(tmp_path, monkeypatch):
     calls = _patch_quantize(monkeypatch, _fake_result("success", str(tmp_path / "q"), final=None, eval_gap=0.01))
     out = asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/models/src", workspace=tmp_path))
     assert out == str(tmp_path / "q")
-    # source model + export dir folded into the effective prompt
+    # source model + export dir folded into the effective prompt; NL request kept.
     assert "/models/src" in calls[0]["prompt"]
     assert str(tmp_path / "quantized") in calls[0]["prompt"]
-    assert calls[0]["interactive"] is False
+    assert "fp8" in calls[0]["prompt"]
+    # The prelude already gated on the flag, so the shell is enabled here.
+    assert calls[0]["enabled"] is True
+    assert calls[0]["workspace"] == tmp_path
 
 
 def test_adapter_partial_with_model_returns_dir(tmp_path, monkeypatch):
@@ -412,3 +412,43 @@ def test_prelude_freetext_takes_priority_over_scheme(tmp_path, monkeypatch):
     args = _Args(model="/models/src", quantize="custom mxfp4 prompt", quantize_scheme="fp8")
     asyncio.run(cli._run_quantization_prelude(args))
     assert seen["prompt"] == "custom mxfp4 prompt"  # free text wins
+
+
+def test_prelude_preserves_source_model_identity(tmp_path, monkeypatch):
+    """Regression: the quantize prelude rewrites args.model to the generic
+    ``<workspace>/quantization/<model>/quantized`` export dir (basename is always
+    ``quantized``). The session / display model identity must NOT collapse to
+    ``quantized`` — otherwise every quantized run lands under
+    ``<root>/quantized/<ts>`` and the report only shows ``Model: quantized``,
+    losing the real model name and colliding across models.
+    """
+    import inference_optimizer.paths as paths
+
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+
+    async def _fake_async(*, prompt, source_model, workspace):
+        # Mirror the real adapter: the export dir basename is always "quantized".
+        return str(tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized")
+
+    monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+
+    args = _Args(model="/wekafs/models/google-gemma-4-26B-A4B-it", quantize="fp8")
+    asyncio.run(cli._run_quantization_prelude(args))
+
+    # The model path is rewritten to the generic quantized export dir ...
+    assert str(args.model).endswith("/quantized")
+    # ... but the identity used for session_dir / state / manifest is preserved.
+    name = cli.resolve_model_display_name(args)
+    assert name != "quantized"
+    assert name == "google-gemma-4-26B-A4B-it-quantized"
+
+
+def test_prelude_no_display_name_without_quantization(monkeypatch):
+    """Without quantization the prelude leaves args untouched, so the identity
+    resolver falls back to the plain model-path basename (no collapse, no
+    spurious suffix)."""
+    args = _Args(model="/models/Qwen3-32B", quantize=None)
+    asyncio.run(cli._run_quantization_prelude(args))
+    assert getattr(args, "model_display_name", None) in (None, "")
+    assert cli.resolve_model_display_name(args) == "Qwen3-32B"
