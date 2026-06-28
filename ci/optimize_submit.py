@@ -363,9 +363,11 @@ def _default_vllm_image() -> str:
     """Return the default vLLM server image.
 
     Returns:
-        The sync-registry vLLM image (v0.21.0).
+        The pinned ``profilerfix`` vLLM image (v0.21.0 / rocm720) whose patched
+        libamdhip64/libroctracer let rocprofiler capture kernels under
+        HipGraphLaunch (same profilerfix rationale as the SGLang image).
     """
-    return "harbor.core42.primus-safe.amd.com/sync/vllm/vllm-openai-rocm:v0.21.0"
+    return "harbor.core42.primus-safe.amd.com/sync/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix-20260627"
 
 
 # ── HuggingFace client ──────────────────────────────────────────────────────────
@@ -747,29 +749,23 @@ def detect_concurrency(tp: int, framework: str) -> int:
 def _sglang_image_for(repo_id: str = "") -> str:
     """Pick the sglang image, honoring per-model baseline-arch needs.
 
-    Default is the profilerfix image. MiMo-V2.x is the exception: the undated
-    v0.5.11 profilerfix base does NOT register ``MiMoV2ForCausalLM`` (the
-    server dies at model-loader registration, three baseline attempts in a
-    row -> ``baseline_failed``), so it needs the image that carries the dated
-    20260508 sglang arch. That image is profilerfix's two patched ROCm libs
-    (libamdhip64/libroctracer, issue #352) layered onto the dated 20260508
-    build, so rocprofiler kernel capture under HipGraphLaunch still works.
-    Must be paired with ``--attention-backend triton`` (injected in
+    Default is the v0.5.12 profilerfix image. Older branches carried a MiMo-V2
+    exception that pinned ``primussafe/sglang:v0.5.11-rocm720-mi30x-mimo-
+    profilerfix`` because the then-current profilerfix image did not register
+    ``MiMoV2ForCausalLM``. The v0.5.12 profilerfix image now includes the MiMo
+    model files, so MiMo should use the same current base as other SGLang
+    models. It is still paired with ``--attention-backend triton`` (injected in
     ``_workload_envs.materialize_config_with_envs``) to dodge the aiter
-    attention CUDA-graph-capture SIGABRT. Matched on the repo basename so it
-    fires for the HF repo id (the /wekafs/<org>-<repo> local path is derived
-    downstream from this same id).
+    attention CUDA-graph-capture SIGABRT.
 
     Args:
         repo_id (str): Model repo id, matched on its basename for overrides.
 
     Returns:
-        str: The MiMo-V2 sglang image for MiMo-V2.x repos, else the default
-        sglang image.
+        str: The default sglang image. ``repo_id`` is accepted for backward
+        compatibility (and future per-model overrides) but no longer triggers a
+        MiMo-specific image; MiMo runs on the same default base.
     """
-    basename = (repo_id or "").split("/")[-1].lower()
-    if "mimo-v2" in basename:
-        return "primussafe/sglang:v0.5.11-rocm720-mi30x-mimo-profilerfix"
     return _default_sglang_image()
 
 
@@ -3239,6 +3235,35 @@ def _json_claw_session_id(data: dict) -> str:
     return ""
 
 
+def _resolve_record_claw_session_id(
+    safe: SafeOptimizeClient,
+    rec: SubmissionRecord,
+    last_task: dict | None = None,
+) -> str | None:
+    """Resolve a Claw session id for a submitted record.
+
+    SaFE's terminal task payload can occasionally omit ``clawSessionId`` even
+    though a subsequent task GET has it. Prefer the freshest terminal payload,
+    but fall back to the cached resolver before leaving the manifest without a
+    Claw id; otherwise Pulse classifies the dispatch as ``no_claw_session``.
+    """
+    for value in (
+        (last_task or {}).get("clawSessionId"),
+        rec.claw_session_id,
+    ):
+        sid = str(value or "").strip()
+        if sid:
+            return sid
+    if rec.task_id:
+        try:
+            sid = safe._claw_session_id_for(rec.task_id)
+            if sid:
+                return sid
+        except Exception as e:
+            log.debug("[task %s] clawSessionId fallback lookup failed: %s", rec.task_id, e)
+    return None
+
+
 def _env_truthy(name: str) -> bool:
     """Report whether an environment variable is set to a truthy value.
 
@@ -3458,6 +3483,9 @@ def _nfs_fallback_collect(
             if rec.claw_session_id != claw:
                 return
             score += 30
+        elif claw and not rec.claw_session_id:
+            rec.claw_session_id = claw
+            score += 20
         if _json_positive_perf(data):
             score += 10
         else:
@@ -3645,7 +3673,7 @@ def wait_and_collect_one(
     rec.final_status = final_status
     rec.final_phase = last_task.get("currentPhase")
     rec.final_message = (last_task.get("message") or "")[:500] or None
-    rec.claw_session_id = (last_task.get("clawSessionId") or "").strip() or None
+    rec.claw_session_id = _resolve_record_claw_session_id(safe, rec, last_task)
     rec.model_path = (last_task.get("modelPath") or "").strip() or rec.model_path
     rec.safe_user_id = (last_task.get("userId") or "").strip() or rec.safe_user_id
     rec.safe_started_at = (last_task.get("startedAt") or "").strip() or rec.safe_started_at

@@ -70,6 +70,9 @@ inference_optimizer = [
     "benches/README.md",
     "orchestrator/system_prompts/*.md",
     "scripts/*",
+    "scripts/configs/*.yaml",
+    "kb/framework/*.md",
+    "kb/recipes/*.json",
 ]
 
 [tool.pytest.ini_options]
@@ -79,6 +82,7 @@ testpaths = [
     "robustness-agent/tests",
     "critic-agent/runtime/tests",
     "quantization_agent/tests",
+    "quark_quantizer/tests",
     "kernel-agent/tools/test_tracelens_arch_benchmark.py",
     "kernel-agent/tools/test_ray_fd_limit.py",
     "kernel-agent/tools/test_gemm_tuning.py",
@@ -131,6 +135,7 @@ source = [
     "framework-agent/src",
     "kernel-agent/tools",
     "quantization_agent",
+    "quark_quantizer",
     "OOB",
     "ci",
 ]
@@ -159,6 +164,12 @@ omit = [
     "kernel-agent/tools/parallel_e2e_runner.py",
     "kernel-agent/tools/apply_kernel_patch.py",
     "kernel-agent/tools/geak_prompt_patcher.py",
+    # Serve/bench/apply CLI primitives — subprocess + live-serving plumbing that
+    # can't be unit-tested without reimplementing a server; same class as the
+    # apply_kernel_patch / parallel_e2e_runner tools above. Their pure helpers
+    # (e.g. _diff_unsupported_ops, _spread) ARE covered by test_apply_and_bench.py.
+    "kernel-agent/tools/apply_and_bench.py",
+    "kernel-agent/tools/geak_vs_forge_driver.py",
     # Backends within kernel-agent tools (subprocess submit).
     "kernel-agent/tools/backends/*",
     # Stand-alone in-tree CLI test scripts (live next to the tool they
@@ -169,6 +180,8 @@ omit = [
     "kernel-agent/skills/unittest/validate_harness.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "quantization_agent/cli.py",
+    # quark_quantizer CLI driver (argparse entrypoint).
+    "quark_quantizer/cli.py",
     # OOB agent_mcp_server entrypoints / server-side runtime: CLI, HTTP
     # server, scheduler, auth proxy, and the subprocess agent backends are
     # network / long-running services exercised end-to-end, not by unit

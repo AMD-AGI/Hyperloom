@@ -1371,6 +1371,29 @@ def _format_impact_range(
     )
 
 
+def _build_extra_context_block(candidate: dict[str, Any]) -> str:
+    """Render authoritative workload context for the candidate, if supplied.
+
+    Optional, default-off: returns ``""`` when ``extra_dispatch_context`` is
+    absent so the prompt is byte-identical to the stock path. When present
+    (set by the driver's ``--enrich`` mode), it injects the real serving config
+    (ISL/OSL/ctx/conc/TP), E2E/Amdahl framing, neighbouring-kernel/fusion cues
+    and resolved roofline specifics — context HL does not otherwise pass, which
+    is what lets harness-gen pin the true decode shapes instead of guessing.
+
+    Args:
+        candidate: The kernel candidate dict, optionally carrying
+            ``extra_dispatch_context`` (a pre-rendered free-form string).
+
+    Returns:
+        The workload-context prompt block, or ``""`` when absent.
+    """
+    ctx = candidate.get("extra_dispatch_context")
+    if not isinstance(ctx, str) or not ctx.strip():
+        return ""
+    return "\n## WORKLOAD CONTEXT (authoritative — use to build the harness; do NOT guess these)\n" + ctx.strip() + "\n"
+
+
 def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
     """Render a TraceLens hypothesis section for the candidate, if any.
 
@@ -1796,10 +1819,17 @@ def build_prompt(
     platform_intro, hardware_notes = _hardware_prompt_blocks(target_platform)
     platform_build_flag = _target_build_flag(target_platform)
     hypothesis_block = _build_hypothesis_block(candidate)
+    extra_context_block = _build_extra_context_block(candidate)
     benchmark_cases_block = _build_benchmark_cases_block(candidate)
     priority_block = _build_priority_block(candidate)
+    # GEAK discovers/builds its own benchmark in preprocess_v3 from the source +
+    # captured shapes + workload context in this prompt. The bench_files list is
+    # populated by a hardcoded op->test map (tracelens_analysis._KNOWN_HARNESS_HINTS)
+    # that can mis-pick (e.g. test_pa.py for paged attention) and seed a wrong
+    # harness, so do NOT surface it in the GEAK prompt: prompt = analysis + shapes +
+    # workload config, GEAK figures out the rest. (Other backends still get it.)
     bench_block = ""
-    if bench_files:
+    if bench_files and backend != "geak":
         bench_block = "\nKnown benchmark/test files (also copied into your workspace as -f):\n"
         for b in bench_files[:8]:
             bench_block += f"- {b}\n"
@@ -2034,6 +2064,7 @@ def build_prompt(
             "",
             hardware_notes,
             hypothesis_block,
+            extra_context_block,
             benchmark_cases_block,
             priority_block,
             "",
@@ -2974,7 +3005,14 @@ def invoke_backend(
         if backend == "forge"
         else _oob_output_dir(args.session_id, prompt_file)
     )
-    if common_test_command:
+    # HL builds a harness only for backends that lack their own preprocess stage
+    # (forge/OOB). GEAK owns harness construction in its preprocess_v3 orchestrator
+    # (it has the shapes, serving config, and harness_kb to build the harness that
+    # matches the live workload), so HL must NOT pre-bake one and force it via
+    # --test-command -- doing so bypasses GEAK's preprocess and was the source of
+    # the GEMM-flattened paged-attention harness. For GEAK, pass the raw
+    # test_command (the op_test) and let GEAK figure it out: one path.
+    if common_test_command and backend != "geak":
         _harness_cmd = _try_generate_harness(
             common_test_command,
             candidate,
@@ -3000,23 +3038,21 @@ def invoke_backend(
         if backend == "geak":
             geak = _import_backend("geak_submit")
             out_dir = _geak_output_dir(args.session_id, prompt_file)
-            # Use the common test_command (already derived + harness-patched above).
-            test_command = common_test_command
+            # GEAK is dispatched PROMPT-ONLY. It owns harness construction in its
+            # preprocess_v3 orchestrator: it discovers the op and builds the harness
+            # from the dispatch prompt (device source + captured serving shapes +
+            # #703 WORKLOAD CONTEXT) alone. HL does NOT pass a test_command/op_test
+            # to GEAK -- a hardcoded op->test map (tracelens_analysis) can mis-pick
+            # (e.g. test_pa.py for paged attention) and seed a wrong harness. The
+            # canonical baseline run dispatched with no test_command and GEAK's
+            # preprocess produced the correct harness + 1.2647x. The prompt is the
+            # only interface. (common_test_command is still computed above solely
+            # for the rocprof before-snapshot, never handed to GEAK.)
             is_multigpu = is_multigpu_common
-            if log_path is not None and test_command:
-                append_log(log_path, f"[geak] test_command={test_command}")
-            if test_command:
-                import shutil as _shutil
-
-                harness_dir = out_dir / "unittest"
-                harness_dir.mkdir(parents=True, exist_ok=True)
-                for _tc_part in test_command.split("&&"):
-                    for _w in _tc_part.strip().split():
-                        if _w.endswith(".py") and Path(_w).exists():
-                            _dst = harness_dir / Path(_w).name
-                            if _dst.exists() and _dst.resolve() == Path(_w).resolve():
-                                continue
-                            _shutil.copy2(_w, _dst)
+            # Prompt-only: do NOT copy a test_command/op_test into the workspace (the
+            # block main had here is intentionally dropped — GEAK builds its own harness
+            # from the prompt). Keep main's updated _apply_geak_env_overrides signature
+            # (now takes `candidate`).
             previous_env = _apply_geak_env_overrides(args, prompt_file, candidate)
             try:
                 result = geak.submit(
@@ -3028,14 +3064,11 @@ def invoke_backend(
                     num_gpus=num_gpus,
                     prefer_ray=prefer_ray,
                     kernel_repo=kernel_repo,
-                    test_command=test_command,
                 )
             finally:
                 _restore_env(previous_env)
             result["stdout"] = result.get("stdout_tail", "")
             result["output_dir"] = str(out_dir)
-            if test_command:
-                result["test_command"] = test_command
             if rocprof_before:
                 result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
                 if rocprof_before.get("reason"):
@@ -3620,6 +3653,37 @@ def _trust_geak_correctness() -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return True
+
+
+def _geak_round_correctness_passed(geak_report: dict[str, Any]) -> bool:
+    """True when a GEAK report carries an explicit verified-correctness record.
+
+    A SIGTERM'd GEAK run writes ``status="incremental_after_round_N"`` and
+    embeds the round's evaluation, including a ``correctness`` block of the form
+    ``{"returncode": 0, "success": true}`` (the kernel was compiled, run, and
+    correctness-checked before the timeout). The generic key-walker
+    :func:`_extract_correctness_from_geak` misses it because the value is a
+    nested dict (key ``success``), not a ``correct``/``valid`` bool. Read the
+    explicit nested record instead.
+
+    Args:
+        geak_report (dict[str, Any]): Parsed ``final_report.json`` contents.
+
+    Returns:
+        bool: True only when ``round_evaluation.correctness.success`` is True
+            (and no failing returncode); False otherwise.
+    """
+    if not isinstance(geak_report, dict):
+        return False
+    for key in ("round_evaluation", "best_round_evaluation"):
+        ev = geak_report.get(key)
+        if isinstance(ev, dict):
+            corr = ev.get("correctness")
+            if isinstance(corr, dict):
+                rc = corr.get("returncode")
+                if corr.get("success") is True and (rc is None or rc == 0):
+                    return True
+    return False
 
 
 def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None:
@@ -4428,14 +4492,27 @@ def build_verification(
     ):
         bp_geak = (best.get("backend_paths") or {}).get("geak_final_report", "")
         geak_status = ""
+        geak_report: dict[str, Any] = {}
         if bp_geak and Path(bp_geak).is_file():
             try:
-                geak_status = str(json.loads(Path(bp_geak).read_text(encoding="utf-8")).get("status") or "").lower()
+                geak_report = json.loads(Path(bp_geak).read_text(encoding="utf-8"))
+                geak_status = str(geak_report.get("status") or "").lower()
             except Exception:  # noqa: BLE001
+                geak_report = {}
                 geak_status = ""
         if geak_status in {"complete", "succeeded", "ok"}:
             correctness_signal = True
             correctness_source = "geak_assumed_pass"
+        # A SIGTERM'd GEAK run finalizes status="incremental_after_round_N" (not
+        # "complete"), but its already-evaluated round still carries an EXPLICIT
+        # verified-correctness record (round_evaluation.correctness.success) plus
+        # a FULL_BENCHMARK-verified speedup. Trust that: the kernel was compiled,
+        # run, and correctness-checked before the timeout — it's a real win, not
+        # an unverified artifact. Without this a verified 2.6x partial is routed
+        # to NEEDS_REVIEW and never reaches integrate/E2E (#735-followup). GEAK-only.
+        elif geak_status.startswith("incremental_after_round") and _geak_round_correctness_passed(geak_report):
+            correctness_signal = True
+            correctness_source = "geak_partial_round_verified"
     if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
         correctness_signal = True
         correctness_source = "accuracy_override"

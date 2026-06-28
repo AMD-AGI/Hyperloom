@@ -116,6 +116,7 @@ from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
     _resolve_session_dir_for_summary,
     _seed_shared_state,
     _snapshot_system_prompts,
+    resolve_model_display_name,
 )
 from .orchestrator.action_executors._aiter_jit import (
     AITER_LOCK_STALE_MINUTES,
@@ -167,8 +168,9 @@ __all__ = [
     "_default_target_summary", "_parse_conc_sweep_concs", "_print_final_summary",
     "_print_kernel_opt_summary_line", "_print_session_skeleton", "_read_failure_summary",
     "_reconcile_crash_count", "_resolve_reference_recipe", "_resolve_session_dir_for_summary",
-    "_seed_shared_state", "_snapshot_system_prompts",
+    "_seed_shared_state", "_snapshot_system_prompts", "resolve_model_display_name",
 ]
+from . import framework_registry
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
@@ -1125,6 +1127,27 @@ def _check_shm_disk() -> None:
 _TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_pytorch_inference",)
 
 
+def _tracelens_required_at_preflight(no_kernel: bool, enable_roofline: bool) -> bool:
+    """Return whether the TraceLens CLI must be present at preflight (hard-fail).
+
+    TraceLens is reached both by the kernel agent AND by the PRELUDE/auto
+    roofline (roofline -> trace_analyze -> TraceLens). ``enable_roofline``
+    defaults True and is NOT disabled by ``--no-kernel``, so under ``--no-kernel``
+    alone the PRELUDE roofline still invokes TraceLens. It is only truly unused
+    when the kernel role is off (``--no-kernel``) AND roofline is disabled; only
+    then may preflight degrade to WARN. Otherwise keep the hard-fail so a missing
+    CLI fails fast at preflight instead of mid-run at the first roofline.
+
+    Args:
+        no_kernel: Whether the run is started with ``--no-kernel``.
+        enable_roofline: Whether the auto/PRELUDE roofline is enabled.
+
+    Returns:
+        bool: ``True`` when TraceLens must hard-gate at preflight.
+    """
+    return not (no_kernel and not enable_roofline)
+
+
 def _check_tracelens_cli() -> None:
     """Hard-gate TraceLens CLI presence — abort before Coordinator starts (SKILL IR-2).
 
@@ -1761,15 +1784,13 @@ def _preflight(
         )
         print("Preflight: ray installed OK")
 
-    # 2. Magpie — the benchmark engine all executors shell out to ($MAGPIE_DIR override; auto-clones if missing).
+    # 2. Magpie — the benchmark engine all executors shell out to ($MAGPIE_PATH override; auto-clones if missing).
     check = subprocess.run(
         [magpie_python, "-c", "import Magpie"],
         capture_output=True,
     )
     if check.returncode != 0:
-        # MAGPIE_PATH is the preferred override; MAGPIE_DIR stays honoured as
-        # a backward-compatible fallback.
-        magpie_env = os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR")
+        magpie_env = os.environ.get("MAGPIE_PATH")
         magpie_env_explicit = bool(magpie_env)
         if magpie_env:
             magpie_dir = Path(magpie_env)
@@ -1779,17 +1800,17 @@ def _preflight(
             magpie_dir = _magpie_default(_session_dir_resolve())
         magpie_dir.parent.mkdir(parents=True, exist_ok=True)
         if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
-            # Refuse-to-clobber: don't clone Magpie main over an explicit $MAGPIE_DIR (would destroy local work).
+            # Refuse-to-clobber: don't clone Magpie main over an explicit $MAGPIE_PATH (would destroy local work).
             if magpie_env_explicit:
                 print(
-                    f"Preflight: ERROR — $MAGPIE_DIR={magpie_dir} has no "
+                    f"Preflight: ERROR — $MAGPIE_PATH={magpie_dir} has no "
                     f"setup.py/pyproject.toml; refusing to clone Magpie "
                     f"main on top of an operator-supplied path. Fix the "
-                    f"env or unset $MAGPIE_DIR to fall back to the "
+                    f"env or unset $MAGPIE_PATH to fall back to the "
                     f"session-default location.",
                     file=sys.stderr,
                 )
-                raise FileNotFoundError(f"$MAGPIE_DIR={magpie_dir} is not a valid Magpie checkout")
+                raise FileNotFoundError(f"$MAGPIE_PATH={magpie_dir} is not a valid Magpie checkout")
             print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
             subprocess.run(
                 ["git", "clone", "--depth", "1", "https://github.com/AMD-AGI/Magpie.git", str(magpie_dir)],
@@ -1811,7 +1832,7 @@ def _preflight(
         )
 
         open_source_root = _open_source_default()
-        _magpie_env = os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR")
+        _magpie_env = os.environ.get("MAGPIE_PATH")
         magpie_root = Path(_magpie_env) if _magpie_env else _magpie_default(_session_dir_resolve())
         # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
@@ -1867,9 +1888,19 @@ def _preflight(
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
 
-    # --- TraceLens CLI presence (HARD-FAIL; SKILL Step 2 step 8.5) ---
+    # --- TraceLens CLI presence (HARD-FAIL unless --no-kernel AND roofline off; SKILL Step 2 step 8.5) ---
     # Catches launchers that skip install.sh, else missing-CLI only surfaces at the tick ~6 robustness probe.
-    _check_tracelens_cli()
+    no_kernel = getattr(args, "no_kernel", False) if args else False
+    enable_roofline = getattr(args, "enable_roofline", True) if args else True
+    if _tracelens_required_at_preflight(no_kernel, enable_roofline):
+        _check_tracelens_cli()
+    else:
+        _missing_tl = [n for n in _TRACELENS_REQUIRED_CLIS if shutil.which(n) is None]
+        if _missing_tl:
+            print(
+                f"Preflight: WARNING — TraceLens CLI(s) not on PATH: {_missing_tl} "
+                f"(skipped; --no-kernel + roofline disabled)"
+            )
 
     # --- IR-3: Cortex KB + PR Monitor reachability (soft degrade) ---
     if args is not None:
@@ -2597,6 +2628,12 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
 
     args.model = Path(quantized_model_dir)
     os.environ["MODEL_PATH"] = str(quantized_model_dir)
+    # Preserve the SOURCE model identity for session naming / display. The export
+    # dir basename is always "quantized" (see quantization_request_handlers), so
+    # deriving the model name from args.model would collapse every quantized run
+    # to "quantized". Pin "<source>-quantized" so the session dir, SharedState,
+    # and manifest carry the real model name and quantized runs stay distinct.
+    args.model_display_name = f"{Path(source_model).name}-quantized"
     print(f"Quantization prelude: model -> {quantized_model_dir}")
 
 
@@ -3103,10 +3140,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         await _run_quantization_prelude(args)
 
         # Resolve framework: --framework > $FRAMEWORK > "sglang" (session-wide; no framework mixing).
-        framework = (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower() or "sglang"
-        if framework not in ("sglang", "vllm", "atom"):
+        framework = (
+            (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
+            or framework_registry.DEFAULT_FRAMEWORK
+        )
+        if not framework_registry.is_supported(framework):
             print(
-                f"ERROR: --framework must be sglang, vllm, or atom "
+                f"ERROR: --framework must be one of "
+                f"{', '.join(framework_registry.names())} "
                 f"(got {framework!r}); set $FRAMEWORK accordingly or pass "
                 "--framework",
                 file=sys.stderr,
@@ -3188,7 +3229,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
 
         # session_dir defaults to <workspace_root>/<model>/<UTC ts>/ (INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat for legacy).
-        session_dir = make_session_dir(model_name=args.model)
+        # Use the resolved identity so a quantized run is named after the source
+        # model (e.g. "<model>-quantized") instead of the generic export-dir
+        # basename "quantized".
+        session_dir = make_session_dir(model_name=resolve_model_display_name(args))
         # Single-optimizer guard (issue #592): a fresh per-session dir is
         # normally uncontended, but take the lock here too so the contract
         # ("one optimizer owns a session") holds uniformly and the owner pid is
@@ -3800,7 +3844,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--framework",
-        choices=["sglang", "vllm", "atom"],
+        choices=list(framework_registry.names()),
         default=None,
         help="Inference framework to benchmark / optimize. Resolution order: "
         "--framework > $FRAMEWORK env > sglang (default). Selection is "
@@ -3808,7 +3852,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "supported. NOTE: --framework atom is single-node-only "
         "(``--nodes>=2`` fails fast); profile / roofline, "
         "kernel-agent, and framework-agent are all enabled on atom. "
-        "The auto-tighten guard only enforces ``--nodes 1``.",
+        "The auto-tighten guard only enforces ``--nodes 1``. "
+        "--framework xdit is a server-less (scriptable) diffusion "
+        "workload (xDiT): no serving server, throughput is img/s, and "
+        "the accuracy gate is an image-quality gate (LPIPS/SSIM/MSE).",
     )
     opt.add_argument(
         "--nodes",
@@ -4700,6 +4747,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "Ignored when ``--no-research-scout`` is set.",
     )
     opt.add_argument(
+        "--static-recon",
+        dest="static_recon",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_STATIC_RECON"),
+        help="Auto-dispatch a read-only static-recon specialist at PRELUDE "
+        "that greps the framework source for un-bridged capability "
+        "switches (predicates that silently disable a faster path for "
+        "this model/GPU/precision, e.g. a CUDA-only ``*_supported()`` "
+        "on ROCm) and seeds bridge candidates as gaps[]. Default on; "
+        "pass ``--no-static-recon`` to disable. Env: "
+        "INFERENCE_OPTIMIZER_STATIC_RECON=0.",
+    )
+    opt.add_argument(
         "--recipe-sediment",
         dest="recipe_sediment",
         action=argparse.BooleanOptionalAction,
@@ -4858,16 +4918,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO",
         ),
         help="Per-variant explore overtime kill: each single-variant "
-        "Magpie run in the explore loop is reaped once its warm "
-        "hot-client benchmark phase (measured from the server-ready "
-        "marker, excluding cold boot / warmup) exceeds "
-        "``baseline_warm_runtime_sec * RATIO``. The variant is "
+        "Magpie run in the explore loop is reaped once its "
+        "POST-READY (pure hot client) wall-clock exceeds "
+        "``decision_anchor_sec * RATIO`` (the warm-decision anchor is "
+        "``baseline_warm_runtime_sec``; pre-ready boot / weight load / "
+        "first-request recompile is excluded — see "
+        "INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY). The variant is "
         "recorded with outcome=KILLED_OVERTIME + runtime_sec + "
         "wall_clock_ratio_vs_baseline (no tput) so the LLM can "
-        "distinguish it from a hard timeout / crash. Default 2.0 "
-        "(kill at 2x the warm baseline client-phase wall-clock). "
-        "Pass 0 to disable. Env: "
-        "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
+        "distinguish it from a hard timeout / crash. Default 2.0 (kill "
+        "at +100%% over the warm client anchor). Pass 0 to disable. "
+        "Env: INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
     )
     # Explore variant hard timeout — operator override for the auto-derived cap.
     # ExploreExecutor auto-derives from baseline_runtime_sec*(kill_ratio+0.5); 0 (default) keeps auto-derive.

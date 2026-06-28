@@ -681,6 +681,17 @@ class Coordinator:
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
+        # Minimum ticks between orchestration-memory compactions. A compaction
+        # resets the persistent conversation and forces a full SEED re-push next
+        # tick, so allowing two compactions back-to-back can wedge the run in a
+        # checkpoint-every-tick loop (the SEED's own tokens re-trip the budget).
+        # A true near-window emergency bypasses this floor (see _maybe_checkpoint).
+        try:
+            self._checkpoint_min_tick_gap: int = max(
+                1, int(os.environ.get("INFERENCE_OPTIMIZER_CHECKPOINT_MIN_TICK_GAP", "").strip() or 3)
+            )
+        except (TypeError, ValueError):
+            self._checkpoint_min_tick_gap = 3
         # Consecutive degenerate checkpoint replies (#1); resets on a good one.
         self._consec_degenerate_ckpt: int = 0
         # Disable checkpointing entirely via env.
@@ -1139,6 +1150,37 @@ class Coordinator:
         # Hard context-token guardrail: near the window we MUST compact even when
         # the LLM summary is degenerate (deterministic fallback) to avoid overflow.
         hard = self._checkpoint_policy.is_hard_compaction(tracker.context_tokens_now)
+        # Anti-thrash floor for the TOKEN-budget triggers only. A compaction
+        # RESETS the persistent conversation, so the next tick re-sends the full
+        # SEED whose own token cost re-trips the soft/hard budget — looping
+        # forever (checkpoint every tick → conversation never persists →
+        # orchestration loses cross-tick memory and re-does discovery instead of
+        # progressing). When the token budget is what's firing, require a minimum
+        # tick gap between compactions; genuine cadence triggers (every_ticks /
+        # minutes / chars / phase boundary) are unaffected. A true near-window
+        # emergency (>= 98% of the window — unreachable by a single SEED) always
+        # bypasses the floor so we never overflow the context window.
+        suppress_token_trigger = False
+        if not force and ticks_since < max(1, int(getattr(self, "_checkpoint_min_tick_gap", 2) or 2)):
+            ctx_token_hard = int(getattr(self._checkpoint_policy, "context_token_hard", 0) or 0)
+            ctx_token_soft = int(getattr(self._checkpoint_policy, "context_token_soft", 0) or 0)
+            ctx_now = int(tracker.context_tokens_now)
+            token_due = (
+                (ctx_token_hard > 0 and ctx_now >= ctx_token_hard)
+                or (ctx_token_soft > 0 and ctx_now >= ctx_token_soft)
+            )
+            emergency_ceiling = (
+                int(ctx_token_hard / max(0.01, _orch_mem.DEFAULT_CONTEXT_TOKEN_HARD_FRACTION) * 0.98)
+                if ctx_token_hard > 0
+                else 0
+            )
+            in_emergency = emergency_ceiling > 0 and ctx_now >= emergency_ceiling
+            suppress_token_trigger = token_due and not in_emergency
+            if suppress_token_trigger:
+                # Suppress the token-driven hard flag so the freshly-seeded
+                # conversation can persist; fall through to the cadence check,
+                # which will return False unless a non-token trigger fired.
+                hard = False
         # Authoritative growth signal is the context-token water level; the char
         # count is a fallback for backends that don't report token usage.
         if (
@@ -1149,7 +1191,10 @@ class Coordinator:
                 minutes_since_last=minutes_since,
                 chars_since_last=tracker.chars_since_last,
                 phase_changed=phase_changed,
-                context_tokens_now=tracker.context_tokens_now,
+                # During the anti-thrash window, zero out the token level so the
+                # soft-token trigger can't re-fire the compaction we just
+                # suppressed; cadence triggers still evaluate normally.
+                context_tokens_now=0 if suppress_token_trigger else tracker.context_tokens_now,
             )
         ):
             return False
@@ -4376,26 +4421,30 @@ class Coordinator:
         return verdict_row
 
     async def _maybe_reprofile_for_kernel(self) -> None:
-        """Re-run profile+TraceLens inline on any change in projected tput vs the last profiled snapshot, so GEAK targets the current bottleneck."""
-        last_rl = float(getattr(self.shared_state, "last_roofline_tput", 0.0) or 0.0)
+        """Reprofile inline when projected tput diverges from the last measured trace, so GEAK targets the live bottleneck."""
+        before = self._last_measured_roofline_tput()
         cur = self._current_tput_from_validated_gain()
-        if last_rl <= 0 or cur <= 0:
+        if cur <= 0:
             return
-        # Reprofile on ANY material change (rise or fall) since the last roofline;
-        # a stack revert can lower validated tput, which must also re-target GEAK.
-        if abs(cur - last_rl) / last_rl < self._REPROFILE_CHANGE_TOL:
+        # With a measured trace, reprofile only on a material change; with none,
+        # fall through so GEAK still gets a real trace.
+        if before > 0 and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL:
             return
-        # State-version the idempotency reason on the validated-gain stack so a
-        # genuine change re-runs (new key) while an unchanged state dedupes.
         stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
         try:
             await self.sub.run_task(
                 await self._enqueue_internal_analysis_task(reason=f"kernel_entry_g{stack_len}")
             )
-            self.shared_state.last_roofline_tput = self._current_tput_from_validated_gain()
-            self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
             log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
+            return
+        # Advance the anchor only when a new snapshot actually landed.
+        after = self._last_measured_roofline_tput()
+        if after > 0 and after != before:
+            self.shared_state.last_roofline_tput = after
+            self.shared_state.save(self.session_dir)
+        else:
+            log.warning("kernel-entry reprofile produced no new snapshot; GEAK targets existing trace")
 
     def _perfskills_enabled(self) -> bool:
         """Whether the KERNEL phase is delegated to the PerfSkills e2e optimizer.
@@ -5592,6 +5641,20 @@ class Coordinator:
             gain = 0.0
         return base * (1.0 + gain / 100.0)
 
+    def _last_measured_roofline_tput(self) -> float:
+        """Measured tok/s of the most recent roofline snapshot; 0.0 when none."""
+        snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
+        for snap in reversed(snaps):
+            if not isinstance(snap, dict):
+                continue
+            try:
+                tput = float(snap.get("achieved_tok_per_sec") or 0.0)
+            except (TypeError, ValueError):
+                tput = 0.0
+            if tput > 0:
+                return tput
+        return 0.0
+
     def _needs_roofline_for_watermark(self) -> bool:
         """True iff projected tput crossed the 10% watermark over ``last_roofline_tput`` (bootstrap guard: False until PRELUDE roofline ran; re-arm guard: False while auto_roofline_pending_task_id is in-flight).
 
@@ -6052,6 +6115,25 @@ class Coordinator:
             outcome["reason"] = f"invalid_tput tput={single_round_tput} baseline={baseline_tput}"
             state.warm_replay_outcome = outcome
             state.save(self.session_dir)
+            return
+        # R3 — warm_replay reuses the BaselineExecutor but is an optimization
+        # candidate, not the baseline, so it must clear the image-quality gate
+        # against the pure baseline reference before promotion. A scriptable run
+        # whose gate ran and FAILED (passed=False / threshold violation vs the
+        # baseline reference) is rejected so a faster but quality-degrading warm
+        # config is never pushed onto the stack/current_best. ``require=False``
+        # keeps a missing/skipped gate non-blocking (parity with
+        # ``is_valid_measurement`` and the serving no-baseline accuracy skip).
+        from .action_executors._accuracy_gate import quality_gate_passed
+
+        qg = result.get("quality_gate")
+        if qg is not None and not quality_gate_passed(qg, require=False):
+            outcome["status"] = "quality_failed"
+            outcome["reason"] = "image-quality gate failed vs baseline reference"
+            outcome["quality_gate"] = qg
+            state.warm_replay_outcome = outcome
+            state.save(self.session_dir)
+            log.info("warm-replay REJECTED by quality gate: %s", qg)
             return
         measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
         min_reproduce = float(
@@ -7515,6 +7597,112 @@ class Coordinator:
         """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
         return self.recorder._aggregate_research_evidence(done_payload)
 
+    async def _enqueue_internal_static_recon_task(
+        self,
+        *,
+        reason: str,
+    ) -> "Task | None":
+        """Enqueue the Coordinator-owned read-only static-recon specialist task.
+
+        Mirrors :meth:`_enqueue_internal_research_scout_task` but seeds a source
+        -code reconnaissance mandate: the specialist greps the framework source
+        tree for un-bridged capability switches (predicates that silently
+        disable a faster path for the current model/GPU/precision). Read-only —
+        produces bridge candidates only; the EXPLORE freeform specialist authors
+        any patch under the normal KEEP gate. Idempotency keyed to the session
+        (PRELUDE one-shot). Returns None when disabled or enqueue fails.
+
+        Args:
+            reason: Tag distinguishing the enqueue site, recorded on the task.
+
+        Returns:
+            The created (or existing) specialist :class:`Task`, or ``None`` when
+            static-recon is disabled or enqueue fails.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "static_recon_enabled", True)):
+            return None
+        idempotency_key = "internal-static-recon-prelude"
+        params: dict[str, Any] = {
+            "domain": "static_recon_specialist",
+            "gap_canonical_id": "gap.static_recon.prelude",
+            "gap_symptom": (
+                "Grep the framework source for un-bridged capability switches "
+                "(predicates that silently disable a faster path for this "
+                "model/GPU/precision) and emit bridge candidates; do not "
+                "benchmark or patch."
+            ),
+            "gap_layer": "static_recon",
+            "source": "coordinator_internal",
+            "reason": str(reason),
+            # Read-only research lane (no worktree, no GPU lease).
+            "readonly": True,
+            "scope": "domain",
+            "mode": "research",
+            "lane": "cpu",
+        }
+        # Seed the curated checklist + its rendered prompt block for the current
+        # (model_class, gpu, precision). Best-effort; an empty checklist still
+        # runs a generic recon pass.
+        try:
+            from . import static_recon_checklist as _src_recon
+
+            _entries = _src_recon.entries_for(
+                model_class=str(getattr(state, "model_class", "") or ""),
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                precision=str(getattr(state, "precision", "") or ""),
+            )
+            _rendered = _src_recon.render_checklist_for_prompt(_entries)
+            if _rendered:
+                params["static_recon_checklist"] = _rendered
+            _dicts = _src_recon.checklist_as_dicts(_entries)
+            if _dicts:
+                params["static_recon_checklist_entries"] = _dicts
+        except Exception:  # noqa: BLE001 — advisory; never block dispatch
+            log.exception("static-recon: checklist seeding failed")
+        await self._warm_specialist_params(params)
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=params,
+                idempotency_key=idempotency_key,
+                requires_lanes=["research_lane"],
+                allowed_tools=[
+                    "Read",
+                    "Grep",
+                    "Glob",
+                    "Write",
+                ],
+                side_effects=["writes_results"],
+                lease_ttl_sec=1800,
+            )
+        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
+            log.exception("static-recon: enqueue failed")
+            return None
+        if not was_existing:
+            try:
+                state.static_recon_runs = int(getattr(state, "static_recon_runs", 0) or 0) + 1
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive bookkeeping
+                log.exception("static-recon: bookkeeping save failed")
+            log.info(
+                "static-recon dispatched: task_id=%s reason=%s",
+                task.task_id,
+                reason,
+            )
+        return task
+
+    async def _maybe_enqueue_prelude_static_recon(self) -> None:
+        """Force-dispatch the PRELUDE static-recon specialist (not LLM-proposable)."""
+        if not bool(getattr(self.shared_state, "static_recon_enabled", True)):
+            return
+        try:
+            await self._enqueue_internal_static_recon_task(
+                reason="prelude_initial",
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("static-recon: PRELUDE dispatch failed")
+
     async def _maybe_force_stalled_domain_specialist(self) -> None:
         """Hard-trigger: force-dispatch a domain specialist for a
         domain that has gone untouched for too many EXPLORE rounds *and* still
@@ -7722,6 +7910,74 @@ class Coordinator:
                     "research-scout: upsert_gap failed for %s",
                     cid,
                 )
+
+    def _consume_static_recon(self, done_payload: dict[str, Any]) -> None:
+        """Seed static-recon bridge candidates into gaps[] (idempotent, fail-soft).
+
+        Reads the specialist's ``recon`` block, validates each
+        ``bridge_candidate``, and upserts one gap per candidate so the EXPLORE
+        freeform specialist later dispatches against it with a precise mandate
+        (predicate location + consequence + bridge sketch). Read-only producer:
+        no patch is applied here; the normal KEEP gate still governs landing.
+
+        Args:
+            done_payload: The completed static-recon task payload; its ``recon``
+                block carries ``bridge_candidates``.
+        """
+        block = done_payload.get("recon")
+        if not isinstance(block, dict):
+            return
+        candidates = block.get("bridge_candidates")
+        if not isinstance(candidates, list):
+            return
+        seeded = 0
+        for idx, cand in enumerate(candidates):
+            if not isinstance(cand, dict):
+                continue
+            predicate_file = str(cand.get("predicate_file") or "").strip()
+            why = str(cand.get("why_disabled_here") or "").strip()
+            # Mirror the specialist's drop rule: a candidate without a source
+            # anchor + an explanation of the disabled branch is not actionable.
+            if not predicate_file or not why:
+                continue
+            raw_id = str(cand.get("id") or f"cand{idx}").strip() or f"cand{idx}"
+            slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw_id)[:80]
+            cid = f"gap.static_recon.{slug}"
+            predicate_name = str(cand.get("predicate_name") or "").strip()
+            consequence = str(cand.get("consequence") or "").strip()
+            bridge_sketch = str(cand.get("bridge_sketch") or "").strip()
+            domain_hint = str(cand.get("domain_hint") or "freeform").strip() or "freeform"
+            symptom_parts = [
+                f"Un-bridged switch in {predicate_file}"
+                + (f" ({predicate_name})" if predicate_name else "")
+                + f": {why}",
+            ]
+            if consequence:
+                symptom_parts.append(f"Consequence: {consequence}")
+            if bridge_sketch:
+                symptom_parts.append(f"Bridge: {bridge_sketch}")
+            symptom = " ".join(symptom_parts)[:1200]
+            try:
+                self.shared_state.upsert_gap(
+                    {
+                        "canonical_id": cid,
+                        "symptom": symptom,
+                        "layer": "static_recon",
+                        "severity": "medium",
+                        "domain_hint": domain_hint,
+                        "source": "static_recon",
+                        "provenance": predicate_file,
+                    }
+                )
+                seeded += 1
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("static-recon: upsert_gap failed for %s", cid)
+        if seeded:
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("static-recon: SharedState.save after seeding failed")
+        log.info("static-recon consumed: bridge_candidates_seeded=%d", seeded)
 
     async def _enqueue_internal_session_breakdown_task(
         self,
@@ -8867,14 +9123,11 @@ class Coordinator:
     def _sequence_denial_for_action(
         self,
         action_name: str,
-        proposed_params: dict[str, Any] | None = None,
     ) -> PolicyDenied | None:
-        """Reject orchestration action/delegate attempts before baseline. Only invariant: nothing runs until baseline_tput > 0 (a data-dependency). proposed_params kept for signature compat.
+        """Reject orchestration action/delegate attempts before baseline. Only invariant: nothing runs until baseline_tput > 0 (a data-dependency).
 
         Args:
             action_name: The proposed/delegated action name.
-            proposed_params: Optional action params; kept for signature
-                compatibility and not currently inspected.
 
         Returns:
             A :class:`PolicyDenied` when the action must wait for baseline, else
@@ -10075,6 +10328,30 @@ class Coordinator:
             _arch_notes = render_model_arch_compact(getattr(state, "model_arch", None))
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
+
+        # Static-recon specialist extras: structured model_info (machine-parseable
+        # companion to arch_notes) + checklist-derived source-hint directories so
+        # the recon focus block can gate + navigate. Other domains unaffected.
+        if domain == "static_recon_specialist":
+            if "model_info" not in params:
+                _minfo = getattr(state, "model_info", None)
+                if isinstance(_minfo, dict) and _minfo:
+                    params["model_info"] = dict(_minfo)
+            if "source_hint_directories" not in params:
+                try:
+                    from . import static_recon_checklist as _src_recon
+
+                    _dirs = _src_recon.source_hint_directories_for(
+                        model_class=str(getattr(state, "model_class", "") or ""),
+                        gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                        precision=str(getattr(state, "precision", "") or ""),
+                    )
+                    if _dirs:
+                        params["source_hint_directories"] = list(_dirs)
+                except Exception:  # noqa: BLE001 — advisory; never block dispatch
+                    log.exception(
+                        "static-recon: source_hint_directories lookup failed",
+                    )
 
         if "target_gap_notes" not in params:
             try:
@@ -11976,6 +12253,26 @@ class Coordinator:
         ``_advance_phase_if_needed`` and the phase advances (prevents the
         KERNEL/EXPLORE interleave grid from stalling the phase machine).
         """
+        # Dead-holder self-heal (runs EVERY tick, before scanning the queue):
+        # a crashed worker leaves its serving lanes leased and its task stuck
+        # 'running' until the multi-hour TTL fires — which strands every queued
+        # GPU task behind it and makes the explore-dedup deny new delegates as
+        # duplicates of a zombie. Detect the dead PID immediately so the lanes
+        # free and the stuck task fails (retry-eligible) this same tick.
+        try:
+            dead_tasks = await self.tasks.reclaim_dead_running(reason="dead_holder_pump")
+            if dead_tasks:
+                log.warning(
+                    "dispatcher: reclaimed %d running task(s) with dead holders: %s",
+                    len(dead_tasks),
+                    ", ".join(t[:12] for t in dead_tasks),
+                )
+        except Exception:  # noqa: BLE001 — self-heal never aborts the pump
+            log.exception("dispatcher: dead-running task reclaim failed")
+        try:
+            await self.locks.reap_dead_holders()
+        except Exception:  # noqa: BLE001
+            log.exception("dispatcher: dead-holder lease reap failed")
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set: a
         # fast task can complete and be reaped (leaving ``inflight``) before its
@@ -13065,6 +13362,10 @@ class Coordinator:
                 )
                 # Step 4 — research scout (parallel, read-only, CPU-only).
                 await self._maybe_enqueue_prelude_research_scout()
+                # Step 5 — static-recon (parallel, read-only, CPU-only): grep
+                # the framework source for un-bridged capability switches and
+                # seed bridge candidates as gaps[] before EXPLORE starts.
+                await self._maybe_enqueue_prelude_static_recon()
         elif task_kind == "replay_warm_recipe":
             # separate promote path so replay doesn't overwrite baseline_tput/current_best via the baseline branch.
             try:

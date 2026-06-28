@@ -51,6 +51,7 @@ from ._subprocess_kill import (
     server_log_death_excerpt,
 )
 from ._workload_envs import (
+    _RUN_EVAL_FALSE_VALUES,
     FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
@@ -62,6 +63,38 @@ from .benchmark_result import (
 
 
 log = logging.getLogger(__name__)
+
+
+# Markers that identify an InferenceX ``run_eval`` (lm-eval) failure as the
+# root cause of a benchmark non-zero exit. ``run_eval`` echoes the first marker
+# on ANY eval failure (benchmark_lib.sh), so it is the most general signal; the
+# others catch the specific redundant-flag breakage even when the generic
+# message scrolled out of a truncated tail.
+_EVAL_FAILURE_MARKERS = (
+    "run_eval failed with exit code",
+    "ERROR: run_eval failed",
+    "Unknown parameter: --concurrent-requests",
+)
+# Bounded per-file read so scanning a failed run's logs for eval markers never
+# slurps a multi-GB server.log.
+_EVAL_SCAN_MAX_BYTES = 262_144
+
+
+def _is_truthy(value: Any) -> bool:
+    """Return whether ``value`` represents an affirmative flag.
+
+    Accepts bools and the usual truthy strings (``true``/``1``/``yes``/``on``);
+    everything else (including ``None`` and ``false``/``0``) is False.
+
+    Args:
+        value: The task-param value to interpret.
+
+    Returns:
+        ``True`` for an affirmative bool/string, else ``False``.
+    """
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 # Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
@@ -252,6 +285,24 @@ BASELINE_COLD_START_TIMEOUT_SEC = 9000        # COLD-start cap, 150 min (include
 # names live in `_workload_envs`.
 _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
+
+
+def _should_establish_quality_ref(task_kind: str | None) -> bool:
+    """Only a genuine ``baseline`` task may establish/overwrite the quality reference.
+
+    ``replay_warm_recipe`` reuses this executor but is an optimization
+    candidate, so it must compare against the pure baseline reference rather
+    than redefine it (otherwise the gate would mask the warm recipe's own
+    deviation from the baseline output).
+
+    Args:
+        task_kind: The task kind (``ctx.task.kind``); ``None`` is treated as
+            "not a baseline".
+
+    Returns:
+        bool: ``True`` only when the task kind is exactly ``"baseline"``.
+    """
+    return str(task_kind or "") == "baseline"
 
 
 def _resolve_reference_base(
@@ -952,7 +1003,127 @@ class BaselineExecutor:
         """
         return None
 
+    @staticmethod
+    def _is_eval_rooted_failure(result: dict[str, Any]) -> bool:
+        """Whether a failed baseline result was caused by the accuracy eval.
+
+        Scans the result's ``error`` tail + ``nonfatal_warnings`` and then any
+        benchmark stdout/stderr + ``server.log`` under the run's ``output_dir``
+        for ``run_eval``-failure markers. Recursive so the double-run path is
+        covered (the warmup round's logs carry the marker even when the measure
+        round failed for a downstream reason). Never raises.
+
+        Args:
+            result: A ``status="failed"`` baseline result dict.
+
+        Returns:
+            ``True`` when an eval-failure marker is found, else ``False``.
+        """
+
+        def _hit(text: str) -> bool:
+            return any(m in text for m in _EVAL_FAILURE_MARKERS)
+
+        if _hit(str(result.get("error") or "")):
+            return True
+        for w in result.get("nonfatal_warnings") or []:
+            if _hit(str(w)):
+                return True
+        out_dir = result.get("output_dir")
+        if not out_dir:
+            return False
+        root = Path(out_dir)
+        # Double-run: the returned result is the measure round, but the eval
+        # failure (and its markers) live in the sibling warmup round. Climb to
+        # the shared task root so the scan covers both rounds — bounded to the
+        # named round subdirs so we never scan a sibling baseline task.
+        if root.name in ("warmup_round", "measure_round"):
+            root = root.parent
+        if not root.exists():
+            return False
+        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
+        seen = 0
+        try:
+            for path in root.rglob("*.log"):
+                if path.name not in log_names:
+                    continue
+                seen += 1
+                if seen > 64:  # bound the scan on pathological trees
+                    break
+                try:
+                    with path.open("rb") as f:
+                        f.seek(0, 2)
+                        size = f.tell()
+                        f.seek(max(0, size - _EVAL_SCAN_MAX_BYTES))
+                        chunk = f.read().decode("utf-8", "replace")
+                except OSError:
+                    continue
+                if _hit(chunk):
+                    return True
+        except OSError:
+            return False
+        return False
+
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the Magpie baseline, with a one-shot eval-failure fallback.
+
+        Delegates to :meth:`_run_once`. When the run fails for an
+        eval-rooted reason (InferenceX ``run_eval`` aborted the benchmark even
+        though throughput was healthy — e.g. the redundant
+        ``--concurrent-requests`` flag, or any lm-eval breakage) AND accuracy
+        eval was active, it re-runs **once** with ``RUN_EVAL=false`` so the
+        throughput baseline is salvaged. The retried result is tagged
+        ``accuracy_source="eval_unavailable"`` and carries a
+        ``eval_failed_fallback_no_accuracy`` warning. This is the in-executor
+        complement to the install-time flag strip in ``_magpie_patcher.py``:
+        even if the upstream script breaks again, the run degrades gracefully
+        instead of terminating after 3 baseline attempts.
+
+        Args:
+            ctx (RunnerContext): The runner context carrying ``task.params``
+                (config / model / timeout knobs) and ``extra`` (workspace).
+
+        Returns:
+            dict[str, Any]: The baseline result dict (see :meth:`_run_once`).
+
+        Raises:
+            FileNotFoundError: If the resolved baseline config does not exist.
+        """
+        result = await self._run_once(ctx)
+        params = ctx.task.params or {}
+        # "Already off" only when the operator explicitly disabled eval — via
+        # the param, or an extra_envs RUN_EVAL that is PRESENT and falsey. An
+        # absent RUN_EVAL must NOT count (the empty string is in
+        # _RUN_EVAL_FALSE_VALUES for the materialize-time default, not here).
+        _extra_envs = params.get("extra_envs") or {}
+        _explicit_run_eval = "RUN_EVAL" in _extra_envs and str(
+            _extra_envs["RUN_EVAL"]
+        ).strip().lower() in _RUN_EVAL_FALSE_VALUES
+        eval_already_off = _is_truthy(params.get("disable_run_eval")) or _explicit_run_eval
+        if (
+            result.get("status") != "succeeded"
+            and not eval_already_off
+            and self._is_eval_rooted_failure(result)
+        ):
+            log.warning(
+                "baseline_executor: failure looks eval-rooted (InferenceX "
+                "run_eval aborted the benchmark); retrying once with "
+                "RUN_EVAL=false to salvage the throughput baseline without "
+                "the accuracy gate."
+            )
+            retry = await self._run_once(ctx, force_disable_eval=True)
+            retry.setdefault("nonfatal_warnings", [])
+            retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
+            if retry.get("status") == "succeeded":
+                retry["accuracy_source"] = "eval_unavailable"
+            return retry
+        return result
+
+    async def _run_once(
+        self,
+        ctx: RunnerContext,
+        *,
+        force_disable_eval: bool = False,
+    ) -> dict[str, Any]:
         """Run the Magpie baseline benchmark and parse its result.
 
         Materializes the workload config, resolves the timeout (with cold-start
@@ -964,6 +1135,9 @@ class BaselineExecutor:
         Args:
             ctx (RunnerContext): The runner context carrying ``task.params``
                 (config / model / timeout knobs) and ``extra`` (workspace).
+            force_disable_eval: When True, force ``RUN_EVAL=false`` into the
+                materialized config (the eval-failure fallback path); also set
+                by the ``disable_run_eval`` task param.
 
         Returns:
             dict[str, Any]: On success, a ``status="succeeded"`` dict with
@@ -976,6 +1150,12 @@ class BaselineExecutor:
             FileNotFoundError: If the resolved baseline config does not exist.
         """
         params = ctx.task.params or {}
+        # Only a genuine ``baseline`` task may establish/overwrite the quality
+        # reference image. ``replay_warm_recipe`` reuses this executor but is an
+        # optimization candidate, so it must compare against the pure baseline
+        # reference rather than redefine it (otherwise the gate would mask the
+        # warm recipe's own deviation from the baseline output).
+        is_genuine_baseline = _should_establish_quality_ref(getattr(ctx.task, "kind", ""))
         config_path = Path(params.get("config_path") or self.default_config_path or self._resolve_default_config())
         if not config_path.exists():
             raise FileNotFoundError(f"baseline config not found: {config_path}")
@@ -1082,18 +1262,27 @@ class BaselineExecutor:
             ref_args, ref_envs = _resolve_reference_base(
                 self.session_dir, model_path=resolved_model,
             )
+        # Accuracy eval (GSM8K) opt-out: the ``disable_run_eval`` task param
+        # (documented to the LLM + fingerprinted) and the in-executor
+        # eval-failure fallback both force ``RUN_EVAL=false`` via extra_envs,
+        # which materialize honors over the default-true. An explicit
+        # extra_envs RUN_EVAL still loses to the deliberate disable.
+        base_extra_envs = dict(params.get("extra_envs") or {})
+        if force_disable_eval or _is_truthy(params.get("disable_run_eval")):
+            base_extra_envs["RUN_EVAL"] = "false"
         try:
             config_path = materialize_config_with_envs(
                 config_path,
                 output_dir,
                 extra_server_args=effective_extra_server_args,
-                extra_envs=dict(params.get("extra_envs") or {}),
+                extra_envs=base_extra_envs,
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
                 inferencex_path=effective_inferencex_path,
                 benchmark_script=override_script,
                 reference_server_args=ref_args,
                 reference_envs=ref_envs,
+                establish_quality_ref=is_genuine_baseline,
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override (e.g. sglang_*.sh on a vllm run):
@@ -1864,11 +2053,14 @@ class BaselineExecutor:
             "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
         }
 
-        # Parse accuracy eval results (GSM8K); RUN_EVAL=true ran lm-eval
-        # while the server was up.
+        # Parse accuracy eval results (GSM8K for serving, or the image-quality
+        # gate for scriptable frameworks); RUN_EVAL=true ran lm-eval while the
+        # server was up. Pass the framework so scriptable runs (xDiT) fail
+        # closed on a missing quality gate instead of falling back to GSM8K.
         from ._accuracy_gate import parse_eval_results
 
-        eval_data = parse_eval_results(workspace)
+        eval_framework = (report or {}).get("framework") or os.environ.get("FRAMEWORK") or None
+        eval_data = parse_eval_results(workspace, framework=eval_framework)
         if eval_data.get("accuracy") is not None:
             result["accuracy"] = eval_data["accuracy"]
             result["accuracy_task"] = eval_data.get("task", "gsm8k")

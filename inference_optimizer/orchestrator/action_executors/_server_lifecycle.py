@@ -86,6 +86,19 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     except (TypeError, ValueError):
         info["port"] = REUSE_PORT_DEFAULT
 
+    # Server-less (scriptable) frameworks — e.g. xDiT diffusion — never boot a
+    # persistent server, so the reuse protocol does not apply. Bail out before
+    # the Magpie built-in-script check (whose script names are serving-only).
+    from ... import framework_registry
+
+    if (
+        str(bench.get("workload_kind") or "").strip().lower()
+        == framework_registry.SCRIPTABLE
+        or framework_registry.is_scriptable(info["framework"])
+    ):
+        info["reason"] = "scriptable framework (server-less; no server_lifecycle)"
+        return info
+
     from ._multi_node_env import is_multi_node
 
     if is_multi_node():
