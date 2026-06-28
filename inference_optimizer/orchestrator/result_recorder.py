@@ -234,6 +234,16 @@ class ResultRecorder:
                     "research-scout harvest failed for task=%s", task.task_id,
                 )
 
+        # Consume static-recon bridge candidates into gaps[] so the EXPLORE
+        # freeform specialist picks them up with a precise mandate. Fail-soft.
+        if domain == "static_recon_specialist":
+            try:
+                self._coord._consume_static_recon(done_payload)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "static-recon consume failed for task=%s", task.task_id,
+                )
+
         # Aggregate research evidence from any domain (e.g. pr_intel) that
         # self-reports a ``research`` block, so FRAMEWORK_PR / explore lanes
         # reuse the session-wide seen-set. Idempotent for research_scout

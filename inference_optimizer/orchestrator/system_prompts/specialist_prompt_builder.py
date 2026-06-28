@@ -458,6 +458,86 @@ def _focus_research_scout_specialist(
     ]
 
 
+def _focus_static_recon_specialist(
+    inp: SpecialistPromptInputs,
+) -> list[str]:
+    """Build the focus section for the static-recon specialist prompt.
+
+    Steers a read-only sub-agent to grep the framework source tree for
+    un-bridged capability switches (predicates that silently disable a fast
+    path for the current GPU/precision), seeded with a curated checklist, and to
+    emit structured bridge candidates rather than patches.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        Prompt lines describing the recon task, the seed checklist, and the
+        ``recon`` output block schema.
+    """
+    checklist_lines: list[str] = []
+    if inp.static_recon_checklist:
+        checklist_lines = [
+            "**Seed checklist (known un-bridged switches for this "
+            "(model, GPU, precision)) — verify each against the LIVE source; "
+            "do not assume it still applies:**",
+            inp.static_recon_checklist,
+            "",
+        ]
+    model_info_line = ""
+    if inp.model_info:
+        try:
+            attn = str(inp.model_info.get("attention_type") or "").strip()
+            is_moe = bool(inp.model_info.get("is_moe"))
+            quant = str(inp.model_info.get("quantization") or "").strip()
+            model_info_line = (
+                "Model features: "
+                f"attention={attn or '?'} moe={is_moe} quant={quant or '?'}."
+            )
+        except Exception:  # noqa: BLE001 — advisory rendering only
+            model_info_line = ""
+    return [
+        "You are the **static-recon specialist** — a read-only reconnaissance",
+        "agent. You do NOT benchmark, apply patches, build a worktree, or",
+        "decide KEEP/REVERT. Your single deliverable is a prioritised list of",
+        "**bridge candidates**: fast paths that *should* be enabled for this",
+        f"GPU ({inp.gpu_type or '?'}) + precision ({inp.precision or '?'}) but",
+        "are silently disabled in the LIVE framework source.",
+        "",
+        *( [model_info_line, ""] if model_info_line else [] ),
+        *checklist_lines,
+        "**How to hunt (read the LIVE source under the source roots / hint",
+        "directories in Section 7):**",
+        "1. grep for capability predicates — ``*_supported()`` /",
+        "   ``*_enabled()`` / ``is_*()`` guards and feature gates in the",
+        "   quantization, linear, fused_moe and attention dispatch paths.",
+        "2. For each, determine whether it returns False (or routes to a slow",
+        "   fallback) on THIS hardware/precision when a faster path exists",
+        "   (e.g. a CUDA-only ``cutlass_*_supported()`` that is always False on",
+        "   ROCm and so disqualifies an AITER kernel).",
+        "3. Trace the consequence: which GEMM / kernel / backend the code then",
+        "   falls back to, and why that is slower.",
+        "4. Confirm the bridge is plausible (the faster path exists and only",
+        "   the guard / scale-granularity / activation-config blocks it).",
+        "",
+        "**Output protocol** — emit ONE ``specialist_done`` carrying a",
+        "``recon`` block with ``bridge_candidates``: a list of",
+        "``{id, predicate_file, predicate_name, why_disabled_here, consequence,",
+        "bridge_sketch, domain_hint, confidence}``. ``id`` is a short slug",
+        "(reuse the seed checklist id when verifying one), ``predicate_file`` is",
+        "the source path you read, ``why_disabled_here`` explains the False",
+        "branch on this hardware, ``bridge_sketch`` is the proposed fix (a",
+        "sketch — you do NOT write the patch), and ``domain_hint`` is the",
+        "EXPLORE specialist that should author it (``freeform`` keeps the whole",
+        "mandate). A candidate without ``predicate_file`` + ``why_disabled_here``",
+        "is dropped.",
+        "",
+        "**Iron rule** — read-only. Never write a patch, never launch a",
+        "benchmark, never recommend a phase transition. Turn verified source",
+        "findings into structured bridge candidates and stop.",
+    ]
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "kernel_switch_specialist": _focus_kernel_switch_specialist,
@@ -466,6 +546,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "system_specialist": _focus_system_specialist,
     "pr_intel_specialist": _focus_pr_intel_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
+    "static_recon_specialist": _focus_static_recon_specialist,
 }
 
 
@@ -551,6 +632,17 @@ class SpecialistPromptInputs:
     # Local source navigation hint
     framework_source_roots: tuple[str, ...] = ()
     source_hint_directories: tuple[str, ...] = ()
+
+    # Structured model architecture features (attention_type / is_moe /
+    # num_experts / quantization, etc.) mirrored from SharedState.model_info.
+    # Richer + machine-parseable companion to ``arch_notes`` (the compact
+    # string); consumed by the static-recon focus block to gate checklist
+    # entries. Empty dict => not warmed.
+    model_info: dict[str, Any] = field(default_factory=dict)
+    # Pre-rendered static-recon checklist block (Markdown) seeded by
+    # ``static_recon_checklist`` for the current (model, gpu, precision). Only
+    # populated for the static_recon_specialist dispatch; empty otherwise.
+    static_recon_checklist: str = ""
 
     # Workspace path (for transcript / heartbeat instructions)
     workspace_path: str = ""
