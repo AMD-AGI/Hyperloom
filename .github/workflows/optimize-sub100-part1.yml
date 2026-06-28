@@ -7,7 +7,7 @@ name: optimize-sub100-part1
 # engine). Resolves the next batch via ci/batch_rotate.py and forwards it to
 # `SaFE Optimize Submit` (optimize-submit.yml) — same shape as part2/part3.
 #
-#   pool   = $WEKAFS_CHENYI_DIR/ci-candidates/hf_sub100_part1_20260626.json
+#   pool   = $WEKAFS_CHENYI_DIR/ci-candidates/hf_sub100_part1_20260628.json
 #   batch  = 240 (= max_parallel; a batch always runs fully in parallel)
 #   budget = max_hours 6 (== cron period)
 #
@@ -17,7 +17,9 @@ name: optimize-sub100-part1
 
 on:
   schedule:
-    - cron: '7 0,6,12,18 * * *'
+    # Beijing 10/16/22/04 (UTC 02/08/14/20), :07 minute. First fire 08:07Z =
+    # Beijing 16:07 -> batch 0 (anchored 2026-06-28 08:00Z). Every 6h == MAX_HOURS.
+    - cron: '7 2,8,14,20 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
@@ -47,8 +49,8 @@ jobs:
       # Off-repo pool on /wekafs (the /wekafs root lives in the WEKAFS_CHENYI_DIR
       # secret; generate_hf_matrix reads the absolute path as-is, and the
       # hyperloom runners RO-mount /wekafs).
-      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/hf_sub100_part1_20260626.json', secrets.WEKAFS_CHENYI_DIR) }}
-      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/hf_sub100_part1_20260626.json', secrets.WEKAFS_CHENYI_DIR) }}
+      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/hf_sub100_part1_20260628.json', secrets.WEKAFS_CHENYI_DIR) }}
+      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/hf_sub100_part1_20260628.json', secrets.WEKAFS_CHENYI_DIR) }}
       # One batch = 240 models, all run concurrently. BATCH_SIZE doubles as the
       # max_parallel (a batch always runs fully in parallel).
       BATCH_SIZE: '240'
@@ -84,7 +86,7 @@ jobs:
             --batch-size "${BATCH_SIZE}" \
             --batch-index "${INPUT_BATCH_INDEX:-}" \
             --max-hours "${MAX_HOURS}" \
-            --anchor "2026-06-26T12:00:00+00:00" \
+            --anchor "2026-06-28T08:00:00+00:00" \
             --event "${EVENT}")
           bi=$(echo "$out" | cut -f1); pool=$(echo "$out" | cut -f2)
           batches=$(echo "$out" | cut -f3); start=$(echo "$out" | cut -f4); end=$(echo "$out" | cut -f5)
