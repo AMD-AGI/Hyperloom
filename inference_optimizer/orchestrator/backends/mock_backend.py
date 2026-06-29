@@ -11,7 +11,7 @@ Usage::
             Intent(IntentType.PROPOSE_ACTION, payload={...}),
         ]),
         MockTurn(intents=[
-            Intent(IntentType.REQUEST, payload={"target_agent": "kernel", ...}),
+            Intent(IntentType.REQUEST, payload={"target_agent": "kernel_agent", ...}),
         ]),
     ])
     backend = MockBackend(plan)

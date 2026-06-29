@@ -3,7 +3,7 @@
 """Acceptance tests for the long-run optimization refinements.
 
 Covers the decaying acceptance curve, decaying-gain convergence, the absolute
-per-phase wall-clock cap (incl. the unbounded 14-day ceiling), the FRAMEWORK_PR
+per-phase wall-clock cap (incl. the unbounded 14-day ceiling), the FRAMEWORK
 reloop target, and the trailing-window crash-rate emergency stop.
 
 All deterministic + offline.

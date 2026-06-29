@@ -1,11 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""FRAMEWORK_PR candidate-level artifacts + outcome classification (Step 1).
+"""FRAMEWORK candidate-level artifacts + outcome classification (Step 1).
 
-Deterministic, LLM-free observability helpers for the FRAMEWORK_PR phase:
+Deterministic, LLM-free observability helpers for the FRAMEWORK_AGENT phase:
 
 - :func:`write_decision_json` drops a uniform ``decision.json`` under
-  ``runs/framework_pr/<slug>/`` for every candidate terminal event
+  ``runs/framework_agent/<slug>/`` for every candidate terminal event
   (critic-denied, executor KEEP/REVERT/apply_failed/..., authored-patch
   KEEP/REVERT). This is the single per-candidate fate record an operator
   or downstream tool can read without parsing the whole event log.
@@ -68,7 +68,7 @@ def write_decision_json(
     accuracy_pass: bool | None = None,
     extra: dict[str, Any] | None = None,
 ) -> str | None:
-    """Write ``runs/framework_pr/<slug>/decision.json`` for one candidate.
+    """Write ``runs/framework_agent/<slug>/decision.json`` for one candidate.
 
     Best-effort: returns the written path, or ``None`` on any failure (never
     raises — observability must not wedge the pump).
@@ -91,7 +91,7 @@ def write_decision_json(
     """
     try:
         slug = candidate_slug(candidate_id)
-        out_dir = runs_dir(Path(session_dir), "framework_pr", slug)
+        out_dir = runs_dir(Path(session_dir), "framework_agent", slug)
         out_dir.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {
             "candidate_id": str(candidate_id),
@@ -111,7 +111,7 @@ def write_decision_json(
         dest.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         return str(dest)
     except Exception:  # noqa: BLE001 — observability is best-effort
-        log.debug("framework_pr_artifacts: write_decision_json failed", exc_info=True)
+        log.debug("framework_agent_artifacts: write_decision_json failed", exc_info=True)
         return None
 
 
@@ -124,7 +124,7 @@ def write_semantic_audit(
     """Persist a candidate's semantic-audit verdict next to its decision.json.
 
     Writes ``semantic_audit.json`` + a readable ``semantic_audit.md`` under
-    ``runs/framework_pr/<slug>/`` (G9 — co-located with decision.json).
+    ``runs/framework_agent/<slug>/`` (G9 — co-located with decision.json).
     Best-effort: returns the JSON path, or ``None`` on failure.
 
     Args:
@@ -139,7 +139,7 @@ def write_semantic_audit(
         return None
     try:
         slug = candidate_slug(candidate_id)
-        out_dir = runs_dir(Path(session_dir), "framework_pr", slug)
+        out_dir = runs_dir(Path(session_dir), "framework_agent", slug)
         out_dir.mkdir(parents=True, exist_ok=True)
         json_path = out_dir / "semantic_audit.json"
         json_path.write_text(json.dumps(verdict, indent=2, sort_keys=True), encoding="utf-8")
@@ -167,7 +167,7 @@ def write_semantic_audit(
         (out_dir / "semantic_audit.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         return str(json_path)
     except Exception:  # noqa: BLE001 — observability is best-effort
-        log.debug("framework_pr_artifacts: write_semantic_audit failed", exc_info=True)
+        log.debug("framework_agent_artifacts: write_semantic_audit failed", exc_info=True)
         return None
 
 
@@ -176,10 +176,10 @@ def summarize_candidate_outcomes(
     *,
     batch_id: str | None = None,
 ) -> dict[str, Any]:
-    """Classify FRAMEWORK_PR progress rows into a phase-outcome summary.
+    """Classify FRAMEWORK progress rows into a phase-outcome summary.
 
     Args:
-        progress: ``framework_pr_phase_progress`` rows (each a dict carrying
+        progress: ``framework_agent_phase_progress`` rows (each a dict carrying
             ``status`` / ``kept`` / ``batch_id``).
         batch_id: When set, only rows for this batch are counted; otherwise all
             rows are counted.

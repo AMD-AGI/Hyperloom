@@ -451,7 +451,7 @@ def _silent_backends() -> dict[str, object]:
     )
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }

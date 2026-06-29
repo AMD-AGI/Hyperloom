@@ -77,7 +77,7 @@ def _decision_trace_fixture():
             "by_component": {
                 "specialist": _bucket(10, 150, 4, 12, 1),
                 "orchestration": _bucket(80, 40, 4, 6, 1),
-                "kernel": _bucket(10, 10, 2, 2, 1),
+                "kernel_agent": _bucket(10, 10, 2, 2, 1),
             },
             "session_total": session_total,
         },
@@ -141,7 +141,7 @@ class TestCollectTokenUsage:
 
     def test_by_component_and_by_phase_passthrough(self):
         out = col.collect_token_usage(_decision_trace_fixture(), _timeline_fixture(), [])
-        assert set(out["by_component"]) == {"specialist", "orchestration", "kernel"}
+        assert set(out["by_component"]) == {"specialist", "orchestration", "kernel_agent"}
         assert out["by_component"]["specialist"]["grand_total"] == 176
         assert out["by_phase"]["EXPLORE"]["grand_total"] == 330
 

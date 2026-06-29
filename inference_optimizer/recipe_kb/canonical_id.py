@@ -12,7 +12,7 @@ the legacy NDJSON pending-queue plumbing).
 Adds two local-store-specific helpers:
 
 * :func:`cid_to_path_components` — decompose a canonical id back into
-  its seven identity slugs (``model / hardware / framework /
+  its seven identity slugs (``model / hardware / framework_name /
   framework_version / precision / model_type / architectures``). The
   local store maps each slug to a directory level, so the round-trip
   ``recipe_canonical_id`` → ``cid_to_path_components`` →
@@ -89,7 +89,7 @@ def cid_to_path_components(
     architectures to maintain backward compatibility.
 
     Returns the tuple in the order
-    ``(model, hardware, framework, framework_version, precision,
+    ``(model, hardware, framework_name, framework_version, precision,
     model_type, architectures)``,
     matching :func:`recipe_canonical_id`'s keyword order so callers
     can splat the result directly into a downstream call.
@@ -121,21 +121,21 @@ def cid_to_path_components(
             raw,
             f"prefix must be {CANONICAL_ID_PREFIX!r}, got {parts[0]!r}",
         )
-    # Order: model, hardware, framework, model_type, architectures, framework_version, precision
-    model, hardware, framework, model_type, architectures, framework_version, precision = parts[1:]
+    # Order: model, hardware, framework_name, model_type, architectures, framework_version, precision
+    model, hardware, framework_name, model_type, architectures, framework_version, precision = parts[1:]
     if any(not seg for seg in parts[1:]):
         raise InvalidCanonicalIdError(
             raw,
             "empty segment(s) detected — every dimension must be non-empty",
         )
-    return (model, hardware, framework, model_type, architectures, framework_version, precision)
+    return (model, hardware, framework_name, model_type, architectures, framework_version, precision)
 
 
 def canonical_id_from_components(
     *,
     model: str,
     hardware: str,
-    framework: str,
+    framework_name: str,
     model_type: str = "",
     architectures: "str | list[str]" = "",
     framework_version: str,
@@ -153,7 +153,7 @@ def canonical_id_from_components(
     return recipe_canonical_id(
         model=model,
         hardware=hardware,
-        framework=framework,
+        framework_name=framework_name,
         model_type=model_type,
         architectures=architectures,
         framework_version=framework_version,
@@ -196,11 +196,11 @@ def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
             f"expected {CANONICAL_ID_DIMENSIONS} levels under root, got {len(parts)}: {parts!r}",
         )
     # Directory order matches canonical_id: model/hw/fw/model_type/arch/fwv/precision
-    model, hardware, framework, model_type, architectures, framework_version, precision = parts
+    model, hardware, framework_name, model_type, architectures, framework_version, precision = parts
     return canonical_id_from_components(
         model=model,
         hardware=hardware,
-        framework=framework,
+        framework_name=framework_name,
         model_type=model_type,
         architectures=architectures,
         framework_version=framework_version,

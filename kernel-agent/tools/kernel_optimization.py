@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Kernel optimization tool for the resident Kernel Agent skill."""
+"""Kernel optimization tool for the resident Kernel-agent skill."""
 
 from __future__ import annotations
 
@@ -4626,7 +4626,7 @@ def main() -> int:
     Returns:
         int: Process exit code (0 on success, non-zero on failure).
     """
-    parser = argparse.ArgumentParser(description="Kernel Agent optimization tool")
+    parser = argparse.ArgumentParser(description="Kernel-agent optimization tool")
     parser.add_argument("--kernel-id", required=True)
     parser.add_argument("--session-id", default="")
     parser.add_argument(

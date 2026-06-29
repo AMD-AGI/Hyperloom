@@ -26,8 +26,8 @@ The four persistent agent roles and their permitted intents::
     │              │          │ + always-on tick                        │
     └──────────────┴──────────┴─────────────────────────────────────────┘
 
-The roster is exactly these four roles. Framework PR work runs as the
-Coordinator-owned FRAMEWORK_PR phase, not an agent role.
+The roster is exactly these four roles. Framework-agent work runs as the
+Coordinator-owned FRAMEWORK_AGENT phase, not an agent role.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 )
 
 
-# Kernel — responder-only; never initiates RPC, never proposes / delegates.
+# Kernel-agent — responder-only; never initiates RPC, never proposes / delegates.
 _KERNEL_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.RESPONSE,
@@ -173,8 +173,8 @@ def default_role_registry() -> dict[str, AgentRole]:
             can_mutate_core_state=False,
             no_tools=False,
         ),
-        "kernel": AgentRole(
-            name="kernel",
+        "kernel_agent": AgentRole(
+            name="kernel_agent",
             backend_type=BackendType.CLAUDE,
             model=DEFAULT_CLAUDE_MODEL,
             api_key_env=DEFAULT_CLAUDE_API_KEY_ENV,
@@ -215,7 +215,7 @@ def roles_for_run() -> tuple[str, ...]:
     Returns:
         tuple[str, ...]: Role names in fixed reactor-iteration order.
     """
-    return ("orchestration", "kernel", "critic", "robustness")
+    return ("orchestration", "kernel_agent", "critic", "robustness")
 
 
 __all__ = [

@@ -83,7 +83,7 @@ def _nested_row(
     cid: str,
     model: str,
     hardware: str,
-    framework: str = "sglang",
+    framework_name: str = "sglang",
     framework_version: str = "0.5.11",
     precision: str = "fp8",
     args: str = "--x 1",
@@ -104,7 +104,7 @@ def _nested_row(
         "labels": {
             "model": model,
             "hardware": hardware,
-            "framework": framework,
+            "framework_name": framework_name,
             "framework_version": framework_version,
             "precision": precision,
             "model_type": "unknown_model_type",
@@ -130,7 +130,7 @@ def test_dispatcher_translates_nested_remote_row(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="qwen3-32b",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.11",
         precision="fp8",
     )
@@ -191,14 +191,14 @@ def test_search_prefer_reorders_without_dropping(tmp_path: Path) -> None:
     cid_a = recipe_canonical_id(
         model="qwen3-32b",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.11",
         precision="fp8",
     )
     cid_b = recipe_canonical_id(
         model="qwen3-32b",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.11",
         precision="fp8",
     )
@@ -289,7 +289,7 @@ class _FakeState:
     warm_start_pitfalls: list[Any] = field(default_factory=list)
     warm_start_lessons: list[Any] = field(default_factory=list)
     warm_start_context: dict[str, Any] = field(default_factory=dict)
-    framework: str = "sglang"
+    framework_name: str = "sglang"
     framework_version: str = "0.5.11"
     precision: str = "fp8"
     tp: int = 8
@@ -315,7 +315,7 @@ def test_t0_status_miss_on_empty_corpus(tmp_path: Path) -> None:
         state,
         workload="brand-new",
         hw="mi300x",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=sd,
     )
     # The T0 put_recipe wrote a bare draft anchor, so the read-back is a
@@ -331,7 +331,7 @@ def test_t0_status_hit_when_actionable_row_present(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="M",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.11",
         precision="fp8",
     )
@@ -339,7 +339,7 @@ def test_t0_status_hit_when_actionable_row_present(tmp_path: Path) -> None:
         canonical_id=cid,
         model="M",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.11",
         precision="fp8",
         best_config={"extra_server_args": "--x 1", "extra_envs": {"A": "1"}},
@@ -350,7 +350,7 @@ def test_t0_status_hit_when_actionable_row_present(tmp_path: Path) -> None:
         state,
         workload="M",
         hw="mi300x",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=sd,
     )
     ctx = state.warm_start_context
