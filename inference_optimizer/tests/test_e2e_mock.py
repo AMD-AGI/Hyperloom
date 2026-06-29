@@ -42,7 +42,7 @@ async def test_mock_kernel_responds_to_request():
     prompt = (
         "Inbox for kernel:\n"
         "  seq=4 msg_id=cafe1234 from=orchestration topic=request "
-        "payload={'target_agent': 'kernel', 'kind': 'trace_analyze', 'params': {'top_k': 5}}"
+        "payload={'target_agent': 'kernel_agent', 'kind': 'trace_analyze', 'params': {'top_k': 5}}"
     )
     res = await backend.run(prompt)
     assert len(res.intents) == 1
@@ -59,7 +59,7 @@ async def test_mock_kernel_dedups_same_request():
     prompt = (
         "Inbox for kernel:\n"
         "  seq=1 msg_id=ded00ad0 from=orchestration topic=request "
-        "payload={'target_agent': 'kernel', 'kind': 'trace_analyze'}"
+        "payload={'target_agent': 'kernel_agent', 'kind': 'trace_analyze'}"
     )
     r1 = await backend.run(prompt)
     r2 = await backend.run(prompt)
@@ -93,7 +93,7 @@ async def test_e2e_propose_approve_dispatch_with_mock_executor(session_dir):
             ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()),
             name="orchestration",
         ),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -128,7 +128,7 @@ async def test_e2e_request_response_round_trip(session_dir):
     req = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "explore_options",
             "params": {"top_k": 5},
         },
@@ -138,7 +138,7 @@ async def test_e2e_request_response_round_trip(session_dir):
             ScriptedPlan(turns=[MockTurn(intents=[req])], default_intent=_heartbeat()),
             name="orchestration",
         ),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -147,13 +147,13 @@ async def test_e2e_request_response_round_trip(session_dir):
         # tick 1 mirror REQUEST to kernel, tick 2 RESPONSE routed back.
         await c.tick(2)
 
-        kernel_inbox = await c.bus.tail(to_agent="kernel", topic="request")
+        kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
         assert kernel_inbox
 
         responses = await c.bus.tail(to_agent="orchestration", topic="response")
         assert responses
         r = responses[0]
-        assert r.from_agent == "kernel"
+        assert r.from_agent == "kernel_agent"
         assert r.payload["status"] == "ok"
         assert r.payload["kind"] == "explore_options_done"
         assert r.payload["result"]["chosen"] == ["mock_kernel_1"]
@@ -165,7 +165,7 @@ async def test_e2e_request_response_round_trip(session_dir):
 async def test_e2e_robustness_heartbeats_throughout(session_dir):
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="orchestration"),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }

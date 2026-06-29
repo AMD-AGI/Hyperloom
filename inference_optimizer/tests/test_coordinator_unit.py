@@ -42,7 +42,7 @@ def test_format_inbox_delegated_result_with_msg_id():
     """delegated_result lines include outcome keys when ``result`` is a dict."""
     m = Message(
         msg_id="mid",
-        from_agent="kernel",
+        from_agent="kernel_agent",
         to_agent="orch",
         topic="delegated_result",
         payload={
@@ -237,10 +237,10 @@ def test_build_sweep_params_from_recipe_grid():
 
 def test_gap_layer_for_action_mapping():
     assert Coordinator._gap_layer_for_action("kernel_opt") == (
-        "kernel",
+        "kernel_agent",
         "kernel_switch_specialist",
     )
-    assert Coordinator._gap_layer_for_action("PROFILE")[0] == "kernel"
+    assert Coordinator._gap_layer_for_action("PROFILE")[0] == "kernel_agent"
     assert Coordinator._gap_layer_for_action("sweep")[0] == "framework"
     assert Coordinator._gap_layer_for_action("baseline")[0] == "system"
     assert Coordinator._gap_layer_for_action("  ") == ("framework", "serving_specialist")

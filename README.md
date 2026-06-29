@@ -365,12 +365,12 @@ Hyperloom/
 │   │   └── system_prompts/               # Orchestration prompt construction
 │   ├── scripts/                          # Install scripts, baseline/profile configs
 │   └── tests/                            # Inference optimizer unit and regression tests
-├── kernel-agent/                         # Kernel Agent toolkit (TraceLens/GEAK/OOB tools)
-│   ├── SKILL.md                          # Kernel Agent operation spec
+├── kernel-agent/                         # Kernel-agent toolkit (TraceLens/GEAK/OOB tools)
+│   ├── SKILL.md                          # Kernel-agent operation spec
 │   ├── tools/                            # TraceLens analysis, kernel optimization, patch apply
 │   │   └── backends/                     # GEAK/OOB submission (Ray-scheduled)
 │   ├── scripts/                          # Runtime setup scripts: install.sh, etc.
-│   └── tests/                            # Kernel Agent tool tests
+│   └── tests/                            # Kernel-agent tool tests
 ├── critic-agent/                         # Critic-agent subprocess runtime (proposal review)
 ├── robustness-agent/                     # Robustness-agent subprocess runtime (health/RCA)
 ├── ci/                                   # CI orchestration (PR submitter, AB test)

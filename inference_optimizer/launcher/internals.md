@@ -2,7 +2,7 @@
 
 Reference for the optimizer's internal phases and contracts. The launcher only
 needs to know these exist; it never proposes or executes them. Read this when
-debugging optimizer behavior or interpreting EXPLORE / FRAMEWORK_PR / KERNEL
+debugging optimizer behavior or interpreting EXPLORE / FRAMEWORK_AGENT / KERNEL
 decisions.
 
 ## IR-4 / IR-6 / IR-7 — EXPLORE phase contracts
@@ -32,18 +32,18 @@ lives in `orchestrator/system_prompts/orchestration.md`. In brief:
 - **IR-6 HARD force-exit**: EXPLORE exits the moment wall-clock remaining <
   `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase budget <
   `--explore-force-exit-budget-pct` (default 20%). Non-negotiable — leaves
-  buffer for KERNEL → SWEEP → CLOSE + report.
-- **Plateau advisory**: EXPLORE / KERNEL / FRAMEWORK_PR plateau signals are
+  buffer for KERNEL_AGENT → SWEEP → CLOSE + report.
+- **Plateau advisory**: EXPLORE / KERNEL_AGENT / FRAMEWORK plateau signals are
   computed every tick and rendered as advisory in the orchestration prompt. They
   do NOT drive phase advance — the LLM may emit
   `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
   when it judges further effort unproductive. IR-6 force-exit and the per-phase
   budget remain the only hard advance gates.
 
-## FRAMEWORK_PR phase
+## FRAMEWORK_AGENT phase
 
-Inserted between PRELUDE and EXPLORE (`--no-framework` opts out). The
-Coordinator owns the loop end-to-end — the LLM never proposes the `framework_pr`
+Inserted between PRELUDE and EXPLORE (`--no-framework-agent` opts out). The
+Coordinator owns the loop end-to-end — the LLM never proposes the `framework`
 action. It discovers a candidate batch **once** via `fa phase-discover`; each
 exploration then processes exactly **one** candidate, with the agent ranking the
 still-available candidates and choosing the one most likely to raise throughput
@@ -52,9 +52,9 @@ candidate is Critic-gated, then `git apply`d against the live
 framework_source_roots and benchmarked; KEEP commits to the live tree (next
 candidate stacks on top), REVERT does `git reset --hard`. Exits on low budget
 (<0.6 × max_hours), plateau (3 consecutive benchmarked candidate tests with no
-KEEP; env `INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK`), or an empty
+KEEP; env `INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK`), or an empty
 discovery batch. Resume skips completed candidates by idempotency key. The
-launcher only chooses whether the phase runs (`--no-framework`).
+launcher only chooses whether the phase runs (`--no-framework-agent`).
 
 ## Retired modules and rules (do not re-introduce)
 
@@ -64,17 +64,17 @@ specialist-informed `explore` flow. Do not recreate the retired `backends` /
 
 Rules that look reasonable but break the current flow:
 
-- **No `framework_pr first-explore priority` rule** in
+- **No `framework first-explore priority` rule** in
   `system_prompts/orchestration.md` — conflicts with the EXPLORE
   specialist-informed flow. Framework-agent runs in the dedicated
-  **FRAMEWORK_PR** phase before EXPLORE; the LLM never proposes the
-  `framework_pr` action — it is Coordinator-managed and absent from
+  **FRAMEWORK** phase before EXPLORE; the LLM never proposes the
+  `framework` action — it is Coordinator-managed and absent from
   `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any LLM-side propose /
-  delegate with `rule='phase_incompatible'`. Use `--no-framework` to skip the
+  delegate with `rule='phase_incompatible'`. Use `--no-framework-agent` to skip the
   phase entirely.
 - **`kernel_opt` sequencing** is no longer gated by an explore-minimum check
   (the `explore_attempts_minimum_before_kernel_opt` rule was retired in
-  loosen_plan P1_06). KERNEL phase may propose `kernel_opt` directly; the
+  loosen_plan P1_06). KERNEL_AGENT phase may propose `kernel_opt` directly; the
   `trace_analyze → run_optimization` data dependency (P2_11 handler-level check)
   and the reusable `kernel_id` validation still keep the inputs valid.
 

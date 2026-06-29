@@ -31,7 +31,7 @@
 #   - Kernel-agent + framework-agent + profile / roofline / TraceLens
 #     all run on atom. The only remaining auto-tighten in cli.py is the
 #     --nodes>=2 fail-fast guard (_apply_atom_auto_tighten /
-#     _assert_atom_single_node); --no-kernel and --no-framework are not
+#     _assert_atom_single_node); --no-kernel and --no-framework-agent are not
 #     auto-flipped.
 
 benchmark:

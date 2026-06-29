@@ -35,7 +35,7 @@ regression — that path goes through `integrate` REVERT instead.
 
   `recover` is a `ROBUSTNESS_DELEGATE_ONLY_ACTIONS` member
   (see `protocol/action_surfaces.py`): it is **not** in
-  `FULL_ENABLED_ACTIONS` / `NO_KERNEL_ENABLED_ACTIONS`, is subtracted
+  `FULL_ENABLED_ACTIONS` / `NO_KERNEL_AGENT_ENABLED_ACTIONS`, is subtracted
   from `PHASE_LLM_PROPOSABLE_ACTIONS`, and PolicyGate denies any
   Orchestration `propose_action` (`rule="propose_action_source"`) or
   `delegate` (`rule="delegate_action_source"`). Orchestration that

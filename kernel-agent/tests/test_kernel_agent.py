@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Local tests for Kernel Agent tools (fixtures generated at runtime; no large trace files in repo)."""
+"""Local tests for Kernel-agent tools (fixtures generated at runtime; no large trace files in repo)."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def write_trace(
         "traceEvents": [
             {
                 "name": kernel_name,
-                "cat": "kernel",
+                "cat": "kernel_agent",
                 "dur": 7000,
                 "args": {
                     "source_file": source_file,
@@ -72,7 +72,7 @@ def write_trace(
             },
             {
                 "name": "aiter_moe_gemm_kernel",
-                "cat": "kernel",
+                "cat": "kernel_agent",
                 "dur": 3000,
                 "args": {
                     "source_file": f"{_FRAMEWORK_ROOT}/moe.py",
@@ -90,7 +90,7 @@ def write_vendor_trace(path: Path) -> None:
         "traceEvents": [
             {
                 "name": "hipblasLt_Cijk_Ailk_Bljk_kernel",
-                "cat": "kernel",
+                "cat": "kernel_agent",
                 "dur": 5000,
                 "args": {"shape": {"M": 128, "N": 128, "K": 128}},
             }

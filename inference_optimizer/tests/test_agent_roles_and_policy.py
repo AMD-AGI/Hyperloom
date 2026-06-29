@@ -21,7 +21,7 @@ from inference_optimizer.orchestrator.policy import (
     CORE_STATE_FIELDS,
     DELEGATE_ACTION_REQUIRED_PAYLOAD,
     DELEGATE_ACTION_SOURCE_ALLOWLIST,
-    KERNEL_OWNED_ACTIONS,
+    KERNEL_AGENT_OWNED_ACTIONS,
     KILL_TASK_SOURCE_ALLOWLIST,
     PolicyDenied,
     PolicyGate,
@@ -38,11 +38,11 @@ from inference_optimizer.paths import asset_system_prompts_dir
 # agent_role
 def test_default_role_registry_has_4_v06_agents():
     reg = default_role_registry()
-    assert set(reg.keys()) == {"orchestration", "kernel", "critic", "robustness"}
+    assert set(reg.keys()) == {"orchestration", "kernel_agent", "critic", "robustness"}
 
 
 def test_roles_for_run_deterministic_order():
-    assert roles_for_run() == ("orchestration", "kernel", "critic", "robustness")
+    assert roles_for_run() == ("orchestration", "kernel_agent", "critic", "robustness")
 
 
 def test_orchestration_permissions():
@@ -64,7 +64,7 @@ def test_orchestration_permissions():
 
 
 def test_kernel_responder_only():
-    role = default_role_registry()["kernel"]
+    role = default_role_registry()["kernel_agent"]
     assert role.backend_type == BackendType.CLAUDE
     assert role.can_delegate_side_effects is False
     assert IntentType.RESPONSE in role.allowed_intents
@@ -100,7 +100,7 @@ def test_robustness_scheduling_police():
 
 # PolicyGate constants
 def test_kernel_owned_actions_include_gemm_tuning():
-    assert KERNEL_OWNED_ACTIONS == frozenset(
+    assert KERNEL_AGENT_OWNED_ACTIONS == frozenset(
         {
             "kernel_opt",
             "integrate",
@@ -114,7 +114,7 @@ def test_kernel_owned_actions_include_gemm_tuning():
 
 def test_request_routing_v06_only_orchestration_to_kernel():
     assert set(REQUEST_ROUTING.keys()) == {"orchestration"}
-    assert REQUEST_ROUTING["orchestration"] == frozenset({"kernel"})
+    assert REQUEST_ROUTING["orchestration"] == frozenset({"kernel_agent"})
 
 
 def test_review_verdict_critic_only():
@@ -176,7 +176,7 @@ def test_gate_orchestration_delegate_kernel_owned_rejected(gate):
 
 def test_gate_orchestration_propose_kernel_owned_rejected():
     """Kernel-owned actions are REQUEST-only on BOTH channels: propose_action of
-    a kernel-owned action is denied exactly like delegate (the ownership guard
+    a kernel_agent-owned action is denied exactly like delegate (the ownership guard
     fires before the fp8 / phase checks)."""
     state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
@@ -202,7 +202,7 @@ def test_gate_run_gemm_tuning_request_rejected_for_non_fp8_geak(monkeypatch):
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
-                payload={"target_agent": "kernel", "kind": "run_gemm_tuning", "params": {}},
+                payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
             ),
         )
     assert exc.value.rule == "fp8_only_action"
@@ -216,7 +216,7 @@ def test_gate_run_gemm_tuning_request_allowed_for_fp8(monkeypatch):
         "orchestration",
         Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "run_gemm_tuning", "params": {}},
+            payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
         ),
     )
 
@@ -229,7 +229,7 @@ def test_gate_run_gemm_tuning_request_allowed_for_bf16_forge(monkeypatch):
         "orchestration",
         Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "run_gemm_tuning", "params": {}},
+            payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
         ),
     )
 
@@ -421,7 +421,7 @@ def test_gate_orchestration_request_to_kernel_ok(gate):
         "orchestration",
         Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "trace_analyze"},
+            payload={"target_agent": "kernel_agent", "kind": "trace_analyze"},
         ),
     )
 
@@ -440,7 +440,7 @@ def test_gate_orchestration_request_to_critic_rejected(gate):
 
 def test_gate_kernel_response_ok(gate):
     gate.validate_intent(
-        "kernel",
+        "kernel_agent",
         Intent(
             type=IntentType.RESPONSE,
             payload={"in_reply_to": "msg-abc", "kind": "trace_analyze_done"},
@@ -451,7 +451,7 @@ def test_gate_kernel_response_ok(gate):
 def test_gate_kernel_request_rejected_by_role(gate):
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
-            "kernel",
+            "kernel_agent",
             Intent(
                 type=IntentType.REQUEST,
                 payload={"target_agent": "orchestration", "kind": "x"},
@@ -463,7 +463,7 @@ def test_gate_kernel_request_rejected_by_role(gate):
 def test_gate_kernel_propose_rejected_by_role(gate):
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
-            "kernel",
+            "kernel_agent",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
                 payload={"action_name": "x", "predicted_gain_pct": 0},
@@ -656,7 +656,7 @@ def test_gate_update_state_degraded_markers_rejected(gate):
 
 # allowed_tools_for_agent
 def test_allowed_tools_claude_returns_emit_intent(gate):
-    assert gate.allowed_tools_for_agent("kernel") == ["emit_intent"]
+    assert gate.allowed_tools_for_agent("kernel_agent") == ["emit_intent"]
     assert gate.allowed_tools_for_agent("robustness") == ["emit_intent"]
     from inference_optimizer.orchestrator.backends.mcp_context_tools import (
         CONTEXT_TOOL_NAMES,
@@ -681,7 +681,7 @@ def test_allowed_tools_unknown_agent_returns_empty(gate):
 
 
 # system_prompts assets
-@pytest.mark.parametrize("name", ["orchestration", "kernel", "critic", "robustness"])
+@pytest.mark.parametrize("name", ["orchestration", "kernel_agent", "critic", "robustness"])
 def test_system_prompt_files_exist_and_nonempty(name):
     p = asset_system_prompts_dir() / f"{name}.md"
     assert p.is_file(), f"missing system prompt: {p}"

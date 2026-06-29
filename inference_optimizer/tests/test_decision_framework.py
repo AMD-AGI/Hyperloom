@@ -31,7 +31,7 @@ def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel": MockBackend(silent, name="k"),
+        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
@@ -93,7 +93,7 @@ async def test_run_optimization_response_records_to_shared_state(
         )
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "run_optimization", "params": {"kernel_id": "k006"}},
+            payload={"target_agent": "kernel_agent", "kind": "run_optimization", "params": {"kernel_id": "k006"}},
         )
         await c._handle_intent("orchestration", intent)
         # SharedState gained a last_kernel_opt entry.
@@ -133,7 +133,7 @@ async def test_trace_analyze_does_not_record_kernel_opt(
         )
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "trace_analyze", "params": {"trace_input": "/tmp/t.json"}},
+            payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/tmp/t.json"}},
         )
         await c._handle_intent("orchestration", intent)
         assert c.shared_state.last_kernel_opt == {}
@@ -177,7 +177,7 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
-                payload={"target_agent": "kernel", "kind": "run_gemm_tuning", "params": {}},
+                payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
             ),
         )
 
@@ -203,7 +203,7 @@ async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
             "candidates_path": "/tmp/candidates.json",
         }
 
-        assert c._sequence_denial_for_request("kernel", "run_optimization") is None
+        assert c._sequence_denial_for_request("kernel_agent", "run_optimization") is None
     finally:
         await c.stop()
 

@@ -63,7 +63,7 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends(scripts: dict[str, ScriptedPlan]) -> dict[str, Backend]:
     backends: dict[str, Backend] = {}
-    for name in ("orchestration", "kernel", "critic", "robustness"):
+    for name in ("orchestration", "kernel_agent", "critic", "robustness"):
         backends[name] = MockBackend(scripts.get(name, _silent_plan()), name=name)
     return backends
 
@@ -471,7 +471,7 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
     req = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"top_k": 5},
         },
@@ -483,7 +483,7 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
         c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
         c.shared_state.save(session_dir)
         await c.tick(1)
-        kernel_inbox = await c.bus.tail(to_agent="kernel", topic="request")
+        kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
         assert any(m.payload.get("kind") == "trace_analyze" for m in kernel_inbox)
     finally:
         await c.stop()
@@ -494,7 +494,7 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
     req = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
         },
     )
@@ -505,12 +505,12 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
         c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
         c.shared_state.save(session_dir)
         await c.tick(1)
-        kernel_inbox = await c.bus.tail(to_agent="kernel", topic="request")
+        kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
         assert kernel_inbox, "no request mirrored to kernel"
         request_msg_id = kernel_inbox[0].msg_id
 
         await c._handle_intent(
-            "kernel",
+            "kernel_agent",
             Intent(
                 type=IntentType.RESPONSE,
                 payload={
@@ -648,7 +648,7 @@ async def test_coordinator_kill_task_by_robustness(session_dir):
 async def test_coordinator_prune_branch_cancels_family_and_records_advisory(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
-        # ``baseline`` is a non-kernel-owned action that flows through the normal
+        # ``baseline`` is a non-kernel_agent-owned action that flows through the normal
         # Critic/pending-proposal path — the prune-advisory mechanism under test
         # is family-agnostic. (Kernel-owned families are REQUEST-only and can no
         # longer be proposed at all.)
@@ -704,7 +704,7 @@ def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel": MockBackend(silent, name="k"),
+        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }

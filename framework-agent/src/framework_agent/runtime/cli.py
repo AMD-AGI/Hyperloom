@@ -13,7 +13,7 @@ Subcommands:
 * ``fa kb``         - knowledge-base operations: ``list``, ``show``,
   ``search``, ``contribute``, ``synthesize``. Defaults to pure-Python
   digest; ``synthesize --with-llm`` lazy-imports ``claude_agent_sdk``.
-* ``fa phase-discover`` - Hyperloom FRAMEWORK_PR phase entry point.
+* ``fa phase-discover`` - Hyperloom FRAMEWORK_AGENT phase entry point.
   Reads a JSON ``--request`` and writes a JSON ``--out``
   (critic-agent style).
 * ``fa phase-audit`` - static local-source judging of whether a candidate
@@ -129,7 +129,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
                 ],
                 "recommended_next_step_values": [
                     "skip",
-                    "direct_framework_pr",
+                    "direct_framework",
                     "author_via_specialist",
                 ],
                 "patch_sources": ["diff_text", "patches_path", "primus_cortex"],
@@ -219,7 +219,7 @@ def _pr_url_for(repo: str, pr_number: int | str) -> str:
 
 
 def _cmd_phase_discover(args: argparse.Namespace) -> None:
-    """Discover one batch of PR candidates for the FRAMEWORK_PR phase.
+    """Discover one batch of PR candidates for the FRAMEWORK_AGENT phase.
 
     Request shape:
         {"model": str, "framework": str, "gpu_type": str,
@@ -292,7 +292,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 "gap_description": gap_desc,
                 # search_perf_prs MUST be True here: enumerate_candidates
                 # short-circuits to explicit-refs-only (empty for phase-discover)
-                # when it is False, so omitting it made FRAMEWORK_PR discovery
+                # when it is False, so omitting it made FRAMEWORK discovery
                 # always return 0 candidates (never querying primus_cortex/github).
                 "search_perf_prs": True,
                 "search_modes": search_modes,
@@ -499,7 +499,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="framework-agent",
-        description="Explore serving framework PRs/refs in isolated worktrees.",
+        description="Explore serving frameworks/refs in isolated worktrees.",
     )
     # Global logging flags on the top-level parser so every subcommand picks
     # them up uniformly (wired into logging_setup.configure_logging).
@@ -566,10 +566,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     explore_p.set_defaults(func=_cmd_explore)
 
-    # ----- Hyperloom FRAMEWORK_PR phase entry points -----
+    # ----- Hyperloom FRAMEWORK_AGENT phase entry points -----
     pd_p = sub.add_parser(
         "phase-discover",
-        help="Discover one batch of PR candidates for the FRAMEWORK_PR phase",
+        help="Discover one batch of PR candidates for the FRAMEWORK_AGENT phase",
     )
     pd_p.add_argument("--request", required=True, help="JSON request file path")
     pd_p.add_argument("--out", default="-", help="Output path (default stdout)")
