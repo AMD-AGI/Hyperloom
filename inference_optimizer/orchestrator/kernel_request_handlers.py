@@ -42,6 +42,119 @@ _BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 
+# ---------------------------------------------------------------------------
+# "Honest E2E" hardening flags (v4-parity). Every behavior below is OFF by
+# default, so with no env set this module is byte-identical to before. The
+# umbrella flag ``HL_HONEST_E2E`` turns the whole cohesive mode on; each fix
+# also has a per-fix override that wins over the umbrella (set it to an
+# explicit falsey value to opt a single fix back out of the umbrella).
+# ---------------------------------------------------------------------------
+_HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
+_TRUEY = {"1", "true", "yes", "on"}
+_FALSEY = {"0", "false", "no", "off"}
+
+
+def _honest_flag(specific_env: str) -> bool:
+    """Resolve a per-fix honest-E2E flag against the umbrella flag.
+
+    Returns ``True`` when the per-fix env ``specific_env`` is truthy, OR when it
+    is unset and the umbrella ``HL_HONEST_E2E`` is truthy. An explicit falsey
+    per-fix value always wins (lets one fix opt out of the umbrella). Off by
+    default so callers are byte-identical to legacy behavior when nothing is set.
+
+    Args:
+        specific_env: The per-fix environment variable name.
+
+    Returns:
+        bool: Whether the gated behavior should be enabled.
+    """
+    raw = os.environ.get(specific_env, "").strip().lower()
+    if raw in _TRUEY:
+        return True
+    if raw in _FALSEY:
+        return False
+    return os.environ.get(_HONEST_E2E_UMBRELLA_ENV, "").strip().lower() in _TRUEY
+
+
+def _vram_guarded_server_args(extra_args: str) -> str:
+    """Optionally cap ``--gpu-memory-utilization`` for the integrate re-baseline.
+
+    v4-parity VRAM barrier: when ``HL_INTEGRATE_VRAM_GUARD`` (or the umbrella)
+    is on and the caller has NOT already pinned ``--gpu-memory-utilization``,
+    append a conservative cap (``HL_INTEGRATE_VRAM_UTIL_CAP``, default 0.90) so a
+    re-baseline server launched on a node with less headroom than the original
+    roofline cannot OOM. Deterministic (no live VRAM probe), additive, and a
+    strict no-op when the flag is off or a util is already specified — so the
+    returned string is byte-identical to the input on the legacy path.
+
+    Args:
+        extra_args: The resolved ``extra_server_args`` string for the server.
+
+    Returns:
+        str: ``extra_args`` unchanged, or with a util cap appended.
+    """
+    if not _honest_flag("HL_INTEGRATE_VRAM_GUARD"):
+        return extra_args
+    if "gpu-memory-utilization" in (extra_args or ""):
+        return extra_args
+    try:
+        cap = float(os.environ.get("HL_INTEGRATE_VRAM_UTIL_CAP", "0.90") or 0.90)
+    except (TypeError, ValueError):
+        cap = 0.90
+    cap = min(max(cap, 0.1), 0.99)
+    addition = f"--gpu-memory-utilization {cap:g}"
+    return f"{extra_args} {addition}".strip() if extra_args else addition
+
+
+def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> bool | None:
+    """Best-effort confirm the patched source was actually imported/compiled.
+
+    v4-parity import-grep: greps the re-baseline server log for evidence the
+    patched module's basename was imported/loaded/compiled by the served
+    process, so a measured E2E delta is attributed to code the workload really
+    ran (not a phantom win on an un-imported patch). Returns a *tri-state*:
+
+    * ``True``  — the module basename appears in import/load/compile context.
+    * ``False`` — the server log is readable and the basename never appears
+      anywhere (positive evidence the patched file was not exercised).
+    * ``None``  — unknown (no source_file, no readable log) — never penalized.
+
+    Args:
+        source_file: Resolved path of the patched kernel source.
+        workspace: Re-baseline workspace dir (holds ``server.log``).
+
+    Returns:
+        bool | None: Tri-state confirmation as described above.
+    """
+    if not source_file or not workspace:
+        return None
+    ws = Path(workspace)
+    logs = [p for p in (ws / "server.log", ws.parent / "server.log") if p.exists()]
+    if not logs:
+        try:
+            logs = sorted(ws.rglob("server.log"))[:1]
+        except Exception:
+            logs = []
+    if not logs:
+        return None
+    stem = Path(source_file).stem
+    if not stem:
+        return None
+    try:
+        text = logs[0].read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+    if stem not in text:
+        return False
+    # Confirmed only when the basename co-occurs with an import/compile cue.
+    for line in text.splitlines():
+        if stem in line and re.search(r"import|load|compil|build|\.py", line, re.IGNORECASE):
+            return True
+    # Basename present but not in an obvious import context — treat as unknown
+    # rather than penalize (avoids false negatives on terse logs).
+    return None
+
+
 # kernel_optimization attempt backends whose stdout log we mine for token
 # usage. ``geak`` uses litellm (OpenAI-shape usage); ``oob`` runs ``oob run
 # --json`` whose envelope may carry a ``usage`` block; ``forge`` (Kernel-Forge
@@ -3078,6 +3191,10 @@ def _batch_kernel_candidates(
         selected.append(item)
 
     # Legacy per-kernel pass for reusable kernels not absorbed into a task_group.
+    # Collect the eligible (live, reusable, source-resolved) ungrouped rows first;
+    # the per-row min_gpu_pct gate / selection is applied below so the optional
+    # op-fanout de-dup can sum sibling GPU% before gating.
+    legacy_eligible: list[tuple[str, dict[str, Any], float]] = []
     for item in kernels:
         if not isinstance(item, dict):
             continue
@@ -3099,6 +3216,40 @@ def _batch_kernel_candidates(
             row_pct = float(item.get("gpu_pct") or 0.0)
         except (TypeError, ValueError):
             row_pct = 0.0
+        legacy_eligible.append((kernel_id, item, row_pct))
+
+    if _honest_flag("HL_KERNEL_OPFANOUT_DEDUP"):
+        # Op-fanout de-dup (flag-gated): one logical kernel (same source_file)
+        # often shows up as many op-instance rows, so each would dispatch
+        # separately and its trace impact would be split across rows. Collapse
+        # same-source rows into a single representative (the highest-GPU% row)
+        # carrying the SUMMED GPU% of the fanned siblings, so the min_gpu_pct
+        # gate and downstream impact ranking see the kernel's true aggregate
+        # share. Off => the per-row loop below is byte-identical to legacy.
+        by_source: dict[str, list[tuple[str, dict[str, Any], float]]] = {}
+        order: list[str] = []
+        for kid, item, row_pct in legacy_eligible:
+            src = str(item.get("source_file") or "")
+            if src not in by_source:
+                by_source[src] = []
+                order.append(src)
+            by_source[src].append((kid, item, row_pct))
+        deduped: list[tuple[str, dict[str, Any], float]] = []
+        for src in order:
+            rows = by_source[src]
+            summed_pct = sum(p for _, _, p in rows)
+            rep_kid, rep_item, _ = max(rows, key=lambda r: r[2])
+            if len(rows) > 1:
+                rep_item = dict(rep_item)
+                rep_item["gpu_pct"] = summed_pct
+                rep_item["opfanout_collapsed_ids"] = [k for k, _, _ in rows]
+                for k, _, _ in rows:
+                    if k != rep_kid:
+                        skipped.setdefault(k, f"opfanout_merged_into={rep_kid}")
+            deduped.append((rep_kid, rep_item, summed_pct))
+        legacy_eligible = deduped
+
+    for kernel_id, item, row_pct in legacy_eligible:
         if row_pct < min_gpu_pct:
             skipped[kernel_id] = f"below_min_gpu_pct={min_gpu_pct}"
             continue
@@ -3131,12 +3282,34 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
         non-KEEP, and higher ``micro_speedup`` breaks ties.
     """
     if not isinstance(result, dict):
-        return (0, 0.0)
+        return (0, 0, 0.0)
     proposal = result.get("proposal") or {}
     verification = result.get("verification") or {}
     keep = 1 if (result.get("status") == "ok" and proposal.get("decision") == "KEEP") else 0
     micro = float(verification.get("micro_speedup") or 0.0)
-    return (keep, micro)
+    # GEAK-only middle tier (flag-gated, default off): a correctness-verified, high-micro
+    # NEEDS_REVIEW from the GEAK backend is promotable above a bare non-KEEP — GEAK emits
+    # NEEDS_REVIEW (no auto-correctness-KEEP) so its real wins otherwise always lose to any
+    # Claude/Codex/forge KEEP. Scoped to backend=="geak" so OOB backends are byte-identical;
+    # off => verified_nr is always 0 => 3-tuple sorts exactly as the old 2-tuple.
+    _promote = _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
+    try:
+        _thr = float(os.environ.get("HL_VERIFIED_MICRO_PROMOTE_THRESHOLD", "1.10") or 1.10)
+    except ValueError:
+        _thr = 1.10
+    _backend = str(verification.get("best_backend") or result.get("backend") or "").lower()
+    verified_nr = (
+        1
+        if (
+            _promote
+            and keep == 0
+            and _backend == "geak"
+            and verification.get("correctness_passed") is True
+            and micro >= _thr
+        )
+        else 0
+    )
+    return (keep, verified_nr, micro)
 
 
 async def _run_backend_ladder(
@@ -4514,6 +4687,9 @@ async def integrate_handler(
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
     extra_args = read_extra_server_args(payload).strip()
+    # VRAM barrier (flag-gated, default off): cap re-baseline util so the
+    # integrate server cannot OOM on a tighter node. No-op when off.
+    extra_args = _vram_guarded_server_args(extra_args)
 
     # Wrap BaselineExecutor in a Task/RunnerContext; extra_server_args goes via task params (forward compat).
     from ..session_paths import runs_dir
@@ -4693,10 +4869,117 @@ async def integrate_handler(
         if (gain_pct > keep_threshold_pct or stack_positive_keep)
         else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
     )
+
+    # import-grep source confirmation (flag-gated, default off). Advisory by
+    # default: annotate whether the served process actually imported/compiled the
+    # patched source. Only the *strict* sub-flag enforces it, and only on
+    # positive non-import evidence (confirmed is False) — an "unknown" (None)
+    # never penalizes a real win. Off => no annotation, decision unchanged.
+    source_import_confirmed: bool | None = None
+    source_not_imported_downgrade = False
+    if _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
+        _src = str(payload.get("target_file") or payload.get("source_file") or "")
+        source_import_confirmed = _confirm_source_imported(_src, bench_result.get("workspace"))
+        if (
+            decision == "KEEP"
+            and source_import_confirmed is False
+            and _honest_flag("HL_CONFIRM_SOURCE_IMPORTED_STRICT")
+        ):
+            decision = "NEEDS_REVIEW"
+            source_not_imported_downgrade = True
+
+    # Paired same-config A/B confirmation (Tier-2; opt-in via its OWN explicit
+    # flag, deliberately NOT enabled by the HL_HONEST_E2E umbrella — it does a
+    # second server launch and revert/re-apply, so it stays opt-in until a full
+    # workload run validates it). The gain above is vs a STORED base_tput scalar
+    # (possibly a different config/run). When a candidate clears KEEP against the
+    # stored scalar, re-confirm it against a PAIRED pristine baseline measured
+    # under the *same* config in this call: revert -> measure pristine ->
+    # recompute gain. A confirmed KEEP is re-applied; a disconfirmed KEEP drops
+    # to NEEDS_REVIEW (never a false KEEP). ANY failure restores the applied
+    # state and falls back to the stored-scalar decision, so it never breaks a run.
+    paired_ab: dict[str, Any] | None = None
+    paired_pristine_revert: HandlerResult | None = None
+    if (
+        os.environ.get("HL_INTEGRATE_PAIRED_AB", "").strip().lower() in _TRUEY
+        and decision == "KEEP"
+        and apply_result.get("status") == "ok"
+    ):
+        paired_ab = {"status": "attempted"}
+        try:
+            paired_pristine_revert = _maybe_revert_kernel_patch(apply_result)
+            paired_ws = runs_dir(session_dir, "integrate", f"{fake_task_id}-pairedbase")
+            paired_ws.mkdir(parents=True, exist_ok=True)
+            paired_task = Task(
+                task_id=f"{fake_task_id}-pairedbase",
+                kind="baseline",
+                state="running",
+                params={
+                    "config_path": payload.get("config_path"),
+                    "output_dir": str(paired_ws),
+                    "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
+                    "extra_server_args": extra_args,
+                    "extra_envs": dict(payload.get("extra_envs") or {}),
+                },
+                idempotency_key=f"{fake_task_id}-pairedbase",
+            )
+            paired_bench = await BaselineExecutor(session_dir=session_dir)(RunnerContext(task=paired_task, lease=None))
+            if is_valid_measurement(paired_bench):
+                paired_base_tput = float(paired_bench.get("output_throughput") or 0.0)
+                paired_gain = gain_pct_or_zero(new_tput, paired_base_tput)
+                paired_ab.update(
+                    {
+                        "status": "ok",
+                        "paired_base_tput": paired_base_tput,
+                        "paired_gain_pct": paired_gain,
+                        "stored_base_tput": base_tput,
+                        "stored_gain_pct": gain_pct,
+                    }
+                )
+                if paired_gain > keep_threshold_pct:
+                    # Confirmed: re-apply so the KEEP lands the patch.
+                    reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
+                    if reapply.get("status") == "ok":
+                        apply_result = reapply
+                        paired_pristine_revert = None  # patch is back; normal revert logic applies
+                        base_tput = paired_base_tput
+                        gain_pct = paired_gain
+                        paired_ab["confirmed"] = True
+                    else:
+                        paired_ab.update({"confirmed": False, "reapply_failed": True})
+                        decision = "NEEDS_REVIEW"
+                else:
+                    # Disconfirmed: leave reverted, drop to NEEDS_REVIEW.
+                    base_tput = paired_base_tput
+                    gain_pct = paired_gain
+                    decision = "NEEDS_REVIEW"
+                    paired_ab["confirmed"] = False
+            else:
+                # Paired measurement failed: restore applied state, keep stored decision.
+                reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
+                if reapply.get("status") == "ok":
+                    apply_result = reapply
+                    paired_pristine_revert = None
+                paired_ab["status"] = "measurement_failed"
+        except Exception as exc:  # noqa: BLE001 — never break integrate on paired-AB
+            log.exception("paired A/B confirmation failed; falling back to stored-scalar decision")
+            try:
+                reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
+                if reapply.get("status") == "ok":
+                    apply_result = reapply
+                    paired_pristine_revert = None
+            except Exception:  # noqa: BLE001
+                pass
+            paired_ab = {"status": "error", "error": repr(exc)}
+
     revert_result = (
         {"status": "skipped", "reason": "KEEP decision"}
         if decision == "KEEP"
-        else _maybe_revert_kernel_patch(apply_result)
+        # If the paired pass already reverted (disconfirmed KEEP), reuse that
+        # result instead of double-reverting an already-reverted manifest.
+        else (
+            paired_pristine_revert if paired_pristine_revert is not None else _maybe_revert_kernel_patch(apply_result)
+        )
     )
 
     # After KEEP, schedule rocprof so integrate returns without waiting
@@ -4729,6 +5012,14 @@ async def integrate_handler(
         result["decision_reason"] = "stack_positive_increment"
         result["stack_incremental_gain_pct"] = stack_incremental_gain_pct
         result["stack_incremental_keep_threshold_pct"] = STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
+    if source_import_confirmed is not None:
+        result["source_import_confirmed"] = source_import_confirmed
+    if source_not_imported_downgrade:
+        result["decision_reason"] = "source_not_confirmed_imported"
+    if paired_ab is not None:
+        result["paired_ab"] = paired_ab
+        if paired_ab.get("confirmed") is False:
+            result["decision_reason"] = "paired_ab_disconfirmed"
     if rocprof_after_info:
         result["rocprof_after_kernel_opt"] = rocprof_after_info
     return result
@@ -5248,6 +5539,11 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     entry["last_deploy_patch_path"] = deploy_patch_path
     entry["last_deploy_repo_root"] = deploy_repo_root
     entry["last_source_file"] = source_file
+    # Record backend + correctness so the GEAK-only verified-NEEDS_REVIEW promotion gate
+    # (next_pending_keep_kernel_id) can identify a correctness-verified GEAK win. Additive;
+    # consumed only when HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW is enabled.
+    entry["last_backend"] = str(verification.get("best_backend") or "")
+    entry["last_correctness_passed"] = verification.get("correctness_passed")
     entry["last_ts"] = ts
     entry["history"] = history
     if test_command:
@@ -5494,7 +5790,27 @@ def pending_keep_kernel_ids(state) -> list[str]:
     for kid, entry in (state.kernel_opt_attempts or {}).items():
         if not isinstance(entry, dict):
             continue
-        if str(entry.get("last_decision", "")).upper() != "KEEP":
+        _dec = str(entry.get("last_decision", "")).upper()
+        # GEAK-only verified-NEEDS_REVIEW promotion (flag-gated, default off): admit a
+        # correctness-verified, high-micro GEAK NEEDS_REVIEW into the integrate queue so its
+        # win is actually E2E-measured. Off => only KEEP queues (today's behavior, byte-identical).
+        _promote = _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
+        try:
+            _thr = float(os.environ.get("HL_VERIFIED_MICRO_PROMOTE_THRESHOLD", "1.10") or 1.10)
+        except ValueError:
+            _thr = 1.10
+        try:
+            _m = float(entry.get("last_micro_speedup") or 0.0)
+        except (TypeError, ValueError):
+            _m = 0.0
+        _geak_nr = (
+            _promote
+            and _dec == "NEEDS_REVIEW"
+            and str(entry.get("last_backend") or "").lower() == "geak"
+            and entry.get("last_correctness_passed") is True
+            and _m >= _thr
+        )
+        if _dec != "KEEP" and not _geak_nr:
             continue
         if kid in integrated_ids or kid in attempted_ids or kid in rejected:
             continue
