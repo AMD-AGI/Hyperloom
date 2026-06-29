@@ -211,6 +211,23 @@ def test_write_minimal_final_json_refreshes_stale_fallback(tmp_path):
     assert data["baseline_tput"] == 42.0
 
 
+def test_write_minimal_final_json_recovers_corrupt(tmp_path):
+    # A non-empty but invalid final.json (e.g. a full-report write killed
+    # mid-flush) must be backed up and replaced with a consumable fallback,
+    # not left in place as garbled JSON downstream can't read.
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "final.json").write_text('{"baseline_tput": 35.83, "trunc', encoding="utf-8")
+
+    target = ex.write_minimal_final_json(tmp_path)
+    data = json.loads(target.read_text(encoding="utf-8"))  # must now parse
+    assert data["safety_net"] is True
+    # Original (corrupt) bytes preserved for forensics.
+    corrupt = reports / "final.json.corrupt"
+    assert corrupt.is_file()
+    assert corrupt.read_text(encoding="utf-8") == '{"baseline_tput": 35.83, "trunc'
+
+
 def test_write_minimal_final_json_fields(tmp_path):
     from inference_optimizer.orchestrator.shared_state import SharedState
 
