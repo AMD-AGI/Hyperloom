@@ -1,7 +1,7 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
 """Coverage for ``cli_kb``: local KB root resolution, the RecipeKB dispatcher
-across remote-mode branches (degraded / gbrain / cortex), the cortex T0
+across remote-mode branches (degraded / gbrain / local-only), the T0
 bootstrap (success + mid-flight failure), and the KnowledgePlane facade."""
 
 from __future__ import annotations
@@ -51,24 +51,29 @@ def test_dispatcher_degraded_kb(tmp_path, monkeypatch) -> None:
     assert kb.remote is None
 
 
-def test_dispatcher_local_only_no_url(tmp_path, monkeypatch) -> None:
+def test_dispatcher_local_only_no_gbrain(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    monkeypatch.delenv("RECIPE_KB_REMOTE", raising=False)
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    from inference_optimizer.recipe_kb import gbrain_remote_client as grc
+
+    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: None)
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
     assert kb.remote is None
 
 
-def test_dispatcher_cortex_url(tmp_path, monkeypatch) -> None:
+def test_dispatcher_cortex_url_is_not_a_recipe_remote(tmp_path, monkeypatch) -> None:
+    # CORTEX_KB_URL / --cortex-kb-url now only feed the critic agent; they must
+    # NOT wire a recipe-KB remote. Without gbrain configured, the dispatcher
+    # stays local-only even when a cortex URL is supplied.
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    monkeypatch.delenv("RECIPE_KB_REMOTE", raising=False)
+    from inference_optimizer.recipe_kb import gbrain_remote_client as grc
+
+    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: None)
     kb = cli_kb._build_recipe_kb_dispatcher(_args(cortex_kb_url="http://cortex"))
-    assert kb.remote is not None
+    assert kb.remote is None
 
 
 def test_dispatcher_gbrain_enabled(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    monkeypatch.setenv("RECIPE_KB_REMOTE", "gbrain")
     monkeypatch.setenv("RECIPE_KB_MIRROR_MODE", "external")
 
     class _Remote:
@@ -83,7 +88,6 @@ def test_dispatcher_gbrain_enabled(tmp_path, monkeypatch) -> None:
 
 def test_dispatcher_gbrain_inline_mirror(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    monkeypatch.setenv("RECIPE_KB_REMOTE", "gbrain")
     monkeypatch.setenv("RECIPE_KB_MIRROR_MODE", "inline")
 
     class _Remote:
@@ -101,18 +105,6 @@ def test_dispatcher_gbrain_inline_mirror(tmp_path, monkeypatch) -> None:
 
 def test_dispatcher_gbrain_not_configured(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    monkeypatch.setenv("RECIPE_KB_REMOTE", "gbrain")
-    from inference_optimizer.recipe_kb import gbrain_remote_client as grc
-
-    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: None)
-    kb = cli_kb._build_recipe_kb_dispatcher(_args())
-    assert kb.remote is None
-
-
-def test_dispatcher_both_no_sources(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    monkeypatch.setenv("RECIPE_KB_REMOTE", "both")
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
     from inference_optimizer.recipe_kb import gbrain_remote_client as grc
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: None)
@@ -140,7 +132,6 @@ def test_attach_recipe_audit_hook_appends_jsonl(tmp_path) -> None:
 
 def test_attach_recipe_audit_hook_unwraps_mirror(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    monkeypatch.setenv("RECIPE_KB_REMOTE", "gbrain")
     monkeypatch.setenv("RECIPE_KB_MIRROR_MODE", "inline")
 
     class _Remote:
