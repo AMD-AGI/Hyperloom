@@ -419,6 +419,16 @@ def _build_summary_dict(
     failure_summary = _build_failure_summary(state, session_dir)
     if failure_summary:
         summary["failure_summary"] = failure_summary
+    # ``host_state_applied`` — the rocm-smi state the
+    # ``power_management`` action left in force on the GPU. Surface it
+    # so the report can render the verbatim replication recipe
+    # alongside ``current_best.extra_server_args``: a fresh operator
+    # needs both to bring the box back to the chosen state after a
+    # reboot (the server flags AND the rocm-smi setters). When no
+    # power_management round won (or the last round failed/reset),
+    # the field is ``None`` and the section is omitted entirely.
+    if isinstance(state.host_state_applied, dict) and state.host_state_applied:
+        summary["host_state_applied"] = state.host_state_applied
     return summary
 
 
@@ -519,6 +529,10 @@ def _format_md(summary: dict[str, Any]) -> str:
     roofline_cmp = summary.get("roofline_comparison")
     if roofline_cmp:
         lines.extend(_format_roofline_comparison_section(roofline_cmp))
+
+    host_state = summary.get("host_state_applied")
+    if host_state:
+        lines.extend(_format_host_state_applied_section(host_state))
 
     ext = summary.get("external_baseline")
     if ext:
@@ -626,6 +640,72 @@ def _format_steward_section(summary: dict[str, Any]) -> list[str]:
             lines.append("")
     if len(history) > 1:
         lines.append(f"- prior assessments: {len(history) - 1}")
+    lines.append("")
+    return lines
+
+
+def _format_host_state_applied_section(
+    host_state: dict[str, Any],
+) -> list[str]:
+    """Render the ``power_management`` GPU state currently in force.
+
+    The companion to ``current_best.extra_server_args``: that section
+    captures the server-flag side of the chosen config, this one
+    captures the rocm-smi side. A fresh operator who wants to
+    reproduce the run's end state past a reboot needs both — the
+    server flags (so the SGLang/vLLM process comes up the same way)
+    and the rocm-smi setters (so the GPUs come up in the same power
+    state). Without this section, the operator would have to dig
+    through ``state.json`` or replay the bus log to find which
+    ``power_management`` variant the run promoted.
+
+    Layout: a header line summarising the winner + gain, a fenced
+    block with the exact shell commands (so copy-paste into a
+    terminal recreates the state), and a small metadata block with
+    the device subset + probed bounds at apply time. ``measured_state``
+    is intentionally NOT rendered here — it's the cache the next
+    power_management round consults for drift detection, not a
+    consumer-facing readback.
+    """
+    lines: list[str] = ["## GPU power state applied", ""]
+    variant_name = str(host_state.get("variant_name") or "?")
+    gain = host_state.get("gain_pct")
+    gain_s = (
+        f"`{gain:+.2f}%` vs base"
+        if isinstance(gain, (int, float)) else "(gain unrecorded)"
+    )
+    ts = str(host_state.get("ts") or "?")
+    lines.append(
+        f"- **winner variant**: `{variant_name}` — {gain_s}  "
+        f"_(applied at {ts})_"
+    )
+    device_ids = list(host_state.get("device_ids") or [])
+    if device_ids:
+        lines.append(f"- **devices**: `{device_ids}`")
+    else:
+        lines.append("- **devices**: all GPUs on this host")
+    probed = host_state.get("probed_range_w")
+    if isinstance(probed, (list, tuple)) and len(probed) == 2:
+        lines.append(
+            f"- **probed cap range**: `[{probed[0]} W, {probed[1]} W]`"
+        )
+    top_sclk = host_state.get("top_sclk_mhz")
+    if isinstance(top_sclk, (int, float)) and top_sclk > 0:
+        lines.append(f"- **top sclk**: `{int(top_sclk)} MHz`")
+    lines.append("")
+    smi_cmds = list(host_state.get("smi_commands") or [])
+    if smi_cmds:
+        lines.append("Re-apply this state (run as root, or with NOPASSWD sudo for rocm-smi):")
+        lines.append("")
+        lines.append("```bash")
+        for cmd in smi_cmds:
+            lines.append(str(cmd))
+        lines.append("```")
+    else:
+        lines.append(
+            "_(no rocm-smi commands recorded — the executor "
+            "reset to defaults before the report ran)_"
+        )
     lines.append("")
     return lines
 

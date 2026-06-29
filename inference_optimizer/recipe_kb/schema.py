@@ -247,6 +247,66 @@ class KernelOptimization:
 
 
 @dataclass
+class PowerState:
+    """The winning host GPU power state paired with the best kernel combo.
+
+    Hyperloom superset (arbor has no power concept). Power management
+    runs in the KERNEL phase and tunes ``rocm-smi`` host knobs (power
+    cap / perflevel / clock pins / determinism / fan) on top of the
+    winning kernel combo. ``best_config`` reproduces the server-flag /
+    kernel stack; this reproduces the host power state that produced
+    ``best_throughput`` so the same combined kernel+power result can be
+    recreated on another machine.
+
+    ``smi_commands`` are the exact ``rocm-smi`` invocations to re-apply
+    (the canonical reproduction handle); ``power_settings`` is the
+    structured ``PowerVariant`` form. ``power_gain_pct`` is the
+    power-only delta (combined vs kernel-only tput). Empty / zero on a
+    run where PM never produced a kept winner.
+    """
+    variant_name: str = ""
+    bound_kind: str = ""
+    power_settings: dict[str, Any] = field(default_factory=dict)
+    smi_commands: list[str] = field(default_factory=list)
+    device_ids: list[int] = field(default_factory=list)
+    power_gain_pct: float = 0.0
+    kernel_tput: float = 0.0
+    combined_tput: float = 0.0
+    ts: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "variant_name":   str(self.variant_name),
+            "bound_kind":     str(self.bound_kind),
+            "power_settings": dict(self.power_settings),
+            "smi_commands":   list(self.smi_commands),
+            "device_ids":     list(self.device_ids),
+            "power_gain_pct": float(self.power_gain_pct),
+            "kernel_tput":    float(self.kernel_tput),
+            "combined_tput":  float(self.combined_tput),
+            "ts":             str(self.ts),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PowerState:
+        d = d or {}
+        return cls(
+            variant_name=str(d.get("variant_name") or ""),
+            bound_kind=str(d.get("bound_kind") or ""),
+            power_settings=dict(d.get("power_settings") or {}),
+            smi_commands=list(d.get("smi_commands") or []),
+            device_ids=list(d.get("device_ids") or []),
+            power_gain_pct=float(d.get("power_gain_pct") or 0.0),
+            kernel_tput=float(d.get("kernel_tput") or 0.0),
+            combined_tput=float(d.get("combined_tput") or 0.0),
+            ts=str(d.get("ts") or ""),
+        )
+
+    def is_empty(self) -> bool:
+        return not self.smi_commands and not self.power_settings
+
+
+@dataclass
 class SessionSummary:
     """One optimisation-session entry — one row per CLOSE.
 
@@ -316,6 +376,13 @@ class Recipe:
     # skip re-optimizing kernels already proven to have no E2E payoff.
     kernel_optimizations: list[KernelOptimization] = field(default_factory=list)
 
+    # ----- hyperloom superset: winning host power state -----
+    # The rocm-smi power state paired with the best kernel combo
+    # (KERNEL-phase power management). arbor consumers ignore the extra
+    # top-level key; warm-start / cross-machine reproduction reads it to
+    # re-apply the exact power knobs that produced ``best_throughput``.
+    power_state: PowerState = field(default_factory=PowerState)
+
     # ----- v2 audit / wire-compat fields (kept so dispatcher can
     # round-trip to the central server) -----
     authority: str = "EXPERIENTIAL"
@@ -377,6 +444,7 @@ class Recipe:
                 for s in self.sessions
             ],
             "kernel_optimizations": [k.to_dict() for k in self.kernel_optimizations],
+            "power_state": self.power_state.to_dict(),
             "authority": str(self.authority),
             "confidence": float(self.confidence),
             "evidence_refs": list(self.evidence_refs),
@@ -434,6 +502,7 @@ class Recipe:
             "stack_fingerprint",
             "sessions",
             "kernel_optimizations",
+            "power_state",
             "authority",
             "confidence",
             "evidence_refs",
@@ -524,6 +593,7 @@ class Recipe:
             kernel_optimizations=[
                 KernelOptimization.from_dict(k) for k in (d.get("kernel_optimizations") or []) if isinstance(k, dict)
             ],
+            power_state=PowerState.from_dict(d.get("power_state") or {}),
             authority=str(d.get("authority") or "EXPERIENTIAL"),
             confidence=float(d.get("confidence") or 0.85),
             evidence_refs=list(d.get("evidence_refs") or []),
@@ -617,6 +687,7 @@ __all__ = [
     "KernelOptimization",
     "Lesson",
     "Pitfall",
+    "PowerState",
     "PRResult",
     "Recipe",
     "SessionSummary",

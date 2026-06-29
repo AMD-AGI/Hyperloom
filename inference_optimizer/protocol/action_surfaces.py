@@ -71,6 +71,7 @@ GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset(
     {
         "explore",
         "sweep",
+        "power_management",
     }
 )
 
@@ -87,6 +88,7 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "specialist",
     "integrate_patch",
     "sweep",
+    "power_management",
     "kernel_opt",
     "integrate",
     "operator_tuning",

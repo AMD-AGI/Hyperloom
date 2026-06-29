@@ -81,6 +81,7 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset(
         "sweep",
         "conc_sweep",
         "explore",
+        "power_management",
         "specialist",
         "integrate_patch",
         "framework_agent",

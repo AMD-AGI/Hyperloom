@@ -129,5 +129,37 @@ The optimizer should:
    `params.grid` is filtered through the same ledger as the default seed grid.
 7. Use `optimization_stack` so backend + params + kernel changes do not
    overwrite each other.
-8. Use `sweep` to understand workload-specific results beyond the smoke
+8. `power_management` runs during PHASE_KERNEL_AGENT (single-node only),
+   **throughput-only, fan + cap maxed at all times**: power is NOT tuned
+   during the greedy kernel climb (a varying power state would confound the
+   irreversible KEEP/REVERT/plateau signal). Instead the Coordinator applies a
+   fixed **incumbent** state (`--setperflevel auto` + ceiling power cap +
+   `--setfan 100%`) once at KERNEL entry and holds it through the whole climb,
+   then runs ONE **settle sweep** at the KERNEL plateau (which gates the
+   KERNEL→SWEEP transition) at the higher PM keep cutoff (2%). The LLM may
+   also delegate an explicit-grid round during KERNEL. The settle sweep builds
+   one **roofline-routed** grid (cap + fan pinned to MAX on every row): the
+   `auto_baseline` incumbent (N reps → median; same hardware state the climb
+   ran under), `high`, a GFX `--setperfdeterminism` determinism ladder
+   (`det_100` always; `det_95`/`det_90`/`det_85` unless compute-bound), and a
+   capability-gated memory axis (only when NOT memory-bound AND ≥2 selectable
+   mclk levels). GFX is tuned via `--setperfdeterminism` only (no DPM-index
+   downregulation). The winner is the highest median throughput that clears
+   the noise floor over `auto_baseline`; otherwise auto is kept; the LLM-grid
+   path with no winner strips to defaults.
+   There is exactly one tuned power state per run (no per-combo map,
+   no mid-climb inheritance). PM never writes
+   `current_best.extra_server_args` (host state is not a server flag), but a
+   settle win refreshes the headline throughput + `cumulative_gain_validated`;
+   the kept rocm-smi commands are recorded on `SharedState.host_state_applied`
+   (attribution on the flat `SharedState.power_attribution`; because cap + fan
+   stay maxed at all times the `auto_baseline` median IS the kernel baseline,
+   so `combined - auto_baseline` is the settle gain — no separate
+   vendor-default measurement), persisted into `recipe.json` under
+   `power_state`, and rendered into the final report so an operator can
+   replicate the GPU state past a reboot. `--no-kernel` runs do no PM at all.
+   Refused (`error_class='multi_node_unsupported'`) on `>=2`-node RayJobs.
+   See `actions/power_management.md` for the full ladder + cross-call ledger
+   semantics.
+9. Use `sweep` to understand workload-specific results beyond the smoke
    workload.

@@ -18,6 +18,13 @@ from .explore import (
 )
 from .conc_sweep import ConcSweepExecutor, conc_sweep_executor
 from .framework_agent import FrameworkAgentExecutor, framework_agent_executor
+from .power_management import (
+    POWER_CAP_DEFAULT_FLOOR_W,
+    POWER_MANAGEMENT_DEFAULT_TIMEOUT_SEC,
+    PowerManagementExecutor,
+    PowerVariant,
+    power_management_executor,
+)
 from .report import ReportExecutor, report_executor
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .sweep import (
@@ -38,6 +45,10 @@ __all__ = [
     "DEFAULT_STACK_STABLE_PCT",
     "ExploreExecutor",
     "FrameworkAgentExecutor",
+    "POWER_CAP_DEFAULT_FLOOR_W",
+    "POWER_MANAGEMENT_DEFAULT_TIMEOUT_SEC",
+    "PowerManagementExecutor",
+    "PowerVariant",
     "RecoverExecutor",
     "ReportExecutor",
     "SessionBreakdownExecutor",
@@ -47,6 +58,7 @@ __all__ = [
     "conc_sweep_executor",
     "explore_executor",
     "framework_agent_executor",
+    "power_management_executor",
     "recover_executor",
     "report_executor",
     "session_breakdown_executor",

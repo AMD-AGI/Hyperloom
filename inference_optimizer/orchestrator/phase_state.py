@@ -97,6 +97,13 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "gemm_tuning",
             "roofline",
             "profile",
+            # The Coordinator auto-enqueues a bound-aware short tune on each
+            # +10% gain watermark crossing and a full settle sweep at the
+            # KERNEL plateau; both are Coordinator-internal (bypass the LLM
+            # propose/delegate path). It sits in the allowlist so those
+            # internal enqueues pass R1 ``phase_incompatible``. ``--no-kernel``
+            # runs skip KERNEL entirely and therefore run no PM.
+            "power_management",
             "recover",
         }
     ),

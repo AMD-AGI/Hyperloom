@@ -129,6 +129,11 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
         "explore",
         # Composite roofline runs profile + trace_analyze atomically.
         "roofline",
+        # power_management: each round writes a per-attempt audit row so
+        # the LLM can see the cross-call history (winners + re-validation
+        # outcomes) the same way it sees explore_attempts / sweep_attempts.
+        # Must match shared_state._AUDIT_ACTIONS exactly.
+        "power_management",
     }
 )
 
@@ -2313,6 +2318,17 @@ class Coordinator:
         if target == (state.phase or "").upper():
             return  # already there
         prior = state.phase
+        # Hold the KERNEL -> SWEEP transition for one full settle PM
+        # sweep on the final combo. MANDATORY on every KERNEL -> SWEEP
+        # exit (plateau, budget-exhausted, no_more_leverage) so the
+        # power tune always runs once; the settle-hold deadline guard
+        # inside bounds the hold. Returns True while the sweep is
+        # in-flight; we defer the transition so PM runs while still in
+        # KERNEL (where it's allowlisted).
+        if await self._maybe_hold_kernel_for_power_sweep(
+            prior=prior or "", target=target, reason=reason,
+        ):
+            return
         # Consume escalate hint after a hint-driven transition so the next tick re-evaluates fresh.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()
@@ -2790,6 +2806,170 @@ class Coordinator:
             await self._on_enter_sweep(from_phase=from_phase)
         elif target == _phase_state.PHASE_CLOSE:
             await self._on_enter_close(from_phase=from_phase)
+
+    def _ensure_run_start_power_reset(self) -> None:
+        """Mandatory reset of host GPU power to vendor
+        defaults at the start of a fresh run.
+
+        Power management lives in the KERNEL phase (a fixed incumbent
+        state — perflevel auto + cap-max + fan-max — held through the
+        climb, then one settle sweep at the plateau). To make every run
+        start from a known clean state (so
+        the baseline is measured at vendor defaults and a stale cap from
+        a previous run can't skew it), we reset the host power knobs once
+        and clear ``host_state_applied``.
+
+        Single-node only (the reset wrapper no-ops on multi-node /
+        dry-run / when rocm-smi is unavailable). Idempotent per
+        Coordinator instance via ``_power_reset_done``.
+
+        Behaviour by start kind:
+
+          * **Fresh run** — mandatory reset to vendor defaults AND clear
+            the ``host_state_applied`` record (nothing has been applied
+            yet, so the record must be empty too).
+          * **Resume into KERNEL** — reset, then re-apply the recorded
+            ``host_state_applied`` (the fixed incumbent climb state —
+            auto + cap-max + fan-max — or a settle winner). KERNEL is
+            the only phase a resume can keep
+            iterating in, so it's the only phase whose tuned state must
+            be re-applied to the live GPU.
+          * **Resume into any other phase** (EXPLORE / SWEEP / CLOSE) or
+            multi-node — reset the hardware to vendor defaults but
+            **preserve** the ``host_state_applied`` record; it drives the
+            report + recipe and must not be wiped just because the live
+            GPU was reset.
+        """
+        if getattr(self, "_power_reset_done", False):
+            return
+        self._power_reset_done = True
+        try:
+            from .action_executors.power_management import (
+                reset_host_power_defaults,
+            )
+            from .action_executors._multi_node_env import is_multi_node
+
+            multi = is_multi_node()
+        except Exception as exc:  # noqa: BLE001 — defensive, never block startup
+            log.warning("run-start power reset import failed (continuing): %r", exc)
+            return
+
+        is_resume = bool(self._resumed_from.get("is_resume"))
+        phase = (self.shared_state.phase or "").strip().upper()
+        try:
+            if not is_resume:
+                result = reset_host_power_defaults(is_multi_node=multi)
+                self.shared_state.host_state_applied = None
+                status = str(result.get("status") or "")
+            elif phase == _phase_state.PHASE_KERNEL_AGENT and not multi:
+                # Resume into KERNEL: reset, then re-apply the recorded
+                # host state (the fixed incumbent climb state — auto +
+                # cap-max + fan-max). This is the only resume case that
+                # re-applies to the live GPU.
+                from .action_executors.power_management import (
+                    reapply_host_power_state,
+                )
+                reset_host_power_defaults(is_multi_node=multi)
+                hs = self.shared_state.host_state_applied
+                if isinstance(hs, dict) and hs.get("smi_commands"):
+                    reapply_host_power_state(hs, is_multi_node=multi)
+                    status = "resume_kernel_reapply"
+                else:
+                    # No recorded state yet — apply the incumbent state
+                    # (auto + cap-max + fan-max) fresh.
+                    self._max_climb_state_applied = False
+                    self._apply_kernel_climb_max_state()
+                    status = "resume_kernel_max_state"
+            else:
+                # Resume into a non-KERNEL phase (or multi-node): reset the
+                # hardware only — keep the records intact.
+                result = reset_host_power_defaults(is_multi_node=multi)
+                status = f"resume_reset_defaults:{result.get('status') or ''}"
+        except Exception as exc:  # noqa: BLE001 — never block startup
+            log.warning("run-start power reset failed (continuing): %r", exc)
+            status = "error"
+        self.shared_state.save(self.session_dir)
+        log.info("run-start power reset (resume=%s phase=%s): %s",
+                 is_resume, phase or "<unset>", status)
+        self._record_phase_entry_evidence(
+            power_reset_at_start=True,
+            power_reset_status=status,
+        )
+
+    def _current_bound_kind(self) -> str:
+        """Return the latest roofline bottleneck (``memory`` / ``compute``
+        / ``unknown``) that routes the settle sweep grid.
+
+        Reads ``roofline_bound_kind`` off the most recent
+        :attr:`SharedState.roofline_snapshots` entry (written by every
+        ``roofline`` action). Read-only + best-effort: any missing /
+        malformed history collapses to ``"unknown"`` so the grid keeps
+        the full ladder (det_100/95/90 + the capability-gated memory
+        axis) rather than pruning rungs on a mis-read bottleneck.
+        """
+        try:
+            snaps = self.shared_state.roofline_snapshots
+            if isinstance(snaps, list) and snaps:
+                latest = snaps[-1]
+                if isinstance(latest, dict):
+                    bk = str(latest.get("roofline_bound_kind") or "").strip().lower()
+                    if bk in ("memory", "compute"):
+                        return bk
+        except Exception:  # noqa: BLE001 — read-only best-effort
+            pass
+        return "unknown"
+
+    def _apply_kernel_climb_max_state(self) -> None:
+        """Apply + record the fixed kernel-incumbent state for the climb.
+
+        Power is held at a single state — ``perflevel auto`` + the
+        manufacturer ceiling power cap + fan at 100% — for the entire
+        greedy kernel climb, then tuned exactly once at the plateau (the
+        settle sweep, whose ``auto_baseline`` row reproduces exactly this
+        state). The cap + fan are pinned to MAX at all times (climb AND
+        sweep) so the kernel phase and the sweep baseline are the same
+        hardware state and power is never a confound; GFX stays on the
+        ``auto`` governor here because the settle sweep tunes GFX only
+        via ``--setperfdeterminism`` and its ``auto_baseline`` reference
+        must line up byte-for-byte with this incumbent.
+
+        Single-node only; best-effort (never raises, never blocks KERNEL
+        entry). No-op on multi-node / rocm-smi-unavailable. The applied
+        snapshot is recorded on ``host_state_applied`` so it is re-applied
+        on resume and passed to the settle sweep as the incumbent.
+        Idempotent per Coordinator instance via ``_max_climb_state_applied``.
+        """
+        if getattr(self, "_max_climb_state_applied", False):
+            return
+        try:
+            from .action_executors._multi_node_env import is_multi_node
+            from .action_executors.power_management import apply_max_climb_state
+
+            multi = is_multi_node()
+        except Exception as exc:  # noqa: BLE001 — never block KERNEL entry
+            log.warning("max-climb-state import failed (continuing): %r", exc)
+            return
+        if multi:
+            return
+        self._max_climb_state_applied = True
+        try:
+            snapshot = apply_max_climb_state(is_multi_node=multi)
+        except Exception as exc:  # noqa: BLE001 — never block KERNEL entry
+            log.warning("max-climb-state apply failed (continuing): %r", exc)
+            return
+        if isinstance(snapshot, dict):
+            self.shared_state.host_state_applied = snapshot
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                pass
+            log.info(
+                "KERNEL climb: applied fixed incumbent host state "
+                "(perflevel auto + cap-max + fan-max)"
+            )
+        self._record_phase_entry_evidence(
+            max_climb_state_applied=isinstance(snapshot, dict),
+        )
 
     async def _on_enter_explore(self, *, from_phase: str) -> None:
         """Warm ``KnowledgePlane.pr_feed`` across specialist domains (best-effort) on EXPLORE entry. Roofline lives in PRELUDE, not here (except the per-cycle forced reprofile below).
@@ -4525,7 +4705,10 @@ class Coordinator:
             from_phase: The phase being left, used only for logging.
         """
         if not self._kernel_enabled():
-            # Should not happen — --no-kernel routes EXPLORE → SWEEP.
+            # Should not happen — compute_next_phase routes
+            # --no-kernel runs straight EXPLORE → SWEEP. (And because PM
+            # is KERNEL-plateau-only, a --no-kernel run does no power
+            # management at all.)
             log.info(
                 "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
                 from_phase or "<unknown>",
@@ -4537,6 +4720,10 @@ class Coordinator:
             # (which reuses PerfSkills' final_launch.sh + bench_e2e.sh).
             await self._run_perfskills_kernel_phase(from_phase=from_phase)
             return
+        # Apply the fixed MAX climb state once, before any kernel work,
+        # and hold it unchanged through the greedy climb (max, then
+        # downregulate; see _apply_kernel_climb_max_state).
+        self._apply_kernel_climb_max_state()
         if not self._gemm_tuning_required_before_kernel_opt():
             # No GEMM tuning here: refresh the snapshot (explore gains) before the LLM drives GEAK.
             await self._maybe_reprofile_for_kernel()
@@ -5455,6 +5642,9 @@ class Coordinator:
         self.shared_state.cumulative_gain_validated_stack_len = len(
             self.shared_state.optimization_stack or []
         )
+        # No per-combo power reconciliation: the fixed clocks-high climb
+        # state applied at KERNEL entry is held unchanged across every
+        # combo (gemm + integrate) until the single settle sweep.
 
     def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
         """Sync the latest GEMM history row after forge E2E rewrites ``result``."""
@@ -7272,6 +7462,201 @@ class Coordinator:
             )
         return task
 
+    async def _enqueue_internal_power_management_task(
+        self, *, reason: str,
+    ) -> "Task | None":
+        """Build + enqueue the Coordinator-internal settle ``power_management`` task.
+
+        This is the single power tune of a run: it fires once on the
+        plateaued KERNEL combo at the KERNEL -> SWEEP boundary. It builds
+        a single roofline-routed grid (throughput-only, cap + fan pinned
+        to MAX on every row): the ``auto_baseline`` incumbent (N reps →
+        median), ``high``, the GFX determinism ladder (det_100 always;
+        det_95/det_90/det_85 unless compute-bound), and the capability-gated
+        memory axis (NOT memory-bound AND >= 2 mclk levels). The winner
+        is the highest median throughput that clears the noise floor over
+        ``auto_baseline``; otherwise auto is kept. Iterates on the run's
+        tuned state via the cross-call ledger
+        (``power_management_search`` injected,
+        ``revalidate_winners='lazy'``). Because the cap + fan stay maxed
+        at all times, the ``auto_baseline`` row IS the kernel-climb
+        state, so its median seeds attribution directly (no separate
+        vendor-default measurement). Single idempotency key so a resume
+        never double-runs it. Uses the higher KERNEL PM keep cutoff
+        (``KERNEL_PM_KEEP_THRESHOLD_PCT``). Returns the created /
+        returned task (or ``None`` on enqueue failure).
+        """
+        from .action_executors.power_management import (
+            KERNEL_PM_KEEP_THRESHOLD_PCT,
+        )
+
+        state = self.shared_state
+        cb = state.current_best or {}
+        cb_args = (
+            str(cb.get("extra_server_args") or "")
+            if isinstance(cb, dict) else ""
+        )
+        cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+        base = (
+            cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0
+            else state.baseline_tput
+        )
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": str(reason),
+            "base_tput": float(base or 0.0),
+            "base_extra_args": cb_args,
+            "keep_threshold_pct": KERNEL_PM_KEEP_THRESHOLD_PCT,
+            "power_management_search": state.power_management_search,
+            # Roofline bottleneck routes the grid: compute-bound prunes
+            # the det_95/det_90/det_85 rungs; memory-bound omits the memory
+            # axis; unknown keeps the full ladder. Read-only snapshot.
+            "bound_kind": self._current_bound_kind(),
+            "revalidate_winners": "lazy",
+            # On the settle path the cap + fan stay maxed at all times,
+            # so the ``auto_baseline`` row reproduces the kernel-climb
+            # state exactly and its N-rep median is the gain reference
+            # AND the attribution baseline — no separate vendor-default
+            # measurement is taken. (Kept for the LLM-grid path only,
+            # where it is honoured; the settle path ignores it.)
+            "measure_kernel_baseline": True,
+        }
+        if state.baseline_config_path:
+            params["config_path"] = state.baseline_config_path
+        # The incumbent for the settle sweep is the fixed kernel-climb
+        # state (perflevel auto + cap-max + fan-max) — passed so the
+        # executor can re-apply it on a no-winner round
+        # (final_state="kept_incumbent").
+        if state.host_state_applied is not None:
+            params["host_state_applied"] = state.host_state_applied
+        last_bl = state.last_baseline or {}
+        if isinstance(last_bl, dict):
+            bs = str(last_bl.get("benchmark_script") or "").strip()
+            if bs:
+                params["benchmark_script"] = bs
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="power_management",
+                params=params,
+                idempotency_key="internal-pm-kernel-settle",
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("internal settle power_management enqueue failed: %r",
+                          exc)
+            return None
+        if was_existing:
+            log.info(
+                "internal settle power_management task already exists "
+                "(idempotent: task_id=%s, state=%s)",
+                task.task_id, task.state,
+            )
+        return task
+
+    async def _maybe_hold_kernel_for_power_sweep(
+        self, *, prior: str, target: str, reason: str,
+    ) -> bool:
+        """Hold KERNEL -> SWEEP for the settle PM sweep.
+
+        Fires on EVERY KERNEL -> SWEEP exit so the single settle power
+        sweep is MANDATORY: the plateau exit (``plateau_kernel``, the
+        "kernels stopped recombining" case the design originally
+        targeted) AND the forced exits (``kernel_phase_budget_exhausted``
+        / ``no_more_leverage``). The forced-exit cases are precisely the
+        ones a no-leverage kernel phase hits (no reusable kernels -> no
+        integrate attempts -> ``compute_plateau_kernel`` never triggers),
+        and the old ``reason == "plateau_kernel"`` gate silently skipped
+        the power tune on those. We now still run it on the held climb /
+        explore combo; the settle-hold deadline guard below bounds the
+        hold so a budget-exhausted exit can't wedge KERNEL forever.
+
+        Single-node + a real combo + a known baseline are still
+        required; otherwise the latch is set and the transition proceeds
+        immediately.
+
+        Returns True to DEFER the transition (settle sweep enqueued /
+        in-flight); False to let it proceed.
+        """
+        if (prior or "").strip().upper() != _phase_state.PHASE_KERNEL_AGENT:
+            return False
+        if target != _phase_state.PHASE_SWEEP:
+            return False
+        # NOTE: intentionally NOT gated on ``reason`` anymore. The settle
+        # PM sweep must run once on any KERNEL -> SWEEP exit (plateau,
+        # budget-exhausted, or no_more_leverage). ``power_settle_sweep_done``
+        # latches it to exactly one run and the deadline guard prevents a
+        # budget-exhausted exit from holding the phase machine forever.
+        state = self.shared_state
+        if getattr(state, "power_settle_sweep_done", False):
+            return False
+        try:
+            from .action_executors._multi_node_env import is_multi_node
+        except Exception:  # noqa: BLE001
+            state.power_settle_sweep_done = True
+            return False
+        if is_multi_node() or not state.optimization_stack or state.baseline_tput <= 0:
+            state.power_settle_sweep_done = True
+            return False
+        # Settle-hold timeout guard: a lost / failed / orphaned settle
+        # task must not wedge KERNEL -> SWEEP forever (which would burn
+        # the whole wall-clock budget holding at the plateau and skip
+        # SWEEP entirely). Stamp the first defer; if we've held past the
+        # deadline, latch done and let the transition proceed.
+        now = datetime.now(timezone.utc)
+        started_ts = getattr(state, "power_settle_hold_started_ts", "") or ""
+        if started_ts:
+            try:
+                started = datetime.fromisoformat(started_ts)
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                if (now - started).total_seconds() > self._power_settle_hold_deadline_sec():
+                    log.warning(
+                        "settle PM sweep hold exceeded deadline (started=%s); "
+                        "latching done and proceeding to SWEEP", started_ts,
+                    )
+                    state.power_settle_sweep_done = True
+                    try:
+                        state.save(self.session_dir)
+                    except Exception:  # noqa: BLE001 — defensive
+                        pass
+                    return False
+            except (TypeError, ValueError):
+                # Malformed timestamp — re-stamp below rather than wedge.
+                started_ts = ""
+        task = await self._enqueue_internal_power_management_task(
+            reason="kernel_settle",
+        )
+        if task is None:
+            # Could not enqueue — don't wedge the phase machine.
+            state.power_settle_sweep_done = True
+            return False
+        if not started_ts:
+            state.power_settle_hold_started_ts = now.isoformat()
+        log.info(
+            "holding KERNEL -> SWEEP for mandatory settle PM sweep "
+            "(exit_reason=%s, task=%s, combo=%s)",
+            reason, task.task_id, state.combo_fingerprint(),
+        )
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+        return True
+
+    @staticmethod
+    def _power_settle_hold_deadline_sec() -> float:
+        """Wall-clock deadline for holding KERNEL -> SWEEP on the settle sweep.
+
+        Sized to the settle sweep's worst-case runtime with headroom:
+        the default per-variant timeout times a small grid + synergy
+        ladder + the kernel-only baseline reps, bounded by a hard cap so
+        a misconfigured timeout can't hold the plateau indefinitely.
+        """
+        from .action_executors.power_management import (
+            POWER_MANAGEMENT_DEFAULT_TIMEOUT_SEC,
+        )
+        # ~ default timeout * (grid headroom) bounded at 2h.
+        return float(min(POWER_MANAGEMENT_DEFAULT_TIMEOUT_SEC * 3, 7200))
+
     @staticmethod
     def _build_sweep_params_from_recipe(state: SharedState) -> dict[str, Any]:
         """Pick a sweep grid (§3.14 R-13): warm_start_recipe.sweep_grid takes precedence over SKILL.md defaults; per-field fallback. Returns source/conc_values/isl_osl_configs/num_prompts_factor.
@@ -8439,6 +8824,10 @@ class Coordinator:
                 previous_handlers = {}
 
         await self._replay_resume_if_needed()
+
+        # Mandatory reset of host GPU power to vendor
+        # defaults at run start (no-op on resume / multi-node).
+        self._ensure_run_start_power_reset()
 
         tick_n = 0
         stop_reason = ""
@@ -9927,6 +10316,25 @@ class Coordinator:
             if self.shared_state.baseline_config_path:
                 params.setdefault(
                     "config_path", self.shared_state.baseline_config_path
+                )
+        if pending.action_name == "power_management":
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+                else self.shared_state.baseline_tput
+            params.setdefault("base_tput", float(base or 0.0))
+            params.setdefault("base_extra_args", cb_args)
+            if self.shared_state.baseline_config_path:
+                params.setdefault(
+                    "config_path", self.shared_state.baseline_config_path
+                )
+            params.setdefault(
+                "power_management_search",
+                self.shared_state.power_management_search,
+            )
+            if self.shared_state.host_state_applied is not None:
+                params.setdefault(
+                    "host_state_applied",
+                    self.shared_state.host_state_applied,
                 )
         lanes, ttl = self._registry_lanes_ttl(pending.action_name)
         task, was_existing = await self.tasks.create_or_return_existing(
@@ -12085,7 +12493,113 @@ class Coordinator:
             await self._maybe_enqueue_watermark_roofline(
                 reason="integrate_keep_watermark",
             )
+        # No per-combo power reconciliation: the fixed incumbent climb
+        # state (auto + cap-max + fan-max) applied at KERNEL entry is
+        # held unchanged across every combo until the single settle
+        # sweep at KERNEL -> SWEEP.
 
+    async def _record_power_management_attribution(
+        self, result: dict[str, Any], *, combined: float, lift_headline: bool,
+    ) -> None:
+        """Record the settle sweep's power-only attribution + (optionally)
+        lift the headline measurement.
+
+        There is exactly one tuned power state per run (the settle
+        winner, or the held auto incumbent), so attribution is a
+        FLAT :attr:`SharedState.power_attribution` dict rather than a
+        combo-keyed map. On the settle path the reference is the
+        ``auto_baseline`` row's N-rep median (the same hardware state the
+        kernel climbed under — cap + fan stay maxed at all times), so
+        ``combined - kernel`` is the FULL power contribution (any settle
+        gain over auto).
+
+        ``combined`` is the throughput under the kept power state
+        (``best_variant.output_throughput`` on a fresh winner; the
+        incumbent's ``base_tput`` on ``kept_incumbent``). When
+        ``lift_headline`` is set AND ``combined`` beats the current best,
+        ``current_best.tput`` + ``cumulative_gain_validated`` are lifted
+        to ``combined`` (tput ONLY — power knobs are never written onto
+        ``extra_server_args``).
+        """
+        if not isinstance(combined, (int, float)) or combined <= 0:
+            return
+        combined = float(combined)
+        # kernel-only baseline = the reference the power delta is measured
+        # against: the executor's median (the auto_baseline median on the
+        # settle path; the vendor-default median on the LLM-grid path),
+        # else the round's ``base_tput``, else ``current_best.tput``.
+        kernel_tput = 0.0
+        try:
+            kernel_tput = float(result.get("kernel_baseline_tput") or 0.0)
+        except (TypeError, ValueError):
+            kernel_tput = 0.0
+        if kernel_tput <= 0:
+            try:
+                kernel_tput = float(result.get("base_tput") or 0.0)
+            except (TypeError, ValueError):
+                kernel_tput = 0.0
+        cb = self.shared_state.current_best or {}
+        if kernel_tput <= 0 and isinstance(cb, dict):
+            try:
+                kernel_tput = float(cb.get("tput") or 0.0)
+            except (TypeError, ValueError):
+                kernel_tput = 0.0
+
+        cur_best_tput = 0.0
+        if isinstance(cb, dict):
+            try:
+                cur_best_tput = float(cb.get("tput") or 0.0)
+            except (TypeError, ValueError):
+                cur_best_tput = 0.0
+
+        # Clamp the power delta to >= 0 so the recipe never ships a
+        # negative "power gain"; flag low_confidence when the median
+        # baseline meets/beats the combined tput (noise inverted it).
+        raw_delta = (
+            (combined - kernel_tput) / kernel_tput * 100.0
+            if kernel_tput > 0 else 0.0
+        )
+        low_confidence = kernel_tput > 0 and kernel_tput >= combined
+        power_delta_pct = max(0.0, raw_delta)
+        try:
+            n_reps = int(result.get("kernel_baseline_reps") or 0)
+        except (TypeError, ValueError):
+            n_reps = 0
+
+        self.shared_state.power_attribution = {
+            "kernel_tput": kernel_tput,
+            "combined_tput": combined,
+            "power_delta_pct": power_delta_pct,
+            "n_reps": n_reps,
+            "low_confidence": bool(low_confidence),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if (
+            not lift_headline
+            or combined <= cur_best_tput
+            or self.shared_state.baseline_tput <= 0
+        ):
+            return
+        # Refresh the headline measurement (tput only).
+        if isinstance(cb, dict):
+            cb["tput"] = combined
+        validated_gain = (
+            (combined - self.shared_state.baseline_tput)
+            / self.shared_state.baseline_tput * 100.0
+        )
+        self.shared_state.cumulative_gain = float(validated_gain)
+        self.shared_state.cumulative_gain_validated = float(validated_gain)
+        self.shared_state.cumulative_gain_validated_ts = (
+            datetime.now(timezone.utc).isoformat()
+        )
+        log.info(
+            "power_management promotion: kernel=%.2f -> combined=%.2f "
+            "(power +%.2f%%); cumulative_gain_validated=%.2f%%",
+            kernel_tput, combined, power_delta_pct, validated_gain,
+        )
+
+    # ==================================================================
     # Dispatcher (pulls queued tasks → SubAgentRunner)
     def _is_promotable_result(self, task_kind: str, result: dict[str, Any]) -> bool:
         """Decide whether a settled task result should be promoted.
@@ -12136,6 +12650,17 @@ class Coordinator:
         """
         result_payload = result or {}
         any_changed = False
+        # A failed / unpromotable settle PM task must still release the
+        # KERNEL -> SWEEP hold — otherwise a lost or crashed settle sweep
+        # wedges the plateau until the wall-clock deadline. Latch the gate
+        # whenever a ``kernel_settle`` power_management task lands here.
+        if task.kind == "power_management" and isinstance(
+            getattr(task, "params", None), dict
+        ):
+            if str(task.params.get("reason") or "") == "kernel_settle":
+                if not getattr(self.shared_state, "power_settle_sweep_done", False):
+                    self.shared_state.power_settle_sweep_done = True
+                    any_changed = True
         # Per-action audit (failed attempt) for the 6 in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
             audit_extras: dict[str, Any] = {}
@@ -13105,6 +13630,38 @@ class Coordinator:
                     reverted_rows.append(row)
         return kept_sources, kept_by_gap, reverted_rows
 
+    def _build_power_state_for_recipe(self) -> dict[str, Any]:
+        """Recipe-shaped view of the run's kept power state
+        (``schema.PowerState`` fields).
+
+        There is exactly one tuned power state per run (the settle
+        winner, or the held clocks-high incumbent), recorded on
+        ``host_state_applied`` with attribution on the flat
+        ``power_attribution`` dict. Returns ``{}`` when no power state was
+        kept so the recipe carries an empty ``power_state`` block.
+        """
+        ss = self.shared_state
+        host = getattr(ss, "host_state_applied", None)
+        if not isinstance(host, dict):
+            host = {}
+        meta = getattr(ss, "power_attribution", None)
+        if not isinstance(meta, dict):
+            meta = {}
+        if not host and not meta:
+            return {}
+        return {
+            "variant_name":   str(host.get("variant_name") or ""),
+            "power_settings": dict(host.get("power_settings") or {}),
+            "smi_commands":   list(host.get("smi_commands") or []),
+            "device_ids":     list(host.get("device_ids") or []),
+            "power_gain_pct": float(meta.get("power_delta_pct") or 0.0),
+            "kernel_tput":    float(meta.get("kernel_tput") or 0.0),
+            "combined_tput":  float(meta.get("combined_tput") or 0.0),
+            "low_confidence": bool(meta.get("low_confidence") or False),
+            "n_reps":         int(meta.get("n_reps") or 0),
+            "ts":             str(meta.get("ts") or host.get("ts") or ""),
+        }
+
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
         """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
         return self.recorder._build_recipe_attrs_from_state()
@@ -13487,6 +14044,9 @@ class Coordinator:
                 if anchor_tput > 0:
                     self.shared_state.last_roofline_tput = float(anchor_tput)
                     changed = True
+            # No mid-climb power tuning: the watermark roofline is pure
+            # kernel analysis. Power is tuned once at the KERNEL plateau
+            # (settle sweep), holding clocks-high until then.
             if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
                 self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
@@ -13528,6 +14088,9 @@ class Coordinator:
                 if anchor_tput > 0:
                     self.shared_state.last_roofline_tput = float(anchor_tput)
                 changed = True
+                # No mid-climb power tuning: the watermark roofline is
+                # pure kernel analysis. Power is tuned once at the KERNEL
+                # plateau (settle sweep), holding clocks-high until then.
             else:
                 audit_decision = "discarded"
                 audit_extras = {
@@ -13871,6 +14434,154 @@ class Coordinator:
             self.shared_state.record_conc_sweep(result)
             self.shared_state.save(self.session_dir)
             return
+        elif task_kind == "power_management":
+            # power_management mutates HOST state (GPU power cap, perflevel,
+            # clock pins, etc.) — distinct from server-config actions like
+            # explore/sweep, but every bit as important to reproduce in
+            # the final report. This branch
+            # persists three surfaces:
+            #
+            # * ``power_management_search_update`` → the cross-call DFS
+            #   ledger (tested fingerprints + winners-as-accepted). Next
+            #   call's executor uses it to dedupe and to re-validate
+            #   prior winners. Mirror of ``explore_search_update``.
+            # * ``host_state_applied`` → canonical "what is the GPU set
+            #   to right now?" snapshot. Updated when a winner was
+            #   re-applied (final_state='applied_best') or the auto
+            #   incumbent was kept (final_state='kept_incumbent');
+            #   cleared to ``None`` on reset_to_default / reset_after_failure
+            #   so a stripped round doesn't leave a stale snapshot.
+            # * Each accepted winner appended to
+            #   ``power_management_search.accepted`` via
+            #   :meth:`SharedState.record_power_management_accepted`
+            #   so the next call's re-validation phase can rehydrate it.
+            #
+            # On a fresh settle winner the headline ``current_best.tput``
+            # + ``cumulative_gain_validated`` are lifted to the combined
+            # tput (tput ONLY — power knobs are never written onto
+            # ``extra_server_args``; they stay in ``host_state_applied`` +
+            # the flat ``power_attribution``). The final report renders
+            # host_state_applied alongside current_best for the operator's
+            # reproducibility view.
+            pm_update = result.get("power_management_search_update")
+            if isinstance(pm_update, dict):
+                self.shared_state.apply_power_management_search_update(pm_update)
+                changed = True
+            # Latch the settle-sweep gate so the held
+            # KERNEL -> SWEEP transition proceeds on the next tick,
+            # regardless of the sweep's win/no-win outcome.
+            if task is not None and isinstance(getattr(task, "params", None), dict):
+                if str(task.params.get("reason") or "") == "kernel_settle":
+                    self.shared_state.power_settle_sweep_done = True
+                    changed = True
+            # Append every round winner to ``accepted`` so the next
+            # invocation can re-validate them. Each entry already
+            # carries ``power_settings`` (used by the executor's
+            # rehydration helper) + a fingerprint.
+            winners_list = result.get("winners") or []
+            for w_entry in winners_list:
+                if not isinstance(w_entry, dict):
+                    continue
+                self.shared_state.record_power_management_accepted({
+                    "name": w_entry.get("variant_name"),
+                    "power_settings": w_entry.get("power_settings"),
+                    "note": (w_entry.get("power_settings") or {}).get("note"),
+                    "output_throughput": w_entry.get("output_throughput"),
+                    "gain_pct": w_entry.get("gain_pct"),
+                })
+                changed = True
+            # ``final_state`` semantics drive host_state_applied updates:
+            #   applied_best        → write the winner snapshot + lift
+            #                         the headline measurement
+            #   kept_incumbent      → preserve the auto incumbent
+            #                         snapshot (no headline lift; combined
+            #                         == the climb tput) + record attribution
+            #   reset_to_default    → clear (no winner; incumbent didn't
+            #                         beat vendor defaults)
+            #   reset_after_failure → clear (executor reset on the
+            #                         exception path; cache would lie)
+            final_state = str(result.get("final_state") or "")
+            if final_state == "applied_best":
+                host_snapshot = result.get("host_state_applied")
+                if isinstance(host_snapshot, dict):
+                    self.shared_state.host_state_applied = host_snapshot
+                    changed = True
+                # A settle-sweep win is a measurement refresh: lift
+                # current_best.tput + cumulative_gain_validated (tput only
+                # — never touch extra_server_args; power knobs stay in
+                # host_state_applied) and record the FULL power delta as a
+                # flat attribution entry.
+                best = result.get("best_variant")
+                combined = (
+                    best.get("output_throughput")
+                    if isinstance(best, dict) else None
+                )
+                await self._record_power_management_attribution(
+                    result,
+                    combined=float(combined or 0.0),
+                    lift_headline=True,
+                )
+            elif final_state == "kept_incumbent":
+                # No fresh winner, but the fixed incumbent climb state
+                # (auto + cap-max + fan-max) is kept. The incumbent's
+                # tput == the round's base_tput (already the headline), so
+                # record attribution only (no headline lift).
+                host_snapshot = result.get("host_state_applied")
+                if isinstance(host_snapshot, dict):
+                    self.shared_state.host_state_applied = host_snapshot
+                    changed = True
+                try:
+                    base_tput = float(result.get("base_tput") or 0.0)
+                except (TypeError, ValueError):
+                    base_tput = 0.0
+                await self._record_power_management_attribution(
+                    result, combined=base_tput, lift_headline=False,
+                )
+            elif final_state in ("reset_to_default", "reset_after_failure"):
+                if self.shared_state.host_state_applied is not None:
+                    self.shared_state.host_state_applied = None
+                    changed = True
+            # Audit decision drives the standard <action>_attempts row
+            # below. Three buckets mirror the executor's status field:
+            #   succeeded → promoted (a winner cleared the gate)
+            #   no_winners → no_promote (variants ran, none won)
+            #   failed → discarded (probe failure / empty grid / etc.)
+            status_str = str(result.get("status") or "")
+            if status_str == "succeeded":
+                audit_decision = "promoted"
+            elif status_str == "no_winners":
+                audit_decision = "no_promote"
+            else:
+                audit_decision = "discarded"
+            grid_degraded = result.get("grid_degraded")
+            audit_extras = {
+                "best_gain_pct": result.get("best_gain_pct"),
+                "best_variant_name": (
+                    (result.get("best_variant") or {}).get("variant_name")
+                    if isinstance(result.get("best_variant"), dict)
+                    else None
+                ),
+                "winners_count": len(winners_list),
+                "bound_kind": result.get("bound_kind"),
+                "grid_size": result.get("grid_size"),
+                "reference_source": result.get("reference_source"),
+                "reference_tput": result.get("reference_tput"),
+                # Structured map of expected-but-empty ladders (the grid
+                # self-check); None when every expected ladder produced
+                # rows. Surfaced into the audit row so a degraded sweep
+                # (e.g. the top-sclk probe failed, so the determinism
+                # ladder collapsed) is never silent — the executor already
+                # log.warning'd it at grid-build time, so we don't repeat
+                # the log here.
+                "grid_degraded": grid_degraded,
+                "revalidate_mode": result.get("revalidate_mode"),
+                "cache_stale": result.get("cache_stale"),
+                "final_state": final_state,
+                "host_state_applied_snapshot": (
+                    self.shared_state.host_state_applied is not None
+                ),
+            }
+            changed = True
         # Audit trail (kernel-parity): one succeeded-attempt record with branch-supplied decision/extras.
         if audit_decision is not None and task_kind in _AUDIT_ACTIONS:
             self.shared_state.record_action_attempt(

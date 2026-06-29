@@ -42,6 +42,8 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "sweep": "shallow",
     # SWEEP-phase post-sweep concurrency comparison.
     "conc_sweep": "shallow",
+    # Host-level rocm-smi knob sweep (single-node only).
+    "power_management": "shallow",
     "report": "shallow",
     "session_breakdown": "shallow",
     # creative (1) — unified specialist dispatch (scope: domain/domains/freeform).

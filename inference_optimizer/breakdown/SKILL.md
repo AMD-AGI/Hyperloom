@@ -137,6 +137,7 @@ another (each becomes a `warnings[]` entry instead).
 | `kernel_lifecycle`   | `runs/profile/*/benchmark_*/benchmark_report.json` (detected) + `state.last_trace_analyze` (recommended) + invocations folded (optimized) + `state.{kernel_integrate_attempts, rejected_kernel_*}` (adopted/rejected) |
 | `param_search`       | `state.{explore_search, params_winner_history, synergy_attempted, discovered_flags, backend_winners_history}`; `params` / `backends` ledgers are historical aliases only |
 | `sweep`              | `state.last_sweep` + `runs/sweep/<task>/variant_*/benchmark_*/benchmark_report.json`                                |
+| `power_management`*  | `state.{power_management_attempts, last_power_management, power_management_search, host_state_applied}` + `runs/power_management/<task>/variant_*/benchmark_*/benchmark_report.json`. \*No dedicated collector yet — these surfaces feed `phase_timeline` via the audit-attempt path; the final report renders `host_state_applied` (see `action_executors/report._format_host_state_applied_section`). |
 | `critic_robustness`  | `critic-workdir/<NNN>/{request,judge_bundle,emit,review}.json` + `robustness-workdir/<NNN>/{signal,action}.json`   |
 | `telemetry`          | All `runs/**/benchmark_*/benchmark_report.json` + `torch_trace/` + `system_profile/` + `server*.log`                  |
 | `attribution`        | `state.gain_per_stack_entry` (preferred) OR best-effort reconstruction from `state.optimization_stack`              |

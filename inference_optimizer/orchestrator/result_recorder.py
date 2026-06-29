@@ -957,6 +957,7 @@ class ResultRecorder:
             "what_worked":       what_worked,
             "what_failed":       what_failed,
             "kernel_optimizations": kernel_optimizations,
+            "power_state":       self._coord._build_power_state_for_recipe(),
             "stack_fingerprint": {"sha": str(stack_fingerprint)} if stack_fingerprint else {},
             "last_profiled":     str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
             "workload":          workload_tags,
@@ -1098,6 +1099,17 @@ class ResultRecorder:
             if has_validated_win and my_tput > live_tput:
                 overrides["best_config"] = attrs["best_config"]
                 overrides["best_throughput"] = my_tput
+                # Persist the winning combo's host power state alongside
+                # best_config (rides the extras channel like
+                # kernel_optimizations; Recipe.from_dict parses
+                # ``power_state`` as a first-class field). Only written when
+                # this session owns the winning config so a CLOSE without a
+                # PM win can't clobber a prior power_state.
+                ps = attrs.get("power_state") or {}
+                if isinstance(ps, dict) and (
+                    ps.get("smi_commands") or ps.get("power_settings")
+                ):
+                    extras_payload["power_state"] = ps
             # Merge stack_fingerprint rather than replace (CLOSE only has the sha; T0 stamps version keys).
             merged_fp = dict(existing_row.get("stack_fingerprint") or {})
             for fp_key, fp_val in (attrs.get("stack_fingerprint") or {}).items():

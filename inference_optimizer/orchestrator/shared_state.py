@@ -231,6 +231,12 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
         "explore",
         # ``roofline`` runs profile + trace_analyze atomically; audited for snapshot id/path visibility.
         "roofline",
+        # power_management produces a cross-round search ledger
+        # (power_management_search), an attempts history
+        # (power_management_attempts), and a canonical applied-state
+        # snapshot (host_state_applied). Membership here is what wires
+        # `record_action_attempt` and the prompt's FAILURE RECOVERY block.
+        "power_management",
     }
 )
 
@@ -242,6 +248,11 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "explore": ("best_gain_pct", "gain_pct"),
     # ``roofline`` key metric is the monotonic snapshot id.
     "roofline": ("snapshot_id", "snapshot_id"),
+    # power_management surfaces its best gain over base_tput as the
+    # key metric. ``best_gain_pct`` (vs. ``gain_pct``) matches the
+    # executor's result schema and the framework_agent-style per-iteration
+    # gate semantics already documented in the executor.
+    "power_management": ("best_gain_pct", "gain_pct"),
 }
 
 
@@ -613,6 +624,11 @@ class SharedState:
     last_explore: dict[str, Any] = field(default_factory=dict)
     # Composite roofline action audit snapshot plus capped history.
     last_roofline: dict[str, Any] = field(default_factory=dict)
+    # power_management per-action audit snapshot (single dict). Mirrors
+    # ``last_explore``: written by ``record_action_attempt`` so the
+    # prompt's "latest <action>" surface renders the most recent
+    # power_management run uniformly with every other audit action.
+    last_power_management: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
@@ -621,6 +637,13 @@ class SharedState:
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Capped roofline audit log with snapshot ids and analysis paths.
     roofline_attempts: list[dict[str, Any]] = field(default_factory=list)
+    # power_management rolling per-attempt history (capped). Mirrors
+    # ``explore_attempts``: one entry per Coordinator-handled result
+    # appended via :meth:`record_action_attempt`, carrying the uniform
+    # audit schema. Without this list any cross-tick "what did
+    # power_management already try" question would have no answer once
+    # the recent-results inbox rotated.
+    power_management_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results (cap _DEFAULT_LAST_FAILURES); rich failure context for self-correction. Covers every task kind.
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
     # Per-kernel run_optimization history by kernel_id; record_kernel_opt retires kernels stuck in PARTIAL (default 2; override via INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL).
@@ -687,6 +710,77 @@ class SharedState:
     last_consumed_escalate_hint_ts: str = ""
     # per-phase plateau threshold overrides locked at session start (CLI flags); empty => library defaults.
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
+    # Persistent power_management DFS state — same schema as
+    # ``explore_search`` (``schema_version`` / ``accepted`` /
+    # ``rejected`` / ``tested`` / ``name_index`` / ``cursor`` /
+    # ``last_round``) keyed on a content fingerprint over the variant's
+    # power knobs (cap / perflevel / sclk_idx / mclk_idx / pcie_idx /
+    # perf_deterministic_mhz / fan_pct / devices). Owned by
+    # PowerManagementExecutor; Coordinator merges via
+    # :meth:`apply_power_management_search_update` after each round and
+    # appends to ``accepted`` on promote (see
+    # :meth:`record_power_management_accepted`). Without this ledger
+    # repeat ``power_management`` calls amnesically re-bench the same
+    # default grid; with it, each call re-validates prior winners and
+    # explores fresh fingerprints only — the same pattern
+    # ``explore`` establishes for server-flag variants.
+    power_management_search: dict[str, Any] = field(default_factory=dict)
+    # Canonical snapshot of the GPU host state currently applied by the
+    # most recent successful ``power_management`` call. Cleared (set to
+    # ``None``) when the executor reset to defaults without re-applying
+    # a winner. Schema:
+    #   {
+    #     "variant_name":    str,                  # e.g. "cap_80pct_high"
+    #     "power_settings":  PowerVariant.to_dict(),
+    #     "smi_commands":    [str, ...],           # exact rocm-smi invocations
+    #     "device_ids":      [int, ...],           # () means "all GPUs"
+    #     "probed_range_w":  [min, max] | None,
+    #     "top_sclk_mhz":    int | None,
+    #     "measured_state":  {  # at-apply-time rocm-smi readouts (best-effort)
+    #         "powercap_w":  int | None,
+    #         "perflevel":   str | None,
+    #     },
+    #     "gain_pct":        float | None,         # over base_tput at apply
+    #     "ts":              iso8601,
+    #     "session_dir":     str,                  # workspace at apply
+    #     "task_id":         str,
+    #   }
+    # This is the SINGLE SOURCE OF TRUTH for "what is the GPU actually
+    # set to right now?" so the final report can render a host-state
+    # block beside current_best.extra_sglang_args for full
+    # reproducibility. The executor consults it on entry to:
+    #   (a) detect drift via re-probe (lazy/always staleness check),
+    #   (b) skip an apply step when the prior winner matches a row in
+    #       the current grid (re-validation is one bench, no setter).
+    host_state_applied: dict[str, Any] | None = None
+    # Flat power-tuning attribution for the run. There is exactly ONE
+    # tuned power state per run (settle-then-tune): the fixed clocks-high
+    # state is held through the kernel climb, then the single settle
+    # sweep at the KERNEL -> SWEEP plateau either keeps it, replaces it
+    # with a winner, or strips to vendor defaults. The kept state lives
+    # on ``host_state_applied``; this dict records the power-only delta,
+    # measured against the TRUE vendor-default baseline so it is the FULL
+    # power contribution::
+    #   {
+    #     "kernel_tput":     float,   # median vendor-default baseline
+    #     "combined_tput":   float,   # tput WITH the kept power state
+    #     "power_delta_pct": float,   # max(0, (combined-kernel)/kernel*100)
+    #     "n_reps":          int,     # baseline reps that produced a number
+    #     "low_confidence":  bool,    # baseline >= combined (noise inverted)
+    #   }
+    # It lives here rather than in ``gain_per_stack_entry`` (which is
+    # strictly index-aligned with ``optimization_stack``) so it never
+    # disturbs the kernel attribution.
+    power_attribution: dict[str, Any] = field(default_factory=dict)
+    # One-shot latch so the KERNEL plateau holds the
+    # KERNEL -> SWEEP transition for exactly one full settle PM sweep on
+    # the final combo, then proceeds. Set True once the settle sweep
+    # task completes (or is skipped on multi-node / no-combo).
+    power_settle_sweep_done: bool = False
+    # Timestamp (ISO-8601) of the first KERNEL -> SWEEP defer for the
+    # settle sweep. Drives the settle-hold timeout so a lost / crashed
+    # settle task can't wedge the plateau forever.
+    power_settle_hold_started_ts: str = ""
     # E2E integrate bookkeeping keyed by kernel_id+patch_path+args; prevents re-validating the same patch after NEEDS_REVIEW/REVERT.
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
     # Crash-safe stack-validation checkpoints (SWEEP-entry combo E2E).
@@ -988,6 +1082,14 @@ class SharedState:
                 event_str,
             )
 
+        # power_management_search uses its own fingerprint scheme (over
+        # power knobs, not extra_sglang_args), so the standard fingerprint-
+        # based migration helper would mangle pre-existing rows. We only
+        # need defensive defaults — there's no legacy v1 ledger to migrate
+        # from (the field was introduced fingerprint-keyed from day one).
+        filtered["power_management_search"] = cls._normalize_pm_search_ledger(
+            filtered.get("power_management_search"),
+        )
         return cls(**filtered)
 
     @staticmethod
@@ -1089,6 +1191,38 @@ class SharedState:
                 if norm:
                     sa_set.add(norm)
         out["synergy_attempted"] = [list(c) for c in sorted(sa_set)]
+        return out
+
+    @staticmethod
+    def _normalize_pm_search_ledger(ledger: Any) -> dict[str, Any]:
+        """Fill defensive defaults on a ``power_management_search`` ledger.
+
+        The schema is intentionally narrower than ``explore_search``: the
+        fingerprint scheme is owned by
+        :func:`power_management.power_variant_fingerprint` (a tuple over
+        the power knobs), so we don't do a name→fingerprint migration
+        here. Empty / missing / non-dict input collapses to ``{}`` so
+        the executor's "no prior ledger" code path stays
+        unconditional.
+        """
+        if not isinstance(ledger, dict) or not ledger:
+            return {}
+        out: dict[str, Any] = dict(ledger)
+        out.setdefault("schema_version", 1)
+        out.setdefault("accepted", [])
+        out.setdefault("rejected", [])
+        out.setdefault("tested", {})
+        out.setdefault("name_index", {})
+        out.setdefault("cursor", 0)
+        out.setdefault("last_round", {})
+        # Drop non-dict entries from the lists so the executor can
+        # assume the canonical shape on every read.
+        for bucket in ("accepted", "rejected"):
+            out[bucket] = [v for v in (out.get(bucket) or []) if isinstance(v, dict)]
+        if not isinstance(out.get("tested"), dict):
+            out["tested"] = {}
+        if not isinstance(out.get("name_index"), dict):
+            out["name_index"] = {}
         return out
 
     def to_dict(self) -> dict[str, Any]:
@@ -2970,6 +3104,106 @@ class SharedState:
         search["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
         self.explore_search = search
 
+    def apply_power_management_search_update(
+        self, update: dict[str, Any],
+    ) -> None:
+        """Merge a PowerManagementExecutor search update into persistent state.
+
+        Mirror of :meth:`apply_explore_search_update`: the executor
+        reports the new ``tested`` / ``rejected`` / ``last_round`` and
+        the Coordinator merges them in, preserving any ``accepted``
+        rows already promoted. ``accepted`` is the Coordinator's
+        responsibility (see :meth:`record_power_management_accepted`)
+        — overwriting it from a fresh round would drop cross-round
+        winners. ``name_index`` is preserved from the update so the
+        executor's display-name → fingerprint lookup stays correct
+        for the next round.
+
+        Invariant: the executor sends
+        ``update["accepted"] == list(prior_accepted)`` (the snapshot
+        of ``self.power_management_search["accepted"]`` at the time
+        its task was injected — see the ``power_management``
+        branch of :meth:`Coordinator._materialize_approved_proposal`
+        which seeds ``params['power_management_search']`` from
+        this attribute before the task is queued).
+        Because the Coordinator's promote ordering is
+        :meth:`apply_power_management_search_update` FIRST, THEN one
+        :meth:`record_power_management_accepted` per round winner,
+        no foreign mutations land in between in normal operation,
+        so ``update["accepted"]`` and the in-memory accepted list
+        agree. The ``if not update.get("accepted"):`` fallback is a
+        defensive guard for two edge cases: a future executor that
+        skips the accepted echo (e.g. on a crash; see
+        :class:`PowerManagementExecutor` ``except Exception`` path
+        which sets ``power_management_search_update=None`` anyway,
+        but a partial implementation could send an update dict
+        without the accepted echo), and direct unit tests that hand-
+        craft an update without echoing accepted.
+        """
+        if not isinstance(update, dict):
+            return
+        prior_accepted = list(
+            (self.power_management_search or {}).get("accepted") or []
+        )
+        merged = dict(update)
+        if "accepted" not in update or not update.get("accepted"):
+            merged["accepted"] = prior_accepted
+        self.power_management_search = merged
+
+    def record_power_management_accepted(
+        self, variant: dict[str, Any],
+    ) -> None:
+        """Append one promoted power_management variant to
+        ``power_management_search.accepted``.
+
+        Called by Coordinator after a power_management winner clears
+        the gate. Dedupes by ``fingerprint`` (computed on the fly if
+        absent — uses the executor's :func:`power_variant_fingerprint`)
+        so repeated promotes of the same content don't bloat the list.
+        Also removes a matching entry from ``rejected`` so a previously-
+        rejected variant that later won doesn't appear in both buckets.
+
+        Unlike :attr:`explore_search.accepted` (audit-only), ``accepted``
+        here is consulted by the executor on its NEXT invocation to
+        re-validate prior winners (subject to ``revalidate_winners``
+        mode). Cross-call deepening depends on this list being kept
+        accurate.
+        """
+        if not isinstance(variant, dict) or not variant:
+            return
+        from .action_executors.power_management import power_variant_fingerprint
+        fp = str(
+            variant.get("fingerprint")
+            or power_variant_fingerprint(variant.get("power_settings") or {})
+        )
+        entry = {
+            "name": str(variant.get("name") or variant.get("variant_name") or ""),
+            "power_settings": dict(variant.get("power_settings") or {}),
+            "note": str(variant.get("note") or ""),
+            "fingerprint": fp,
+            "tput": variant.get("output_throughput") or variant.get("tput"),
+            "gain_pct": variant.get("gain_pct"),
+        }
+        search = dict(self.power_management_search or {})
+        search.setdefault("schema_version", 1)
+        accepted = list(search.get("accepted") or [])
+        accepted = [
+            v for v in accepted
+            if not (isinstance(v, dict) and v.get("fingerprint") == fp)
+        ]
+        accepted.append(entry)
+        search["accepted"] = accepted
+        rejected = [
+            v for v in (search.get("rejected") or [])
+            if not (isinstance(v, dict) and v.get("fingerprint") == fp)
+        ]
+        search["rejected"] = rejected
+        name_index = dict(search.get("name_index") or {})
+        if entry["name"]:
+            name_index[entry["name"]] = fp
+        search["name_index"] = name_index
+        self.power_management_search = search
+
     # search-space expansion bookkeeping
     def record_discovered_flags(
         self,
@@ -3046,6 +3280,53 @@ class SharedState:
         entry_gain_pct = gain_pct(tput, base)
         self.gain_per_stack_entry.append(entry_gain_pct)
         return entry_gain_pct
+
+    def combo_fingerprint(self) -> str:
+        """Stable 16-char hash identifying the current kernel combo.
+
+        The combo is the set of throughput-affecting ``optimization_stack``
+        entries (kernel ``integrate`` / ``gemm_tuning`` / explore /
+        framework). Power state is deliberately NOT part of the combo
+        identity. Two runs that reach the same stack of kernel/server
+        layers therefore share a fingerprint regardless of which power
+        knobs were applied. Surfaced for logging / observability of the
+        plateaued combo at the settle sweep.
+
+        Empty stack (baseline, no layers) hashes to a stable
+        ``"baseline"`` sentinel.
+        """
+        return self._fingerprint_for_stack(self.optimization_stack)
+
+    @staticmethod
+    def _fingerprint_for_stack(entries: list[dict[str, Any]] | None) -> str:
+        """Stable 16-char hash over a list of ``optimization_stack`` entries.
+
+        Used by :meth:`combo_fingerprint`.
+        """
+        import hashlib
+
+        parts: list[str] = []
+        for entry in (entries or []):
+            if not isinstance(entry, dict):
+                continue
+            action = str(entry.get("action") or "")
+            # Power attribution never lands in optimization_stack, but
+            # guard anyway so a stray entry can't shift the fingerprint.
+            if action == "power_management":
+                continue
+            ident = (
+                entry.get("kernel_id")
+                or entry.get("variant_name")
+                or entry.get("tuned_file")
+                or entry.get("patch_path")
+                or ""
+            )
+            args = str(entry.get("extra_server_args") or "")
+            parts.append(f"{action}|{ident}|{args}")
+        if not parts:
+            return "baseline"
+        digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+        return digest[:16]
 
     def seed_stack_from_current_best(self) -> None:
         """Backfill stack for old sessions that only had current_best."""
@@ -3566,7 +3847,10 @@ class SharedState:
             f"last_gemm_tuning={self._format_attempt(self.last_gemm_tuning)}",
             f"last_explore={self._format_attempt(self.last_explore)}",
             f"last_sweep={self._format_attempt(self.last_sweep)}",
+            f"last_power_management={self._format_attempt(self.last_power_management)}",
             f"attempts_history={self._format_attempts_history()}",
+            f"power_management_search={self._format_power_management_search()}",
+            f"host_state_applied={self._format_host_state_applied()}",
             f"last_action_failures={self._format_last_action_failures()}",
             f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"stop_reason={self.stop_reason or '(none)'}",
@@ -3772,6 +4056,132 @@ class SharedState:
                 :attr:`explore_search`.
         """
         return self._format_search_state(self.explore_search)
+
+    def _format_power_management_search(self) -> str:
+        """Multi-line render of the ``power_management_search`` ledger.
+
+        Distinct from :meth:`_format_search_state` because
+        power_management entries key on ``power_settings`` (the
+        rocm-smi knob dict) rather than ``extra_sglang_args`` /
+        ``extra_envs``, so the per-row formatter must read a
+        different schema. Shape parallels the sibling renderers
+        (head line with counts, body limited to the 5 most-recent
+        rows per bucket) so a prompt reader doesn't need a separate
+        mental model.
+        """
+        return self._format_pm_search_state(self.power_management_search)
+
+    @staticmethod
+    def _format_pm_search_state(search: dict[str, Any] | None) -> str:
+        if not search:
+            return "(none)"
+        accepted = list(search.get("accepted") or [])
+        rejected = list(search.get("rejected") or [])
+        tested = search.get("tested") or {}
+        cursor = search.get("cursor", 0)
+        out: list[str] = [
+            "",
+            f"    cursor={cursor}  accepted={len(accepted)}  "
+            f"rejected={len(rejected)}  tested={len(tested)}",
+        ]
+        if accepted:
+            out.append("    accepted:")
+            for entry in accepted[-5:]:
+                if not isinstance(entry, dict):
+                    continue
+                out.append("      • " + SharedState._format_pm_variant_line(
+                    SharedState._enrich_with_tested_gain(entry, tested)
+                ))
+        if rejected:
+            out.append("    rejected (last 5):")
+            for entry in rejected[-5:]:
+                if not isinstance(entry, dict):
+                    continue
+                out.append("      • "
+                           + SharedState._format_pm_variant_line(entry))
+        return "\n".join(out)
+
+    @staticmethod
+    def _format_pm_variant_line(entry: dict[str, Any]) -> str:
+        """One-line render of a power_management ledger entry.
+
+        Format: ``{name:28s} {±gain%:>9} (tput=...) <knob=value ...>``.
+        Only non-None knobs are surfaced so the line stays compact
+        on the common case of a single-axis variant (e.g. just a
+        ``power_cap_w``). ``devices`` is appended only when the
+        variant targeted a non-empty subset (the empty-tuple
+        all-GPUs default is the silent case).
+        """
+        name = str(entry.get("name") or "?")
+        gain = entry.get("gain_pct")
+        tput = entry.get("tput") or entry.get("output_throughput")
+        gain_s = (
+            f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
+        )
+        tput_s = (
+            f" (tput={tput:.1f})"
+            if isinstance(tput, (int, float)) and tput > 0
+            else ""
+        )
+        ps = entry.get("power_settings") or {}
+        knobs: list[str] = []
+        for key in (
+            "power_cap_w", "perflevel", "sclk_idx", "mclk_idx", "pcie_idx",
+            "perf_deterministic_mhz", "fan_pct",
+        ):
+            val = ps.get(key) if isinstance(ps, dict) else None
+            if val is None or val == "":
+                continue
+            knobs.append(f"{key}={val}")
+        devices = ps.get("devices") if isinstance(ps, dict) else None
+        if devices:
+            knobs.append(f"devices={list(devices)}")
+        knobs_s = " " + " ".join(knobs) if knobs else " (no-knob)"
+        return f"{name:28s} {gain_s:>9}{tput_s} {knobs_s}"
+
+    def _format_host_state_applied(self) -> str:
+        """Render the currently-applied rocm-smi state for prompt injection.
+
+        ``host_state_applied`` is set by the Coordinator after a
+        successful ``power_management`` round (and cleared on
+        ``reset_to_default`` / ``reset_after_failure``), so this
+        formatter doubles as the prompt-side answer to "is the GPU
+        currently in a non-default power state?". The output is a
+        short multi-line block: the chosen variant's name, the
+        rocm-smi commands that established it, and the gain it was
+        promoted with. When nothing is applied we render ``(none)``
+        so the prompt diff stays compact on the no-power round.
+        """
+        hs = self.host_state_applied
+        if not isinstance(hs, dict) or not hs:
+            return "(none)"
+        variant_name = str(hs.get("variant_name") or "?")
+        gain = hs.get("gain_pct")
+        gain_s = (
+            f"{gain:+.2f}%" if isinstance(gain, (int, float)) else "?"
+        )
+        ts = str(hs.get("ts") or "?")
+        smi_cmds = list(hs.get("smi_commands") or [])
+        out = [
+            "",
+            f"    variant={variant_name}  gain={gain_s}  ts={ts}",
+        ]
+        if smi_cmds:
+            out.append(f"    smi_commands ({len(smi_cmds)}):")
+            # Cap at 6 commands — the canonical winner stack is
+            # cap + perflevel + (optional) determinism + fan, plus
+            # the inevitable rocm-smi-binary auto-respond suffix.
+            # A longer list almost always means a future curated
+            # combo added knobs we didn't anticipate; surface the
+            # truncation tag rather than letting the prompt grow.
+            for cmd in smi_cmds[:6]:
+                out.append(f"      $ {cmd}")
+            if len(smi_cmds) > 6:
+                out.append(
+                    f"      ... [+{len(smi_cmds) - 6} more] (see "
+                    f"host_state_applied on disk for the full list)"
+                )
+        return "\n".join(out)
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:

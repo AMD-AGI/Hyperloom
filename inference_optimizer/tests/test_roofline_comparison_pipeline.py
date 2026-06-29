@@ -92,6 +92,10 @@ def _mock_state(
         max_minutes=150,
         last_trace_analyze=last_trace_analyze or {},
         roofline_snapshots=list(roofline_snapshots or []),
+        # Real SharedState field (defaults to None). _build_summary_dict
+        # reads it to emit the optional host_state_applied block, so the
+        # stub must mirror it or the read raises AttributeError.
+        host_state_applied=None,
     )
 
 

@@ -1,0 +1,118 @@
+name: power_management
+family: shallow
+# Cost calibration (p50/p75).
+#
+# Each variant runs one Magpie rebench inside its own ``run_grid``
+# invocation. On single-node hosts a Magpie cycle is ~4-6 min wall
+# clock (cold-start + bench + leak salvage). The roofline-routed settle
+# grid is small: ``auto_baseline`` (N reps, also the attribution
+# baseline — no separate vendor-default measurement) + ``high`` +
+# ``det_100`` always, + ``det_95`` / ``det_90`` / ``det_85`` unless
+# compute-bound, + capability-gated ``mclk_*`` rows. Plus ~10-15 s of
+# rocm-smi apply + reset between rows and the final re-apply.
+#
+# * p50 ≈ 3 auto_baseline reps + high + det_100 = 5 benches ≈ 35 min — a
+#   compute-bound round (det_95/det_90/det_85 pruned, memory axis skipped).
+# * p75 ≈ 3 auto_baseline reps + high + det_100/95/90/85 = 8 benches
+#   ≈ 55 min — a non-compute round that runs the full determinism ladder
+#   (plus any capability-gated memory rows).
+#
+# Coordinator phase: KERNEL (see ``phase_state.PHASE_ALLOWED_ACTIONS``).
+# Throughput-only, fan + cap maxed at all times: the Coordinator holds a
+# fixed incumbent state (perflevel=auto + ceiling cap + fan100) through
+# the climb and auto-enqueues exactly ONE roofline-routed settle sweep
+# at the KERNEL plateau (Coordinator-internal). ``pipeline_phase:
+# explore`` below is catalogue grouping only.
+cost_minutes_p50: 35.0
+cost_minutes_p75: 55.0
+expected_gain_pct: [1.0, 8.0]
+accuracy_risk: 0.0
+crash_risk: 0.10
+prerequisites:
+  - baseline
+requires_lanes:
+  - server_lifecycle
+  - benchmark_lane
+allowed_tools:
+  - emit_intent
+  - Read
+  - Bash
+side_effects:
+  - mutates_gpu_state
+  - launches_server
+  - writes_results
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 20
+lease_ttl_sec: 5400
+description: "Sweep rocm-smi host knobs (power-cap, perf-level, clock pin, determinism, fan) on top of current best and KEEP the best variant. Override default sweep via params.grid=[{name,power_cap_w?,...}]."
+pipeline_phase: explore
+typical_runtime_min: 35.0
+applicable_when:
+  - "baseline_tput > 0"
+  # Single-node only. The executor shells out to `rocm-smi` on the LOCAL
+  # node only; on a >=2-node RayJob cluster that would apply the power
+  # cap / perflevel / clock pin to the head node alone, leaving the
+  # peer nodes at defaults and producing a Magpie measurement whose
+  # GPU state varies across the workers driving the same request set.
+  # The executor itself hard-refuses with
+  # `error_class='multi_node_unsupported'` on multi-node entry; this
+  # predicate makes the constraint visible to the Orchestration LLM
+  # via the action catalogue so it never proposes the action on a
+  # multi-node session in the first place.
+  - "not is_multi_node"
+# Descriptive (not validated by ActionRegistry) — surface the LLM-injectable
+# grid shape. Each variant rocm-smi-applies its knobs out of band before a
+# single Magpie rebench; the executor always resets to defaults in `finally`.
+params_schema:
+  grid:
+    type: list
+    description: |
+      Optional LLM-injected list of power variants. Each entry is a dict:
+        {name: str,                       # human label
+         power_cap_w?: int,               # rocm-smi --setpoweroverdrive
+         perflevel?: str,                 # rocm-smi --setperflevel (auto/high/manual/profile_standard/profile_peak/profile_compute)
+         sclk_idx?: int,                  # rocm-smi --setsclk  (requires perflevel=manual)
+         mclk_idx?: int,                  # rocm-smi --setmclk  (requires perflevel=manual)
+         pcie_idx?: int,                  # rocm-smi --setpcie  (requires perflevel=manual)
+         perf_deterministic_mhz?: int,    # rocm-smi --setperfdeterminism
+         fan_pct?: int,                   # rocm-smi --setfan
+         devices?: [int, ...],            # optional GPU subset (-d <id>); default = all
+         note?: str}
+      When omitted, the Coordinator-internal settle sweep builds one
+      roofline-routed grid: ``auto_baseline`` (incumbent, N-rep median) +
+      ``high`` + a GFX determinism ladder (``det_100`` always; ``det_95``
+      / ``det_90`` / ``det_85`` unless compute-bound) + capability-gated
+      memory-axis rows (only when not memory-bound and >= 2 selectable
+      mclk levels).
+      GFX is tuned via --setperfdeterminism only; cap + fan stay maxed on
+      every row. So the action stays usable without a curated payload.
+  power_cap_floor_w:
+    type: int
+    description: |
+      Reject any variant whose `power_cap_w` is below this floor (default
+      150). Hard backstop against the LLM proposing an unservable cap.
+  power_cap_ceiling_w:
+    type: int
+    description: |
+      Reject any variant whose `power_cap_w` is above this ceiling. When
+      unset the executor uses the `--showmaxpower` upper bound; values
+      above the GPU's manufacturer ceiling are silently rejected by
+      rocm-smi anyway.
+  dry_run:
+    type: bool
+    description: |
+      Skip actual rocm-smi invocations and the Magpie rebench. Returns a
+      stub result with `status='succeeded'` and the resolved grid. Used by
+      unit tests and by operators who want to validate a proposed grid
+      without disturbing the GPU.
+  benchmark_script:
+    type: string
+    description: |
+      Bare *.sh file name. Force-pin Magpie script for every variant in
+      this round; same semantics as baseline.params_schema.benchmark_script.
+  result_dir:
+    type: string
+    description: |
+      Absolute or workspace-relative path forwarded as $RESULT_DIR for
+      every variant.

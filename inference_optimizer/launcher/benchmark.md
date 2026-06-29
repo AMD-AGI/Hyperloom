@@ -64,13 +64,16 @@ calculation. A comma `$CONC` value such as `4,16,128` is treated as a sweep
 ladder: the single baseline CONC becomes the first value and the ladder is
 forwarded to `INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS`.
 
-## Workload-contract reuse (baseline → explore/sweep)
+## Workload-contract reuse (baseline → explore/sweep/power_management)
 
 `baseline` materializes its YAML once with the operator's process env (`CONC` /
 `ISL` / `OSL` / `TP` / `MAX_MODEL_LEN` / `PRECISION` / `RUN_EVAL` /
-`ROCR_VISIBLE_DEVICES` + adaptive `NUM_PROMPTS` / `NUM_WARMUPS`), saves it as
-`baseline_config.with_envs.yaml`, and forwards the path as
-`task.params["config_path"]` to every `explore` / `sweep` task — so variants
-benchmark the **same workload baseline ran** (without it they'd fall back to the
-YAML's smoke defaults `TP=1`/`CONC=8`/`ISL=256`/`OSL=256`, ~10x lower tput).
-Per-variant `extra_envs` still win (applied last).
+`ROCR_VISIBLE_DEVICES` plus adaptive `NUM_PROMPTS` / `NUM_WARMUPS`), saves it as
+`baseline_config.with_envs.yaml`, and forwards the path on
+`SharedState.baseline_config_path` as `task.params["config_path"]` to every
+`explore` / `sweep` / `power_management` task. Variants thus benchmark the
+**same workload baseline ran**; without this contract they would render from the
+YAML's smoke defaults (`TP=1` / `CONC=8` / `ISL=256` / `OSL=256`) and produce
+~10x lower throughput. Downstream actions re-materialize on top of `config_path`;
+per-variant `extra_envs` (e.g. sweep's explicit `CONC`/`ISL`/`OSL`) still win
+because `_grid_runner._build_variant_yaml` applies them last.

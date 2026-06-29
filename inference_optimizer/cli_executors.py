@@ -21,6 +21,7 @@ from .orchestrator.action_executors import (
     baseline_executor,
     conc_sweep_executor,
     explore_executor,
+    power_management_executor,
     recover_executor,
     report_executor,
     session_breakdown_executor,
@@ -67,6 +68,7 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "profile": profile_executor,
     "explore": explore_executor,
     "sweep": sweep_executor,
+    "power_management": power_management_executor,
     # conc_sweep: Coordinator-internal post-sweep concurrency comparison
     # (disable via --no-enable-conc-sweep); LLM-proposed conc_sweep denied.
     "conc_sweep": conc_sweep_executor,

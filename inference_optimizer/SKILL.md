@@ -22,7 +22,7 @@ objective progress.
 
 The CLI starts a Python Coordinator that coordinates:
 
-- Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests, `report`).
+- Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, `power_management`, Kernel requests, `report`).
 - Kernel: responder path for `trace_analyze`, `run_optimization`, `integrate`.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).

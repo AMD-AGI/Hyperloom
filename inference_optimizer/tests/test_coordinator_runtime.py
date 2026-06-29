@@ -1098,6 +1098,204 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
         await c.stop()
 
 
+# ---------------------------------------------------------------------------
+# power_management — succeeded path persists ledger, host state, audit row
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_promote_power_management_success_persists_ledger_and_host_state(
+    session_dir,
+):
+    # End-to-end Coordinator wiring test: feed a power_management
+    # result through ``_promote_to_shared_state`` and assert all three
+    # cross-call surfaces (search ledger + host_state_applied + audit
+    # row) land correctly. The executor's payload shape is what's
+    # contracted with the Coordinator here.
+    from inference_optimizer.orchestrator.action_executors.power_management import (
+        power_variant_fingerprint,
+    )
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 1000.0
+        task = _mk_task("power_management", "t-pm-1")
+        winner_settings = {
+            "power_cap_w": 300, "perflevel": "high",
+            "sclk_idx": None, "mclk_idx": None, "pcie_idx": None,
+            "perf_deterministic_mhz": None, "fan_pct": None, "devices": [],
+            "note": "default_grid",
+        }
+        winner_fp = power_variant_fingerprint(winner_settings)
+        result = {
+            "status": "succeeded",
+            "base_tput": 1000.0,
+            "grid_size": 1,
+            "all_results": [{
+                "variant_name": "cap_300_high",
+                "power_settings": winner_settings,
+                "status": "succeeded",
+                "output_throughput": 1042.0,
+                "gain_pct": 4.2,
+            }],
+            "winners": [{
+                "variant_name": "cap_300_high",
+                "power_settings": winner_settings,
+                "output_throughput": 1042.0,
+                "gain_pct": 4.2,
+            }],
+            "best_variant": {
+                "variant_name": "cap_300_high",
+                "power_settings": winner_settings,
+                "output_throughput": 1042.0,
+                "gain_pct": 4.2,
+            },
+            "best_gain_pct": 4.2,
+            "final_state": "applied_best",
+            "bound_kind": "memory",
+            "revalidate_mode": "lazy",
+            "cache_stale": False,
+            "reference_source": "auto_baseline",
+            "grid_degraded": None,
+            "host_state_applied": {
+                "variant_name": "cap_300_high",
+                "power_settings": winner_settings,
+                "smi_commands": [
+                    "rocm-smi --setpoweroverdrive 300 --autorespond yes",
+                    "rocm-smi --setperflevel high --autorespond yes",
+                ],
+                "device_ids": [],
+                "probed_range_w": [200, 400],
+                "top_sclk_mhz": 1900,
+                "measured_state": {"powercap_w": 300, "perflevel": "high"},
+                "gain_pct": 4.2,
+                "ts": "2026-05-26T12:00:00+00:00",
+                "session_dir": "/runs/pm/t-pm-1",
+                "task_id": "t-pm-1",
+            },
+            "power_management_search_update": {
+                "schema_version": 1,
+                "accepted": [],
+                "rejected": [],
+                "tested": {winner_fp: {
+                    "name": "cap_300_high",
+                    "power_settings": winner_settings,
+                    "fingerprint": winner_fp,
+                    "status": "succeeded",
+                    "tput": 1042.0,
+                    "gain_pct": 4.2,
+                }},
+                "name_index": {"cap_300_high": winner_fp},
+                "cursor": 1,
+                "last_round": {
+                    "round_id": "power_management-001",
+                    "action": "power_management",
+                    "round_winners": [winner_fp],
+                },
+            },
+        }
+        await c._promote_to_shared_state("power_management", result, task=task)
+        # Ledger: tested fingerprint persisted + winner appended to accepted.
+        pm_search = c.shared_state.power_management_search
+        assert winner_fp in pm_search["tested"]
+        assert len(pm_search["accepted"]) == 1
+        assert pm_search["accepted"][0]["fingerprint"] == winner_fp
+        assert pm_search["accepted"][0]["gain_pct"] == 4.2
+        # Host state cached for the next call's lazy-revalidate check.
+        hs = c.shared_state.host_state_applied
+        assert hs is not None
+        assert hs["variant_name"] == "cap_300_high"
+        assert any("setpoweroverdrive" in cmd for cmd in hs["smi_commands"])
+        assert hs["measured_state"] == {"powercap_w": 300, "perflevel": "high"}
+        # Audit row recorded with promoted decision + best_gain_pct metric.
+        last = c.shared_state.last_power_management
+        assert last["status"] == "succeeded"
+        assert last["decision"] == "promoted"
+        assert last["key_metric"] == pytest.approx(4.2)
+        assert last["key_metric_kind"] == "gain_pct"
+        assert last["extras"]["best_variant_name"] == "cap_300_high"
+        assert last["extras"]["final_state"] == "applied_best"
+        assert last["extras"]["host_state_applied_snapshot"] is True
+        assert len(c.shared_state.power_management_attempts) == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_power_management_no_winners_records_no_promote(
+    session_dir,
+):
+    # no_winners status → decision=no_promote, host_state_applied
+    # cleared, audit row reflects the per-round outcome.
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        # Pre-seed a stale host_state_applied so we can assert it gets cleared.
+        c.shared_state.host_state_applied = {
+            "variant_name": "stale", "measured_state": {"powercap_w": 999},
+        }
+        task = _mk_task("power_management", "t-pm-2")
+        result = {
+            "status": "no_winners",
+            "base_tput": 1000.0,
+            "grid_size": 2,
+            "all_results": [],
+            "winners": [],
+            "best_variant": None,
+            "best_gain_pct": 0.5,
+            "final_state": "reset_to_default",
+            "bound_kind": "unknown",
+            "revalidate_mode": "lazy",
+            "cache_stale": False,
+            "reference_source": "auto_baseline",
+            "grid_degraded": None,
+            "host_state_applied": None,
+            "power_management_search_update": {
+                "schema_version": 1, "accepted": [], "rejected": [],
+                "tested": {}, "name_index": {}, "cursor": 0,
+                "last_round": {"round_id": "power_management-001",
+                               "round_winners": []},
+            },
+        }
+        await c._promote_to_shared_state("power_management", result, task=task)
+        # host_state_applied cleared — no winner left applied.
+        assert c.shared_state.host_state_applied is None
+        # Audit row: succeeded status (the executor returned a coherent
+        # result) but no_promote decision (no winner cleared the gate).
+        last = c.shared_state.last_power_management
+        assert last["status"] == "succeeded"
+        assert last["decision"] == "no_promote"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_power_management_records_attempt(
+    session_dir,
+):
+    # power_management failure flows through _handle_unpromotable_result
+    # (status=failed) and appends to power_management_attempts via
+    # the audit-set machinery.
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        await c._handle_unpromotable_result(
+            _mk_task("power_management", "t-pm-fail"),
+            {"status": "failed", "error_class": "rocm_smi_unavailable",
+             "error": "rocm-smi not found on PATH"},
+        )
+        assert len(c.shared_state.power_management_attempts) == 1
+        entry = c.shared_state.power_management_attempts[-1]
+        assert entry["status"] == "failed"
+        assert entry["decision"] == "no_promote"
+        assert entry["error_class"] == "rocm_smi_unavailable"
+        # Global rolling log also gets it (every kind).
+        assert any(
+            f.get("action") == "power_management"
+            for f in c.shared_state.last_action_failures
+        )
+    finally:
+        await c.stop()
+
+
 @pytest.mark.asyncio
 async def test_failed_initial_roofline_rearms_watermark_from_baseline(
     session_dir,

@@ -26,7 +26,6 @@ from ...protocol.action_surfaces import (
 )
 from . import read_rules_fragment as _read_rules_fragment
 
-
 # Phase ordering for the catalogue; unknown phases appended at the end.
 _PHASE_ORDER: tuple[str, ...] = (
     "prep",
@@ -497,6 +496,64 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "GRID OVERRIDE: emit `delegate{action_name='sweep', params={grid: "
             "[{conc, isl, osl}, ...]}}` (or params.conc_values / "
             "params.isl_osl_values) to override the workload frontier."
+        )
+    if name == "power_management":
+        # Kept deliberately compact (parallels explore grid hints).
+        # The action playbook (``actions/power_management.md``) carries
+        # the full lifecycle explanation; the LLM reads it on demand.
+        # We only surface here what's needed to author a correct grid
+        # in one shot: emit shape, the "max, then downregulate" model,
+        # the perflevel vocabulary + pin contract (the two
+        # validation-time rejections an LLM author can trip on), and
+        # the cross-call ledger surface so the LLM knows it can read
+        # SharedState.power_management_search / host_state_applied
+        # before proposing.
+        return (
+            "GRID OVERRIDE: emit `delegate{action_name='power_management', "
+            "params={grid: [{name, power_cap_w?, perflevel?, sclk_idx?, "
+            "mclk_idx?, pcie_idx?, perf_deterministic_mhz?, fan_pct?, "
+            "devices?:[id,...], note?}, ...], power_cap_floor_w?: 150, "
+            "power_cap_ceiling_w?: 0, "
+            "revalidate_winners?: 'lazy'|'always'|'never', "
+            "force_retest?: false, dry_run?: false}}` to sweep host "
+            "rocm-smi knobs (power cap, perflevel, clock pin, "
+            "determinism, fan) on top of current_best. An explicit "
+            "`grid` is benched as-is. SINGLE-NODE ONLY: refused with "
+            "error_class='multi_node_unsupported' on >=2-node RayJobs.\n"
+            "  MAX, THEN DOWNREGULATE: for a max-throughput goal "
+            "\"max everything\" is the strong baseline; the only way to "
+            "beat it is to find that max self-throttles and a slightly-"
+            "lower-but-stable config sustains more. The Coordinator's "
+            "automatic KERNEL-plateau settle sweep does this in two "
+            "stages (no grid needed): Stage 1 starts at max "
+            "(perflevel=high + ceiling cap + fan100) and drops the "
+            "NON-bottleneck clock by one DPM index (memory-bound → drop "
+            "GFX sclk; compute-bound → drop memory mclk; unknown → "
+            "both); Stage 2 refines GFX with a determinism ladder "
+            "(90/95/100% of top sclk) off the Stage-1 winner. Hand-"
+            "author a `grid` only to probe knobs/values outside that.\n"
+            "  CROSS-CALL: ledger lives in "
+            "`SharedState.power_management_search` (dedup + prior "
+            "winners) + `SharedState.host_state_applied` (rocm-smi "
+            "state currently in force). Variants already in `tested` "
+            "with the same fingerprint are dropped — set "
+            "`force_retest=true` to bypass. `revalidate_winners` "
+            "controls how prior winners are re-benched: 'lazy' "
+            "(default; only on detected drift), 'always', 'never'.\n"
+            "  VOCABULARY: perflevel ∈ {auto, high, manual, "
+            "profile_standard, profile_peak, profile_compute}; "
+            "perf-regressing modes (low / profile_min_*) are rejected "
+            "at validation time. PIN CONTRACT: any sclk_idx / "
+            "mclk_idx / pcie_idx REQUIRES perflevel='manual' (omit "
+            "perflevel to auto-inject); pairing a pin with "
+            "perflevel='auto'/'high'/'profile_*' is rejected as "
+            "contradictory.\n"
+            "  This action does NOT update "
+            "current_best.extra_server_args — power state is a host "
+            "property; host_state_applied is the canonical record "
+            "for the final report (cleared when no winner was "
+            "re-applied). See actions/power_management.md for the "
+            "full roofline-routed settle-sweep model + the climb state."
         )
     return None
 

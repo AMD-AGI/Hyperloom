@@ -333,7 +333,7 @@ class IntentRouter:
         nested_idempotency_key = params.pop("idempotency_key", None)
         # Plumb baseline's materialized YAML into grid-style tasks for the workload contract; setdefault lets delegator override.
         if (
-            action_name in ("sweep", "explore")
+            action_name in ("sweep", "explore", "power_management")
             and self.shared_state.baseline_config_path
         ):
             params.setdefault(
@@ -363,6 +363,21 @@ class IntentRouter:
         # Specialist pre-dispatch warmup: warm external-knowledge sections via KnowledgePlane (setdefault fills gaps).
         if action_name == "specialist":
             await self._warm_specialist_params(params)
+        if action_name == "power_management":
+            # Mirror of the proposal-review path (see
+            # _materialize_approved_proposal): the LLM-driven delegate
+            # surface gets the same SharedState plumbing so a direct
+            # delegate{action_name='power_management'} sees the
+            # ledger + cached host state.
+            params.setdefault(
+                "power_management_search",
+                self.shared_state.power_management_search,
+            )
+            if self.shared_state.host_state_applied is not None:
+                params.setdefault(
+                    "host_state_applied",
+                    self.shared_state.host_state_applied,
+                )
         # Idempotency-key chain: top-level → nested compat alias → content-fingerprint auto-key.
         # Terminal collisions retry with -retry<N> (up to 5); non-terminal collisions → policy_denied.
         raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
