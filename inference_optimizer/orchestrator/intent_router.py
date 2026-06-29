@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..protocol.intent import Intent, IntentType
-from .coordinator_helpers import format_exc_brief
+from .coordinator_helpers import format_exc_brief, serialize_verdict_advisory
 from .message_bus import Message
 from .policy import PolicyDenied
 from .task_registry import Task
@@ -223,6 +223,7 @@ class IntentRouter:
             pending=pending,
             verdict=verdict,
             reasoning=str(intent.payload.get("reasoning") or ""),
+            advisory=serialize_verdict_advisory(intent.payload),
         )
 
     async def _handle_single_verdict(
@@ -232,6 +233,7 @@ class IntentRouter:
         pending: "PendingProposal",  # noqa: F821 - deferred ref; imported lazily in handlers to avoid import cycle.
         verdict: str,
         reasoning: str,
+        advisory: dict[str, Any] | None = None,
     ) -> None:
         """Single-verdict handler (approve/advise materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate.
 
@@ -240,16 +242,24 @@ class IntentRouter:
             pending: The pending proposal the verdict targets.
             verdict: The collapsed verdict (approve / advise / reject / needs_review).
             reasoning: Free-text reasoning recorded with the verdict.
+            advisory: Pre-serialised advisory fields (``required_evidence`` /
+                ``risks`` / ``advice_text`` / ``alternative_action`` /
+                ``notes`` / ``kb_evidence`` / ``packet_evidence``) to carry on
+                the rebroadcast payload so the full Critic context reaches the
+                orchestration inbox and downstream consumers.
         """
         pending.decided = True
         pending.verdict = verdict
+        rebroadcast_payload: dict[str, Any] = {
+            "target_proposal_msg_id": pending.proposal_msg_id,
+            "verdict":                verdict,
+            "reasoning":              reasoning,
+        }
+        if advisory:
+            rebroadcast_payload.update(advisory)
         await self.bus.append_and_seq(Message.new(
             source, pending.from_agent, "review_verdict",
-            {
-                "target_proposal_msg_id": pending.proposal_msg_id,
-                "verdict":                verdict,
-                "reasoning":              reasoning,
-            },
+            rebroadcast_payload,
             priority=0 if verdict == "reject" else 1,
             in_reply_to=pending.proposal_msg_id,
         ))

@@ -421,3 +421,57 @@ def _dedupe_extra_server_args(args_str: str) -> str:
     for k in order:
         out.extend(pair_by_flag[k])
     return " ".join(out)
+
+
+# Advisory fields carried on a Critic ``review_verdict`` payload beyond the
+# bare verdict/reasoning. The list-valued keys are normalised to lists with
+# empty entries dropped; the string keys are kept only when non-blank.
+_VERDICT_ADVISORY_LIST_KEYS: tuple[str, ...] = (
+    "required_evidence",
+    "risks",
+    "notes",
+    "kb_evidence",
+    "packet_evidence",
+)
+_VERDICT_ADVISORY_TEXT_KEYS: tuple[str, ...] = (
+    "advice_text",
+    "alternative_action",
+)
+
+
+def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract the advisory field set from a ``review_verdict`` payload.
+
+    Produces the canonical advisory subset (``required_evidence`` / ``risks`` /
+    ``advice_text`` / ``alternative_action`` / ``notes`` / ``kb_evidence`` /
+    ``packet_evidence``). This is the single definition of that field set,
+    shared by verdict rebroadcast payload assembly and compact inbox rendering
+    so the two never drift apart.
+
+    Empty values are omitted; list-valued fields are coerced to lists with
+    ``None``/empty entries dropped.
+
+    Args:
+        payload: A ``review_verdict`` intent/message payload.
+
+    Returns:
+        A dict holding only the present, non-empty advisory fields.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in _VERDICT_ADVISORY_LIST_KEYS:
+        raw = payload.get(key)
+        if isinstance(raw, (list, tuple)):
+            items = [item for item in raw if item not in (None, "")]
+        elif raw in (None, ""):
+            items = []
+        else:
+            items = [raw]
+        if items:
+            out[key] = list(items)
+    for key in _VERDICT_ADVISORY_TEXT_KEYS:
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            out[key] = raw
+    return out

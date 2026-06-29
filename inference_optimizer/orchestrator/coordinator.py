@@ -112,6 +112,7 @@ from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _resolve_roofline_watermark_ratio,
     effective_closing_grace_sec,
     format_exc_brief,
+    serialize_verdict_advisory,
 )
 
 
@@ -364,11 +365,23 @@ def _format_inbox_event(m: "Message") -> str:
         )
 
     if topic == "review_verdict":
-        return (
+        parts = [
             f"{head} target={payload.get('target_proposal_msg_id')!r} "
             f"verdict={payload.get('verdict')!r} "
             f"reasoning={str(payload.get('reasoning') or '')[:140]!r}"
-        )
+        ]
+        advisory = serialize_verdict_advisory(payload)
+        required_evidence = advisory.get("required_evidence")
+        if required_evidence:
+            shown = "; ".join(str(item) for item in required_evidence[:3])
+            parts.append(f"required_evidence[{len(required_evidence)}]={shown[:140]!r}")
+        risks = advisory.get("risks")
+        if risks:
+            parts.append(f"risks={len(risks)}")
+        advice_text = advisory.get("advice_text")
+        if advice_text:
+            parts.append(f"advice={advice_text[:140]!r}")
+        return " ".join(parts)
 
     if topic == "observation":
         kind = payload.get("kind")
@@ -9568,9 +9581,10 @@ class Coordinator:
         pending: "PendingProposal",
         verdict: str,
         reasoning: str,
+        advisory: dict[str, Any] | None = None,
     ) -> None:
         """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
-        return await self.router._handle_single_verdict(source=source, pending=pending, verdict=verdict, reasoning=reasoning)
+        return await self.router._handle_single_verdict(source=source, pending=pending, verdict=verdict, reasoning=reasoning, advisory=advisory)
 
     def _inject_explore_runtime_params(self, params: dict) -> None:
         """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides. Knobs: baseline_runtime_sec + explore_overtime_kill_ratio (soft_deadline), variant_timeout_sec, variant_timeout_safety_margin.
