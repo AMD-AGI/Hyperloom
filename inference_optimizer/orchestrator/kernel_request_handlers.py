@@ -3023,13 +3023,30 @@ def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) ->
     last_decision = str(entry.get("last_decision") or "").strip()
     last_status = str(entry.get("last_status") or "").lower()
     rejected_reason = str(entry.get("rejected_reason") or "").strip()
-    if (
-        failure_count < max_failures
-        and last_decision == ""
-        and last_status in {"failed", "error", "timeout"}
-        and not rejected_reason
-    ):
+    is_retryable_infra = (
+        last_decision == "" and last_status in {"failed", "error", "timeout"} and not rejected_reason
+    )
+    if failure_count < max_failures and is_retryable_infra:
         return max_failures
+    # High-impact infra-retry (flag-gated, default off): a high-GPU%-share kernel
+    # that keeps infra-failing ("didn't finish") gets extra attempts to COMPLETE
+    # before retirement, mirroring the retirement-side cap in record_kernel_opt so
+    # dispatch / record / kernel_work_pending agree. Off => unchanged.
+    if is_retryable_infra and _honest_flag("HL_INFRA_RETRY_HIGH_IMPACT"):
+        try:
+            impact_pct = float(entry.get("last_gpu_pct") or 0.0)
+        except (TypeError, ValueError):
+            impact_pct = 0.0
+        try:
+            min_gpu = float(os.environ.get("HL_INFRA_RETRY_MIN_GPU_PCT", "5.0") or 5.0)
+        except ValueError:
+            min_gpu = 5.0
+        try:
+            infra_max = int(os.environ.get("HL_INFRA_RETRY_MAX", "4") or 4)
+        except ValueError:
+            infra_max = 4
+        if impact_pct >= min_gpu and failure_count < infra_max:
+            return infra_max
     return _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
 
 
@@ -5589,10 +5606,38 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     # REVERT still retires immediately below, but infra failures get a retry.
     max_failures = resolve_kernel_opt_max_failures()
 
+    # High-impact infra-retry (flag-gated, default off). An infra non-finish
+    # (timeout / preprocess / agent-crash; no verdict) means the attempt "didn't
+    # finish", NOT that the kernel "can't be improved" — evidence: the same FP8
+    # blockscale GEMM that infra-failed-then-was-retired on one workload won 2.9x
+    # on another once GEAK completed. So a high-GPU%-share kernel should not be
+    # permanently retired after only ``max_failures`` non-finishes the way a
+    # REVERT is; give it more attempts to COMPLETE (pairs with GEAK adaptive
+    # budget). REVERT / partial retirement is unchanged; off => byte-identical.
+    infra_failure_cap = max_failures
+    if _honest_flag("HL_INFRA_RETRY_HIGH_IMPACT"):
+        try:
+            _impact_pct = float(_kernel_trace_impact_pct(state, kernel_id) or 0.0)
+        except Exception:  # noqa: BLE001 - impact is best-effort
+            _impact_pct = 0.0
+        # Stamp impact so the dispatch-side cap (_kernel_dispatch_attempt_cap)
+        # widens consistently from the same record.
+        entry["last_gpu_pct"] = _impact_pct
+        try:
+            _min_gpu = float(os.environ.get("HL_INFRA_RETRY_MIN_GPU_PCT", "5.0") or 5.0)
+        except ValueError:
+            _min_gpu = 5.0
+        try:
+            _infra_max = int(os.environ.get("HL_INFRA_RETRY_MAX", "4") or 4)
+        except ValueError:
+            _infra_max = 4
+        if _impact_pct >= _min_gpu:
+            infra_failure_cap = max(max_failures, _infra_max)
+
     should_reject = (
         decision == "REVERT"
         or int(entry.get("partial_count", 0)) >= max_partial
-        or int(entry.get("failure_count", 0)) >= max_failures
+        or int(entry.get("failure_count", 0)) >= infra_failure_cap
     )
     if should_reject:
         if kernel_id not in state.rejected_kernel_ids:
