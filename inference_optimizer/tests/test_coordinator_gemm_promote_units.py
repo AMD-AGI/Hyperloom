@@ -9,6 +9,7 @@ forge results on the per-tuner E2E path while GEAK results promote inline.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,14 @@ import inference_optimizer.orchestrator.action_executors.explore as explore_mod
 import inference_optimizer.orchestrator.kernel_request_handlers as krh_mod
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.shared_state import SharedState
+
+
+def _journal_entries(session_dir: Path) -> list[dict]:
+    """Read the optimization_journal entries written under ``session_dir``."""
+    path = session_dir / "reports" / "optimization_journal.json"
+    if not path.exists():
+        return []
+    return list(json.loads(path.read_text(encoding="utf-8")).get("entries") or [])
 
 
 def _make_integrate(responses):
@@ -112,6 +121,30 @@ class TestPromoteGemmTuningKeep:
         assert stack[0]["variant_name"] == "a8w8_blockscale_tuned_gemm"
         envs = coord.shared_state.current_best["extra_envs"]
         assert envs["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"] == "/tuned/gemm.csv"
+
+    def test_geak_keep_writes_gemm_tuning_journal_event(self, tmp_path):
+        # The adopted GEMM-tuning run must surface as a phase_timeline event:
+        # a KIND_GEMM_TUNING KEEP journal row carrying the serving throughput
+        # and the originating task_id (for token attribution).
+        coord = _coord(tmp_path, baseline_tput=200.0)
+        coord._promote_gemm_tuning_keep(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.1,
+                "backend": "geak",
+                "tuned_file": "/tuned/gemm.csv",
+                "task_id": "kernel_entry_gemm_tuning",
+            }
+        )
+        rows = [e for e in _journal_entries(tmp_path) if e.get("kind") == "gemm_tuning"]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["outcome"] == "KEEP"
+        assert row["variant_name"] == "a8w8_blockscale_tuned_gemm"
+        assert row["throughput_after"] == pytest.approx(220.0)
+        assert row["task_id"] == "kernel_entry_gemm_tuning"
+        assert row["provenance"] == "gemm_tuning:geak"
 
     def test_forge_keep_dedupes_same_tuned_file(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
@@ -508,6 +541,14 @@ class TestValidateForgeGemmTuningE2E:
         assert fake.calls[1]["base_tput"] == pytest.approx(120.0)
 
         assert len(coord.shared_state.optimization_stack) == 2
+        # Each kept tuner also lands as a gemm_tuning KEEP journal event with
+        # its serving throughput + per-tuner task_id.
+        gj = [e for e in _journal_entries(tmp_path) if e.get("kind") == "gemm_tuning"]
+        assert [e["throughput_after"] for e in gj] == pytest.approx([120.0, 132.0])
+        assert {e["task_id"] for e in gj} == {
+            "gemm_tune_e2e_fmoe_ck",
+            "gemm_tune_e2e_dense_gemm",
+        }
         cb = coord.shared_state.current_best
         assert cb["engine"] == "forge"
         assert cb["tput"] == pytest.approx(132.0)
