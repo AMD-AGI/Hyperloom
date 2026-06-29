@@ -3907,6 +3907,80 @@ class Coordinator:
             )
         except Exception:  # noqa: BLE001
             log.exception("framework_pr: prs_tested write failed")
+        # Real-time KG write-back: reflect this KEEP/REVERT as native link-graph
+        # edge(s) immediately so the live graph is queryable before the next
+        # mirror cron. Best-effort and native-only (see _emit_kg_decision).
+        self._emit_kg_decision(
+            patch_file=str(patch_path),
+            outcome=outcome,
+            gain_pct=float(delta_pct or 0.0),
+            error_class=str(error_class or ""),
+            archs=list(entry.get("applicable_arch") or []),
+        )
+
+    def _emit_kg_decision(
+        self,
+        *,
+        patch_file: str,
+        outcome: str,
+        gain_pct: float,
+        error_class: str,
+        archs: list[Any],
+    ) -> None:
+        """Emit a real-time KG edge for a KEEP/REVERT patch decision.
+
+        Mirrors the bulk kb-mirror's recipe edge mapping (a KEEP with a
+        positive gain becomes ``patch IMPROVES arch``; a REVERT becomes
+        ``patch REVERTED_ON arch``) so the live link graph reflects the
+        decision immediately, instead of only after the next mirror cron.
+
+        Native-only and best-effort: ``get_kg_client`` returns a native
+        client only when ``GBRAIN_KG_NATIVE`` is set (otherwise edges would
+        be written as a ``## Facts`` fence that gbrain ingest discards), and
+        all failures degrade silently via the ``*_safe`` wrappers so a KG
+        hiccup never affects the run.
+
+        Args:
+            patch_file: The patch identifier (edge subject).
+            outcome: ``KEEP`` or ``REVERT``.
+            gain_pct: Measured throughput delta (signed percent).
+            error_class: Failure class for a REVERT (edge ``error`` property).
+            archs: Applicable architectures (one edge per arch).
+        """
+        if not patch_file or not archs:
+            return
+        try:
+            from ..recipe_kb.kg_client import get_kg_client
+
+            kg = get_kg_client()
+            if kg is None or not getattr(kg, "_native", False) or not kg.is_available():
+                return
+            ss = self.shared_state
+            hw = str(getattr(ss, "gpu_type", "") or getattr(ss, "hardware", "") or "")
+            fw = str(getattr(ss, "framework", "") or "")
+            for raw_arch in archs:
+                arch = str(raw_arch or "").strip()
+                if not arch:
+                    continue
+                if outcome == "KEEP" and gain_pct > 0:
+                    kg.emit_fact_safe(
+                        page_slug="",
+                        subject=patch_file,
+                        predicate="IMPROVES",
+                        object=arch,
+                        properties={"gain": f"{gain_pct:+.1f}%", "hw": hw, "fw": fw},
+                    )
+                elif outcome == "REVERT":
+                    kg.emit_fact_safe(
+                        page_slug="",
+                        subject=patch_file,
+                        predicate="REVERTED_ON",
+                        object=arch,
+                        properties={"loss": f"{gain_pct:.1f}%", "error": error_class, "hw": hw, "fw": fw},
+                    )
+            log.info("kg write-back: emitted %s edge(s) for %s [%s]", len(archs), patch_file, outcome)
+        except Exception as exc:  # noqa: BLE001 - write-back is advisory
+            log.warning("kg write-back degraded: %s", exc)
 
     def _record_framework_pr_phase_done(
         self,
@@ -5830,6 +5904,81 @@ class Coordinator:
         state.warm_history_injected = True
         return added
 
+    def _filter_warm_patches_with_kg(
+        self,
+        patches: list,
+        advisory_blocked: list,
+        state: Any,
+    ) -> list:
+        """Filter replay patches using KG advisory blocks, expiry, conflicts.
+
+        Removes patches that are (a) advisory-blocked at/above the
+        configurable confidence threshold, (b) flagged ``expired`` by the
+        warm-start validity check, or (c) in a ``CONFLICTS_WITH`` relation
+        with another patch in the set. Best-effort: any failure returns the
+        input patches unchanged so replay never breaks on a KG hiccup.
+
+        Args:
+            patches: The candidate replay patches from ``recommended_replay``.
+            advisory_blocked: The ``advisory_blocked_patches`` list from the
+                warm-start context.
+            state: The live SharedState (for hardware/framework conditions).
+
+        Returns:
+            The filtered patch list.
+        """
+        if not patches:
+            return patches
+        try:
+            threshold = float(os.environ.get("WARM_REPLAY_ADVISORY_CONFIDENCE", "0.75"))
+        except (TypeError, ValueError):
+            threshold = 0.75
+
+        def _norm(value: Any) -> str:
+            return str(value or "").strip().replace(" ", "_").replace("/", "_").lower()
+
+        try:
+            advisory_drop = {
+                _norm(ab.get("patch_file"))
+                for ab in (advisory_blocked or [])
+                if isinstance(ab, dict) and float(ab.get("confidence") or 0.0) >= threshold
+            }
+            kept = [
+                p
+                for p in patches
+                if isinstance(p, dict)
+                and not p.get("expired")
+                and _norm(p.get("patch_file")) not in advisory_drop
+            ]
+            for p in patches:
+                if isinstance(p, dict) and _norm(p.get("patch_file")) in advisory_drop:
+                    log.info("warm-replay advisory block (conf>=%.2f): %s", threshold, p.get("patch_file"))
+
+            if len(kept) >= 2:
+                from ..recipe_kb.kg_client import get_kg_client
+
+                kg = get_kg_client()
+                if kg is not None and kg.is_available():
+                    knobs = [str(p.get("patch_file") or "") for p in kept]
+                    conflicts = kg.find_conflicts_safe(
+                        knobs=knobs,
+                        hardware=str(getattr(state, "gpu_type", "") or getattr(state, "hardware", "") or ""),
+                        framework=str(getattr(state, "framework", "") or ""),
+                    )
+                    drop = {_norm(c.get("knob")) for c in conflicts}
+                    if drop:
+                        for c in conflicts:
+                            log.info(
+                                "warm-replay conflict: %s conflicts_with %s",
+                                c.get("knob"),
+                                c.get("conflicts_with"),
+                            )
+                        kept = [p for p in kept if _norm(p.get("patch_file")) not in drop]
+            return kept
+        except Exception as exc:  # noqa: BLE001 - filtering is advisory only
+            log.warning("warm-replay KG patch filtering degraded: %s", exc)
+            return patches
+
     async def _maybe_enqueue_warm_replay(
         self,
         *,
@@ -5938,6 +6087,11 @@ class Coordinator:
         # Extract code patches from warm_start_context (populated by T0).
         wsc_patches = (wsc.get("recommended_replay") or {}).get("patches") or [] if isinstance(wsc, dict) else []
         wsc_blocked = wsc.get("blocked_patches") or [] if isinstance(wsc, dict) else []
+        wsc_advisory = wsc.get("advisory_blocked_patches") or [] if isinstance(wsc, dict) else []
+        # KG-driven filtering: drop high-confidence advisory blocks, expired
+        # patches, and graph-detected conflicts before replay. Best-effort —
+        # falls back to the unfiltered list on any KG failure.
+        wsc_patches = self._filter_warm_patches_with_kg(wsc_patches, wsc_advisory, state)
         if not bc_args and not bc_envs and not wsc_patches:
             state.warm_replay_outcome = {
                 "status": "skipped",
@@ -10249,6 +10403,20 @@ class Coordinator:
             params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
         if state.warm_start_lessons and "warm_start_lessons" not in params:
             params["warm_start_lessons"] = list(state.warm_start_lessons)
+        # KG graph-recommended knobs (cross-recipe IMPROVES candidates from the
+        # T0 warm-start context); advisory positive priors for the specialist.
+        if "kg_recommended_knobs" not in params:
+            wsc = getattr(state, "warm_start_context", None) or {}
+            kg_knobs = wsc.get("recommended_knobs") if isinstance(wsc, dict) else None
+            if kg_knobs:
+                params["kg_recommended_knobs"] = [k for k in kg_knobs if isinstance(k, dict)]
+        # KG graph-guided config knobs (journal KNOB_IMPROVES, runnable args/envs);
+        # only present when GBRAIN_KG_GUIDED enabled the T0 enhancement.
+        if "kg_guided_knobs" not in params:
+            wsc = getattr(state, "warm_start_context", None) or {}
+            guided = wsc.get("graph_guided_knobs") if isinstance(wsc, dict) else None
+            if guided:
+                params["kg_guided_knobs"] = [k for k in guided if isinstance(k, dict)]
         # runtime framework/version so the prompt's _format_version_note annotates version-mismatched lessons.
         if "framework" not in params:
             fw = str(getattr(state, "framework", "") or "").strip()
