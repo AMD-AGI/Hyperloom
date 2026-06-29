@@ -61,7 +61,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "kernel", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "kernel_agent", "critic", "robustness")}
 
 
 def _write_baseline_yaml(path: Path) -> None:
@@ -836,7 +836,7 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
                 Intent(
                     type=IntentType.REQUEST,
                     payload={
-                        "target_agent": "kernel",
+                        "target_agent": "kernel_agent",
                         "kind": "integrate",
                         "params": {
                             "base_tput": 800.0,
@@ -904,7 +904,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
         }
         c.shared_state.save(session_dir)
         payload = {
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "integrate",
             "params": {
                 "base_tput": 800.0,

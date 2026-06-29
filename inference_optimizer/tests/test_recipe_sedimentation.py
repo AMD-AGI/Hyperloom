@@ -22,7 +22,7 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle),
-        "kernel": MockBackend(idle),
+        "kernel_agent": MockBackend(idle),
         "critic": MockBackend(idle),
         "robustness": MockBackend(idle),
     }

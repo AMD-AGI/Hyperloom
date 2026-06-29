@@ -4,7 +4,7 @@
 
 Wraps the ``critic.md`` rules fragment with generated sections (mission,
 run context, known actions, default verdict, phase review contract, optional
-kernel-owned carve-out, rules, output protocol). Deterministic for given inputs.
+kernel_agent-owned carve-out, rules, output protocol). Deterministic for given inputs.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ..action_registry import ActionMetadata, ActionRegistry
 from .prompt_builder import (
-    KERNEL_OWNED_ACTIONS,
+    KERNEL_AGENT_OWNED_ACTIONS,
     _resolve_prompt_prelude,
     join_sections,
 )
@@ -61,7 +61,7 @@ def _section_run_context(
 
     Args:
         framework (str): The framework name (e.g. ``sglang``) shown verbatim.
-        kernel_enabled (bool): Whether kernel-owned actions are enabled.
+        kernel_enabled (bool): Whether kernel_agent-owned actions are enabled.
         max_minutes (int): Wall-clock budget for the run, in minutes.
 
     Returns:
@@ -78,7 +78,7 @@ def _section_run_context(
         "the user message as a judge bundle — not in this system prompt.",
         "",
         "Every `judge_bundle` you receive carries a `phase` field",
-        "(PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE). Use the phase-",
+        "(PRELUDE / FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP / CLOSE). Use the phase-",
         "specific review rules in §6 to interpret each proposal in",
         "context. Phase fit is strategy: when a proposal looks out-of-",
         "phase or out-of-sequence, prefer `advise` over `reject` and",
@@ -103,8 +103,8 @@ def _section_phase_review_contract() -> list[str]:
     lines: list[str] = [
         "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
         "",
-        "Each `judge_bundle` carries a `phase` (PRELUDE / FRAMEWORK_PR /",
-        "EXPLORE / KERNEL / SWEEP / CLOSE). Phase-proposable action sets:",
+        "Each `judge_bundle` carries a `phase` (PRELUDE / FRAMEWORK_AGENT /",
+        "EXPLORE / KERNEL_AGENT / SWEEP / CLOSE). Phase-proposable action sets:",
         "",
     ]
     lines.extend(render_phase_proposable_bullets(interleave=interleave))
@@ -134,7 +134,7 @@ def _section_phase_review_contract() -> list[str]:
                 "",
                 "Phase interleave is ON: EXPLORE additionally accepts kernel-",
                 "owned REQUEST kinds and KERNEL additionally accepts explore /",
-                "specialist / integrate_patch. The kernel-owned data-dependency",
+                "specialist / integrate_patch. The kernel_agent-owned data-dependency",
                 "and integrate_patch Critic gates still apply.",
             ]
         )
@@ -235,23 +235,23 @@ def _section_default_verdict(actions: list[ActionMetadata]) -> list[str]:
 
 
 def _section_kernel_owned_carveout() -> list[str]:
-    """Build the KERNEL-OWNED CARVE-OUT section.
+    """Build the KERNEL_AGENT-OWNED CARVE-OUT section.
 
     Returns:
-        list[str]: Markdown lines listing the kernel-owned actions and noting
-        that hard E2E gating is enforced by the Kernel agent, not the verdict.
+        list[str]: Markdown lines listing the kernel_agent-owned actions and noting
+        that hard E2E gating is enforced by the Kernel-agent, not the verdict.
     """
-    owned = ", ".join(sorted(KERNEL_OWNED_ACTIONS))
+    owned = ", ".join(sorted(KERNEL_AGENT_OWNED_ACTIONS))
     return [
-        "## 5b. KERNEL-OWNED CARVE-OUT",
+        "## 5b. KERNEL_AGENT-OWNED CARVE-OUT",
         "",
-        "These actions use `request{target_agent='kernel', kind=...}`, not",
+        "These actions use `request{target_agent='kernel_agent', kind=...}`, not",
         "`propose_action`. Your job is to OK the proposal flow:",
         "",
         f"  {owned}",
         "",
         "Hard E2E gating (correctness, 1.20× speedup, accuracy gate) is",
-        "enforced by the Kernel agent, not by your verdict.",
+        "enforced by the Kernel-agent, not by your verdict.",
     ]
 
 

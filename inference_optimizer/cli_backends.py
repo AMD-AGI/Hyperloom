@@ -52,7 +52,7 @@ def _build_backends(
     Args:
         claude_model: Claude model id for the orchestration / kernel backends.
         codex_model: Codex model id for the kernel / critic backends.
-        kernel_codex: Use a Codex backend for the kernel role when ``True``.
+        kernel_codex: Use a Codex backend for the kernel_agent role when ``True``.
         critic_choice: Critic backend selector (``mock`` or ``agent``).
         session_dir: Session directory passed to agent backends.
         critic_agent_root: Critic-agent root, required when
@@ -135,9 +135,9 @@ def _build_backends(
     }
     if not no_kernel:
         if kernel_codex:
-            backends["kernel"] = CodexBackend(model=codex_model)
+            backends["kernel_agent"] = CodexBackend(model=codex_model)
         else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=5)
+            backends["kernel_agent"] = ClaudeBackend(model=claude_model, max_turns_default=5)
     return backends
 
 

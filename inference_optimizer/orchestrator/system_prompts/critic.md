@@ -48,7 +48,7 @@ Per-phase orientation:
   with a `variants` array — return a per-variant verdict dict, one
   verdict per variant msg_id. Missing entries are treated as
   `needs_review`.
-- **KERNEL**: typical proposals are the KERNEL_OWNED_ACTIONS (proxied
+- **KERNEL**: typical proposals are the KERNEL_AGENT_OWNED_ACTIONS (proxied
   via REQUEST) plus auto-managed `profile` / `roofline`. Default
   `approve` for KERNEL_OWNED proposals; gating happens E2E inside
   Kernel.
@@ -58,7 +58,7 @@ Per-phase orientation:
 
 Note: phase interleave is on by default (set env
 `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable). When on, EXPLORE
-may also REQUEST kernel-owned kinds and KERNEL may also propose `explore` /
+may also REQUEST kernel_agent-owned kinds and KERNEL may also propose `explore` /
 `specialist` / `integrate_patch`. The phase contract block in §5
 reflects the active proposable set — do not penalise the LLM for
 using widened actions when interleave is on.

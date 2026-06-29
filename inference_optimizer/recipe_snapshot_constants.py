@@ -61,7 +61,7 @@ F_PROVENANCE: Final[str] = "provenance"
 # recipe_canonical_id; stamp them so /recipes/search can filter by dimension.
 F_LABEL_MODEL: Final[str] = "model"
 F_LABEL_HARDWARE: Final[str] = "hardware"
-F_LABEL_FRAMEWORK: Final[str] = "framework"
+F_LABEL_FRAMEWORK_NAME: Final[str] = "framework_name"
 F_LABEL_FRAMEWORK_VERSION: Final[str] = "framework_version"
 F_LABEL_PRECISION: Final[str] = "precision"
 F_LABEL_MODEL_TYPE: Final[str] = "model_type"
@@ -231,14 +231,14 @@ def recipe_canonical_id(
     *,
     model: str,
     hardware: str,
-    framework: str,
+    framework_name: str,
     model_type: str = "",
     architectures: "str | list[str]" = "",
     framework_version: str,
     precision: str,
 ) -> str:
     """Build the recipe ``canonical_id``:
-    ``inference:{model}:{hardware}:{framework}:{model_type}:{architectures}:{framework_version}:{precision}``.
+    ``inference:{model}:{hardware}:{framework_name}:{model_type}:{architectures}:{framework_version}:{precision}``.
 
     8 colon-separated segments: 1 prefix + 7 identity dimensions.
     Dimension order reflects fallback priority: model is dropped first
@@ -248,7 +248,7 @@ def recipe_canonical_id(
         f"inference:"
         f"{_slug(model, DEFAULT_MODEL_SLUG)}:"
         f"{_slug(hardware, DEFAULT_HARDWARE_SLUG)}:"
-        f"{_slug(framework, DEFAULT_FRAMEWORK_SLUG)}:"
+        f"{_slug(framework_name, DEFAULT_FRAMEWORK_SLUG)}:"
         f"{_slug(model_type, DEFAULT_MODEL_TYPE_SLUG)}:"
         f"{_architectures_slug(architectures)}:"
         f"{_slug(framework_version, DEFAULT_FRAMEWORK_VERSION_SLUG)}:"
@@ -260,7 +260,7 @@ def canonical_labels(
     *,
     model: str,
     hardware: str,
-    framework: str,
+    framework_name: str,
     model_type: str = "",
     architectures: "str | list[str]" = "",
     framework_version: str,
@@ -273,8 +273,8 @@ def canonical_labels(
     Args:
         model: The model identifier.
         hardware: The hardware/GPU identifier.
-        framework: The serving framework name.
-        framework_version: The framework version.
+        framework_name: The serving framework_name name.
+        framework_version: The framework_name version.
         precision: The precision/quantization scheme.
 
     Returns:
@@ -283,7 +283,7 @@ def canonical_labels(
     return {
         F_LABEL_MODEL: _slug(model, DEFAULT_MODEL_SLUG),
         F_LABEL_HARDWARE: _slug(hardware, DEFAULT_HARDWARE_SLUG),
-        F_LABEL_FRAMEWORK: _slug(framework, DEFAULT_FRAMEWORK_SLUG),
+        F_LABEL_FRAMEWORK_NAME: _slug(framework_name, DEFAULT_FRAMEWORK_SLUG),
         F_LABEL_MODEL_TYPE: _slug(model_type, DEFAULT_MODEL_TYPE_SLUG),
         F_LABEL_ARCHITECTURES: _architectures_slug(architectures),
         F_LABEL_FRAMEWORK_VERSION: _slug(framework_version, DEFAULT_FRAMEWORK_VERSION_SLUG),
@@ -291,7 +291,7 @@ def canonical_labels(
     }
 
 
-# framework slug -> python package whose __version__ is authoritative. Keep
+# framework_name slug -> python package whose __version__ is authoritative. Keep
 # narrow: every entry must be safe to import at boot (don't import sglang in a
 # vLLM-only run).
 _FRAMEWORK_VERSION_MODULES: Final[dict[str, str]] = {
@@ -301,19 +301,19 @@ _FRAMEWORK_VERSION_MODULES: Final[dict[str, str]] = {
 }
 
 
-def detect_framework_version(framework: str) -> str:
-    """Best-effort installed version of ``framework`` via importing its
+def detect_framework_version(framework_name: str) -> str:
+    """Best-effort installed version of ``framework_name`` via importing its
     top-level package and reading ``__version__``. Failures degrade to
     :data:`DEFAULT_FRAMEWORK_VERSION_SLUG` (the optimizer must boot without
-    the framework importable).
+    the framework_name importable).
 
     Args:
-        framework: The serving framework name to probe.
+        framework_name: The serving framework_name name to probe.
 
     Returns:
         The detected version slug, or the default on any failure.
     """
-    fw_slug = _slug(framework, "")
+    fw_slug = _slug(framework_name, "")
     if not fw_slug:
         return DEFAULT_FRAMEWORK_VERSION_SLUG
     module_name = _FRAMEWORK_VERSION_MODULES.get(fw_slug)
@@ -377,7 +377,7 @@ __all__ = [
     "F_PROVENANCE",
     "F_LABEL_MODEL",
     "F_LABEL_HARDWARE",
-    "F_LABEL_FRAMEWORK",
+    "F_LABEL_FRAMEWORK_NAME",
     "F_LABEL_FRAMEWORK_VERSION",
     "F_LABEL_PRECISION",
     "F_CANONICAL_ID",

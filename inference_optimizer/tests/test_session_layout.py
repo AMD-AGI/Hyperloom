@@ -463,7 +463,7 @@ def test_policy_path_inside_session_dir_passes(tmp_path):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": str(tmp_path / "runs" / "profile" / "x.json.gz")},
         },
@@ -476,7 +476,7 @@ def test_policy_path_outside_session_dir_denied(tmp_path):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": "/tmp/some-trace.json.gz"},
         },
@@ -500,7 +500,7 @@ def test_policy_source_file_allowlist_passes(tmp_path):
             },
         },
     )
-    gate.validate_intent("kernel", intent)
+    gate.validate_intent("kernel_agent", intent)
 
 
 def test_policy_source_file_outside_allowlist_denied(tmp_path):
@@ -518,7 +518,7 @@ def test_policy_source_file_outside_allowlist_denied(tmp_path):
         },
     )
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("kernel", intent)
+        gate.validate_intent("kernel_agent", intent)
     assert exc.value.rule == "source_file_not_allowlisted"
 
 
@@ -527,7 +527,7 @@ def test_policy_strict_off_skips_path_check(tmp_path):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": "/tmp/anywhere.json"},
         },
@@ -545,7 +545,7 @@ def test_policy_env_var_enables_strict(tmp_path, monkeypatch):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": "/tmp/x.json"},
         },

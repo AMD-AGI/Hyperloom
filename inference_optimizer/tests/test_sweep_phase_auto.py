@@ -92,7 +92,7 @@ def coord(tmp_path: Path):
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
-    c.role_registry = {"kernel": object()}
+    c.role_registry = {"kernel_agent": object()}
     return c
 
 
@@ -492,7 +492,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     )
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
-    c.role_registry = {"kernel": object()}
+    c.role_registry = {"kernel_agent": object()}
     # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP
     for kid, gain in (("k001", 0.6), ("k004", 0.8)):
         c.shared_state.record_kernel_integrate_result(
@@ -898,7 +898,7 @@ async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel": MockBackend(idle_plan),
+        "kernel_agent": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
         "robustness": MockBackend(idle_plan),
     }
@@ -920,7 +920,7 @@ async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
         {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
     ]
 
-    # Simulate a real KERNEL → SWEEP transition.
+    # Simulate a real KERNEL_AGENT → SWEEP transition.
     coord.shared_state.record_phase_transition(
         to_phase="SWEEP",
         reason="plateau_kernel",
@@ -958,7 +958,7 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
         "critic": MockBackend(idle_plan),
         "robustness": MockBackend(idle_plan),
     }
-    role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel"}
+    role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel_agent"}
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,

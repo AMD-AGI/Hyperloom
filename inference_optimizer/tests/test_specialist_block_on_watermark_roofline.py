@@ -99,7 +99,7 @@ def coord(tmp_path: Path) -> Coordinator:
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
-    c.role_registry = {"kernel": object()}
+    c.role_registry = {"kernel_agent": object()}
     return c
 
 

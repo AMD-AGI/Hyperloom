@@ -267,7 +267,7 @@ async def test_run_extracts_multiple_emit_intent_tool_uses():
                 name=EMIT_INTENT_TOOL_QUALIFIED,
                 input={
                     "intent_type": "request",
-                    "payload": {"target_agent": "kernel", "kind": "trace_analyze"},
+                    "payload": {"target_agent": "kernel_agent", "kind": "trace_analyze"},
                 },
             ),
         ]
