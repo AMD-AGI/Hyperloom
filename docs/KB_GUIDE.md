@@ -1,16 +1,17 @@
 # Knowledge-Base Guide
 
-> **Scope.** This page explains the optional Recipe/Cortex knowledge-base (KB)
-> integration used by Hyperloom, how local and remote stores are selected, and
-> how the runtime behaves when KB sources are unavailable. The KB is optional;
-> Hyperloom can run in local-only or degraded mode.
+> **Scope.** This page explains the optional recipe knowledge-base (KB)
+> integration used by Hyperloom, how the local store and the gbrain read-side
+> remote are selected, and how the runtime behaves when KB sources are
+> unavailable. The KB is optional; Hyperloom can run in local-only or degraded
+> mode.
 
 Hyperloom uses a **recipe-snapshot KB**:
 
 | KB path | Owner / process | Purpose |
 |---------|-----------------|---------|
 | Local recipe KB | `inference_optimizer` | Durable local writes for recipes, attempts, and session-derived optimization knowledge. |
-| Remote Cortex KB (optional) | Cortex KB service | Optional read-side enrichment when `--cortex-kb-url` / `CORTEX_KB_URL` is configured. |
+| Remote gbrain KB (optional) | gbrain page store | Optional read-side enrichment when `GBRAIN_BASE_URL` / `GBRAIN_TOKEN` are configured. |
 
 The old `INFERENCE_OPTIMIZER_KB_ROOT` JSONL store is retired. Current code does
 not read it; use `HYPERLOOM_LOCAL_KB_ROOT` or `--local-kb-root` instead.
@@ -68,24 +69,23 @@ Recommended locations:
 
 ---
 
-## 3. Remote Cortex KB
+## 3. Remote gbrain KB
 
-Hyperloom never silently connects to a remote KB. Remote reads are enabled only
-when you explicitly pass a URL:
-
-```bash
-inference_optimizer optimize --cortex-kb-url https://your-cortex-kb ...
-```
-
-or export:
+Hyperloom never silently connects to a remote KB. Remote recipe reads are served
+by the gbrain page store and are enabled only when you configure gbrain:
 
 ```bash
-export CORTEX_KB_URL=https://your-cortex-kb
+export GBRAIN_BASE_URL=https://your-gbrain
+export GBRAIN_TOKEN=...
 ```
 
-Writes still go to the local recipe KB. If the configured remote is unreachable,
-the dispatcher degrades to local-only behaviour; use `--degraded-kb` to skip KB
-hooks deliberately.
+Writes still go to the local recipe KB. If gbrain is unreachable, the dispatcher
+degrades to local-only behaviour; use `--degraded-kb` to skip KB hooks
+deliberately.
+
+> **Note.** `--cortex-kb-url` / `CORTEX_KB_URL` are NOT the recipe KB. They
+> configure the Cortex KB used only by the Critic agent's per-proposal assess
+> enrichment (`/v2/reasoning/assess`). Recipe reads always go to gbrain.
 
 ---
 
@@ -108,7 +108,7 @@ No. That variable belongs to the retired JSONL KB path and is not read by the
 current runtime. Use `--degraded-kb` to skip KB hooks, or leave KB flags unset to
 use the default local store.
 
-**Q: Does a missing remote Cortex KB fail the run?**
+**Q: Does a missing remote gbrain KB fail the run?**
 No. An explicitly configured but unreachable remote degrades to local-only
 operation. `--degraded-kb` skips the KB path intentionally.
 

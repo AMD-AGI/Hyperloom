@@ -55,7 +55,7 @@ from .local_store import (
     LocalRecipeStoreError,
     RECIPE_FILENAME,
 )
-from .remote_client import RemoteRecipeClient, RemoteRecipeClientError
+from .remote_client import RemoteRecipeClientError
 from .schema import Attempt, Recipe
 
 
@@ -77,7 +77,6 @@ __all__ = [
     "RECIPE_FILENAME",
     "Recipe",
     "RecipeKB",
-    "RemoteRecipeClient",
     "RemoteRecipeClientError",
     "canonical_id_for_path",
     "canonical_id_from_components",

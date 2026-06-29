@@ -509,21 +509,6 @@ class SpecialistRunner:
 
         allocated_gpu_ids = tuple(int(g) for g in ((ctx.extra or {}).get("gpu_ids") or []))
 
-        # SUBSTRATE × GBRAIN DUAL-READ — deterministic cross-check of the two
-        # warmed knowledge sources (cortex substrate levers vs the gbrain
-        # warm-start recipe), computed here per specialist so the comparison +
-        # source selection land on this specialist's trace. Best-effort: a
-        # missing source or a failed assess call degrades the digest and never
-        # blocks dispatch. Reuses a coordinator-precomputed digest when present.
-        dual_read = dict(params.get("substrate_dual_read") or {})
-        if not dual_read:
-            # Offload the blocking urllib KB call off the event loop so a slow
-            # or unreachable cortex KB can't stall the orchestrator (matches the
-            # repo's asyncio.to_thread convention for sync IO).
-            dual_read = await asyncio.to_thread(self._compute_substrate_dual_read, params)
-        if dual_read:
-            self._trace_substrate_dual_read(ctx.task.task_id, dual_read)
-
         if prompt_inputs is None:
             prompt_inputs = SpecialistPromptInputs(
                 task_id=ctx.task.task_id,
@@ -536,10 +521,6 @@ class SpecialistRunner:
                 kb_subgraph=dict(params.get("kb_subgraph") or {}),
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
-                # Substrate directional lever priors (cortex /v2/reasoning/levers).
-                substrate_levers=dict(params.get("substrate_levers") or {}),
-                # Substrate↔gbrain dual-read cross-check (computed above).
-                substrate_dual_read=dual_read,
                 sub_kind=str(params.get("sub_kind") or ""),
                 extra_focus_tags=_extra_focus_tags(params, domain),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
@@ -699,72 +680,6 @@ class SpecialistRunner:
                 task_id,
                 turn,
                 exc_info=True,
-            )
-
-    def _compute_substrate_dual_read(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Run the substrate↔gbrain dual-read for this specialist (best-effort).
-
-        Compares the warmed substrate directional levers
-        (``params['substrate_levers']``) against the gbrain warm-start recipe
-        (``params['warm_start_recipe']``) by asking the substrate to assess the
-        recipe's champion config. Returns ``{}`` on any failure or when neither
-        source carries signal — never raises, never blocks dispatch.
-
-        Args:
-            params: The specialist task params (read-only here).
-
-        Returns:
-            dict[str, Any]: The dual-read digest, or ``{}`` on miss/error.
-        """
-        try:
-            from .substrate_dual_read import compute_dual_read
-
-            return compute_dual_read(
-                substrate_levers=params.get("substrate_levers") or {},
-                warm_start_recipe=params.get("warm_start_recipe") or {},
-            )
-        except Exception as exc:  # noqa: BLE001 — advisory, never a gate
-            log.warning("specialist: substrate dual-read failed: %r", exc)
-            return {}
-
-    def _trace_substrate_dual_read(self, task_id: str, digest: dict[str, Any]) -> None:
-        """Mirror the dual-read digest into Langfuse as a ``kb_dual_read`` span.
-
-        Records the full digest (both sources' request/response, the substrate
-        assessment, and the selected source) under the ``specialist`` agent so
-        the "which knowledge source steered this specialist, and did the two
-        agree" evidence lands on this specialist's trace. No-op when Langfuse is
-        disabled or no session dir; never raises into the run.
-
-        Args:
-            task_id: The specialist task id (used in the span name).
-            digest: The dual-read digest from ``_compute_substrate_dual_read``.
-        """
-        if self.session_dir is None or not digest:
-            return
-        try:
-            from .trace.langfuse_emitter import get_emitter
-
-            emitter = get_emitter(self.session_dir)
-            if not emitter.enabled:
-                return
-            conflicts = digest.get("conflicts") if isinstance(digest.get("conflicts"), list) else []
-            emitter.record_kb_span(
-                name=f"kb_dual_read:{task_id}",
-                agent="specialist",
-                output=digest,
-                metadata={
-                    "kind": "kb_dual_read",
-                    "task_id": task_id,
-                    "verdict": digest.get("verdict"),
-                    "selected_source": digest.get("selected_source"),
-                    "conflict_count": len(conflicts),
-                },
-            )
-        except Exception:  # noqa: BLE001 — trace must never break the run
-            log.debug(
-                "full-trace: specialist dual-read span failed for task_id=%s",
-                task_id, exc_info=True,
             )
 
     def _record_specialist_intel(
