@@ -3,12 +3,13 @@
 Three groups, all offline (no Quark / Claude SDK / GPU):
 
 * Parser     — ``--quantize`` flag parses (default None / value when passed).
-* Adapter    — ``run_quantization_prelude_async`` maps quark_quantizer's
-               QuarkRunResult status -> decision (return dir vs SystemExit(3)).
+* Adapter    — ``run_quantization_prelude_async`` maps quantization_agent's
+               QuantSkillRunResult status -> decision (return dir vs SystemExit(3)).
 * CLI hook   — ``cli._run_quantization_prelude`` is a no-op without the flag,
-               skipped on --resume, and rewrites args.model otherwise.
+               skipped on --resume, gated on $HYPERLOOM_QUANTIZE_ENABLED, and
+               rewrites args.model otherwise.
 
-``quark_quantizer.quantize`` is monkeypatched so nothing real runs.
+``quantization_agent.quantize_via_prompt`` is monkeypatched so nothing real runs.
 """
 
 from __future__ import annotations
@@ -25,30 +26,45 @@ from inference_optimizer.orchestrator import quantization_request_handlers as qr
 from inference_optimizer.orchestrator import quantization_schemes as qs
 
 
+@pytest.fixture(autouse=True)
+def _enable_quant_by_default(monkeypatch):
+    """Default the deterministic master switch ON for prelude tests.
+
+    Most CLI-hook tests exercise the path AFTER the
+    ``$HYPERLOOM_QUANTIZE_ENABLED`` gate, so default it ON to reach the adapter.
+    The dedicated gate tests override this. No-op / resume / scheme-mismatch
+    tests return before the gate, so this is harmless for them.
+    """
+    monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", "1")
+
+
 # ---------------------------------------------------------------------------
 # fakes
 # ---------------------------------------------------------------------------
 
 
-def _fake_result(status: str, output_dir: str | None, *, final="x", eval_gap=None, error=""):
-    """Build a stand-in for quark_quantizer.QuarkRunResult."""
+def _fake_result(status: str, qdir: str | None, *, final="x", eval_gap=None):
+    """Build a stand-in for quantization_agent.QuantSkillRunResult."""
+    assessment = types.SimpleNamespace(final=final, eval_gap=eval_gap)
     return types.SimpleNamespace(
-        status=status, output_dir=output_dir, final=final, eval_gap=eval_gap, error=error
+        status=status,
+        quantized_model_dir=Path(qdir) if qdir else None,
+        assessment=assessment,
     )
 
 
 def _patch_quantize(monkeypatch: pytest.MonkeyPatch, result):
-    """Replace quark_quantizer.quantize with an async stub that records its
-    call (prompt + enabled + kwargs) and returns ``result``."""
-    import quark_quantizer
+    """Replace quantization_agent.quantize_via_prompt with an async stub that
+    records its call (prompt + kwargs) and returns ``result``."""
+    import quantization_agent
 
     calls: list[dict] = []
 
-    async def _fake(prompt, *, enabled=False, **kwargs):
-        calls.append({"prompt": prompt, "enabled": enabled, **kwargs})
+    async def _fake(prompt, **kwargs):
+        calls.append({"prompt": prompt, **kwargs})
         return result
 
-    monkeypatch.setattr(quark_quantizer, "quantize", _fake)
+    monkeypatch.setattr(quantization_agent, "quantize_via_prompt", _fake)
     return calls
 
 
@@ -238,8 +254,7 @@ def test_adapter_success_returns_quantized_dir(tmp_path, monkeypatch):
     assert "/models/src" in calls[0]["prompt"]
     assert str(tmp_path / "quantized") in calls[0]["prompt"]
     assert "fp8" in calls[0]["prompt"]
-    # The prelude already gated on the flag, so the shell is enabled here.
-    assert calls[0]["enabled"] is True
+    assert calls[0]["interactive"] is False
     assert calls[0]["workspace"] == tmp_path
 
 
@@ -452,3 +467,57 @@ def test_prelude_no_display_name_without_quantization(monkeypatch):
     asyncio.run(cli._run_quantization_prelude(args))
     assert getattr(args, "model_display_name", None) in (None, "")
     assert cli.resolve_model_display_name(args) == "Qwen3-32B"
+
+
+# ---------------------------------------------------------------------------
+# Group D — deterministic env switch ($HYPERLOOM_QUANTIZE_ENABLED)
+# ---------------------------------------------------------------------------
+
+
+def test_prelude_env_gate_skips_when_disabled(monkeypatch, capsys):
+    """With $HYPERLOOM_QUANTIZE_ENABLED off, the prelude skips quantization even
+    when --quantize is present (deterministic OFF; prevents mis-quantization)."""
+    monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", "0")
+    monkeypatch.setenv("HYPERLOOM_QUANTIZATION_SKIPPED", "")
+    called = {"n": 0}
+
+    async def _should_not_run(**kwargs):  # pragma: no cover - asserts non-call
+        called["n"] += 1
+        return "x"
+
+    monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
+    args = _Args(model="/models/src", quantize="fp8")
+    asyncio.run(cli._run_quantization_prelude(args))
+
+    assert called["n"] == 0
+    assert str(args.model) == "/models/src"  # unchanged -> downstream un-quantized
+    captured = capsys.readouterr()
+    assert "QUANTIZATION_SKIPPED" in captured.out
+    assert os.environ.get("HYPERLOOM_QUANTIZATION_SKIPPED")
+
+
+def test_prelude_env_gate_skips_when_unset(monkeypatch):
+    """Unset env => disabled (strict gate): quantization does not run."""
+    monkeypatch.delenv("HYPERLOOM_QUANTIZE_ENABLED", raising=False)
+    called = {"n": 0}
+
+    async def _should_not_run(**kwargs):  # pragma: no cover - asserts non-call
+        called["n"] += 1
+        return "x"
+
+    monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
+    args = _Args(model="/models/src", quantize="fp8")
+    asyncio.run(cli._run_quantization_prelude(args))
+    assert called["n"] == 0
+    assert str(args.model) == "/models/src"
+
+
+def test_quantization_enabled_via_env_helper(monkeypatch):
+    for v in ("1", "true", "TRUE", "yes", "on", "On", " 1 "):
+        monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", v)
+        assert cli._quantization_enabled_via_env() is True
+    for v in ("0", "false", "no", "off", "", "bogus"):
+        monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", v)
+        assert cli._quantization_enabled_via_env() is False
+    monkeypatch.delenv("HYPERLOOM_QUANTIZE_ENABLED", raising=False)
+    assert cli._quantization_enabled_via_env() is False

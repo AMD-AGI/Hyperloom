@@ -2549,6 +2549,26 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
         )
 
 
+def _quantization_enabled_via_env() -> bool:
+    """Return ``True`` iff the deterministic quantization master switch is on.
+
+    Quantization is gated on ``$HYPERLOOM_QUANTIZE_ENABLED`` (truthy = ``1`` /
+    ``true`` / ``yes`` / ``on``, case-insensitive). This makes the on/off
+    decision a deterministic, frontend-settable env flag rather than something
+    an LLM agent infers from natural language. Anything else — including unset —
+    disables quantization.
+
+    Returns:
+        ``True`` when the env var is set to a recognized truthy value.
+    """
+    return os.environ.get("HYPERLOOM_QUANTIZE_ENABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 async def _run_quantization_prelude(args: argparse.Namespace) -> None:
     """Run the quantization-agent once before the optimization loop.
 
@@ -2615,6 +2635,22 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         return
     if getattr(args, "resume", False):
         print("Quantization prelude: skipped (--resume); using model from manifest.")
+        return
+
+    # Deterministic master switch: quantization runs ONLY when
+    # $HYPERLOOM_QUANTIZE_ENABLED is explicitly truthy. This decouples the
+    # on/off decision from any agent's natural-language judgement — even if a
+    # --quantize / --quantize-scheme flag reached us (e.g. an in-sandbox agent
+    # added it from the prompt), we refuse to quantize unless the env switch is
+    # on. Absent / false => skip and continue on the un-quantized model, made
+    # detectable via the QUANTIZATION_SKIPPED marker + $HYPERLOOM_QUANTIZATION_SKIPPED.
+    if not _quantization_enabled_via_env():
+        reason = "HYPERLOOM_QUANTIZE_ENABLED is not set to a truthy value"
+        os.environ["HYPERLOOM_QUANTIZATION_SKIPPED"] = reason
+        print(
+            f"QUANTIZATION_SKIPPED: {reason}; continuing optimization on the "
+            "un-quantized model. Set HYPERLOOM_QUANTIZE_ENABLED=1 to quantize."
+        )
         return
 
     from .paths import workspace_root
