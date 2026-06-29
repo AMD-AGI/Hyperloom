@@ -276,6 +276,38 @@ async def test_run_action_now_happy_path_emits_delegated_result(
 
 
 @pytest.mark.asyncio
+async def test_run_action_now_calls_sequence_denial_with_single_arg(
+    session_dir,
+    monkeypatch,
+):
+    """Regression: ``_run_action_now`` must call ``_sequence_denial_for_action``
+    with only ``action_name``. A stray second positional (``params``) raised
+    ``TypeError`` at runtime; it stayed hidden because other tests stub the
+    method with ``lambda *a, **k``. This drives the real 1-arg signature."""
+    c = _silent_coordinator(session_dir)
+    try:
+
+        async def _stub(ctx: RunnerContext) -> dict:
+            return {"status": "ok", "gain_pct": 0.0}
+
+        c.sub.register_executor("inline_probe", _stub)
+        monkeypatch.setattr(
+            c,
+            "_inline_action_whitelist",
+            lambda: frozenset({"inline_probe"}),
+        )
+        monkeypatch.setattr(c.policy, "validate_intent", lambda *a, **k: None)
+        # Deliberately NOT stubbing _sequence_denial_for_action so the real
+        # 1-arg signature is exercised through the call site.
+        c.shared_state.baseline_tput = 100.0
+
+        out = await c._run_action_now("inline_probe", {"p": 1})
+        assert "inline run complete" in out
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_run_action_now_sync_bridges_to_coordinator_loop(
     session_dir,
     monkeypatch,

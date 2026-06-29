@@ -1526,7 +1526,7 @@ class Coordinator:
                 f"{getattr(denied, 'rule', '')!s} — "
                 f"{str(getattr(denied, 'hint', denied))[:200]})"
             )
-        seq_denied = self._sequence_denial_for_action(action_name, params)
+        seq_denied = self._sequence_denial_for_action(action_name)
         if seq_denied is not None:
             await self._record_policy_denied(
                 "orchestration",
