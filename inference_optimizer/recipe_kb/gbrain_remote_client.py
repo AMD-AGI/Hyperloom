@@ -2,14 +2,12 @@
 
 """Gbrain-backed read-only remote for the recipe-snapshot KB.
 
-A drop-in alternative to :class:`recipe_kb.RemoteRecipeClient`: it
-exposes the identical read surface (``health`` / ``get_recipe`` /
-``get_history`` / ``list_recent`` / ``search`` / ``list_attempts`` /
-``list_session_attempts`` / ``session_summary`` / ``close`` plus the
-``enabled`` attribute) so :class:`recipe_kb.RecipeKB` can hold it in
-the ``remote`` slot without any dispatcher change. The corpus is the
-gbrain page store (JSON-RPC MCP over HTTP) instead of the central
-cortex kb-service.
+The sole read-side remote for the recipe KB. It exposes the read
+surface (``health`` / ``get_recipe`` / ``get_history`` / ``list_recent``
+/ ``search`` / ``list_attempts`` / ``list_session_attempts`` /
+``session_summary`` / ``close`` plus the ``enabled`` attribute) so
+:class:`recipe_kb.RecipeKB` can hold it in the ``remote`` slot. The
+corpus is the gbrain page store (JSON-RPC MCP over HTTP).
 
 Design fit: this honours the recipe_kb local-first contract verbatim —
 writes still go local-only through the dispatcher; gbrain is consulted
@@ -26,12 +24,11 @@ nested KB-interface envelope. The recipe corpus is small
 filters client-side, which sidesteps slug-scheme differences between
 gbrain tags and the canonical id.
 
-Wire shape returned by every read is the SAME nested KB-interface
+Wire shape returned by every read is the unified nested KB-interface
 envelope (``labels`` / ``body`` / ``metrics`` / ``findings`` /
-``failures`` / ``gaps`` / ``lessons`` / ``pitfalls``) the cortex
-kb-service emits, so the :class:`recipe_kb.RecipeKB` dispatcher runs a
-single ``_v2_to_arbor`` translation regardless of which backend served
-the row. The gbrain page store is the adapter's private storage detail.
+``failures`` / ``gaps`` / ``lessons`` / ``pitfalls``), so the
+:class:`recipe_kb.RecipeKB` dispatcher runs a single ``_v2_to_arbor``
+translation. The gbrain page store is the adapter's private storage detail.
 """
 
 from __future__ import annotations
@@ -465,11 +462,10 @@ def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> 
 class GbrainRemoteRecipeClient:
     """Read-only recipe-snapshot client backed by gbrain.
 
-    Duck-types :class:`recipe_kb.RemoteRecipeClient`. Constructed by
-    ``cli._build_recipe_kb_dispatcher`` when ``RECIPE_KB_REMOTE=gbrain``.
-    Every read returns the unified nested KB-interface envelope (same
-    shape as the cortex kb-service) so the ``RecipeKB`` dispatcher runs a
-    single translation regardless of which backend served the row.
+    The read-side ``remote`` for :class:`recipe_kb.RecipeKB`, constructed by
+    ``cli._build_recipe_kb_dispatcher`` when ``GBRAIN_*`` is configured.
+    Every read returns the unified nested KB-interface envelope so the
+    ``RecipeKB`` dispatcher runs a single translation.
     """
 
     def __init__(
@@ -501,7 +497,7 @@ class GbrainRemoteRecipeClient:
         self._scan_cache_ts = 0.0
 
     # -- lifecycle ---------------------------------------------------------
-    def close(self) -> None:  # symmetry with RemoteRecipeClient
+    def close(self) -> None:
         """Release the underlying MCP client."""
         self._mcp = None
 
@@ -661,7 +657,7 @@ class GbrainRemoteRecipeClient:
             self._scan_cache_ts = time.monotonic()
         return out
 
-    # -- read surface (mirrors RemoteRecipeClient) -------------------------
+    # -- read surface ------------------------------------------------------
     def get_recipe(
         self,
         *,

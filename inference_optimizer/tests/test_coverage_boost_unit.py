@@ -378,57 +378,6 @@ def test_paths_asset_root_missing_override(monkeypatch, tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.substrate_levers_client                                        #
-# --------------------------------------------------------------------------- #
-def test_substrate_levers_client_construction(monkeypatch) -> None:
-    from inference_optimizer.orchestrator.substrate_levers_client import SubstrateLeversClient
-
-    with pytest.raises(ValueError):
-        SubstrateLeversClient("")  # line 57
-
-    # from_env: no URL -> None.
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
-    assert SubstrateLeversClient.from_env() is None
-
-    # from_env: bad timeout falls back (lines 78-79).
-    monkeypatch.setenv("CORTEX_KB_URL", "http://kb.local")
-    monkeypatch.setenv("CORTEX_KB_HTTP_TIMEOUT_SEC", "not-a-float")
-    client = SubstrateLeversClient.from_env()
-    assert client is not None
-    assert client.timeout_sec == SubstrateLeversClient.from_env().timeout_sec
-
-    # recommend with no model -> None (best-effort guard).
-    assert client.recommend(focus={}) is None
-
-
-def test_substrate_levers_recommend_with_token(monkeypatch) -> None:
-    from inference_optimizer.orchestrator import substrate_levers_client as slc
-
-    captured = {}
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return b'{"levers": []}'
-
-    def fake_urlopen(req, timeout=None):
-        captured["auth"] = req.headers.get("Authorization")
-        return _Resp()
-
-    monkeypatch.setattr(slc.urllib.request, "urlopen", fake_urlopen)
-    client = slc.SubstrateLeversClient("http://kb.local", token="secret")
-    out = client.recommend(focus={"model": "m"})
-    assert out == {"levers": []}
-    # Authorization header set when a token is present (line 102).
-    assert captured["auth"] == "Bearer secret"
-
-
-# --------------------------------------------------------------------------- #
 # orchestrator.backends._runtime_bridge                                       #
 # --------------------------------------------------------------------------- #
 def test_runtime_bridge_success(monkeypatch, tmp_path) -> None:
