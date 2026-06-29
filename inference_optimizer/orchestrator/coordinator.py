@@ -3331,7 +3331,10 @@ class Coordinator:
         self,
         candidate: dict[str, Any],
         audit: dict[str, Any] | None = None,
-    ) -> None:
+        *,
+        reauthor_attempt: int = 0,
+        critic_feedback: dict[str, Any] | None = None,
+    ) -> str:
         """Dispatch a write-capable specialist seeded with ``candidate`` (flows through autosubmit → Critic → integrate_patch → bench → KEEP/REVERT).
 
         Args:
@@ -3342,6 +3345,18 @@ class Coordinator:
                 symbols / why the raw diff doesn't fit / where the change
                 should land) is injected into the seed so the specialist
                 authors against the live source instead of re-discovering it.
+            reauthor_attempt: Re-author round (Fix 2c); ``0`` is the first
+                dispatch. When ``> 0`` the idempotency key gains a
+                ``reauthor:{n}`` suffix so the new round never collides with the
+                original (or an earlier) dispatch.
+            critic_feedback: Optional prior-round Critic advisory
+                (``required_evidence`` / ``advice_text`` / ``risks``) injected
+                into the authoring seed so the specialist supplies the evidence
+                the previous round was missing.
+
+        Returns:
+            The dispatched specialist ``task_id`` (empty string when a
+            cross-resume livelock-break short-circuits the re-dispatch).
         """
         state = self.shared_state
         cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
@@ -3379,6 +3394,29 @@ class Coordinator:
                 "not benchmark. A config-lever deliverable is a full result, not empty.",
             ]
         )
+        if critic_feedback:
+            req_ev = [
+                str(x).strip()
+                for x in (critic_feedback.get("required_evidence") or [])
+                if str(x).strip()
+            ]
+            fb_lines = [
+                "",
+                "PRIOR CRITIC FEEDBACK (re-author round — your last deliverable was",
+                "sent back as needs_review; supply the evidence below this round):",
+            ]
+            fb_lines.extend(f"  • required evidence: {ev}" for ev in req_ev[:10])
+            advice = str(critic_feedback.get("advice_text") or "").strip()
+            if advice:
+                fb_lines.append(f"- advice: {advice}")
+            risks = [
+                str(r).strip()
+                for r in (critic_feedback.get("risks") or [])
+                if str(r).strip()
+            ]
+            if risks:
+                fb_lines.append("- risks: " + "; ".join(risks[:6]))
+            notes_lines.extend(fb_lines)
         notes = "\n".join(notes_lines)
         params: dict[str, Any] = {
             "domain": "serving_specialist",
@@ -3403,6 +3441,8 @@ class Coordinator:
                 exc_info=True,
             )
         idem = f"framework_pr_authoring:{batch_id}:{cand_id}"
+        if reauthor_attempt > 0:
+            idem = f"{idem}:reauthor:{int(reauthor_attempt)}"
         spec_task, _spec_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -3469,14 +3509,14 @@ class Coordinator:
                         "FRAMEWORK_PR: livelock-break empty-outcome stamp failed candidate=%s",
                         cand_id,
                     )
-                return
+                return ""
         # Remember which candidate this specialist task authors for. The
         # downstream integrate_patch task only carries ``specialist_task_id``,
         # so the authored-outcome bridge resolves the PR-URL candidate id from
         # this map (else the progress row is keyed on a task_id that never
         # matches the select key -> FRAMEWORK_PR pump re-dispatches forever).
+        spec_tid = str(getattr(spec_task, "task_id", "") or "")
         try:
-            spec_tid = str(getattr(spec_task, "task_id", "") or "")
             if spec_tid and cand_id:
                 if not isinstance(
                     getattr(state, "framework_pr_specialist_candidate_map", None), dict
@@ -3495,6 +3535,7 @@ class Coordinator:
             batch_id,
             gap_cid,
         )
+        return spec_tid
 
     def _unprocessed_framework_pr_candidates(self) -> list[dict[str, Any]]:
         """Return all not-yet-processed candidates in the latest batch (order preserved).
@@ -4476,6 +4517,152 @@ class Coordinator:
             cand_id,
             batch_id,
             str(reasoning or "")[:200],
+        )
+
+    async def _maybe_reauthor_from_critic_feedback(
+        self,
+        pending: "PendingProposal",
+        advisory: dict[str, Any] | None,
+    ) -> None:
+        """Re-author a FRAMEWORK_PR deliverable once when the Critic returns ``needs_review`` with concrete ``required_evidence`` (Fix 2c).
+
+        Fires only for ``needs_review`` (``advise`` proceeds, never re-authors),
+        only when ``required_evidence`` is non-empty, and only for a
+        framework_pr candidate pre-screen proposal or a framework_pr authoring
+        ``integrate_patch`` proposal. The re-author is dispatched through
+        :meth:`_enqueue_framework_pr_authoring_specialist` with the prior
+        round's ``required_evidence`` / ``advice_text`` / ``risks`` injected as
+        the authoring seed, under an idempotency key carrying a ``reauthor:{n}``
+        suffix. It is capped at :attr:`_MAX_REAUTHOR_ATTEMPTS` per candidate and
+        is NOT charged against the macro-cycle no-keep / plateau budget, so the
+        cap plus the suffixed key are the only loop guards.
+
+        Args:
+            pending: The proposal the ``needs_review`` verdict targets.
+            advisory: The serialized Critic advisory (``required_evidence`` /
+                ``advice_text`` / ``risks`` / ...).
+        """
+        advisory = advisory or {}
+        required_evidence = [
+            str(x).strip()
+            for x in (advisory.get("required_evidence") or [])
+            if str(x).strip()
+        ]
+        if not required_evidence:
+            return
+        action_name = str(getattr(pending, "action_name", "") or "")
+        payload = getattr(pending, "payload", {}) or {}
+        candidate: dict[str, Any] = {}
+        audit: dict[str, Any] = {}
+        if action_name == "framework_pr":
+            candidate = dict(payload.get("candidate") or {})
+            raw_audit = payload.get("audit")
+            audit = raw_audit if isinstance(raw_audit, dict) else {}
+        elif action_name == "integrate_patch":
+            # An authored-patch integrate_patch sent back for more evidence:
+            # rebuild the candidate from the originating authoring specialist so
+            # the re-author goes back through the same FRAMEWORK_PR seed.
+            params = payload.get("params") or {}
+            if not bool(params.get("framework_pr_authoring")):
+                return
+            sid = str(params.get("specialist_task_id") or "").strip()
+            spec_params: dict[str, Any] = {}
+            if sid:
+                try:
+                    spec_task = await self.tasks.get(sid)
+                    spec_params = dict(getattr(spec_task, "params", None) or {})
+                except Exception:  # noqa: BLE001 — best-effort lookup
+                    spec_params = {}
+            candidate = {
+                "candidate_id": str(
+                    params.get("framework_pr_candidate_id")
+                    or spec_params.get("framework_pr_candidate_id")
+                    or ""
+                ),
+                "batch_id": str(
+                    params.get("framework_pr_batch_id")
+                    or spec_params.get("framework_pr_batch_id")
+                    or ""
+                ),
+                "title": str(spec_params.get("gap_symptom") or ""),
+                "framework": str(spec_params.get("framework") or ""),
+                "gap_canonical_id": str(spec_params.get("gap_canonical_id") or ""),
+            }
+            raw_audit = spec_params.get("framework_pr_audit")
+            audit = raw_audit if isinstance(raw_audit, dict) else {}
+        else:
+            return
+        cand_id = str(
+            candidate.get("candidate_id")
+            or candidate.get("pr_url")
+            or candidate.get("ref")
+            or ""
+        ).strip()
+        if not cand_id:
+            return
+        attempts = getattr(self.shared_state, "specialist_reauthor_attempts", None)
+        if not isinstance(attempts, dict):
+            attempts = {}
+            self.shared_state.specialist_reauthor_attempts = attempts
+        prior = int(attempts.get(cand_id, 0) or 0)
+        if prior >= self._MAX_REAUTHOR_ATTEMPTS:
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "reauthor_cap_reached",
+                    "candidate_id": cand_id,
+                    "attempts": prior,
+                    "proposal_msg_id": str(getattr(pending, "proposal_msg_id", "") or ""),
+                    "verdict": "needs_review",
+                },
+            )
+            return
+        attempt = prior + 1
+        attempts[cand_id] = attempt
+        critic_feedback = {
+            "required_evidence": required_evidence,
+            "advice_text": str(advisory.get("advice_text") or ""),
+            "risks": [
+                str(r).strip()
+                for r in (advisory.get("risks") or [])
+                if str(r).strip()
+            ],
+        }
+        new_task_id = ""
+        try:
+            new_task_id = await self._enqueue_framework_pr_authoring_specialist(
+                candidate,
+                audit=audit,
+                reauthor_attempt=attempt,
+                critic_feedback=critic_feedback,
+            )
+        except Exception:  # noqa: BLE001 — never wedge the verdict handler
+            log.exception(
+                "Fix 2c: re-author dispatch failed candidate=%s attempt=%s",
+                cand_id,
+                attempt,
+            )
+            return
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "save after re-author dispatch failed candidate=%s",
+                cand_id,
+            )
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "specialist_reauthor_dispatched",
+                "candidate_id": cand_id,
+                "attempt": attempt,
+                "proposal_msg_id": str(getattr(pending, "proposal_msg_id", "") or ""),
+                "new_specialist_task_id": new_task_id,
+                "verdict": "needs_review",
+                "required_evidence": required_evidence[:6],
+            },
         )
 
     async def _maybe_reprofile_for_kernel(self) -> None:
@@ -5678,6 +5865,13 @@ class Coordinator:
     # this re-runs profile+TraceLens. Tiny value (validated gain is rounded to 3
     # decimals) so it is effectively "any change", just absorbing float noise.
     _REPROFILE_CHANGE_TOL: float = 1e-5
+
+    # Fix 2c: per-candidate cap on Critic-driven re-authoring rounds. A
+    # ``needs_review`` verdict with ``required_evidence`` triggers at most this
+    # many re-author dispatches; re-author is not charged to the macro-cycle
+    # budget, so this cap (plus the ``reauthor:{n}`` idempotency suffix) is the
+    # sole guard against an infinite re-author loop.
+    _MAX_REAUTHOR_ATTEMPTS: int = 1
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).

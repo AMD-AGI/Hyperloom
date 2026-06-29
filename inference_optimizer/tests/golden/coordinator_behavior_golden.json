@@ -353,6 +353,7 @@
     "session_id": "<volatile>",
     "specialist_domain_empty_streak": {},
     "specialist_patch_verdicts": {},
+    "specialist_reauthor_attempts": {},
     "specialist_rounds": [],
     "stack_fingerprint_meta": {},
     "start_ts": "<volatile>",

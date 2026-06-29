@@ -585,6 +585,15 @@ class SharedState:
     framework_pr_specialist_candidate_map: dict[str, str] = field(
         default_factory=dict,
     )
+    # Re-author attempts per FRAMEWORK_PR candidate id (Fix 2c). A Critic
+    # ``needs_review`` verdict carrying ``required_evidence`` triggers one
+    # re-authoring round seeded with that evidence; the count is capped (=1) so
+    # the loop cannot run forever. Re-author is deliberately NOT charged against
+    # the macro-cycle no-keep / plateau budget, so this cap + the suffixed
+    # idempotency key are the only loop guards.
+    specialist_reauthor_attempts: dict[str, int] = field(
+        default_factory=dict,
+    )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``. Absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposal).
     enable_roofline: bool = True
     # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM measure time when warm-decision is active, else the cold baseline. The kill clock starts at the server-ready marker so it measures only the post-ready (pure hot client) phase, matching the anchor. Warmup + stack-rebench exempt. Default 2.0x.

@@ -306,6 +306,14 @@ class IntentRouter:
             await self._coord._record_framework_pr_critic_denied(
                 pending, reasoning,
             )
+        elif verdict == "needs_review":
+            # Fix 2c: a needs_review verdict carrying required_evidence seeds one
+            # re-authoring round for framework_pr candidate / authoring proposals
+            # (advise proceeds, never re-authors; cap + idempotency suffix guard
+            # the loop).
+            await self._coord._maybe_reauthor_from_critic_feedback(
+                pending, advisory,
+            )
 
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task.
