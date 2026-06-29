@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,30 @@ from ...storage.connection import SqliteConnection
 
 
 log = logging.getLogger(__name__)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (tempfile in the same dir + os.replace).
+
+    Guarantees a reader never observes a half-written file: either the old
+    contents or the complete new contents, never a truncated/partial one.
+
+    Args:
+        path: Destination file path.
+        text: Full file contents to write.
+    """
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:
@@ -1124,8 +1149,10 @@ class ReportExecutor:
 
         json_path = output_dir / "final.json"
         md_path = output_dir / "final.md"
-        with json_path.open("w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2, sort_keys=True)
+        # Atomic write: a kill mid-flush must never leave a non-empty but
+        # invalid final.json on disk (issue #464 — downstream keys off it, and
+        # the crash-safe fallback would otherwise see garbled JSON).
+        _atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
         md_path.write_text(_format_md(summary), encoding="utf-8")
 
         log.info(
