@@ -272,11 +272,11 @@ original session, or the session never reached the point of writing
 
 ## KB writes silently failing
 
-**Symptom.** Recipe KB warm-start is empty, `--cortex-kb-url` enrichment is
+**Symptom.** Recipe KB warm-start is empty, gbrain read-side enrichment is
 missing, or new local KB records do not appear under the selected local KB root.
 
 **Cause.** The local recipe KB root is on a read-only/full mount, permission is
-denied, or the optional remote Cortex KB URL is unreachable.
+denied, or the optional remote gbrain KB is unreachable.
 
 **Fix.**
 
@@ -287,9 +287,9 @@ denied, or the optional remote Cortex KB URL is unreachable.
    mkdir -p "$KB_ROOT"
    touch "$KB_ROOT/.write-test" && rm "$KB_ROOT/.write-test"
    ```
-2. If you passed `--cortex-kb-url` or exported `CORTEX_KB_URL`, verify the URL
-   from inside the same pod. If it is intentionally unavailable, remove the URL
-   and run local-only.
+2. If you configured `GBRAIN_BASE_URL` / `GBRAIN_TOKEN`, verify gbrain
+   reachability from inside the same pod. If it is intentionally unavailable,
+   unset them and run local-only.
 3. To skip KB hooks deliberately for a diagnosis run, pass `--degraded-kb`.
 
 KB unreachability is **never** fatal. Hyperloom continues with local-only or
