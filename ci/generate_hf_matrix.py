@@ -856,13 +856,14 @@ def _matrix_entry(entry: dict | str) -> dict:
             "tp",
             "conc",
             "gain",
-            "task_id",
-            "created_at",
-            "nodes",
-            "rayjob_image",
-            "is_top",
-            "params_b",
-        ):
+			"task_id",
+			"created_at",
+			"nodes",
+			"rayjob_image",
+			"is_top",
+			"params_b",
+			"downloads",
+		):
             if entry.get(key) is not None:
                 out[key] = entry[key]
         batch_size_raw = (os.environ.get("INPUT_BATCH_SIZE") or "").strip()

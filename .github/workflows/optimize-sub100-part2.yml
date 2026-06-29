@@ -16,11 +16,6 @@ name: optimize-sub100-part2
 # instead of the git repo, so the large pool never bloats git history.
 
 on:
-  # Four times a day (every 6 hours, UTC) at 01:07/07:07/13:07/19:07 UTC
-  # (Beijing 09:07 / 15:07 / 21:07 / 03:07). optimize-submit fires 1h earlier
-  # (Beijing 08/14/20/02) and optimize-gte100 1h later (Beijing 10/22), so no
-  # two start in the same hour. Minute :07 (not :00) dodges GitHub's congested
-  # top-of-hour scheduling queue.
   schedule:
     # Beijing 11/17/23/05 (UTC 03/09/15/21), :07 minute. First fire 09:07Z =
     # Beijing 17:07 -> batch 0 (anchored 2026-06-28 09:00Z). Every 6h == MAX_HOURS.
