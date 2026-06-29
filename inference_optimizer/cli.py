@@ -367,7 +367,18 @@ _CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, _CLAUDE_FALLBACK_MODEL)
 # Catalog probe retry contract: gateway is documented-flaky. Sleep N seconds before attempt i+1;
 # len(_CATALOG_RETRY_DELAYS_SEC) is the retry count after the initial attempt.
 _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
-_CATALOG_REQUEST_TIMEOUT_SEC = 5.0
+# Per-attempt read timeout for the gateway /models catalog probe. The AMD
+# gateway is documented-flaky; on slow/borderline days a healthy /models call
+# can take ~5.5s, straddling this cutoff and causing spurious "gateway catalog
+# unreachable" launch refusals even though the gateway is up. Allow an operator
+# override via env (default unchanged at 5.0s) for slow-gateway windows.
+try:
+    _CATALOG_REQUEST_TIMEOUT_SEC = float(
+        os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_TIMEOUT_SEC", "5.0")
+        or "5.0"
+    )
+except (TypeError, ValueError):
+    _CATALOG_REQUEST_TIMEOUT_SEC = 5.0
 
 # /dev/shm threshold: below this, next launch collides with stale vLLM/NCCL shm segments and hangs in zmq.
 _DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
