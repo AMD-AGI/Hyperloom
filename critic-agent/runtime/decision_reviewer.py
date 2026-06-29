@@ -1096,6 +1096,17 @@ class DecisionReviewer:
             verdicts_raw = review.get("verdicts")
         if not isinstance(verdicts_raw, list):
             raise ReviewValidationError("coordinator_inbox commit expects review.review_verdicts to be a list")
+
+        advice_by_target: dict[str, list[str]] = {}
+        for advisory in review.get("advice") or []:
+            if not isinstance(advisory, dict):
+                continue
+            body = advisory.get("body_md") or advisory.get("text")
+            advice_target = advisory.get("target_proposal_msg_id")
+            if not body or not isinstance(advice_target, str) or not advice_target:
+                continue
+            advice_by_target.setdefault(advice_target, []).append(body)
+
         intents: list[Intent] = []
         for i, item in enumerate(verdicts_raw):
             if not isinstance(item, dict):
@@ -1106,6 +1117,12 @@ class DecisionReviewer:
                 raise ReviewValidationError(f"review.review_verdicts[{i}].verdict {verdict!r} is not valid")
             if not isinstance(target, str) or not target:
                 raise ReviewValidationError(f"review.review_verdicts[{i}].target_proposal_msg_id missing")
+            advice_parts = [
+                part
+                for part in [item.get("advice_text", ""), *advice_by_target.get(target, [])]
+                if isinstance(part, str) and part.strip()
+            ]
+            advice_text = "\n\n".join(advice_parts)
             try:
                 intent = build_review_verdict_intent(
                     target_proposal_msg_id=target,
@@ -1119,7 +1136,7 @@ class DecisionReviewer:
                     risks=item.get("risks") or [],
                     required_evidence=item.get("required_evidence") or [],
                     alternative_action=item.get("alternative_action"),
-                    advice_text=item.get("advice_text", ""),
+                    advice_text=advice_text,
                     notes=item.get("notes") or [],
                 )
             except IntentEnvelopeValidationError as exc:
