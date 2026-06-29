@@ -2,7 +2,7 @@
 
 """Read-vs-write dispatcher for the recipe-snapshot KB.
 
-Routes calls between the local store and the central kb-service
+Routes calls between the local store and the gbrain read-side remote
 according to the design fixed in 2026-05-28:
 
 Writes — local-only::
@@ -48,7 +48,7 @@ through to local on absence / failure::
 Reads — local-only mode::
 
     A dispatcher constructed with ``remote=None`` (e.g.
-    ``--degraded-kb`` or no ``--cortex-kb-url``) skips step 1
+    ``--degraded-kb`` or no gbrain configured) skips step 1
     entirely; reads go directly to the local store. A
     ``remote.enabled=False`` client behaves the same way (the
     client itself short-circuits each call to "no info").
@@ -72,7 +72,7 @@ from typing import Any
 
 from .canonical_id import InvalidCanonicalIdError, cid_to_path_components
 from .local_store import LocalRecipeStore
-from .remote_client import RemoteRecipeClient, RemoteRecipeClientError
+from .remote_client import RemoteRecipeClientError
 
 
 log = logging.getLogger(__name__)
@@ -81,9 +81,7 @@ log = logging.getLogger(__name__)
 # name (used by :meth:`RecipeKB._remote_label` for logs/audit trace). Unknown
 # backends fall back to their class name.
 _REMOTE_LABELS: dict[str, str] = {
-    "RemoteRecipeClient": "cortex",
     "GbrainRemoteRecipeClient": "gbrain",
-    "CompositeRemoteRecipeClient": "composite",
 }
 
 
@@ -169,9 +167,9 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(v2_payload, dict):
         return {}
     # Idempotency guard. A remote may hand us a row that is ALREADY in
-    # arbor shape: the gbrain client (``GbrainRemoteRecipeClient``)
-    # pre-translates pages into the ``Recipe.to_dict()`` layout, unlike
-    # the central kb-service which speaks the nested v2 envelope. Running
+    # arbor shape: the gbrain client (``GbrainRemoteRecipeClient``) may
+    # pre-translate pages into the ``Recipe.to_dict()`` layout rather than
+    # the nested v2 envelope. Running
     # the v2->arbor projection again on an already-arbor row would read
     # from absent top-level ``body``/``labels``/``findings`` and silently
     # null out ``model`` / ``best_config`` / ``best_throughput`` /
@@ -251,8 +249,8 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
 # Client-side rerank by ``prefer`` similarity
 # ---------------------------------------------------------------------------
 # The ``required`` filter (7-tuple ``label_match``) decides reusability;
-# ``prefer`` decides similarity. Neither the cortex kb-service nor the
-# gbrain page store rank by ``prefer`` server-side, so the dispatcher does
+# ``prefer`` decides similarity. The gbrain page store does not rank by
+# ``prefer`` server-side, so the dispatcher does
 # a stable client-side rerank over the already-arbor rows: higher
 # prefer-hit count first, ties broken by the backend's original order
 # (the sort is stable). Rows are NEVER dropped — prefer only reorders.
@@ -362,7 +360,7 @@ class RecipeKB:
     """
 
     local: LocalRecipeStore
-    remote: RemoteRecipeClient | None = None
+    remote: Any = None  # read-side gbrain client (duck-typed); None = local-only
     on_remote_failure: Any = None
     audit_hook: Any = None
 
@@ -405,8 +403,8 @@ class RecipeKB:
     def _normalize_remote_row(self, row: dict[str, Any]) -> dict[str, Any]:
         """Project a remote row into the consistent arbor shape callers see.
 
-        Every remote backend (cortex kb-service, gbrain, and any future
-        KB) returns the SAME unified nested KB-interface envelope
+        Every remote backend (gbrain and any future KB) returns the
+        SAME unified nested KB-interface envelope
         (``labels`` / ``body`` / ``metrics`` / ``findings`` / ``failures``
         / ``gaps`` / ``lessons`` / ``pitfalls``). The dispatcher runs a
         single :func:`_v2_to_arbor` translation regardless of which
@@ -429,9 +427,8 @@ class RecipeKB:
         """A short, stable label for the configured remote backend.
 
         Returns:
-            str: ``"none"`` when no remote, else ``"cortex"`` /
-                ``"gbrain"`` / ``"composite"`` (falling back to the
-                client class name for any future backend).
+            str: ``"none"`` when no remote, else ``"gbrain"`` (falling
+                back to the client class name for any future backend).
         """
         if self.remote is None:
             return "none"
@@ -494,23 +491,6 @@ class RecipeKB:
                 "best_throughput": float(row.get("best_throughput") or 0.0),
                 "best_config_nonempty": bool(row.get("best_config")),
             }
-            # Per-path provenance — only populated when the composite remote
-            # served the read (single-source backends leave these absent).
-            # ``sources``: which backend(s) contributed this merged row;
-            # ``best_config_source``: which path supplied the replayable
-            # champion config; ``field_sources``: per-field attribution;
-            # ``source_candidates``: candidate-row count each path returned.
-            # These let the trace evaluate gbrain vs cortex contribution.
-            field_sources = row.get("_field_sources")
-            if isinstance(field_sources, dict) and field_sources:
-                result["field_sources"] = dict(field_sources)
-                result["best_config_source"] = field_sources.get("best_config")
-            sources = row.get("_sources")
-            if isinstance(sources, list) and sources:
-                result["sources"] = list(sources)
-            source_candidates = row.get("_source_candidates")
-            if isinstance(source_candidates, dict) and source_candidates:
-                result["source_candidates"] = dict(source_candidates)
         return {
             "method": method,
             "remote": self._remote_label(),

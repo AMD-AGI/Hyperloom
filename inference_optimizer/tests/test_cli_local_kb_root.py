@@ -16,7 +16,6 @@ from inference_optimizer.cli import (
 from inference_optimizer.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,
-    RemoteRecipeClient,
 )
 
 
@@ -28,6 +27,9 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
         "HYPERLOOM_LOCAL_KB_ROOT",
         "USER_DATA_PATH",
         "CORTEX_KB_URL",
+        "GBRAIN_BASE_URL",
+        "GBRAIN_TOKEN",
+        "RECIPE_KB_MIRROR_MODE",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -121,7 +123,7 @@ def test_build_dispatcher_no_remote_when_degraded_kb(
     env_clean: None,
     tmp_path: Path,
 ) -> None:
-    """``--degraded-kb`` short-circuits remote regardless of any configured URL."""
+    """``--degraded-kb`` short-circuits remote regardless of configuration."""
     args = _ns(
         local_kb_root=str(tmp_path),
         cortex_kb_url="http://kb.example",
@@ -131,70 +133,45 @@ def test_build_dispatcher_no_remote_when_degraded_kb(
     assert kb.remote is None
 
 
-def test_build_dispatcher_no_remote_when_no_url(
+def test_build_dispatcher_no_remote_when_gbrain_unconfigured(
     env_clean: None,
     tmp_path: Path,
 ) -> None:
-    """No URL anywhere → local-only; the dispatcher wires ``remote=None``."""
+    """No gbrain configured → local-only; the dispatcher wires ``remote=None``."""
     args = _ns(local_kb_root=str(tmp_path))
     kb = _build_recipe_kb_dispatcher(args)
     assert kb.remote is None
 
 
-def test_build_dispatcher_wires_remote_when_url_passed(
-    env_clean: None,
-    tmp_path: Path,
-) -> None:
-    args = _ns(
-        local_kb_root=str(tmp_path),
-        cortex_kb_url="http://kb.example",
-    )
-    kb = _build_recipe_kb_dispatcher(args)
-    assert isinstance(kb.remote, RemoteRecipeClient)
-    assert kb.remote.kb_url == "http://kb.example"
-    assert kb.remote.enabled is True
-
-
-def test_build_dispatcher_wires_remote_from_env_url(
+def test_build_dispatcher_cortex_url_does_not_wire_recipe_remote(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """``$CORTEX_KB_URL`` is the second-priority source, used when the flag is unset."""
+    """CORTEX_KB_URL / --cortex-kb-url feed the critic agent, NOT the recipe
+    KB; without gbrain the recipe dispatcher stays local-only."""
     monkeypatch.setenv("CORTEX_KB_URL", "http://env-kb.example")
+    args = _ns(local_kb_root=str(tmp_path), cortex_kb_url="http://flag-kb.example")
+    kb = _build_recipe_kb_dispatcher(args)
+    assert kb.remote is None
+
+
+def test_build_dispatcher_wires_gbrain_remote(
+    env_clean: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An enabled gbrain remote becomes the dispatcher's read-side ``remote``."""
+
+    class _Remote:
+        enabled = True
+
+    from inference_optimizer.recipe_kb import gbrain_remote_client as grc
+
+    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
     args = _ns(local_kb_root=str(tmp_path))
     kb = _build_recipe_kb_dispatcher(args)
-    assert isinstance(kb.remote, RemoteRecipeClient)
-    assert kb.remote.kb_url == "http://env-kb.example"
-
-
-def test_build_dispatcher_flag_url_beats_env(
-    env_clean: None,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("CORTEX_KB_URL", "http://env-kb.example")
-    args = _ns(
-        local_kb_root=str(tmp_path),
-        cortex_kb_url="http://flag-kb.example",
-    )
-    kb = _build_recipe_kb_dispatcher(args)
-    assert kb.remote is not None
-    assert kb.remote.kb_url == "http://flag-kb.example"
-
-
-def test_build_dispatcher_uses_foreground_profile_for_remote(
-    env_clean: None,
-    tmp_path: Path,
-) -> None:
-    """The CLI always wires the foreground profile so a slow remote can't stall the main loop."""
-    args = _ns(
-        local_kb_root=str(tmp_path),
-        cortex_kb_url="http://kb.example",
-    )
-    kb = _build_recipe_kb_dispatcher(args)
-    assert kb.remote is not None
-    assert kb.remote.foreground is True
+    assert isinstance(kb.remote, _Remote)
 
 
 def test_build_dispatcher_idempotent(
