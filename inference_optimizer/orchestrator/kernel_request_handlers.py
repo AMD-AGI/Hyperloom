@@ -257,13 +257,19 @@ _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
 
 @functools.lru_cache(maxsize=1)
 def _default_geak_budget_minutes() -> float:
-    """Default per-GEAK-attempt budget tracking ``$GEAK_RUN_MODE`` (quick→70, full→130); mirrors kernel-agent tool defaults.
+    """Default per-GEAK-attempt budget tracking ``$GEAK_RUN_MODE`` (quick→70, full→180); mirrors kernel-agent tool defaults.
+
+    Full mode gets 180 min (3 h) so preprocess (CK/.cu harness build) + the
+    optimization round + the post-round FULL_BENCHMARK verification all fit;
+    at 130 min the verification step was being starved and every attempt
+    finalized as an unverified NEEDS_REVIEW. Matches the kernel-agent tool
+    default (kernel_optimization.py).
 
     Returns:
         The default per-attempt GEAK budget in minutes.
     """
     raw = (os.environ.get("GEAK_RUN_MODE") or "").strip().lower()
-    return 70.0 if raw == "quick" else 130.0
+    return 70.0 if raw == "quick" else 180.0
 
 
 def _visible_gpu_count() -> int | None:
