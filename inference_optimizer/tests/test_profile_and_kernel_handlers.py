@@ -2516,11 +2516,11 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
-def test_optimization_wrapper_timeout_sec_geak_default_full_mode_130min(monkeypatch):
-    # Default tracks ``$GEAK_RUN_MODE`` (full -> 130 min) to match the kernel-agent defaults (PR #301).
+def test_optimization_wrapper_timeout_sec_geak_default_full_mode_180min(monkeypatch):
+    # Default tracks ``$GEAK_RUN_MODE`` (full -> 180 min / 3 h) to match the kernel-agent defaults.
     monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
     monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
-    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 130 * 60 + 180
+    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 180 * 60 + 180
 
 
 def test_optimization_wrapper_timeout_sec_geak_quick_mode_70min(monkeypatch):
