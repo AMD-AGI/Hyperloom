@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Integration test for ``_pump_framework_pr_phase`` (Fix 4 converged async gate).
+"""Integration test for ``_pump_framework_pr_phase`` (converged async gate).
 
 The pump discovers a batch then submits the chosen candidate as a normal
 ``framework_pr`` proposal; the async Critic verdict (handled on a later tick)

@@ -1,13 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Fix 2c — Critic-driven specialist re-author loop.
+"""Critic-driven specialist re-author loop.
 
-A Critic ``needs_review`` verdict carrying non-empty ``required_evidence`` for a
+A ``needs_review`` verdict carrying non-empty ``required_evidence`` for a
 framework_pr candidate / authoring proposal triggers exactly one re-authoring
 round, seeded with that evidence and dispatched under an idempotency key with a
-``reauthor:{n}`` suffix. ``advise`` proceeds (never re-authors); the cap (=1)
-plus the suffixed key are the only loop guards (re-author is not charged against
-the macro-cycle budget).
+``reauthor:{n}`` suffix. ``advise`` proceeds and never re-authors; the per-candidate
+cap is the loop guard.
 """
 
 from __future__ import annotations
@@ -140,24 +139,128 @@ async def test_needs_review_with_evidence_reauthors_once(coord: Coordinator) -> 
 
 
 @pytest.mark.asyncio
-async def test_reauthor_caps_at_one(coord: Coordinator) -> None:
-    calls = _record_reauthor_calls(coord)
+async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
+    """The loop guard: the first needs_review re-authors with a ``reauthor:1``
+    idempotency suffix + evidence seed; subsequent ones hit the cap (=1) and do
+    not re-author."""
+    from types import SimpleNamespace
+
+    created: list[dict[str, Any]] = []
+
+    async def _fake_create(**kwargs: Any) -> Any:
+        created.append(kwargs)
+        return (
+            SimpleNamespace(
+                task_id=f"spec-{len(created)}",
+                params=kwargs.get("params") or {},
+                state="queued",
+            ),
+            False,
+        )
+
+    coord.tasks.create_or_return_existing = _fake_create  # type: ignore[method-assign]
 
     for _ in range(3):
-        pending = _framework_pr_pending()
         await coord._handle_single_verdict(
             source="critic",
-            pending=pending,
+            pending=_framework_pr_pending(),
             verdict="needs_review",
             reasoning="needs more evidence",
             advisory=dict(_ADVISORY),
         )
 
-    # Cap = 1: only the first verdict re-authors; the rest are no-ops.
-    assert len(calls) == 1
+    assert len(created) == 1
+    assert created[0]["idempotency_key"].endswith(":reauthor:1")
+    notes = created[0]["params"]["notes"]
+    assert "profile showing the kernel is the bottleneck" in notes
+    assert "narrow the patch to the MoE gemm path" in notes
     assert (
         coord.shared_state.specialist_reauthor_attempts[_CANDIDATE["candidate_id"]] == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_reauthor_skipped_when_candidate_already_materializing(
+    coord: Coordinator,
+) -> None:
+    """A live integrate_patch task for the candidate suppresses re-author."""
+    from types import SimpleNamespace
+
+    calls = _record_reauthor_calls(coord)
+    live = SimpleNamespace(
+        kind="integrate_patch",
+        task_id="i-live",
+        params={"framework_pr_candidate_id": _CANDIDATE["candidate_id"]},
+    )
+
+    async def _queued() -> list[Any]:
+        return [live]
+
+    async def _running() -> list[Any]:
+        return []
+
+    coord.tasks.queued = _queued  # type: ignore[method-assign]
+    coord.tasks.running = _running  # type: ignore[method-assign]
+
+    await coord._handle_single_verdict(
+        source="critic",
+        pending=_framework_pr_pending(),
+        verdict="needs_review",
+        reasoning="needs more evidence",
+        advisory=dict(_ADVISORY),
+    )
+
+    assert calls == []
+    assert coord.shared_state.specialist_reauthor_attempts == {}
+
+
+@pytest.mark.asyncio
+async def test_authoring_integrate_patch_reauthors_and_records_old_task(
+    coord: Coordinator,
+) -> None:
+    """An authored-patch integrate_patch sent back for evidence re-authors via
+    the originating specialist; the observation carries old + new task ids."""
+    from types import SimpleNamespace
+
+    calls = _record_reauthor_calls(coord)
+    observations: list[dict[str, Any]] = []
+
+    async def _rec_obs(source: str, topic: str, payload: dict[str, Any]) -> None:
+        observations.append(payload)
+
+    async def _get(task_id: str) -> Any:
+        return SimpleNamespace(
+            params={
+                "framework_pr_candidate_id": _CANDIDATE["candidate_id"],
+                "framework_pr_batch_id": "batch-1",
+                "gap_symptom": "perf: speed up moe",
+                "framework": "sglang",
+                "gap_canonical_id": "gap.x",
+                "framework_pr_audit": {"recommended_next_step": "author_via_specialist"},
+            }
+        )
+
+    coord._record_observation = _rec_obs  # type: ignore[method-assign]
+    coord.tasks.get = _get  # type: ignore[method-assign]
+
+    pending = PendingProposal(
+        proposal_msg_id="m-int",
+        from_agent="coordinator",
+        action_name="integrate_patch",
+        predicted_gain_pct=0.0,
+        payload={
+            "params": {"framework_pr_authoring": True, "specialist_task_id": "spec-old"}
+        },
+    )
+
+    await coord._maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))
+
+    assert len(calls) == 1
+    assert calls[0]["candidate"]["candidate_id"] == _CANDIDATE["candidate_id"]
+    dispatched = [o for o in observations if o.get("kind") == "specialist_reauthor_dispatched"]
+    assert len(dispatched) == 1
+    assert dispatched[0]["old_specialist_task_id"] == "spec-old"
+    assert dispatched[0]["new_specialist_task_id"] == "spec-1"
 
 
 @pytest.mark.asyncio
@@ -219,34 +322,3 @@ async def test_non_framework_pr_proposal_does_not_reauthor(coord: Coordinator) -
 
     assert calls == []
     assert coord.shared_state.specialist_reauthor_attempts == {}
-
-
-@pytest.mark.asyncio
-async def test_reauthor_idempotency_key_carries_suffix_and_seed(
-    coord: Coordinator,
-) -> None:
-    """The real enqueue path stamps a ``reauthor:{n}`` idempotency suffix and
-    injects the Critic feedback into the authoring seed notes."""
-    captured: dict[str, Any] = {}
-
-    async def _fake_create(**kwargs: Any) -> Any:
-        captured.update(kwargs)
-        from types import SimpleNamespace
-
-        return SimpleNamespace(task_id="spec-9", params=kwargs.get("params") or {}, state="queued"), False
-
-    coord.tasks.create_or_return_existing = _fake_create  # type: ignore[method-assign]
-
-    task_id = await coord._enqueue_framework_pr_authoring_specialist(
-        dict(_CANDIDATE),
-        audit={"recommended_next_step": "author_via_specialist"},
-        reauthor_attempt=1,
-        critic_feedback=dict(_ADVISORY),
-    )
-
-    assert task_id == "spec-9"
-    assert captured["idempotency_key"].endswith(":reauthor:1")
-    notes = captured["params"]["notes"]
-    assert "PRIOR CRITIC FEEDBACK" in notes
-    assert "profile showing the kernel is the bottleneck" in notes
-    assert "narrow the patch to the MoE gemm path" in notes

@@ -2907,11 +2907,8 @@ class Coordinator:
         for t in (*queued, *running):
             if getattr(t, "kind", "") == "framework_pr":
                 return
-        # A framework_pr candidate proposal is awaiting a Critic verdict (Fix 4
-        # async gate). Serialize one candidate at a time: do not select/audit/
-        # submit another until the verdict resolves it (enqueue or critic_denied
-        # on a later tick). ``pending_proposals`` is rebuilt by
-        # ``replay_for_resume`` so this dedup survives resume.
+        # Serialize one candidate at a time: skip while a candidate proposal
+        # awaits its Critic verdict (resolved on a later tick).
         try:
             if any(
                 getattr(p, "action_name", "") == "framework_pr"
@@ -3038,12 +3035,8 @@ class Coordinator:
                 _cand_id_log,
             )
             audit_step = "author_via_specialist"
-        # Critic gate before apply (Fix 4 — fully converged): submit the
-        # candidate as a normal ``proposal`` carrying its resolved audit route,
-        # then return. The async Critic verdict arrives on a later tick and
-        # drives the apply/author enqueue (approve/advise) or the critic_denied
-        # row (reject) via ``_handle_single_verdict`` →
-        # ``_materialize_approved_proposal`` / ``_record_framework_pr_critic_denied``.
+        # Submit the candidate as a proposal; the async Critic verdict drives
+        # the apply/author enqueue or the critic_denied row on a later tick.
         await self._submit_framework_pr_candidate_for_review(
             next_candidate,
             audit=audit,
@@ -3066,9 +3059,8 @@ class Coordinator:
         for t in (*queued, *running):
             if getattr(t, "kind", "") in ("specialist", "integrate_patch"):
                 return True
-        # An authored patch may sit in the Critic queue before the
-        # integrate_patch task; a FRAMEWORK_PR candidate may sit awaiting its
-        # pre-screen verdict (Fix 4). Both keep the phase from exiting early.
+        # An authored patch awaiting Critic review or a candidate awaiting its
+        # pre-screen verdict both keep the phase from exiting early.
         try:
             for p in self.state.pending_proposals.values():
                 if getattr(p, "decided", False):
@@ -3345,18 +3337,14 @@ class Coordinator:
                 symbols / why the raw diff doesn't fit / where the change
                 should land) is injected into the seed so the specialist
                 authors against the live source instead of re-discovering it.
-            reauthor_attempt: Re-author round (Fix 2c); ``0`` is the first
-                dispatch. When ``> 0`` the idempotency key gains a
-                ``reauthor:{n}`` suffix so the new round never collides with the
-                original (or an earlier) dispatch.
-            critic_feedback: Optional prior-round Critic advisory
-                (``required_evidence`` / ``advice_text`` / ``risks``) injected
-                into the authoring seed so the specialist supplies the evidence
-                the previous round was missing.
+            reauthor_attempt: Re-author round; ``> 0`` adds a ``reauthor:{n}``
+                idempotency-key suffix so the round gets a fresh task.
+            critic_feedback: Prior-round Critic advisory (``required_evidence`` /
+                ``advice_text`` / ``risks``) appended to the authoring seed.
 
         Returns:
-            The dispatched specialist ``task_id`` (empty string when a
-            cross-resume livelock-break short-circuits the re-dispatch).
+            The dispatched specialist ``task_id`` (empty when a livelock-break
+            short-circuits the re-dispatch).
         """
         state = self.shared_state
         cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
@@ -4318,7 +4306,7 @@ class Coordinator:
         audit: dict[str, Any] | None = None,
         audit_step: str = "",
     ) -> None:
-        """Submit a FRAMEWORK_PR candidate as a normal ``proposal`` for async Critic review (Fix 4).
+        """Submit a FRAMEWORK_PR candidate as a normal ``proposal`` for async Critic review.
 
         Mirrors :meth:`_maybe_autosubmit_specialist_patches`: writes a
         ``topic="proposal"`` message + registers a :class:`PendingProposal`,
@@ -4412,7 +4400,7 @@ class Coordinator:
         self,
         pending: "PendingProposal",
     ) -> None:
-        """Route a Critic-approved FRAMEWORK_PR candidate to the apply / author tracks (Fix 4).
+        """Route a Critic-approved FRAMEWORK_PR candidate to the apply / author tracks.
 
         Reads the audit route stamped on the proposal payload and reuses the
         existing ``direct_framework_pr`` (raw-diff executor) vs
@@ -4463,7 +4451,7 @@ class Coordinator:
         pending: "PendingProposal",
         reasoning: str,
     ) -> None:
-        """Record a ``critic_denied`` FRAMEWORK_PR row when the async gate rejects a candidate (Fix 4).
+        """Record a ``critic_denied`` FRAMEWORK_PR row when the async gate rejects a candidate.
 
         Stamps a ``framework_pr_phase_progress`` row + ``decision.json`` keyed
         on the candidate id so ``_select_best_framework_pr_candidate`` treats it
@@ -4524,23 +4512,15 @@ class Coordinator:
         pending: "PendingProposal",
         advisory: dict[str, Any] | None,
     ) -> None:
-        """Re-author a FRAMEWORK_PR deliverable once when the Critic returns ``needs_review`` with concrete ``required_evidence`` (Fix 2c).
+        """Re-author a framework_pr deliverable once, seeding the next authoring round with the Critic's ``required_evidence``.
 
-        Fires only for ``needs_review`` (``advise`` proceeds, never re-authors),
-        only when ``required_evidence`` is non-empty, and only for a
-        framework_pr candidate pre-screen proposal or a framework_pr authoring
-        ``integrate_patch`` proposal. The re-author is dispatched through
-        :meth:`_enqueue_framework_pr_authoring_specialist` with the prior
-        round's ``required_evidence`` / ``advice_text`` / ``risks`` injected as
-        the authoring seed, under an idempotency key carrying a ``reauthor:{n}``
-        suffix. It is capped at :attr:`_MAX_REAUTHOR_ATTEMPTS` per candidate and
-        is NOT charged against the macro-cycle no-keep / plateau budget, so the
-        cap plus the suffixed key are the only loop guards.
+        Fires only for a ``needs_review`` verdict carrying non-empty
+        ``required_evidence`` on a framework_pr candidate or authoring proposal,
+        capped at :attr:`_MAX_REAUTHOR_ATTEMPTS` per candidate.
 
         Args:
-            pending: The proposal the ``needs_review`` verdict targets.
-            advisory: The serialized Critic advisory (``required_evidence`` /
-                ``advice_text`` / ``risks`` / ...).
+            pending: The proposal the verdict targets.
+            advisory: The serialized Critic advisory.
         """
         advisory = advisory or {}
         required_evidence = [
@@ -4554,18 +4534,18 @@ class Coordinator:
         payload = getattr(pending, "payload", {}) or {}
         candidate: dict[str, Any] = {}
         audit: dict[str, Any] = {}
+        old_sid = ""
         if action_name == "framework_pr":
             candidate = dict(payload.get("candidate") or {})
             raw_audit = payload.get("audit")
             audit = raw_audit if isinstance(raw_audit, dict) else {}
         elif action_name == "integrate_patch":
-            # An authored-patch integrate_patch sent back for more evidence:
-            # rebuild the candidate from the originating authoring specialist so
-            # the re-author goes back through the same FRAMEWORK_PR seed.
+            # Rebuild the candidate from the originating authoring specialist.
             params = payload.get("params") or {}
             if not bool(params.get("framework_pr_authoring")):
                 return
             sid = str(params.get("specialist_task_id") or "").strip()
+            old_sid = sid
             spec_params: dict[str, Any] = {}
             if sid:
                 try:
@@ -4600,6 +4580,17 @@ class Coordinator:
         ).strip()
         if not cand_id:
             return
+        # Skip if the candidate is already materializing as a live integrate_patch task.
+        try:
+            live_tasks = [*await self.tasks.queued(), *await self.tasks.running()]
+        except Exception:  # noqa: BLE001 — defensive
+            live_tasks = []
+        for t in live_tasks:
+            if getattr(t, "kind", "") != "integrate_patch":
+                continue
+            tp = getattr(t, "params", None) or {}
+            if str(tp.get("framework_pr_candidate_id") or "") == cand_id:
+                return
         attempts = getattr(self.shared_state, "specialist_reauthor_attempts", None)
         if not isinstance(attempts, dict):
             attempts = {}
@@ -4639,7 +4630,7 @@ class Coordinator:
             )
         except Exception:  # noqa: BLE001 — never wedge the verdict handler
             log.exception(
-                "Fix 2c: re-author dispatch failed candidate=%s attempt=%s",
+                "re-author dispatch failed candidate=%s attempt=%s",
                 cand_id,
                 attempt,
             )
@@ -4659,6 +4650,7 @@ class Coordinator:
                 "candidate_id": cand_id,
                 "attempt": attempt,
                 "proposal_msg_id": str(getattr(pending, "proposal_msg_id", "") or ""),
+                "old_specialist_task_id": old_sid,
                 "new_specialist_task_id": new_task_id,
                 "verdict": "needs_review",
                 "required_evidence": required_evidence[:6],
@@ -5866,11 +5858,7 @@ class Coordinator:
     # decimals) so it is effectively "any change", just absorbing float noise.
     _REPROFILE_CHANGE_TOL: float = 1e-5
 
-    # Fix 2c: per-candidate cap on Critic-driven re-authoring rounds. A
-    # ``needs_review`` verdict with ``required_evidence`` triggers at most this
-    # many re-author dispatches; re-author is not charged to the macro-cycle
-    # budget, so this cap (plus the ``reauthor:{n}`` idempotency suffix) is the
-    # sole guard against an infinite re-author loop.
+    # Max re-author rounds per candidate on a needs_review verdict.
     _MAX_REAUTHOR_ATTEMPTS: int = 1
 
     def _current_tput_from_validated_gain(self) -> float:
@@ -9915,11 +9903,8 @@ class Coordinator:
             approved_variant_names: When set, restricts an explore grid to these
                 Critic-approved variant names; ``None`` keeps the full grid.
         """
-        # FRAMEWORK_PR candidate gate (Fix 4): an approved candidate proposal
-        # routes to the raw-diff / authoring tracks by the stamped audit route
-        # rather than creating a generic ``framework_pr`` task via the shared
-        # tail below (which cannot express direct/author routing). Must early
-        # return.
+        # Route the approved candidate to raw-diff/authoring tracks by its
+        # stamped audit route; the shared tail below cannot express that.
         if pending.action_name == "framework_pr":
             await self._materialize_framework_pr_candidate(pending)
             return

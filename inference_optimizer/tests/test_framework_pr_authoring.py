@@ -220,7 +220,7 @@ def test_pump_submits_candidate_proposal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Fix 4: the pump submits the candidate as a ``framework_pr`` proposal; no task is created inline."""
+    """The pump submits the candidate as a ``framework_pr`` proposal; no task is created inline."""
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
 

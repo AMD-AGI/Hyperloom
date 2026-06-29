@@ -2022,7 +2022,7 @@ async def test_pump_framework_pr_discover_empty_marks_done(coord: Coordinator, m
 
 @pytest.mark.asyncio
 async def test_pump_framework_pr_submits_candidate_proposal(coord: Coordinator, monkeypatch) -> None:
-    """Fix 4: the pump submits the candidate as a ``framework_pr`` proposal (async gate) instead of enqueuing inline."""
+    """The pump submits the candidate as a ``framework_pr`` proposal (async gate) instead of enqueuing inline."""
     _enter_framework_pr(coord)
 
     async def _select():

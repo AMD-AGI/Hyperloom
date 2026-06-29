@@ -585,12 +585,7 @@ class SharedState:
     framework_pr_specialist_candidate_map: dict[str, str] = field(
         default_factory=dict,
     )
-    # Re-author attempts per FRAMEWORK_PR candidate id (Fix 2c). A Critic
-    # ``needs_review`` verdict carrying ``required_evidence`` triggers one
-    # re-authoring round seeded with that evidence; the count is capped (=1) so
-    # the loop cannot run forever. Re-author is deliberately NOT charged against
-    # the macro-cycle no-keep / plateau budget, so this cap + the suffixed
-    # idempotency key are the only loop guards.
+    # Re-author rounds per candidate id (capped); needs_review verdicts increment.
     specialist_reauthor_attempts: dict[str, int] = field(
         default_factory=dict,
     )

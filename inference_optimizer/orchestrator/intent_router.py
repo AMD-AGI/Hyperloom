@@ -250,6 +250,16 @@ class IntentRouter:
         """
         pending.decided = True
         pending.verdict = verdict
+        if pending.action_name == "framework_pr":
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind":            "framework_pr_verdict_received",
+                    "proposal_msg_id": pending.proposal_msg_id,
+                    "candidate_id":    str((pending.payload or {}).get("framework_pr_candidate_id") or ""),
+                    "verdict":         verdict,
+                },
+            )
         rebroadcast_payload: dict[str, Any] = {
             "target_proposal_msg_id": pending.proposal_msg_id,
             "verdict":                verdict,
@@ -300,17 +310,11 @@ class IntentRouter:
         if verdict in ("approve", "advise"):
             await self._materialize_approved_proposal(pending)
         elif verdict == "reject" and pending.action_name == "framework_pr":
-            # FRAMEWORK_PR pre-screen reject (Fix 4): the generic path has no
-            # reject branch, so record the critic_denied row here keyed on the
-            # candidate id, marking the candidate processed so the pump advances.
+            # Record the critic_denied row so the framework_pr pump advances.
             await self._coord._record_framework_pr_critic_denied(
                 pending, reasoning,
             )
         elif verdict == "needs_review":
-            # Fix 2c: a needs_review verdict carrying required_evidence seeds one
-            # re-authoring round for framework_pr candidate / authoring proposals
-            # (advise proceeds, never re-authors; cap + idempotency suffix guard
-            # the loop).
             await self._coord._maybe_reauthor_from_critic_feedback(
                 pending, advisory,
             )

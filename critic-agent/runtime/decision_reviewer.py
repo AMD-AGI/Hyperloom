@@ -156,10 +156,8 @@ _FRAMEWORK_OP_ACTIONS: frozenset[str] = frozenset(
         "recover",
         "report",
         "session_breakdown",
-        # FRAMEWORK_PR pre-screen gate: a candidate-selection decision, not the
-        # final patch-landing gate. The real code/config materialisation still
-        # flows through ``integrate_patch`` with the strict patch-landing
-        # checks + bench, so this carries no extra approve_requires.
+        # Candidate-selection gate only; patches still land through
+        # integrate_patch's strict checks, so no extra approve_requires.
         "framework_pr",
     }
 )

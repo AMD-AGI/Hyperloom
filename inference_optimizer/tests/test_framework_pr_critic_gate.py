@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Fix 4 — converged FRAMEWORK_PR pre-screen gate.
+"""Converged FRAMEWORK_PR pre-screen gate.
 
 The candidate is submitted as a normal ``framework_pr`` proposal (PolicyGate
 bypassed, COORDINATOR_INTERNAL) and the async Critic verdict drives the
