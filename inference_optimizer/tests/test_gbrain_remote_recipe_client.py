@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from inference_optimizer.recipe_kb import gbrain_remote_client as grc
+from inference_optimizer.recipe_kb import recipe_canonical_id
 from inference_optimizer.recipe_kb.gbrain_remote_client import (
     GbrainRemoteError,
     GbrainRemoteRecipeClient,
@@ -17,6 +18,33 @@ from inference_optimizer.recipe_kb.gbrain_remote_client import (
     build_gbrain_remote_from_env,
 )
 from inference_optimizer.recipe_kb.remote_client import RemoteRecipeClientError
+
+
+def test_page_to_recipe_reads_legacy_framework_attr() -> None:
+    """gbrain pages authored before the framework->framework_name rename carry
+    the serving framework under the legacy ``framework`` attr. The reader must
+    fall back to it so the 5-tuple identity (and canonical id) stays correct
+    instead of degrading to the ``unknown_framework`` default slug."""
+    frontmatter = {
+        "attrs": {
+            "model": "deepseek-r1",
+            "hardware": "mi300x",
+            "framework": "sglang",  # legacy key (pre-rename pages)
+            "framework_version": "0.4.5",
+            "precision": "fp8",
+        },
+    }
+    recipe = _page_to_recipe(frontmatter)
+    assert recipe is not None
+    assert recipe["labels"]["framework_name"] == "sglang"
+    expected_cid = recipe_canonical_id(
+        model="deepseek-r1",
+        hardware="mi300x",
+        framework_name="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
+    )
+    assert recipe["canonical_id"] == expected_cid
 
 
 class _FakeMcp:

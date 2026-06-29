@@ -250,7 +250,10 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     args, envs = _best_config_split(best_config)
     model = str(recipe.get("model") or "")
     hardware = str(recipe.get("hardware") or "")
-    framework_name = str(recipe.get("framework_name") or "")
+    # Back-compat: the batch ingest reads raw on-disk recipe.json via
+    # ``list_all_live_recipes`` (no Recipe.from_dict normalization), so rows
+    # persisted before the framework_name rename still carry the legacy key.
+    framework_name = str(recipe.get("framework_name") or recipe.get("framework") or "")
     attrs: dict[str, Any] = {
         "model": model,
         "hardware": hardware,

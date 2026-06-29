@@ -417,6 +417,9 @@ class Recipe:
             "model",
             "hardware",
             "framework_name",
+            # Legacy framework-identity key (pre framework_name rename); consumed
+            # into framework_name below, listed here so it never leaks into extras.
+            "framework",
             "framework_version",
             "precision",
             "best_config",
@@ -444,7 +447,9 @@ class Recipe:
             updated_at=str(d.get("updated_at") or ""),
             model=str(d.get("model") or ""),
             hardware=str(d.get("hardware") or ""),
-            framework_name=str(d.get("framework_name") or ""),
+            # Back-compat: rows persisted before the framework_name rename stored
+            # the serving framework under the legacy ``framework`` key.
+            framework_name=str(d.get("framework_name") or d.get("framework") or ""),
             framework_version=str(d.get("framework_version") or ""),
             precision=str(d.get("precision") or ""),
             best_config=dict(d.get("best_config") or {}),

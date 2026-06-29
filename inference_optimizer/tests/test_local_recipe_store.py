@@ -18,10 +18,45 @@ from inference_optimizer.recipe_kb import (
     LocalRecipeStore,
     LocalRecipeStoreError,
     RECIPE_FILENAME,
+    Recipe,
     canonical_id_for_path,
     cid_to_path_components,
     recipe_canonical_id,
 )
+from inference_optimizer.recipe_kb.local_store import _matches_labels
+
+
+def test_from_dict_reads_legacy_framework_key() -> None:
+    """Recipes persisted before the framework->framework_name rename store the
+    serving framework under the legacy ``framework`` key. ``from_dict`` must
+    still hydrate ``framework_name`` from it and must not leak the legacy key
+    into ``extras``."""
+    legacy = {
+        "canonical_id": "inference:m:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8",
+        "model": "m",
+        "hardware": "mi300x",
+        "framework": "sglang",
+        "framework_version": "0.4.5",
+        "precision": "fp8",
+    }
+    recipe = Recipe.from_dict(legacy)
+    assert recipe.framework_name == "sglang"
+    assert "framework" not in recipe.extras
+
+
+def test_from_dict_prefers_new_framework_name_over_legacy() -> None:
+    """When both keys exist the current ``framework_name`` wins."""
+    both = {"framework_name": "vllm", "framework": "sglang"}
+    assert Recipe.from_dict(both).framework_name == "vllm"
+
+
+def test_matches_labels_matches_legacy_framework_payload() -> None:
+    """A search filtered by ``framework_name`` must still match recipe rows
+    persisted on disk with the legacy ``framework`` key (search reads raw JSON
+    without normalizing through ``Recipe.from_dict``)."""
+    legacy_payload = {"model": "m", "hardware": "mi300x", "framework": "sglang"}
+    assert _matches_labels(legacy_payload, {"framework_name": "sglang"}) is True
+    assert _matches_labels(legacy_payload, {"framework_name": "vllm"}) is False
 
 
 # canonical_id <-> path components

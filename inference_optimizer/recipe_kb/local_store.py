@@ -1179,6 +1179,14 @@ def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> boo
         elif key == "model_type":
             if not _model_type_matches(payload.get("model_type"), expected):
                 return False
+        elif key == "framework_name":
+            # Back-compat: rows persisted before the framework_name rename
+            # stored the serving framework under the legacy ``framework`` key;
+            # search reads raw on-disk JSON without normalizing through
+            # ``Recipe.from_dict``, so fall back here too.
+            actual = payload.get("framework_name") or payload.get("framework")
+            if actual != expected:
+                return False
         else:
             actual = payload.get(key)
             if actual != expected:

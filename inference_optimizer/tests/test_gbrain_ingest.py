@@ -33,6 +33,25 @@ def _recipe(**over: Any) -> dict[str, Any]:
     return base
 
 
+def test_recipe_to_page_reads_legacy_framework_key() -> None:
+    """The batch ingest reads raw on-disk recipe.json (no Recipe normalization),
+    so rows persisted before the framework_name rename still carry the legacy
+    ``framework`` key. The emitted page must surface it as ``framework_name``
+    (attr + tag) instead of an empty framework dimension."""
+    import yaml
+
+    legacy = _recipe()
+    legacy.pop("framework_name")
+    legacy["framework"] = "sglang"
+    slug, content = recipe_to_page(legacy)
+    assert slug.split("/")[4] == "sglang"
+    fm = yaml.safe_load(content.split("---", 2)[1])
+    assert fm["attrs"]["framework_name"] == "sglang"
+    assert "framework_name:sglang" in fm["tags"]
+    recovered = _page_to_recipe(fm)
+    assert recovered["labels"]["framework_name"] == "sglang"
+
+
 def test_scalar_quotes_risky_keeps_barewords() -> None:
     # digit-leading underscore token must be quoted (else YAML octal 329)
     assert _scalar("0_5_11") == '"0_5_11"'

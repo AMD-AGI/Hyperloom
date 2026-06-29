@@ -342,7 +342,9 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
     hardware = str(attrs.get("hardware") or "").strip()
     if not model or not hardware:
         return None
-    framework_name = str(attrs.get("framework_name") or "").strip()
+    # Back-compat: pages authored before the framework_name rename carry the
+    # serving framework under the legacy ``framework`` attr.
+    framework_name = str(attrs.get("framework_name") or attrs.get("framework") or "").strip()
     framework_version = str(attrs.get("framework_version") or "").strip()
     precision = str(attrs.get("precision") or "").strip()
     model_type = str(attrs.get("model_type") or "").strip()

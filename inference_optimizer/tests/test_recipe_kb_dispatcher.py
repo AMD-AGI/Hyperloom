@@ -22,6 +22,21 @@ from inference_optimizer.recipe_kb import (
     RemoteRecipeClientError,
     recipe_canonical_id,
 )
+from inference_optimizer.recipe_kb.dispatcher import _v2_to_arbor
+
+
+def test_v2_to_arbor_reads_legacy_framework_label() -> None:
+    """v2 rows whose ``labels`` predate the framework->framework_name rename
+    store the serving framework under the legacy ``framework`` key. The arbor
+    projection must still surface it as ``framework_name``."""
+    v2 = {
+        "canonical_id": "inference:m:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8",
+        "labels": {"model": "m", "hardware": "mi300x", "framework": "sglang"},
+        "body": {},
+        "metrics": {},
+    }
+    arbor = _v2_to_arbor(v2)
+    assert arbor["framework_name"] == "sglang"
 
 
 def _cid(model: str = "m") -> str:

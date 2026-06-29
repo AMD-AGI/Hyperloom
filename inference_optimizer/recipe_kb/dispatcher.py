@@ -200,7 +200,9 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
         # central row pre-dates the labels stamp)
         "model": str(labels.get("model") or ""),
         "hardware": str(labels.get("hardware") or ""),
-        "framework_name": str(labels.get("framework_name") or ""),
+        # Back-compat: rows whose labels predate the framework_name rename
+        # stored the serving framework under the legacy ``framework`` key.
+        "framework_name": str(labels.get("framework_name") or labels.get("framework") or ""),
         "framework_version": str(labels.get("framework_version") or ""),
         "precision": str(labels.get("precision") or ""),
         # arbor payload pulled out of body / metrics.
