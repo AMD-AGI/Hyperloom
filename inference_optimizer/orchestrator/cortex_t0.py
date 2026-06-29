@@ -260,6 +260,135 @@ def _max_session_gain(row: Mapping[str, Any]) -> float:
     return best
 
 
+def _donor_is_trustworthy(
+    donor: Mapping[str, Any],
+    *,
+    target_arch_slug: str,
+    target_model_type: str,
+    target_conc: Any = None,
+    target_isl: Any = None,
+    target_osl: Any = None,
+) -> bool:
+    """Gate a BORROWED (cross-model) warm-replay config donor.
+
+    Borrowing a champion config on a loose same-arch match empirically produced
+    near-zero or negative replay gains: cross-architecture configs, donors whose
+    architecture is ``unknown``, and donors whose own validated gain was zero
+    ("reproduce baseline" no-ops). A borrowed donor must therefore satisfy ALL:
+
+    * a replayable champion config (args or envs);
+    * a positive validated/session gain (rejects zero-gain donors);
+    * a concrete architecture (not ``unknown``) equal to the target's;
+    * no explicit workload-shape (conc/isl/osl) mismatch with the target.
+
+    This is only applied to BORROWED donors — a true-self (identity ``exact``)
+    replay is never gated, preserving the "reproduce my own champion" contract.
+
+    Args:
+        donor: Candidate donor recipe row.
+        target_arch_slug: Architectures slug of the workload being optimized.
+        target_model_type: Model type of the workload being optimized.
+        target_conc: Target concurrency (optional shape hint).
+        target_isl: Target input sequence length (optional shape hint).
+        target_osl: Target output sequence length (optional shape hint).
+
+    Returns:
+        ``True`` when the donor is safe to borrow for warm-replay.
+    """
+    if not isinstance(donor, Mapping):
+        return False
+    if not _has_replayable_config(donor):
+        return False
+    # RC1: require evidence of a real positive gain (no zero-gain borrows).
+    if _max_session_gain(donor) <= 0:
+        return False
+    # RC2: require a concrete architecture matching the target (no cross-arch / unknown).
+    from ..recipe_snapshot_constants import _architectures_slug
+
+    donor_arch = _architectures_slug(donor.get("architectures") or [])
+    donor_mt = str(donor.get("model_type") or "").strip().lower()
+    _unknown = {"", "unknown", "unknown_arch", "unknown_model_type"}
+    if donor_arch in _unknown or donor_mt in _unknown:
+        return False
+    if target_arch_slug and donor_arch and donor_arch != target_arch_slug:
+        return False
+    tgt_mt = str(target_model_type or "").strip().lower()
+    if tgt_mt and donor_mt and donor_mt != tgt_mt:
+        return False
+
+    # RC3: reject an explicit workload-shape mismatch (only when both are known).
+    def _shape_conflict(target_val: Any, donor_key: str) -> bool:
+        try:
+            tv = int(target_val)
+            dv = int(donor.get(donor_key))
+        except (TypeError, ValueError):
+            return False  # unknown on either side → not a conflict
+        if tv <= 0 or dv <= 0:
+            return False
+        return tv != dv
+
+    if (
+        _shape_conflict(target_conc, "conc")
+        or _shape_conflict(target_isl, "isl")
+        or _shape_conflict(target_osl, "osl")
+    ):
+        return False
+    return True
+
+
+def _kg_native_config_donor(
+    *,
+    architectures: "list[str] | None",
+    precision: str,
+    hardware: str,
+    framework: str,
+    model_type: str,
+) -> Mapping[str, Any] | None:
+    """Borrow a cross-model warm-replay donor from the native KG link-graph.
+
+    Active only when a NATIVE KG client (``GBRAIN_KG_NATIVE``) is reachable.
+    Returns a recipe-shaped donor synthesized from the strongest cross-model
+    ``KNOB_IMPROVES`` edge for the target ``arch+precision`` (single_top), or
+    ``None`` to fall back to the recipe-KB sibling search. Fully
+    degradation-safe — any failure yields ``None`` and never blocks warm-start.
+
+    Args:
+        architectures: Current model architecture list.
+        precision: Baseline precision (folded into the KG object node).
+        hardware: Hardware condition filter.
+        framework: Framework condition filter.
+        model_type: Target model type (stamped onto the synthesized donor).
+
+    Returns:
+        A recipe-shaped donor row, or ``None`` when KG is unavailable, not in
+        native mode, or carries no usable cross-model knob.
+    """
+    archs = [a for a in (architectures or []) if str(a or "").strip()]
+    if not archs:
+        return None
+    try:
+        from ..recipe_kb.kg_client import (
+            generate_warmstart_donor_graph_guided,
+            get_kg_client,
+        )
+
+        kg = get_kg_client()
+        if kg is None or not getattr(kg, "_native", False) or not kg.is_available():
+            return None
+        donor = generate_warmstart_donor_graph_guided(
+            kg,
+            architectures=archs,
+            precision=precision or "",
+            hardware=hardware or "",
+            framework=framework or "",
+            model_type=model_type or "",
+        )
+        return donor or None
+    except Exception as exc:  # noqa: BLE001 — KG donor is best-effort/advisory
+        log.info("KG-native config donor skipped: %s", exc)
+        return None
+
+
 def _find_config_donor(
     kb: Any,
     *,
@@ -270,6 +399,9 @@ def _find_config_donor(
     arch_slug: str,
     framework_version: str,
     precision: str,
+    target_conc: Any = None,
+    target_isl: Any = None,
+    target_osl: Any = None,
 ) -> tuple[Mapping[str, Any] | None, str, float]:
     """Borrow a replayable champion config from the nearest same-arch sibling.
 
@@ -279,7 +411,10 @@ def _find_config_donor(
     conf 0.95) then L3 (same arch, any framework version, conf 0.5).
 
     Only same ``hw+framework+model_type+arch(+precision)(+fwv)`` siblings are
-    considered, so the borrowed config is stack-compatible. Returns
+    searched, and each candidate must additionally clear
+    :func:`_donor_is_trustworthy` (positive validated gain, concrete matching
+    architecture, no workload-shape conflict) so a borrowed config is both
+    stack-compatible and evidence-backed. Returns
     ``(donor_row, donor_tier, donor_confidence)`` or ``(None, "", 0.0)``.
     """
     if not (model_type or arch_slug):
@@ -318,7 +453,16 @@ def _find_config_donor(
         for r in rows or []:
             if str(r.get("canonical_id") or "") == cid:
                 continue
-            if _has_replayable_config(r):
+            # Borrowed donor must clear the trustworthiness gate (validated gain,
+            # concrete matching arch, no shape conflict) — not just carry a config.
+            if _donor_is_trustworthy(
+                r,
+                target_arch_slug=arch_slug,
+                target_model_type=model_type,
+                target_conc=target_conc,
+                target_isl=target_isl,
+                target_osl=target_osl,
+            ):
                 return r, tier, conf
     return None, "", 0.0
 
@@ -335,6 +479,10 @@ def _build_warm_start_context(
     config_donor_tier: str = "",
     config_donor_confidence: float = 0.0,
     model_architectures: "list[str] | None" = None,
+    hardware: str = "",
+    framework: str = "",
+    precision: str = "",
+    kg_client: Any = None,
 ) -> dict[str, Any]:
     """Build the model-facing WarmStartContext from a KB recipe row.
 
@@ -407,7 +555,237 @@ def _build_warm_start_context(
             }
     # Extract replayable code patches from prs_tested (positive + negative).
     _extract_patches_from_prs_tested(ctx, recipe, model_architectures)
+    # KG enhancement: cross-recipe revert aggregation + arch-graph advisory
+    # blocks + graph-recommended knobs + validity. Best-effort and fully
+    # degradable — never lose the local prs_tested patches on KG failure.
+    _enhance_warm_start_with_kg(
+        ctx,
+        model_architectures=model_architectures,
+        hardware=hardware,
+        framework=framework,
+        precision=precision,
+        kg_client=kg_client,
+    )
     return ctx
+
+
+def _kg_guided_enabled() -> bool:
+    """Return ``True`` when journal-knob graph guidance is enabled.
+
+    Gated by ``GBRAIN_KG_GUIDED`` (default off) so emitting ``KNOB_*`` edges
+    and surfacing ``graph_guided_knobs`` is a deliberate opt-in that never
+    changes live behavior until explicitly turned on.
+    """
+    return os.environ.get("GBRAIN_KG_GUIDED", "").strip().lower() in ("1", "true", "yes")
+
+
+def _arch_norm(value: Any) -> str:
+    """Normalize an architecture/entity token to match KG fact slugs.
+
+    Args:
+        value: Raw architecture or entity name.
+
+    Returns:
+        The lowercased slug (spaces/slashes to underscores).
+    """
+    return str(value or "").strip().replace(" ", "_").replace("/", "_").lower()
+
+
+def _enhance_warm_start_with_kg(
+    ctx: dict[str, Any],
+    *,
+    model_architectures: "list[str] | None",
+    hardware: str,
+    framework: str,
+    precision: str = "",
+    kg_client: Any = None,
+) -> None:
+    """Augment the warm-start context with knowledge-graph signals.
+
+    Adds, when a KG backend is reachable:
+
+    * ``blocked_patches`` — cross-recipe hard blocks on the same arch
+      (``REVERTED_ON`` / ``DEGRADES`` / ``CRASHES``).
+    * ``advisory_blocked_patches`` — soft blocks inferred from related
+      architectures (decayed confidence), reached via ``USES_ARCH`` /
+      ``VARIANT_OF`` graph traversal.
+    * ``recommended_knobs`` — ``IMPROVES`` candidates for the current
+      arch+hw+fw (minus anything blocked).
+    * ``expired`` markers on replay patches whose ``VALID_FOR`` window
+      has lapsed.
+
+    The whole step is wrapped in a degradation guard: any failure leaves
+    ``ctx`` exactly as the local prs_tested logic produced it.
+
+    Args:
+        ctx: The warm-start context to mutate in place.
+        model_architectures: The current model's architecture list.
+        hardware: The current hardware/GPU identifier.
+        framework: The current inference framework.
+        kg_client: Optional injected KG client (defaults to the env-built
+            singleton; ``None`` disables enhancement).
+    """
+    archs = [a for a in (model_architectures or []) if str(a or "").strip()]
+    if not archs:
+        return
+    try:
+        kg = kg_client
+        if kg is None:
+            from ..recipe_kb.kg_client import get_kg_client
+
+            kg = get_kg_client()
+        if kg is None or not kg.is_available():
+            return
+    except Exception as exc:  # noqa: BLE001 - availability probe must never raise out
+        log.warning("KG warm-start enhancement skipped (unavailable): %s", exc)
+        return
+
+    try:
+        own_arch = {_arch_norm(a) for a in archs}
+        # 1. Architecture-family graph: reach related architectures.
+        related: set[str] = set(own_arch)
+        for arch in archs:
+            for node in kg.graph_traverse_safe(
+                start_entity=arch,
+                predicate_filter=["USES_ARCH", "VARIANT_OF"],
+                max_hops=2,
+                direction="both",
+            ):
+                if node.entity:
+                    related.add(node.entity)
+
+        # 2. Cross-recipe negatives → hard (own arch) vs advisory (related).
+        already_blocked = {
+            _arch_norm(b.get("patch_file"))
+            for b in (ctx.get("blocked_patches") or [])
+            if isinstance(b, dict)
+        }
+        hard: list[dict[str, Any]] = []
+        advisory: list[dict[str, Any]] = []
+        seen_adv: set[str] = set()
+        for fact in kg.query_facts_safe(
+            object=sorted(related),
+            predicate=["REVERTED_ON", "DEGRADES", "CRASHES"],
+            limit=100,
+        ):
+            patch = fact.subject
+            if not patch:
+                continue
+            if fact.object in own_arch:
+                if patch in already_blocked:
+                    continue
+                already_blocked.add(patch)
+                hard.append({
+                    "patch_file": patch,
+                    "reason": f"{fact.predicate}: {fact.properties.get('error') or fact.properties.get('reason', '')}",
+                    "confidence": fact.confidence,
+                    "block_type": "hard",
+                    "source": "kg",
+                })
+            else:
+                if patch in seen_adv or patch in own_arch:
+                    continue
+                seen_adv.add(patch)
+                advisory.append({
+                    "patch_file": patch,
+                    "reason": f"{fact.predicate} on related arch {fact.object}",
+                    "confidence": round(fact.confidence * 0.6, 3),
+                    "block_type": "advisory",
+                    "source": "kg",
+                })
+        if hard:
+            ctx.setdefault("blocked_patches", []).extend(hard)
+        if advisory:
+            ctx["advisory_blocked_patches"] = advisory
+
+        # 3. Positive candidates for current arch+hw+fw, minus blocked.
+        conditions: dict[str, Any] = {}
+        if hardware:
+            conditions["hw"] = hardware
+        if framework:
+            conditions["fw"] = framework
+        blocked_now = {_arch_norm(b.get("patch_file")) for b in (ctx.get("blocked_patches") or [])}
+        recommended: list[dict[str, Any]] = []
+        seen_rec: set[str] = set()
+        for fact in kg.query_facts_safe(
+            object=sorted(own_arch),
+            predicate=["IMPROVES"],
+            conditions=conditions or None,
+            limit=50,
+        ):
+            knob = fact.subject
+            if not knob or knob in blocked_now or knob in seen_rec:
+                continue
+            seen_rec.add(knob)
+            recommended.append({
+                "knob": knob,
+                "expected_gain": fact.gain,
+                "confidence": fact.confidence,
+                "source": "kg_graph",
+            })
+        if recommended:
+            recommended.sort(key=lambda r: -(r.get("expected_gain") or 0.0))
+            ctx["recommended_knobs"] = recommended
+
+        # 3b. Journal-derived config knobs (KNOB_IMPROVES), behind a flag.
+        # These carry runnable args/envs and use the fingerprint vocabulary,
+        # so they ride a separate ctx key and never mix with the patch-keyed
+        # ``recommended_knobs`` above.
+        if _kg_guided_enabled():
+            from ..recipe_kb.kg_client import generate_knob_candidates_graph_guided
+
+            knobs = generate_knob_candidates_graph_guided(
+                kg,
+                architectures=archs,
+                precision=precision,
+                hardware=hardware,
+                framework=framework,
+                max_variants=8,
+            )
+            if knobs:
+                ctx["graph_guided_knobs"] = knobs
+
+        # 4. Validity check: flag replay patches whose VALID_FOR has lapsed.
+        replay = ctx.get("recommended_replay")
+        if isinstance(replay, Mapping):
+            for patch in replay.get("patches") or []:
+                if not isinstance(patch, dict):
+                    continue
+                pf = patch.get("patch_file") or ""
+                if not pf:
+                    continue
+                for v in kg.query_facts_safe(subject=pf, predicate=["VALID_FOR"], limit=10):
+                    if _validity_expired(v.properties):
+                        patch["expired"] = True
+                        patch["expire_reason"] = f"valid_for {v.properties.get('version', '')}".strip()
+                        break
+    except Exception as exc:  # noqa: BLE001 - enhancement is advisory only
+        log.warning("KG warm-start enhancement degraded: %s", exc)
+
+
+def _validity_expired(props: Mapping[str, Any]) -> bool:
+    """Return ``True`` when a ``VALID_FOR`` fact's ``expires`` date is past.
+
+    Only an explicit ``expires`` ISO date triggers expiry; free-form
+    version ranges are intentionally not parsed here (avoids false
+    positives) and are deferred to the native KG validity engine.
+
+    Args:
+        props: The ``VALID_FOR`` fact's properties.
+
+    Returns:
+        ``True`` when ``expires`` is a past date, else ``False``.
+    """
+    expires = str(props.get("expires") or "").strip()
+    if not expires:
+        return False
+    try:
+        exp = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    return exp < datetime.now(timezone.utc)
 
 
 def _extract_patches_from_prs_tested(
@@ -818,11 +1196,42 @@ def run_t0_anchor(
     config_donor: Mapping[str, Any] | None = None
     config_donor_tier = ""
     config_donor_conf = 0.0
-    if warm_point and _has_replayable_config(warm_point):
+    _tgt_conc = getattr(shared_state, "conc", None)
+    _tgt_isl = getattr(shared_state, "isl", None)
+    _tgt_osl = getattr(shared_state, "osl", None)
+    # A true-self (identity ``exact``) champion always replays; a cross-model
+    # warm_point that happens to carry a config is a BORROW and must clear the
+    # trustworthiness gate before it is adopted as the replay donor.
+    if warm_point and _has_replayable_config(warm_point) and (
+        warm_tier == "exact"
+        or _donor_is_trustworthy(
+            warm_point,
+            target_arch_slug=_arch_slug,
+            target_model_type=_model_type_val,
+            target_conc=_tgt_conc,
+            target_isl=_tgt_isl,
+            target_osl=_tgt_osl,
+        )
+    ):
         config_donor = warm_point
         config_donor_tier = "self"
         config_donor_conf = warm_conf
-    elif warm_point:
+    # KG-native cross-model donor (single_top, gated by GBRAIN_KG_NATIVE): when
+    # a borrow is needed, prefer the strongest cross-model KNOB_IMPROVES edge
+    # over the recipe-KB sibling search. Degradation-safe → recipe-KB fallback.
+    if config_donor is None and warm_point:
+        kg_donor = _kg_native_config_donor(
+            architectures=_architectures_val if isinstance(_architectures_val, list) else None,
+            precision=_precision or "",
+            hardware=hw,
+            framework=_framework or "",
+            model_type=_model_type_val,
+        )
+        if kg_donor is not None:
+            config_donor = kg_donor
+            config_donor_tier = "kg_cross_model"
+            config_donor_conf = float(kg_donor.get("confidence") or 0.0)
+    if config_donor is None and warm_point:
         donor, dtier, dconf = _find_config_donor(
             kb,
             cid=cid,
@@ -832,6 +1241,9 @@ def run_t0_anchor(
             arch_slug=_arch_slug,
             framework_version=_fw_version or "",
             precision=_precision or "",
+            target_conc=_tgt_conc,
+            target_isl=_tgt_isl,
+            target_osl=_tgt_osl,
         )
         if donor is not None:
             config_donor = donor
@@ -896,6 +1308,9 @@ def run_t0_anchor(
             source=warm_source,
             recipe=warm_point or None,
             model_architectures=_architectures_val if isinstance(_architectures_val, list) else None,
+            hardware=hw,
+            framework=_framework or "",
+            precision=_precision or "",
         )
     except Exception:  # noqa: BLE001 — defensive; context is advisory
         log.exception("warm_start_context build failed")
