@@ -56,8 +56,8 @@ class TestListAndMatch:
         (kb_root / "framework").mkdir()
         (kb_root / "framework" / "README.md").write_text("# fw")
         (kb_root / "framework" / "empirical_kb.md").write_text("# empirical")
-        (kb_root / "kernel").mkdir()
-        assert kb.list_domains() == ["framework", "kernel"]
+        (kb_root / "kernel_agent").mkdir()
+        assert kb.list_domains() == ["framework", "kernel_agent"]
         names = sorted(p.name for p in kb.get_domain_files("framework"))
         assert names == ["README.md", "empirical_kb.md"]
 
@@ -65,7 +65,7 @@ class TestListAndMatch:
         """A task description containing whitelisted keywords picks the right domain."""
         domains = kb._match_domains("improve sglang vllm cudagraph attention")
         assert "framework" in domains
-        assert "kernel" in domains
+        assert "kernel_agent" in domains
 
     def test_match_domains_no_hit(self) -> None:
         """When no keyword matches, the result is an empty list."""
@@ -108,11 +108,11 @@ class TestSelectKb:
 
     def test_full_text_fallback(self, kb_root: Path) -> None:
         """When no keyword matches, fallback scans file contents for the lower-cased query."""
-        d = kb_root / "kernel"
+        d = kb_root / "kernel_agent"
         d.mkdir()
         (d / "empirical_kb.md").write_text("Quirk-Wibble is the new HotAcronym for stuff.")
         out = kb.select_kb("quirk-wibble")
-        assert out and out[0].domain == "kernel"
+        assert out and out[0].domain == "kernel_agent"
 
 
 class TestContributeAndSynthesize:
@@ -185,7 +185,7 @@ class TestSearchKb:
         a.mkdir()
         (a / "empirical_kb.md").write_text("FlashInfer NVFP4 winners")
         (a / "shared_pitfalls.md").write_text("nothing special here")
-        b = kb_root / "kernel"
+        b = kb_root / "kernel_agent"
         b.mkdir()
         (b / "empirical_kb.md").write_text("torch.nn.functional.gelu shenanigans")
         hits = kb.search_kb("flashinfer")

@@ -107,7 +107,7 @@ def test_audit_not_present_direct_apply(tmp_path: Path):
     )
     assert out["semantic_status"] == "not_present"
     assert out["applicability"] == "direct_apply"
-    assert out["recommended_next_step"] == "direct_framework_pr"
+    assert out["recommended_next_step"] == "direct_framework"
 
 
 def test_audit_partially_present_needs_rewrite(tmp_path: Path):

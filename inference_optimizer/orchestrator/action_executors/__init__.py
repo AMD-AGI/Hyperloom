@@ -17,7 +17,7 @@ from .explore import (
     explore_executor,
 )
 from .conc_sweep import ConcSweepExecutor, conc_sweep_executor
-from .framework_pr import FrameworkPrExecutor, framework_pr_executor
+from .framework_agent import FrameworkAgentExecutor, framework_agent_executor
 from .report import ReportExecutor, report_executor
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .sweep import (
@@ -37,7 +37,7 @@ __all__ = [
     "DEFAULT_KEEP_THRESHOLD_PCT",
     "DEFAULT_STACK_STABLE_PCT",
     "ExploreExecutor",
-    "FrameworkPrExecutor",
+    "FrameworkAgentExecutor",
     "RecoverExecutor",
     "ReportExecutor",
     "SessionBreakdownExecutor",
@@ -46,7 +46,7 @@ __all__ = [
     "baseline_executor",
     "conc_sweep_executor",
     "explore_executor",
-    "framework_pr_executor",
+    "framework_agent_executor",
     "recover_executor",
     "report_executor",
     "session_breakdown_executor",

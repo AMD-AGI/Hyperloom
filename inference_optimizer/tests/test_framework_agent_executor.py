@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""FrameworkPrExecutor — Stage 2d coverage."""
+"""FrameworkAgentExecutor — Stage 2d coverage."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
-from inference_optimizer.orchestrator.action_executors.framework_pr import (
-    FrameworkPrExecutor,
+from inference_optimizer.orchestrator.action_executors.framework_agent import (
+    FrameworkAgentExecutor,
     _candidate_slug,
     _fetch_diff_to_path,
     _materialize_pr_diff_via_worktree,
@@ -30,7 +30,7 @@ from inference_optimizer.orchestrator.task_registry import Task
 def _init_git_repo(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    env["GIT_AUTHOR_NAME"] = "FRAMEWORK_PR Test"
+    env["GIT_AUTHOR_NAME"] = "FRAMEWORK Test"
     env["GIT_AUTHOR_EMAIL"] = "fw-pr@test.local"
     env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
     env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
@@ -99,7 +99,7 @@ def _make_candidate(
 def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
     task = Task(
         task_id=task_id,
-        kind="framework_pr",
+        kind="framework_agent",
         state="queued",
         params=params,
         idempotency_key=task_id,
@@ -155,7 +155,7 @@ def test_fetch_diff_to_path_fails_on_bad_url(tmp_path: Path):
 async def test_executor_missing_candidate_fails_cleanly(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     ctx = _make_ctx("t-fp-1", {})
     result = await executor(ctx)
     assert result["status"] == "failed"
@@ -169,7 +169,7 @@ async def test_executor_no_patch_when_no_source_at_all(tmp_path: Path):
     session_dir.mkdir()
     repo = tmp_path / "framework"
     _init_git_repo(repo)
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = {  # source-less candidate
         "repo": "sgl-project/sglang",
         "pr_number": "",
@@ -198,7 +198,7 @@ async def test_executor_no_patch_when_explicit_patches_all_missing(tmp_path: Pat
     repo = tmp_path / "framework"
     _init_git_repo(repo)
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()  # carries a real diff_url
     missing = [str(tmp_path / "nope-1.patch"), str(tmp_path / "nope-2.patch")]
     ctx = _make_ctx(
@@ -230,7 +230,7 @@ async def test_executor_apply_only_with_explicit_patch_succeeds(tmp_path: Path):
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
     ctx = _make_ctx(
         "t-fp-3",
@@ -262,7 +262,7 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
     patch_path = tmp_path / "bad.patch"
     patch_path.write_text(_BAD_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
     ctx = _make_ctx(
         "t-fp-4",
@@ -281,16 +281,16 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_executor_no_framework_root_returns_apply_failed(tmp_path: Path):
+async def test_executor_no_framework_agent_root_returns_apply_failed(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.framework_pr._resolve_framework_root",
+        "inference_optimizer.orchestrator.action_executors.framework_agent._resolve_framework_root",
         return_value=None,
     ):
         ctx = _make_ctx(
@@ -304,7 +304,7 @@ async def test_executor_no_framework_root_returns_apply_failed(tmp_path: Path):
         result = await executor(ctx)
 
     assert result["status"] == "apply_failed"
-    assert result["error_class"] == "no_framework_root"
+    assert result["error_class"] == "no_framework_agent_root"
 
 
 @pytest.mark.asyncio
@@ -314,7 +314,7 @@ async def test_executor_fetch_failure_returns_fetch_failed(tmp_path: Path):
     session_dir.mkdir()
     repo = tmp_path / "framework"
     _init_git_repo(repo)
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate(
         diff_url=f"file://{tmp_path / 'missing-diff.patch'}",
     )
@@ -335,7 +335,7 @@ async def test_executor_fetch_failure_returns_fetch_failed(tmp_path: Path):
 # 3. KEEP / REVERT decision (mocked bench)
 def _mk_variant_result(*, tput: float | None, status: str = "succeeded") -> VariantResult:
     return VariantResult(
-        name="framework-pr-x",
+        name="framework-x",
         extra_server_args="",
         extra_envs={},
         status=status,
@@ -354,7 +354,7 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
     async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
@@ -373,7 +373,7 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
             "keep_threshold_pct": 1.0,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
     assert result["status"] == "kept"
@@ -399,7 +399,7 @@ async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
     cand["pr_url"] = "https://github.com/sgl-project/sglang/pull/1234"
 
@@ -419,7 +419,7 @@ async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
             "keep_threshold_pct": 1.0,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
     assert result["status"] == "kept"
@@ -447,7 +447,7 @@ async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
     cand["pr_url"] = "https://github.com/sgl-project/sglang/pull/1234"
 
@@ -467,7 +467,7 @@ async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
             "keep_threshold_pct": 1.0,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
     assert result["status"] == "reverted"
@@ -490,7 +490,7 @@ async def test_executor_revert_when_delta_below_threshold(tmp_path: Path):
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
     async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
@@ -509,7 +509,7 @@ async def test_executor_revert_when_delta_below_threshold(tmp_path: Path):
             "keep_threshold_pct": 1.0,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
     assert result["status"] == "reverted"
@@ -529,7 +529,7 @@ async def test_executor_revert_on_accuracy_regression(tmp_path: Path):
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
     async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
@@ -548,7 +548,7 @@ async def test_executor_revert_on_accuracy_regression(tmp_path: Path):
             "keep_threshold_pct": 1.0,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
     assert result["status"] == "reverted"
@@ -566,7 +566,7 @@ async def test_executor_bench_exception_triggers_revert(tmp_path: Path):
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
     async def boom(self, *, params, output_root, slug):  # noqa: ARG001
@@ -581,7 +581,7 @@ async def test_executor_bench_exception_triggers_revert(tmp_path: Path):
             "base_tput": 1000.0,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=boom):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=boom):
         result = await executor(ctx)
 
     assert result["status"] == "reverted"
@@ -615,7 +615,7 @@ async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
     patch_b = tmp_path / "b.patch"
     patch_b.write_text(_PATCH_B_ADDS_FILE, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
 
     async def keep_bench(self, *, params, output_root, slug):  # noqa: ARG001
         return (
@@ -639,7 +639,7 @@ async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
             "keep_threshold_pct": 1.0,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=keep_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=keep_bench):
         res_a = await executor(ctx_a)
     assert res_a["status"] == "kept", res_a
     assert res_a.get("keep_commit_sha"), "KEEP must record commit sha"
@@ -655,7 +655,7 @@ async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
             "keep_threshold_pct": 1.0,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=reject_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=reject_bench):
         res_b = await executor(ctx_b)
     assert res_b["status"] == "reverted", res_b
 
@@ -677,7 +677,7 @@ async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
     bad_patch = tmp_path / "bad.patch"
     bad_patch.write_text(_BAD_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
 
     async def keep_bench(self, *, params, output_root, slug):  # noqa: ARG001
         return (
@@ -695,7 +695,7 @@ async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
             "keep_threshold_pct": 1.0,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=keep_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=keep_bench):
         res_a = await executor(ctx_a)
     assert res_a["status"] == "kept"
 
@@ -717,7 +717,7 @@ async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
 # 3c. checkout-head (diff source) mode
 def _git_env() -> dict[str, str]:
     env = os.environ.copy()
-    env["GIT_AUTHOR_NAME"] = "FRAMEWORK_PR Test"
+    env["GIT_AUTHOR_NAME"] = "FRAMEWORK Test"
     env["GIT_AUTHOR_EMAIL"] = "fw-pr@test.local"
     env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
     env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
@@ -799,7 +799,7 @@ async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, mon
     repo = tmp_path / "framework"
     head_sha = _init_repo_with_pr_branch(repo, pr_ref="pr-head")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = {
         "repo": "sgl-project/sglang",
         "pr_number": 7,
@@ -825,7 +825,7 @@ async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path, mon
             "keep_threshold_pct": 1.0,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
     assert result["status"] == "kept", result
@@ -842,7 +842,7 @@ async def test_executor_no_diff_url_falls_back_to_checkout_head(tmp_path: Path):
     repo = tmp_path / "framework"
     head_sha = _init_repo_with_pr_branch(repo, pr_ref="pr-head")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = {
         "repo": "sgl-project/sglang",
         "pr_number": 7,
@@ -874,7 +874,7 @@ async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
     patch_path = tmp_path / "add.patch"
     patch_path.write_text(_PATCH_B_ADDS_FILE, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
     async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
@@ -893,7 +893,7 @@ async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
             "keep_threshold_pct": 1.0,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
     assert result["status"] == "kept", result
@@ -923,7 +923,7 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
     diff_file = tmp_path / "served.patch"
     diff_file.write_text(_VALID_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = {
         "repo": "ROCm/vllm",  # cross-repo vs the sglang live origin
         "pr_number": 42,
@@ -949,7 +949,7 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
 
 # 3d. accuracy gate inside _bench_candidate (Step 0 regression)
 #
-# Regression for the framework_pr accuracy-gate bug: the gate read the
+# Regression for the framework accuracy-gate bug: the gate read the
 # nonexistent ``score`` key from parse_eval_results (which returns
 # ``accuracy``) and passed (new, baseline) reversed into accuracy_passed,
 # so accuracy_pass was always None -> KEEP always allowed. These tests drive
@@ -973,12 +973,12 @@ async def test_bench_candidate_accuracy_gate_reads_accuracy_key(
     config_path = tmp_path / "baseline.yaml"
     config_path.write_text("benchmark: {}\n", encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
 
     async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
         return [_mk_variant_result(tput=1100.0, status="succeeded")]
 
-    import inference_optimizer.orchestrator.action_executors.framework_pr as fp_mod
+    import inference_optimizer.orchestrator.action_executors.framework_agent as fp_mod
 
     with (
         patch.object(fp_mod, "run_grid", new=fake_run_grid),
@@ -1008,12 +1008,12 @@ async def test_bench_candidate_accuracy_gate_skipped_without_baseline(tmp_path: 
     config_path = tmp_path / "baseline.yaml"
     config_path.write_text("benchmark: {}\n", encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
 
     async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
         return [_mk_variant_result(tput=1100.0, status="succeeded")]
 
-    import inference_optimizer.orchestrator.action_executors.framework_pr as fp_mod
+    import inference_optimizer.orchestrator.action_executors.framework_agent as fp_mod
 
     with (
         patch.object(fp_mod, "run_grid", new=fake_run_grid),
@@ -1044,7 +1044,7 @@ async def test_executor_require_accuracy_blocks_keep_when_unevaluated(tmp_path: 
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
     async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
@@ -1065,7 +1065,7 @@ async def test_executor_require_accuracy_blocks_keep_when_unevaluated(tmp_path: 
             "accuracy_baseline": 0.80,
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
     assert result["status"] == "accuracy_unavailable_reject"
@@ -1083,7 +1083,7 @@ async def test_executor_require_accuracy_degrades_without_baseline(tmp_path: Pat
     patch_path = tmp_path / "p.patch"
     patch_path.write_text(_VALID_PATCH, encoding="utf-8")
 
-    executor = FrameworkPrExecutor(session_dir=session_dir)
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate()
 
     async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
@@ -1104,7 +1104,7 @@ async def test_executor_require_accuracy_degrades_without_baseline(tmp_path: Pat
             # no accuracy_baseline -> cannot enforce -> degrade
         },
     )
-    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
         result = await executor(ctx)
 
     assert result["status"] == "kept"
@@ -1112,22 +1112,22 @@ async def test_executor_require_accuracy_degrades_without_baseline(tmp_path: Pat
 
 
 # 4. Registration / import surface
-def test_framework_pr_executor_imports_clean():
+def test_framework_agent_executor_imports_clean():
     from inference_optimizer.orchestrator.action_executors import (
-        framework_pr as fp_mod,
+        framework_agent as fp_mod,
     )
 
-    assert hasattr(fp_mod, "FrameworkPrExecutor")
-    assert callable(fp_mod.FrameworkPrExecutor)
+    assert hasattr(fp_mod, "FrameworkAgentExecutor")
+    assert callable(fp_mod.FrameworkAgentExecutor)
 
 
-def test_framework_pr_meta_loads():
-    """The action_registry can load actions/_meta/framework_pr.yaml."""
+def test_framework_meta_loads():
+    """The action_registry can load actions/_meta/framework_agent.yaml."""
     from inference_optimizer.orchestrator.action_registry import ActionRegistry
 
     reg = ActionRegistry().load()
-    fp = reg.get("framework_pr")
+    fp = reg.get("framework_agent")
     assert fp is not None
-    assert fp.name == "framework_pr"
+    assert fp.name == "framework_agent"
     assert fp.family == "shallow"
     assert "Bash" in fp.allowed_tools

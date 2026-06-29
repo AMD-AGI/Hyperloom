@@ -1,4 +1,4 @@
-name: framework_pr
+name: framework_agent
 family: shallow
 cost_minutes_p50: 12.0
 cost_minutes_p75: 30.0
@@ -12,7 +12,7 @@ requires_lanes:
   - workspace_mutation
   - benchmark_lane
 allowed_tools:
-  # framework_pr is a deterministic Python executor with no LLM driver.
+  # framework_agent is a deterministic Python executor with no LLM driver.
   # The tool list keeps the workspace_mutation invariant happy
   # (``test_actions_with_workspace_lane_have_edit_tool``) even though
   # the executor itself shells out to ``git apply``.
@@ -31,11 +31,11 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 4
 lease_ttl_sec: 3600
-description: "FRAMEWORK_PR-phase per-candidate executor: applies an upstream framework PR to framework_source_roots, runs throughput + accuracy gate, KEEPs or REVERTs. Coordinator-internal."
+description: "FRAMEWORK_AGENT-phase per-candidate executor: applies an upstream framework to framework_source_roots, runs throughput + accuracy gate, KEEPs or REVERTs. Coordinator-internal."
 pipeline_phase: explore
 typical_runtime_min: 12.0
 applicable_when:
-  - "phase == 'FRAMEWORK_PR'"
+  - "phase == 'FRAMEWORK_AGENT'"
   - "baseline_tput > 0"
 params_schema:
   candidate:
@@ -54,7 +54,7 @@ params_schema:
     type: string
     description: |
       Optional. Phase-loop batch identifier; echoed back in the result
-      so ``framework_pr_phase_progress`` entries group correctly.
+      so ``framework_agent_phase_progress`` entries group correctly.
   patches:
     type: list
     description: |

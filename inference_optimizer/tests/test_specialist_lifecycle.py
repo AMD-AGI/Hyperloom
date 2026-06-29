@@ -464,7 +464,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
         backends = {
             "orchestration": MockOrchBackend(idle_plan),
-            "kernel": MockOrchBackend(idle_plan),
+            "kernel_agent": MockOrchBackend(idle_plan),
             "critic": MockOrchBackend(idle_plan),
             "robustness": MockOrchBackend(idle_plan),
         }

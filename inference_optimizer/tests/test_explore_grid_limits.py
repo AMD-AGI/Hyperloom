@@ -53,7 +53,7 @@ def _propose(grid: list[dict]) -> Intent:
 
 def _specialist_delegate(params: dict) -> Intent:
     merged = {
-        "tags": ["kernel"],
+        "tags": ["kernel_agent"],
         "gap_canonical_id": "gap.kernel.microbench.session-test",
     }
     merged.update(params)

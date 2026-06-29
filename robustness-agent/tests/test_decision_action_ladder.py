@@ -129,7 +129,7 @@ async def test_medium_cluster_fault_emits_alert_only():
 async def test_high_agent_stall_emits_alert_only():
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("agent_stall", SymptomSeverity.HIGH, subject={"agent": "kernel"})],
+        [_sym("agent_stall", SymptomSeverity.HIGH, subject={"agent": "kernel_agent"})],
         tick_index=0,
         now_unix=1.0,
     )

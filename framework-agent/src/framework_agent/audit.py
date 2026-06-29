@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""FRAMEWORK_PR semantic audit — static local-source judging (Step 2 MVP).
+"""FRAMEWORK semantic audit — static local-source judging (Step 2 MVP).
 
 Given a candidate PR's unified diff and the live framework source roots,
 decide whether the PR's change is **already present** in the local tree
@@ -390,7 +390,7 @@ def _classify(
             confidence=round(min(0.9, 0.5 + 0.4 * mean_context), 4),
             evidence=evidence,
             risks=[],
-            recommended_next_step="direct_framework_pr",
+            recommended_next_step="direct_framework",
             metrics=metrics,
         )
     return _verdict(
@@ -493,7 +493,7 @@ def _fetch_diff_url(diff_url: str, work_dir: Path) -> str:
 
 
 def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
-    """Run the FRAMEWORK_PR semantic audit for one candidate.
+    """Run the FRAMEWORK semantic audit for one candidate.
 
     Args:
         request: ``{candidate, framework, framework_source_roots, repo_url?,
@@ -614,7 +614,7 @@ def _maybe_llm_refine(
         "a local framework source tree. Given the static analysis result and the "
         "PR diff, return STRICT JSON with keys: semantic_status (one of "
         f"{list(_SEMANTIC_STATUSES)}), applicability (one of {list(_APPLICABILITIES)}), "
-        "confidence (0..1), recommended_next_step (skip|direct_framework_pr|"
+        "confidence (0..1), recommended_next_step (skip|direct_framework|"
         "author_via_specialist), note (short). Do not invent evidence.\n\n"
         f"STATIC_RESULT:\n{json.dumps(static_result, ensure_ascii=False)}\n\n"
         f"PR_DIFF (truncated):\n{patch_text[:6000]}\n"
@@ -646,7 +646,7 @@ def _maybe_llm_refine(
     if isinstance(refined.get("confidence"), (int, float)):
         static_result["confidence"] = round(float(refined["confidence"]), 4)
     nxt = str(refined.get("recommended_next_step") or "")
-    if nxt in ("skip", "direct_framework_pr", "author_via_specialist"):
+    if nxt in ("skip", "direct_framework", "author_via_specialist"):
         static_result["recommended_next_step"] = nxt
     note = str(refined.get("note") or "").strip()
     if note:

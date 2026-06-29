@@ -22,13 +22,28 @@ from inference_optimizer.recipe_kb import (
     RemoteRecipeClientError,
     recipe_canonical_id,
 )
+from inference_optimizer.recipe_kb.dispatcher import _v2_to_arbor
+
+
+def test_v2_to_arbor_reads_legacy_framework_label() -> None:
+    """v2 rows whose ``labels`` predate the framework->framework_name rename
+    store the serving framework under the legacy ``framework`` key. The arbor
+    projection must still surface it as ``framework_name``."""
+    v2 = {
+        "canonical_id": "inference:m:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8",
+        "labels": {"model": "m", "hardware": "mi300x", "framework": "sglang"},
+        "body": {},
+        "metrics": {},
+    }
+    arbor = _v2_to_arbor(v2)
+    assert arbor["framework_name"] == "sglang"
 
 
 def _cid(model: str = "m") -> str:
     return recipe_canonical_id(
         model=model,
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
@@ -171,7 +186,7 @@ def test_v2_framework_version_label_is_read(local_store: LocalRecipeStore) -> No
         "labels": {
             "model": "remote-model",
             "hardware": "mi300x",
-            "framework": "sglang",
+            "framework_name": "sglang",
             "framework_version": "0.4.5",
             "precision": "fp8",
         },
@@ -194,7 +209,7 @@ def test_v2_legacy_version_label_is_not_read(local_store: LocalRecipeStore) -> N
         "labels": {
             "model": "remote-model",
             "hardware": "mi300x",
-            "framework": "sglang",
+            "framework_name": "sglang",
             "version": "0.4.5",
             "precision": "fp8",
         },
@@ -249,7 +264,7 @@ def test_get_recipe_remote_sends_5tuple_label_match(local_store: LocalRecipeStor
     assert set(label_match) == {
         "model",
         "hardware",
-        "framework",
+        "framework_name",
         "framework_version",
         "precision",
         "model_type",

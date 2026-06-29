@@ -37,7 +37,7 @@ class FrameworkSpec:
         name: Canonical lowercase framework name.
         kind: Execution model — ``"serving"`` or ``"scriptable"``.
         extra_args_env: Env var Magpie scripts expand to append backend args.
-        repo_url: Canonical upstream git URL (FRAMEWORK_PR), or ``None``.
+        repo_url: Canonical upstream git URL (FRAMEWORK), or ``None``.
         supports_server_reuse: Whether the Magpie ``server_lifecycle`` reuse
             protocol applies (always ``False`` for ``scriptable``).
         throughput_unit: Human-readable throughput unit for reports.

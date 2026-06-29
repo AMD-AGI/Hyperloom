@@ -39,7 +39,7 @@ def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel": MockBackend(silent, name="k"),
+        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
@@ -125,12 +125,12 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
             fake_handler,
         )
 
-        cur_before = await c.cursors.load("kernel")
+        cur_before = await c.cursors.load("kernel_agent")
         assert cur_before.last_processed_seq == 0
 
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "trace_analyze", "params": {"trace_input": "/tmp/trace.json"}},
+            payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/tmp/trace.json"}},
         )
         await c._handle_intent("orchestration", intent)
 
@@ -139,14 +139,14 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
         assert "request" in topics
         assert "response" in topics
 
-        cur_after = await c.cursors.load("kernel")
+        cur_after = await c.cursors.load("kernel_agent")
         request_msg = next(m for m in msgs if m.topic == "request")
         assert cur_after.last_processed_seq >= request_msg.seq, (
             f"kernel cursor {cur_after.last_processed_seq} must be past "
             f"request seq {request_msg.seq} to suppress duplicate response"
         )
         leftover = await c.bus.replay_for(
-            "kernel",
+            "kernel_agent",
             after_seq=cur_after.last_processed_seq,
         )
         assert not any(m.topic == "request" and m.msg_id == request_msg.msg_id for m in leftover)
@@ -190,7 +190,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
         intent = Intent(
             type=IntentType.REQUEST,
             payload={
-                "target_agent": "kernel",
+                "target_agent": "kernel_agent",
                 "kind": "trace_analyze",
                 "params": {"trace_input": "/tmp/trace-A.json.gz"},
             },
@@ -211,7 +211,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
             Intent(
                 type=IntentType.REQUEST,
                 payload={
-                    "target_agent": "kernel",
+                    "target_agent": "kernel_agent",
                     "kind": "trace_analyze",
                     "params": {"trace_input": "/tmp/trace-B.json.gz"},
                 },

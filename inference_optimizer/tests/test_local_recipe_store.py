@@ -18,10 +18,45 @@ from inference_optimizer.recipe_kb import (
     LocalRecipeStore,
     LocalRecipeStoreError,
     RECIPE_FILENAME,
+    Recipe,
     canonical_id_for_path,
     cid_to_path_components,
     recipe_canonical_id,
 )
+from inference_optimizer.recipe_kb.local_store import _matches_labels
+
+
+def test_from_dict_reads_legacy_framework_key() -> None:
+    """Recipes persisted before the framework->framework_name rename store the
+    serving framework under the legacy ``framework`` key. ``from_dict`` must
+    still hydrate ``framework_name`` from it and must not leak the legacy key
+    into ``extras``."""
+    legacy = {
+        "canonical_id": "inference:m:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8",
+        "model": "m",
+        "hardware": "mi300x",
+        "framework": "sglang",
+        "framework_version": "0.4.5",
+        "precision": "fp8",
+    }
+    recipe = Recipe.from_dict(legacy)
+    assert recipe.framework_name == "sglang"
+    assert "framework" not in recipe.extras
+
+
+def test_from_dict_prefers_new_framework_name_over_legacy() -> None:
+    """When both keys exist the current ``framework_name`` wins."""
+    both = {"framework_name": "vllm", "framework": "sglang"}
+    assert Recipe.from_dict(both).framework_name == "vllm"
+
+
+def test_matches_labels_matches_legacy_framework_payload() -> None:
+    """A search filtered by ``framework_name`` must still match recipe rows
+    persisted on disk with the legacy ``framework`` key (search reads raw JSON
+    without normalizing through ``Recipe.from_dict``)."""
+    legacy_payload = {"model": "m", "hardware": "mi300x", "framework": "sglang"}
+    assert _matches_labels(legacy_payload, {"framework_name": "sglang"}) is True
+    assert _matches_labels(legacy_payload, {"framework_name": "vllm"}) is False
 
 
 # canonical_id <-> path components
@@ -29,14 +64,14 @@ def _cid(
     *,
     model: str = "deepseek-r1",
     hardware: str = "mi300x",
-    framework: str = "sglang",
+    framework_name: str = "sglang",
     framework_version: str = "0.4.5",
     precision: str = "fp8",
 ) -> str:
     return recipe_canonical_id(
         model=model,
         hardware=hardware,
-        framework=framework,
+        framework_name=framework_name,
         framework_version=framework_version,
         precision=precision,
     )
@@ -52,6 +87,12 @@ def test_cid_to_path_components_rejects_legacy_4_segment_id() -> None:
     """Pre-Commit-1 4-segment ids like ``inference:m:fw:hw`` must NOT be accepted (would shadow real recipes)."""
     with pytest.raises(InvalidCanonicalIdError):
         cid_to_path_components("inference:m:fw:hw")
+
+
+def test_cid_to_path_components_rejects_empty_id() -> None:
+    with pytest.raises(InvalidCanonicalIdError) as ei:
+        cid_to_path_components("")
+    assert "empty string" in ei.value.reason
 
 
 def test_cid_to_path_components_rejects_legacy_6_segment() -> None:
@@ -81,6 +122,19 @@ def test_canonical_id_for_path_inverse_of_cid_decomposition(
     assert canonical_id_for_path(root=tmp_path, recipe_dir=recipe_dir) == cid
 
 
+def test_canonical_id_for_path_rejects_path_outside_root(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside" / "recipe"
+    with pytest.raises(InvalidCanonicalIdError) as ei:
+        canonical_id_for_path(root=tmp_path, recipe_dir=outside)
+    assert "not under store root" in ei.value.reason
+
+
+def test_canonical_id_for_path_rejects_unexpected_depth(tmp_path: Path) -> None:
+    with pytest.raises(InvalidCanonicalIdError) as ei:
+        canonical_id_for_path(root=tmp_path, recipe_dir=tmp_path / "too" / "shallow")
+    assert "expected" in ei.value.reason
+
+
 # put_recipe — happy path + history archival
 def test_put_recipe_first_call_creates_live_at_version_1(
     tmp_path: Path,
@@ -91,7 +145,7 @@ def test_put_recipe_first_call_creates_live_at_version_1(
         canonical_id=cid,
         model="deepseek-r1",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         best_config={"tp": "8"},
@@ -282,21 +336,21 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
     cid_a = recipe_canonical_id(
         model="m-a",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
     cid_b = recipe_canonical_id(
         model="m-b",
         hardware="mi300x",
-        framework="vllm",
+        framework_name="vllm",
         framework_version="0.6.0",
         precision="bf16",
     )
     cid_c = recipe_canonical_id(
         model="m-c",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.0",
         precision="fp8",
     )
@@ -306,7 +360,7 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
         canonical_id=cid_a,
         model="m-a",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         best_throughput=10000.0,
@@ -317,7 +371,7 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
         canonical_id=cid_b,
         model="m-b",
         hardware="mi300x",
-        framework="vllm",
+        framework_name="vllm",
         framework_version="0.6.0",
         precision="bf16",
         best_throughput=25000.0,
@@ -328,7 +382,7 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
         canonical_id=cid_c,
         model="m-c",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.0",
         precision="fp8",
         best_throughput=5000.0,

@@ -52,7 +52,7 @@ def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel": MockBackend(silent, name="k"),
+        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
@@ -200,7 +200,7 @@ async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_
         intent = Intent(
             type=IntentType.REQUEST,
             payload={
-                "target_agent": "kernel",
+                "target_agent": "kernel_agent",
                 "kind": "trace_analyze",
                 "params": {"trace_input": "/tmp/trace-A.json.gz"},
             },
@@ -261,7 +261,7 @@ async def test_handle_request_end_surfaces_tracelens_report_paths(
         intent = Intent(
             type=IntentType.REQUEST,
             payload={
-                "target_agent": "kernel",
+                "target_agent": "kernel_agent",
                 "kind": "trace_analyze",
                 "params": {"trace_input": "/tmp/trace-B.json.gz"},
             },
@@ -292,7 +292,7 @@ async def test_handle_request_failed_handler_emits_error(session_dir, monkeypatc
 
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "trace_analyze", "params": {"trace_input": "/tmp/t.json.gz"}},
+            payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/tmp/t.json.gz"}},
         )
         await c._handle_intent("orchestration", intent)
 
@@ -375,7 +375,7 @@ async def test_handle_request_cache_hit_emits_lone_end(session_dir, monkeypatch)
         intent = Intent(
             type=IntentType.REQUEST,
             payload={
-                "target_agent": "kernel",
+                "target_agent": "kernel_agent",
                 "kind": "trace_analyze",
                 "params": {"trace_input": "/tmp/trace.json.gz"},
             },
@@ -425,7 +425,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
 
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "integrate", "params": {"patch_path": "/tmp/p.patch"}},
+            payload={"target_agent": "kernel_agent", "kind": "integrate", "params": {"patch_path": "/tmp/p.patch"}},
         )
         await c._handle_intent("orchestration", intent)
 
@@ -452,7 +452,7 @@ async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
         monkeypatch.setattr(
             _ps,
             "compute_next_phase",
-            lambda *a, **k: (_ps.PHASE_KERNEL, "kernel_ready", {"evidence": "test"}),
+            lambda *a, **k: (_ps.PHASE_KERNEL_AGENT, "kernel_ready", {"evidence": "test"}),
         )
 
         # Isolate the emit from per-phase entry side effects.
@@ -467,8 +467,8 @@ async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
         assert len(enter) == 1, f"want one ENTER, got {c.shared_state.lifecycle}"
         ev = enter[0]
         # ENTER is a point-in-time marker: step == the phase name, no END.
-        assert ev["phase"] == _ps.PHASE_KERNEL.upper()
-        assert ev["step"] == _ps.PHASE_KERNEL
+        assert ev["phase"] == _ps.PHASE_KERNEL_AGENT.upper()
+        assert ev["step"] == _ps.PHASE_KERNEL_AGENT
         assert ev["label"] == "Kernel optimization"
         assert "reason=kernel_ready" in ev["detail"]
         assert "duration_s" not in ev

@@ -153,7 +153,7 @@ def test_metadata_filter_array_contains_subset():
             "kind": "technique",
             "slug": "tag-test",
             "importance": 0.5,
-            "metadata": {"tags": ["dispatch", "kernel", "active_path"]},
+            "metadata": {"tags": ["dispatch", "kernel_agent", "active_path"]},
         }
     )
     hit = kb.list(

@@ -50,17 +50,17 @@ def test_build_backends_mock_defaults_with_kernel_claude() -> None:
     assert b["orchestration"][0] == "claude"
     assert b["critic"] == ("mock_critic",)
     assert b["robustness"] == ("mock_rob",)
-    assert b["kernel"][0] == "claude"
+    assert b["kernel_agent"][0] == "claude"
 
 
 def test_build_backends_kernel_codex() -> None:
     b = _build(kernel_codex=True)
-    assert b["kernel"][0] == "codex"
+    assert b["kernel_agent"][0] == "codex"
 
 
 def test_build_backends_no_kernel() -> None:
     b = _build(no_kernel=True)
-    assert "kernel" not in b
+    assert "kernel_agent" not in b
 
 
 def test_build_backends_invalid_critic_choice() -> None:

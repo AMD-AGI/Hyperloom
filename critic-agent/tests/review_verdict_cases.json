@@ -7,14 +7,14 @@
       "request_type": "review_verdict",
       "target_proposal_msg_id": "msg_attn_keep_001",
       "trigger": {
-        "source_agent": "kernel",
+        "source_agent": "kernel_agent",
         "kind": "integrate",
         "status": "keep_proposed"
       },
       "action_metadata": {
         "name": "integrate",
         "family": "deep_kernel",
-        "owner": "kernel",
+        "owner": "kernel_agent",
         "accuracy_risk": 1
       },
       "optimization_goal": "Improve tok/s/GPU by replacing the active fused attention kernel for Qwen3-14B on MI355X.",
