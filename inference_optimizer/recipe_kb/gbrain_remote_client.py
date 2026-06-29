@@ -165,17 +165,28 @@ class _GbrainMcp:
                 break
             chunks.append(piece)
             buf += piece
-            # For SSE, one complete ``data:`` record (blank-line terminated, or
-            # at least one full line after a ``data:`` prefix) is all these MCP
-            # calls ever return — stop as soon as we have it.
+            # An SSE event is terminated by a blank line (``\n\n`` or, with CR,
+            # ``\r\n\r\n``). Stop at that boundary — never on a bare ``}``.
+            # gbrain >= 0.41 streams ``text/event-stream`` chunked with no
+            # Content-Length, delivering the JSON-RPC response as a single long
+            # ``data:`` line; a short socket read that happens to land on a
+            # nested ``}`` would otherwise break the loop mid-payload, truncate
+            # the JSON, and surface as a spurious "bad envelope" parse error.
+            if b"\n\n" in buf or b"\r\n\r\n" in buf:
+                break
+            # Non-SSE JSON body with no Content-Length: stop once the buffer
+            # holds a complete JSON value. A real parse (not an
+            # ``endswith('}')`` check) means a short read landing on a nested
+            # ``}`` keeps reading instead of truncating, while a re-emitting
+            # stream cannot duplicate an already-complete payload. EOF (empty
+            # ``piece``) and the wall-clock ``deadline`` bound everything else.
             stripped = buf.strip()
-            if b"\n\n" in buf or (b"data:" in buf and stripped.endswith(b"}")):
-                break
-            # Plain (non-SSE) JSON body with no Content-Length: stop once we
-            # hold a complete top-level object so a non-closing / re-emitting
-            # stream cannot duplicate the payload.
-            if stripped.startswith(b"{") and stripped.endswith(b"}"):
-                break
+            if stripped[:1] in (b"{", b"["):
+                try:
+                    json.loads(stripped)
+                    break
+                except ValueError:
+                    pass
         return b"".join(chunks).decode("utf-8", "replace")
 
     def call(self, tool: str, arguments: dict[str, Any]) -> Any:
@@ -218,8 +229,17 @@ class _GbrainMcp:
             if raw.lstrip().startswith("{"):
                 obj = json.loads(raw)
             else:  # text/event-stream framing
-                data_lines = [l[5:] for l in raw.splitlines() if l.startswith("data:")]
-                obj = json.loads(data_lines[0]) if data_lines else {}
+                # Per the SSE spec a single event may carry multiple ``data:``
+                # lines that the client concatenates with ``\n`` (one optional
+                # leading space after the colon is stripped). gbrain emits one
+                # line today; joining keeps parsing correct if that changes.
+                parts: list[str] = []
+                for line in raw.splitlines():
+                    if line.startswith("data:"):
+                        seg = line[5:]
+                        parts.append(seg[1:] if seg.startswith(" ") else seg)
+                payload = "\n".join(parts)
+                obj = json.loads(payload) if payload.strip() else {}
         except (json.JSONDecodeError, IndexError) as exc:
             raise GbrainRemoteError(f"gbrain {tool} bad envelope: {exc!r}") from exc
         if not isinstance(obj, dict):
