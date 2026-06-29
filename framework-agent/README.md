@@ -62,7 +62,7 @@ inference_optimizer optimize \
 ```
 
 See `inference_optimizer/SKILL.md` "Framework-Agent as Bandit Arm"
-and `inference_optimizer/orchestrator/action_executors/framework.py`.
+and `inference_optimizer/orchestrator/action_executors/framework_agent.py`.
 
 ## Design references
 
