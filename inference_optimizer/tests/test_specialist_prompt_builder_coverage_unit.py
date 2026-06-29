@@ -46,7 +46,7 @@ def test_build_for_each_domain_and_framework(domain_key, framework):
         arch_notes="MoE 8x7B",
         target_gap_notes="competitor at 2x",
         gap_canonical_id="gap.x",
-        gap_layer="kernel",
+        gap_layer="kernel_agent",
         gap_symptom="slow",
         gap_evidence={"k": 1},
     )
@@ -79,7 +79,7 @@ def _rich_inputs(**overrides):
         arch_notes="MoE",
         target_gap_notes="target gap note",
         gap_canonical_id="gap.x",
-        gap_layer="kernel",
+        gap_layer="kernel_agent",
         gap_symptom="slow decode",
         gap_evidence={"step": 1},
         kb_subgraph={"nodes": [1, 2]},

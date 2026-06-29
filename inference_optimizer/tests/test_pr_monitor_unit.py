@@ -150,7 +150,7 @@ def _rich_items():
             "title": " feat ",
             "html_url": "http://pr/1",
             "state": "open",
-            "labels": [{"name": "kernel"}, "perf", None],
+            "labels": [{"name": "kernel_agent"}, "perf", None],
             "author": {"login": "alice"},
             "merged_at": "",
             "updated_at": "t2",

@@ -13,7 +13,7 @@ so a backfilled trace and a live-pushed trace are shaped identically.
 Mapping (trace -> phase span -> agent span -> generation)::
 
     Trace                 = one session
-      phase span          = PRELUDE / EXPLORE / KERNEL / SWEEP / ...
+      phase span          = PRELUDE / EXPLORE / KERNEL_AGENT / SWEEP / ...
         agent span        = component (orchestration / kernel / specialist /
                             critic / geak / oob / proposal_scorer / ...)
           Generation      = one LLM call (llm_calls.jsonl; prompt/response

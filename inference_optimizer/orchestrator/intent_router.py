@@ -288,7 +288,7 @@ class IntentRouter:
         # `approve` and `advise` mean "dispatch may proceed" (advise = proceed
         # with advisory notes). Treat them identically for materialization so an
         # `advise` verdict is not silently dropped (which previously stranded
-        # FRAMEWORK_PR config-lever deliverables — routed but never benched).
+        # FRAMEWORK config-lever deliverables — routed but never benched).
         if verdict in ("approve", "advise"):
             await self._materialize_approved_proposal(pending)
 
@@ -540,7 +540,7 @@ class IntentRouter:
             return
 
         # Programmatic shortcut: run a registered kernel handler inline + emit RESPONSE so a deterministic shell-tool invocation doesn't burn an LLM turn (see kernel_request_handlers.py).
-        if target_agent == "kernel":
+        if target_agent == "kernel_agent":
             handler = get_handler(kind)
             if handler is not None:
                 params = intent.payload.get("params") or {}
@@ -674,7 +674,7 @@ class IntentRouter:
                             duration_s=time.monotonic() - _lc_t0,
                         )
                 await self.bus.append_and_seq(Message.new(
-                    "kernel", source, "response",
+                    "kernel_agent", source, "response",
                     {
                         "in_reply_to": request_msg.msg_id,
                         "kind": f"{kind}_done",
@@ -720,7 +720,7 @@ class IntentRouter:
                                 result["gap_canonical_id"] = payload_gap
                         await self._record_integrate_keep(result)
                     self.shared_state.save(self.session_dir)
-                # Advance the kernel cursor past this request seq so the LLM kernel agent doesn't re-answer it next tick.
+                # Advance the kernel cursor past this request seq so the LLM Kernel-agent doesn't re-answer it next tick.
                 await self.cursors.advance(
                     target_agent,
                     seq=request_msg.seq,
@@ -834,7 +834,7 @@ class IntentRouter:
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
             ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
             PHASE_EXPLORE,
-            PHASE_KERNEL,
+            PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
             is_pause_specialist_hint,
             is_valid_escalate_hint,
@@ -854,7 +854,7 @@ class IntentRouter:
             return
         if hint == ESCALATE_HINT_EXTEND_KERNEL_BUDGET:
             self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
-                self.shared_state.phase_budget_pct, phase=PHASE_KERNEL,
+                self.shared_state.phase_budget_pct, phase=PHASE_KERNEL_AGENT,
             )
             self.shared_state.last_consumed_escalate_hint = hint
             self.shared_state.last_consumed_escalate_hint_ts = now_ts

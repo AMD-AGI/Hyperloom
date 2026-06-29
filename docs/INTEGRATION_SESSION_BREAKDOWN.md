@@ -179,7 +179,7 @@ downstream consumers:
 
 Chronologically ordered events, one per Coordinator action completion.
 Each entry has `action`, `task_id`, `status`, `decision`,
-`key_metric`, optional `kernel_id` (for kernel-owned actions),
+`key_metric`, optional `kernel_id` (for kernel_agent-owned actions),
 optional `workspace`, and an `extras` dict for action-specific payload.
 
 Useful for rendering session-progress timelines and "what changed at

@@ -219,7 +219,7 @@ def test_validator_no_warning_when_execute_star_present_without_user_annotation(
         "traceEvents": [
             {"name": "cpu_op", "ph": "X", "ts": 0, "dur": 1},
             {
-                "name": "kernel",
+                "name": "kernel_agent",
                 "ph": "X",
                 "args": {"label": "execute_16384_context_16(sq16384sk16384)"},
             },
