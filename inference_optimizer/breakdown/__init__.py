@@ -22,6 +22,7 @@ from .exporter import (
     build,
     patch_breakdown_langfuse,
     write_breakdown_json,
+    write_minimal_final_json,
     write_minimal_final_report,
 )
 from .schema import SCHEMA_VERSION
@@ -35,5 +36,6 @@ __all__ = [
     "package_session_artifacts",
     "patch_breakdown_langfuse",
     "write_breakdown_json",
+    "write_minimal_final_json",
     "write_minimal_final_report",
 ]

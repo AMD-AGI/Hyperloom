@@ -944,10 +944,115 @@ def write_minimal_final_report(
     return target
 
 
+def write_minimal_final_json(
+    session_dir: Path | str,
+    *,
+    output_path: Path | str | None = None,
+) -> Path:
+    """Issue #464: crash-safe ``reports/final.json`` fallback for any non-graceful exit.
+
+    The full ``ReportExecutor`` writes ``final.json`` only on the graceful
+    CLOSE step-1 path. When the run is time-exhausted, killed by an external
+    SIGTERM, or the report task itself fails, no machine-readable summary is
+    produced — yet the entire downstream stats/analytics pipeline keys off
+    ``final.json``. This mirror of :func:`write_minimal_final_report` emits a
+    compact JSON summary from ``state.json`` so a consumable result always
+    exists.
+
+    Stays minimal (one SharedState read) so it never raises or blocks
+    shutdown. Idempotent: never overwrites an existing non-empty
+    ``reports/final.json`` (so it can never clobber a full ReportExecutor
+    summary).
+
+    Args:
+        session_dir: The hyperloom session directory.
+        output_path: Destination file; defaults to
+            ``<session_dir>/reports/final.json``.
+
+    Returns:
+        The path of the (existing or newly written) ``final.json`` file.
+    """
+    from datetime import datetime, timezone
+
+    from ..orchestrator.shared_state import SharedState
+    from ..session_paths import reports_dir
+
+    sd = Path(session_dir).resolve()
+    target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Decide whether to keep the existing final.json or (re)write the fallback:
+    #   * full report (``safety_net`` absent/false) -> keep, never clobber it.
+    #   * prior crash-safe fallback (``safety_net: true``) -> refresh: after
+    #     ``--resume`` the old fallback is stale vs the resumed state.json.
+    #   * corrupt / unreadable (e.g. a non-atomic full-report write killed
+    #     mid-flush) -> preserve the bytes as ``final.json.corrupt`` for
+    #     forensics, then overwrite so downstream still gets consumable JSON.
+    if target.exists() and target.stat().st_size > 0:
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            overwrite = isinstance(existing, dict) and existing.get("safety_net") is True
+        except (OSError, json.JSONDecodeError):
+            try:
+                target.replace(target.with_name(target.name + ".corrupt"))
+            except OSError:
+                log.warning("crash-safe final.json: could not back up corrupt %s", target)
+            overwrite = True
+        if not overwrite:
+            return target
+
+    state = SharedState.load_or_init(sd)
+    summary: dict[str, Any] = {
+        # Crash-safe markers: a consumer can distinguish this from the full
+        # ReportExecutor output and know the run did not finish gracefully.
+        "safety_net": True,
+        "report_complete": False,
+        "session_id": state.session_id,
+        "model_name": state.model_name,
+        "model_path": state.model_path,
+        "model_class": state.model_class,
+        "framework": state.framework,
+        "gpu_type": state.gpu_type,
+        "phase": state.phase,
+        "stop_reason": state.stop_reason,
+        "baseline_tput": state.baseline_tput,
+        "baseline_accuracy": state.baseline_accuracy,
+        "current_best": state.current_best,
+        "cumulative_gain": state.cumulative_gain,
+        "cumulative_gain_validated": state.cumulative_gain_validated,
+        "optimization_stack_len": len(state.optimization_stack or []),
+        "crash_count": state.crash_count,
+        "max_minutes": state.max_minutes,
+        "report_generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    fd, tmp = tempfile.mkstemp(
+        prefix=".final.json.",
+        suffix=".tmp",
+        dir=str(target.parent),
+    )
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        tmp_path.write_text(
+            json.dumps(summary, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    log.info("crash-safe final.json: wrote %s", target)
+    return target
+
+
 __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "build",
     "write_breakdown_json",
+    "write_minimal_final_json",
     "write_minimal_final_report",
 ]
