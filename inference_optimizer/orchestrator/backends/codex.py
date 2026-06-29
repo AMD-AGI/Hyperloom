@@ -36,8 +36,7 @@ Reply with EXACTLY ONE JSON object that matches this envelope schema:
 {
   "intents": [
     { "intent_type": "<one of send_message|propose_action|review_verdict|"
-                     "alert|update_state|update_persona|ask_question|"
-                     "answer>",
+                     "alert|update_state>",
       "payload": { /* per-intent fields */ } }
   ]
 }

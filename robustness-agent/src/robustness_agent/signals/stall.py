@@ -83,7 +83,7 @@ def evaluate_stall_signals(
                 },
                 subject={"agent": agent},
                 source="local" if data.coordinator_events else "inbox",
-                suggestion=("force_dispatch the head queued task or escalate strategy if agent remains silent"),
+                suggestion=("escalate strategy if agent remains silent"),
             )
         )
     return out

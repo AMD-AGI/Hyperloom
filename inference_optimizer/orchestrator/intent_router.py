@@ -90,8 +90,6 @@ class IntentRouter:
                 await self._coord._handle_kill_task(source, intent)
             elif it == IntentType.PRUNE_BRANCH:
                 await self._coord._handle_prune_branch(source, intent)
-            elif it == IntentType.FORCE_DISPATCH:
-                await self._coord._handle_force_dispatch(source, intent)
             elif it == IntentType.ESCALATE_STRATEGY_CHANGE:
                 await self._coord._handle_escalate_strategy_change(source, intent)
             elif it == IntentType.SEND_MESSAGE:
@@ -104,7 +102,7 @@ class IntentRouter:
                 # Terminal specialist intent (R3 already validated); handler only bookkeeps. Defense-in-depth.
                 await self._coord._handle_specialist_done(source, intent)
             else:
-                # ASK_QUESTION / ANSWER / UPDATE_PERSONA — record for replay
+                # Unknown / unhandled intent — record for replay (defensive).
                 await self._record_observation(
                     source, "observation",
                     {"intent": it.value, "payload": intent.payload},
@@ -796,22 +794,6 @@ class IntentRouter:
             source, "*", "event",
             {"kind": "prune_branch", "family": family,
              "cancelled_task_ids": cancelled,
-             "reason": intent.payload.get("reason")},
-        ))
-
-    async def _handle_force_dispatch(self, source: str, intent: Intent) -> None:
-        """Handle a ``force_dispatch`` intent by emitting an event.
-
-        Currently this only broadcasts a ``force_dispatch`` event; dispatcher
-        reordering is not yet implemented.
-
-        Args:
-            source: Identifier of the intent's originating agent.
-            intent: The ``force_dispatch`` intent carrying ``task_id``.
-        """
-        await self.bus.append_and_seq(Message.new(
-            source, "*", "event",
-            {"kind": "force_dispatch", "task_id": intent.payload["task_id"],
              "reason": intent.payload.get("reason")},
         ))
 

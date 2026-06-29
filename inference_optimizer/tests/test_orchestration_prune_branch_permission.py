@@ -4,7 +4,7 @@
 
 Orchestration may now emit PRUNE_BRANCH (Roofline-v2 C3) and
 ESCALATE_STRATEGY_CHANGE in addition to the robustness path;
-FORCE_DISPATCH stays robustness-only, and Kernel/Critic cannot emit any.
+Kernel/Critic cannot emit any.
 """
 
 from __future__ import annotations
@@ -71,21 +71,7 @@ def test_robustness_can_still_emit_prune_branch(gate):
     )
 
 
-# Per-intent override widens PRUNE_BRANCH and ESCALATE_STRATEGY_CHANGE;
-# FORCE_DISPATCH stays robustness-only.
-def test_orchestration_cannot_emit_force_dispatch(gate):
-    """FORCE_DISPATCH stays robustness-only — Orchestration's role gate fires first."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.FORCE_DISPATCH,
-                payload={"task_id": "t-1", "reason": "x"},
-            ),
-        )
-    assert exc.value.rule == "role"
-
-
+# Per-intent override widens PRUNE_BRANCH and ESCALATE_STRATEGY_CHANGE.
 def test_orchestration_can_emit_escalate_strategy_change(gate):
     """Orchestration may emit phase-advance hints directly."""
     gate.validate_intent(

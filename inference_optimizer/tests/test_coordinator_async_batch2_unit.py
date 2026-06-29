@@ -1658,7 +1658,6 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
     routes = {
         IntentType.KILL_TASK: "_handle_kill_task",
         IntentType.PRUNE_BRANCH: "_handle_prune_branch",
-        IntentType.FORCE_DISPATCH: "_handle_force_dispatch",
         IntentType.ALERT: "_handle_alert",
         IntentType.UPDATE_STATE: "_handle_update_state",
         IntentType.SPECIALIST_DONE: "_handle_specialist_done",

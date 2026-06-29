@@ -59,7 +59,6 @@ def test_orchestration_permissions():
     assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
     assert IntentType.KILL_TASK not in role.allowed_intents
-    assert IntentType.FORCE_DISPATCH not in role.allowed_intents
     assert IntentType.RESPONSE not in role.allowed_intents
 
 
@@ -83,14 +82,12 @@ def test_critic_review_only_codex_no_tools():
     assert IntentType.REQUEST not in role.allowed_intents
     assert IntentType.PROPOSE_ACTION not in role.allowed_intents
     assert IntentType.KILL_TASK not in role.allowed_intents
-    assert IntentType.FORCE_DISPATCH not in role.allowed_intents
 
 
 def test_robustness_scheduling_police():
     role = default_role_registry()["robustness"]
     assert role.backend_type == BackendType.CLAUDE
     assert IntentType.KILL_TASK in role.allowed_intents
-    assert IntentType.FORCE_DISPATCH in role.allowed_intents
     assert IntentType.PRUNE_BRANCH in role.allowed_intents
     assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
     assert IntentType.PROPOSE_ACTION not in role.allowed_intents
@@ -129,7 +126,6 @@ def test_kill_and_robustness_only_renamed():
     assert ROBUSTNESS_ONLY_SOURCE_ALLOWLIST == frozenset({"robustness"})
     assert ROBUSTNESS_ONLY_INTENTS == frozenset(
         {
-            IntentType.FORCE_DISPATCH,
             IntentType.PRUNE_BRANCH,
             IntentType.ESCALATE_STRATEGY_CHANGE,
         }
@@ -555,16 +551,6 @@ def test_gate_robustness_kill_task_process_scope_rejected(gate):
             ),
         )
     assert exc.value.rule == "kill_scope"
-
-
-def test_gate_robustness_force_dispatch_ok(gate):
-    gate.validate_intent(
-        "robustness",
-        Intent(
-            type=IntentType.FORCE_DISPATCH,
-            payload={"task_id": "t1", "reason": "high value"},
-        ),
-    )
 
 
 def test_gate_robustness_prune_branch_requires_family(gate):

@@ -11792,10 +11792,6 @@ class Coordinator:
         """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
         return await self.router._handle_prune_branch(source, intent)
 
-    async def _handle_force_dispatch(self, source: str, intent: Intent) -> None:
-        """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
-        return await self.router._handle_force_dispatch(source, intent)
-
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
         """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
         return await self.router._handle_escalate_strategy_change(source, intent)

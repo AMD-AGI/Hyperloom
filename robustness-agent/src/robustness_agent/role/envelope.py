@@ -27,15 +27,11 @@ class IntentType(str, Enum):
     DELEGATE = "delegate"
     PROPOSE_ACTION = "propose_action"
     UPDATE_STATE = "update_state"
-    UPDATE_PERSONA = "update_persona"
-    ASK_QUESTION = "ask_question"
-    ANSWER = "answer"
     ALERT = "alert"
     REQUEST = "request"
     RESPONSE = "response"
     REVIEW_VERDICT = "review_verdict"
     KILL_TASK = "kill_task"
-    FORCE_DISPATCH = "force_dispatch"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
     # Robustness never emits this; kept in the mirror for the upstream-contract test.
@@ -49,9 +45,6 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.DELEGATE: ("action_name",),
     IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
     IntentType.UPDATE_STATE: ("changes",),
-    IntentType.UPDATE_PERSONA: ("body_md",),
-    IntentType.ASK_QUESTION: ("topic", "question"),
-    IntentType.ANSWER: ("in_reply_to", "answer"),
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     IntentType.RESPONSE: ("in_reply_to", "kind"),
@@ -60,7 +53,6 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
     # ``policy._validate_review_verdict_payload``.
     IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
     IntentType.KILL_TASK: ("task_id", "reason"),
-    IntentType.FORCE_DISPATCH: ("task_id", "reason"),
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
     # specialist exit envelope; payload validated by
@@ -80,7 +72,6 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
 ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
     {
         IntentType.KILL_TASK,
-        IntentType.FORCE_DISPATCH,
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }
@@ -92,14 +83,10 @@ ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
 ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset(
     {
         IntentType.SEND_MESSAGE,
-        IntentType.ASK_QUESTION,
-        IntentType.ANSWER,
         IntentType.ALERT,
-        IntentType.UPDATE_PERSONA,
         IntentType.UPDATE_STATE,
         IntentType.DELEGATE,
         IntentType.KILL_TASK,
-        IntentType.FORCE_DISPATCH,
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }
@@ -427,29 +414,6 @@ def build_kill_task(task_id: str, reason: str) -> Intent:
     return Intent(
         type=IntentType.KILL_TASK,
         payload={"task_id": task_id, "reason": reason, "scope": "task"},
-    )
-
-
-def build_force_dispatch(task_id: str, reason: str) -> Intent:
-    """Construct a ``force_dispatch`` intent. Robustness-only.
-
-    Args:
-        task_id (str): Non-empty id of the task to force-dispatch.
-        reason (str): Non-empty reason for the force-dispatch.
-
-    Returns:
-        Intent: A ``force_dispatch`` intent.
-
-    Raises:
-        ValueError: If ``task_id`` or ``reason`` is empty.
-    """
-    if not task_id:
-        raise ValueError("force_dispatch task_id must be non-empty")
-    if not reason:
-        raise ValueError("force_dispatch reason must be non-empty")
-    return Intent(
-        type=IntentType.FORCE_DISPATCH,
-        payload={"task_id": task_id, "reason": reason},
     )
 
 

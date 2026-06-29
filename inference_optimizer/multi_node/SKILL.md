@@ -345,7 +345,7 @@ Operator-visible effects:
 * All robustness intents are heartbeats — no `alert(HIGH)`,
   no `escalate_strategy_change`, no `delegate(report)` /
   `delegate(recover)` / `delegate(server_lifecycle)`,
-  no `prune_branch`, no `force_dispatch`, no `kill_task`.
+  no `prune_branch`, no `kill_task`.
 * The `<session_dir>/robustness-workdir/` and
   `<session_dir>/agents/robustness/` directories stay empty (mock
   backend does not write them).
