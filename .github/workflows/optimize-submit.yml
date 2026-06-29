@@ -374,6 +374,10 @@ jobs:
           MATRIX_BATCH_INDEX:     ${{ matrix.batch_index }}
           MATRIX_BATCH_SIZE:      ${{ matrix.batch_size }}
           MATRIX_SOURCE_TASK_ID:  ${{ matrix.task_id }}
+          # HF download count carried from the candidates pool. optimize_submit.py
+          # pins CLAUDE_MODEL=claude-opus-4-6 (via session env) when this is an
+          # int < 100; missing / non-int is a no-op.
+          MATRIX_DOWNLOADS:       ${{ matrix.downloads }}
           OUTPUT_DIR:             ${{ github.workspace }}/submit-output
           ARTIFACTS_DIR:          ${{ github.workspace }}/task-artifacts
           # GitHub-issued, repo-scoped, 7-day token. We embed it into the
@@ -465,6 +469,9 @@ jobs:
           fi
           if [ -n "${MATRIX_SOURCE_TASK_ID:-}" ]; then
             ARGS+=(--pool-source-task-id "${MATRIX_SOURCE_TASK_ID}")
+          fi
+          if [ -n "${MATRIX_DOWNLOADS:-}" ]; then
+            ARGS+=(--downloads "${MATRIX_DOWNLOADS}")
           fi
           ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-420}")
           ARGS+=(--output-dir "${OUTPUT_DIR}")
