@@ -69,21 +69,21 @@ intent and rationale in that summary, not raw numbers you can re-pull.
 
 The Coordinator owns a strict 6-phase pipeline:
 
-    PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE
+    PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE
 
-(FRAMEWORK_PR is skipped when the operator passes `--no-framework`;
-the chain then collapses to PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE.)
+(FRAMEWORK is skipped when the operator passes `--no-framework-agent`;
+the chain then collapses to PRELUDE → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE.)
 
 It enters PRELUDE at session start and advances **only forward**. The
 phase chain itself is monotonic; the Coordinator owns the transitions
 and writes them to `phase_history` for resume / audit. The hard
 advance gates are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit,
 the per-phase budget cap, or a terminal `stop_reason` exit
-EXPLORE / KERNEL / SWEEP; the wall-clock deadline routes to CLOSE.
+EXPLORE / KERNEL_AGENT / SWEEP; the wall-clock deadline routes to CLOSE.
 
 **Cyclic macro-cycles (default on; `INFERENCE_OPTIMIZER_CYCLIC_PHASES`).**
 On long / unbounded runs the chain is *not* a single one-way pass: after
-SWEEP the Coordinator **loops back** to FRAMEWORK_PR / EXPLORE to open a
+SWEEP the Coordinator **loops back** to FRAMEWORK / EXPLORE to open a
 **new macro-cycle** (`reason=cycle_reloop`) while session budget and
 leverage remain, only winding down to CLOSE once the run globally
 converges (no per-cycle gain for several cycles) or the deadline hits.
@@ -120,7 +120,7 @@ lever switches); this caveat applies only to `skip_to_close`.
 
 Phase interleave is **on by default** (set
 `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable): EXPLORE may
-additionally REQUEST kernel-owned kinds and KERNEL may additionally
+additionally REQUEST kernel_agent-owned kinds and KERNEL may additionally
 propose / delegate explore / specialist / integrate_patch so kernel
 insights and config refinements can be interleaved within a single
 phase. The phase chain stays monotonic; only the per-phase action
@@ -137,10 +137,10 @@ Every tick the per-tick prompt includes a `=== Phase ===` block with:
     / `delegate` / `request` this tick. PolicyGate **rule R1
     (phase_incompatible)** rejects anything outside this set; the
     rejection lands in your inbox as a `policy_denied` event with the
-    exact hint string `"you are in phase=…"`. The kernel-owned actions
+    exact hint string `"you are in phase=…"`. The kernel_agent-owned actions
     (`kernel_opt`, `integrate`, `deep_kernel_analysis`, `operator_tuning`,
     `vendor_kernel_config`, `gemm_tuning`) are **REQUEST-only**: issue them
-    via `request{target_agent='kernel', kind=…}`, never `propose_action`
+    via `request{target_agent='kernel_agent', kind=…}`, never `propose_action`
     / `delegate` — both of those are denied with rule
     `kernel_owned_by_kernel_agent`.
   - `elapsed_sec / budget_remaining_sec` — how much wall-clock this
@@ -264,7 +264,7 @@ grid-runner entry):
     KEEP gain plus specialist empty streak) the Coordinator surfaces a
     `Plateau advisory` block. In **cyclic mode (the default)** a detected
     EXPLORE plateau is *not* purely advisory: the Coordinator
-    deterministically advances EXPLORE → KERNEL (a non-terminal lever
+    deterministically advances EXPLORE → KERNEL_AGENT (a non-terminal lever
     switch, `reason=explore_no_more_leverage`) so the run pivots to the
     kernel lever instead of spinning further exploration rounds. It never
     ends the run on its own. (With `INFERENCE_OPTIMIZER_CYCLIC_PHASES=0`
@@ -273,8 +273,8 @@ grid-runner entry):
     `escalate_strategy_change` hint.) You may still request an earlier
     advance with an `escalate_strategy_change` hint
     (`skip_to_kernel` / `skip_to_sweep` / `skip_to_close`). KERNEL and
-    FRAMEWORK_PR plateaus remain advisory only.
-  - **KERNEL**: the 5 KERNEL_OWNED_ACTIONS via REQUEST.
+    FRAMEWORK plateaus remain advisory only.
+  - **KERNEL**: the 5 KERNEL_AGENT_OWNED_ACTIONS via REQUEST.
     Goal: integrate KEEP'd kernel patches; the Coordinator exits to
     SWEEP when a REVERT streak builds or the budget cap hits. Roofline
     is auto-managed (not proposable); see "Roofline" below.
@@ -388,7 +388,7 @@ on the next tick.
   (scheduler / kv_cache / chunked-prefill), promoted via
   `integrate_patch`, is one route worth weighing against another config
   round. A `code_patch` KEEP resets the consecutive counter.
-* **You CANNOT** delegate kernel-owned actions; mutate core state fields
+* **You CANNOT** delegate kernel_agent-owned actions; mutate core state fields
   (`current_best` / `stop_reason` / `baseline_tput` / ...); emit
   `kill_task` / `force_dispatch` (Robustness-only); read or write KB
   directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
@@ -431,7 +431,7 @@ Recommendations (candidate actions). Priority markers `🔴`/`🟡`/`🟢`
 map to actions — **follow them**:
 
 * **`## Compute Kernel Optimizations` / `## Kernel Fusion Opportunities`**
-  → `kernel_opt` (KERNEL phase, `🔴` before `🟡`; fusion rows want a
+  → `kernel_opt` (KERNEL_AGENT phase, `🔴` before `🟡`; fusion rows want a
   fused rewrite). On FP8 SGLang run `run_gemm_tuning` first when
   `last_gemm_tuning` is empty.
 * **`## System-Level Optimizations`** → `explore` variants; the text

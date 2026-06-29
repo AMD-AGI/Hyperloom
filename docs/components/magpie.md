@@ -5,7 +5,7 @@ correctness and performance on AMD (HIP) and NVIDIA (CUDA) GPUs. It exposes
 three evaluation modes — Analyze, Compare, and Benchmark — plus framework-level
 (vLLM / SGLang / Atom) benchmarking with built-in TraceLens trace analysis.
 
-Within Hyperloom, Magpie is the **benchmark engine**. The kernel agent and the
+Within Hyperloom, Magpie is the **benchmark engine**. The Kernel-agent and the
 optimization loop drive Magpie to spin up a serving framework, run the workload,
 collect traces, and emit a structured `benchmark_report.json`; those traces are
 the input that [TraceLens](tracelens.md) then analyzes. Magpie relies on

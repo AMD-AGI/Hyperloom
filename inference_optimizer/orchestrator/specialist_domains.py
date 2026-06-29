@@ -66,12 +66,12 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "Reads sglang/vllm source, focuses on scheduler, cuda graph, "
             "kv cache, batching, chunked prefill, max-num-seqs."
         ),
-        # Upstream PR discovery runs as the standalone FRAMEWORK_PR phase.
+        # Upstream PR discovery runs as the standalone FRAMEWORK_AGENT phase.
     ),
     SpecialistDomain(
         key="kernel_switch_specialist",
         layer="aiter / sglang kernels / triton",
-        kb_anchor="kernel",
+        kb_anchor="kernel_agent",
         pr_repos=("ROCm/aiter", "triton-lang/triton"),
         available_in="M6",
         description=(
@@ -115,7 +115,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         description=(
             "EXPLORE-phase per-gap PR top-up. Surveys PRs across known "
             "repos and feeds refs to other specialists. The bulk pre-scan "
-            "runs in the dedicated FRAMEWORK_PR phase; this domain is for "
+            "runs in the dedicated FRAMEWORK_AGENT phase; this domain is for "
             "narrow follow-ups discovered mid-EXPLORE. Dispatch sparingly "
             "(one every K rounds)."
         ),

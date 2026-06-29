@@ -459,7 +459,7 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel": MockBackend(idle_plan),
+        "kernel_agent": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
         "robustness": MockBackend(idle_plan),
     }
@@ -514,7 +514,7 @@ async def test_cortex_t4_hook_short_circuits_when_sequencer_done(tmp_path: Path)
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel": MockBackend(idle_plan),
+        "kernel_agent": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
         "robustness": MockBackend(idle_plan),
     }
@@ -540,7 +540,7 @@ async def test_cortex_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path)
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel": MockBackend(idle_plan),
+        "kernel_agent": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
         "robustness": MockBackend(idle_plan),
     }

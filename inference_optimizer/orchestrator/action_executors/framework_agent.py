@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""FrameworkPrExecutor — FRAMEWORK_PR phase per-candidate executor.
+"""FrameworkAgentExecutor — FRAMEWORK_AGENT phase per-candidate executor.
 
 Counterpart to :class:`IntegratePatchExecutor`. The Coordinator pump
 enumerates PR candidates via ``fa phase-discover``, gates each through
@@ -15,7 +15,7 @@ the Critic, and dispatches this executor per approved candidate to::
   5. KEEP commits to the live tree (next candidate stacks); REVERT runs
      ``git reset --hard <pre_apply_sha>`` + ``git clean -fd``.
 
-Coordinator-internal: ``framework_pr`` is absent from
+Coordinator-internal: ``framework`` is absent from
 ``PHASE_LLM_PROPOSABLE_ACTIONS`` so PolicyGate R1 denies LLM proposals.
 
 Inputs (``ctx.task.params``)::
@@ -25,7 +25,7 @@ Inputs (``ctx.task.params``)::
     framework (str, optional) — ``"sglang"`` / ``"vllm"``. Falls back to
         ``candidate["framework"]`` then ``$INFERENCE_OPTIMIZER_FRAMEWORK``.
     batch_id (str, optional) — passed back in the result so the phase
-        loop can group ``framework_pr_phase_progress`` entries.
+        loop can group ``framework_agent_phase_progress`` entries.
     patches (list[str], optional) — explicit patch paths. When omitted,
         the executor curls ``candidate.diff_url`` into the per-task
         workspace and applies that.
@@ -96,7 +96,7 @@ from .integrate_patch import (
 from ..kb_writeback import (
     OUTCOME_INTEGRATED,
     OUTCOME_REVERTED_SMOKE_FAIL,
-    write_framework_pr_record,
+    write_framework_record,
 )
 
 
@@ -183,9 +183,9 @@ def _git_commit_keep(
     cp = _run_git_cp(
         [
             "-c",
-            "user.email=framework-pr@hyperloom.local",
+            "user.email=framework@hyperloom.local",
             "-c",
-            "user.name=hyperloom framework_pr",
+            "user.name=hyperloom framework",
             "-C",
             str(framework_root),
             "commit",
@@ -447,8 +447,8 @@ def _materialize_pr_diff_via_worktree(
         )
 
 
-class FrameworkPrExecutor:
-    """ActionRunner for the ``framework_pr`` action (FRAMEWORK_PR phase)."""
+class FrameworkAgentExecutor:
+    """ActionRunner for the ``framework`` action (FRAMEWORK_AGENT phase)."""
 
     def __init__(
         self,
@@ -506,17 +506,17 @@ class FrameworkPrExecutor:
                 "status": "failed",
                 "error_class": "missing_param",
                 "error": (
-                    "framework_pr requires params.candidate (the PR metadata row produced by `fa phase-discover`)"
+                    "framework requires params.candidate (the PR metadata row produced by `fa phase-discover`)"
                 ),
             }
         batch_id = str(params.get("batch_id") or "")
         slug = _candidate_slug(candidate)
 
-        # Per-task workspace under runs/framework_pr/<task_id>/.
+        # Per-task workspace under runs/framework/<task_id>/.
         output_root = Path(
             params.get("output_dir")
             or extra.get("workspace")
-            or runs_dir(self.session_dir, "framework_pr", ctx.task.task_id)
+            or runs_dir(self.session_dir, "framework_agent", ctx.task.task_id)
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
@@ -526,7 +526,7 @@ class FrameworkPrExecutor:
         if framework_root is None:
             return {
                 "status": "apply_failed",
-                "error_class": "no_framework_root",
+                "error_class": "no_framework_agent_root",
                 "error": (
                     "no framework_source_root resolved; cannot apply "
                     "candidate PR. Configure $INFERENCEX_PATH or pass "
@@ -554,7 +554,7 @@ class FrameworkPrExecutor:
                     patch_paths.append(pp.resolve())
                 else:
                     log.warning(
-                        "framework_pr: explicit patch %r not found",
+                        "framework: explicit patch %r not found",
                         p,
                     )
             # Refuse to bench an unpatched tree when every explicit patch
@@ -597,7 +597,7 @@ class FrameworkPrExecutor:
                 framework_root,
             ):
                 log.info(
-                    "framework_pr: candidate repo %r differs from live "
+                    "framework: candidate repo %r differs from live "
                     "framework_root origin; disabling checkout-head, "
                     "using diff_url",
                     candidate.get("repo") or candidate.get("discovered_repo_url"),
@@ -627,7 +627,7 @@ class FrameworkPrExecutor:
                     # Fall back to diff_url so a worktree/fetch hiccup doesn't
                     # strand an otherwise-applyable candidate.
                     log.warning(
-                        "framework_pr: checkout-head failed (%s); falling back to diff_url",
+                        "framework: checkout-head failed (%s); falling back to diff_url",
                         err,
                     )
                     patch_source_mode = "diff_url_fallback"
@@ -679,7 +679,7 @@ class FrameworkPrExecutor:
         stash_state, stash_note = _git_stash_if_dirty(framework_root)
         if stash_state == "failed":
             log.error(
-                "framework_pr: cannot stash user changes in %s: %s; "
+                "framework: cannot stash user changes in %s: %s; "
                 "aborting candidate to avoid data loss",
                 framework_root,
                 stash_note,
@@ -825,7 +825,7 @@ class FrameworkPrExecutor:
         )
         if acc_degraded:
             log.warning(
-                "framework_pr: accuracy gate required but no baseline accuracy; "
+                "framework: accuracy gate required but no baseline accuracy; "
                 "KEEP allowed on throughput only (candidate=%s)",
                 slug,
             )
@@ -876,7 +876,7 @@ class FrameworkPrExecutor:
 
         # KEEP: commit the patches so they survive the next candidate's
         # REJECT (whose pre_apply_sha already includes this commit).
-        keep_message = f"framework_pr KEEP {slug}"
+        keep_message = f"framework KEEP {slug}"
         keep_sha, commit_err = _git_commit_keep(framework_root, keep_message)
         if keep_sha is None:
             # Commit failed — reset to pre_apply_sha so the next candidate
@@ -929,7 +929,7 @@ class FrameworkPrExecutor:
             "workspace": str(output_root),
         })
 
-    # KB writeback: append FRAMEWORK_PR outcome to lessons.jsonl
+    # KB writeback: append FRAMEWORK outcome to lessons.jsonl
     async def _write_kb_record(
         self,
         *,
@@ -939,7 +939,7 @@ class FrameworkPrExecutor:
         patch_path: str,
         extra: dict[str, Any],
     ) -> None:
-        """Append a FRAMEWORK_PR outcome to ``lessons.jsonl`` so the next
+        """Append a FRAMEWORK outcome to ``lessons.jsonl`` so the next
         ``fa phase-discover`` can dedup integrated PRs.
 
         Best-effort: candidates lacking both ``pr_url`` and ``head_sha``
@@ -957,7 +957,7 @@ class FrameworkPrExecutor:
         pr_sha = str(candidate.get("head_sha") or "").strip()
         if not pr_url and not pr_sha:
             log.warning(
-                "framework_pr: candidate lacks pr_url/head_sha; KB writeback skipped",
+                "framework: candidate lacks pr_url/head_sha; KB writeback skipped",
             )
             return
         session_id = ""
@@ -965,7 +965,7 @@ class FrameworkPrExecutor:
         if ss is not None:
             session_id = str(getattr(ss, "cortex_session_id", "") or "")
         try:
-            written = await write_framework_pr_record(
+            written = await write_framework_record(
                 pr_url=pr_url,
                 pr_sha=pr_sha,
                 patch_path=patch_path,
@@ -974,14 +974,14 @@ class FrameworkPrExecutor:
                 session_id=session_id,
             )
             log.info(
-                "framework_pr: wrote KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
+                "framework: wrote KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
                 written,
                 outcome,
                 pr_url,
                 float(tps_delta_pct),
             )
         except Exception as exc:  # noqa: BLE001 — KB write is best-effort
-            log.warning("framework_pr: KB writeback failed: %r", exc)
+            log.warning("framework: KB writeback failed: %r", exc)
 
     # Helpers
     def _revert_patches(
@@ -1010,7 +1010,7 @@ class FrameworkPrExecutor:
         ok, err = _git_reset_hard(framework_root, pre_apply_sha)
         if not ok:
             log.error(
-                "framework_pr: git reset --hard %s failed in %s: %s",
+                "framework: git reset --hard %s failed in %s: %s",
                 pre_apply_sha,
                 framework_root,
                 err,
@@ -1039,7 +1039,7 @@ class FrameworkPrExecutor:
         """
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
-            raise RuntimeError(f"framework_pr bench: config not found at {config_path}")
+            raise RuntimeError(f"framework bench: config not found at {config_path}")
         resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
@@ -1064,14 +1064,14 @@ class FrameworkPrExecutor:
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
             extra_envs=bench_extra_envs or None,
-            out_name="framework_pr.with_envs.yaml",
+            out_name="framework.with_envs.yaml",
         )
 
         variant = GridVariant(
-            name=f"framework-pr-{slug}"[:96],
+            name=f"framework-{slug}"[:96],
             extra_server_args=str(params.get("base_extra_args") or "").strip(),
             extra_envs={},
-            note=f"framework_pr:{slug}",
+            note=f"framework:{slug}",
         )
 
         results: list[VariantResult] = await run_grid(
@@ -1130,16 +1130,16 @@ class FrameworkPrExecutor:
                         float(new_accuracy),
                     )
             except Exception:  # noqa: BLE001
-                log.exception("framework_pr: accuracy gate parse failed; treating as None (gate skipped)")
+                log.exception("framework: accuracy gate parse failed; treating as None (gate skipped)")
 
         return bench, {"accuracy_pass": accuracy_pass}
 
 
-framework_pr_executor = FrameworkPrExecutor
+framework_agent_executor = FrameworkAgentExecutor
 
 
 __all__ = [
     "DEFAULT_DIFF_FETCH_TIMEOUT_SEC",
-    "FrameworkPrExecutor",
-    "framework_pr_executor",
+    "FrameworkAgentExecutor",
+    "framework_agent_executor",
 ]

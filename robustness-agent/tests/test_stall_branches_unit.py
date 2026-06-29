@@ -31,8 +31,8 @@ def test_coerce_unix_variants() -> None:
 def test_collect_last_seen_branches() -> None:
     inbox = [
         _item("user", ts=999.0),  # untracked -> skip (line 113)
-        _item("kernel", ts=50.0),  # tracked -> set (lines 117-119)
-        _item("kernel"),  # no ts -> skip
+        _item("kernel_agent", ts=50.0),  # tracked -> set (lines 117-119)
+        _item("kernel_agent"),  # no ts -> skip
     ]
     events = [
         {"agent": "critic"},  # no ts -> continue (line 127)
@@ -40,7 +40,7 @@ def test_collect_last_seen_branches() -> None:
         {"agent": "user", "ts": 5.0},  # untracked
     ]
     last = _collect_last_seen(inbox, events)
-    assert last == {"kernel": 50.0, "orchestration": 200.0}
+    assert last == {"kernel_agent": 50.0, "orchestration": 200.0}
 
 
 def test_evaluate_stall_emits_high() -> None:

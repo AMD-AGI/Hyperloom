@@ -187,7 +187,7 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
 * `by_component` — per-agent breakdown (orchestration / kernel / critic /
   specialist / proposal_scorer / geak / oob / …), each with the same
   convenience totals.
-* `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_PR / EXPLORE / SWEEP / …).
+* `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / EXPLORE / SWEEP / …).
 * `attribution` — `attributed_to_decisions` vs `unattributed` split plus
   `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
   to a KEEP/REVERT or dynamic_action decision (e.g. specialist subprocess
@@ -228,7 +228,7 @@ window (`MODEL_CONTEXT_WINDOWS`; 200k default), scaled by the fractions below.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE` | off | EXPLORE↔KERNEL phase interleave, **off by default** (matches `origin/main`). Set to `1`/`true`/`yes`/`on` to opt in: EXPLORE may then propose kernel-owned actions and KERNEL may propose the explore triple (`explore`/`specialist`/`integrate_patch`). Default-off keeps phase gating strict. |
+| `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE` | off | EXPLORE↔KERNEL_AGENT phase interleave, **off by default** (matches `origin/main`). Set to `1`/`true`/`yes`/`on` to opt in: EXPLORE may then propose kernel_agent-owned actions and KERNEL may propose the explore triple (`explore`/`specialist`/`integrate_patch`). Default-off keeps phase gating strict. |
 | `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY` | detected GPU count | Max number of GPU-specialist leases (the `gpu_research_lane` pool size). When set it wins (parsed as a non-negative int; `0` disables `needs_gpu=true` dispatch). When unset it defaults to the visible GPU count probed at launch (`detect_gpu_count()`), which honours `ROCR_VISIBLE_DEVICES` → `HIP_VISIBLE_DEVICES` → `CUDA_VISIBLE_DEVICES`, else whole-machine via `rocm-smi`. |
 | `INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES` | derived from mask | Explicit comma/semicolon-separated **absolute** GPU id pool for specialists (capped to capacity). When unset, the pool is derived from the visible-device mask (`ROCR_VISIBLE_DEVICES`, then `HIP`/`CUDA`) so specialists stay on the operator's pinned cards; with no mask set it falls back to `0..capacity-1`. The leased ids are written verbatim into each specialist subprocess's `ROCR_VISIBLE_DEVICES`. |
 

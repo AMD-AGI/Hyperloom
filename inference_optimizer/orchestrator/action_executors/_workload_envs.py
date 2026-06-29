@@ -828,7 +828,7 @@ def materialize_config_with_envs(
     # server_args + extra_envs merges above) so any operator-pinned flag (via
     # extra_server_args, extra_envs, or the YAML) is honored and never doubled.
     # Both are no-ops for vllm/atom. This is the single choke point every
-    # benchmark path (baseline / profile / sweep / explore / framework_pr /
+    # benchmark path (baseline / profile / sweep / explore / framework /
     # conc_sweep) funnels through before the YAML is handed to Magpie, so the
     # flags reach every sglang launch.
     #
@@ -912,7 +912,7 @@ def materialize_config_with_envs(
     # (seen on Kimi-K2 / Qwen3.6 / any custom-code model). Mirror it onto every
     # client-trust env so custom-code models work WITHOUT per-model special-
     # casing. This is the single choke point every bench path (baseline /
-    # profile / sweep / explore / framework_pr / conc_sweep) funnels through.
+    # profile / sweep / explore / framework / conc_sweep) funnels through.
     # setdefault never overrides an operator's deliberate opt-out (e.g.
     # extra_envs={"BENCH_TRUST_REMOTE_CODE": "0"}).
     for _trust_key in (

@@ -601,7 +601,7 @@ BOTTLENECK_DOMAIN_HINTS: dict[str, tuple[str, str]] = {
     "comm": ("comm_specialist", "communication"),
     "host_overhead": ("system_specialist", "systems"),
     "idle": ("system_specialist", "systems"),
-    "compute": ("kernel_switch_specialist", "kernel"),
+    "compute": ("kernel_switch_specialist", "kernel_agent"),
     "memory": ("serving_specialist", "framework"),
 }
 

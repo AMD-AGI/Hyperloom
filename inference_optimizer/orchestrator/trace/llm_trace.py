@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 VALID_COMPONENTS: frozenset[str] = frozenset(
     {
         "orchestration",
-        "kernel",
+        "kernel_agent",
         "dynamic_action",
         "specialist",
         "critic",

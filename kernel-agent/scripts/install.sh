@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-# Kernel Agent installer.
+# Kernel-agent installer.
 #
 # Base install is intentionally small and deterministic:
 #   - ray[default]==2.44.1 + click<8.3.0
@@ -151,7 +151,7 @@ GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 GEAK_REF="${GEAK_REF:-v3.2.2}"
 # e2e whole-pipeline optimizer (formerly the standalone PerfSkills repo). Its
 # code has MIGRATED INTO GEAK on the GEAK_v4 branch (interface/run_e2e.py +
-# e2e_workflow/). Hyperloom calls interface/run_e2e.py at the KERNEL phase when
+# e2e_workflow/). Hyperloom calls interface/run_e2e.py at the KERNEL_AGENT phase when
 # KERNEL_OPT_BACKEND_ORDER=perfskills. This is a SECOND GEAK checkout pinned to the
 # e2e branch, kept SEPARATE from the single-kernel GEAK checkout above. The
 # PERFSKILLS_* names are retained as the stable handle for this optimizer;

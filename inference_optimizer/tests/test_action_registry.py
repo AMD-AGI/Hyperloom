@@ -193,7 +193,7 @@ def test_gate_delegate_unknown_action_rejected(gate_with_registry):
 
 
 def test_gate_delegate_kernel_owned_still_kernel_owned_check(gate_with_registry):
-    """Even with registry wired, kernel-owned actions get the kernel_owned reject."""
+    """Even with registry wired, kernel_agent-owned actions get the kernel_owned reject."""
     with pytest.raises(PolicyDenied) as exc:
         gate_with_registry.validate_intent(
             "orchestration",
