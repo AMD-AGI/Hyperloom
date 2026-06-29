@@ -49,7 +49,7 @@ _TECHNICAL_TERMS = frozenset(
         "pp",
         "fused",
         "fusion",
-        "kernel",
+        "kernel_agent",
         "hipify",
         "rocm",
         "hip",

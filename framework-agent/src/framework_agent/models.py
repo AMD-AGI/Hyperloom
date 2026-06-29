@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Request and result models for framework PR/ref exploration.
+"""Request and result models for framework/ref exploration.
 
 ``ExploreRequest.gap_description`` feeds :mod:`framework_agent.keywords` for
 perf keyword extraction; ``search_modes`` is an ordered tuple of enabled
@@ -157,7 +157,7 @@ class Candidate:
     ``score`` is the gap-relevance score from
     :func:`framework_agent.keywords.score_title_with_anti_signal`; 0.0 when no
     gap-driven ranking happened. Non-load-bearing in fa itself (sort order is
-    preserved by the list); downstream IO ``framework_pr`` logs it.
+    preserved by the list); downstream IO ``framework`` logs it.
     """
 
     ref: str

@@ -85,9 +85,9 @@ def main() -> int:
                 counts[f"proposal:{p.get('action_name')}"] += 1
             elif topic == "delegated_result":
                 counts[f"delegated:{p.get('kind')}:{p.get('state')}"] += 1
-            elif topic == "request" and ta == "kernel":
+            elif topic == "request" and ta == "kernel_agent":
                 counts[f"kernel_request:{p.get('kind')}"] += 1
-            elif topic == "response" and fa == "kernel":
+            elif topic == "response" and fa == "kernel_agent":
                 counts[f"kernel_response:{p.get('kind')}:{p.get('status')}"] += 1
 
     print(json.dumps(dict(counts), indent=2, sort_keys=True))

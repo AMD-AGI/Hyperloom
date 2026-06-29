@@ -36,7 +36,7 @@ def coord(tmp_path: Path) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _BareState()
-    c.role_registry = {"kernel": object()}
+    c.role_registry = {"kernel_agent": object()}
     c._compare_against_gpu = ""
     # Short-circuit ``_target_analysis_baseline_exists`` so the gate doesn't mask the profile-prereq branch under test.
     c._target_analysis_baseline_exists = lambda: True  # type: ignore[assignment]
@@ -68,4 +68,4 @@ def test_sequence_denial_request_no_longer_blocks_on_profile(
     """The request-layer profile-prereq deny was demoted into ``run_optimization_handler``, so kernel requests aren't pre-denied on an empty ``last_profile_trace``."""
     coord.shared_state.last_profile_trace = ""
     coord.shared_state.baseline_tput = 100.0
-    assert coord._sequence_denial_for_request("kernel", req_kind) is None
+    assert coord._sequence_denial_for_request("kernel_agent", req_kind) is None

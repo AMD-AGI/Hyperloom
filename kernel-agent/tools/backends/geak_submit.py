@@ -101,7 +101,7 @@ def _build_cmd(
     # alone never switches scoring. Pass it explicitly when set so kernel_ms scoring
     # is deterministic across the Ray boundary.
     _score_target = os.environ.get("GEAK_SCORE_TARGET", "").strip().lower()
-    if _score_target in {"wall", "kernel"}:
+    if _score_target in {"wall", "kernel_agent"}:
         cmd.extend(["--target", _score_target])
     if kernel_path:
         cmd.extend(["--kernel-path", kernel_path])
@@ -254,7 +254,7 @@ def run_via_ray(
         # GEAK's --target default ("wall") outranks $GEAK_SCORE_TARGET; pass it
         # explicitly so kernel_ms scoring survives the Ray boundary (see _build_cmd).
         _score_target = _os.environ.get("GEAK_SCORE_TARGET", "").strip().lower()
-        if _score_target in {"wall", "kernel"}:
+        if _score_target in {"wall", "kernel_agent"}:
             cmd.extend(["--target", _score_target])
         if kernel_path:
             cmd.extend(["--kernel-path", kernel_path])

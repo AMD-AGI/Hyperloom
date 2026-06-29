@@ -649,7 +649,7 @@ import argparse, importlib.util, math, sys
 import torch
 
 KERNEL_FILE = {kernel_file!r}
-ENTRY_HINTS = ("matmul", "gemm", "mm", "run", "forward", "kernel")
+ENTRY_HINTS = ("matmul", "gemm", "mm", "run", "forward", "kernel_agent")
 
 
 def _load():
@@ -848,7 +848,7 @@ KERNEL_FILE = {kernel_file!r}
 ENTRY_HINTS = (
     "silu_and_mul", "act_and_mul", "gelu_and_mul",
     "silu", "gelu", "relu", "swiglu", "geglu",
-    "forward", "run", "kernel",
+    "forward", "run", "kernel_agent",
 )
 
 

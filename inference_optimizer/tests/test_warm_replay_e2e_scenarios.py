@@ -3,8 +3,8 @@
 Covers:
   C3: Same patch both KEEP and REVERT → REVERT wins (block)
   C4: Anti-pattern from gbrain remote → blocklist correctly populated
-  D1: Framework-PR KEEP → writes prs_tested[KEEP] entry
-  D2: Framework-PR REVERT → writes prs_tested[REVERT] entry
+  D1: Framework KEEP → writes prs_tested[KEEP] entry
+  D2: Framework REVERT → writes prs_tested[REVERT] entry
   D3: Write-back includes applicable_arch + error_class
 """
 from __future__ import annotations
@@ -184,7 +184,7 @@ def test_c4_gbrain_empty_prs_tested_is_safe():
         assert decoded == [] or decoded is None or decoded == []
 
 
-# ─── D1/D2/D3: Framework-PR write-back to prs_tested ────────────────────
+# ─── D1/D2/D3: Framework write-back to prs_tested ────────────────────
 
 
 @dataclass
@@ -196,7 +196,7 @@ class _MockSharedState:
 
 @dataclass
 class _MockCoordinator:
-    """Minimal coordinator surface for testing framework-pr write-back."""
+    """Minimal coordinator surface for testing framework write-back."""
     shared_state: _MockSharedState = field(default_factory=_MockSharedState)
     _local_recipe_row: dict = field(default_factory=dict)
     _amended: list = field(default_factory=list)
@@ -212,7 +212,7 @@ class _MockCoordinator:
         self._amended.append(recipe_overrides or kwargs)
 
 
-def _build_framework_pr_entry(
+def _build_framework_entry(
     coord: _MockCoordinator,
     *,
     status: str,
@@ -222,7 +222,7 @@ def _build_framework_pr_entry(
     repo: str = "ROCm/vllm",
     error_class: str = "",
 ) -> dict:
-    """Simulate the framework-pr result → prs_tested entry construction
+    """Simulate the framework result → prs_tested entry construction
     (mirrors coordinator.py L3077-3115 logic)."""
     from datetime import datetime, timezone
 
@@ -250,12 +250,12 @@ def _build_framework_pr_entry(
     return entry
 
 
-def test_d1_framework_pr_keep_writes_prs_tested():
-    """D1: Framework-PR KEEP result → prs_tested[KEEP] with positive gain."""
+def test_d1_framework_keep_writes_prs_tested():
+    """D1: Framework KEEP result → prs_tested[KEEP] with positive gain."""
     coord = _MockCoordinator(
         _local_recipe_row={"prs_tested": []},
     )
-    _build_framework_pr_entry(
+    _build_framework_entry(
         coord,
         status="kept",
         patch_path="vllm/attention/rocm_flash_attn.py",
@@ -271,12 +271,12 @@ def test_d1_framework_pr_keep_writes_prs_tested():
     assert written[0]["error_class"] == ""
 
 
-def test_d2_framework_pr_revert_writes_prs_tested():
-    """D2: Framework-PR REVERT result → prs_tested[REVERT] with negative gain."""
+def test_d2_framework_revert_writes_prs_tested():
+    """D2: Framework REVERT result → prs_tested[REVERT] with negative gain."""
     coord = _MockCoordinator(
         _local_recipe_row={"prs_tested": []},
     )
-    _build_framework_pr_entry(
+    _build_framework_entry(
         coord,
         status="reverted",
         patch_path="sglang/radix_cache.py",
@@ -302,7 +302,7 @@ def test_d3_writeback_includes_arch_and_error_class():
         ),
         _local_recipe_row={"prs_tested": []},
     )
-    _build_framework_pr_entry(
+    _build_framework_entry(
         coord,
         status="reverted",
         patch_path="vllm/model_executor/moe.py",
@@ -330,7 +330,7 @@ def test_d3_append_to_existing_prs_tested():
     coord = _MockCoordinator(
         _local_recipe_row={"prs_tested": existing},
     )
-    _build_framework_pr_entry(
+    _build_framework_entry(
         coord,
         status="kept",
         patch_path="new_patch.py",

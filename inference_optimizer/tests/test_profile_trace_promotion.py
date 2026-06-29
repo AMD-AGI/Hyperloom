@@ -28,7 +28,7 @@ def _silent_coordinator(session_dir) -> Coordinator:
         session_dir,
         backends={
             "orchestration": MockBackend(silent, name="o"),
-            "kernel": MockBackend(silent, name="k"),
+            "kernel_agent": MockBackend(silent, name="k"),
             "critic": MockBackend(silent, name="c"),
             "robustness": MockBackend(silent, name="r"),
         },

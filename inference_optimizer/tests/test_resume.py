@@ -46,7 +46,7 @@ def _backends_full() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -108,7 +108,7 @@ async def test_replay_rebuilds_undecided_proposals(session_dir):
         "orchestration": MockBackend(
             ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()), name="o"
         ),
-        "kernel": MockBackend(silent, name="k"),
+        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
@@ -179,7 +179,7 @@ async def test_replay_skips_rejected_proposals(session_dir):
             ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()),
             name="o",
         ),
-        "kernel": MockBackend(silent, name="k"),
+        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
@@ -217,7 +217,7 @@ async def test_replay_mixed_pending_and_decided(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     backends = {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel": MockBackend(silent, name="k"),
+        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
@@ -281,7 +281,7 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     backends = {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel": MockBackend(silent, name="k"),
+        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
@@ -319,7 +319,7 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     backends = {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel": MockBackend(silent, name="k"),
+        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }

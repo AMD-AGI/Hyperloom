@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Workload renderer — model / framework / GPU / shape / objective."""
+"""Workload renderer — model / framework name / GPU / shape / objective."""
 
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ from ..base import RenderedSection, md_kv_list, register_renderer
 
 @register_renderer("workload")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the workload section: model / framework / GPU / shape / objective.
+    """Render the workload section: model / framework name / GPU / shape / objective.
 
-    Surfaces the model and framework identity, GPU type, request shape
+    Surfaces the model and framework name, GPU type, request shape
     (tp / conc / isl / osl / max_model_len / precision) and objective,
     warning when the GPU type is missing. Skipped when neither model nor
-    framework is present.
+    framework name is present.
 
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
@@ -29,7 +29,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     warnings: list[str] = []
 
     model = w.get("model_name") or ""
-    fw = w.get("framework") or ""
+    fw = w.get("framework_name") or ""
     fw_v = w.get("framework_version") or ""
     gpu = w.get("gpu_type") or ""
     tp = w.get("tp")
@@ -59,7 +59,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("model_name", model),
             ("model_path", w.get("model_path")),
             ("model_class", w.get("model_class")),
-            ("framework", fw),
+            ("framework_name", fw),
             ("framework_version", fw_v or None),
             ("gpu_type", gpu or None),
             ("tp", tp),

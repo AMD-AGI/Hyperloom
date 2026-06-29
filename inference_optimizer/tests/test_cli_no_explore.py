@@ -25,7 +25,7 @@ def test_no_explore_flag_sets_true():
 
 
 def test_no_explore_has_no_env_fallback(monkeypatch):
-    # Unlike --no-framework, --no-explore does not read an env var.
+    # Unlike --no-framework-agent, --no-explore does not read an env var.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NO_EXPLORE", "1")
     args = _parse_optimize([])
     assert getattr(args, "no_explore") is False
@@ -58,7 +58,7 @@ def _apply_resume_writeback(state: _ResumeStateStub, args: _ArgsStub) -> str:
         msg = "DISABLED_PERSISTED"
     elif bool(getattr(args, "no_explore", False)):
         cur_phase = (getattr(state, "phase", "") or "").strip().upper()
-        if cur_phase in ("", "PRELUDE", "FRAMEWORK_PR"):
+        if cur_phase in ("", "PRELUDE", "FRAMEWORK_AGENT"):
             state.explore_enabled = False
             msg = "DISABLING_RESUME"
         else:
@@ -73,8 +73,8 @@ def test_resume_writeback_disables_state_when_prelude_and_flag_passed():
     assert state.explore_enabled is False
 
 
-def test_resume_writeback_allows_disable_in_framework_pr():
-    state = _ResumeStateStub(explore_enabled=True, phase="FRAMEWORK_PR")
+def test_resume_writeback_allows_disable_in_framework():
+    state = _ResumeStateStub(explore_enabled=True, phase="FRAMEWORK_AGENT")
     args = _ArgsStub(no_explore=True)
     assert _apply_resume_writeback(state, args) == "DISABLING_RESUME"
     assert state.explore_enabled is False
@@ -88,7 +88,7 @@ def test_resume_writeback_warns_when_already_in_explore():
 
 
 def test_resume_writeback_honours_persisted_disable_over_flag_absent():
-    state = _ResumeStateStub(explore_enabled=False, phase="KERNEL")
+    state = _ResumeStateStub(explore_enabled=False, phase="KERNEL_AGENT")
     args = _ArgsStub(no_explore=False)
     assert _apply_resume_writeback(state, args) == "DISABLED_PERSISTED"
     assert args.no_explore is True
