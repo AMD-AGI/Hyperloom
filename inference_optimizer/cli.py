@@ -4415,22 +4415,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
     opt.add_argument("--kernel-prompt", type=str, default=None, help="Override Kernel system prompt")
-    # Cortex KB integration flags
-    # Defaults wire Cortex on. --degraded-kb bypasses KB hooks; --cortex-kb-url overrides $CORTEX_KB_URL;
-    # --cortex-strict-fingerprint requires the manifest stack_fingerprint to match before warm_start.
+    # Cortex KB flag (Critic agent only)
+    # --degraded-kb bypasses KB hooks; --cortex-kb-url overrides $CORTEX_KB_URL.
     opt.add_argument(
         "--cortex-kb-url",
         dest="cortex_kb_url",
         type=str,
         default=None,
-        help="Remote recipe-snapshot KB URL (read-only) for this run; "
-        "also settable via $CORTEX_KB_URL. Leave it UNSET to run "
-        "fully local — there is no default endpoint, so the "
-        "optimizer never connects to a remote KB unless you pass "
-        "this explicitly. Writes always go to --local-kb-root "
-        "regardless; an explicitly-configured but unreachable URL "
-        "degrades the dispatcher to local-only transparently (no "
-        "need to also pass --degraded-kb).",
+        help="Cortex KB base URL for this run, used only by the Critic "
+        "agent's per-proposal assess enrichment (/v2/reasoning/assess); "
+        "also settable via $CORTEX_KB_URL. This is NOT the recipe KB — "
+        "recipe reads are served by gbrain ($GBRAIN_*) and writes always "
+        "go to --local-kb-root. Leave it UNSET to skip Critic assess "
+        "enrichment entirely.",
     )
     opt.add_argument(
         "--specialist-kb-mcp-url",
