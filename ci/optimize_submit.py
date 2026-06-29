@@ -1212,8 +1212,11 @@ class SafeOptimizeClient:
         # Optional session-scoped env forwarded to SaFE (body.env). SaFE relays
         # it to Claw as session_env, injected into the sandbox so the
         # inference_optimizer process sees it (e.g. CLAUDE_MODEL override).
+        # Logged so each CI job records exactly which session env it submitted,
+        # making "did the env reach Claw" verifiable from the job log alone.
         if env:
             body["env"] = env
+            log.info("[%s] session env forwarded to SaFE: %s", display_name, env)
         attempts = 8
         # Captured before the first POST so the dedup lookup only matches a task
         # this call created (not an unrelated older one for the same model).
