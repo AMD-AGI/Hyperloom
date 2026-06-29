@@ -7,19 +7,19 @@ name: optimize-sub100-part1
 # engine). Resolves the next batch via ci/batch_rotate.py and forwards it to
 # `SaFE Optimize Submit` (optimize-submit.yml) — same shape as part2/part3.
 #
-#   pool   = $WEKAFS_CHENYI_DIR/ci-candidates/hf_sub100_part1_20260628.json
+#   pool   = $WEKAFS_CHENYI_DIR/ci-candidates/hf_sub100_part1_20260629.json
 #   batch  = 240 (= max_parallel; a batch always runs fully in parallel)
 #   budget = max_hours 6 (== cron period)
 #
-# Cadence: every 6h at UTC 00:07 / 06:07 / 12:07 / 18:07 (Beijing 08/14/20/02) —
-# identical to the old optimize-submit schedule. Minute :07 dodges GitHub's
-# congested top-of-hour cron queue. INVARIANT: cron period == MAX_HOURS (6h).
+# Cadence: every 6h at UTC 12:30 / 18:30 / 00:30 / 06:30 (Beijing 20:30 / 02:30 /
+# 08:30 / 14:30). First fire 12:30Z = Beijing 20:30 -> batch 0 (anchored
+# 2026-06-29 12:00Z = Beijing 20:00). INVARIANT: cron period == MAX_HOURS (6h).
 
 on:
   schedule:
-    # Beijing 10/16/22/04 (UTC 02/08/14/20), :07 minute. First fire 08:07Z =
-    # Beijing 16:07 -> batch 0 (anchored 2026-06-28 08:00Z). Every 6h == MAX_HOURS.
-    - cron: '7 2,8,14,20 * * *'
+    # Beijing 20:30 / 02:30 / 08:30 / 14:30 (UTC 12:30 / 18:30 / 00:30 / 06:30).
+    # First fire 12:30Z -> batch 0 (anchor 2026-06-29 12:00Z). Every 6h == MAX_HOURS.
+    - cron: '30 0,6,12,18 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
@@ -49,8 +49,8 @@ jobs:
       # Off-repo pool on /wekafs (the /wekafs root lives in the WEKAFS_CHENYI_DIR
       # secret; generate_hf_matrix reads the absolute path as-is, and the
       # hyperloom runners RO-mount /wekafs).
-      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/hf_sub100_part1_20260628.json', secrets.WEKAFS_CHENYI_DIR) }}
-      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/hf_sub100_part1_20260628.json', secrets.WEKAFS_CHENYI_DIR) }}
+      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/hf_sub100_part1_20260629.json', secrets.WEKAFS_CHENYI_DIR) }}
+      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/hf_sub100_part1_20260629.json', secrets.WEKAFS_CHENYI_DIR) }}
       # One batch = 240 models, all run concurrently. BATCH_SIZE doubles as the
       # max_parallel (a batch always runs fully in parallel).
       BATCH_SIZE: '240'
@@ -76,17 +76,16 @@ jobs:
           # Same max_hours-paced rotation as the sibling pools (ci/batch_rotate.py,
           # unit-tested): one batch advances per MAX_HOURS of wall-clock time since
           # the anchor, auto-rotating on schedule and honoring an explicit
-          # batch_index on manual dispatch. ANCHOR 2026-06-26 12:00Z is INHERITED
-          # from the old built-in optimize-submit schedule (generate_hf_matrix's
-          # _CRON_ANCHOR_UTC) so this pool CONTINUES the rotation already in
-          # progress instead of restarting at batch 0 and re-running done batches.
+          # batch_index on manual dispatch. ANCHOR 2026-06-29 12:00Z (Beijing
+          # 20:00) restarts THIS pool's sweep at batch 0 on the first fire
+          # (12:30Z = Beijing 20:30) for the freshly-split part1 pool.
           n=$(python3 -c "import json,os;print(len(json.load(open(os.environ['CANDIDATES_PATH'])).get('candidates') or []))")
           out=$(python3 ci/batch_rotate.py \
             --count "${n}" \
             --batch-size "${BATCH_SIZE}" \
             --batch-index "${INPUT_BATCH_INDEX:-}" \
             --max-hours "${MAX_HOURS}" \
-            --anchor "2026-06-28T08:00:00+00:00" \
+            --anchor "2026-06-29T12:00:00+00:00" \
             --event "${EVENT}")
           bi=$(echo "$out" | cut -f1); pool=$(echo "$out" | cut -f2)
           batches=$(echo "$out" | cut -f3); start=$(echo "$out" | cut -f4); end=$(echo "$out" | cut -f5)
