@@ -69,14 +69,57 @@ def test_mcp_call_bad_json_envelope(monkeypatch) -> None:
 def test_mcp_call_event_stream_framing_non_dict(monkeypatch) -> None:
     # text/event-stream body whose first data line decodes to a list ->
     # unexpected envelope type guard.
-    _patch_raw(monkeypatch, "data: [1, 2, 3]\n")
+    _patch_raw(monkeypatch, "data: [1, 2, 3]\n\n")
     with pytest.raises(GbrainRemoteError, match="unexpected envelope type"):
         _mcp().call("list_pages", {})
 
 
 def test_mcp_call_event_stream_returns_parsed_content(monkeypatch) -> None:
-    body = 'data: {"jsonrpc":"2.0","id":"1","result":{"content":[{"text":"{\\"ok\\": true}"}]}}\n'
+    body = 'data: {"jsonrpc":"2.0","id":"1","result":{"content":[{"text":"{\\"ok\\": true}"}]}}\n\n'
     _patch_raw(monkeypatch, body)
+    assert _mcp().call("get_page", {}) == {"ok": True}
+
+
+def test_mcp_call_event_stream_short_read_on_brace_not_truncated(monkeypatch) -> None:
+    # Regression: gbrain >= 0.41 streams the JSON-RPC response as a single long
+    # ``data:`` line (text/event-stream, chunked, no Content-Length) ending with
+    # a blank-line terminator. A socket short read that lands on an internal
+    # ``}`` must keep reading instead of truncating mid-JSON (which previously
+    # surfaced as a spurious "bad envelope" parse error).
+    inner = (
+        '{"jsonrpc":"2.0","id":"1","result":'
+        '{"content":[{"text":"{\\"ok\\": true}"}]}}'
+    )
+    body = ("event: message\ndata: " + inner + "\n\n").encode()
+    stop = body.index(b"}") + 1  # first read ends on an internal brace
+
+    class _ChunkResp:
+        def __init__(self, data: bytes, stop_at: int) -> None:
+            self._d = data
+            self._p = 0
+            self._stop = stop_at
+            self.headers = {"Content-Type": "text/event-stream"}
+
+        def read(self, n: int = 4096) -> bytes:
+            if self._p == 0:
+                chunk = self._d[: self._stop]
+                self._p = self._stop
+                return chunk
+            chunk = self._d[self._p : self._p + n]
+            self._p += len(chunk)
+            return chunk
+
+        def __enter__(self) -> "_ChunkResp":
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        grc.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _ChunkResp(body, stop),
+    )
     assert _mcp().call("get_page", {}) == {"ok": True}
 
 
