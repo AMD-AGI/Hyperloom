@@ -980,8 +980,20 @@ def write_minimal_final_json(
     sd = Path(session_dir).resolve()
     target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.json"
     target.parent.mkdir(parents=True, exist_ok=True)
+    # Skip only when a *full* report already exists — never clobber the real
+    # ReportExecutor output. A prior crash-safe fallback (``safety_net: true``)
+    # is intentionally refreshed: after ``--resume`` the old fallback is stale
+    # relative to the resumed state.json, so a later non-graceful exit must be
+    # allowed to rewrite it. Unreadable/garbled JSON is treated as a full
+    # report (left untouched) so we never overwrite something we can't parse.
     if target.exists() and target.stat().st_size > 0:
-        return target
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            is_stale_fallback = isinstance(existing, dict) and existing.get("safety_net") is True
+        except (OSError, json.JSONDecodeError):
+            is_stale_fallback = False
+        if not is_stale_fallback:
+            return target
 
     state = SharedState.load_or_init(sd)
     summary: dict[str, Any] = {

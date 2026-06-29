@@ -188,6 +188,29 @@ def test_write_minimal_final_json_idempotent(tmp_path):
     assert json.loads(again.read_text(encoding="utf-8")) == {"full_report": True}
 
 
+def test_write_minimal_final_json_refreshes_stale_fallback(tmp_path):
+    # A prior crash-safe fallback (safety_net=true) is stale after --resume and
+    # must be overwritten with the current state, NOT preserved.
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "final.json").write_text(
+        '{"safety_net": true, "stop_reason": "time_exhausted", "baseline_tput": 1.0}',
+        encoding="utf-8",
+    )
+
+    state = SharedState.load_or_init(tmp_path)
+    state.set_stop_reason("signal")
+    state.baseline_tput = 42.0
+    state.save(tmp_path)
+
+    again = ex.write_minimal_final_json(tmp_path)
+    data = json.loads(again.read_text(encoding="utf-8"))
+    assert data["stop_reason"] == "signal"
+    assert data["baseline_tput"] == 42.0
+
+
 def test_write_minimal_final_json_fields(tmp_path):
     from inference_optimizer.orchestrator.shared_state import SharedState
 
