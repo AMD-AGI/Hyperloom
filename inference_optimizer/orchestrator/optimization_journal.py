@@ -40,6 +40,7 @@ KIND_KERNEL_FILE: str = "kernel_file"  # kernel-opt patch on a specific file
 KIND_INTEGRATE: str = "integrate"  # framework PR / patch integration
 KIND_BASELINE: str = "baseline"
 KIND_PROFILE: str = "profile"
+KIND_GEMM_TUNING: str = "gemm_tuning"  # adopted GEMM-tuning run (GEAK / forge)
 KIND_OTHER: str = "other"
 
 
@@ -489,6 +490,7 @@ __all__ = [
     "KIND_BACKEND",
     "KIND_BASELINE",
     "KIND_ENV",
+    "KIND_GEMM_TUNING",
     "KIND_INTEGRATE",
     "KIND_KERNEL_FILE",
     "KIND_OTHER",
