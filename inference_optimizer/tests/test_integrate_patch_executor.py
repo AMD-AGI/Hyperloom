@@ -141,20 +141,20 @@ def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
 # G2 — force RUN_EVAL for framework-authored source patches (only with a baseline)
 def test_framework_run_eval_envs_forces_for_authored_with_baseline():
     assert IntegratePatchExecutor._framework_run_eval_envs(
-        {"framework_pr_authoring": True, "accuracy_baseline": 0.8}
+        {"framework_agent_authoring": True, "accuracy_baseline": 0.8}
     ) == {"RUN_EVAL": "true"}
     assert IntegratePatchExecutor._framework_run_eval_envs(
-        {"framework_pr_candidate_id": "c1", "accuracy_baseline": 0.8}
+        {"framework_agent_candidate_id": "c1", "accuracy_baseline": 0.8}
     ) == {"RUN_EVAL": "true"}
 
 
 def test_framework_run_eval_envs_no_force_without_baseline():
     # baseline eval never produced a score -> nothing to gate against -> don't
-    # force eval on the candidate (matches the framework_pr path / G1 degrade).
-    assert IntegratePatchExecutor._framework_run_eval_envs({"framework_pr_authoring": True}) is None
+    # force eval on the candidate (matches the framework path / G1 degrade).
+    assert IntegratePatchExecutor._framework_run_eval_envs({"framework_agent_authoring": True}) is None
     assert (
         IntegratePatchExecutor._framework_run_eval_envs(
-            {"framework_pr_authoring": True, "accuracy_baseline": 0.0}
+            {"framework_agent_authoring": True, "accuracy_baseline": 0.0}
         )
         is None
     )

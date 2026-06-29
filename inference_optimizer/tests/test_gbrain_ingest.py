@@ -20,7 +20,7 @@ def _recipe(**over: Any) -> dict[str, Any]:
         "canonical_id": "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:0_5_11:fp8",
         "model": "Qwen3-32B",
         "hardware": "mi300x",
-        "framework": "sglang",
+        "framework_name": "sglang",
         "framework_version": "0_5_11",
         "precision": "fp8",
         "best_config": {"extra_server_args": "--cuda-graph-max-bs 256", "FOO": "1"},
@@ -58,7 +58,7 @@ def test_recipe_to_page_roundtrips_via_reader() -> None:
         "attrs": {
             "model": "Qwen3-32B",
             "hardware": "mi300x",
-            "framework": "sglang",
+            "framework_name": "sglang",
             "framework_version": "0_5_11",
             "precision": "fp8",
             "best_config_args": "--cuda-graph-max-bs 256",
@@ -202,7 +202,7 @@ def test_ingest_counts_and_gates(monkeypatch) -> None:
         _recipe(),
         _recipe(canonical_id="inference:a:b:c:d:e", best_config={}),  # anchor -> mirror
         _recipe(canonical_id="", best_config={}),  # no cid -> skip
-        _recipe(canonical_id="inference:m2:mi355x:vllm:v1:fp16", model="m2", hardware="mi355x", framework="vllm"),
+        _recipe(canonical_id="inference:m2:mi355x:vllm:v1:fp16", model="m2", hardware="mi355x", framework_name="vllm"),
     ]
     mcp = _FakeMcp()
     stats = ingest_local_to_gbrain(recipes=recipes, mcp=mcp, dry_run=False)

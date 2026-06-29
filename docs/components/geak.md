@@ -9,7 +9,7 @@ for its agent loop and environment tooling.
 
 Within Hyperloom, GEAK is one of the kernel-rewrite backends: when a hot kernel
 is identified, it is optimized asynchronously through GEAK (alongside the OOB
-kernel-optimization path that uses Claude Code / OpenAI Codex). The kernel agent
+kernel-optimization path that uses Claude Code / OpenAI Codex). The Kernel-agent
 dispatches GEAK runs through Ray so multiple candidates can be explored in
 parallel on the cluster's GPUs.
 
@@ -114,7 +114,7 @@ For the full CLI reference and examples, see the
 
 ## Role in Hyperloom
 
-GEAK is wired in as a kernel-rewrite backend of the kernel agent:
+GEAK is wired in as a kernel-rewrite backend of the Kernel-agent:
 
 - `kernel-agent/tools/kernel_optimization.py` selects the backend ladder
   (defaulting to `forge,geak,claude,codex,cursor` (Forge-GEAK-OOB); `cursor` is

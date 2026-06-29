@@ -26,13 +26,13 @@ from .orchestrator.action_executors import (
     session_breakdown_executor,
     sweep_executor,
 )
-from .orchestrator.action_executors.framework_pr import FrameworkPrExecutor
+from .orchestrator.action_executors.framework_agent import FrameworkAgentExecutor
 from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
 from .orchestrator.action_executors.profile import profile_executor
 from .orchestrator.action_executors.roofline import make_roofline_executor
 from .orchestrator.backends import ClaudeBackend
 from .orchestrator.framework_paths import resolve_source_file_allowlist
-from .protocol.action_surfaces import KERNEL_OWNED_ACTIONS
+from .protocol.action_surfaces import KERNEL_AGENT_OWNED_ACTIONS
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
     from .orchestrator.coordinator import Coordinator
@@ -77,9 +77,9 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "recover": recover_executor,
 }
 
-# Kernel-owned kinds (dispatched via request{target_agent='kernel'}); no-op
+# Kernel-owned kinds (dispatched via request{target_agent='kernel_agent'}); no-op
 # executors here so SubAgentRunner doesn't raise no_executor on a stale task.
-_NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = tuple(sorted(KERNEL_OWNED_ACTIONS))
+_NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = tuple(sorted(KERNEL_AGENT_OWNED_ACTIONS))
 
 
 def _build_specialist_executor(
@@ -234,13 +234,13 @@ def _register_executors(
     specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
 ) -> None:
     """Wire all available action executors onto ``coordinator``: the
-    _REAL_EXECUTORS_FULL set, kernel-owned no-ops (skipped when no_kernel),
+    _REAL_EXECUTORS_FULL set, kernel_agent-owned no-ops (skipped when no_kernel),
     the always-wired Coordinator-internal executors, and the optional
     specialist executor.
 
     Args:
         coordinator: The live Coordinator to register executors on.
-        no_kernel: When True, skip wiring the kernel-owned no-op executors.
+        no_kernel: When True, skip wiring the kernel_agent-owned no-op executors.
         compare_against_gpu: Optional GPU type for the target-analysis executor.
         session_dir: Optional session directory passed to executors.
         specialist_executor: Optional specialist executor to register.
@@ -266,10 +266,10 @@ def _register_executors(
         IntegratePatchExecutor(session_dir=session_dir),
     )
 
-    # FRAMEWORK_PR per-candidate executor — Coordinator-internal only.
+    # FRAMEWORK per-candidate executor — Coordinator-internal only.
     coordinator.sub.register_executor(
-        "framework_pr",
-        FrameworkPrExecutor(session_dir=session_dir),
+        "framework",
+        FrameworkAgentExecutor(session_dir=session_dir),
     )
 
     # roofline (profile + trace_analyze): auto-enqueued at PRELUDE + each 10%

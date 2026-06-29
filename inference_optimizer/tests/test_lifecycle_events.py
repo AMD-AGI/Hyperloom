@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from inference_optimizer.orchestrator.phase_state import (
     LIFECYCLE_STATUSES,
-    PHASE_KERNEL,
+    PHASE_KERNEL_AGENT,
     lifecycle_label,
     make_lifecycle_event,
 )
@@ -48,8 +48,8 @@ def test_lifecycle_label_resolves_human_labels():
 
 def test_lifecycle_label_falls_back_to_phase_then_verbatim():
     # A bare phase name resolves to its human label ...
-    assert lifecycle_label("KERNEL") == "Kernel optimization"
-    assert lifecycle_label("kernel") == "Kernel optimization"
+    assert lifecycle_label("KERNEL_AGENT") == "Kernel optimization"
+    assert lifecycle_label("kernel_agent") == "Kernel optimization"
     # ... and an unmapped name is returned verbatim (never empty).
     assert lifecycle_label("some_new_step") == "some_new_step"
     assert lifecycle_label("") == ""
@@ -59,7 +59,7 @@ def test_make_lifecycle_event_shape():
     event = make_lifecycle_event(
         step="trace_analyze",
         status="start",  # lower-cased on purpose
-        phase="kernel",  # lower-cased on purpose
+        phase="kernel_agent",  # lower-cased on purpose
         label=None,  # default from step
         artifacts={"out_dir": "/tmp/run", "empty": "", "none": None},
         detail="  starting  ",
@@ -69,7 +69,7 @@ def test_make_lifecycle_event_shape():
     )
     assert event["seq"] == 3
     assert event["ts"] == "2026-06-09T00:00:00+00:00"
-    assert event["phase"] == "KERNEL"  # upper-cased
+    assert event["phase"] == "KERNEL_AGENT"  # upper-cased
     assert event["step"] == "trace_analyze"
     assert event["label"] == "TraceLens"  # defaulted from step
     assert event["status"] == "START"  # upper-cased
@@ -107,7 +107,7 @@ def test_lifecycle_statuses_enum():
 # ===========================================================================
 def test_record_lifecycle_event_appends_and_defaults_phase():
     s = SharedState(session_id="abc")
-    s.phase = PHASE_KERNEL
+    s.phase = PHASE_KERNEL_AGENT
     row = s.record_lifecycle_event(
         step="run_optimization",
         status="START",
@@ -116,7 +116,7 @@ def test_record_lifecycle_event_appends_and_defaults_phase():
     )
     assert len(s.lifecycle) == 1
     assert row is s.lifecycle[0]
-    assert row["phase"] == "KERNEL"  # defaulted from current phase
+    assert row["phase"] == "KERNEL_AGENT"  # defaulted from current phase
     assert row["label"] == "GEAK"  # defaulted from step
     assert row["status"] == "START"
     assert row["artifacts"] == {"workspace": "/tmp/ws"}
@@ -125,7 +125,7 @@ def test_record_lifecycle_event_appends_and_defaults_phase():
 
 def test_record_lifecycle_event_explicit_phase_and_label_override():
     s = SharedState(session_id="abc")
-    s.phase = PHASE_KERNEL
+    s.phase = PHASE_KERNEL_AGENT
     row = s.record_lifecycle_event(
         step="custom",
         status="END",
@@ -156,7 +156,7 @@ def test_record_lifecycle_event_monotonic_seq_and_cap():
 
 def test_lifecycle_persists_round_trip(tmp_path):
     s = SharedState(session_id="abc")
-    s.phase = PHASE_KERNEL
+    s.phase = PHASE_KERNEL_AGENT
     s.record_lifecycle_event(
         step="trace_analyze",
         status="END",

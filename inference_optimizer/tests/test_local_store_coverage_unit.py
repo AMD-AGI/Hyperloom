@@ -11,11 +11,11 @@ from inference_optimizer.recipe_kb import local_store as ls
 from inference_optimizer.recipe_kb.canonical_id import canonical_id_from_components
 
 
-def _cid(model="m", hardware="mi300", framework="sglang", framework_version="v1", precision="fp8") -> str:
+def _cid(model="m", hardware="mi300", framework_name="sglang", framework_version="v1", precision="fp8") -> str:
     return canonical_id_from_components(
         model=model,
         hardware=hardware,
-        framework=framework,
+        framework_name=framework_name,
         framework_version=framework_version,
         precision=precision,
     )

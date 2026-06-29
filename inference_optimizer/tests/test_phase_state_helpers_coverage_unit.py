@@ -150,7 +150,7 @@ def test_session_remaining_seconds() -> None:
 def test_interleave_kernel_strips_explore_when_disabled() -> None:
     # interleave ON, explore_enabled default True: KERNEL gets the explore triple.
     full = ps.llm_proposable_actions_for_with_interleave(
-        ps.PHASE_KERNEL,
+        ps.PHASE_KERNEL_AGENT,
         interleave=True,
     )
     assert "explore" in full
@@ -159,7 +159,7 @@ def test_interleave_kernel_strips_explore_when_disabled() -> None:
 
     # --no-explore: KERNEL loses `explore` but keeps specialist/integrate_patch.
     stripped = ps.llm_proposable_actions_for_with_interleave(
-        ps.PHASE_KERNEL,
+        ps.PHASE_KERNEL_AGENT,
         interleave=True,
         explore_enabled=False,
     )
@@ -167,7 +167,7 @@ def test_interleave_kernel_strips_explore_when_disabled() -> None:
     assert "specialist" in stripped
     assert "integrate_patch" in stripped
 
-    # EXPLORE phase extras (kernel-owned) are unaffected by explore_enabled.
+    # EXPLORE phase extras (kernel_agent-owned) are unaffected by explore_enabled.
     explore_set = ps.llm_proposable_actions_for_with_interleave(
         ps.PHASE_EXPLORE,
         interleave=True,
@@ -179,7 +179,7 @@ def test_interleave_kernel_strips_explore_when_disabled() -> None:
     assert (
         ps.is_action_llm_proposable_in_phase_with_interleave(
             "explore",
-            ps.PHASE_KERNEL,
+            ps.PHASE_KERNEL_AGENT,
             interleave=True,
             explore_enabled=False,
         )
@@ -188,7 +188,7 @@ def test_interleave_kernel_strips_explore_when_disabled() -> None:
     assert (
         ps.is_action_llm_proposable_in_phase_with_interleave(
             "specialist",
-            ps.PHASE_KERNEL,
+            ps.PHASE_KERNEL_AGENT,
             interleave=True,
             explore_enabled=False,
         )
@@ -199,21 +199,21 @@ def test_interleave_kernel_strips_explore_when_disabled() -> None:
 # -- post-prelude target + history row ------------------------------------
 def test_post_prelude_target() -> None:
     assert ps._post_prelude_target(explore_enabled=True, kernel_enabled=True) == ps.PHASE_EXPLORE
-    assert ps._post_prelude_target(explore_enabled=False, kernel_enabled=True) == ps.PHASE_KERNEL
+    assert ps._post_prelude_target(explore_enabled=False, kernel_enabled=True) == ps.PHASE_KERNEL_AGENT
     assert ps._post_prelude_target(explore_enabled=False, kernel_enabled=False) == ps.PHASE_SWEEP
 
 
 def test_make_history_row() -> None:
     row = ps.make_history_row(
         from_phase="explore",
-        to_phase="kernel",
+        to_phase="kernel_agent",
         reason="  plateau  ",
         evidence={"k": 1},
         ts="2026-06-09T00:00:00Z",
         ts_unix=12.0,
     )
     assert row["from_phase"] == "EXPLORE"
-    assert row["to_phase"] == "KERNEL"
+    assert row["to_phase"] == "KERNEL_AGENT"
     assert row["reason"] == "plateau"
     assert row["evidence"] == {"k": 1}
     assert row["ts_unix"] == 12.0

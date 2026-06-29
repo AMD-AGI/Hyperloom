@@ -3,7 +3,7 @@
 """KERNEL-phase auto-integrate retry for un-exhausted integration faults.
 
 Covers ``Coordinator._auto_enqueue_pending_integrations`` re-dispatching a
-retryable integration fault inside the KERNEL phase (rather than deferring to
+retryable integration fault inside the KERNEL_AGENT phase (rather than deferring to
 the SWEEP-entry drain), the recorded-attempt-count in-flight guard, and the
 ``SharedState.integrate_attempt_count_for_kernel`` helper that powers it.
 """
@@ -124,7 +124,7 @@ async def test_auto_enqueue_dispatches_pending_keep_once_then_guards_inflight():
     assert _dispatched_kids(coord) == ["k001"]
 
 
-# Retryable fault is re-dispatched in KERNEL phase
+# Retryable fault is re-dispatched in KERNEL_AGENT phase
 @pytest.mark.asyncio
 async def test_auto_enqueue_retries_unexhausted_fault():
     state = SharedState()

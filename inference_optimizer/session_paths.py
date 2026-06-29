@@ -83,7 +83,7 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset(
         "explore",
         "specialist",
         "integrate_patch",
-        "framework_pr",
+        "framework_agent",
         "integrate",
         "kernel_opt",
         "deep_kernel_analysis",
@@ -172,7 +172,7 @@ def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
     return runs_root(session_dir) / a / tid
 
 
-# Kernel agent long-lived workspaces (cross-task, keyed by kernel_id)
+# Kernel-agent long-lived workspaces (cross-task, keyed by kernel_id)
 def kernel_workspace(session_dir: Path, kernel_id: str) -> Path:
     """``<sd>/kernel-agent-workspace/<kernel_id>/`` — extracted source,
     GEAK/OOB candidates, and the chosen patch for one kernel. Keyed by

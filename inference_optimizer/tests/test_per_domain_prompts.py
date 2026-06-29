@@ -903,7 +903,7 @@ def test_note_specialist_dispatched_resets_only_its_anchor():
     s.note_specialist_dispatched("serving_specialist")
     assert s.rounds_since_last_specialist["framework"] == 0
     # A different anchor is untouched.
-    assert s.rounds_since_last_specialist["kernel"] == 2
+    assert s.rounds_since_last_specialist["kernel_agent"] == 2
     # keep counter is independent of the dispatch reset.
     assert s.rounds_since_last_keep["framework"] == 2
 
@@ -936,7 +936,7 @@ def test_stalled_domains_reports_over_threshold_widest_first():
     s.note_domain_keep("framework")
     stalled = s.stalled_domains(specialist_threshold=3, keep_threshold=3)
     assert "framework" not in stalled
-    assert "kernel" in stalled  # never dispatched/kept -> at 5
+    assert "kernel_agent" in stalled  # never dispatched/kept -> at 5
     # Ordering: widest gap first, ties broken by anchor name.
     assert stalled == sorted(
         stalled,

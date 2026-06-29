@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Opt-in live tests for Kernel Agent tools.
+"""Opt-in live tests for Kernel-agent tools.
 
 Run with:
   KERNEL_AGENT_RUN_LIVE=1 \
@@ -115,7 +115,7 @@ def write_live_files(workspace: Path) -> tuple[Path, Path, Path]:
                 "traceEvents": [
                     {
                         "name": "triton_rmsnorm_kernel",
-                        "cat": "kernel",
+                        "cat": "kernel_agent",
                         "dur": 1000,
                         "args": {
                             "source_file": str(source),

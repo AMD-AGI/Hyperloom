@@ -16,7 +16,7 @@ Result schema (delivered on the bus as ``delegated_result``)::
     trace_dir:     absolute path of the torch_trace dir (or None)
     report_path:   absolute path of benchmark_report.json
 
-Downstream (Kernel agent → tracelens_analysis.py) needs ``trace_dir``; the
+Downstream (Kernel-agent → tracelens_analysis.py) needs ``trace_dir``; the
 rest is surfaced so the baseline SharedState promotion works unchanged.
 """
 

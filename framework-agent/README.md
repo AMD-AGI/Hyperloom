@@ -2,9 +2,9 @@
 
 vllm/sglang source-layer optimisation companion for
 [`inference_optimizer`](../inference_optimizer/). The live Hyperloom
-integration uses the FRAMEWORK_PR discovery path:
+integration uses the FRAMEWORK discovery path:
 
-- **FRAMEWORK_PR discovery** (`fa phase-discover`) — returns upstream PR
+- **FRAMEWORK discovery** (`fa phase-discover`) — returns upstream PR
   candidates to `inference_optimizer`, which owns Critic review, diff
   apply, benchmark, KEEP, and REVERT.
 - **Standalone PR exploration** (`fa candidates` / `fa explore`) —
@@ -43,9 +43,9 @@ pytest -q tests/test_logging_setup.py tests/test_isolation.py \
 ## Used by inference_optimizer
 
 `inference_optimizer` drives PR discovery in the Coordinator-owned
-FRAMEWORK_PR phase. After `baseline` completes, the Coordinator calls
+FRAMEWORK_AGENT phase. After `baseline` completes, the Coordinator calls
 `fa phase-discover`, routes each candidate through Critic review, then
-uses `FrameworkPrExecutor` to apply the diff to the live framework tree,
+uses `FrameworkAgentExecutor` to apply the diff to the live framework tree,
 benchmark it, and KEEP/REVERT based on throughput and correctness gates.
 
 Gap / keywords are auto-composed from SharedState (`framework`,
@@ -62,7 +62,7 @@ inference_optimizer optimize \
 ```
 
 See `inference_optimizer/SKILL.md` "Framework-Agent as Bandit Arm"
-and `inference_optimizer/orchestrator/action_executors/framework_pr.py`.
+and `inference_optimizer/orchestrator/action_executors/framework.py`.
 
 ## Design references
 

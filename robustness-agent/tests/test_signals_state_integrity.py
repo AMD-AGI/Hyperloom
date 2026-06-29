@@ -263,7 +263,7 @@ def test_i4_separate_symptom_per_role_and_kind():
                     "inbox_bytes": 600 * 1024 * 1024,
                     "outbox_bytes": 200 * 1024 * 1024,
                 },
-                "kernel": {
+                "kernel_agent": {
                     "inbox_bytes": 150 * 1024 * 1024,
                     "outbox_bytes": 0,
                 },
@@ -277,7 +277,7 @@ def test_i4_separate_symptom_per_role_and_kind():
     assert keys == {
         ("orchestration", "inbox"),
         ("orchestration", "outbox"),
-        ("kernel", "inbox"),
+        ("kernel_agent", "inbox"),
     }
 
 

@@ -118,7 +118,7 @@ def test_topic_allowlist_v06_changes():
 @pytest.mark.asyncio
 async def test_message_bus_append_assigns_seq(db):
     bus = MessageBus(db)
-    msg = Message.new("Orchestration", "Kernel", "request", {"target_agent": "kernel", "kind": "trace_analyze"})
+    msg = Message.new("Orchestration", "Kernel", "request", {"target_agent": "kernel_agent", "kind": "trace_analyze"})
     seq = await bus.append_and_seq(msg)
     assert seq >= 1
     assert msg.seq == seq
