@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""End-to-end Kernel Agent runner for real model/profile/backend testing.
+"""End-to-end Kernel-agent runner for real model/profile/backend testing.
 
 Takes a pre-generated trace (``--trace-path``), picks a hot kernel, launches
 backend optimization attempts in parallel (backend x replicas), and summarizes.
@@ -348,7 +348,7 @@ def write_summary(run_dir: Path, summary: dict[str, Any]) -> None:
     """
     write_json(run_dir / "parallel_e2e_summary.json", summary)
     lines = [
-        "# Kernel Agent Parallel E2E Summary",
+        "# Kernel-agent Parallel E2E Summary",
         "",
         f"- Session: `{summary['session_id']}`",
         f"- Model: `{summary['model_path']}`",
@@ -390,7 +390,7 @@ def main() -> int:
         int: 0 on success, 1 on any failure (the error is also recorded
             in the summary and printed as JSON).
     """
-    parser = argparse.ArgumentParser(description="Run Kernel Agent real parallel E2E")
+    parser = argparse.ArgumentParser(description="Run Kernel-agent real parallel E2E")
     parser.add_argument("--model-path", default="/wekafs/models/Qwen3-30B-A3B")
     parser.add_argument(
         "--workspace-path",

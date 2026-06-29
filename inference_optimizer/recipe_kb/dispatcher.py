@@ -98,20 +98,20 @@ def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
 
     Returns:
         dict[str, str]: The 7-key ``label_match`` dict (``model`` /
-            ``hardware`` / ``framework`` / ``framework_version`` /
+            ``hardware`` / ``framework_name`` / ``framework_version`` /
             ``precision`` / ``model_type`` / ``architectures``).
 
     Raises:
         InvalidCanonicalIdError: If ``canonical_id`` is malformed; the
             caller falls back to a local read.
     """
-    model, hardware, framework, model_type, architectures, framework_version, precision = cid_to_path_components(
+    model, hardware, framework_name, model_type, architectures, framework_version, precision = cid_to_path_components(
         canonical_id
     )
     return {
         "model": model,
         "hardware": hardware,
-        "framework": framework,
+        "framework_name": framework_name,
         "model_type": model_type,
         "architectures": architectures,
         "framework_version": framework_version,
@@ -141,7 +141,7 @@ def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
 #   pulled out as top-level arbor fields.
 # * v2 ``metrics.throughput`` (or ``body.best_throughput``) → arbor
 #   ``best_throughput``.
-# * v2 ``labels.{model,hardware,framework,framework_version,precision}``
+# * v2 ``labels.{model,hardware,framework_name,framework_version,precision}``
 #   → top-level arbor identity fields (so an arbor consumer can read
 #   them without parsing canonical_id). The remote kb-service and local
 #   store both key the 4th identity dimension as ``framework_version``.
@@ -200,7 +200,9 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
         # central row pre-dates the labels stamp)
         "model": str(labels.get("model") or ""),
         "hardware": str(labels.get("hardware") or ""),
-        "framework": str(labels.get("framework") or ""),
+        # Back-compat: rows whose labels predate the framework_name rename
+        # stored the serving framework under the legacy ``framework`` key.
+        "framework_name": str(labels.get("framework_name") or labels.get("framework") or ""),
         "framework_version": str(labels.get("framework_version") or ""),
         "precision": str(labels.get("precision") or ""),
         # arbor payload pulled out of body / metrics.
@@ -541,7 +543,7 @@ class RecipeKB:
         canonical_id: str,
         model: str = "",
         hardware: str = "",
-        framework: str = "",
+        framework_name: str = "",
         framework_version: str = "",
         precision: str = "",
         best_config: dict[str, str] | None = None,
@@ -573,7 +575,7 @@ class RecipeKB:
                 non-empty.
             model (str): Model identity slot.
             hardware (str): Hardware identity slot.
-            framework (str): Framework identity slot.
+            framework_name (str): Framework identity slot.
             framework_version (str): Framework version identity slot.
             precision (str): Precision identity slot.
             best_config (dict[str, str] | None): Best-known config.
@@ -601,7 +603,7 @@ class RecipeKB:
             canonical_id=canonical_id,
             model=model,
             hardware=hardware,
-            framework=framework,
+            framework_name=framework_name,
             framework_version=framework_version,
             precision=precision,
             best_config=best_config,

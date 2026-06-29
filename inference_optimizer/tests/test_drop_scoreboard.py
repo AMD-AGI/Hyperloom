@@ -250,7 +250,7 @@ def test_kernel_opt_body_references_v08_decision_signals():
         "state.gaps[]",
         "last_action_failures",
         "last_kernel_opt",
-        "KERNEL plateau",
+        "KERNEL_AGENT plateau",
         "rejected_kernel_ids",
         "_DEFAULT_KERNEL_OPT_MAX_PARTIAL",
     ):

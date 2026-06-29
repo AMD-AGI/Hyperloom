@@ -17,7 +17,7 @@ from inference_optimizer.orchestrator.phase_state import (
     ESCALATE_HINT_SKIP_TO_SWEEP,
     ESCALATE_HINT_VOCAB,
     PHASE_CLOSE,
-    PHASE_KERNEL,
+    PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     STOP_REASON_VOCAB,
     apply_escalate_budget_bump,
@@ -278,9 +278,9 @@ def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
 
 
 def test_exit_normal_kernel_does_not_exit_on_plateau():
-    """KERNEL plateau is advisory only; only the skip_to_sweep hint or budget exhaustion may exit KERNEL."""
+    """KERNEL_AGENT plateau is advisory only; only the skip_to_sweep hint or budget exhaustion may exit KERNEL."""
     state = SimpleNamespace(
-        phase="KERNEL",
+        phase="KERNEL_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
@@ -295,9 +295,9 @@ def test_exit_normal_kernel_does_not_exit_on_plateau():
 
 
 def test_exit_normal_kernel_after_gemm_does_not_exit():
-    """The GEMM-completed shortcut is removed; GEMM completion alone never advances KERNEL → SWEEP."""
+    """The GEMM-completed shortcut is removed; GEMM completion alone never advances KERNEL_AGENT → SWEEP."""
     state = SimpleNamespace(
-        phase="KERNEL",
+        phase="KERNEL_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
@@ -372,13 +372,13 @@ def test_compute_next_phase_skip_to_sweep_from_explore_routes_to_kernel():
     out = compute_next_phase(_skip_to_sweep_state("EXPLORE"), kernel_enabled=True)
     assert out is not None
     target, reason, evidence = out
-    assert target == PHASE_KERNEL
+    assert target == PHASE_KERNEL_AGENT
     assert reason == "explore_no_more_leverage"
     assert evidence.get("terminal") is not True
 
 
 def test_compute_next_phase_skip_to_sweep_from_kernel_routes_to_sweep():
-    out = compute_next_phase(_skip_to_sweep_state("KERNEL"), kernel_enabled=True)
+    out = compute_next_phase(_skip_to_sweep_state("KERNEL_AGENT"), kernel_enabled=True)
     assert out is not None
     target, reason, _ = out
     assert target == PHASE_SWEEP
@@ -386,7 +386,7 @@ def test_compute_next_phase_skip_to_sweep_from_kernel_routes_to_sweep():
 
 
 def test_kernel_skip_to_sweep_waits_for_pending_keep():
-    state = _skip_to_sweep_state("KERNEL")
+    state = _skip_to_sweep_state("KERNEL_AGENT")
     state.has_keep_pending_integrate = True
 
     assert kernel_work_pending(state) is True
@@ -395,7 +395,7 @@ def test_kernel_skip_to_sweep_waits_for_pending_keep():
 
 
 def test_kernel_skip_to_sweep_waits_for_partial_kernel_attempt():
-    state = _skip_to_sweep_state("KERNEL")
+    state = _skip_to_sweep_state("KERNEL_AGENT")
     state.kernel_opt_attempts = {
         "k009": {
             "last_decision": "PARTIAL",
@@ -410,7 +410,7 @@ def test_kernel_skip_to_sweep_waits_for_partial_kernel_attempt():
 
 
 def test_kernel_skip_to_sweep_waits_for_untried_hot_kernel():
-    state = _skip_to_sweep_state("KERNEL")
+    state = _skip_to_sweep_state("KERNEL_AGENT")
     state.untried_hot_reusable_kernels = lambda: ["k017"]
 
     assert kernel_work_pending(state) is True
@@ -419,7 +419,7 @@ def test_kernel_skip_to_sweep_waits_for_untried_hot_kernel():
 
 
 def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
-    state = _skip_to_sweep_state("KERNEL")
+    state = _skip_to_sweep_state("KERNEL_AGENT")
     state.kernel_opt_attempts = {
         "k018": {
             "attempts": 1,
@@ -436,7 +436,7 @@ def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
 
 
 def test_kernel_skip_to_sweep_ignores_rejected_or_integrated_attempts():
-    state = _skip_to_sweep_state("KERNEL")
+    state = _skip_to_sweep_state("KERNEL_AGENT")
     state.rejected_kernel_ids = ["k001"]
     state.optimization_stack = [{"action": "integrate", "kernel_id": "k002"}]
     state.kernel_opt_attempts = {
@@ -618,7 +618,7 @@ def test_collect_phase_breakdown_buckets_by_phase():
         "phase_history": [
             {"to_phase": "PRELUDE", "ts_unix": 0.0, "reason": "phase_entered"},
             {"to_phase": "EXPLORE", "ts_unix": 50.0, "reason": "prelude_done"},
-            {"to_phase": "KERNEL", "ts_unix": 200.0, "reason": "plateau_explore"},
+            {"to_phase": "KERNEL_AGENT", "ts_unix": 200.0, "reason": "plateau_explore"},
             {"to_phase": "SWEEP", "ts_unix": 400.0, "reason": "plateau_kernel"},
         ],
         "explore_search": {
@@ -631,8 +631,8 @@ def test_collect_phase_breakdown_buckets_by_phase():
     pb = out["phase_breakdown"]
     assert pb["explore"]["total_gain_pct"] == 5.0
     assert pb["explore"]["by_domain"]["serving_specialist"] == 5.0
-    assert pb["kernel"]["total_gain_pct"] == 7.5
-    assert pb["kernel"]["by_kernel_id"]["fmoe_fp8"] == 7.5
+    assert pb["kernel_agent"]["total_gain_pct"] == 7.5
+    assert pb["kernel_agent"]["by_kernel_id"]["fmoe_fp8"] == 7.5
     # No prelude/sweep contributions.
     assert pb["prelude"]["total_gain_pct"] == 0.0
     assert pb["sweep"]["total_gain_pct"] == 0.0

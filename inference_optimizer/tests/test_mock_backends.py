@@ -42,7 +42,7 @@ def _backends_with_mock_critic_and_robustness(
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(plans.get("orchestration", silent), name="o"),
-        "kernel": MockBackend(plans.get("kernel", silent), name="k"),
+        "kernel_agent": MockBackend(plans.get("kernel_agent", silent), name="k"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }

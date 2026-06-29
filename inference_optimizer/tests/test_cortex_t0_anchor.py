@@ -56,7 +56,7 @@ class _FakeSharedState:
     warm_start_pitfalls: list[Any] = field(default_factory=list)
     warm_start_lessons: list[Any] = field(default_factory=list)
     warm_start_context: dict[str, Any] = field(default_factory=dict)
-    framework: str = "sglang"
+    framework_name: str = "sglang"
     framework_version: str = "0.4.5"
     precision: str = "fp8"
     tp: int = 8
@@ -92,7 +92,7 @@ def _expected_cid(state: _FakeSharedState, workload: str, hw: str) -> str:
     return recipe_canonical_id(
         model=workload,
         hardware=hw,
-        framework=state.framework,
+        framework_name=state.framework_name,
         framework_version=state.framework_version,
         precision=state.precision,
     )
@@ -113,7 +113,7 @@ def test_t0_anchor_writes_recipe_row_with_arbor_schema(
         image_digest="img-sha-abc",
         stack_fingerprint={"vllm": "0.6.0", "rocm": "7.2", "aiter": "abc1234"},
         extra_attrs={
-            "framework": "sglang",
+            "framework_name": "sglang",
             "model_class": "moe",
         },
         session_dir=session_dir,
@@ -143,7 +143,7 @@ def test_t0_anchor_writes_warm_start_snapshot_to_disk(
         state,
         workload="m",
         hw="mi300x",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
     warm_path = session_dir / "runtime" / "cortex" / ".kb_warm.json"
@@ -169,7 +169,7 @@ def test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row(
         canonical_id=cid,
         model="M",
         hardware="MI300X",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         pitfalls=[{"description": "watch for X"}],
@@ -181,7 +181,7 @@ def test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row(
         state,
         workload="M",
         hw="MI300X",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
     assert len(state.warm_start_pitfalls) == 1
@@ -203,7 +203,7 @@ def test_t0_anchor_no_prior_recipe_means_warm_miss(
         state,
         workload="cold-model",
         hw="mi300x",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
     assert state.warm_start_pitfalls == []
@@ -225,7 +225,7 @@ def test_t0_anchor_short_circuits_when_already_anchored(
         state,
         workload="m",
         hw="mi300x",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
         resume=False,
     )
@@ -248,7 +248,7 @@ def test_t0_anchor_resume_does_not_short_circuit(
         state,
         workload="m",
         hw="mi300x",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
         resume=True,
     )
@@ -268,7 +268,7 @@ def test_t0_anchor_uses_existing_cortex_session_id_when_present(
         state,
         workload="m",
         hw="mi300x",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
     assert state.cortex_session_id == "prior-sid-from-resume"
@@ -285,7 +285,7 @@ def test_t0_anchor_falls_back_to_session_dir_basename_for_sid(
         state,
         workload="m",
         hw="mi300x",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
     assert state.cortex_session_id == session_dir.name
@@ -303,7 +303,7 @@ def test_t0_anchor_preserves_existing_best_config_on_metadata_stamp(
         canonical_id=cid,
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         best_config={"tp": "16", "ep": "8"},
@@ -319,7 +319,7 @@ def test_t0_anchor_preserves_existing_best_config_on_metadata_stamp(
         workload="m",
         hw="mi300x",
         image_digest="new-img-digest",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
     after = kb.get_recipe(canonical_id=cid)
@@ -341,7 +341,7 @@ def test_t0_anchor_increments_version_on_existing_row(
         canonical_id=cid,
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         provenance={"source": "seed", "generator": "ut"},
@@ -352,7 +352,7 @@ def test_t0_anchor_increments_version_on_existing_row(
         state,
         workload="m",
         hw="mi300x",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
     after = kb.get_recipe(canonical_id=cid)

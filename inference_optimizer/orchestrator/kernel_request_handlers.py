@@ -2625,7 +2625,7 @@ def perfskills_selected(payload: dict | None = None) -> bool:
     """Whether ``perfskills`` is requested in the kernel backend order.
 
     ``perfskills`` is not a per-kernel backend: when it appears in the order it
-    means "delegate the whole KERNEL phase to the PerfSkills e2e optimizer".
+    means "delegate the whole KERNEL_AGENT phase to the PerfSkills e2e optimizer".
     It therefore *owns* the phase whenever present (any other backends in the
     order are ignored for the kernel phase), so an order of just ``perfskills``
     runs only PerfSkills.

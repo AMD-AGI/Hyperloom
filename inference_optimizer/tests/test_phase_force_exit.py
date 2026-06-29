@@ -196,7 +196,7 @@ def test_compute_next_phase_routes_to_kernel_with_kernel_enabled():
     nxt = phase_state.compute_next_phase(state, kernel_enabled=True)
     assert nxt is not None
     target, reason, evidence = nxt
-    assert target == phase_state.PHASE_KERNEL
+    assert target == phase_state.PHASE_KERNEL_AGENT
     assert reason == "explore_force_exit_low_budget"
 
 
@@ -238,7 +238,7 @@ def test_force_exit_thresholds_routed_through_overrides():
     nxt = phase_state.compute_next_phase(state, kernel_enabled=True)
     assert nxt is not None
     target, reason, _ = nxt
-    assert target == phase_state.PHASE_KERNEL
+    assert target == phase_state.PHASE_KERNEL_AGENT
     assert reason == "explore_force_exit_low_budget"
 
 

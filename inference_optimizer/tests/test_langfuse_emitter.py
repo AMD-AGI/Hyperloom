@@ -423,14 +423,14 @@ def test_generation_nests_under_phase_and_agent_spans(tmp_path, monkeypatch):
     sd = tmp_path / "SID"
     _write_manifest(sd)
     em = lfe.LangfuseEmitter(sd)
-    em.record_llm_call(_llm_row(phase="EXPLORE", component="kernel", role="kernel"))
-    em.record_conversation(_conv_row(phase="EXPLORE", component="kernel", role="kernel"))
+    em.record_llm_call(_llm_row(phase="EXPLORE", component="kernel_agent", role="kernel_agent"))
+    em.record_conversation(_conv_row(phase="EXPLORE", component="kernel_agent", role="kernel_agent"))
 
     # Root + phase:EXPLORE + agent:kernel spans exist; the generation is a child.
     assert client.span_named("phase:EXPLORE") is not None
-    assert client.span_named("agent:kernel") is not None
+    assert client.span_named("agent:kernel_agent") is not None
     assert len(client.generations) == 1
-    assert client.generations[0].kwargs["metadata"]["component"] == "kernel"
+    assert client.generations[0].kwargs["metadata"]["component"] == "kernel_agent"
 
 
 def test_distinct_agents_get_distinct_spans(tmp_path, monkeypatch):
@@ -442,11 +442,11 @@ def test_distinct_agents_get_distinct_spans(tmp_path, monkeypatch):
     em = lfe.LangfuseEmitter(sd)
     em.record_llm_call(_llm_row(phase="EXPLORE", component="orchestration", role="orchestration", tick=1))
     em.record_conversation(_conv_row(phase="EXPLORE", component="orchestration", role="orchestration", tick=1))
-    em.record_llm_call(_llm_row(phase="EXPLORE", component="kernel", role="kernel", tick=2))
-    em.record_conversation(_conv_row(phase="EXPLORE", component="kernel", role="kernel", tick=2))
+    em.record_llm_call(_llm_row(phase="EXPLORE", component="kernel_agent", role="kernel_agent", tick=2))
+    em.record_conversation(_conv_row(phase="EXPLORE", component="kernel_agent", role="kernel_agent", tick=2))
     agent_spans = [s for s in client.spans if s.kwargs.get("name", "").startswith("agent:")]
     names = sorted(s.kwargs["name"] for s in agent_spans)
-    assert names == ["agent:kernel", "agent:orchestration"]
+    assert names == ["agent:kernel_agent", "agent:orchestration"]
     # One shared phase span reused across both agents.
     phase_spans = [s for s in client.spans if s.kwargs.get("name") == "phase:EXPLORE"]
     assert len(phase_spans) == 1
@@ -630,7 +630,7 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
             {
                 "decision": {
                     "change": "tp_sweep",
-                    "component": "kernel",
+                    "component": "kernel_agent",
                     "operation_kind": "kernel_opt",
                     "outcome": "KEEP",
                     "gain_pct": 12.5,
@@ -663,8 +663,8 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     )
     em = lfe.LangfuseEmitter(sd)
     # Create an agent span for (KERNEL, kernel) so its step span parents there.
-    em.record_llm_call(_llm_row(phase="KERNEL", component="kernel", role="kernel"))
-    em.record_conversation(_conv_row(phase="KERNEL", component="kernel", role="kernel"))
+    em.record_llm_call(_llm_row(phase="KERNEL_AGENT", component="kernel_agent", role="kernel_agent"))
+    em.record_conversation(_conv_row(phase="KERNEL_AGENT", component="kernel_agent", role="kernel_agent"))
     em.flush_session()
 
     # Each decision now opens an ``optimization_step:<operation_kind>`` span,
@@ -1045,7 +1045,7 @@ def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):
     (sd / "reports" / "trace" / "decision_trace.jsonl").write_text(
         json.dumps(
             {
-                "decision": {"change": "x", "component": "kernel", "outcome": "KEEP", "gain_pct": 5.0, "task_id": "k1"},
+                "decision": {"change": "x", "component": "kernel_agent", "outcome": "KEEP", "gain_pct": 5.0, "task_id": "k1"},
                 "phase": "KERNEL",
                 "tick": 1,
                 "ts": "2026-06-09T16:00:00Z",

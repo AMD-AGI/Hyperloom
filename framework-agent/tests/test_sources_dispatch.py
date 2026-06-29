@@ -459,7 +459,7 @@ def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch)
 
 # ---------------------------------------------------------------------------
 # Candidate.score must carry the rerank score across the subprocess JSON
-# boundary so the IO framework_pr arm can log it.
+# boundary so the IO framework arm can log it.
 # ---------------------------------------------------------------------------
 
 

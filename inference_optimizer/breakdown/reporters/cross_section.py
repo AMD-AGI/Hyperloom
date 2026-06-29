@@ -83,7 +83,7 @@ def _workload_summary(workload: dict[str, Any]) -> str:
 
     Args:
         workload (dict[str, Any]): The ``workload`` section of the breakdown,
-            with keys such as ``model_name``, ``framework``, ``precision``,
+            with keys such as ``model_name``, ``framework_name``, ``precision``,
             ``tp``, ``conc``, ``isl`` and ``osl``.
 
     Returns:
@@ -91,7 +91,7 @@ def _workload_summary(workload: dict[str, Any]) -> str:
             using placeholders for any missing fields.
     """
     model = workload.get("model_name") or "(unknown-model)"
-    fw = workload.get("framework") or "?"
+    fw = workload.get("framework_name") or "?"
     prec = workload.get("precision") or "?"
     tp = workload.get("tp")
     conc = workload.get("conc")

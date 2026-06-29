@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Directed + cross-repo + dedup coverage for the FRAMEWORK_PR discover batch builder."""
+"""Directed + cross-repo + dedup coverage for the FRAMEWORK discover batch builder."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pytest
 
 from inference_optimizer.orchestrator import framework_agent_client as _fa_client
 from inference_optimizer.orchestrator.coordinator import (
-    DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES,
+    DEFAULT_FRAMEWORK_MAX_CANDIDATES,
     Coordinator,
 )
 from inference_optimizer.orchestrator.specialist_domains import get_domain
@@ -20,11 +20,11 @@ from inference_optimizer.orchestrator.specialist_domains import get_domain
 
 class _StateStub:
     def __init__(self) -> None:
-        self.phase = "FRAMEWORK_PR"
-        self.framework_pr_phase_done = False
-        self.framework_pr_discover_failures = 0
-        self.framework_pr_batches: list[dict[str, Any]] = []
-        self.framework_pr_phase_progress: list[dict[str, Any]] = []
+        self.phase = "FRAMEWORK"
+        self.framework_agent_phase_done = False
+        self.framework_agent_discover_failures = 0
+        self.framework_agent_batches: list[dict[str, Any]] = []
+        self.framework_agent_phase_progress: list[dict[str, Any]] = []
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
         self.model = "test-model"
@@ -32,7 +32,7 @@ class _StateStub:
         self.gpu_type = "MI300X"
         self.model_class = "dense"
         self.precision = "fp8"
-        self.framework_pr_max_candidates = 0
+        self.framework_max_candidates = 0
         self.last_profile_kernel_breakdown = None
 
     def save(self, _session_dir: Path) -> None:
@@ -45,28 +45,28 @@ class _CoordinatorStub:
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub()
-        self.framework_pr_discover_timeout_sec = 0.0
+        self.framework_agent_discover_timeout_sec = 0.0
 
-    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
-        return Coordinator._framework_pr_discover_repo_urls(self, framework)  # type: ignore[arg-type]
+    def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
+        return Coordinator._framework_agent_discover_repo_urls(self, framework)  # type: ignore[arg-type]
 
-    def _framework_pr_known_candidate_ids(self) -> set[str]:
-        return Coordinator._framework_pr_known_candidate_ids(self)  # type: ignore[arg-type]
+    def _framework_known_candidate_ids(self) -> set[str]:
+        return Coordinator._framework_known_candidate_ids(self)  # type: ignore[arg-type]
 
-    def _framework_pr_tried_refs(self) -> list[str]:
-        return Coordinator._framework_pr_tried_refs(self)  # type: ignore[arg-type]
+    def _framework_tried_refs(self) -> list[str]:
+        return Coordinator._framework_tried_refs(self)  # type: ignore[arg-type]
 
 
 def _call_discover(stub: _CoordinatorStub) -> bool:
     return asyncio.run(
-        Coordinator._discover_next_framework_pr_batch(stub)  # type: ignore[arg-type]
+        Coordinator._discover_next_framework_batch(stub)  # type: ignore[arg-type]
     )
 
 
-def test_repo_urls_cover_pr_intel_set_with_framework_primary():
+def test_repo_urls_cover_pr_intel_set_with_frameworkimary():
     """The repo set leads with the framework's own repo, includes every pr_intel_specialist repo, de-duplicated and order-preserving."""
     stub = _CoordinatorStub(Path("/tmp"))
-    urls = stub._framework_pr_discover_repo_urls("sglang")
+    urls = stub._framework_agent_discover_repo_urls("sglang")
 
     assert urls[0] == _fa_client.repo_url_for_framework("sglang")
     domain = get_domain("pr_intel_specialist")
@@ -99,9 +99,9 @@ def test_discover_merges_candidates_across_repos(
     ok = _call_discover(stub)
     assert ok is True
 
-    n_repos = len(stub._framework_pr_discover_repo_urls("sglang"))
+    n_repos = len(stub._framework_agent_discover_repo_urls("sglang"))
     assert len(seen_repo_urls) == n_repos
-    batch = stub.shared_state.framework_pr_batches[-1]
+    batch = stub.shared_state.framework_agent_batches[-1]
     # One merged candidate per repo (all distinct).
     assert batch["candidate_count"] == n_repos
 
@@ -145,7 +145,7 @@ def test_discover_uses_max_candidates_override(
 
     monkeypatch.setattr(_fa_client, "phase_discover", _spy)
     stub = _CoordinatorStub(tmp_path)
-    stub.shared_state.framework_pr_max_candidates = 13
+    stub.shared_state.framework_max_candidates = 13
 
     _call_discover(stub)
     assert captured["max_candidates"] == 13
@@ -163,10 +163,10 @@ def test_discover_default_max_candidates_when_unset(
 
     monkeypatch.setattr(_fa_client, "phase_discover", _spy)
     stub = _CoordinatorStub(tmp_path)
-    stub.shared_state.framework_pr_max_candidates = 0
+    stub.shared_state.framework_max_candidates = 0
 
     _call_discover(stub)
-    assert captured["max_candidates"] == DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES
+    assert captured["max_candidates"] == DEFAULT_FRAMEWORK_MAX_CANDIDATES
 
 
 def test_discover_dedups_against_prior_batches(
@@ -186,7 +186,7 @@ def test_discover_dedups_against_prior_batches(
     monkeypatch.setattr(_fa_client, "phase_discover", _spy)
     stub = _CoordinatorStub(tmp_path)
     # Pre-seed a prior batch carrying that exact candidate id.
-    stub.shared_state.framework_pr_batches = [
+    stub.shared_state.framework_agent_batches = [
         {
             "batch_id": "b1",
             "candidate_count": 1,
@@ -200,7 +200,7 @@ def test_discover_dedups_against_prior_batches(
     ok = _call_discover(stub)
     # Every discovered candidate was a duplicate → no new batch appended.
     assert ok is False
-    assert len(stub.shared_state.framework_pr_batches) == 1
+    assert len(stub.shared_state.framework_agent_batches) == 1
 
 
 def test_discover_intra_batch_dedup_across_repos(
@@ -221,7 +221,7 @@ def test_discover_intra_batch_dedup_across_repos(
 
     ok = _call_discover(stub)
     assert ok is True
-    batch = stub.shared_state.framework_pr_batches[-1]
+    batch = stub.shared_state.framework_agent_batches[-1]
     assert batch["candidate_count"] == 1
 
 
@@ -248,8 +248,8 @@ def test_discover_survives_partial_repo_failures(
 
     ok = _call_discover(stub)
     assert ok is True
-    assert stub.shared_state.framework_pr_discover_failures == 0
-    batch = stub.shared_state.framework_pr_batches[-1]
+    assert stub.shared_state.framework_agent_discover_failures == 0
+    batch = stub.shared_state.framework_agent_batches[-1]
     assert batch["candidate_count"] >= 1
 
 

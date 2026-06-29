@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Integration test for ``_pump_framework_pr_phase`` covering the full discover → Critic gate → enqueue path."""
+"""Integration test for ``_pump_framework_agent_phase`` covering the full discover → Critic gate → enqueue path."""
 
 from __future__ import annotations
 
@@ -52,12 +52,12 @@ _FRAMEWORK_CANDIDATES: dict[str, dict[str, Any]] = {
 
 class _StateStub:
     def __init__(self, framework: str = "sglang") -> None:
-        self.phase = "FRAMEWORK_PR"
-        self.framework_pr_phase_done = False
-        self.framework_pr_discover_failures = 0
-        self.framework_pr_batches: list[dict[str, Any]] = []
-        self.framework_pr_phase_progress: list[dict[str, Any]] = []
-        self.framework_pr_critic_decisions: list[dict[str, Any]] = []
+        self.phase = "FRAMEWORK_AGENT"
+        self.framework_agent_phase_done = False
+        self.framework_agent_discover_failures = 0
+        self.framework_agent_batches: list[dict[str, Any]] = []
+        self.framework_agent_phase_progress: list[dict[str, Any]] = []
+        self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
         self.model = "test-model"
@@ -152,14 +152,14 @@ class _CoordinatorStub:
 
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
-    _collect_framework_pr_priors = Coordinator._collect_framework_pr_priors
-    _unprocessed_framework_pr_candidates = Coordinator._unprocessed_framework_pr_candidates
-    _select_next_framework_pr_candidate = Coordinator._select_next_framework_pr_candidate
-    _select_best_framework_pr_candidate = Coordinator._select_best_framework_pr_candidate
-    _record_framework_pr_phase_done = Coordinator._record_framework_pr_phase_done
-    _critic_review_framework_pr_candidate = Coordinator._critic_review_framework_pr_candidate
-    _discover_next_framework_pr_batch = Coordinator._discover_next_framework_pr_batch
-    _enqueue_framework_pr_task = Coordinator._enqueue_framework_pr_task
+    _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
+    _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
+    _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
+    _select_best_framework_agent_candidate = Coordinator._select_best_framework_agent_candidate
+    _record_framework_agent_phase_done = Coordinator._record_framework_agent_phase_done
+    _critic_review_framework_agent_candidate = Coordinator._critic_review_framework_agent_candidate
+    _discover_next_framework_batch = Coordinator._discover_next_framework_batch
+    _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
 
     def __init__(
         self,
@@ -171,20 +171,20 @@ class _CoordinatorStub:
         self.session_dir = tmp_path
         self.shared_state = _StateStub(framework=framework)
         self.tasks = _TasksStub()
-        self.framework_pr_discover_timeout_sec = 0.0
+        self.framework_agent_discover_timeout_sec = 0.0
         self._framework = framework
         self.backends: dict[str, Any] = {}
         if critic is not None:
             self.backends["critic"] = critic
 
-    async def _rank_framework_pr_candidates_llm(
+    async def _rank_framework_agent_candidates_llm(
         self, candidates: list[dict[str, Any]]
     ) -> dict[str, Any] | None:
         # Hermetic: force the deterministic discovery-order fallback so these
         # scenarios assert a stable candidate ordering (no network/LLM call).
         return None
 
-    async def _audit_framework_pr_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+    async def _audit_framework_agent_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
         # Hermetic: default to an "unknown" verdict so the pump preserves the
         # legacy routing these scenarios assert. Tests may set ``_audit_verdict``.
         v = getattr(self, "_audit_verdict", None) or {"recommended_next_step": ""}
@@ -194,19 +194,19 @@ class _CoordinatorStub:
             pass
         return v
 
-    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
+    def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
         # Pin to a single repo so these scenarios keep one-batch/one-task accounting.
         return [_fa_client.repo_url_for_framework(framework or self._framework)]
 
-    def _framework_pr_known_candidate_ids(self) -> set[str]:
-        return Coordinator._framework_pr_known_candidate_ids(self)  # type: ignore[arg-type]
+    def _framework_known_candidate_ids(self) -> set[str]:
+        return Coordinator._framework_known_candidate_ids(self)  # type: ignore[arg-type]
 
-    def _framework_pr_tried_refs(self) -> list[str]:
-        return Coordinator._framework_pr_tried_refs(self)  # type: ignore[arg-type]
+    def _framework_tried_refs(self) -> list[str]:
+        return Coordinator._framework_tried_refs(self)  # type: ignore[arg-type]
 
 
 def _pump(stub: _CoordinatorStub) -> None:
-    asyncio.run(Coordinator._pump_framework_pr_phase(stub))  # type: ignore[arg-type]
+    asyncio.run(Coordinator._pump_framework_agent_phase(stub))  # type: ignore[arg-type]
 
 
 # Scenario 1 — discover → approve → enqueue (parametrised across frameworks)
@@ -216,7 +216,7 @@ def test_pump_happy_path_discover_approve_enqueue(
     monkeypatch: pytest.MonkeyPatch,
     framework: str,
 ):
-    """A single-candidate batch is approved and enqueued as one ``framework_pr`` task (parametrised sglang/vllm/atom)."""
+    """A single-candidate batch is approved and enqueued as one ``framework`` task (parametrised sglang/vllm/atom)."""
     captured_framework: dict[str, str] = {}
 
     async def _discover(**kwargs: Any) -> dict[str, Any]:
@@ -233,16 +233,16 @@ def test_pump_happy_path_discover_approve_enqueue(
     _pump(stub)
 
     assert captured_framework["framework"] == framework
-    assert len(stub.shared_state.framework_pr_batches) == 1
+    assert len(stub.shared_state.framework_agent_batches) == 1
     assert critic.call_count == 1
     assert len(stub.tasks.created) == 1
-    assert stub.tasks.created[0]["kind"] == "framework_pr"
+    assert stub.tasks.created[0]["kind"] == "framework_agent"
     enqueued = stub.tasks.created[0]["params"]["candidate"]
     assert enqueued["framework"] == framework
     assert enqueued["pr_url"] == _FRAMEWORK_CANDIDATES[framework]["pr_url"]
     # No progress rows yet (the executor writes those).
-    assert stub.shared_state.framework_pr_phase_progress == []
-    decisions = stub.shared_state.framework_pr_critic_decisions
+    assert stub.shared_state.framework_agent_phase_progress == []
+    decisions = stub.shared_state.framework_agent_critic_decisions
     assert len(decisions) == 1
     assert decisions[0]["verdict"] == "approve"
 
@@ -280,7 +280,7 @@ def test_pump_reject_writes_progress_then_next_tick_picks_next(
     assert discover_calls.n == 1
     assert critic.call_count == 1
     assert stub.tasks.created == []
-    denied = [r for r in stub.shared_state.framework_pr_phase_progress if r.get("status") == "critic_denied"]
+    denied = [r for r in stub.shared_state.framework_agent_phase_progress if r.get("status") == "critic_denied"]
     assert len(denied) == 1
     assert denied[0]["candidate_id"] == "https://example.com/pr/1"
 
@@ -297,11 +297,11 @@ def test_pump_reject_writes_progress_then_next_tick_picks_next(
 
 
 # Scenario 3 — already-in-flight task → pump no-op
-def test_pump_is_noop_when_framework_pr_task_already_running(
+def test_pump_is_noop_when_framework_task_already_running(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """An already-running ``framework_pr`` task makes the pump return early without discover or Critic (idempotency guard)."""
+    """An already-running ``framework`` task makes the pump return early without discover or Critic (idempotency guard)."""
     discover_called = SimpleNamespace(n=0)
 
     async def _discover(**_: Any) -> dict[str, Any]:
@@ -311,9 +311,9 @@ def test_pump_is_noop_when_framework_pr_task_already_running(
     monkeypatch.setattr(_fa_client, "phase_discover", _discover)
     critic = _ScriptedCriticBackend(["approve"])
     stub = _CoordinatorStub(tmp_path, critic)
-    # Pretend a framework_pr task is already running.
+    # Pretend a framework task is already running.
     stub.tasks._running.append(
-        SimpleNamespace(kind="framework_pr", task_id="t-existing"),
+        SimpleNamespace(kind="framework_agent", task_id="t-existing"),
     )
 
     _pump(stub)
@@ -321,7 +321,7 @@ def test_pump_is_noop_when_framework_pr_task_already_running(
     assert discover_called.n == 0
     assert critic.call_count == 0
     assert stub.tasks.created == []
-    assert stub.shared_state.framework_pr_phase_done is False
+    assert stub.shared_state.framework_agent_phase_done is False
 
 
 # Scenario 4 — discover empty payload → phase_history row + phase_done
@@ -329,7 +329,7 @@ def test_pump_marks_phase_done_with_history_row_on_empty_discover(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A clean empty discover payload flips ``framework_pr_phase_done`` and records a phase_history row; no Critic call."""
+    """A clean empty discover payload flips ``framework_agent_phase_done`` and records a phase_history row; no Critic call."""
 
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "", "candidates": []}
@@ -340,8 +340,8 @@ def test_pump_marks_phase_done_with_history_row_on_empty_discover(
 
     _pump(stub)
 
-    assert stub.shared_state.framework_pr_phase_done is True
+    assert stub.shared_state.framework_agent_phase_done is True
     assert critic.call_count == 0
-    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_pr_phase_done"]
+    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"]
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_empty_payload"

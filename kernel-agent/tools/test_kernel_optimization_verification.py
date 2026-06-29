@@ -1694,7 +1694,7 @@ def test_build_hypothesis_block_renders_when_only_identification_present():
     """A P-item with only Identification still produces a block (GEAK needs the source pointer)."""
     block = ko._build_hypothesis_block(
         {
-            "name": "kernel",
+            "name": "kernel_agent",
             "identification": "Three ops flagged. (source: gemm_metrics.json)",
         }
     )
@@ -1757,7 +1757,7 @@ def test_build_hypothesis_block_renders_all_pitem_prose_when_function_spans_pite
 def test_build_hypothesis_block_falls_back_to_flat_prose_for_single_pitem():
     """Single-entry ``all_pitem_prose`` → legacy flat layout (common case, avoids header noise)."""
     candidate = {
-        "name": "kernel",
+        "name": "kernel_agent",
         "reasoning_for_slowdown": "Memory-bound.",
         "resolution": "Fuse with neighbour.",
         "task_group": {
@@ -1924,7 +1924,7 @@ def test_build_prompt_omits_benchmark_cases_for_legacy_candidates():
 
 # PR-B §3: bound-keyed optimization priority block in build_prompt
 def test_build_priority_block_empty_when_no_bound_info():
-    block = ko._build_priority_block({"name": "kernel", "source_type": "triton"})
+    block = ko._build_priority_block({"name": "kernel_agent", "source_type": "triton"})
     assert block == ""
 
 
@@ -1956,7 +1956,7 @@ def test_build_priority_block_compute_bound_leads_with_compute_utilization():
 def test_build_priority_block_unknown_bound_uses_default_order():
     block = ko._build_priority_block(
         {
-            "name": "kernel",
+            "name": "kernel_agent",
             "bound_type": "mixed",
         }
     )
