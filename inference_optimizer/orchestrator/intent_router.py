@@ -299,6 +299,13 @@ class IntentRouter:
         # FRAMEWORK_PR config-lever deliverables — routed but never benched).
         if verdict in ("approve", "advise"):
             await self._materialize_approved_proposal(pending)
+        elif verdict == "reject" and pending.action_name == "framework_pr":
+            # FRAMEWORK_PR pre-screen reject (Fix 4): the generic path has no
+            # reject branch, so record the critic_denied row here keyed on the
+            # candidate id, marking the candidate processed so the pump advances.
+            await self._coord._record_framework_pr_critic_denied(
+                pending, reasoning,
+            )
 
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task.

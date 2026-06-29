@@ -2907,6 +2907,20 @@ class Coordinator:
         for t in (*queued, *running):
             if getattr(t, "kind", "") == "framework_pr":
                 return
+        # A framework_pr candidate proposal is awaiting a Critic verdict (Fix 4
+        # async gate). Serialize one candidate at a time: do not select/audit/
+        # submit another until the verdict resolves it (enqueue or critic_denied
+        # on a later tick). ``pending_proposals`` is rebuilt by
+        # ``replay_for_resume`` so this dedup survives resume.
+        try:
+            if any(
+                getattr(p, "action_name", "") == "framework_pr"
+                and not getattr(p, "decided", False)
+                for p in self.state.pending_proposals.values()
+            ):
+                return
+        except Exception:  # noqa: BLE001 — defensive
+            pass
         # An authoring specialist (or its downstream integrate_patch) for the
         # current candidate may still be running. The authoring track records
         # its terminal progress row only when the dispatcher harvests the
@@ -3024,77 +3038,17 @@ class Coordinator:
                 _cand_id_log,
             )
             audit_step = "author_via_specialist"
-        # Critic gate before apply: reject short-circuits with a critic_denied row; approve/abstain enqueues.
-        verdict = await self._critic_review_framework_pr_candidate(next_candidate)
-        if verdict.get("verdict") == "reject":
-            cand_id = str(
-                next_candidate.get("candidate_id") or next_candidate.get("pr_url") or "",
-            )
-            progress = getattr(state, "framework_pr_phase_progress", None)
-            if not isinstance(progress, list):
-                progress = []
-                state.framework_pr_phase_progress = progress
-            progress.append(
-                {
-                    "candidate_id": cand_id,
-                    "batch_id": next_candidate.get("batch_id") or "",
-                    "task_id": None,
-                    "status": "critic_denied",
-                    "rationale": str(verdict.get("rationale") or ""),
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            try:
-                from .framework_pr_artifacts import write_decision_json
-
-                write_decision_json(
-                    self.session_dir,
-                    candidate_id=cand_id,
-                    batch_id=str(next_candidate.get("batch_id") or ""),
-                    status="critic_denied",
-                    kept=False,
-                    provenance="critic",
-                    reason=str(verdict.get("rationale") or ""),
-                )
-            except Exception:  # noqa: BLE001 — observability is best-effort
-                log.debug("FRAMEWORK_PR: critic_denied decision.json write failed", exc_info=True)
-            state.save(self.session_dir)
-            log.info(
-                "FRAMEWORK_PR: critic rejected candidate=%s batch=%s rationale=%r",
-                cand_id,
-                next_candidate.get("batch_id") or "",
-                str(verdict.get("rationale") or "")[:200],
-            )
-            return
-        # Route dispatch by the audit verdict (Step 3). ``direct_framework_pr``
-        # -> raw-diff executor only; ``author_via_specialist`` -> authoring
-        # specialist only, seeded with audit evidence; unknown / other ->
-        # legacy both-tracks. A candidate routed to authoring while authoring is
-        # disabled falls back to the raw-diff executor so it still gets a
-        # terminal row (no re-audit loop).
-        authoring_enabled = bool(getattr(state, "framework_pr_authoring_enabled", False))
-        want_raw = audit_step == "direct_framework_pr"
-        want_author = audit_step == "author_via_specialist"
-        if audit_step not in ("direct_framework_pr", "author_via_specialist"):
-            want_raw = True
-            want_author = True
-        if want_author and not authoring_enabled:
-            want_raw = True
-            want_author = False
-        if want_raw:
-            await self._enqueue_framework_pr_task(next_candidate)
-        # Authoring track (PR-G): hand the PR to a write-capable specialist to author its own patch.
-        if want_author and authoring_enabled:
-            try:
-                await self._enqueue_framework_pr_authoring_specialist(
-                    next_candidate,
-                    audit=audit,
-                )
-            except Exception as exc:  # noqa: BLE001 — never wedge the pump
-                log.warning(
-                    "FRAMEWORK_PR: authoring specialist dispatch failed: %r",
-                    exc,
-                )
+        # Critic gate before apply (Fix 4 — fully converged): submit the
+        # candidate as a normal ``proposal`` carrying its resolved audit route,
+        # then return. The async Critic verdict arrives on a later tick and
+        # drives the apply/author enqueue (approve/advise) or the critic_denied
+        # row (reject) via ``_handle_single_verdict`` →
+        # ``_materialize_approved_proposal`` / ``_record_framework_pr_critic_denied``.
+        await self._submit_framework_pr_candidate_for_review(
+            next_candidate,
+            audit=audit,
+            audit_step=audit_step,
+        )
 
     async def _framework_pr_authoring_inflight(self) -> bool:
         """True while a FRAMEWORK_PR-authored patch is still in flight (specialist/integrate_patch task or pending integrate_patch proposal); pump waits before advancing.
@@ -3112,10 +3066,14 @@ class Coordinator:
         for t in (*queued, *running):
             if getattr(t, "kind", "") in ("specialist", "integrate_patch"):
                 return True
-        # An authored patch may sit in the Critic queue before the integrate_patch task.
+        # An authored patch may sit in the Critic queue before the
+        # integrate_patch task; a FRAMEWORK_PR candidate may sit awaiting its
+        # pre-screen verdict (Fix 4). Both keep the phase from exiting early.
         try:
             for p in self.state.pending_proposals.values():
-                if getattr(p, "action_name", "") == "integrate_patch":
+                if getattr(p, "decided", False):
+                    continue
+                if getattr(p, "action_name", "") in ("integrate_patch", "framework_pr"):
                     return True
         except Exception:  # noqa: BLE001 — defensive
             pass
@@ -4312,126 +4270,213 @@ class Coordinator:
             "recent_outcomes": outcomes,
         }
 
-    async def _critic_review_framework_pr_candidate(
+    async def _submit_framework_pr_candidate_for_review(
         self,
         candidate: dict[str, Any],
-    ) -> dict[str, str]:
-        """Ask the Critic backend whether to apply ``candidate``.
+        *,
+        audit: dict[str, Any] | None = None,
+        audit_step: str = "",
+    ) -> None:
+        """Submit a FRAMEWORK_PR candidate as a normal ``proposal`` for async Critic review (Fix 4).
 
-        Returns {"verdict": "approve"|"reject"|"abstain", "rationale": str}. abstain is the safe degraded
-        path (treated as approve by caller); decisions cached in framework_pr_critic_decisions for resume.
+        Mirrors :meth:`_maybe_autosubmit_specialist_patches`: writes a
+        ``topic="proposal"`` message + registers a :class:`PendingProposal`,
+        bypassing ``_handle_intent`` / ``PolicyGate`` (``framework_pr`` is a
+        COORDINATOR_INTERNAL action that ``propose_action`` would deny). The
+        Critic verdict arrives on a later tick and drives the apply/author
+        enqueue (approve/advise) or the critic_denied row (reject) via
+        ``_handle_single_verdict``. All context needed by ``replay_for_resume``
+        and ``_materialize_framework_pr_candidate`` lives in the payload, so no
+        separate persistent candidate map is kept.
 
         Args:
-            candidate: The discovered PR candidate to review.
-
-        Returns:
-            A dict with ``verdict`` (one of "approve", "reject", "abstain") and
-            ``rationale``; abstain is the safe degraded path treated as approve
-            by the caller.
+            candidate: The discovered PR candidate to gate.
+            audit: The semantic-audit verdict (carried for the authoring seed).
+            audit_step: The resolved route (``direct_framework_pr`` /
+                ``author_via_specialist`` / ``""`` for legacy both-tracks).
         """
-        state = self.shared_state
         cand_id = str(
-            candidate.get("candidate_id") or candidate.get("pr_url") or "",
+            candidate.get("candidate_id")
+            or candidate.get("pr_url")
+            or candidate.get("ref")
+            or ""
         )
-        # Resume-safe cache lookup.
-        cached = getattr(state, "framework_pr_critic_decisions", None)
-        if isinstance(cached, list):
-            for row in cached:
-                if not isinstance(row, dict):
+        batch_id = str(candidate.get("batch_id") or "")
+        # Dedup: a candidate is already awaiting its pre-screen verdict.
+        for p in self.state.pending_proposals.values():
+            try:
+                if getattr(p, "action_name", "") != "framework_pr":
                     continue
-                if str(row.get("candidate_id") or "") == cand_id and cand_id:
-                    return {
-                        "verdict": str(row.get("verdict") or "abstain"),
-                        "rationale": str(row.get("rationale") or ""),
-                    }
-        critic_backend = self.backends.get("critic")
-        if critic_backend is None:
-            return {"verdict": "abstain", "rationale": "no critic backend"}
-        # Proposal-formatted prompt for both Mock + Agent critic backends; deterministic all-hex msg_id
-        # from candidate id so MockCriticBackend's [a-f0-9]+ regex + dedupe set stay consistent.
-        msg_id = hashlib.md5(
-            f"framework_pr:{cand_id}".encode(),
-        ).hexdigest()
-        payload = {
-            "action": "framework_pr",
-            "candidate": {
-                "candidate_id": cand_id,
-                "pr_url": str(candidate.get("pr_url") or ""),
-                "diff_url": str(candidate.get("diff_url") or ""),
-                "repo": str(candidate.get("repo") or ""),
-                "ref": str(candidate.get("ref") or ""),
-                "title": str(candidate.get("title") or ""),
-                "framework": str(candidate.get("framework") or ""),
-                "gap_canonical_id": str(candidate.get("gap_canonical_id") or ""),
-                "rationale": str(candidate.get("rationale") or ""),
-            },
-            "batch_id": candidate.get("batch_id") or "",
-            # Session-local priors (classified candidates + apply/bench outcomes); bounded to keep prompt compact.
+                if getattr(p, "decided", False):
+                    continue
+                pl = getattr(p, "payload", {}) or {}
+                if str(pl.get("framework_pr_candidate_id") or "") == cand_id and cand_id:
+                    return
+            except Exception:  # noqa: BLE001 — defensive
+                continue
+        propose_payload: dict[str, Any] = {
+            "action_name": "framework_pr",
+            "provenance": "framework_pr",
+            "predicted_gain_pct": 0.0,
+            "candidate": dict(candidate),
+            "batch_id": batch_id,
+            "framework_pr_candidate_id": cand_id,
+            "audit": dict(audit) if isinstance(audit, dict) else {},
+            "audit_step": str(audit_step or ""),
             "priors": self._collect_framework_pr_priors(),
         }
-        prompt = f"seq=1 msg_id={msg_id} from=coordinator topic=proposal payload={json.dumps(payload, sort_keys=True)}"
-        verdict_row: dict[str, str] = {
-            "verdict": "abstain",
-            "rationale": "no verdict emitted",
-        }
+        msg = Message.new(
+            "coordinator",
+            "*",
+            "proposal",
+            {**propose_payload, "needs_review": True},
+            priority=1,
+        )
+        await self.bus.append_and_seq(msg)
+        self.state.pending_proposals[msg.msg_id] = PendingProposal(
+            proposal_msg_id=msg.msg_id,
+            from_agent="coordinator",
+            action_name="framework_pr",
+            predicted_gain_pct=0.0,
+            payload=dict(propose_payload),
+        )
+        log.info(
+            "FRAMEWORK_PR: candidate submitted for Critic review msg_id=%s "
+            "candidate=%s batch=%s audit_step=%s",
+            msg.msg_id,
+            cand_id,
+            batch_id,
+            audit_step or "<unknown>",
+        )
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "framework_pr_candidate_submitted_for_review",
+                "proposal_msg_id": msg.msg_id,
+                "candidate_id": cand_id,
+                "batch_id": batch_id,
+                "audit_step": str(audit_step or ""),
+            },
+        )
         try:
-            result = await critic_backend.run(
-                prompt=prompt,
-                system_prompt=None,
-                tools=[],
-                max_turns=1,
-            )
-        except Exception as exc:  # noqa: BLE001 — defensive
-            log.warning(
-                "FRAMEWORK_PR: critic call failed for candidate=%s: %r",
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "save after framework_pr candidate submit failed for candidate=%s",
                 cand_id,
-                exc,
             )
-            verdict_row = {
-                "verdict": "abstain",
-                "rationale": f"critic call failed: {exc!r}",
-            }
-        else:
-            for intent in getattr(result, "intents", []) or []:
-                itype = getattr(intent, "type", None)
-                itype_val = getattr(itype, "value", itype)
-                if str(itype_val) != "review_verdict":
-                    continue
-                ipayload = getattr(intent, "payload", {}) or {}
-                if not isinstance(ipayload, dict):
-                    continue
-                if str(ipayload.get("target_proposal_msg_id") or "") != msg_id:
-                    continue
-                v = str(ipayload.get("verdict") or "").strip().lower()
-                # Map Critic verdict vocab onto {approve, reject, abstain}; redirect/advise/needs_review -> abstain.
-                if v == "approve":
-                    mapped = "approve"
-                elif v == "reject":
-                    mapped = "reject"
-                else:
-                    mapped = "abstain"
-                verdict_row = {
-                    "verdict": mapped,
-                    "rationale": str(
-                        ipayload.get("reasoning") or ipayload.get("rationale") or "",
-                    ),
-                }
-                break
-        decisions = getattr(state, "framework_pr_critic_decisions", None)
-        if not isinstance(decisions, list):
-            decisions = []
-            state.framework_pr_critic_decisions = decisions
-        decisions.append(
+
+    async def _materialize_framework_pr_candidate(
+        self,
+        pending: "PendingProposal",
+    ) -> None:
+        """Route a Critic-approved FRAMEWORK_PR candidate to the apply / author tracks (Fix 4).
+
+        Reads the audit route stamped on the proposal payload and reuses the
+        existing ``direct_framework_pr`` (raw-diff executor) vs
+        ``author_via_specialist`` enqueue helpers, with the same
+        authoring-disabled → raw-diff fallback the pump used to apply inline.
+
+        Args:
+            pending: The approved framework_pr pending proposal.
+        """
+        payload = pending.payload or {}
+        candidate = dict(payload.get("candidate") or {})
+        audit = payload.get("audit") if isinstance(payload.get("audit"), dict) else {}
+        audit_step = str(payload.get("audit_step") or "")
+        cand_id = str(payload.get("framework_pr_candidate_id") or "")
+        authoring_enabled = bool(getattr(self.shared_state, "framework_pr_authoring_enabled", False))
+        want_raw = audit_step == "direct_framework_pr"
+        want_author = audit_step == "author_via_specialist"
+        if audit_step not in ("direct_framework_pr", "author_via_specialist"):
+            want_raw = True
+            want_author = True
+        if want_author and not authoring_enabled:
+            want_raw = True
+            want_author = False
+        log.info(
+            "FRAMEWORK_PR: critic-approved candidate=%s batch=%s audit_step=%s raw=%s author=%s",
+            cand_id,
+            str(payload.get("batch_id") or ""),
+            audit_step or "<unknown>",
+            want_raw,
+            want_author,
+        )
+        if want_raw:
+            await self._enqueue_framework_pr_task(candidate)
+        if want_author and authoring_enabled:
+            try:
+                await self._enqueue_framework_pr_authoring_specialist(
+                    candidate,
+                    audit=audit if isinstance(audit, dict) else {},
+                )
+            except Exception as exc:  # noqa: BLE001 — never wedge the phase
+                log.warning(
+                    "FRAMEWORK_PR: authoring specialist dispatch failed: %r",
+                    exc,
+                )
+
+    async def _record_framework_pr_critic_denied(
+        self,
+        pending: "PendingProposal",
+        reasoning: str,
+    ) -> None:
+        """Record a ``critic_denied`` FRAMEWORK_PR row when the async gate rejects a candidate (Fix 4).
+
+        Stamps a ``framework_pr_phase_progress`` row + ``decision.json`` keyed
+        on the candidate id so ``_select_best_framework_pr_candidate`` treats it
+        as processed and the pump advances to the next candidate.
+
+        Args:
+            pending: The rejected framework_pr pending proposal.
+            reasoning: The Critic's free-text rationale.
+        """
+        state = self.shared_state
+        payload = pending.payload or {}
+        cand_id = str(payload.get("framework_pr_candidate_id") or "")
+        batch_id = str(payload.get("batch_id") or "")
+        progress = getattr(state, "framework_pr_phase_progress", None)
+        if not isinstance(progress, list):
+            progress = []
+            state.framework_pr_phase_progress = progress
+        progress.append(
             {
                 "candidate_id": cand_id,
-                "batch_id": candidate.get("batch_id") or "",
-                "verdict": verdict_row["verdict"],
-                "rationale": verdict_row["rationale"],
+                "batch_id": batch_id,
+                "task_id": None,
+                "status": "critic_denied",
+                "rationale": str(reasoning or ""),
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
         )
-        state.save(self.session_dir)
-        return verdict_row
+        try:
+            from .framework_pr_artifacts import write_decision_json
+
+            write_decision_json(
+                self.session_dir,
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status="critic_denied",
+                kept=False,
+                provenance="critic",
+                reason=str(reasoning or ""),
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("FRAMEWORK_PR: critic_denied decision.json write failed", exc_info=True)
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "save after framework_pr critic_denied failed for candidate=%s",
+                cand_id,
+            )
+        log.info(
+            "FRAMEWORK_PR: critic rejected candidate=%s batch=%s rationale=%r",
+            cand_id,
+            batch_id,
+            str(reasoning or "")[:200],
+        )
 
     async def _maybe_reprofile_for_kernel(self) -> None:
         """Reprofile inline when projected tput diverges from the last measured trace, so GEAK targets the live bottleneck."""
@@ -9676,6 +9721,14 @@ class Coordinator:
             approved_variant_names: When set, restricts an explore grid to these
                 Critic-approved variant names; ``None`` keeps the full grid.
         """
+        # FRAMEWORK_PR candidate gate (Fix 4): an approved candidate proposal
+        # routes to the raw-diff / authoring tracks by the stamped audit route
+        # rather than creating a generic ``framework_pr`` task via the shared
+        # tail below (which cannot express direct/author routing). Must early
+        # return.
+        if pending.action_name == "framework_pr":
+            await self._materialize_framework_pr_candidate(pending)
+            return
         params = dict(pending.payload.get("params") or {})
         # Carry the proposer's predicted gain onto the task so the post-run
         # journal write can persist predicted-vs-realized for calibration.

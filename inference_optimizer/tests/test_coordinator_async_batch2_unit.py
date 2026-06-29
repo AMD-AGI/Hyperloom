@@ -2021,7 +2021,36 @@ async def test_pump_framework_pr_discover_empty_marks_done(coord: Coordinator, m
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_critic_rejects(coord: Coordinator, monkeypatch) -> None:
+async def test_pump_framework_pr_submits_candidate_proposal(coord: Coordinator, monkeypatch) -> None:
+    """Fix 4: the pump submits the candidate as a ``framework_pr`` proposal (async gate) instead of enqueuing inline."""
+    _enter_framework_pr(coord)
+
+    async def _select():
+        return {"candidate_id": "c1", "pr_url": "https://example.com/pr/1", "batch_id": "b1"}
+
+    monkeypatch.setattr(coord, "_select_best_framework_pr_candidate", _select)
+
+    async def _audit(cand):
+        return {"recommended_next_step": "direct_framework_pr"}
+
+    monkeypatch.setattr(coord, "_audit_framework_pr_candidate", _audit)
+    monkeypatch.setattr(coord, "_framework_roots_have_git", lambda: True)
+
+    await coord._pump_framework_pr_phase()
+
+    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_pr"]
+    assert len(pendings) == 1
+    payload = pendings[0].payload
+    assert payload["framework_pr_candidate_id"] == "c1"
+    assert payload["audit_step"] == "direct_framework_pr"
+    # No framework_pr task is created synchronously; the verdict drives it later.
+    queued = await coord.tasks.queued()
+    assert not [t for t in queued if getattr(t, "kind", "") == "framework_pr"]
+
+
+@pytest.mark.asyncio
+async def test_pump_framework_pr_dedup_does_not_resubmit(coord: Coordinator, monkeypatch) -> None:
+    """A candidate already awaiting its verdict is not re-submitted on the next tick."""
     _enter_framework_pr(coord)
 
     async def _select():
@@ -2030,46 +2059,62 @@ async def test_pump_framework_pr_critic_rejects(coord: Coordinator, monkeypatch)
     monkeypatch.setattr(coord, "_select_best_framework_pr_candidate", _select)
 
     async def _audit(cand):
-        return {"recommended_next_step": ""}  # unknown -> proceed to Critic
-
-    monkeypatch.setattr(coord, "_audit_framework_pr_candidate", _audit)
-
-    async def _review(cand):
-        return {"verdict": "reject", "rationale": "unsafe"}
-
-    monkeypatch.setattr(coord, "_critic_review_framework_pr_candidate", _review)
-    await coord._pump_framework_pr_phase()
-    prog = coord.shared_state.framework_pr_phase_progress
-    assert any(p.get("status") == "critic_denied" for p in prog)
-
-
-@pytest.mark.asyncio
-async def test_pump_framework_pr_approve_enqueues(coord: Coordinator, monkeypatch) -> None:
-    _enter_framework_pr(coord)
-
-    async def _select():
-        return {"candidate_id": "c2", "batch_id": "b2"}
-
-    monkeypatch.setattr(coord, "_select_best_framework_pr_candidate", _select)
-
-    async def _audit(cand):
-        # direct_apply -> raw-diff executor only (keeps this test hermetic).
         return {"recommended_next_step": "direct_framework_pr"}
 
     monkeypatch.setattr(coord, "_audit_framework_pr_candidate", _audit)
-    # direct_apply requires a git checkout; force the preflight True so the
-    # candidate routes to the raw-diff executor instead of degrading to authoring.
     monkeypatch.setattr(coord, "_framework_roots_have_git", lambda: True)
 
-    async def _review(cand):
-        return {"verdict": "approve"}
+    await coord._pump_framework_pr_phase()
+    await coord._pump_framework_pr_phase()  # pending proposal -> no second submit
+    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_pr"]
+    assert len(pendings) == 1
 
-    monkeypatch.setattr(coord, "_critic_review_framework_pr_candidate", _review)
+
+@pytest.mark.asyncio
+async def test_framework_pr_reject_records_critic_denied(coord: Coordinator) -> None:
+    """A reject verdict on a framework_pr candidate proposal writes a critic_denied progress row."""
+    from inference_optimizer.orchestrator.coordinator import PendingProposal
+
+    pending = PendingProposal(
+        proposal_msg_id="m1",
+        from_agent="coordinator",
+        action_name="framework_pr",
+        predicted_gain_pct=0.0,
+        payload={"framework_pr_candidate_id": "c1", "batch_id": "b1"},
+    )
+    coord.state.pending_proposals["m1"] = pending
+    await coord._handle_single_verdict(
+        source="critic", pending=pending, verdict="reject", reasoning="unsafe",
+    )
+    prog = coord.shared_state.framework_pr_phase_progress
+    assert any(p.get("status") == "critic_denied" and p.get("candidate_id") == "c1" for p in prog)
+
+
+@pytest.mark.asyncio
+async def test_framework_pr_approve_routes_to_enqueue(coord: Coordinator, monkeypatch) -> None:
+    """An approve verdict routes a ``direct_framework_pr`` candidate to the raw-diff enqueue helper."""
+    from inference_optimizer.orchestrator.coordinator import PendingProposal
+
     enq: list = []
 
     async def _enqueue(cand):
         enq.append(cand)
 
     monkeypatch.setattr(coord, "_enqueue_framework_pr_task", _enqueue)
-    await coord._pump_framework_pr_phase()
+    pending = PendingProposal(
+        proposal_msg_id="m2",
+        from_agent="coordinator",
+        action_name="framework_pr",
+        predicted_gain_pct=0.0,
+        payload={
+            "framework_pr_candidate_id": "c2",
+            "batch_id": "b2",
+            "candidate": {"candidate_id": "c2", "batch_id": "b2"},
+            "audit_step": "direct_framework_pr",
+        },
+    )
+    coord.state.pending_proposals["m2"] = pending
+    await coord._handle_single_verdict(
+        source="critic", pending=pending, verdict="approve", reasoning="ok",
+    )
     assert enq

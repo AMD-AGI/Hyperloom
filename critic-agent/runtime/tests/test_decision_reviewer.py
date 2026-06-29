@@ -175,6 +175,18 @@ def test_prepare_review_framework_op_emits_empty_approve_requires(reviewer):
     assert constraints["proposal_action_classes"] == {"baseA": "framework_op"}
 
 
+def test_classify_framework_pr_is_framework_op():
+    """FRAMEWORK_PR pre-screen candidates classify as framework_op (no extra approve_requires)."""
+    from runtime.decision_reviewer import (
+        _APPROVE_REQUIRES_BY_CLASS,
+        ACTION_CLASS_FRAMEWORK_OP,
+        classify_proposal_action,
+    )
+
+    assert classify_proposal_action("framework_pr") == ACTION_CLASS_FRAMEWORK_OP
+    assert _APPROVE_REQUIRES_BY_CLASS[ACTION_CLASS_FRAMEWORK_OP] == ()
+
+
 def test_prepare_review_mixed_batch_uses_strictest_class(reviewer):
     rev, _, _ = reviewer
     bundle = rev.prepare_review(_coordinator_request(_mixed_prompt(), "sess_mix"))
