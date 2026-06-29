@@ -6,7 +6,7 @@ myst:
 ---
 # Integrate Recipe/Cortex knowledge base in Hyperloom
 
-This topic explains the optional Recipe/Cortex knowledge-base (KB)integration used by Hyperloom, how local and remote stores are selected, and
+This topic explains the optional Recipe/Cortex knowledge-base (KB) integration used by Hyperloom, how local and remote stores are selected, and
 how the runtime behaves when KB sources are unavailable. The KB is optional;
 Hyperloom can run in local-only or degraded mode.
 

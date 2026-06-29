@@ -254,7 +254,7 @@ ray --version
 
 ## Upgrading
 
-See [Upgrade Hyperloom version](../how-to/upgrade.md) for per-version migration steps.
+See [Upgrade Hyperloom version](upgrade.md) for per-version migration steps.
 The summary policy: `USER_DATA_PATH` is forward-compatible across
 patch releases; minor releases might add new fields to
 `session_breakdown.json` (backwards-compatible) without bumping

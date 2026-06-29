@@ -79,7 +79,7 @@ You *never* need to copy `SAFE_API_KEY` into separate
 If those variables are unset, the install scripts fill them from
 `SAFE_API_KEY` at process-launch time.
 
-### Set the credetials
+### Set the credentials
 
 The recommended pattern, run once per shell:
 
@@ -104,7 +104,7 @@ The following credentials are optional and only needed for specific backends.
 
 ### `CURSOR_API_KEY` — Cursor SDK kernel-opt backend
 
-The OOB `cursor` backend talks to*Cursor's gateway, not the AMD
+The OOB `cursor` backend talks to Cursor's gateway, not the AMD
 primus-safe gateway. It therefore requires a separate issuer key
 with prefix `crsr_...`:
 

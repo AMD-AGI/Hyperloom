@@ -13,7 +13,7 @@ session directory.
 
 All scripts respect the `$USER_DATA_PATH` env (default
 `/workspace/hyperloom`) when no explicit `--session-dir` is given. See
-[Hyperloom authentication and credentials](authentication.md) §4.
+[Hyperloom authentication and credentials](authentication.md).
 
 ---
 

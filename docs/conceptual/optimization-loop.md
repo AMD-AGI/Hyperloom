@@ -98,7 +98,7 @@ KERNEL phase is the bridge to kernel-agent work. Orchestration may send
 kernel requests, but the Coordinator owns the request handlers and safety
 gates.
 
-These are the types of live rquests:
+These are the types of live requests:
 
 - `trace_analyze`
 - `run_gemm_tuning`

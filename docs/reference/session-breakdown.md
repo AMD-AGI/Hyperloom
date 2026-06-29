@@ -14,7 +14,7 @@ dashboards). One file per session, written to
 operator demand using [`dump_session_breakdown.py`](operator-scripts.md)).
 
 The authoritative source of truth for the wire shape is
-[`inference_optimizer/breakdown/schema.py`](../inference_optimizer/breakdown/schema.py).
+[`inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/inference_optimizer/breakdown/schema.py).
 This page describes the contract from a consumer's perspective.
 
 ---
