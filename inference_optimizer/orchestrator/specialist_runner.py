@@ -545,6 +545,8 @@ class SpecialistRunner:
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(params.get("warm_start_pitfalls") or []),
                 warm_start_lessons=list(params.get("warm_start_lessons") or []),
+                kg_recommended_knobs=[p for p in (params.get("kg_recommended_knobs") or []) if isinstance(p, dict)],
+                kg_guided_knobs=[p for p in (params.get("kg_guided_knobs") or []) if isinstance(p, dict)],
                 pr_feed=list(params.get("pr_feed") or []),
                 pr_monitor_available=bool(params.get("pr_monitor_available", True)),
                 framework=str(params.get("framework") or ""),
