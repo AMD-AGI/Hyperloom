@@ -11,8 +11,6 @@ setup(
         include=[
             "inference_optimizer",
             "inference_optimizer.*",
-            "quark_quantizer",
-            "quark_quantizer.*",
         ],
     ),
 )
