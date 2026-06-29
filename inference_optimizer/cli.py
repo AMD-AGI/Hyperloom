@@ -3681,6 +3681,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
         session_lock.release()
+        # Issue #464: crash-safe reports/final.json. Runs unconditionally and
+        # FIRST so a consumable machine-readable summary always exists even
+        # when the CLOSE sequencer never ran (time_exhausted / external
+        # SIGTERM) or its report task failed. Idempotent: a no-op when the
+        # full ReportExecutor already wrote final.json. coordinator.run's own
+        # finally has persisted state.json (with stop_reason) before we get
+        # here, so the fields are current.
+        try:
+            from .breakdown import write_minimal_final_json
+
+            final_json = write_minimal_final_json(session_dir)
+            print(f"Final summary     : {final_json}")
+        except Exception:  # noqa: BLE001 — safety net must never mask stop_reason
+            log.exception("crash-safe final.json write failed (non-fatal)")
         # End-of-session safety net: always materialize session_breakdown.json (best-effort; never mask stop_reason).
         # Skip when the CLOSE sequencer already wrote it (close_sequence_done is locked in CORE_STATE_FIELDS).
         sequencer_done = getattr(
