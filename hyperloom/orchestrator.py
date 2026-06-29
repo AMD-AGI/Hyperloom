@@ -221,7 +221,16 @@ def _exec_dispatch_agents(tool_input: dict, session_dir: str) -> str:
     global _AGENT_HANDLES
 
     tasks_input = tool_input.get("tasks", [])
-    model = tool_input.get("model", os.environ.get("AGENT_MODEL", "claude-sonnet-4-6"))
+    # The orchestrator sometimes fills `model` with the model-under-test (e.g.
+    # "MiniMax-M3-FP8") rather than an agent LLM. Only honor a tool-provided value
+    # if it names an actual agent LLM; otherwise use AGENT_MODEL (the same family
+    # the orchestrator runs on) so dispatched specialists hit a model the
+    # configured endpoint actually serves.
+    requested = tool_input.get("model") or ""
+    if requested.startswith(("claude", "gpt")):
+        model = requested
+    else:
+        model = os.environ.get("AGENT_MODEL", "claude-opus-4-6")
     timeout_minutes = tool_input.get("timeout_minutes", 120)
     pool = _get_gpu_pool(session_dir)
 
@@ -232,12 +241,13 @@ def _exec_dispatch_agents(tool_input: dict, session_dir: str) -> str:
     for t in tasks_input:
         kb_content = ""
         kb_domains = t.get("kb_domains", [])
-        if kb_domains:
-            try:
-                kb_files = select_kb(t["task_description"], domains=kb_domains)
-                kb_content = load_kb_content([f.path for f in kb_files])
-            except Exception:
-                pass
+        try:
+            # Always run KB selection: use caller-provided domains when present,
+            # otherwise fall back to keyword/content matching on the task text.
+            kb_files = select_kb(t["task_description"], domains=kb_domains or None)
+            kb_content = load_kb_content(kb_files)
+        except Exception:
+            log.exception("KB selection failed for task %r", t.get("task_summary", ""))
 
         prompt = build_agent_prompt(
             task=t["task_description"],

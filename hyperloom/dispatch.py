@@ -33,6 +33,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -911,7 +912,7 @@ def _dispatch_via_cli(
         cmd.extend(["--mcp-config", mcp_config_path])
 
     add_dirs = [session_dir]
-    for var in ("BASE_DIR", "INFERENCEX_PATH"):
+    for var in ("BASE_DIR", "INFERENCEX_PATH", "KERNEL_AGENTS_PATH"):
         val = os.environ.get(var)
         if val and Path(val).is_dir():
             add_dirs.append(val)
@@ -941,10 +942,37 @@ def _dispatch_via_cli(
             proc = subprocess.Popen(full_cmd, stdout=log_f, stderr=subprocess.STDOUT)
     else:
         repo_root = str(Path(session_dir).resolve().parent)
-        with open(log_path, "w") as log_f:
-            proc = subprocess.Popen(
-                cmd, stdout=log_f, stderr=subprocess.STDOUT, env=env, cwd=repo_root,
+        if shutil.which("claude") is None:
+            # No `claude` CLI on this node — fall back to the SDK-based runner,
+            # which drives bash/read/write tools over the configured Anthropic
+            # endpoint (e.g. the local llm-proxy). Same done.json/heartbeat.json
+            # contract that reap/check_agents expects.
+            fallback_cmd = [
+                sys.executable, "-m", "hyperloom.remote_agent",
+                "--prompt-file", str(prompt_file),
+                "--model", model,
+                "--session-dir", session_dir,
+                "--agent-id", agent_id,
+            ]
+            # hyperloom may only be importable via cwd (not pip-installed), and we
+            # run the child from repo_root (the session's parent), so make the
+            # package dir explicit on PYTHONPATH.
+            pkg_parent = str(Path(__file__).resolve().parent.parent)
+            fb_env = env.copy()
+            existing_pp = fb_env.get("PYTHONPATH", "")
+            fb_env["PYTHONPATH"] = (
+                pkg_parent + (os.pathsep + existing_pp if existing_pp else "")
             )
+            with open(log_path, "w") as log_f:
+                proc = subprocess.Popen(
+                    fallback_cmd, stdout=log_f, stderr=subprocess.STDOUT,
+                    env=fb_env, cwd=repo_root,
+                )
+        else:
+            with open(log_path, "w") as log_f:
+                proc = subprocess.Popen(
+                    cmd, stdout=log_f, stderr=subprocess.STDOUT, env=env, cwd=repo_root,
+                )
 
     return AgentHandle(
         agent_id=agent_id,

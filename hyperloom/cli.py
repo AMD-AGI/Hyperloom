@@ -115,6 +115,14 @@ def optimize(
     if not config.session_dir:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         config.session_dir = f"sessions/{ts}"
+    elif "{" in config.session_dir:
+        # Allow templated --session-dir, e.g. ".../{model_name}-{timestamp}".
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        model_name = Path(config.model_path.rstrip("/")).name or "model"
+        config.session_dir = config.session_dir.format(
+            model_name=model_name,
+            timestamp=ts,
+        )
 
     caps = detect_capabilities()
     click.echo("Hyperloom Optimization Session")

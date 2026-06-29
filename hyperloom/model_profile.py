@@ -30,6 +30,8 @@ class ModelInfo:
     is_moe: bool = False
     num_experts: int = 0
     num_experts_per_tok: int = 0
+    has_shared_expert: bool = False
+    num_shared_experts: int = 0
     is_mla: bool = False
     quantization: str = ""
     dtype: str = ""
@@ -62,6 +64,21 @@ def detect_model_info(model_path: str) -> ModelInfo:
     is_moe = bool(data.get("num_local_experts") or data.get("num_experts"))
     is_mla = "mla" in arch.lower() or data.get("q_lora_rank", 0) > 0
 
+    # Always-on "shared"/dense expert detection (DeepSeek-V2/V3, MiniMax-M3,
+    # GLM-MoE, Ernie-MoE, ...). Surfaced so the orchestrator can consider
+    # shared-expert fusion (see kb/fusion/empirical_kb.md).
+    num_shared_experts = int(
+        data.get("n_shared_experts")
+        or data.get("num_shared_experts")
+        or data.get("moe_num_shared_experts")
+        or 0
+    )
+    has_shared_expert = bool(
+        num_shared_experts
+        or data.get("shared_expert_intermediate_size", 0)
+        or data.get("shared_experts")
+    )
+
     return ModelInfo(
         name=Path(model_path).name,
         architecture=arch,
@@ -74,6 +91,8 @@ def detect_model_info(model_path: str) -> ModelInfo:
         is_moe=is_moe,
         num_experts=data.get("num_local_experts", data.get("num_experts", 0)),
         num_experts_per_tok=data.get("num_experts_per_tok", 0),
+        has_shared_expert=has_shared_expert,
+        num_shared_experts=num_shared_experts,
         is_mla=is_mla,
         quantization=data.get("quantization_config", {}).get("quant_method", ""),
         dtype=data.get("torch_dtype", ""),
