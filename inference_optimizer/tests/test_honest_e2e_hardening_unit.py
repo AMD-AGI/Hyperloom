@@ -189,3 +189,61 @@ def test_opfanout_on_via_umbrella(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "1.0")
     sel = krh._batch_kernel_candidates({"candidates_path": _write_candidates(tmp_path)})
     assert len(sel) == 1
+
+
+# -- high-impact infra-retry cap (the dominant root-cause fix) -------------
+def _infra_entry(failure_count: int, gpu_pct: float) -> dict:
+    """An infra non-finish record (no verdict, status failed) at max_failures."""
+    return {
+        "failure_count": failure_count,
+        "last_decision": "",
+        "last_status": "failed",
+        "rejected_reason": "",
+        "last_gpu_pct": gpu_pct,
+    }
+
+
+def test_infra_retry_off_retires_at_max_failures(monkeypatch) -> None:
+    monkeypatch.delenv("HL_HONEST_E2E", raising=False)
+    monkeypatch.delenv("HL_INFRA_RETRY_HIGH_IMPACT", raising=False)
+    # failure_count == max_failures => legacy retires (cap collapses to default 1).
+    cap = krh._kernel_dispatch_attempt_cap(_infra_entry(2, 26.7), max_failures=2)
+    assert cap == krh._DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
+
+
+def test_infra_retry_on_widens_for_high_impact(monkeypatch) -> None:
+    monkeypatch.setenv("HL_INFRA_RETRY_HIGH_IMPACT", "1")
+    monkeypatch.delenv("HL_INFRA_RETRY_MIN_GPU_PCT", raising=False)
+    monkeypatch.delenv("HL_INFRA_RETRY_MAX", raising=False)
+    # 26.7%-GPU kernel that infra-failed twice still gets attempts up to infra_max (4).
+    cap = krh._kernel_dispatch_attempt_cap(_infra_entry(2, 26.7), max_failures=2)
+    assert cap == 4
+
+
+def test_infra_retry_on_via_umbrella(monkeypatch) -> None:
+    monkeypatch.setenv("HL_HONEST_E2E", "1")
+    monkeypatch.delenv("HL_INFRA_RETRY_HIGH_IMPACT", raising=False)
+    assert krh._kernel_dispatch_attempt_cap(_infra_entry(2, 8.0), max_failures=2) == 4
+
+
+def test_infra_retry_low_impact_not_widened(monkeypatch) -> None:
+    monkeypatch.setenv("HL_INFRA_RETRY_HIGH_IMPACT", "1")
+    # 1%-GPU kernel below the 5% threshold: not widened, retires as legacy.
+    cap = krh._kernel_dispatch_attempt_cap(_infra_entry(2, 1.0), max_failures=2)
+    assert cap == krh._DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
+
+
+def test_infra_retry_does_not_touch_revert(monkeypatch) -> None:
+    monkeypatch.setenv("HL_INFRA_RETRY_HIGH_IMPACT", "1")
+    # A real REVERT (has a verdict) is NOT a retryable infra non-finish — unchanged.
+    entry = _infra_entry(2, 26.7)
+    entry["last_decision"] = "REVERT"
+    cap = krh._kernel_dispatch_attempt_cap(entry, max_failures=2)
+    assert cap == krh._DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
+
+
+def test_infra_retry_exhausted_at_infra_max(monkeypatch) -> None:
+    monkeypatch.setenv("HL_INFRA_RETRY_HIGH_IMPACT", "1")
+    # Once failure_count reaches infra_max, even a high-impact kernel retires.
+    cap = krh._kernel_dispatch_attempt_cap(_infra_entry(4, 26.7), max_failures=2)
+    assert cap == krh._DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
