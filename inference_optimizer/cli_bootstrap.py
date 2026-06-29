@@ -202,7 +202,7 @@ def _seed_shared_state(
     # KB architecture tags from config.json (architectures + model_type); fresh-launch only (resume rehydrates).
     _cfg_tags = _load_model_config_tags(str(args.model))
 
-    # Single control plane for the KERNEL phase: the kernel backend order env
+    # Single control plane for the KERNEL_AGENT phase: the kernel backend order env
     # (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``), set by the
     # launcher / CI submit layer. The per-kernel ladder and the phase-level
     # PerfSkills check read it directly; here we derive the persisted
@@ -279,8 +279,8 @@ def _seed_shared_state(
         enable_roofline=bool(
             getattr(args, "enable_roofline", True),
         ),
-        # Standalone FRAMEWORK_PR phase; --no-framework skips it (mirrors --no-kernel/kernel_enabled).
-        framework_phase_enabled=not bool(getattr(args, "no_framework", False)),
+        # Standalone FRAMEWORK_AGENT phase; --no-framework-agent skips it (mirrors --no-kernel/kernel_enabled).
+        framework_agent_phase_enabled=not bool(getattr(args, "no_framework_agent", False)),
         # --no-explore skips the EXPLORE phase entirely.
         explore_enabled=not bool(getattr(args, "no_explore", False)),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,

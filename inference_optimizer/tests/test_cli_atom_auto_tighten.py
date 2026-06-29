@@ -16,7 +16,7 @@ def _fresh_args(**overrides) -> argparse.Namespace:
     """Mint a Namespace matching the atom-invocation default surface."""
     base = dict(
         no_kernel=False,
-        no_framework=False,
+        no_framework_agent=False,
         enable_roofline=True,
         nodes=1,
     )
@@ -29,22 +29,22 @@ def test_atom_auto_tighten_only_guards_multi_node(capsys):
     args = _fresh_args()
     disabled = optimizer_cli._apply_atom_auto_tighten(args)
     assert args.no_kernel is False
-    assert args.no_framework is False
+    assert args.no_framework_agent is False
     assert args.enable_roofline is True
     assert disabled == []
     out = capsys.readouterr().out
     assert "framework=atom" in out
     assert "no auto-disable applied" in out
     assert "--no-kernel" not in out
-    assert "--no-framework" not in out
+    assert "--no-framework-agent" not in out
     assert "--no-enable-roofline" not in out
 
 
-def test_atom_no_framework_flag_preserved_when_user_passes_it(capsys):
-    """Explicit ``--no-framework`` keeps ``args.no_framework`` True; auto-tighten respects the operator choice."""
-    args = _fresh_args(no_framework=True)
+def test_atom_no_framework_agent_flag_preserved_when_user_passes_it(capsys):
+    """Explicit ``--no-framework-agent`` keeps ``args.no_framework_agent`` True; auto-tighten respects the operator choice."""
+    args = _fresh_args(no_framework_agent=True)
     optimizer_cli._apply_atom_auto_tighten(args)
-    assert args.no_framework is True
+    assert args.no_framework_agent is True
 
 
 def test_atom_no_kernel_flag_preserved_when_user_passes_it():
@@ -113,7 +113,7 @@ def test_atom_auto_tighten_only_purpose_is_multi_node_guard():
     # Strip the docstring before checking; it may reference historical flips.
     body_only = src.split('"""', 2)[-1] if '"""' in src else src
     assert "args.no_kernel = True" not in body_only, "auto-tighten body must not flip no_kernel"
-    assert "args.no_framework = True" not in body_only, "auto-tighten body must not flip no_framework"
+    assert "args.no_framework_agent = True" not in body_only, "auto-tighten body must not flip no_framework_agent"
     assert "args.enable_roofline" not in body_only, "auto-tighten body must not touch enable_roofline"
     assert "nodes" in body_only
 

@@ -35,7 +35,7 @@ class _Spec:
         *,
         model: str,
         hardware: str,
-        framework: str,
+        framework_name: str,
         framework_version: str,
         precision: str,
         args: str,
@@ -47,7 +47,7 @@ class _Spec:
     ) -> None:
         self.model = model
         self.hardware = hardware
-        self.framework = framework
+        self.framework_name = framework_name
         self.framework_version = framework_version
         self.precision = precision
         self.args = args
@@ -62,7 +62,7 @@ class _Spec:
         return recipe_canonical_id(
             model=self.model,
             hardware=self.hardware,
-            framework=self.framework,
+            framework_name=self.framework_name,
             framework_version=self.framework_version,
             precision=self.precision,
         )
@@ -81,7 +81,7 @@ class _Spec:
         attrs: dict[str, Any] = {
             "model": self.model,
             "hardware": self.hardware,
-            "framework": self.framework,
+            "framework_name": self.framework_name,
             "framework_version": self.framework_version,
             "precision": self.precision,
             "best_throughput": self.throughput,
@@ -100,12 +100,43 @@ class _Spec:
             "updated_at": "2026-06-03T14:00:00Z",
         }
 
+    def cortex_v2_row(self) -> dict[str, Any]:
+        """Render as a central kb-service v2-nested recipe row."""
+        model_s, hw_s, fw_s, mt_s, arch_s, fwv_s, prec_s = cid_to_path_components(self.cid)
+        return {
+            "canonical_id": self.cid,
+            "version": 1,
+            "labels": {
+                "model": model_s,
+                "hardware": hw_s,
+                "framework_name": fw_s,
+                "framework_version": fwv_s,
+                "precision": prec_s,
+                "model_type": mt_s,
+                "architectures": arch_s,
+            },
+            "body": {
+                "best_config": self.best_config,
+                "best_throughput": self.throughput,
+            },
+            "metrics": {"throughput": self.throughput},
+            "findings": self.what_worked,
+            "failures": [],
+            "gaps": [],
+            "pitfalls": self.pitfalls,
+            "lessons": self.lessons,
+            "authority": "EXPERIENTIAL",
+            "confidence": 0.9,
+            "created_at": "",
+            "updated_at": "2026-06-03T14:00:00Z",
+        }
+
 
 SPECS = [
     _Spec(
         model="Qwen/Qwen3-32B",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.11",
         precision="fp8",
         args="--cuda-graph-max-bs 256",
@@ -118,7 +149,7 @@ SPECS = [
     _Spec(
         model="meta-llama/Llama-3-70B",
         hardware="mi300x",
-        framework="vllm",
+        framework_name="vllm",
         framework_version="0.6.0",
         precision="fp16",
         args="--max-num-seqs 512",
@@ -127,6 +158,19 @@ SPECS = [
         what_worked=[],
         pitfalls=[{"id": "p2"}],
         lessons=[],
+    ),
+    _Spec(
+        model="Qwen/Qwen3-32B",
+        hardware="mi355x",
+        framework_name="sglang",
+        framework_version="0.5.11",
+        precision="fp8",
+        args="--attention-backend fa3",
+        envs={"FOO": "bar"},
+        throughput=6100.0,
+        what_worked=[{"id": "w3"}],
+        pitfalls=[],
+        lessons=[{"id": "l3"}],
     ),
 ]
 
@@ -242,7 +286,7 @@ def test_gbrain_transport_error_falls_back_to_local(tmp_path) -> None:
         canonical_id=spec.cid,
         model=model_s,
         hardware=hw_s,
-        framework=fw_s,
+        framework_name=fw_s,
         framework_version=fwv_s,
         precision=prec_s,
         best_config=spec.best_config,

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P1.b — Critic gate before FRAMEWORK_PR apply: approve/abstain enqueue, reject writes ``critic_denied``."""
+"""P1.b — Critic gate before FRAMEWORK apply: approve/abstain enqueue, reject writes ``critic_denied``."""
 
 from __future__ import annotations
 
@@ -19,10 +19,10 @@ from inference_optimizer.protocol.intent import Intent, IntentType
 
 class _StateStub:
     def __init__(self) -> None:
-        self.phase = "FRAMEWORK_PR"
-        self.framework_pr_phase_done = False
-        self.framework_pr_phase_progress: list[dict[str, Any]] = []
-        self.framework_pr_critic_decisions: list[dict[str, Any]] = []
+        self.phase = "FRAMEWORK"
+        self.framework_agent_phase_done = False
+        self.framework_agent_phase_progress: list[dict[str, Any]] = []
+        self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.phase_history: list[dict[str, Any]] = []
         self._saves = 0
 
@@ -31,11 +31,11 @@ class _StateStub:
 
 
 class _CoordinatorStub:
-    """Holds just enough state for the gate helper to run (real ``_collect_framework_pr_priors`` bound)."""
+    """Holds just enough state for the gate helper to run (real ``_collect_framework_agent_candidate_priors`` bound)."""
 
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
-    _collect_framework_pr_priors = Coordinator._collect_framework_pr_priors
+    _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
 
     def __init__(self, tmp_path: Path, backend: Any | None) -> None:
         self.session_dir = tmp_path
@@ -47,7 +47,7 @@ class _CoordinatorStub:
 
 def _call_gate(stub: _CoordinatorStub, candidate: dict[str, Any]) -> dict[str, str]:
     return asyncio.run(
-        Coordinator._critic_review_framework_pr_candidate(  # type: ignore[arg-type]
+        Coordinator._critic_review_framework_agent_candidate(  # type: ignore[arg-type]
             stub,
             candidate,
         ),
@@ -71,8 +71,8 @@ def test_gate_returns_approve_for_mock_critic(tmp_path: Path) -> None:
     result = _call_gate(stub, candidate)
     assert result["verdict"] == "approve"
     # Decision cached.
-    assert len(stub.shared_state.framework_pr_critic_decisions) == 1
-    row = stub.shared_state.framework_pr_critic_decisions[0]
+    assert len(stub.shared_state.framework_agent_critic_decisions) == 1
+    row = stub.shared_state.framework_agent_critic_decisions[0]
     assert row["verdict"] == "approve"
     assert row["candidate_id"] == candidate["candidate_id"]
     assert row["batch_id"] == "batch-1"
@@ -121,7 +121,7 @@ def test_gate_returns_reject_with_rationale(tmp_path: Path) -> None:
     result = _call_gate(stub, candidate)
     assert result["verdict"] == "reject"
     assert "out of scope" in result["rationale"]
-    row = stub.shared_state.framework_pr_critic_decisions[0]
+    row = stub.shared_state.framework_agent_critic_decisions[0]
     assert row["verdict"] == "reject"
     assert "out of scope" in row["rationale"]
 
@@ -132,7 +132,7 @@ def test_gate_abstains_when_no_critic_backend(tmp_path: Path) -> None:
     result = _call_gate(stub, {"candidate_id": "pr-1", "batch_id": "b-1"})
     assert result["verdict"] == "abstain"
     # No backend → no cache write (short-circuit before the cache append).
-    assert stub.shared_state.framework_pr_critic_decisions == []
+    assert stub.shared_state.framework_agent_critic_decisions == []
 
 
 class _RaisingBackend:
@@ -154,7 +154,7 @@ def test_gate_abstains_when_backend_raises(tmp_path: Path) -> None:
     result = _call_gate(stub, {"candidate_id": "pr-9", "batch_id": "b-9"})
     assert result["verdict"] == "abstain"
     assert "simulated backend failure" in result["rationale"]
-    row = stub.shared_state.framework_pr_critic_decisions[0]
+    row = stub.shared_state.framework_agent_critic_decisions[0]
     assert row["verdict"] == "abstain"
 
 
@@ -234,7 +234,7 @@ class _CountingBackend:
 
 
 def test_gate_uses_cached_decision_on_repeat_call(tmp_path: Path) -> None:
-    """Resume path: a repeat call reads ``framework_pr_critic_decisions`` instead of re-invoking the Critic."""
+    """Resume path: a repeat call reads ``framework_agent_critic_decisions`` instead of re-invoking the Critic."""
     backend = _CountingBackend()
     stub = _CoordinatorStub(tmp_path, backend)
     cand = {"candidate_id": "pr-cached", "batch_id": "b-c"}
@@ -243,7 +243,7 @@ def test_gate_uses_cached_decision_on_repeat_call(tmp_path: Path) -> None:
     assert first["verdict"] == "approve"
     assert second["verdict"] == "approve"
     assert backend.run_count == 1, "second call should hit the cache"
-    assert len(stub.shared_state.framework_pr_critic_decisions) == 1
+    assert len(stub.shared_state.framework_agent_critic_decisions) == 1
 
 
 # Gap 3 — prompt enrichment (diff_url + session-local priors).
@@ -324,7 +324,7 @@ def test_critic_prompt_renders_candidate_diff_url_across_frameworks(
     assert framework in backend.last_prompt
 
 
-def test_critic_prompt_no_framework_specific_rule_text_for_atom(
+def test_critic_prompt_no_framework_agent_specific_rule_text_for_atom(
     tmp_path: Path,
 ) -> None:
     """The atom-candidate Critic prompt must not contain sglang/vllm-specific rule text."""
@@ -352,7 +352,7 @@ def test_prompt_includes_session_local_priors(tmp_path: Path) -> None:
     """Recent Critic decisions + apply/bench outcomes fold into the prompt for pattern-spotting."""
     backend = _PromptCapturingBackend()
     stub = _CoordinatorStub(tmp_path, backend)
-    stub.shared_state.framework_pr_critic_decisions.extend(
+    stub.shared_state.framework_agent_critic_decisions.extend(
         [
             {
                 "candidate_id": "pr-prev-1",
@@ -368,7 +368,7 @@ def test_prompt_includes_session_local_priors(tmp_path: Path) -> None:
             },
         ]
     )
-    stub.shared_state.framework_pr_phase_progress.extend(
+    stub.shared_state.framework_agent_phase_progress.extend(
         [
             {
                 "candidate_id": "pr-prev-2",
@@ -399,21 +399,21 @@ def test_priors_helper_trims_to_tail_length(tmp_path: Path) -> None:
 
     stub = _CoordinatorStub(tmp_path, backend=None)
     for i in range(12):
-        stub.shared_state.framework_pr_critic_decisions.append(
+        stub.shared_state.framework_agent_critic_decisions.append(
             {
                 "candidate_id": f"pr-{i}",
                 "verdict": "approve",
                 "rationale": "",
             }
         )
-        stub.shared_state.framework_pr_phase_progress.append(
+        stub.shared_state.framework_agent_phase_progress.append(
             {
                 "candidate_id": f"pr-{i}",
                 "status": "kept",
                 "gain_pct": 1.0,
             }
         )
-    priors = Coordinator._collect_framework_pr_priors(stub)  # type: ignore[arg-type]
+    priors = Coordinator._collect_framework_agent_candidate_priors(stub)  # type: ignore[arg-type]
     assert len(priors["recent_decisions"]) == 5
     assert len(priors["recent_outcomes"]) == 5
     assert priors["recent_decisions"][-1]["candidate_id"] == "pr-11"
@@ -425,13 +425,13 @@ def test_priors_helper_skips_non_terminal_outcomes(tmp_path: Path) -> None:
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     stub = _CoordinatorStub(tmp_path, backend=None)
-    stub.shared_state.framework_pr_phase_progress.extend(
+    stub.shared_state.framework_agent_phase_progress.extend(
         [
             {"candidate_id": "pr-running", "status": "running"},
             {"candidate_id": "pr-kept", "status": "kept", "gain_pct": 2.0},
         ]
     )
-    priors = Coordinator._collect_framework_pr_priors(stub)  # type: ignore[arg-type]
+    priors = Coordinator._collect_framework_agent_candidate_priors(stub)  # type: ignore[arg-type]
     ids = [r["candidate_id"] for r in priors["recent_outcomes"]]
     assert "pr-kept" in ids
     assert "pr-running" not in ids

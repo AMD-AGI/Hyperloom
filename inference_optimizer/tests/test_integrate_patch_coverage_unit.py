@@ -94,7 +94,7 @@ async def test_missing_specialist_task_id(tmp_path):
 
 # ---- no framework root ----
 @pytest.mark.asyncio
-async def test_no_framework_root(tmp_path, monkeypatch):
+async def test_no_framework_agent_root(tmp_path, monkeypatch):
     session = tmp_path / "s"
     session.mkdir()
     _write_workspace(session, "spec")
@@ -105,7 +105,7 @@ async def test_no_framework_root(tmp_path, monkeypatch):
     ex = IntegratePatchExecutor(session_dir=session)
     res = await ex(_make_ctx("t", {"specialist_task_id": "spec"}))
     assert res["status"] == "apply_failed"
-    assert res["error_class"] == "no_framework_root"
+    assert res["error_class"] == "no_framework_agent_root"
 
 
 # ---- rejected by critic ----
@@ -299,7 +299,7 @@ async def test_revert_when_rebench_accuracy_missing_with_baseline(tmp_path, monk
                 "specialist_task_id": "spec",
                 "framework_source_root": str(repo),
                 "base_tput": 100.0,
-                "framework_pr_authoring": True,
+                "framework_agent_authoring": True,
                 "accuracy_baseline": 0.8,
             },
         )
@@ -451,15 +451,15 @@ async def test_bench_script_mismatch_reverts(tmp_path, monkeypatch):
     assert res["error_class"] == "framework_script_mismatch"
 
 
-# ---- framework_pr KB writeback on KEEP ----
+# ---- framework KB writeback on KEEP ----
 @pytest.mark.asyncio
-async def test_framework_pr_kb_writeback(tmp_path, monkeypatch):
+async def test_framework_kb_writeback(tmp_path, monkeypatch):
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
     _init_git_repo(repo)
     proposal = {
-        "provenance": "specialist:serving:framework_pr:x",
+        "provenance": "specialist:serving:framework:x",
         "fa_pr_url": "https://example/pr/1",
         "fa_pr_sha": "deadbeef",
         "patches_written": ["patches/001.patch"],
@@ -473,7 +473,7 @@ async def test_framework_pr_kb_writeback(tmp_path, monkeypatch):
         return "/tmp/lessons.jsonl"
 
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.kb_writeback.write_framework_pr_record",
+        "inference_optimizer.orchestrator.kb_writeback.write_framework_record",
         _fake_write,
     )
     ex = IntegratePatchExecutor(session_dir=session)
@@ -502,9 +502,9 @@ async def test_framework_pr_kb_writeback(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     ex = IntegratePatchExecutor(session_dir=tmp_path)
-    payload = {"proposal_set": [{"provenance": "specialist:serving:framework_pr"}]}
+    payload = {"proposal_set": [{"provenance": "specialist:serving:framework"}]}
     # No fa_pr_url / fa_pr_sha -> early return, no exception.
-    await ex._maybe_write_framework_pr_kb_record(
+    await ex._maybe_write_framework_kb_record(
         done_payload=payload,
         outcome="integrated",
         tps_delta_pct=1.0,
@@ -512,12 +512,12 @@ async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     )
 
 
-def test_find_framework_pr_proposal():
-    assert IntegratePatchExecutor._find_framework_pr_proposal(None) is None
-    assert IntegratePatchExecutor._find_framework_pr_proposal({"proposal_set": "x"}) is None
-    assert IntegratePatchExecutor._find_framework_pr_proposal({"proposal_set": [{"provenance": "kernel:x"}]}) is None
-    found = IntegratePatchExecutor._find_framework_pr_proposal(
-        {"proposal_set": [{"provenance": "specialist:serving:framework_pr:y", "id": 1}]}
+def test_find_frameworkoposal():
+    assert IntegratePatchExecutor._find_frameworkoposal(None) is None
+    assert IntegratePatchExecutor._find_frameworkoposal({"proposal_set": "x"}) is None
+    assert IntegratePatchExecutor._find_frameworkoposal({"proposal_set": [{"provenance": "kernel:x"}]}) is None
+    found = IntegratePatchExecutor._find_frameworkoposal(
+        {"proposal_set": [{"provenance": "specialist:serving:framework:y", "id": 1}]}
     )
     assert found["id"] == 1
 

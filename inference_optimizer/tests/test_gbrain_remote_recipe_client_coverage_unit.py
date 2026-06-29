@@ -166,7 +166,7 @@ class _FakeMcp:
 
 def _recipe_page(model: str, hw: str, updated: str) -> dict[str, Any]:
     return {
-        "attrs": {"model": model, "hardware": hw, "framework": "sglang"},
+        "attrs": {"model": model, "hardware": hw, "framework_name": "sglang"},
         "updated_at": updated,
     }
 

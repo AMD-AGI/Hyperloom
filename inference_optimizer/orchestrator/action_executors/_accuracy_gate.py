@@ -26,7 +26,7 @@ ACCURACY_THRESHOLD = 0.05  # 5% allowed deviation
 def require_framework_accuracy_default() -> bool:
     """Default for the framework source-patch accuracy-KEEP gate (Step 4 / Q5).
 
-    Source patches (framework_pr raw-diff + framework-authored integrate_patch)
+    Source patches (framework raw-diff + framework-authored integrate_patch)
     require the accuracy gate by default; opt out with
     ``INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY=0``.
 

@@ -88,7 +88,7 @@ async def test_local_probe_reads_v6_events_schema(session_dir: Path):
         session_dir,
         [
             {"agent": "orchestration", "topic": "heartbeat", "payload": {"x": 1}},
-            {"agent": "kernel", "topic": "alert", "payload": {"y": 2}},
+            {"agent": "kernel_agent", "topic": "alert", "payload": {"y": 2}},
         ],
         schema="v6",
     )
@@ -105,13 +105,13 @@ async def test_local_probe_reads_v6_events_schema(session_dir: Path):
 async def test_local_probe_reads_legacy_events_schema(session_dir: Path):
     _seed_coordinator_db(
         session_dir,
-        [{"agent": "kernel", "intent_type": "alert", "topic": "alert", "timestamp": 1.0}],
+        [{"agent": "kernel_agent", "intent_type": "alert", "topic": "alert", "timestamp": 1.0}],
         schema="legacy",
     )
     cfg = LocalProbeConfig(session_dir=session_dir, disk_mountpoints=())
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     assert len(data.coordinator_events) == 1
-    assert data.coordinator_events[0]["agent"] == "kernel"
+    assert data.coordinator_events[0]["agent"] == "kernel_agent"
 
 
 @pytest.mark.asyncio
@@ -1221,12 +1221,12 @@ def test_sample_state_integrity_aggregates_slots(tmp_path):
     _write(tmp_path / "state.json", json.dumps({"baseline_tput": 5.0}))
     _write(tmp_path / "storage" / "coordinator.db", "x")
     _write(tmp_path / "storage" / "coordinator.db-wal", "y" * 100)
-    _write(tmp_path / "agents" / "kernel" / "inbox.jsonl", "data")
+    _write(tmp_path / "agents" / "kernel_agent" / "inbox.jsonl", "data")
     _write(tmp_path / "optimizer_runs" / "run_x.pid", "9999999\n")
     out = _sample_state_integrity(tmp_path, "optimizer_runs")
     assert out["state_json"]["valid"] is True
     assert out["wal"]["wal_bytes"] == 100
-    assert "kernel" in out["agents"]
+    assert "kernel_agent" in out["agents"]
     assert out["coordinator"]["recorded_pid"] == 9999999
     assert out["coordinator"]["alive"] is False
 

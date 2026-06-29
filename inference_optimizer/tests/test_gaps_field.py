@@ -50,7 +50,7 @@ def test_gaps_field_roundtrip_through_state_json(tmp_path):
         {
             "canonical_id": "issue.moe.routing",
             "symptom": "MoE routing overhead dominates",
-            "layer": "kernel",
+            "layer": "kernel_agent",
             "severity": "high",
             "domain_hint": "kernel_switch_specialist",
             "source": "baseline",
@@ -63,7 +63,7 @@ def test_gaps_field_roundtrip_through_state_json(tmp_path):
     loaded = SharedState.load_or_init(sd)
     assert len(loaded.gaps) == 1
     assert loaded.gaps[0]["canonical_id"] == "issue.moe.routing"
-    assert loaded.gaps[0]["layer"] == "kernel"
+    assert loaded.gaps[0]["layer"] == "kernel_agent"
 
 
 # 2. PolicyGate lock (Inv-1 / Inv-10.2)
@@ -93,7 +93,7 @@ def test_upsert_gap_inserts_then_merges_by_canonical_id():
         {
             "canonical_id": "issue.attn.headdim",
             "symptom": "attention head dim mismatch",
-            "layer": "kernel",
+            "layer": "kernel_agent",
             "severity": "medium",
         }
     )
@@ -200,7 +200,7 @@ def test_to_gaps_summary_renders_canonical_id_and_layer():
         {
             "canonical_id": "issue.moe.routing",
             "symptom": "MoE routing dominates",
-            "layer": "kernel",
+            "layer": "kernel_agent",
             "severity": "high",
         }
     )
@@ -214,7 +214,7 @@ def test_to_gaps_summary_renders_canonical_id_and_layer():
     )
     out = s.to_gaps_summary()
     assert "issue.moe.routing" in out
-    assert "kernel/high" in out
+    assert "kernel_agent/high" in out
     assert "MoE routing dominates" in out
     assert "attempts=1" in out
     assert "last=explore:REVERT" in out
@@ -312,7 +312,7 @@ async def test_refresh_gaps_dedupes_recurring_failures(coord):
     assert len(backends_gaps) == 1
     assert len(backends_gaps[0]["attempts"]) == 2
     assert backends_gaps[0]["layer"] == "framework"
-    assert kernel_gaps and kernel_gaps[0]["layer"] == "kernel"
+    assert kernel_gaps and kernel_gaps[0]["layer"] == "kernel_agent"
 
 
 @pytest.mark.asyncio
@@ -398,7 +398,7 @@ async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
         {
             "canonical_id": "issue.moe.routing",
             "symptom": "MoE routing overhead",
-            "layer": "kernel",
+            "layer": "kernel_agent",
             "severity": "high",
             "domain_hint": "kernel_switch_specialist",
         }
@@ -417,7 +417,7 @@ async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
     }
     await coord._warm_specialist_params(params)
     assert params["gap_symptom"] == "MoE routing overhead"
-    assert params["gap_layer"] == "kernel"
+    assert params["gap_layer"] == "kernel_agent"
     evidence = params["gap_evidence"]
     assert isinstance(evidence, dict)
     assert evidence["severity"] == "high"
@@ -480,7 +480,7 @@ async def test_refresh_gaps_merges_cortex_traverse_rows(coord):
             {
                 "canonical_id": "issue.kb.fp8_kv_prior",
                 "symptom": "prior session refuted fp8 kv at bs=256",
-                "layer": "kernel",
+                "layer": "kernel_agent",
                 "severity": "medium",
                 "domain_hint": "kernel_switch_specialist",
             },
