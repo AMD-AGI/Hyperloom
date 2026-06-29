@@ -775,6 +775,31 @@ class RecipeKB:
                         )
                     )
                     return ranked[0]
+                # Framework version drift should not hide otherwise reusable
+                # recipe pages. Retry without that single dimension only after
+                # both the exact slug and full label-match paths miss.
+                relaxed_labels = dict(labels)
+                relaxed_labels.pop("framework_version", None)
+                rows = self.remote.search(  # type: ignore[union-attr]
+                    label_match=relaxed_labels,
+                    limit=candidate_limit,
+                    prefer=prefer,
+                )
+                if rows:
+                    normalized_rows = [self._normalize_remote_row(r) for r in rows]
+                    ranked = _rerank_by_prefer(normalized_rows, prefer)
+                    self._emit_audit(
+                        self._read_audit_event(
+                            method="get_recipe",
+                            resolution="remote",
+                            row=ranked[0],
+                            canonical_id=canonical_id,
+                            prefer=prefer,
+                            label_match=relaxed_labels,
+                            candidates=len(rows),
+                        )
+                    )
+                    return ranked[0]
                 # remote miss — fall through to local.
                 resolution = "remote_miss"
             except RemoteRecipeClientError as exc:
