@@ -107,6 +107,22 @@ def test_mcp_call_multiline_data_field_joined(monkeypatch) -> None:
     assert _mcp().call("get_page", {}) == {"ok": 1}
 
 
+def test_mcp_call_native_kg_bare_list_result(monkeypatch) -> None:
+    body = 'event: message\ndata: [{"from":"a","to":"b","link_type":"improves"}]\n\n'
+    _patch_raw(monkeypatch, body)
+    assert _mcp().call("get_backlinks", {"slug": "b"}) == [
+        {"from": "a", "to": "b", "link_type": "improves"}
+    ]
+
+
+def test_mcp_call_native_kg_bare_dict_result(monkeypatch) -> None:
+    body = 'event: message\ndata: {"edges":[{"from":"a","to":"b"}]}\n\n'
+    _patch_raw(monkeypatch, body)
+    assert _mcp().call("traverse_graph", {"start": "a"}) == {
+        "edges": [{"from": "a", "to": "b"}]
+    }
+
+
 def test_mcp_call_event_stream_returns_parsed_content(monkeypatch) -> None:
     body = 'data: {"jsonrpc":"2.0","id":"1","result":{"content":[{"text":"{\\"ok\\": true}"}]}}\n\n'
     _patch_raw(monkeypatch, body)
@@ -219,10 +235,16 @@ def test_passes_metric_filters() -> None:
 
 # -- client read surface edges --------------------------------------------
 class _FakeMcp:
-    def __init__(self, pages: dict[str, dict[str, Any]], page_size: int = 100) -> None:
+    def __init__(
+        self,
+        pages: dict[str, dict[str, Any]],
+        page_size: int = 100,
+        search_slugs: list[str] | None = None,
+    ) -> None:
         self.pages = pages
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.page_size = page_size
+        self.search_slugs = search_slugs or []
 
     def call(self, tool: str, args: dict[str, Any]) -> Any:
         self.calls.append((tool, dict(args)))
@@ -237,6 +259,8 @@ class _FakeMcp:
         if tool == "get_page":
             fm = self.pages.get(args.get("slug"))
             return {"frontmatter": fm} if fm is not None else {}
+        if tool == "search":
+            return [{"slug": s} for s in self.search_slugs]
         return {}
 
 
@@ -265,6 +289,27 @@ def test_scan_cache_ttl_env(monkeypatch) -> None:
     assert c._scan_cache_ttl() == 12.5
     monkeypatch.setenv("GBRAIN_RECIPE_SCAN_TTL_SEC", "bogus")
     assert c._scan_cache_ttl() == grc._SCAN_CACHE_TTL_SEC
+
+
+def test_partial_scan_cache_prevents_repeated_budget_scan(monkeypatch) -> None:
+    c = _client({"r1": _recipe_page("uncached", "mi300x", "t1")})
+    c._scan_cache = [
+        {
+            "body": {},
+            "labels": {"model": "cached", "hardware": "mi300x"},
+            "metrics": {},
+            "updated_at": "t0",
+        }
+    ]
+    c._scan_cache_complete = False
+    c._scan_cache_ts = grc.time.monotonic()
+    monkeypatch.setenv("GBRAIN_RECIPE_SCAN_TTL_SEC", "30")
+
+    rows = c.search(label_match={"model": "cached"})
+
+    assert len(rows) == 1
+    assert rows[0]["labels"]["model"] == "cached"
+    assert [tool for tool, _ in c._mcp.calls] == ["search"]  # type: ignore[union-attr]
 
 
 def test_get_recipe_validation() -> None:
@@ -299,6 +344,20 @@ def test_search_metric_filter() -> None:
     c = _client({"r1": _recipe_page("m", "mi300x", "t1")})
     # the page has no throughput attr -> filtered out by a min throughput bound
     assert c.search(metric_filters={"throughput": {"min": 1.0}}) == []
+
+
+def test_label_search_uses_page_search_before_scan() -> None:
+    c = _client({"r1": _recipe_page("target", "mi300x", "t1")})
+    c._mcp = _FakeMcp(  # type: ignore[assignment]
+        {"r1": _recipe_page("target", "mi300x", "t1")},
+        search_slugs=["r1"],
+    )
+
+    rows = c.search(label_match={"model": "target"}, limit=1)
+
+    assert len(rows) == 1
+    assert rows[0]["labels"]["model"] == "target"
+    assert [tool for tool, _ in c._mcp.calls] == ["search", "get_page"]  # type: ignore[union-attr]
 
 
 def test_list_recent_returns_rows() -> None:
