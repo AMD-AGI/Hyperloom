@@ -94,6 +94,55 @@ def test_mcp_call_multi_event_sse_selects_result_by_id(monkeypatch) -> None:
     assert _mcp().call("get_backlinks", {"slug": "x"}) == {"ok": True}
 
 
+def test_mcp_call_sse_large_content_text_read_by_line(monkeypatch) -> None:
+    edges = [
+        {
+            "from_slug": f"recipe_{idx}",
+            "to_slug": "llamaforcausallm",
+            "link_type": "uses_arch",
+            "context": {"idx": idx},
+        }
+        for idx in range(200)
+    ]
+    json_dump = grc.json.dumps(edges)
+    result = grc.json.dumps({"result": {"content": [{"type": "text", "text": json_dump}]}})
+    body_text = f"event: message\ndata: {result}\n\n"
+    body = body_text.encode()
+    assert len(body) > 4096
+
+    class _SseLineResp:
+        """Response stand-in whose SSE line is complete but larger than 4096 bytes."""
+
+        headers = {"Content-Type": "text/event-stream"}
+
+        def __init__(self, data: bytes) -> None:
+            """Initialize the response stand-in."""
+            self._lines = iter(data.splitlines(keepends=True))
+
+        def readline(self) -> bytes:
+            """Return the next SSE line."""
+            return next(self._lines, b"")
+
+        def read(self, n: int = 4096) -> bytes:
+            """Fail if the client regresses to fixed-size reads for SSE."""
+            raise AssertionError("SSE responses must be read by line")
+
+        def __enter__(self) -> "_SseLineResp":
+            """Enter the response context."""
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            """Exit the response context."""
+            return False
+
+    monkeypatch.setattr(
+        grc.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _SseLineResp(body),
+    )
+    assert _mcp().call("get_backlinks", {"slug": "llamaforcausallm"}) == edges
+
+
 def test_mcp_call_multiline_data_field_joined(monkeypatch) -> None:
     # A single SSE event whose data field is split across multiple data: lines
     # must be joined with newlines before JSON parsing (SSE spec).
