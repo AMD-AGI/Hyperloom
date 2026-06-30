@@ -59,8 +59,11 @@ def _honest_flag(specific_env: str) -> bool:
 
     Returns ``True`` when the per-fix env ``specific_env`` is truthy, OR when it
     is unset and the umbrella ``HL_HONEST_E2E`` is truthy. An explicit falsey
-    per-fix value always wins (lets one fix opt out of the umbrella). Off by
-    default so callers are byte-identical to legacy behavior when nothing is set.
+    per-fix value always wins (lets one fix opt out of the umbrella). The umbrella
+    now defaults ON: E2E-faithful verdicts (paired same-config A/B, engagement
+    gate, verified-micro promotion) are the default so a GEAK kernel win is judged
+    by real serving throughput, not a stored-scalar gain. Opt the whole cohort
+    back out with ``HL_HONEST_E2E=0`` (or a single fix via its per-fix env).
 
     Args:
         specific_env: The per-fix environment variable name.
@@ -73,7 +76,7 @@ def _honest_flag(specific_env: str) -> bool:
         return True
     if raw in _FALSEY:
         return False
-    return os.environ.get(_HONEST_E2E_UMBRELLA_ENV, "").strip().lower() in _TRUEY
+    return os.environ.get(_HONEST_E2E_UMBRELLA_ENV, "1").strip().lower() in _TRUEY
 
 
 def _vram_guarded_server_args(extra_args: str) -> str:
@@ -94,6 +97,14 @@ def _vram_guarded_server_args(extra_args: str) -> str:
         str: ``extra_args`` unchanged, or with a util cap appended.
     """
     if not _honest_flag("HL_INTEGRATE_VRAM_GUARD"):
+        return extra_args
+    # ``--gpu-memory-utilization`` is a vLLM-only flag; sglang REJECTS it
+    # ("unrecognized arguments") and the server exits immediately, failing the
+    # integrate re-baseline for EVERY sglang workload. sglang caps memory via
+    # ``--mem-fraction-static`` (set by its launcher), so it needs no guard here.
+    # Apply the cap only for vLLM; sglang/unknown framework -> strict no-op.
+    framework = (os.environ.get("FRAMEWORK") or "").strip().lower()
+    if framework != "vllm":
         return extra_args
     if "gpu-memory-utilization" in (extra_args or ""):
         return extra_args
@@ -3701,13 +3712,21 @@ def _run_combined_e2e_sync(
         return {"status": "error", "error": f"apply_and_bench import failed: {exc}"}
 
     cfg = _combined_e2e_serving_config(payload)
+    # Expose exactly the GPUs the serving TP needs. apply_and_bench sets
+    # HIP/ROCR_VISIBLE_DEVICES=gpu, so a hardcoded "0" with tp>1 makes the server
+    # request device ordinals that aren't visible -> "HIP error: invalid device
+    # ordinal" and a baseline_failed A/B. Map the first `tp` visible GPUs (clamped
+    # to n_gpus) so tp=8 serving gets "0,1,...,7".
+    _tp = int(cfg.get("tp") or 1)
+    _tp = max(1, min(_tp, int(n_gpus)))
+    _gpu_ids = ",".join(str(i) for i in range(_tp))
     kwargs: dict[str, Any] = dict(
         pairs=pairs,
         backup_root=str(session_dir / "e2e_backups"),
         model=model,
         out_dir=str(session_dir / "combined_e2e"),
         reps=int(payload.get("e2e_reps", 5)),
-        gpu="0",
+        gpu=_gpu_ids,
         aiter_rebuild=True,
     )
     # Only forward knobs we actually resolved; apply_and_bench has its own defaults.
@@ -3716,6 +3735,7 @@ def _run_combined_e2e_sync(
     for k in ("tp", "isl", "osl", "conc", "num_prompts"):
         if cfg.get(k) is not None:
             kwargs[k] = int(cfg[k])
+    kwargs["tp"] = _tp  # keep --tp consistent with the exposed GPU set
     log.info("combined_e2e: applying %d patch(es) -> E2E A/B (model=%s, cfg=%s)",
              len(pairs), model, cfg)
     try:

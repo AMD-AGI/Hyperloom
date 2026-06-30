@@ -139,6 +139,13 @@ def main() -> int:
     ap.add_argument("--top-k", type=int, default=10)
     ap.add_argument("--target-platform", default="MI300X")
     ap.add_argument(
+        "--candidates", default="",
+        help="Structured kernel_candidates.json to use DIRECTLY (its hot_kernels) "
+             "instead of re-parsing analysis.md. Preserves the precise profiler op "
+             "names that op_to_source resolution needs (analysis.md drops them), so "
+             "composite ops (fused-MoE, gdn-attn) resolve to the editable hot source.",
+    )
+    ap.add_argument(
         "--only-op", default="", help="substring filter: keep only candidates whose op name matches (e.g. 'attention')"
     )
     ap.add_argument(
@@ -164,8 +171,15 @@ def main() -> int:
     md = Path(a.analysis)
     csv_dir = Path(a.csv_dir) if a.csv_dir else None
 
-    # 1) HL: analysis.md -> candidates (parse + finalize with CSV-resolved shapes/source)
-    parsed = tlr.parse_analysis_md(md, top_k=a.top_k)
+    # 1) HL: analysis.md -> candidates (parse + finalize with CSV-resolved shapes/source).
+    # --candidates: use the STRUCTURED kernel_candidates.json hot_kernels directly so the
+    # precise op names survive (analysis.md re-parse loses them -> composite ops can't resolve).
+    if a.candidates:
+        _cd = json.loads(Path(a.candidates).read_text())
+        parsed = [c for c in (_cd.get("hot_kernels") or []) if isinstance(c, dict)][: a.top_k]
+        print(f"[driver] loaded {len(parsed)} structured candidates from {a.candidates}", flush=True)
+    else:
+        parsed = tlr.parse_analysis_md(md, top_k=a.top_k)
     cands = tla._finalize_candidates(
         parsed,
         total_dur=None,

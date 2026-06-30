@@ -988,10 +988,19 @@ def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, An
             )
             if case["raw"] or case["args"]:
                 cases.append(case)
-    if not cases and isinstance(input_shapes, list) and input_shapes and not is_synthetic:
-        # Only use input_shapes when they come from a real program output
-        # (TraceLens / runtime enrichment), not from the synthetic
-        # legacy-shapes conversion in enrich_candidates_with_runtime_metadata.
+    # ``_input_shapes_synthetic`` marks input_shapes DERIVED from the trace
+    # ``shapes`` strings (enrich_candidates_with_runtime_metadata) rather than a
+    # structured capture — but the DIMS are still real when shape_provenance is
+    # ``torch_trace`` (only the tensor VALUES are synthesized by the harness,
+    # which is acceptable for timing + patched-vs-reference correctness; a real
+    # value oracle for value-dependent kernels is a separate PRELUDE capture).
+    # Across all 24h runs 100% of candidates are flagged synthetic, so excluding
+    # them here dropped real trace dims for every composite op without a
+    # task_group (e.g. fused-MoE) -> GEAK got no shapes. Use the real dims.
+    dims_real = str(candidate.get("shape_provenance") or "").strip().lower() == "torch_trace"
+    if not cases and isinstance(input_shapes, list) and input_shapes and (not is_synthetic or dims_real):
+        # Use input_shapes when they are a real program output (TraceLens /
+        # runtime enrichment) OR carry real torch_trace dims (synthetic values only).
         for idx, entry in enumerate(input_shapes):
             case = _shape_case_from_value(entry, primary=idx == 0)
             case["source"] = "input_shapes"
@@ -1812,7 +1821,11 @@ def build_prompt(
         )
     # Quote the per-backend wall-clock so GEAK's task-mode parser infers the right mode (>=120min→full).
     if backend == "geak":
-        budget_min = int(getattr(args, "geak_budget_min", 130) or 130)
+        # Default tracks $GEAK_RUN_MODE (quick->70, full->180); 180 matches GEAK's own
+        # full-mode budget so the quoted wall-clock triggers full mode. The prior 130
+        # killed GEAK before its deadline (see parallel_e2e_runner / _default_geak_budget_minutes).
+        _geak_default = 70 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 180
+        budget_min = int(getattr(args, "geak_budget_min", _geak_default) or _geak_default)
     else:
         budget_min = int(getattr(args, "budget_minutes", 60) or 60)
     target_platform = getattr(args, "target_platform", "") or _env_target_platform()
@@ -2950,9 +2963,12 @@ def invoke_backend(
             tails, gpu_ids, elapsed_s, cmd, and optional optimized_path /
             cli_workspace).
     """
-    # GEAK needs more wall-clock than claude/codex; 130min default triggers GEAK's mode=full path.
+    # GEAK needs more wall-clock than claude/codex; full mode -> 180min (3h) matches
+    # GEAK's own budget so the subprocess timeout doesn't kill it mid-round before it
+    # finalizes a deployable artifact (which would also skip the combined-E2E A/B).
     if backend == "geak":
-        budget_min = float(getattr(args, "geak_budget_min", 0) or getattr(args, "budget_minutes", 60) or 60)
+        _geak_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 180.0
+        budget_min = float(getattr(args, "geak_budget_min", 0) or _geak_default)
     else:
         budget_min = float(getattr(args, "budget_minutes", 60) or 60)
     timeout_s = max(60, int(budget_min * 60))
