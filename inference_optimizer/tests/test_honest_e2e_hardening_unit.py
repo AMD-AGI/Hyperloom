@@ -4,8 +4,8 @@
 umbrella-flag resolution, VRAM util guard, import-grep source confirmation,
 op-fanout de-dup in candidate batching, and umbrella-driven GEAK promotion.
 
-Every behavior is OFF by default, so the "off" assertions below also pin the
-byte-identical-to-legacy contract.
+Honest-E2E now defaults ON (umbrella). The "off" tests opt out explicitly with
+HL_HONEST_E2E=0 to pin the legacy/opt-out contract.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from inference_optimizer.orchestrator import kernel_request_handlers as krh
 
 # -- _honest_flag (umbrella + per-fix override) ---------------------------
 def test_honest_flag_default_off(monkeypatch) -> None:
-    monkeypatch.delenv("HL_HONEST_E2E", raising=False)
+    monkeypatch.setenv("HL_HONEST_E2E", "0")  # umbrella now default-on; opt out explicitly
     monkeypatch.delenv("HL_KERNEL_OPFANOUT_DEDUP", raising=False)
     assert krh._honest_flag("HL_KERNEL_OPFANOUT_DEDUP") is False
 
@@ -43,13 +43,14 @@ def test_honest_flag_specific_falsey_overrides_umbrella(monkeypatch) -> None:
 
 # -- _vram_guarded_server_args -------------------------------------------
 def test_vram_guard_off_is_identity(monkeypatch) -> None:
-    monkeypatch.delenv("HL_HONEST_E2E", raising=False)
+    monkeypatch.setenv("HL_HONEST_E2E", "0")  # umbrella now default-on; opt out explicitly
     monkeypatch.delenv("HL_INTEGRATE_VRAM_GUARD", raising=False)
     assert krh._vram_guarded_server_args("--foo bar") == "--foo bar"
     assert krh._vram_guarded_server_args("") == ""
 
 
 def test_vram_guard_appends_when_on(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("HL_INTEGRATE_VRAM_GUARD", "1")
     monkeypatch.delenv("HL_INTEGRATE_VRAM_UTIL_CAP", raising=False)
     out = krh._vram_guarded_server_args("--trust-remote-code")
@@ -58,12 +59,14 @@ def test_vram_guard_appends_when_on(monkeypatch) -> None:
 
 
 def test_vram_guard_noop_if_already_set(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("HL_INTEGRATE_VRAM_GUARD", "1")
     existing = "--gpu-memory-utilization 0.7"
     assert krh._vram_guarded_server_args(existing) == existing
 
 
 def test_vram_guard_umbrella_and_cap(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("HL_HONEST_E2E", "1")
     monkeypatch.delenv("HL_INTEGRATE_VRAM_GUARD", raising=False)
     monkeypatch.setenv("HL_INTEGRATE_VRAM_UTIL_CAP", "0.85")
@@ -72,10 +75,19 @@ def test_vram_guard_umbrella_and_cap(monkeypatch) -> None:
 
 
 def test_vram_guard_cap_clamped(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("HL_INTEGRATE_VRAM_GUARD", "1")
     monkeypatch.setenv("HL_INTEGRATE_VRAM_UTIL_CAP", "5.0")
     out = krh._vram_guarded_server_args("")
     assert out == "--gpu-memory-utilization 0.99"
+
+
+def test_vram_guard_sglang_is_noop(monkeypatch) -> None:
+    # sglang rejects --gpu-memory-utilization; the guard must be a no-op for it.
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setenv("HL_INTEGRATE_VRAM_GUARD", "1")
+    assert krh._vram_guarded_server_args("--trust-remote-code") == "--trust-remote-code"
+    assert "gpu-memory-utilization" not in krh._vram_guarded_server_args("")
 
 
 # -- _confirm_source_imported (tri-state) ---------------------------------
@@ -117,7 +129,7 @@ def _geak_nr_result() -> dict:
 
 
 def test_rank_geak_nr_not_promoted_when_off(monkeypatch) -> None:
-    monkeypatch.delenv("HL_HONEST_E2E", raising=False)
+    monkeypatch.setenv("HL_HONEST_E2E", "0")  # umbrella now default-on; opt out explicitly
     monkeypatch.delenv("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW", raising=False)
     keep, verified_nr, micro = krh._kernel_result_rank(_geak_nr_result())
     assert (keep, verified_nr) == (0, 0)
@@ -165,7 +177,7 @@ def _write_candidates(tmp_path: Path) -> str:
 
 
 def test_opfanout_off_keeps_both_rows(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.delenv("HL_HONEST_E2E", raising=False)
+    monkeypatch.setenv("HL_HONEST_E2E", "0")  # umbrella now default-on; opt out explicitly
     monkeypatch.delenv("HL_KERNEL_OPFANOUT_DEDUP", raising=False)
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "1.0")
     sel = krh._batch_kernel_candidates({"candidates_path": _write_candidates(tmp_path)})
@@ -204,7 +216,7 @@ def _infra_entry(failure_count: int, gpu_pct: float) -> dict:
 
 
 def test_infra_retry_off_retires_at_max_failures(monkeypatch) -> None:
-    monkeypatch.delenv("HL_HONEST_E2E", raising=False)
+    monkeypatch.setenv("HL_HONEST_E2E", "0")  # umbrella now default-on; opt out explicitly
     monkeypatch.delenv("HL_INFRA_RETRY_HIGH_IMPACT", raising=False)
     # failure_count == max_failures => legacy retires (cap collapses to default 1).
     cap = krh._kernel_dispatch_attempt_cap(_infra_entry(2, 26.7), max_failures=2)

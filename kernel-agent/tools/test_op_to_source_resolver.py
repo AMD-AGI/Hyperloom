@@ -520,3 +520,42 @@ def test_finalize_in_dict_non_rewritable_does_not_grep(tla, monkeypatch) -> None
     assert out["reusable_native_kernel"] is False
     assert out["skip_reason"].startswith("op_to_source:")
     assert out["source_file"] == "launcher.py"
+
+
+# --------------------------------------------------------------------------- #
+# load_op_dominant_kernel_map (data-driven composite disambiguation)
+# --------------------------------------------------------------------------- #
+def test_dominant_kernel_map_picks_max_duration(tla, tmp_path) -> None:
+    """The dominant device kernel = max aggregated duration, parsed from the CSV."""
+    import csv as _csv
+
+    csv_dir = tmp_path
+    rows = [
+        {
+            "name": "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel",
+            "kernel_details_summary": (
+                "[{'name': '_per_token_group_quant_8bit', 'stream': 8, 'count': 2001, "
+                "'total_duration_us': np.float64(9266.1), 'mean_duration_us': np.float64(4.63)}, "
+                "{'name': 'fused_moe_kernel', 'stream': 8, 'count': 2001, "
+                "'total_duration_us': np.float64(401466.7), 'mean_duration_us': np.float64(200.63)}]"
+            ),
+        },
+        # second row (different shape) for the same op — durations must aggregate
+        {
+            "name": "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel",
+            "kernel_details_summary": (
+                "[{'name': 'fused_moe_kernel', 'stream': 8, 'count': 138, "
+                "'total_duration_us': np.float64(287774.7), 'mean_duration_us': np.float64(2085.3)}]"
+            ),
+        },
+    ]
+    with (csv_dir / "unified_perf_summary.csv").open("w", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=["name", "kernel_details_summary"])
+        w.writeheader()
+        w.writerows(rows)
+    m = tla.load_op_dominant_kernel_map(csv_dir)
+    assert m["sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel"] == "fused_moe_kernel"
+
+
+def test_dominant_kernel_map_missing_csv_is_empty(tla, tmp_path) -> None:
+    assert tla.load_op_dominant_kernel_map(tmp_path) == {}

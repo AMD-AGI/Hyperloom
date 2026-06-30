@@ -552,6 +552,55 @@ class OpResolver:
                             patchable=True, framework=framework,
                             sources=[_absolutize_source(str(path))], matched_route=kname,
                         )
+        # No trace device symbol (composite pybind ops frequently carry none —
+        # device_kernel_name is None for the fused-MoE / gdn-attention labels).
+        # NAME-ANCHORED disambiguation: a composite op is named after its primary
+        # device kernel (``..._invoke_fused_moe_kernel``, ``paged_attention_ragged``).
+        # Route to the single editable leaf whose device-kernel symbol is contained
+        # in the op name, instead of splitting ``duration_us`` evenly across the
+        # co-firing quant/scale/align helpers (which sends GEAK at the wrong file).
+        # Only pins when EXACTLY ONE editable source matches; otherwise the full
+        # fan-out below is unchanged (byte-identical for ambiguous/0-match ops).
+        anchor = op_name.split("::")[-1].lower()
+        if anchor:
+            fw_anchor = (framework or "").strip().lower()
+            anchor_containers = (
+                [entry.get("sglang"), entry.get("vllm")]
+                if fw_anchor == "sglang"
+                else [entry.get("vllm"), entry.get("sglang")]
+            )
+            for container in anchor_containers:
+                matched: list[tuple[str, str, str]] = []
+                seen_paths: set[str] = set()
+                for kname, info in (container or {}).items():
+                    if not isinstance(info, dict) or not info.get("patchable"):
+                        continue
+                    path = info.get("kernel_source_path")
+                    if not _is_editable_source(path, info.get("kernel_kind")):
+                        continue
+                    core = str(kname).split("(")[0].strip().lower()
+                    # Require the device-kernel SYMBOL to appear in the op name
+                    # (the composite is named after its primary kernel, e.g.
+                    # ``fused_moe_kernel`` ⊂ ``..._invoke_fused_moe_kernel``).
+                    # One-directional + min length avoids trivial-token mis-pins.
+                    if core and len(core) >= 6 and core in anchor:
+                        ap = _absolutize_source(str(path))
+                        if ap not in seen_paths:
+                            seen_paths.add(ap)
+                            matched.append(
+                                (ap, str(info.get("kernel_kind") or ""), str(info.get("prebuilt_binary") or ""))
+                            )
+                if len(matched) == 1:
+                    ap, kk, pb = matched[0]
+                    return OpResolution(
+                        op_name=op_name, kind="composite", status=_ROUTABLE_STATUS,
+                        patchable=True, framework=framework, sources=[ap],
+                        kernel_kinds=[kk], prebuilt_binaries=[pb],
+                        matched_route="name_anchored",
+                    )
+                if matched:
+                    break  # ambiguous in this container -> fall through to fan-out
+
         meta = self._select_source_meta(entry, framework)
         fanout = [
             OpResolution(
@@ -2856,8 +2905,59 @@ def load_op_category_map(
     return out
 
 
+# Capture a device-kernel ``name`` and its total (preferred) or mean duration from
+# the ``kernel_details_summary`` / ``trunc_kernel_details`` repr strings TraceLens
+# writes per row. ``total_duration_us`` appears before ``mean_duration_us`` in the
+# full summary, so the non-greedy match prefers total when present.
+_KERNEL_DETAIL_RE = re.compile(
+    r"'name':\s*'((?:[^'\\]|\\.)*)'.*?'(total_duration_us|mean_duration_us)':\s*(?:np\.float64\()?([0-9.eE+-]+)"
+)
+
+
+def load_op_dominant_kernel_map(perf_report_csv_dir: Path | str) -> dict[str, str]:
+    """Read ``{op_name: dominant_device_kernel_name}`` from the unified perf summary.
+
+    A composite profiler op (e.g. the Triton fused-MoE label) fires several device
+    kernels under one CPU op; TraceLens records them per row in
+    ``kernel_details_summary`` with per-kernel durations. The dominant
+    (max aggregated duration) device kernel is the real hot kernel — surfacing it
+    as ``device_kernel_name`` lets :meth:`OpResolver._composite` pin the single
+    owning source instead of fanning out across the co-firing helpers. This is
+    data-driven (actual per-kernel time) and framework-agnostic: it works for any
+    composite op in any vLLM/SGLang trace, with no per-op curation. ``{}`` when the
+    CSV is absent or unreadable.
+    """
+    csv_path = Path(perf_report_csv_dir) / "unified_perf_summary.csv"
+    if not csv_path.is_file():
+        return {}
+    agg: dict[str, dict[str, float]] = {}
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                name = str(row.get("name") or "").strip()
+                if not name:
+                    continue
+                detail = str(row.get("kernel_details_summary") or row.get("trunc_kernel_details") or "")
+                if not detail:
+                    continue
+                per = agg.setdefault(name, {})
+                for m in _KERNEL_DETAIL_RE.finditer(detail):
+                    kname = m.group(1).strip()
+                    try:
+                        dur = float(m.group(3))
+                    except (TypeError, ValueError):
+                        continue
+                    if kname:
+                        per[kname] = per.get(kname, 0.0) + dur
+    except (OSError, csv.Error):
+        return {}
+    return {op: max(per.items(), key=lambda kv: kv[1])[0] for op, per in agg.items() if per}
+
+
 def _expand_op_fanout(
-    top: list[dict[str, Any]], framework: str | None = None,
+    top: list[dict[str, Any]],
+    framework: str | None = None,
+    op_dominant_kernel: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve each op against the dictionary and fan out one candidate per ``.cu``.
 
@@ -2876,12 +2976,16 @@ def _expand_op_fanout(
     ordering.
     """
     framework = (framework or "").strip().lower() or None
+    op_dominant_kernel = op_dominant_kernel or {}
     expanded: list[dict[str, Any]] = []
     for item in top:
-        res = resolve_op_source(
-            str(item.get("name") or ""), framework=framework,
-            device_kernel_name=str(item.get("device_kernel_name") or "") or None,
-        )
+        op_name = str(item.get("name") or "")
+        # Prefer the candidate's own device symbol; else fall back to the
+        # dominant-by-time device kernel for this op (composite labels arrive with
+        # device_kernel_name=None, so this is what lets _composite pin the single
+        # hot source instead of fanning out evenly across helper kernels).
+        dkn = str(item.get("device_kernel_name") or "").strip() or op_dominant_kernel.get(op_name) or None
+        res = resolve_op_source(op_name, framework=framework, device_kernel_name=dkn)
         if res is None:
             item["_op_resolution"] = None
             expanded.append(item)
@@ -3633,9 +3737,11 @@ def _finalize_candidates(
         The finalized candidate list (the same ``top`` object).
     """
     op_cat_map = load_op_category_map(perf_report_csv_dir) if perf_report_csv_dir is not None else {}
+    op_dom_map = load_op_dominant_kernel_map(perf_report_csv_dir) if perf_report_csv_dir is not None else {}
     # Dict-first: resolve each op to its editable .cu (ground truth) and expand
-    # composite fan-out into one candidate per sub-kernel before finalizing.
-    top = _expand_op_fanout(top, framework=framework)
+    # composite fan-out into one candidate per sub-kernel before finalizing. The
+    # dominant-kernel map pins composites to their single hot source (data-driven).
+    top = _expand_op_fanout(top, framework=framework, op_dominant_kernel=op_dom_map)
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
     # #727 companion: the fused-MoE expert kernel's top-level trace event carries
