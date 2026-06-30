@@ -824,3 +824,70 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
     statuses = {p["candidate_id"]: p["status"] for p in coord.shared_state.framework_pr_phase_progress}
     assert statuses["na-1"] == "not_applicable"
     assert statuses["ae-1"] == "author_empty"
+
+
+# ---------------------------------------------------------------------------
+# Ranker "none applicable" sentinel propagation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ranker_none_applicable_propagates_to_select(
+    coord: Coordinator, monkeypatch
+) -> None:
+    from inference_optimizer.orchestrator.coordinator import _FRAMEWORK_PR_NONE_APPLICABLE
+
+    cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
+    monkeypatch.setattr(coord, "_unprocessed_framework_pr_candidates", lambda: cands)
+    _install_ranker(
+        coord,
+        monkeypatch,
+        _FakeClient('{"applicable": false, "reason": "all off-arch"}'),
+    )
+    result = await coord._select_best_framework_pr_candidate()
+    assert result is _FRAMEWORK_PR_NONE_APPLICABLE
+
+
+@pytest.mark.asyncio
+async def test_pump_stamps_no_applicable_candidates_on_sentinel(
+    coord: Coordinator, monkeypatch
+) -> None:
+    import types as _types
+
+    from inference_optimizer.orchestrator.coordinator import _FRAMEWORK_PR_NONE_APPLICABLE
+
+    _enter_fpr(coord)
+    coord.shared_state.framework_pr_batches = [
+        {"batch_id": "bx", "candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}
+    ]
+    coord.shared_state.framework_pr_phase_progress = []
+
+    # Stub tasks so the pump's early-return guards pass without a real DB.
+    _empty_tasks = _types.SimpleNamespace(
+        queued=lambda: ([]).__class__.__new__(list) or [],
+        running=lambda: [],
+    )
+
+    async def _empty_list():
+        return []
+
+    _empty_tasks.queued = _empty_list
+    _empty_tasks.running = _empty_list
+    monkeypatch.setattr(coord, "tasks", _empty_tasks)
+
+    # No pending proposals so the framework_pr proposal guard passes.
+    coord.state.pending_proposals = {}
+
+    async def _none_applicable(_cands):
+        return _FRAMEWORK_PR_NONE_APPLICABLE
+
+    monkeypatch.setattr(coord, "_rank_framework_pr_candidates_llm", _none_applicable)
+
+    from inference_optimizer.orchestrator.coordinator import Coordinator as _C
+
+    await _C._pump_framework_pr_phase(coord)  # type: ignore[arg-type]
+
+    assert coord.shared_state.framework_pr_phase_done is True
+    history = coord.shared_state.phase_history
+    done_rows = [e for e in history if e.get("event") == "framework_pr_phase_done"]
+    assert done_rows, "expected a phase_done history row"
+    assert done_rows[-1]["reason"] == "no_applicable_candidates"

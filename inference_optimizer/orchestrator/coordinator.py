@@ -55,6 +55,9 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # Floor on the per-repo framework-PR discover timeout so a slow repo still gets a
 # usable budget even when the phase timeout is spread thin across many repos.
 _FRAMEWORK_PR_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
+# Sentinel returned by _rank_framework_pr_candidates_llm / _select_best_framework_pr_candidate
+# when the ranker explicitly signals that no candidate is applicable.
+_FRAMEWORK_PR_NONE_APPLICABLE: object = object()
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
 _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # Default resume-drift floor (%): a re-measured current_best below this fraction
@@ -2938,7 +2941,11 @@ class Coordinator:
                 _r = await self.tasks.running()
             except Exception:  # noqa: BLE001 — defensive
                 _q, _r = [], []
-            if any(getattr(t, "kind", "") in ("specialist", "integrate_patch") for t in (*_q, *_r)):
+            if any(
+                getattr(t, "kind", "") in ("specialist", "integrate_patch")
+                and bool((getattr(t, "params", None) or {}).get("framework_pr_authoring"))
+                for t in (*_q, *_r)
+            ):
                 return
             # Proposal-window guard: the task check above misses the interval
             # between a specialist completing (config-lever / patch deliverable)
@@ -2958,6 +2965,14 @@ class Coordinator:
         # Pick the most promising un-dispatched candidate (agent-ranked), or
         # request a new batch if exhausted.
         next_candidate = await self._select_best_framework_pr_candidate()
+        if next_candidate is _FRAMEWORK_PR_NONE_APPLICABLE:
+            self._record_framework_pr_phase_done(
+                reason="no_applicable_candidates",
+                failure_count=int(getattr(state, "framework_pr_discover_failures", 0) or 0),
+            )
+            state.framework_pr_phase_done = True
+            state.save(self.session_dir)
+            return
         if next_candidate is None:
             # Hold the phase open while authored patches are still benched/critic-reviewed (gains must land before plateau judge); gated by authoring flag.
             # Only wait when the pump itself discovered a PR batch to author against:
@@ -2991,6 +3006,14 @@ class Coordinator:
                 state.save(self.session_dir)
                 return
             next_candidate = await self._select_best_framework_pr_candidate()
+            if next_candidate is _FRAMEWORK_PR_NONE_APPLICABLE:
+                self._record_framework_pr_phase_done(
+                    reason="no_applicable_candidates",
+                    failure_count=int(getattr(state, "framework_pr_discover_failures", 0) or 0),
+                )
+                state.framework_pr_phase_done = True
+                state.save(self.session_dir)
+                return
             if next_candidate is None:
                 self._record_framework_pr_phase_done(
                     reason="discover_returned_no_new_candidates",
@@ -3035,6 +3058,30 @@ class Coordinator:
                 _cand_id_log,
             )
             audit_step = "author_via_specialist"
+        # G4: a candidate that belongs to a different concrete framework cannot
+        # be direct-applied into this session's source tree. Downgrade to
+        # authoring so the idea can still be ported. ``aiter`` is shared across
+        # frameworks and is never treated as a mismatch.
+        if audit_step == "direct_framework_pr":
+            session_fw = str(getattr(state, "framework", "") or "").strip().lower()
+            cand_fw = str(next_candidate.get("framework") or "").strip().lower()
+            if not cand_fw:
+                repo_token = str(
+                    next_candidate.get("repo") or next_candidate.get("discovered_repo_url") or ""
+                ).lower()
+                for _fw_tok in ("sglang", "vllm", "atom"):
+                    if f"/{_fw_tok}" in repo_token or repo_token.endswith(_fw_tok):
+                        cand_fw = _fw_tok
+                        break
+            if cand_fw and cand_fw != "aiter" and session_fw and cand_fw != session_fw:
+                log.info(
+                    "FRAMEWORK_PR: direct_apply downgraded to authoring "
+                    "(candidate framework=%s differs from session framework=%s) candidate=%s",
+                    cand_fw,
+                    session_fw,
+                    _cand_id_log,
+                )
+                audit_step = "author_via_specialist"
         # Submit the candidate as a proposal; the async Critic verdict drives
         # the apply/author enqueue or the critic_denied row on a later tick.
         await self._submit_framework_pr_candidate_for_review(
@@ -3044,29 +3091,51 @@ class Coordinator:
         )
 
     async def _framework_pr_authoring_inflight(self) -> bool:
-        """True while a FRAMEWORK_PR-authored patch is still in flight (specialist/integrate_patch task or pending integrate_patch proposal); pump waits before advancing.
+        """True while a FRAMEWORK_PR-authored patch for an unprocessed candidate is still in flight.
+
+        Counts only items with the ``framework_pr_authoring`` provenance marker whose candidate
+        is still unprocessed (no terminal progress row yet). A KERNEL-phase specialist/integrate or
+        an orphaned stale proposal therefore never pins the pump.
 
         Returns:
-            ``True`` if a specialist/integrate_patch task is queued or running,
-            or an integrate_patch proposal is pending Critic review; else
-            ``False``.
+            ``True`` if a framework-owned specialist/integrate_patch task is queued or running,
+            or a framework-owned undecided proposal targets an unprocessed candidate; else ``False``.
         """
+        unprocessed_ids = {
+            str(c.get("candidate_id") or c.get("pr_url") or c.get("ref") or "")
+            for c in self._unprocessed_framework_pr_candidates()
+        }
         try:
             queued = await self.tasks.queued()
             running = await self.tasks.running()
         except Exception:  # noqa: BLE001 — defensive
             queued, running = [], []
         for t in (*queued, *running):
-            if getattr(t, "kind", "") in ("specialist", "integrate_patch"):
+            if getattr(t, "kind", "") not in ("specialist", "integrate_patch"):
+                continue
+            params = getattr(t, "params", None) or {}
+            if not params.get("framework_pr_authoring"):
+                continue
+            cand_id = str(params.get("framework_pr_candidate_id") or "")
+            if not cand_id or cand_id in unprocessed_ids:
                 return True
-        # An authored patch awaiting Critic review or a candidate awaiting its
-        # pre-screen verdict both keep the phase from exiting early.
         try:
             for p in self.state.pending_proposals.values():
                 if getattr(p, "decided", False):
                     continue
-                if getattr(p, "action_name", "") in ("integrate_patch", "framework_pr"):
-                    return True
+                action = getattr(p, "action_name", "")
+                payload = getattr(p, "payload", None) or {}
+                if action == "framework_pr":
+                    cand_id = str(payload.get("framework_pr_candidate_id") or "")
+                    if not cand_id or cand_id in unprocessed_ids:
+                        return True
+                elif action == "integrate_patch":
+                    iparams = payload.get("params") or {}
+                    if not iparams.get("framework_pr_authoring"):
+                        continue
+                    cand_id = str(iparams.get("framework_pr_candidate_id") or "")
+                    if not cand_id or cand_id in unprocessed_ids:
+                        return True
         except Exception:  # noqa: BLE001 — defensive
             pass
         return False
@@ -3595,6 +3664,8 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — ranking is advisory; never wedge the pump
             log.debug("FRAMEWORK_PR: agent candidate ranking failed", exc_info=True)
             chosen = None
+        if chosen is _FRAMEWORK_PR_NONE_APPLICABLE:
+            return _FRAMEWORK_PR_NONE_APPLICABLE  # type: ignore[return-value]
         if chosen is not None:
             return chosen
         # Deterministic fallback: discovery order.
@@ -3658,7 +3729,9 @@ class Coordinator:
             "Prefer PRs that target this model's architecture/precision/GPU and "
             "the serving hot path (MoE/FP8/attention/GEMM/KV-cache/scheduling). "
             "Deprioritize PRs scoped to unrelated models, archs, or GPUs. "
-            'Reply with ONLY compact JSON: {"candidate_id": "<id>", "reason": "<short>"}.'
+            "If NO candidate is applicable to this workload, reply "
+            '{"applicable": false, "reason": "<short>"}. '
+            'Otherwise reply {"candidate_id": "<id>", "reason": "<short>"}.'
         )
         prompt = "\n".join(ctx_lines)
 
@@ -3703,6 +3776,16 @@ class Coordinator:
             end = text.rfind("}")
             if start != -1 and end != -1 and end > start:
                 obj = _json.loads(text[start : end + 1])
+                # Explicit "none applicable" signal — only when the key is present
+                # and its value is exactly false (avoid false positives from
+                # truthy/missing values).
+                if obj.get("applicable") is False:
+                    reason = str(obj.get("reason") or "").strip()
+                    log.info(
+                        "FRAMEWORK_PR: ranker signalled no applicable candidate reason=%s",
+                        reason[:160],
+                    )
+                    return _FRAMEWORK_PR_NONE_APPLICABLE  # type: ignore[return-value]
                 chosen_id = str(obj.get("candidate_id") or "").strip()
                 reason = str(obj.get("reason") or "").strip()
         except Exception:  # noqa: BLE001
