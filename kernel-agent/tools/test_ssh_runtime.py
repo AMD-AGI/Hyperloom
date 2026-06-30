@@ -83,7 +83,6 @@ def test_extract_last_json_none_on_empty_or_no_brace_or_malformed():
 
 
 # -- GEAK pod-runner defaults (PR #768 review: kernel scoring + skip-profile) ----
-import json as _json  # noqa: E402
 import os as _os  # noqa: E402
 import stat as _stat  # noqa: E402
 import subprocess as _sp  # noqa: E402
