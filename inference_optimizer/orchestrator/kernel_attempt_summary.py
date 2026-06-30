@@ -25,6 +25,16 @@ CATEGORY_ATTEMPTED_REJECTED = "ATTEMPTED_REJECTED"
 CATEGORY_IN_FLIGHT = "IN_FLIGHT"
 CATEGORY_UNATTEMPTED = "UNATTEMPTED"
 
+#: Terminal kernel-outcome bucket. Closed 4-value set the dashboard reads
+#: directly (one uniform field across forge / geak / oob backends) instead of
+#: re-deriving from decision/status strings. ``IN_FLIGHT`` (no terminal
+#: decision) folds into ``fail`` -- a completed session should never leave a
+#: kernel mid-flight.
+OUTCOME_SUCCESS = "success"
+OUTCOME_FAIL = "fail"
+OUTCOME_TIMEOUT = "timeout"
+OUTCOME_SKIP = "skip"
+
 #: Sub-reason vocabulary for ``UNATTEMPTED`` kernels. Picked off the
 #: top15 entry's geometry (``source_file``, ``reusable_native_kernel``,
 #: ``recommended_backends``) so the front-end can filter by why.
@@ -283,6 +293,10 @@ def _load_backend_ladder(
             "attempt_id": str(a.get("attempt_id") or ""),
             "produced_artifact": produced,
         }
+        # Structured backend self-skip marker (forge bailed before any real
+        # attempt); surfaced so the outcome classifier can label ``skip``.
+        if a.get("skipped"):
+            row["skipped"] = True
         # Canonical source is elapsed_s; elapsed_sec read for forward-compat.
         elapsed = a.get("elapsed_s")
         if elapsed is None:
@@ -341,6 +355,72 @@ def _classify_attempted(
     if last_decision == "KEEP":
         return CATEGORY_KEEP_PENDING
     return CATEGORY_IN_FLIGHT
+
+
+def _kernel_outcome_class(
+    category: str,
+    backend_ladder: list[dict[str, Any]],
+) -> str:
+    """Map a kernel's category + backend ladder to a terminal outcome bucket.
+
+    Closed 4-value vocabulary (``success`` / ``fail`` / ``timeout`` / ``skip``),
+    derived only from structured signals so the dashboard reads one uniform
+    field across backends:
+
+    * ``success`` — kept/integrated (a KEEP reached).
+    * ``skip``    — never dispatched (``UNATTEMPTED``) OR every recorded attempt
+      self-skipped before real work (``skipped`` marker, e.g. forge bailed on a
+      compile-only/unsupported/non-git kernel).
+    * ``timeout`` — at least one attempt timed out (``error_class == timeout``)
+      and none of the above.
+    * ``fail``    — anything else that was attempted (compile/correctness/agent
+      errors, no measurable improvement, or a non-terminal ``IN_FLIGHT``).
+
+    Args:
+        category: The kernel's outcome category constant.
+        backend_ladder: Per-backend attempt rows for the kernel.
+
+    Returns:
+        One of ``OUTCOME_SUCCESS`` / ``OUTCOME_SKIP`` / ``OUTCOME_TIMEOUT`` /
+        ``OUTCOME_FAIL``.
+    """
+    if category in (CATEGORY_INTEGRATED, CATEGORY_KEEP_PENDING):
+        return OUTCOME_SUCCESS
+    if category == CATEGORY_UNATTEMPTED:
+        return OUTCOME_SKIP
+    ladder = backend_ladder or []
+    # Every recorded attempt self-skipped before doing real work -> skip. A mixed
+    # ladder (one backend skipped, another really tried) is NOT a skip.
+    if ladder and all(bool(r.get("skipped")) for r in ladder):
+        return OUTCOME_SKIP
+    if any(str(r.get("error_class") or "") == ERROR_CLASS_TIMEOUT for r in ladder):
+        return OUTCOME_TIMEOUT
+    return OUTCOME_FAIL
+
+
+def _session_kernel_opt_outcome(by_kernel: list[dict[str, Any]]) -> str:
+    """Roll per-kernel ``outcome_class`` up to one session-level verdict.
+
+    Precedence: any ``success`` -> ``success``; else if every kernel is
+    ``skip`` (or there are no kernels) -> ``skip``; else ``timeout`` only when a
+    timeout is present and no real ``fail``; otherwise ``fail``.
+
+    Args:
+        by_kernel: The per-kernel summary rows (each carrying ``outcome_class``).
+
+    Returns:
+        The session-level kernel-optimization outcome bucket.
+    """
+    classes = [str(r.get("outcome_class") or "") for r in by_kernel if r.get("outcome_class")]
+    if not classes:
+        return OUTCOME_SKIP
+    if OUTCOME_SUCCESS in classes:
+        return OUTCOME_SUCCESS
+    if all(c == OUTCOME_SKIP for c in classes):
+        return OUTCOME_SKIP
+    if OUTCOME_TIMEOUT in classes and OUTCOME_FAIL not in classes:
+        return OUTCOME_TIMEOUT
+    return OUTCOME_FAIL
 
 
 def _unattempted_reason(top_entry: dict[str, Any]) -> tuple[str, str]:
@@ -592,6 +672,9 @@ def build_kernel_optimization_summary(
         "session_id": session_id,
         "model_name": str(getattr(state, "model_name", "") or ""),
         "cumulative_gain_validated_pct": float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0),
+        # Session-level kernel-optimization verdict (success/fail/timeout/skip),
+        # rolled up from each kernel's ``outcome_class``.
+        "kernel_opt_outcome": _session_kernel_opt_outcome(by_kernel),
         "totals": counts,
         "rejection_breakdown": rejection_breakdown,
         "unattempted_reason_breakdown": unattempted_breakdown,
@@ -634,6 +717,7 @@ def _render_unattempted_row(
         "reusable_native_kernel": bool(top_entry.get("reusable_native_kernel")),
         "recommended_backends": list(top_entry.get("recommended_backends") or []),
         "category": CATEGORY_UNATTEMPTED,
+        "outcome_class": OUTCOME_SKIP,
         "unattempted_reason": reason_code,
         "unattempted_detail": reason_detail,
         "summary": f"not attempted: {reason_code}",
@@ -727,6 +811,7 @@ def _render_attempted_row(
         "bound_type": str(top_entry.get("bound_type") or ""),
         "arithmetic_intensity": _to_float(top_entry.get("arithmetic_intensity")),
         "category": category,
+        "outcome_class": _kernel_outcome_class(category, ladder),
         "rejected_reason": str(attempt.get("rejected_reason") or ""),
         "summary": summary_text,
         "attempts_total": int(attempt.get("attempts") or 0),
@@ -942,6 +1027,10 @@ def _to_float(v: Any) -> float | None:
 
 __all__ = [
     "build_kernel_optimization_summary",
+    "OUTCOME_SUCCESS",
+    "OUTCOME_FAIL",
+    "OUTCOME_TIMEOUT",
+    "OUTCOME_SKIP",
     "CATEGORY_INTEGRATED",
     "CATEGORY_KEEP_PENDING",
     "ERROR_CLASS_TIMEOUT",
