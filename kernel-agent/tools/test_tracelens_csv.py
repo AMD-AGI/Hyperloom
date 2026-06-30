@@ -2,13 +2,14 @@
 
 """Regression tests for the kernel-agent tracelens_analysis filter fixes.
 
-Locks the ``is_kernel_event`` fix to require strict ``cat == 'kernel_agent'`` (fuzzy
+Locks the ``is_kernel_event`` fix to require strict ``cat == 'kernel'`` (fuzzy
 name/category matching had promoted a CPU sync to the #1 hot kernel). Production
 TraceLens now consumes only ``analysis.md``; legacy CSV fallbacks are gone.
 """
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import sys
@@ -226,7 +227,7 @@ def test_deterministic_main_fails_before_high_idle_gate(
     assert "Deterministic TraceLens pipeline failed" in result["error"]
 
 
-# A path — is_kernel_event strict cat == 'kernel_agent'
+# A path — is_kernel_event strict cat == 'kernel'
 def test_a_filters_python_function_synchronize():
     """The exact event that ranked #1 in the buggy resume3/4 trace."""
     sync_event = {
@@ -255,7 +256,7 @@ def test_a_filters_cpu_op():
 def test_a_accepts_real_kernel_event():
     real = {
         "name": ("_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0ELb1ELi1EEEvPT0_"),
-        "cat": "kernel_agent",
+        "cat": "kernel",
         "dur": 6.48,
     }
     assert tla.is_kernel_event(real) is True
@@ -263,14 +264,14 @@ def test_a_accepts_real_kernel_event():
 
 def test_a_accepts_kernel_with_runtime_lookalike_name_but_kernel_cat():
     # Defensive: pathological name + correct cat → still a kernel
-    weird = {"name": "void synchronize_kernel<...>", "cat": "kernel_agent", "dur": 1.0}
+    weird = {"name": "void synchronize_kernel<...>", "cat": "kernel", "dur": 1.0}
     assert tla.is_kernel_event(weird) is True
 
 
 def test_a_rejects_kernel_cat_when_name_is_runtime_api():
     # Belt-and-braces: even with cat=kernel, names listed in
     # RUNTIME_API_NAMES (caught by mis-tagged traces) are rejected.
-    weird = {"name": "hipDeviceSynchronize", "cat": "kernel_agent", "dur": 1.0}
+    weird = {"name": "hipDeviceSynchronize", "cat": "kernel", "dur": 1.0}
     assert tla.is_kernel_event(weird) is False
 
 
@@ -285,9 +286,9 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
         {"name": "hipDeviceSynchronize", "cat": "cuda_runtime", "dur": 10364.0},
         {"name": "<built-in method synchronize of Event object at 0x123>", "cat": "python_function", "dur": 88671.0},
         # 3 real kernels, smaller duration
-        {"name": "aiter::add_rmsnorm_quant_kernel<...>", "cat": "kernel_agent", "dur": 466.0},
-        {"name": "sgl_hip::activation::act_and_mul_kernel<...>", "cat": "kernel_agent", "dur": 380.0},
-        {"name": "void paged_attention_ll4mi_QKV_mfma16_kernel<...>", "cat": "kernel_agent", "dur": 889.0},
+        {"name": "aiter::add_rmsnorm_quant_kernel<...>", "cat": "kernel", "dur": 466.0},
+        {"name": "sgl_hip::activation::act_and_mul_kernel<...>", "cat": "kernel", "dur": 380.0},
+        {"name": "void paged_attention_ll4mi_QKV_mfma16_kernel<...>", "cat": "kernel", "dur": 889.0},
     ]
     # Direct call paths used by analyze_trace_files
     kept = [e for e in events if tla.is_kernel_event(e)]
@@ -299,6 +300,41 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
     # No sync poison left
     for n in kept_names:
         assert "synchronize" not in n.lower()
+
+
+# Issue #769 regression: the torch.profiler Chrome-trace category for a GPU
+# kernel is literally "kernel". A global rename (#734 / commit 33ac6cc) once
+# replaced this data-format literal with "kernel_agent", so is_kernel_event
+# matched nothing and count_gpu_kernel_events returned 0 for every healthy
+# trace -> tracelens_analysis raised "Trace contains zero GPU kernel events".
+# These assertions pin the torch convention so a future rename cannot silently
+# break GPU-kernel detection again.
+def test_issue_769_kernel_event_uses_torch_cat_kernel():
+    """A real GPU kernel uses cat=='kernel'; the renamed 'kernel_agent' is not a trace category."""
+    real_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel", "dur": 5.0}
+    assert tla.is_kernel_event(real_kernel) is True
+    # The component-name string 'kernel_agent' must never be treated as a GPU
+    # kernel trace category.
+    not_a_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel_agent", "dur": 5.0}
+    assert tla.is_kernel_event(not_a_kernel) is False
+
+
+def test_issue_769_count_gpu_kernel_events_nonzero_on_healthy_trace(tmp_path):
+    """count_gpu_kernel_events must count cat=='kernel' events in a real torch trace."""
+    trace = {
+        "traceEvents": [
+            {"name": "python_function frame", "cat": "python_function", "dur": 100.0},
+            {"name": "aten::matmul", "cat": "cpu_op", "dur": 50.0},
+            {"name": "hipDeviceSynchronize", "cat": "cuda_runtime", "dur": 92.0},
+            {"name": "void gemm_kernel<...>", "cat": "kernel", "dur": 6.0},
+            {"name": "void attn_kernel<...>", "cat": "kernel", "dur": 11.0},
+            {"name": "void rmsnorm_kernel<...>", "cat": "kernel", "dur": 3.0},
+        ]
+    }
+    trace_path = tmp_path / "healthy.trace.json.gz"
+    with gzip.open(trace_path, "wt", encoding="utf-8") as fh:
+        json.dump(trace, fh)
+    assert tla.count_gpu_kernel_events(trace_path) == 3
 
 
 # Native-only kernel-opt targeting
@@ -1088,8 +1124,8 @@ def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path
             {
                 "traceEvents": [
                     {"cat": "cpu_op", "name": "aten::add", "dur": 1.0},
-                    {"cat": "kernel_agent", "name": "void some_gemm_kernel<...>", "dur": 7.0},
-                    {"cat": "kernel_agent", "name": "void some_attn_kernel<...>", "dur": 11.0},
+                    {"cat": "kernel", "name": "void some_gemm_kernel<...>", "dur": 7.0},
+                    {"cat": "kernel", "name": "void some_attn_kernel<...>", "dur": 11.0},
                     {"cat": "cuda_runtime", "name": "hipLaunchKernel", "dur": 0.5},
                 ]
             },
@@ -1609,7 +1645,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
                 "traceEvents": [
                     # At least one real GPU kernel event so the new fail-fast
                     # validation lets the run continue into the splitter step.
-                    {"cat": "kernel_agent", "name": "void some_real_kernel<...>", "dur": 5.0},
+                    {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
                 ]
             },
             f,
@@ -1712,7 +1748,7 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
         _json.dump(
             {
                 "traceEvents": [
-                    {"cat": "kernel_agent", "name": "void some_real_kernel<...>", "dur": 5.0},
+                    {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
                 ]
             },
             f,
