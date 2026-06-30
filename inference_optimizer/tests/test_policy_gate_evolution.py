@@ -73,7 +73,7 @@ def test_specialist_role_owns_all_readonly_external_tools():
 
 
 def test_primary_roles_have_empty_external_tool_set():
-    for role_name in ("orchestration", "kernel", "critic", "robustness"):
+    for role_name in ("orchestration", "kernel_agent", "critic", "robustness"):
         assert TOOL_WHITELIST_BY_ROLE[role_name] == frozenset()
 
 
@@ -91,7 +91,7 @@ def test_no_tools_are_phase_restricted():
     [
         "specialist",
         "orchestration",
-        "kernel",
+        "kernel_agent",
         "critic",
         "robustness",
     ],
@@ -125,7 +125,7 @@ def test_validate_tool_invocation_blocks_readonly_external_tools_for_non_special
     read_tool: str,
 ):
     gate = _gate(_State(phase="EXPLORE"))
-    for role_name in ("orchestration", "kernel", "critic", "robustness"):
+    for role_name in ("orchestration", "kernel_agent", "critic", "robustness"):
         with pytest.raises(PolicyDenied) as excinfo:
             gate.validate_tool_invocation(read_tool, source_role=role_name)
         assert excinfo.value.rule == "tool_whitelist_role"
@@ -150,7 +150,7 @@ def test_specialist_web_tools_allowed_in_any_phase(
 
 def test_specialist_pr_monitor_allowed_in_any_phase():
     """PR Monitor read tools are usable in any phase."""
-    for phase in ("PRELUDE", "FRAMEWORK_PR", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
+    for phase in ("PRELUDE", "FRAMEWORK", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
         gate = _gate(_State(phase=phase))
         for tool in PR_MONITOR_TOOL_NAMES:
             gate.validate_tool_invocation(tool, source_role="specialist")
@@ -206,7 +206,7 @@ def test_request_kind_with_kb_write_name_denied():
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "mcp__cortex_kb__propose_point",
         },
     )

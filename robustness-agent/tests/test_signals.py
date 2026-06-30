@@ -56,7 +56,7 @@ def test_stall_emits_medium_when_agent_silent_past_threshold():
     ctx = _ctx(now_unix=now)
     data = SourceData(
         coordinator_events=[
-            {"agent": "kernel", "topic": "heartbeat", "ts": now - 600.0},
+            {"agent": "kernel_agent", "topic": "heartbeat", "ts": now - 600.0},
             {"agent": "orchestration", "topic": "heartbeat", "ts": now - 100.0},
         ],
     )
@@ -64,14 +64,14 @@ def test_stall_emits_medium_when_agent_silent_past_threshold():
     assert len(out) == 1
     assert out[0].name == "agent_stall"
     assert out[0].severity is SymptomSeverity.MEDIUM
-    assert out[0].evidence["agent"] == "kernel"
+    assert out[0].evidence["agent"] == "kernel_agent"
 
 
 def test_stall_escalates_to_high_after_long_silence():
     now = 1_000.0
     ctx = _ctx(now_unix=now)
     data = SourceData(
-        coordinator_events=[{"agent": "kernel", "ts": now - 1500.0}],
+        coordinator_events=[{"agent": "kernel_agent", "ts": now - 1500.0}],
     )
     out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0))
     assert out and out[0].severity is SymptomSeverity.HIGH
@@ -88,11 +88,11 @@ def test_stall_uses_iso_timestamps_too():
     ctx = _ctx(now_unix=now)
     data = SourceData(
         coordinator_events=[
-            {"agent": "kernel", "ts": "2023-11-14T22:13:20+00:00"},  # ~1700000000
+            {"agent": "kernel_agent", "ts": "2023-11-14T22:13:20+00:00"},  # ~1700000000
         ],
     )
     out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=300.0))
-    assert out and out[0].evidence["agent"] == "kernel"
+    assert out and out[0].evidence["agent"] == "kernel_agent"
 
 
 # ---------------------------------------------------------------------------

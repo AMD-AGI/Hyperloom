@@ -31,7 +31,7 @@ def _build_coord(tmp_path: Path, *, gpu_capacity: int) -> Coordinator:
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         name: MockBackend(idle)
-        for name in ("orchestration", "kernel", "critic", "robustness")
+        for name in ("orchestration", "kernel_agent", "critic", "robustness")
     }
     return Coordinator(
         session_dir=tmp_path,

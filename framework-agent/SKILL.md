@@ -1,10 +1,10 @@
 # Framework Agent — Sibling Skill
 
 > **Purpose**: vllm/sglang source-layer optimisation companion for
-> `inference_optimizer`. It discovers framework PR / ref candidates
+> `inference_optimizer`. It discovers framework / ref candidates
 > (via Primus Cortex + GitHub Search), optionally builds/benchmarks
 > them in isolated worktrees, and serves the Coordinator's
-> FRAMEWORK_PR phase. Exposed through the `fa` / `framework-agent`
+> FRAMEWORK_AGENT phase. Exposed through the `fa` / `framework-agent`
 > console entry points.
 
 ## Layout
@@ -36,19 +36,19 @@ framework-agent/
 fa schema                 # print the request schema summary (debug)
 fa candidates --request req.json [--out -]   # enumerate PR/ref candidates, no build/bench
 fa explore   --request req.json [--execute] [--out -]   # plan (default) or build/bench loop
-fa phase-discover --request req.json [--out -]   # Coordinator FRAMEWORK_PR phase entry point
+fa phase-discover --request req.json [--out -]   # Coordinator FRAMEWORK_AGENT phase entry point
 fa phase-audit --request req.json [--out -]   # static local-source judging of a discovered candidate
 fa kb list|show|search|contribute|synthesize ...   # knowledge-base ops
 ```
 
 `fa candidates` / `fa explore` run a standalone investigation loop (no
 IO coordinator). `fa phase-discover` is the thin shim driven by the
-Coordinator's per-candidate pump in the FRAMEWORK_PR phase (between
+Coordinator's per-candidate pump in the FRAMEWORK_AGENT phase (between
 PRELUDE and EXPLORE in `inference_optimizer`); it is the **only**
 subcommand `inference_optimizer/orchestrator/framework_agent_client.py`
 invokes. Don't use `phase-discover` outside that context.
 
-## FRAMEWORK_PR phase (`fa phase-discover`)
+## FRAMEWORK_AGENT phase (`fa phase-discover`)
 
 Reads `--request <json>` and writes `--out <json|->` (envelope style
 mirrors `critic-agent/runtime/cli.py`):
@@ -60,7 +60,7 @@ mirrors `critic-agent/runtime/cli.py`):
 fa phase-discover --request req.json --out -
 ```
 
-## FRAMEWORK_PR semantic audit (`fa phase-audit`)
+## FRAMEWORK semantic audit (`fa phase-audit`)
 
 Given a discovered candidate + the live framework source roots, decide whether
 the PR's change is already present locally so the Coordinator can skip
@@ -81,7 +81,7 @@ fa phase-audit --request req.json --out -
     `partially_present` / `not_present` / `unknown`.
   - `applicability` ∈ `direct_apply` / `needs_rewrite` / `not_applicable` /
     `needs_human_review`; `recommended_next_step` ∈ `skip` /
-    `direct_framework_pr` / `author_via_specialist`.
+    `direct_framework` / `author_via_specialist`.
   - `already_*` is evidence-gated (downgraded to `unknown` without a concrete
     symbol/line hit).
 - **llm layer (opt-in, `use_llm=true`)**: single chat-completion refine; needs

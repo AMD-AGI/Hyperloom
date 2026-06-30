@@ -1,13 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Step 1 — FRAMEWORK_PR candidate artifacts + outcome classification."""
+"""Step 1 — FRAMEWORK candidate artifacts + outcome classification."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from inference_optimizer.orchestrator.framework_pr_artifacts import (
+from inference_optimizer.orchestrator.framework_agent_artifacts import (
     candidate_slug,
     summarize_candidate_outcomes,
     write_decision_json,
@@ -49,7 +49,7 @@ def test_write_decision_json_roundtrip(tmp_path: Path):
     assert dest is not None
     p = Path(dest)
     assert p.name == "decision.json"
-    assert p.parent.parent.name == "framework_pr"  # runs/framework_pr/<slug>/
+    assert p.parent.parent.name == "framework_agent"  # runs/framework_agent/<slug>/
     data = json.loads(p.read_text())
     assert data["candidate_id"] == "ROCm/vllm#42"
     assert data["batch_id"] == "batch-001"
@@ -99,7 +99,7 @@ def test_write_semantic_audit_co_located(tmp_path: Path):
     assert dest is not None
     p = Path(dest)
     assert p.name == "semantic_audit.json"
-    assert p.parent.parent.name == "framework_pr"
+    assert p.parent.parent.name == "framework_agent"
     assert (p.parent / "semantic_audit.md").exists()
     data = json.loads(p.read_text())
     assert data["semantic_status"] == "already_equivalent"

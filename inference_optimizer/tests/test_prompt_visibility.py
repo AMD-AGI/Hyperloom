@@ -20,7 +20,7 @@ from inference_optimizer.orchestrator.phase_state import (
 )
 from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
-    NO_KERNEL_ENABLED_ACTIONS,
+    NO_KERNEL_AGENT_ENABLED_ACTIONS,
     build_orchestration_prompt,
 )
 from inference_optimizer.paths import asset_system_prompts_dir
@@ -85,8 +85,8 @@ def test_full_enabled_actions_contains_specialist_and_integrate_patch() -> None:
 
 
 def test_no_kernel_enabled_actions_contains_specialist_and_integrate_patch() -> None:
-    assert "specialist" in NO_KERNEL_ENABLED_ACTIONS
-    assert "integrate_patch" in NO_KERNEL_ENABLED_ACTIONS
+    assert "specialist" in NO_KERNEL_AGENT_ENABLED_ACTIONS
+    assert "integrate_patch" in NO_KERNEL_AGENT_ENABLED_ACTIONS
 
 
 # Phase allowlist visibility (PolicyGate R1)
@@ -137,7 +137,7 @@ def test_specialist_emit_hint_in_no_kernel_prompt(
     prompt = _build_prompt(
         registry,
         rules_path,
-        enabled=NO_KERNEL_ENABLED_ACTIONS,
+        enabled=NO_KERNEL_AGENT_ENABLED_ACTIONS,
         kernel_enabled=False,
     )
     assert "EMIT: delegate{action_name='specialist'" in prompt
