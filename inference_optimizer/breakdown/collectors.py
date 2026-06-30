@@ -6526,6 +6526,240 @@ def _perfskills_accepted_kernels_from_journey(
     return accepted
 
 
+def _perfskills_reconstruct_from_disk(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any] | None:
+    """Best-effort reconstruction of a PerfSkills run from on-disk survivors.
+
+    When ``state.perfskills_result`` is empty/missing — typically because the
+    coordinator was killed (external SIGKILL / OOM / budget) AFTER the e2e
+    runner produced artifacts but BEFORE the tick-boundary ``state.save`` — the
+    normalized result never lands in state and, on resume past KERNEL, the
+    section would otherwise be a bare ``status=missing`` black hole. The
+    runner's working tree under ``<session>/perfskills/`` survives on the shared
+    FS, so this scans it to recover WHAT actually ran: the handoff (proves HL
+    handed off), the e2e ``exp_root`` and the stages it reached (baseline /
+    kernels / opbench / strategy), any flushed-but-unpromoted ``result.json``
+    status, and the per-kernel ``kernel_journey`` accepted kernels.
+
+    Returns ``None`` when nothing usable is on disk (caller keeps the legacy
+    ``missing`` section). Never raises — failures append to ``warnings``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any] | None: The recovered evidence, or ``None``.
+    """
+    pf = session_dir / "perfskills"
+    try:
+        if not pf.is_dir():
+            return None
+    except OSError:
+        return None
+
+    def _load_json(p: Path) -> dict[str, Any]:
+        try:
+            if p.is_file():
+                obj = json.loads(p.read_text(encoding="utf-8"))
+                return obj if isinstance(obj, dict) else {}
+        except (OSError, ValueError) as exc:
+            warnings.append(
+                f"perfskills: reconstruct read failed for {p.name}: {exc}"
+            )
+        return {}
+
+    stages: list[str] = []
+    recon: dict[str, Any] = {}
+
+    # 1) handoff.json — proves HL built + handed the e2e contract off.
+    handoff = _load_json(pf / "handoff.json")
+    if handoff:
+        stages.append("handoff")
+        recon["handoff"] = {
+            "model_path": handoff.get("model_path"),
+            "framework": handoff.get("framework"),
+            "gpu_type": handoff.get("gpu_type"),
+            "tp": handoff.get("tp"),
+            "workload": handoff.get("workload"),
+            "accepted_flags": handoff.get("accepted_flags"),
+            "raw_baseline_tput": _to_float(handoff.get("raw_baseline_tput")),
+        }
+
+    # 2) a flushed-but-unpromoted result.json. A status==ok result.json is
+    #    promoted by the coordinator's crash-recovery; reaching here means the
+    #    file is absent or carried a non-ok status — record it for the audit.
+    flushed = _load_json(pf / "result.json")
+    if flushed:
+        stages.append("result_json")
+        recon["flushed_result_status"] = flushed.get("status")
+
+    # 3) the e2e exp_root (newest ``e2e_*`` dir) + the stages it reached.
+    exp_root: Path | None = None
+    try:
+        e2e_dirs = sorted(
+            (d for d in pf.iterdir() if d.is_dir() and d.name.startswith("e2e_")),
+            key=lambda d: d.name,
+        )
+        if e2e_dirs:
+            exp_root = e2e_dirs[-1]
+    except OSError as exc:
+        warnings.append(f"perfskills: reconstruct iterdir failed: {exc}")
+
+    kernels_attempted: list[dict[str, Any]] = []
+    if exp_root is not None:
+        recon["exp_root"] = _rel(exp_root, session_dir)
+        for name, label in (
+            ("baseline", "baseline"),
+            ("baseline_rerun", "baseline_rerun"),
+            ("strategy.md", "strategy"),
+            ("kernel_journey.json", "kernel_journey"),
+        ):
+            try:
+                if (exp_root / name).exists():
+                    stages.append(label)
+            except OSError:
+                continue
+        kdir = exp_root / "kernels"
+        try:
+            if kdir.is_dir():
+                stages.append("kernels")
+                for d in sorted(kdir.iterdir(), key=lambda p: p.name):
+                    if d.is_dir() and not d.name.startswith("_"):
+                        kernels_attempted.append({"name": d.name})
+                # ``_exp`` holds the per-team op-bench / recursive kernel work.
+                if (kdir / "_exp").is_dir():
+                    stages.append("opbench")
+        except OSError as exc:
+            warnings.append(f"perfskills: reconstruct kernels scan failed: {exc}")
+    recon["kernels_attempted"] = kernels_attempted
+
+    # 4) per-kernel accepted kernels from the journey (reuse the projection so
+    #    the recovered section's shape matches the producer-populated one).
+    if exp_root is not None:
+        kj = exp_root / "kernel_journey.json"
+        try:
+            if kj.is_file():
+                recon["accepted_kernels"] = (
+                    _perfskills_accepted_kernels_from_journey(
+                        {"kernel_journey_path": str(kj)}, warnings
+                    )
+                )
+        except OSError:
+            pass
+
+    # 5) newest-artifact timestamp (how far the run got in wall-clock). Bounded
+    #    to a handful of key paths — the exp_root tree can hold thousands of
+    #    profiler CSVs and a full rglob at every CLOSE would be wasteful.
+    candidates = [pf / "handoff.json", pf / "result.json"]
+    if exp_root is not None:
+        candidates += [
+            exp_root,
+            exp_root / "logs",
+            exp_root / "kernels",
+            exp_root / "strategy.md",
+            exp_root / "kernel_journey.json",
+        ]
+    newest = 0.0
+    for p in candidates:
+        try:
+            newest = max(newest, p.stat().st_mtime)
+        except OSError:
+            continue
+    if newest > 0:
+        recon["last_artifact_ts"] = datetime.fromtimestamp(
+            newest, tz=timezone.utc
+        ).isoformat()
+
+    # 6) op-bench verdicts — the direct "上报缺口现场" evidence. Each per-kernel
+    #    ``opbench_result.json`` records whether the backend bake-off found a
+    #    deployable winner (``winner_editable`` + ``isolated_speedup`` > 1). Their
+    #    presence proves the e2e DID kernel work; an all-non-editable / ≤1.0x set
+    #    explains WHY there was no win to flush (vs an outright kill). Bounded to
+    #    the top-level per-task files (the deep ``_exp`` tree is skipped).
+    opbench_results: list[dict[str, Any]] = []
+    if exp_root is not None:
+        try:
+            task_dirs = [
+                d for d in (exp_root / "kernels").iterdir()
+                if d.is_dir() and not d.name.startswith("_")
+            ] if (exp_root / "kernels").is_dir() else []
+            for task_dir in sorted(task_dirs, key=lambda p: p.name)[:12]:
+                ob = _load_json(task_dir / "opbench_result.json")
+                if ob:
+                    opbench_results.append({
+                        "task": ob.get("task") or task_dir.name,
+                        "winner_backend": ob.get("winner_backend"),
+                        "isolated_speedup": _to_float(ob.get("isolated_speedup")),
+                        "winner_editable": bool(ob.get("winner_editable")),
+                        "winner_kind": ob.get("winner_kind"),
+                    })
+        except OSError as exc:
+            warnings.append(f"perfskills: reconstruct opbench scan failed: {exc}")
+    if opbench_results:
+        recon["opbench_results"] = opbench_results
+
+    # 7) runner log tails — the run_e2e stdout/stderr survivors under
+    #    ``exp_root/logs/``. The normalized returncode/stdout_tail/stderr_tail the
+    #    coordinator would have folded into ``perfskills_result`` died with the
+    #    killed process; these on-disk logs are the closest recoverable proxy for
+    #    "how far / why". Bounded to the newest handful, tail-only.
+    log_tails: dict[str, str] = {}
+    if exp_root is not None:
+        logs_dir = exp_root / "logs"
+        try:
+            if logs_dir.is_dir():
+                logs = sorted(
+                    (p for p in logs_dir.iterdir() if p.is_file()),
+                    key=lambda p: p.stat().st_mtime,
+                )
+                for p in logs[-4:]:
+                    try:
+                        log_tails[p.name] = p.read_text(
+                            encoding="utf-8", errors="replace",
+                        )[-1500:]
+                    except OSError:
+                        continue
+        except OSError as exc:
+            warnings.append(f"perfskills: reconstruct log-tail read failed: {exc}")
+    if log_tails:
+        recon["runner_log_tails"] = log_tails
+
+    # 8) likely_cause — a conservative classification of WHY no result reached
+    #    state, so a reader does not have to re-derive it from the raw survivors:
+    #      * ``runner_reported_failure``  — a non-ok result.json was flushed.
+    #      * ``ran_no_deployable_winner`` — op-bench ran but found no editable
+    #        winner > 1.0x, so there was simply nothing to flush as a win.
+    #      * ``killed_before_flush``      — stages were reached but neither a
+    #        kernel_journey nor a result.json landed (the in-flight result died
+    #        with the process — the incident pattern: SIGKILL / budget / hang).
+    #      * ``indeterminate``            — not enough on-disk signal to classify.
+    has_journey = "kernel_journey" in stages
+    ran_opbench = "opbench" in stages or bool(opbench_results)
+    any_deployable = any(
+        (r.get("isolated_speedup") or 0.0) > 1.0 and r.get("winner_editable")
+        for r in opbench_results
+    )
+    if flushed and flushed.get("status") and flushed.get("status") != "ok":
+        likely_cause = "runner_reported_failure"
+    elif ran_opbench and not any_deployable and not has_journey:
+        likely_cause = "ran_no_deployable_winner"
+    elif stages and not has_journey and "result_json" not in stages:
+        likely_cause = "killed_before_flush"
+    else:
+        likely_cause = "indeterminate"
+    recon["likely_cause"] = likely_cause
+
+    recon["stages_reached"] = stages
+    # Nothing meaningful recovered (e.g. an empty ``perfskills/`` dir) → let the
+    # caller emit the legacy ``missing`` section.
+    if not (handoff or flushed or exp_root):
+        return None
+    return recon
+
+
 def collect_perfskills(
     session_dir: Path,
     state: dict[str, Any],
@@ -6564,13 +6798,53 @@ def collect_perfskills(
         return {}
     if not has_result:
         # Engaged via the optimizer flag but no result recorded yet/at all.
+        # Before surfacing a bare ``missing`` black hole, try to reconstruct the
+        # run from the on-disk ``perfskills/`` working tree — it survives an
+        # external kill that lost the in-memory result before the tick-boundary
+        # ``state.save`` (the exact gap behind the empty ``perfskills_result``).
+        recon = _perfskills_reconstruct_from_disk(session_dir, warnings)
+        if recon is None:
+            return {
+                "engaged": True,
+                "status": "missing",
+                "error_class": "no_result",
+                "error": (
+                    "kernel_optimizer=perfskills but no perfskills_result "
+                    "recorded"
+                ),
+                "accepted_kernels": [],
+                "accepted_heads": [],
+            }
+        recovered_kernels = recon.get("accepted_kernels") or []
         return {
             "engaged": True,
-            "status": "missing",
+            "status": "no_result_recovered_from_disk",
             "error_class": "no_result",
-            "error": "kernel_optimizer=perfskills but no perfskills_result recorded",
-            "accepted_kernels": [],
+            "error": (
+                "kernel_optimizer=perfskills but no perfskills_result was "
+                "committed to state; reconstructed the run from on-disk "
+                "perfskills/ artifacts. The runner handed off and produced "
+                "intermediate output, but the normalized result.json was never "
+                "folded into state — typically an external kill (SIGKILL / OOM "
+                "/ budget) before the tick-boundary state.save, then a resume "
+                "past KERNEL."
+            ),
+            "recovered_from_disk": True,
+            "handoff": recon.get("handoff"),
+            "exp_root": recon.get("exp_root"),
+            "stages_reached": recon.get("stages_reached") or [],
+            "kernels_attempted": recon.get("kernels_attempted") or [],
+            "opbench_results": recon.get("opbench_results") or [],
+            "runner_log_tails": recon.get("runner_log_tails") or {},
+            "likely_cause": recon.get("likely_cause"),
+            "flushed_result_status": recon.get("flushed_result_status"),
+            "last_artifact_ts": recon.get("last_artifact_ts"),
+            "accepted_kernels": recovered_kernels,
+            "accepted_kernels_source": (
+                "kernel_journey_backfill" if recovered_kernels else None
+            ),
             "accepted_heads": [],
+            "kernels_optimized": len(recovered_kernels),
         }
 
     def _rel_if_under(p: Any) -> Any:

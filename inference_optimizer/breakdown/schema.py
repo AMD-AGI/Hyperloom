@@ -961,7 +961,12 @@ class Perfskills(TypedDict, total=False):
     Attributes:
         engaged (bool): True when PerfSkills owned the KERNEL_AGENT phase.
         status (str): ``ok`` / ``no_gain`` / ``error`` / ``timeout`` /
-            ``skipped`` / ``missing`` / ``unknown``.
+            ``skipped`` / ``missing`` / ``no_result_recovered_from_disk`` /
+            ``unknown``. ``no_result_recovered_from_disk`` is emitted when
+            ``perfskills_result`` was never committed to state (e.g. an external
+            kill before the tick-boundary ``state.save``, then a resume past
+            KERNEL) but the run was reconstructed from the on-disk
+            ``perfskills/`` working tree.
         error_class (str | None): Normalized failure class (None on success),
             e.g. ``timeout`` / ``insufficient_budget`` / ``no_result_json`` /
             ``runner_crashed`` / ``workflow_parse_error``.
@@ -992,6 +997,32 @@ class Perfskills(TypedDict, total=False):
         final_patch (str | None): Relative path to the final patch.
         runner_timeout_s (int | None): Budget-capped runner timeout.
         kill_timeout_s (int | None): Hard subprocess kill timeout.
+        recovered_from_disk (bool): True when the section was reconstructed from
+            the on-disk ``perfskills/`` tree because no result reached state.
+        handoff (dict[str, Any] | None): Recovered handoff summary (model /
+            framework / workload / accepted_flags) proving HL handed off.
+        exp_root (str | None): Relative path to the recovered e2e ``exp_root``.
+        stages_reached (list[str]): Stages the e2e run reached on disk
+            (``handoff`` / ``baseline`` / ``kernels`` / ``opbench`` /
+            ``strategy`` / ``kernel_journey`` / ``result_json``).
+        kernels_attempted (list[Any]): Kernel task dirs the runner created.
+        opbench_results (list[Any]): Per-kernel op-bench verdicts recovered from
+            ``opbench_result.json`` (``task`` / ``winner_backend`` /
+            ``isolated_speedup`` / ``winner_editable`` / ``winner_kind``). Proves
+            the e2e did kernel work and explains an absent win (no editable
+            winner > 1.0x ⇒ nothing to flush).
+        runner_log_tails (dict[str, str]): Newest ``exp_root/logs`` tails
+            (run_e2e stdout/stderr survivors) — the closest recoverable proxy
+            for the returncode/stdout_tail/stderr_tail lost with the killed
+            process.
+        likely_cause (str | None): Conservative classification of why no result
+            reached state -- ``runner_reported_failure`` /
+            ``ran_no_deployable_winner`` / ``killed_before_flush`` /
+            ``indeterminate``.
+        flushed_result_status (str | None): ``status`` of a flushed-but-
+            unpromoted ``result.json`` (None when absent).
+        last_artifact_ts (str | None): ISO UTC mtime of the newest recovered
+            artifact (how far the run got in wall-clock before the kill).
     """
 
     engaged: bool
@@ -999,6 +1030,16 @@ class Perfskills(TypedDict, total=False):
     error_class: str | None
     error: str | None
     returncode: int | None
+    recovered_from_disk: bool
+    handoff: dict[str, Any] | None
+    exp_root: str | None
+    stages_reached: list[str]
+    kernels_attempted: list[Any]
+    opbench_results: list[Any]
+    runner_log_tails: dict[str, str]
+    likely_cause: str | None
+    flushed_result_status: str | None
+    last_artifact_ts: str | None
     baseline_throughput_tok_s: float | None
     final_throughput_tok_s: float | None
     throughput_speedup: float | None
