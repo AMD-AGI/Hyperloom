@@ -72,7 +72,7 @@ inference_optimizer/
 
 ## Package metadata
 
-* **License:** Apache-2.0 (see top-level `LICENSE`).
+* **License:** MIT (see top-level `LICENSE`).
 * **Python:** 3.10+.
 * **Distribution:** PyPI as `hyperloom-inference_optimizer`. Source of
   truth: `pyproject.toml` at the repo root.
