@@ -1821,7 +1821,11 @@ def build_prompt(
         )
     # Quote the per-backend wall-clock so GEAK's task-mode parser infers the right mode (>=120min→full).
     if backend == "geak":
-        budget_min = int(getattr(args, "geak_budget_min", 130) or 130)
+        # Default tracks $GEAK_RUN_MODE (quick->70, full->180); 180 matches GEAK's own
+        # full-mode budget so the quoted wall-clock triggers full mode. The prior 130
+        # killed GEAK before its deadline (see parallel_e2e_runner / _default_geak_budget_minutes).
+        _geak_default = 70 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 180
+        budget_min = int(getattr(args, "geak_budget_min", _geak_default) or _geak_default)
     else:
         budget_min = int(getattr(args, "budget_minutes", 60) or 60)
     target_platform = getattr(args, "target_platform", "") or _env_target_platform()
@@ -2959,9 +2963,12 @@ def invoke_backend(
             tails, gpu_ids, elapsed_s, cmd, and optional optimized_path /
             cli_workspace).
     """
-    # GEAK needs more wall-clock than claude/codex; 130min default triggers GEAK's mode=full path.
+    # GEAK needs more wall-clock than claude/codex; full mode -> 180min (3h) matches
+    # GEAK's own budget so the subprocess timeout doesn't kill it mid-round before it
+    # finalizes a deployable artifact (which would also skip the combined-E2E A/B).
     if backend == "geak":
-        budget_min = float(getattr(args, "geak_budget_min", 0) or getattr(args, "budget_minutes", 60) or 60)
+        _geak_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 180.0
+        budget_min = float(getattr(args, "geak_budget_min", 0) or _geak_default)
     else:
         budget_min = float(getattr(args, "budget_minutes", 60) or 60)
     timeout_s = max(60, int(budget_min * 60))
