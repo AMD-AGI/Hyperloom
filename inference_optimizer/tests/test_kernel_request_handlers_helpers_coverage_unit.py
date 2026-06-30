@@ -159,7 +159,7 @@ def test_artifact_paths_other_type() -> None:
 
 # -- _kernel_result_rank ---------------------------------------------------
 def test_kernel_result_rank_non_dict() -> None:
-    assert krh._kernel_result_rank(None) == (0, 0.0)
+    assert krh._kernel_result_rank(None) == (0, 0, 0.0)
 
 
 def test_kernel_result_rank_keep_beats_higher_micro_review() -> None:
