@@ -43,7 +43,7 @@ def _backends_full() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -280,7 +280,7 @@ def test_run_optimization_request_no_longer_blocked_by_stale_trace_analyze(
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    assert coord._sequence_denial_for_request("kernel", "run_optimization") is None
+    assert coord._sequence_denial_for_request("kernel_agent", "run_optimization") is None
 
 
 def test_trace_analyze_request_itself_passes(session_dir):
@@ -291,7 +291,7 @@ def test_trace_analyze_request_itself_passes(session_dir):
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    assert coord._sequence_denial_for_request("kernel", "trace_analyze") is None
+    assert coord._sequence_denial_for_request("kernel_agent", "trace_analyze") is None
 
 
 def test_run_optimization_handler_reports_missing_trace_analyze(session_dir):
@@ -342,7 +342,7 @@ def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(session_dir)
         "trace_input": "/tmp/profile.tar.gz",
         "candidates_path": "/tmp/cands.json",
     }
-    assert coord._sequence_denial_for_request("kernel", "run_optimization") is None
+    assert coord._sequence_denial_for_request("kernel_agent", "run_optimization") is None
 
 
 def test_closing_phase_denies_non_report_proposals():

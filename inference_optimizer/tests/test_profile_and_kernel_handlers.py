@@ -61,7 +61,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "kernel", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "kernel_agent", "critic", "robustness")}
 
 
 def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
@@ -2823,20 +2823,20 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
                 Intent(
                     type=IntentType.REQUEST,
                     payload={
-                        "target_agent": "kernel",
+                        "target_agent": "kernel_agent",
                         "kind": "trace_analyze",
                         "params": {"trace_input": "/tmp/fake-trace.json.gz"},
                     },
                 ),
             )
-            req_msgs = await c.bus.tail(topic="request", to_agent="kernel")
+            req_msgs = await c.bus.tail(topic="request", to_agent="kernel_agent")
             assert req_msgs, "request must be mirrored to kernel inbox"
             req_id = req_msgs[0].msg_id
 
             resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
             assert resp_msgs, "handler must emit RESPONSE without LLM"
             r = resp_msgs[0]
-            assert r.from_agent == "kernel"
+            assert r.from_agent == "kernel_agent"
             assert r.payload["kind"] == "trace_analyze_done"
             assert r.payload["status"] == "ok"
             assert r.payload["result"]["hot_kernels"] == ["kernel_a", "kernel_b"]
@@ -2860,12 +2860,12 @@ async def test_coordinator_request_unknown_kind_routes_to_llm(session_dir):
             Intent(
                 type=IntentType.REQUEST,
                 payload={
-                    "target_agent": "kernel",
+                    "target_agent": "kernel_agent",
                     "kind": "invent_brand_new_kind",  # NOT in registry
                 },
             ),
         )
-        req_msgs = await c.bus.tail(topic="request", to_agent="kernel")
+        req_msgs = await c.bus.tail(topic="request", to_agent="kernel_agent")
         assert req_msgs, "request must be mirrored even when no handler"
         # No auto-response should have been emitted.
         resp_msgs = await c.bus.tail(topic="response")
@@ -2888,7 +2888,7 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
-                    payload={"target_agent": "kernel", "kind": "trace_analyze"},
+                    payload={"target_agent": "kernel_agent", "kind": "trace_analyze"},
                 ),
             )
             resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
@@ -2956,7 +2956,7 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
                 Intent(
                     type=IntentType.REQUEST,
                     payload={
-                        "target_agent": "kernel",
+                        "target_agent": "kernel_agent",
                         "kind": "run_optimization",
                         "params": {
                             "kernel_id": "k001",
@@ -3592,7 +3592,7 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
                 Intent(
                     type=IntentType.REQUEST,
                     payload={
-                        "target_agent": "kernel",
+                        "target_agent": "kernel_agent",
                         "kind": "integrate",
                         "params": {
                             "kernel_id": "k001",
@@ -3639,7 +3639,7 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
                 Intent(
                     type=IntentType.REQUEST,
                     payload={
-                        "target_agent": "kernel",
+                        "target_agent": "kernel_agent",
                         "kind": "integrate",
                         "params": {
                             "kernel_id": "k009",

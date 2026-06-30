@@ -11,14 +11,14 @@ from inference_optimizer.orchestrator.action_registry import (
     VALID_FAMILIES,
     VALID_PIPELINE_PHASES,
 )
-from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
+from inference_optimizer.orchestrator.policy import KERNEL_AGENT_OWNED_ACTIONS
 from inference_optimizer.protocol.action_surfaces import (
-    FRAMEWORK_PR_INTERNAL_ACTION_NAMES as SURFACE_FRAMEWORK_PR_INTERNAL_ACTION_NAMES,
+    FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES as SURFACE_FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES,
     FULL_ENABLED_ACTIONS as SURFACE_FULL_ENABLED_ACTIONS,
     GRID_INJECTABLE_ACTIONS as SURFACE_GRID_INJECTABLE_ACTIONS,
     INTERNAL_ONLY_ACTION_NAMES as SURFACE_INTERNAL_ONLY_ACTION_NAMES,
-    KERNEL_OWNED_ACTIONS as SURFACE_KERNEL_OWNED_ACTIONS,
-    NO_KERNEL_ENABLED_ACTIONS as SURFACE_NO_KERNEL_ENABLED_ACTIONS,
+    KERNEL_AGENT_OWNED_ACTIONS as SURFACE_KERNEL_AGENT_OWNED_ACTIONS,
+    NO_KERNEL_AGENT_ENABLED_ACTIONS as SURFACE_NO_KERNEL_AGENT_ENABLED_ACTIONS,
     PHASE_ALLOWLIST_BYPASS_ACTIONS as SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS,
 )
 
@@ -37,8 +37,8 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # shallow (5) — ``explore`` is the merged grid-runner entry.
     "explore": "shallow",
     "integrate_patch": "shallow",
-    # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor.
-    "framework_pr": "shallow",
+    # FRAMEWORK_AGENT phase: per-candidate Coordinator-internal executor.
+    "framework_agent": "shallow",
     "sweep": "shallow",
     # SWEEP-phase post-sweep concurrency comparison.
     "conc_sweep": "shallow",
@@ -74,10 +74,10 @@ def test_catalogue_count_matches_expected(registry):
 
 
 def test_kernel_owned_actions_all_in_registry(registry):
-    """The 5 KERNEL_OWNED_ACTIONS must each have metadata."""
-    for name in KERNEL_OWNED_ACTIONS:
+    """The 5 KERNEL_AGENT_OWNED_ACTIONS must each have metadata."""
+    for name in KERNEL_AGENT_OWNED_ACTIONS:
         meta = registry.get(name)
-        assert meta is not None, f"missing metadata for kernel-owned action: {name}"
+        assert meta is not None, f"missing metadata for kernel_agent-owned action: {name}"
         assert meta.family == "deep_kernel"
 
 
@@ -87,13 +87,13 @@ def test_action_surface_constants_are_shared():
     from inference_optimizer.orchestrator import policy
     from inference_optimizer.orchestrator.system_prompts import prompt_builder
 
-    assert policy.KERNEL_OWNED_ACTIONS is SURFACE_KERNEL_OWNED_ACTIONS
-    assert prompt_builder.KERNEL_OWNED_ACTIONS is SURFACE_KERNEL_OWNED_ACTIONS
-    assert set(_NOOP_KINDS_KERNEL_ONLY) == SURFACE_KERNEL_OWNED_ACTIONS
+    assert policy.KERNEL_AGENT_OWNED_ACTIONS is SURFACE_KERNEL_AGENT_OWNED_ACTIONS
+    assert prompt_builder.KERNEL_AGENT_OWNED_ACTIONS is SURFACE_KERNEL_AGENT_OWNED_ACTIONS
+    assert set(_NOOP_KINDS_KERNEL_ONLY) == SURFACE_KERNEL_AGENT_OWNED_ACTIONS
     assert prompt_builder.GRID_INJECTABLE_ACTIONS is SURFACE_GRID_INJECTABLE_ACTIONS
     assert policy.INTERNAL_ONLY_ACTION_NAMES is SURFACE_INTERNAL_ONLY_ACTION_NAMES
     assert prompt_builder.FULL_ENABLED_ACTIONS is SURFACE_FULL_ENABLED_ACTIONS
-    assert prompt_builder.NO_KERNEL_ENABLED_ACTIONS is SURFACE_NO_KERNEL_ENABLED_ACTIONS
+    assert prompt_builder.NO_KERNEL_AGENT_ENABLED_ACTIONS is SURFACE_NO_KERNEL_AGENT_ENABLED_ACTIONS
 
 
 def test_prompt_enabled_actions_are_live_registry_actions(registry):
@@ -105,12 +105,12 @@ def test_prompt_enabled_actions_are_live_registry_actions(registry):
         "validate_stack",
         "select_kernels",
     }
-    enabled = set(SURFACE_FULL_ENABLED_ACTIONS) | set(SURFACE_NO_KERNEL_ENABLED_ACTIONS)
+    enabled = set(SURFACE_FULL_ENABLED_ACTIONS) | set(SURFACE_NO_KERNEL_AGENT_ENABLED_ACTIONS)
     assert not (enabled & retired)
     for name in enabled:
         assert registry.get(name) is not None, f"prompt-visible action {name!r} must have action metadata"
-    assert SURFACE_KERNEL_OWNED_ACTIONS <= set(SURFACE_FULL_ENABLED_ACTIONS)
-    assert SURFACE_KERNEL_OWNED_ACTIONS.isdisjoint(set(SURFACE_NO_KERNEL_ENABLED_ACTIONS))
+    assert SURFACE_KERNEL_AGENT_OWNED_ACTIONS <= set(SURFACE_FULL_ENABLED_ACTIONS)
+    assert SURFACE_KERNEL_AGENT_OWNED_ACTIONS.isdisjoint(set(SURFACE_NO_KERNEL_AGENT_ENABLED_ACTIONS))
 
 
 def test_phase_allowlist_actions_are_live_registry_actions(registry):
@@ -133,16 +133,16 @@ def test_phase_allowlist_actions_are_live_registry_actions(registry):
 def test_action_surface_sets_are_phase_aligned():
     from inference_optimizer.orchestrator.phase_state import (
         PHASE_ALLOWED_ACTIONS,
-        PHASE_FRAMEWORK_PR,
-        PHASE_KERNEL,
+        PHASE_FRAMEWORK_AGENT,
+        PHASE_KERNEL_AGENT,
     )
 
     all_phase_actions = set().union(*PHASE_ALLOWED_ACTIONS.values())
-    assert SURFACE_KERNEL_OWNED_ACTIONS <= PHASE_ALLOWED_ACTIONS[PHASE_KERNEL]
+    assert SURFACE_KERNEL_AGENT_OWNED_ACTIONS <= PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT]
     assert (SURFACE_INTERNAL_ONLY_ACTION_NAMES - SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS) <= all_phase_actions
     assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS <= SURFACE_INTERNAL_ONLY_ACTION_NAMES
     assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS.isdisjoint(all_phase_actions)
-    assert SURFACE_FRAMEWORK_PR_INTERNAL_ACTION_NAMES <= PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK_PR]
+    assert SURFACE_FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES <= PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK_AGENT]
     assert SURFACE_GRID_INJECTABLE_ACTIONS <= all_phase_actions
 
 
@@ -326,7 +326,7 @@ def test_explore_action_metadata(registry):
 
 def test_kernel_owned_actions_in_deep_pipeline_phase(registry):
     """Kernel-owned actions must declare pipeline_phase=='deep'."""
-    for name in KERNEL_OWNED_ACTIONS:
+    for name in KERNEL_AGENT_OWNED_ACTIONS:
         m = registry.get(name)
         assert m is not None
         if name == "deep_kernel_analysis":

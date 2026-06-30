@@ -21,8 +21,8 @@ from ..action_registry import (
 from ...protocol.action_surfaces import (
     FULL_ENABLED_ACTIONS,
     GRID_INJECTABLE_ACTIONS,
-    KERNEL_OWNED_ACTIONS,
-    NO_KERNEL_ENABLED_ACTIONS,
+    KERNEL_AGENT_OWNED_ACTIONS,
+    NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
 from . import read_rules_fragment as _read_rules_fragment
 
@@ -43,7 +43,7 @@ _PHASE_HEADERS: dict[str, str] = {
     "measure": "Measure — establish baseline_tput. Gate for everything else.",
     "analysis": "Analysis — read-only; produces traces / candidate kernels.",
     "explore": "Explore — propose modifications; one round produces a candidate, not yet validated.",
-    "deep": "Deep — kernel-owned. Emit via REQUEST(target_agent='kernel', kind=...).",
+    "deep": "Deep — kernel_agent-owned. Emit via REQUEST(target_agent='kernel_agent', kind=...).",
     "validate": "Validate — apply the accumulated optimization_stack and re-bench to get an honest cumulative gain.",
     "finalize": "Finalize — write the final report.",
     "support": "Support — invoke only when triggered (plateau / crash / re-exploration).",
@@ -85,14 +85,14 @@ def _section_session_context(
     objective_value: float | str | None,
     max_minutes: int,
     explore_enabled: bool = True,
-    framework_phase_enabled: bool = True,
+    framework_agent_phase_enabled: bool = True,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> list[str]:
     """Build the SESSION CONTEXT section lines.
 
     Args:
         framework (str): The framework name shown verbatim.
-        kernel_enabled (bool): Whether kernel-owned actions are enabled.
+        kernel_enabled (bool): Whether kernel_agent-owned actions are enabled.
         objective_kind (str): The objective kind (e.g. ``time_only``,
             ``gain_pct``).
         objective_value (float | str | None): Optional objective target value
@@ -116,7 +116,7 @@ def _section_session_context(
         f"- framework        : {framework}",
         f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
         f"- explore_enabled  : {'true' if explore_enabled else 'false'}",
-        f"- framework_phase_enabled : {'true' if framework_phase_enabled else 'false'}",
+        f"- framework_agent_phase_enabled : {'true' if framework_agent_phase_enabled else 'false'}",
         f"- objective        : {obj}",
         f"- max_minutes      : {max_minutes}",
         f"- framework_source_roots: {roots_line}",
@@ -138,7 +138,7 @@ def _section_session_context(
         "block lists the exact set of actions you may propose this tick;",
         "anything outside that set returns `policy_denied` with rule",
         "`phase_incompatible`. The 6-phase chain is:",
-        "  PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE",
+        "  PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE",
         "Disabled phases (see PHASE CONTRACT below) are skipped but keep their place in the chain. Transitions are Coordinator-owned (you cannot write phase).",
     ]
 
@@ -147,20 +147,20 @@ def _section_phase_semantics(
     *,
     kernel_enabled: bool,
     explore_enabled: bool = True,
-    framework_phase_enabled: bool = True,
+    framework_agent_phase_enabled: bool = True,
 ) -> list[str]:
     """Render the per-phase allowed-action contract (current phase injected
     dynamically by the Coordinator).
 
     Phases switched off by ``--no-explore`` / ``--no-kernel`` /
-    ``--no-framework`` keep their row in the 6-phase chain but are annotated
+    ``--no-framework-agent`` keep their row in the 6-phase chain but are annotated
     ``(DISABLED: --no-xxx — phase skipped)`` so Orchestration plans against the
     phases the run will actually enter.
 
     Args:
-        kernel_enabled: Whether kernel-owned actions are enabled.
+        kernel_enabled: Whether kernel_agent-owned actions are enabled.
         explore_enabled: Whether the EXPLORE phase is enabled.
-        framework_phase_enabled: Whether the FRAMEWORK_PR phase is enabled.
+        framework_agent_phase_enabled: Whether the FRAMEWORK_AGENT phase is enabled.
 
     Returns:
         Markdown lines for the phase-contract section.
@@ -172,12 +172,12 @@ def _section_phase_semantics(
 
     # phase name -> the flag that disabled it (None => always enabled).
     disabled_suffix: dict[str, str] = {}
-    if not framework_phase_enabled:
-        disabled_suffix["FRAMEWORK_PR"] = "--no-framework"
+    if not framework_agent_phase_enabled:
+        disabled_suffix["FRAMEWORK_AGENT"] = "--no-framework-agent"
     if not explore_enabled:
         disabled_suffix["EXPLORE"] = "--no-explore"
     if not kernel_enabled:
-        disabled_suffix["KERNEL"] = "--no-kernel"
+        disabled_suffix["KERNEL_AGENT"] = "--no-kernel"
 
     interleave = is_phase_interleave_enabled()
     lines: list[str] = [
@@ -201,13 +201,13 @@ def _section_phase_semantics(
     )
     lines.extend([
         "",
-        "roofline, profile, replay_warm_recipe and framework_pr are never",
+        "roofline, profile, replay_warm_recipe and framework are never",
         "in the sets above: the Coordinator auto-manages them and PolicyGate",
         "denies any attempt to propose them.",
         "",
         "Phase transitions are Coordinator-owned. The hard advance gates",
         "are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit, the per-",
-        "phase budget cap, or a terminal stop_reason exit EXPLORE / KERNEL",
+        "phase budget cap, or a terminal stop_reason exit EXPLORE / KERNEL_AGENT",
         "/ SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
         "You may also emit `escalate_strategy_change{next_action_hint=",
         "'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}` directly",
@@ -228,13 +228,13 @@ def _section_phase_semantics(
                 "",
                 "**Phase interleave mode is ON** (off by default; enabled via "
                 + "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=1`):",
-                "- EXPLORE may also REQUEST kernel-owned kinds "
+                "- EXPLORE may also REQUEST kernel_agent-owned kinds "
                 + "(kernel_opt / integrate / deep_kernel_analysis / "
                 + "operator_tuning / vendor_kernel_config / gemm_tuning) when "
                 + "a probe of the kernel surface is needed mid-EXPLORE.",
-                "- KERNEL may also propose / delegate explore / specialist /",
+                "- KERNEL_AGENT may also propose / delegate explore / specialist /",
                 "  integrate_patch when a config / patch refinement is needed",
-                "  mid-KERNEL.",
+                "  mid-KERNEL_AGENT.",
                 "- The phase chain stays monotonic for resume / audit / the",
                 "  CLOSE sequencer; only the per-phase action contract is",
                 "  widened. Data-dependency (trace_analyze→run_optimization),",
@@ -294,7 +294,7 @@ def _resolve_prompt_prelude(
     """
     actions = _filter_actions(action_registry, enabled_actions)
     if kernel_enabled is None:
-        kernel_enabled = any(a.name in KERNEL_OWNED_ACTIONS for a in actions)
+        kernel_enabled = any(a.name in KERNEL_AGENT_OWNED_ACTIONS for a in actions)
     framework_norm = (framework or "sglang").strip().lower() or "sglang"
     rules_md = _read_rules_fragment(rules_fragment_path)
     return actions, kernel_enabled, framework_norm, rules_md
@@ -422,7 +422,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     Returns:
         str: The emit-hint string for the catalogue entry.
     """
-    if meta.name in KERNEL_OWNED_ACTIONS:
+    if meta.name in KERNEL_AGENT_OWNED_ACTIONS:
         if meta.name == "kernel_opt":
             kind_hint = "run_optimization"
         elif meta.name == "gemm_tuning":
@@ -431,7 +431,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             kind_hint = "integrate"
         else:
             kind_hint = meta.name
-        return f"REQUEST{{target_agent='kernel', kind='{kind_hint}', params={{...}}}}"
+        return f"REQUEST{{target_agent='kernel_agent', kind='{kind_hint}', params={{...}}}}"
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
     if meta.name == "specialist":
@@ -529,8 +529,8 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
         for name in names:
             meta = name_to_meta[name]
             tag_parts: list[str] = []
-            if name in KERNEL_OWNED_ACTIONS:
-                tag_parts.append("KERNEL-OWNED")
+            if name in KERNEL_AGENT_OWNED_ACTIONS:
+                tag_parts.append("KERNEL_AGENT-OWNED")
             tag = (" (" + ", ".join(tag_parts) + ")") if tag_parts else ""
             lines.append(f"- **{name}**{tag} — {meta.description}")
             lines.append(
@@ -555,7 +555,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
     idea-generation guidance.
 
     Args:
-        kernel_enabled (bool): Whether kernel-owned actions are enabled for this
+        kernel_enabled (bool): Whether kernel_agent-owned actions are enabled for this
             run.
 
     Returns:
@@ -584,7 +584,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "Coordinator-managed and never in the per-phase proposable set, "
         "so PolicyGate denies both with ``rule='phase_incompatible'``. "
         "While the analysis task is in flight, ``specialist`` / "
-        "``explore`` / kernel-owned dispatches are deferred until "
+        "``explore`` / kernel_agent-owned dispatches are deferred until "
         "``analysis.md`` / ``last_profile_trace`` refreshes.",
     )
     lines.extend([
@@ -624,7 +624,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   longer robustness-only; see the `skip_to_close` exception in the",
         "   PHASE CONTRACT). Otherwise the Coordinator advances only on IR-6",
         "   force-exit, phase-budget exhaustion, or a terminal stop_reason.",
-        "7. **Sweep / report tail**: once EXPLORE / KERNEL exit, the",
+        "7. **Sweep / report tail**: once EXPLORE / KERNEL_AGENT exit, the",
         "   Coordinator routes the run to SWEEP (or directly to it under",
         "   --no-kernel). When SWEEP completes, propose `report` for the",
         "   LLM narrative (Coordinator also auto-enqueues one at the",
@@ -651,7 +651,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   `extra_envs` / `model_path` / `gpu_type` / `config_path` /",
         "   `disable_run_eval`.",
         "2. **`last_action_failures`** (global rolling log capped at the last",
-        "   10 unpromotable results across ALL kinds, including kernel-owned).",
+        "   10 unpromotable results across ALL kinds, including kernel_agent-owned).",
         "   Use this when the per-action history doesn't carry the kind you",
         "   need (e.g. `integrate` failure visible here but `<action>_attempts`",
         "   only covers the six explore/validate kinds).",
@@ -735,22 +735,22 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
 _KERNEL_OPT_PIPELINE_BODY: str = """\
 ## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-The four kernel-owned actions are picked per the DECISION FRAMEWORK
+The four kernel_agent-owned actions are picked per the DECISION FRAMEWORK
 (phase allowed-set + gaps + KB priors); there is no system-side
 priority ranking (§3.9 Inv-9.1). Pick the next one by reading these facts in order:
-a `state.gaps[]` `layer='kernel'` gap with attempts left →
+a `state.gaps[]` `layer='kernel_agent'` gap with attempts left →
 `last_kernel_opt` (KEEP→integrate next; PARTIAL→retry at most
 `_DEFAULT_KERNEL_OPT_MAX_PARTIAL` then rejected; REVERT→rejected) →
 skip ids in `rejected_kernel_ids` → recover from `last_action_failures`.
-A KERNEL plateau signal (3 REVERTs across distinct kernels, or low
-recent KEEP gain) is rendered as advisory; KERNEL → SWEEP advance is
+A KERNEL_AGENT plateau signal (3 REVERTs across distinct kernels, or low
+recent KEEP gain) is rendered as advisory; KERNEL_AGENT → SWEEP advance is
 driven by the phase budget, an `escalate_strategy_change` hint, or a
 terminal stop_reason. Read the advisory and emit `skip_to_sweep` if
 you want to wind down sooner.
 
 ### `trace_analyze` — must precede every `run_optimization`
 
-  request{target_agent: 'kernel', kind: 'trace_analyze',
+  request{target_agent: 'kernel_agent', kind: 'trace_analyze',
           params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
 
   Skip if `last_trace_analyze.trace_input` already equals
@@ -758,7 +758,7 @@ you want to wind down sooner.
 
 ### `gemm_tuning` — `run_gemm_tuning`
 
-  request{target_agent: 'kernel', kind: 'run_gemm_tuning', params={}}
+  request{target_agent: 'kernel_agent', kind: 'run_gemm_tuning', params={}}
 
   Only when `last_gemm_tuning` is empty (the Coordinator also auto-runs it at
   KERNEL entry; eligibility is decided backend-side).
@@ -776,7 +776,7 @@ are non-unique (several kernels share `aten::mm`) and are rejected.
 `skipped_kernels_top` lists operators TraceLens detected but cannot
 rewrite (each with a `skip_reason`); they are off-limits, not targets.
 
-  request{target_agent: 'kernel', kind: 'run_optimization',
+  request{target_agent: 'kernel_agent', kind: 'run_optimization',
           params: {kernel_id: <picked kernel_id>,
                    source_file: <hot_kernels[i].source_file>,
                    candidates_path: <trace_analyze_done.candidates_path>,
@@ -797,7 +797,7 @@ rewrite (each with a `skip_reason`); they are off-limits, not targets.
 On `run_optimization_done` with `decision='KEEP'`, integrate is the only
 allowed action until the patch lands on `optimization_stack`:
 
-  request{target_agent: 'kernel', kind: 'integrate',
+  request{target_agent: 'kernel_agent', kind: 'integrate',
           params: {kernel_id, patch_path, target_file, base_tput,
                    extra_server_args, config_path}}
 
@@ -879,7 +879,7 @@ def build_orchestration_prompt(
     framework: str = "sglang",
     kernel_enabled: bool | None = None,
     explore_enabled: bool = True,
-    framework_phase_enabled: bool = True,
+    framework_agent_phase_enabled: bool = True,
     objective_kind: str = "time_only",
     objective_value: float | str | None = None,
     max_minutes: int = 0,
@@ -900,8 +900,8 @@ def build_orchestration_prompt(
         explore_enabled: when False (``--no-explore``) the EXPLORE phase is
             skipped; the prompt annotates it as DISABLED so Orchestration's plan
             matches the real phase chain.
-        framework_phase_enabled: when False (``--no-framework``) the
-            FRAMEWORK_PR phase is skipped; annotated DISABLED in the prompt.
+        framework_agent_phase_enabled: when False (``--no-framework-agent``) the
+            FRAMEWORK_AGENT phase is skipped; annotated DISABLED in the prompt.
         objective_kind: :mod:`objective` kind string, printed verbatim.
         objective_value: :mod:`objective` target value, printed verbatim.
         max_minutes: wall-clock budget for the run.
@@ -933,14 +933,14 @@ def build_orchestration_prompt(
             objective_value=objective_value,
             max_minutes=max_minutes,
             explore_enabled=explore_enabled,
-            framework_phase_enabled=framework_phase_enabled,
+            framework_agent_phase_enabled=framework_agent_phase_enabled,
             framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
         _section_phase_semantics(
             kernel_enabled=kernel_enabled,
             explore_enabled=explore_enabled,
-            framework_phase_enabled=framework_phase_enabled,
+            framework_agent_phase_enabled=framework_agent_phase_enabled,
         ),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
@@ -961,14 +961,14 @@ def default_enabled_actions(
     """Return the canonical enabled-action set used by the CLI.
 
     Filters :data:`FULL_ENABLED_ACTIONS` per flag so the flags compose: a
-    ``--no-kernel --no-explore`` run drops both kernel-owned names and the
-    ``explore`` grid-runner. ``--no-framework`` is intentionally absent — the
-    ``framework_pr`` action is Coordinator-internal and never appears in the
+    ``--no-kernel --no-explore`` run drops both kernel_agent-owned names and the
+    ``explore`` grid-runner. ``--no-framework-agent`` is intentionally absent — the
+    ``framework`` action is Coordinator-internal and never appears in the
     catalogue, so it has nothing to trim.
 
     Args:
         no_kernel (bool): When ``True``, drop the kernel-only actions (keep the
-            intersection with :data:`NO_KERNEL_ENABLED_ACTIONS`).
+            intersection with :data:`NO_KERNEL_AGENT_ENABLED_ACTIONS`).
         no_explore (bool): When ``True``, drop the ``explore`` grid-runner
             action (EXPLORE phase is skipped).
 
@@ -978,7 +978,7 @@ def default_enabled_actions(
     """
     actions = list(FULL_ENABLED_ACTIONS)
     if no_kernel:
-        actions = [a for a in actions if a in NO_KERNEL_ENABLED_ACTIONS]
+        actions = [a for a in actions if a in NO_KERNEL_AGENT_ENABLED_ACTIONS]
     if no_explore:
         actions = [a for a in actions if a != "explore"]
     return tuple(actions)
@@ -987,8 +987,8 @@ def default_enabled_actions(
 __all__ = [
     "FULL_ENABLED_ACTIONS",
     "GRID_INJECTABLE_ACTIONS",
-    "KERNEL_OWNED_ACTIONS",
-    "NO_KERNEL_ENABLED_ACTIONS",
+    "KERNEL_AGENT_OWNED_ACTIONS",
+    "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "VALID_PIPELINE_PHASES",
     "build_orchestration_prompt",
     "default_enabled_actions",

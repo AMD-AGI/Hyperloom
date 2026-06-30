@@ -5,7 +5,7 @@
 Covers:
 * cyclic EXPLORE plateau is *actionable* (winds the cycle down via
   ``explore_no_more_leverage`` + ``switch_bottleneck``); advisory-only when cyclic off.
-* ``compute_next_phase`` routes a plateaued EXPLORE → KERNEL (switch lever).
+* ``compute_next_phase`` routes a plateaued EXPLORE → KERNEL_AGENT (switch lever).
 * Coordinator stamps the bottleneck-switch handoff onto SharedState.
 * The redirect advisory renders in the next cycle's EXPLORE and names a
   suggested specialist domain; it clears once the live bottleneck drifts.
@@ -80,7 +80,7 @@ def test_compute_next_phase_plateau_routes_explore_to_kernel(monkeypatch):
     st = _plateaued_explore_state()
     target, reason, evidence = ps.compute_next_phase(st, max_hours=96.0)
     # Exhausted explore leverage switches lever to KERNEL (non-terminal).
-    assert target == ps.PHASE_KERNEL
+    assert target == ps.PHASE_KERNEL_AGENT
     assert reason == "explore_no_more_leverage"
     assert evidence.get("switch_bottleneck") is True
 
@@ -107,7 +107,7 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -133,7 +133,7 @@ async def test_coordinator_marks_bottleneck_switch_on_plateau(cyclic_coordinator
     await c._advance_phase_if_needed()
 
     # Exhausted explore leverage switches lever to KERNEL (non-terminal).
-    assert st.phase == ps.PHASE_KERNEL
+    assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.pending_bottleneck_switch is True
     assert st.last_cycle_bottleneck == "MoE_fused"
 

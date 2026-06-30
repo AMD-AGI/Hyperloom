@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""TraceLens analysis tool for the resident Kernel Agent skill.
+"""TraceLens analysis tool for the resident Kernel-agent skill.
 
 Conservative: records every step, writes a stable artifact set, supports TraceLens
 capture directories, and has a dry-run path that works without TraceLens installed.
@@ -1080,7 +1080,7 @@ def _check_selected_chunk_has_gpu_events_quality(
 
 
 KERNEL_HINTS = (
-    "kernel",
+    "kernel_agent",
     "triton",
     "hip",
     "cuda",
@@ -1338,7 +1338,7 @@ def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
 def is_kernel_event(event: dict[str, Any]) -> bool:
     """Apply a strict GPU-kernel filter to a trace event.
 
-    Only ``cat == 'kernel'`` events qualify, excluding host-side sync/launch
+    Only ``cat == 'kernel_agent'`` events qualify, excluding host-side sync/launch
     wrappers that would eclipse real kernels.
 
     Args:
@@ -1348,7 +1348,7 @@ def is_kernel_event(event: dict[str, Any]) -> bool:
         ``True`` if the event is a real GPU kernel.
     """
     cat = str(event.get("cat") or event.get("category") or "").lower()
-    if cat != "kernel":
+    if cat != "kernel_agent":
         return False
     name = str(event.get("name") or event.get("kernel_name") or "")
     if name.lower() in RUNTIME_API_NAMES:
@@ -3154,7 +3154,7 @@ _OPS_RANKING_JSON_RELPATHS = (
     "perf_report_csvs/priority_data.json",
 )
 
-_RANK_NAME_KEYS = ("name", "operation", "op", "kernel", "kernel_name", "op_name")
+_RANK_NAME_KEYS = ("name", "operation", "op", "kernel_agent", "kernel_name", "op_name")
 _RANK_CATEGORY_KEYS = (
     # ``categories`` is the real ops_summary.csv column (stored as a list-repr
     # string like ``['MoE_fused']``; see _clean_category_label).
@@ -5490,7 +5490,7 @@ def main() -> int:
         int: ``0`` on success, ``1`` when the run failed (the error is also
             written to status and printed as JSON).
     """
-    parser = argparse.ArgumentParser(description="Kernel Agent TraceLens analysis tool")
+    parser = argparse.ArgumentParser(description="Kernel-agent TraceLens analysis tool")
     parser.add_argument("--trace-input", required=True)
     parser.add_argument("--session-id", default="")
     parser.add_argument("--model-name", default="")

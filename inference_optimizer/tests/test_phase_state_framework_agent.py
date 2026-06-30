@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Pure-function tests for FRAMEWORK_PR phase routing and exit conditions."""
+"""Pure-function tests for FRAMEWORK_AGENT phase routing and exit conditions."""
 
 from __future__ import annotations
 
@@ -16,19 +16,19 @@ class _State:
     def __init__(
         self,
         *,
-        phase: str = phase_state.PHASE_FRAMEWORK_PR,
+        phase: str = phase_state.PHASE_FRAMEWORK_AGENT,
         baseline_tput: float | None = 1500.0,
-        framework_pr_batches: list[dict[str, Any]] | None = None,
-        framework_pr_phase_done: bool = False,
-        framework_pr_phase_progress: list[dict[str, Any]] | None = None,
+        framework_agent_batches: list[dict[str, Any]] | None = None,
+        framework_agent_phase_done: bool = False,
+        framework_agent_phase_progress: list[dict[str, Any]] | None = None,
         remaining_minutes_value: float = 9999.0,
         phase_history: list[dict[str, Any]] | None = None,
     ) -> None:
         self.phase = phase
         self.baseline_tput = baseline_tput
-        self.framework_pr_batches = framework_pr_batches or []
-        self.framework_pr_phase_done = framework_pr_phase_done
-        self.framework_pr_phase_progress = framework_pr_phase_progress or []
+        self.framework_agent_batches = framework_agent_batches or []
+        self.framework_agent_phase_done = framework_agent_phase_done
+        self.framework_agent_phase_progress = framework_agent_phase_progress or []
         self._rem_min = remaining_minutes_value
         self.phase_history = phase_history or []
         self.optimization_stack: list[dict[str, Any]] = []
@@ -43,33 +43,33 @@ class _State:
 
 
 # PHASE_NAMES + exit reason vocab presence
-def test_framework_pr_is_in_phase_names_between_prelude_and_explore():
+def test_framework_is_in_phase_names_between_prelude_and_explore():
     names = phase_state.PHASE_NAMES
-    i = names.index("FRAMEWORK_PR")
+    i = names.index("FRAMEWORK_AGENT")
     assert i > 0
     assert names[i - 1] == "PRELUDE"
     assert names[i + 1] == "EXPLORE"
 
 
-def test_framework_pr_exit_reasons_registered():
+def test_framework_exit_reasons_registered():
     reasons = {
-        "framework_pr_phase_done",
-        "framework_pr_plateau",
-        "framework_pr_force_exit_low_budget",
+        "framework_agent_phase_done",
+        "framework_agent_plateau",
+        "framework_agent_force_exit_low_budget",
     }
     assert reasons <= phase_state.PHASE_EXIT_REASONS
     assert reasons <= phase_state.STOP_REASON_VOCAB
 
 
-def test_framework_pr_skipped_is_not_a_registered_reason():
-    """``framework_pr_skipped`` is dead vocab — never emitted, must not be registered."""
-    assert "framework_pr_skipped" not in phase_state.PHASE_EXIT_REASONS
-    assert "framework_pr_skipped" not in phase_state.STOP_REASON_VOCAB
+def test_framework_agent_skipped_is_not_a_registered_reason():
+    """``framework_agent_skipped`` is dead vocab — never emitted, must not be registered."""
+    assert "framework_agent_skipped" not in phase_state.PHASE_EXIT_REASONS
+    assert "framework_agent_skipped" not in phase_state.STOP_REASON_VOCAB
 
 
-def test_framework_pr_action_allowlist():
-    allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase_state.PHASE_FRAMEWORK_PR]
-    assert "framework_pr" in allowed
+def test_framework_action_allowlist():
+    allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase_state.PHASE_FRAMEWORK_AGENT]
+    assert "framework_agent" in allowed
     assert "integrate_patch" in allowed
     assert "roofline" in allowed
     assert "profile" in allowed
@@ -78,30 +78,58 @@ def test_framework_pr_action_allowlist():
     assert "specialist" not in allowed
 
 
-# exit_normal_framework_pr
-def test_exit_normal_framework_pr_returns_none_when_nothing_to_do():
+def test_phase_action_helpers_return_empty_for_unknown_phase():
+    assert phase_state.allowed_actions_for("unknown") == ()
+    assert phase_state.llm_proposable_actions_for("unknown") == ()
+    assert not phase_state.is_action_llm_proposable_in_phase("explore", "unknown")
+
+
+def test_long_run_and_gain_helpers_handle_edge_values():
+    unbounded = _State()
+    unbounded.max_minutes = 0
+    assert phase_state.is_long_run(unbounded)
+
+    invalid_gain = _State()
+    invalid_gain.cumulative_gain_validated = "not-a-number"
+    assert phase_state._cumulative_gain_validated(invalid_gain) == 0.0  # noqa: SLF001
+
+
+# exit_normal_framework_agent
+def test_exit_normal_framework_agent_returns_none_when_nothing_to_do():
     state = _State()
-    assert phase_state.exit_normal_framework_pr(state) is None
+    assert phase_state.exit_normal_framework_agent(state) is None
 
 
-def test_exit_normal_framework_pr_force_exit_when_remaining_below_ratio():
+def test_exit_normal_framework_agent_force_exit_when_remaining_below_ratio():
     # remaining 30min < 0.6 × 2h × 60 = 72min → fires.
     state = _State(remaining_minutes_value=30.0)
-    out = phase_state.exit_normal_framework_pr(state, max_hours=2.0)
+    out = phase_state.exit_normal_framework_agent(state, max_hours=2.0)
     assert out is not None
     reason, ev = out
-    assert reason == "framework_pr_force_exit_low_budget"
+    assert reason == "framework_agent_force_exit_low_budget"
     assert ev["evidence"] == "force_exit"
     assert ev["remaining_minutes"] == 30.0
 
 
-def test_exit_normal_framework_pr_no_force_exit_when_remaining_above_ratio():
+def test_exit_normal_framework_agent_no_force_exit_when_remaining_above_ratio():
     # remaining 80min > 0.6 × 2h × 60 = 72min → no force exit.
     state = _State(remaining_minutes_value=80.0)
-    assert phase_state.exit_normal_framework_pr(state, max_hours=2.0) is None
+    assert phase_state.exit_normal_framework_agent(state, max_hours=2.0) is None
 
 
-def test_exit_normal_framework_pr_exits_on_consecutive_reject_plateau():
+def test_exit_normal_framework_agent_accepts_positional_remaining_minutes():
+    class PositionalRemainingState(_State):
+        def remaining_minutes(self) -> float:  # type: ignore[override]
+            return 30.0
+
+    out = phase_state.exit_normal_framework_agent(PositionalRemainingState(), max_hours=2.0)
+
+    assert out is not None
+    assert out[0] == "framework_agent_force_exit_low_budget"
+    assert out[1]["remaining_minutes"] == 30.0
+
+
+def test_exit_normal_framework_agent_exits_on_consecutive_reject_plateau():
     """3 consecutive resolved-no-keep candidates (here 'reject') trip the
     plateau exit. (Updated from the pre-plateau-feature behaviour where the
     streak was advisory-only and reject rows were ignored.)"""
@@ -128,17 +156,17 @@ def test_exit_normal_framework_pr_exits_on_consecutive_reject_plateau():
         {"batch_id": "b3", "candidate_id": "c3a", "status": "reject"},
     ]
     state = _State(
-        framework_pr_batches=batches,
-        framework_pr_phase_progress=progress,
+        framework_agent_batches=batches,
+        framework_agent_phase_progress=progress,
     )
-    out = phase_state.exit_normal_framework_pr(state)
+    out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
-    assert out[0] == "framework_pr_plateau"
+    assert out[0] == "framework_agent_plateau"
     assert out[1]["consecutive_no_keep"] == 3
 
 
-def test_compute_plateau_framework_pr_returns_signal():
-    """compute_plateau_framework_pr remains as a pure advisory."""
+def test_compute_plateau_framework_agent_returns_signal():
+    """compute_plateau_framework_agent remains as a pure advisory."""
     batches = [
         {
             "batch_id": "b1",
@@ -162,15 +190,15 @@ def test_compute_plateau_framework_pr_returns_signal():
         {"batch_id": "b3", "candidate_id": "c3a", "status": "reject"},
     ]
     state = _State(
-        framework_pr_batches=batches,
-        framework_pr_phase_progress=progress,
+        framework_agent_batches=batches,
+        framework_agent_phase_progress=progress,
     )
-    triggered, ev = phase_state.compute_plateau_framework_pr(state)
+    triggered, ev = phase_state.compute_plateau_framework_agent(state)
     assert triggered is True
     assert ev["lookback"] == 3
 
 
-def test_exit_normal_framework_pr_force_exit_evidence_carries_pending_count():
+def test_exit_normal_framework_agent_force_exit_evidence_carries_pending_count():
     """Regression for P1.a — force-exit evidence surfaces ``pending_candidate_count``."""
     batches = [
         {
@@ -183,53 +211,53 @@ def test_exit_normal_framework_pr_force_exit_evidence_carries_pending_count():
         {"batch_id": "b1", "candidate_id": "c1a", "status": "reject"},
     ]
     state = _State(
-        framework_pr_batches=batches,
-        framework_pr_phase_progress=progress,
+        framework_agent_batches=batches,
+        framework_agent_phase_progress=progress,
         remaining_minutes_value=10.0,
     )
-    out = phase_state.exit_normal_framework_pr(state, max_hours=2.0)
+    out = phase_state.exit_normal_framework_agent(state, max_hours=2.0)
     assert out is not None
     reason, ev = out
-    assert reason == "framework_pr_force_exit_low_budget"
+    assert reason == "framework_agent_force_exit_low_budget"
     assert ev["pending_candidate_count"] == 2
 
 
-def test_exit_normal_framework_pr_phase_done_when_signalled():
-    state = _State(framework_pr_phase_done=True)
-    out = phase_state.exit_normal_framework_pr(state)
+def test_exit_normal_framework_agent_phase_done_when_signalled():
+    state = _State(framework_agent_phase_done=True)
+    out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
     reason, ev = out
-    assert reason == "framework_pr_phase_done"
+    assert reason == "framework_agent_phase_done"
     assert ev["evidence"] == "no_more_candidates"
 
 
-def test_exit_normal_framework_pr_plateau_after_three_consecutive_no_keep():
-    """3 consecutive benchmarked tests with no KEEP → framework_pr_plateau."""
+def test_exit_normal_framework_agent_plateau_after_three_consecutive_no_keep():
+    """3 consecutive benchmarked tests with no KEEP → framework_agent_plateau."""
     progress = [
         {"candidate_id": "c1", "status": "reverted", "kept": False},
         {"candidate_id": "c2", "status": "reverted", "kept": False},
         {"candidate_id": "c3", "status": "reverted", "kept": False},
     ]
-    state = _State(framework_pr_phase_progress=progress)
-    out = phase_state.exit_normal_framework_pr(state)
+    state = _State(framework_agent_phase_progress=progress)
+    out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
     reason, ev = out
-    assert reason == "framework_pr_plateau"
+    assert reason == "framework_agent_plateau"
     assert ev["consecutive_no_keep"] == 3
     assert ev["threshold"] == 3
 
 
-def test_exit_normal_framework_pr_no_plateau_below_threshold():
+def test_exit_normal_framework_agent_no_plateau_below_threshold():
     """Two reverts is below the streak threshold → no exit."""
     progress = [
         {"candidate_id": "c1", "status": "reverted", "kept": False},
         {"candidate_id": "c2", "status": "reverted", "kept": False},
     ]
-    state = _State(framework_pr_phase_progress=progress)
-    assert phase_state.exit_normal_framework_pr(state) is None
+    state = _State(framework_agent_phase_progress=progress)
+    assert phase_state.exit_normal_framework_agent(state) is None
 
 
-def test_exit_normal_framework_pr_keep_resets_no_keep_streak():
+def test_exit_normal_framework_agent_keep_resets_no_keep_streak():
     """A KEEP breaks the streak; only reverts after it count."""
     progress = [
         {"candidate_id": "c1", "status": "reverted", "kept": False},
@@ -237,18 +265,32 @@ def test_exit_normal_framework_pr_keep_resets_no_keep_streak():
         {"candidate_id": "c3", "status": "reverted", "kept": False},
         {"candidate_id": "c4", "status": "reverted", "kept": False},
     ]
-    state = _State(framework_pr_phase_progress=progress)
+    state = _State(framework_agent_phase_progress=progress)
     # Trailing run after the KEEP is only 2 reverts → no plateau.
-    assert phase_state.exit_normal_framework_pr(state) is None
+    assert phase_state.exit_normal_framework_agent(state) is None
 
 
-def test_exit_normal_framework_pr_plateau_counts_non_benchmarked_no_keep_rows():
+def test_framework_agent_consecutive_no_keep_handles_malformed_progress():
+    state = _State(
+        framework_agent_phase_progress=[
+            {"candidate_id": "c0", "status": "kept", "kept": True},
+            "not-a-row",
+            {"candidate_id": "c1", "status": "reverted", "kept": False},
+            object(),
+            {"candidate_id": "c2", "status": "apply_failed", "kept": False},
+        ],
+    )
+
+    assert phase_state._framework_agent_consecutive_no_keep(state) == 2  # noqa: SLF001
+
+
+def test_exit_normal_framework_agent_plateau_counts_non_benchmarked_no_keep_rows():
     """not_applicable / apply_failed / authored_empty rows count toward the
     no-keep streak (they are resolved candidates that did not KEEP).
 
     In a wheel-based framework env the direct_apply path cannot run and
     authoring overwhelmingly returns not_applicable / authored_empty, so a batch
-    of dead candidates must still trip the plateau gate — otherwise FRAMEWORK_PR
+    of dead candidates must still trip the plateau gate — otherwise FRAMEWORK
     (which has no wall-clock budget cap) grinds for hours without leverage.
     """
     progress = [
@@ -256,14 +298,14 @@ def test_exit_normal_framework_pr_plateau_counts_non_benchmarked_no_keep_rows():
         {"candidate_id": "c2", "status": "apply_failed", "kept": False},
         {"candidate_id": "c3", "status": "authored_empty", "kept": False},
     ]
-    state = _State(framework_pr_phase_progress=progress)
-    out = phase_state.exit_normal_framework_pr(state)
+    state = _State(framework_agent_phase_progress=progress)
+    out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
-    assert out[0] == "framework_pr_plateau"
+    assert out[0] == "framework_agent_plateau"
     assert out[1]["consecutive_no_keep"] == 3
 
 
-def test_exit_normal_framework_pr_plateau_mixed_terminal_no_keep_rows():
+def test_exit_normal_framework_agent_plateau_mixed_terminal_no_keep_rows():
     """A mix of reverted + non-benchmarked terminal rows all count; a KEEP
     still breaks the streak so only the trailing run is counted."""
     progress = [
@@ -272,14 +314,14 @@ def test_exit_normal_framework_pr_plateau_mixed_terminal_no_keep_rows():
         {"candidate_id": "c2", "status": "not_applicable", "kept": False},
         {"candidate_id": "c3", "status": "apply_failed", "kept": False},
     ]
-    state = _State(framework_pr_phase_progress=progress)
-    out = phase_state.exit_normal_framework_pr(state)
+    state = _State(framework_agent_phase_progress=progress)
+    out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
-    assert out[0] == "framework_pr_plateau"
+    assert out[0] == "framework_agent_plateau"
     assert out[1]["consecutive_no_keep"] == 3
 
 
-def test_exit_normal_framework_pr_force_exit_beats_plateau():
+def test_exit_normal_framework_agent_force_exit_beats_plateau():
     """Priority order: force-exit > plateau."""
     progress = [
         {"candidate_id": "c1", "status": "reverted", "kept": False},
@@ -287,15 +329,15 @@ def test_exit_normal_framework_pr_force_exit_beats_plateau():
         {"candidate_id": "c3", "status": "reverted", "kept": False},
     ]
     state = _State(
-        framework_pr_phase_progress=progress,
+        framework_agent_phase_progress=progress,
         remaining_minutes_value=10.0,
     )
-    out = phase_state.exit_normal_framework_pr(state, max_hours=2.0)
+    out = phase_state.exit_normal_framework_agent(state, max_hours=2.0)
     assert out is not None
-    assert out[0] == "framework_pr_force_exit_low_budget"
+    assert out[0] == "framework_agent_force_exit_low_budget"
 
 
-def test_exit_normal_framework_pr_plateau_beats_phase_done():
+def test_exit_normal_framework_agent_plateau_beats_phase_done():
     """Priority order: plateau > phase_done."""
     progress = [
         {"candidate_id": "c1", "status": "reverted", "kept": False},
@@ -303,44 +345,52 @@ def test_exit_normal_framework_pr_plateau_beats_phase_done():
         {"candidate_id": "c3", "status": "reverted", "kept": False},
     ]
     state = _State(
-        framework_pr_phase_progress=progress,
-        framework_pr_phase_done=True,
+        framework_agent_phase_progress=progress,
+        framework_agent_phase_done=True,
     )
-    out = phase_state.exit_normal_framework_pr(state)
+    out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
-    assert out[0] == "framework_pr_plateau"
+    assert out[0] == "framework_agent_plateau"
 
 
-def test_exit_normal_framework_pr_plateau_routes_to_explore():
-    """A plateau exit routes FRAMEWORK_PR → EXPLORE via compute_next_phase."""
+def test_exit_normal_framework_agent_plateau_routes_to_explore():
+    """A plateau exit routes FRAMEWORK_AGENT → EXPLORE via compute_next_phase."""
     progress = [
         {"candidate_id": "c1", "status": "reverted", "kept": False},
         {"candidate_id": "c2", "status": "reverted", "kept": False},
         {"candidate_id": "c3", "status": "reverted", "kept": False},
     ]
-    state = _State(framework_pr_phase_progress=progress)
-    out = phase_state.compute_next_phase(state, framework_phase_enabled=True)
+    state = _State(framework_agent_phase_progress=progress)
+    out = phase_state.compute_next_phase(state, framework_agent_phase_enabled=True)
     assert out is not None
     next_phase, reason, _ev = out
     assert next_phase == phase_state.PHASE_EXPLORE
-    assert reason == "framework_pr_plateau"
+    assert reason == "framework_agent_plateau"
 
 
-def test_exit_normal_framework_pr_plateau_streak_env_override(monkeypatch):
-    """INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK overrides the threshold."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK", "2")
+def test_exit_normal_framework_agent_plateau_streak_env_override(monkeypatch):
+    """INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK overrides the threshold."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK", "2")
     progress = [
         {"candidate_id": "c1", "status": "reverted", "kept": False},
         {"candidate_id": "c2", "status": "reverted", "kept": False},
     ]
-    state = _State(framework_pr_phase_progress=progress)
-    out = phase_state.exit_normal_framework_pr(state)
+    state = _State(framework_agent_phase_progress=progress)
+    out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
-    assert out[0] == "framework_pr_plateau"
+    assert out[0] == "framework_agent_plateau"
     assert out[1]["threshold"] == 2
 
 
-def test_exit_normal_framework_pr_force_exit_beats_phase_done():
+def test_framework_agent_plateau_streak_env_invalid_uses_default(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK", "invalid")
+    assert phase_state._framework_agent_plateau_streak_threshold() == 3  # noqa: SLF001
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK", "0")
+    assert phase_state._framework_agent_plateau_streak_threshold() == 3  # noqa: SLF001
+
+
+def test_exit_normal_framework_agent_force_exit_beats_phase_done():
     """Priority order: force-exit > phase_done."""
     batches = [
         {"max_gain_pct_observed_in_batch": 0.1},
@@ -348,70 +398,70 @@ def test_exit_normal_framework_pr_force_exit_beats_phase_done():
         {"max_gain_pct_observed_in_batch": 0.1},
     ]
     state = _State(
-        framework_pr_batches=batches,
-        framework_pr_phase_done=True,
+        framework_agent_batches=batches,
+        framework_agent_phase_done=True,
         remaining_minutes_value=10.0,
     )
-    out = phase_state.exit_normal_framework_pr(state, max_hours=2.0)
+    out = phase_state.exit_normal_framework_agent(state, max_hours=2.0)
     assert out is not None
-    assert out[0] == "framework_pr_force_exit_low_budget"
+    assert out[0] == "framework_agent_force_exit_low_budget"
 
 
-# compute_next_phase routing (with explicit framework_phase_enabled)
-def test_compute_next_phase_prelude_to_framework_pr_when_enabled():
+# compute_next_phase routing (with explicit framework_agent_phase_enabled)
+def test_compute_next_phase_prelude_to_framework_when_enabled():
     state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
-    out = phase_state.compute_next_phase(state, framework_phase_enabled=True)
+    out = phase_state.compute_next_phase(state, framework_agent_phase_enabled=True)
     assert out is not None
     next_phase, reason, _ev = out
-    assert next_phase == phase_state.PHASE_FRAMEWORK_PR
+    assert next_phase == phase_state.PHASE_FRAMEWORK_AGENT
     assert reason == "prelude_done"
 
 
 def test_compute_next_phase_prelude_to_explore_when_disabled_keeps_prelude_done_reason():
-    """``framework_phase_enabled=False`` preserves the historical ``prelude_done`` reason."""
+    """``framework_agent_phase_enabled=False`` preserves the historical ``prelude_done`` reason."""
     state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
-    out = phase_state.compute_next_phase(state, framework_phase_enabled=False)
+    out = phase_state.compute_next_phase(state, framework_agent_phase_enabled=False)
     assert out is not None
     next_phase, reason, _ev = out
     assert next_phase == phase_state.PHASE_EXPLORE
     assert reason == "prelude_done"
 
 
-def test_compute_next_phase_framework_pr_does_not_advance_on_plateau():
-    """Plateau no longer drives FRAMEWORK_PR exit."""
+def test_compute_next_phase_framework_does_not_advance_on_plateau():
+    """Plateau no longer drives FRAMEWORK exit."""
     state = _State(
-        phase=phase_state.PHASE_FRAMEWORK_PR,
-        framework_pr_batches=[
+        phase=phase_state.PHASE_FRAMEWORK_AGENT,
+        framework_agent_batches=[
             {"max_gain_pct_observed_in_batch": 0.0},
             {"max_gain_pct_observed_in_batch": 0.5},
             {"max_gain_pct_observed_in_batch": 0.7},
         ],
     )
-    assert phase_state.compute_next_phase(state, framework_phase_enabled=True) is None
+    assert phase_state.compute_next_phase(state, framework_agent_phase_enabled=True) is None
 
 
-def test_compute_next_phase_framework_pr_force_exit_passes_max_hours_through():
+def test_compute_next_phase_framework_agent_force_exit_passes_max_hours_through():
     state = _State(
-        phase=phase_state.PHASE_FRAMEWORK_PR,
+        phase=phase_state.PHASE_FRAMEWORK_AGENT,
         remaining_minutes_value=30.0,
     )
     out = phase_state.compute_next_phase(
         state,
-        framework_phase_enabled=True,
+        framework_agent_phase_enabled=True,
         max_hours=2.0,
     )
     assert out is not None
     next_phase, reason, ev = out
     assert next_phase == phase_state.PHASE_EXPLORE
-    assert reason == "framework_pr_force_exit_low_budget"
+    assert reason == "framework_agent_force_exit_low_budget"
     assert ev["max_hours"] == 2.0
 
 
-def test_compute_next_phase_framework_pr_stays_when_no_signal():
-    state = _State(phase=phase_state.PHASE_FRAMEWORK_PR)
+def test_compute_next_phase_framework_stays_when_no_signal():
+    state = _State(phase=phase_state.PHASE_FRAMEWORK_AGENT)
     out = phase_state.compute_next_phase(
         state,
-        framework_phase_enabled=True,
+        framework_agent_phase_enabled=True,
         max_hours=10.0,
     )
     assert out is None
@@ -422,13 +472,13 @@ def test_compute_next_phase_prelude_skips_explore_to_kernel():
     state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
     out = phase_state.compute_next_phase(
         state,
-        framework_phase_enabled=False,
+        framework_agent_phase_enabled=False,
         explore_enabled=False,
         kernel_enabled=True,
     )
     assert out is not None
     next_phase, reason, ev = out
-    assert next_phase == phase_state.PHASE_KERNEL
+    assert next_phase == phase_state.PHASE_KERNEL_AGENT
     assert reason == "prelude_done"
     assert ev.get("explore_skipped") is True
 
@@ -437,7 +487,7 @@ def test_compute_next_phase_prelude_skips_to_sweep_when_no_explore_no_kernel():
     state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
     out = phase_state.compute_next_phase(
         state,
-        framework_phase_enabled=False,
+        framework_agent_phase_enabled=False,
         explore_enabled=False,
         kernel_enabled=False,
     )
@@ -448,28 +498,28 @@ def test_compute_next_phase_prelude_skips_to_sweep_when_no_explore_no_kernel():
     assert ev.get("explore_skipped") is True
 
 
-def test_compute_next_phase_framework_pr_skips_explore_to_kernel():
-    """With explore disabled, FRAMEWORK_PR phase_done routes straight to KERNEL."""
+def test_compute_next_phase_framework_skips_explore_to_kernel():
+    """With explore disabled, FRAMEWORK_AGENT phase_done routes straight to KERNEL."""
     state = _State(
-        phase=phase_state.PHASE_FRAMEWORK_PR,
-        framework_pr_phase_done=True,
+        phase=phase_state.PHASE_FRAMEWORK_AGENT,
+        framework_agent_phase_done=True,
     )
     out = phase_state.compute_next_phase(
         state,
-        framework_phase_enabled=True,
+        framework_agent_phase_enabled=True,
         explore_enabled=False,
         kernel_enabled=True,
     )
     assert out is not None
     next_phase, reason, ev = out
-    assert next_phase == phase_state.PHASE_KERNEL
-    assert reason == "framework_pr_phase_done"
+    assert next_phase == phase_state.PHASE_KERNEL_AGENT
+    assert reason == "framework_agent_phase_done"
     assert ev.get("explore_skipped") is True
 
 
 def test_compute_next_phase_explore_enabled_default_routes_to_explore():
     state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
-    out = phase_state.compute_next_phase(state, framework_phase_enabled=False)
+    out = phase_state.compute_next_phase(state, framework_agent_phase_enabled=False)
     assert out is not None
     next_phase, _reason, ev = out
     assert next_phase == phase_state.PHASE_EXPLORE

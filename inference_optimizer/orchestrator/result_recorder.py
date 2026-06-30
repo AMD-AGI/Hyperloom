@@ -245,7 +245,7 @@ class ResultRecorder:
                 )
 
         # Aggregate research evidence from any domain (e.g. pr_intel) that
-        # self-reports a ``research`` block, so FRAMEWORK_PR / explore lanes
+        # self-reports a ``research`` block, so FRAMEWORK / explore lanes
         # reuse the session-wide seen-set. Idempotent for research_scout
         # (already harvested above). Fail-soft.
         try:
@@ -288,16 +288,16 @@ class ResultRecorder:
                 "B3: specialist patch autosubmit failed for task=%s",
                 task.task_id,
             )
-        # Relaxed FRAMEWORK_PR rule: a config-lever deliverable (no source patch,
+        # Relaxed FRAMEWORK rule: a config-lever deliverable (no source patch,
         # but a proposal_set of serving flags / env vars) is routed through the
         # same integrate_patch gate via its config_changes channel.
         try:
-            await self._maybe_autosubmit_framework_pr_config(
+            await self._maybe_autosubmit_framework_config(
                 task=task, done_payload=done_payload,
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
-                "FRAMEWORK_PR config autosubmit failed for task=%s",
+                "FRAMEWORK config autosubmit failed for task=%s",
                 task.task_id,
             )
 
@@ -1124,7 +1124,7 @@ class ResultRecorder:
         session-wide seen-set, de-duped across the session.
 
         Applies to every domain that self-reports a ``research`` block
-        (``pr_intel`` + ``research_scout``), so FRAMEWORK_PR / explore lanes do
+        (``pr_intel`` + ``research_scout``), so FRAMEWORK / explore lanes do
         not re-fetch the same references. Fail-soft: never raises (the caller
         also guards, but keep this self-contained so partial payloads degrade
         gracefully).
@@ -1182,7 +1182,7 @@ class ResultRecorder:
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: competitor_target write failed")
-        # Share inspected PR ids with the FRAMEWORK_PR dedup set.
+        # Share inspected PR ids with the FRAMEWORK dedup set.
         pr_ids: list[Any] = []
         for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
             vals = block.get(key)

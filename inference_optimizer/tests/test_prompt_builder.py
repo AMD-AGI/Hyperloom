@@ -14,8 +14,8 @@ from inference_optimizer.orchestrator.action_registry import (
 )
 from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
-    KERNEL_OWNED_ACTIONS,
-    NO_KERNEL_ENABLED_ACTIONS,
+    KERNEL_AGENT_OWNED_ACTIONS,
+    NO_KERNEL_AGENT_ENABLED_ACTIONS,
     _PHASE_HEADERS,
     build_orchestration_prompt,
     default_enabled_actions,
@@ -36,7 +36,7 @@ def rules_path() -> Path:
 # Default enabled-action sets
 def test_default_enabled_actions_full_includes_kernel_actions():
     full = default_enabled_actions(no_kernel=False)
-    assert set(KERNEL_OWNED_ACTIONS) <= set(full)
+    assert set(KERNEL_AGENT_OWNED_ACTIONS) <= set(full)
     # Gap-10: validate_stack is deprecated; the merged ``explore`` action replaces it.
     assert "explore" in full
     assert "report" in full
@@ -45,7 +45,7 @@ def test_default_enabled_actions_full_includes_kernel_actions():
 
 def test_default_enabled_actions_no_kernel_excludes_all_kernel_actions():
     bare = default_enabled_actions(no_kernel=True)
-    assert set(KERNEL_OWNED_ACTIONS).isdisjoint(set(bare))
+    assert set(KERNEL_AGENT_OWNED_ACTIONS).isdisjoint(set(bare))
     assert "profile" not in bare  # profile only feeds kernel-opt
     # Gap-10: ``explore`` replaces the v0.6 backends/params/validate_stack triple.
     assert "explore" in bare
@@ -56,7 +56,7 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
     """All enabled actions must be present in the registry."""
     for name in FULL_ENABLED_ACTIONS:
         assert registry.get(name) is not None, f"FULL_ENABLED_ACTIONS lists {name!r} but it's not in registry"
-    for name in NO_KERNEL_ENABLED_ACTIONS:
+    for name in NO_KERNEL_AGENT_ENABLED_ACTIONS:
         assert registry.get(name) is not None
 
 
@@ -72,7 +72,7 @@ def test_recover_is_robustness_delegate_only_with_real_executor(registry):
     )
 
     assert "recover" not in FULL_ENABLED_ACTIONS
-    assert "recover" not in NO_KERNEL_ENABLED_ACTIONS
+    assert "recover" not in NO_KERNEL_AGENT_ENABLED_ACTIONS
     assert "recover" in ROBUSTNESS_DELEGATE_ONLY_ACTIONS
     assert registry.get("recover") is not None
     assert "recover" in _REAL_EXECUTORS_FULL
@@ -118,7 +118,7 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
 def test_no_kernel_prompt_drops_section_six(registry, rules_path):
     text = build_orchestration_prompt(
         action_registry=registry,
-        enabled_actions=NO_KERNEL_ENABLED_ACTIONS,
+        enabled_actions=NO_KERNEL_AGENT_ENABLED_ACTIONS,
         framework="sglang",
         objective_kind="time_only",
         objective_value=None,
@@ -188,9 +188,9 @@ def test_kernel_owned_actions_marked_kernel_owned(registry, rules_path):
         max_minutes=120,
         rules_fragment_path=rules_path,
     )
-    for name in KERNEL_OWNED_ACTIONS:
-        marker = f"**{name}** (KERNEL-OWNED)"
-        assert marker in text, f"expected '(KERNEL-OWNED)' tag next to {name!r}"
+    for name in KERNEL_AGENT_OWNED_ACTIONS:
+        marker = f"**{name}** (KERNEL_AGENT-OWNED)"
+        assert marker in text, f"expected '(KERNEL_AGENT-OWNED)' tag next to {name!r}"
 
 
 def test_emit_hints_use_request_for_kernel_actions(registry, rules_path):
@@ -206,7 +206,7 @@ def test_emit_hints_use_request_for_kernel_actions(registry, rules_path):
     # propose_action hint for non-kernel; Gap-10 made ``explore`` the canonical grid-runner.
     assert "propose_action{action_name='baseline'" in text
     assert "propose_action{action_name='explore'" in text
-    assert "REQUEST{target_agent='kernel'" in text
+    assert "REQUEST{target_agent='kernel_agent'" in text
 
 
 # Determinism + fragment fallback
@@ -226,7 +226,7 @@ def test_build_is_deterministic(registry, rules_path):
 def test_missing_rules_fragment_yields_placeholder(tmp_path, registry):
     text = build_orchestration_prompt(
         action_registry=registry,
-        enabled_actions=NO_KERNEL_ENABLED_ACTIONS,
+        enabled_actions=NO_KERNEL_AGENT_ENABLED_ACTIONS,
         framework="sglang",
         objective_kind="time_only",
         objective_value=None,

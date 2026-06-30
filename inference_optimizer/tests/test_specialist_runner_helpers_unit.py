@@ -77,7 +77,7 @@ def test_classify_unknown():
 # ---- build_empty_specialist_done ------------------------------------------
 def test_build_empty_specialist_done():
     out = build_empty_specialist_done(
-        gap_canonical_id="g1", domain="kernel", reason="no idea", confidence=2.0
+        gap_canonical_id="g1", domain="kernel_agent", reason="no idea", confidence=2.0
     )  # clamped to 1.0
     assert out["empty"] is True
     assert out["proposal_set"] == []

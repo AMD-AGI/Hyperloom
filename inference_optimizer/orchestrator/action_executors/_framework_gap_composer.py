@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Compose ``gap_description`` + ``keywords`` for the framework_pr arm.
+"""Compose ``gap_description`` + ``keywords`` for the framework arm.
 
 Deterministically composes the gap/keyword text from structured workload data
 (framework, gpu_type, model_class, precision, profile bottleneck) instead of a
@@ -85,7 +85,7 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
         if isinstance(items, list):
             for item in items[:_MAX_KERNELS_SCANNED]:
                 if isinstance(item, dict):
-                    nm = str(item.get("name") or item.get("kernel") or "").strip()
+                    nm = str(item.get("name") or item.get("kernel_agent") or "").strip()
                     if nm:
                         candidates.append(nm.lower())
                 elif isinstance(item, str):
@@ -93,7 +93,7 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
     elif isinstance(raw, list):
         for item in raw[:_MAX_KERNELS_SCANNED]:
             if isinstance(item, dict):
-                nm = str(item.get("name") or item.get("kernel") or "").strip()
+                nm = str(item.get("name") or item.get("kernel_agent") or "").strip()
                 if nm:
                     candidates.append(nm.lower())
             elif isinstance(item, str):
@@ -156,7 +156,7 @@ def compose_gap(
     precision: str = "",
     profile_kernel_breakdown_path: str | Path | None = None,
 ) -> tuple[str, list[str]]:
-    """Build ``(gap_description, keywords)`` for the framework_pr arm.
+    """Build ``(gap_description, keywords)`` for the framework arm.
 
     All workload fields are optional; missing pieces drop from the gap.
     ``precision`` comes from ``manifest.json``'s ``workload.precision``.

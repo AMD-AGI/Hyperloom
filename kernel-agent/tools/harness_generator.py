@@ -81,7 +81,7 @@ class BenchmarkAnalyzer:
 
     PERF_DECORATORS = {"perftest", "benchmark"}
     REF_HINTS = {"torch", "ref", "native", "baseline", "reference", "gold"}
-    KERNEL_HINTS = {"ck", "hip", "triton", "kernel", "optimized", "custom", "fused"}
+    KERNEL_HINTS = {"ck", "hip", "triton", "kernel_agent", "optimized", "custom", "fused"}
 
     def __init__(self, source: str, source_file_module: str = ""):
         """Parse the benchmark source into an AST for later queries.

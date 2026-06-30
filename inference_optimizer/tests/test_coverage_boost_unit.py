@@ -51,7 +51,7 @@ async def test_kb_writeback_rejects_unknown_outcome() -> None:
     from inference_optimizer.orchestrator import kb_writeback
 
     with pytest.raises(ValueError):
-        await kb_writeback.write_framework_pr_record(
+        await kb_writeback.write_framework_record(
             pr_url="u",
             pr_sha="s",
             patch_path="p",
@@ -65,7 +65,7 @@ async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
     from inference_optimizer.orchestrator import kb_writeback
 
     monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "fa")
-    path = await kb_writeback.write_framework_pr_record(
+    path = await kb_writeback.write_framework_record(
         pr_url="https://x/pr/1",
         pr_sha="abc",
         patch_path="/tmp/p.patch",
