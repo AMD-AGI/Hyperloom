@@ -318,8 +318,15 @@ def run_one_attempt(
     if harness_path:
         cmd.extend(["--test-harness-path", harness_path])
     started = time.time()
+    # Outer-wrapper timeout must cover the ACTUAL backend's budget: GEAK runs up to
+    # --geak-budget-min (default 180 min), OOB backends up to --budget-minutes
+    # (default 60). Using backend_budget_min unconditionally would SIGKILL
+    # kernel_optimization.py ~62 min in -> GEAK never finalizes its deploy artifact
+    # and the combined-E2E/integrate A/B is skipped. Match the inner budget + a
+    # finalize grace (>= GEAK finalize_grace 300s + kill_buffer 60s).
+    _effective_budget_min = args.geak_budget_min if backend == "geak" else args.backend_budget_min
     try:
-        result = run_json(cmd, env=local_env, timeout_s=int(args.backend_budget_min * 60) + 120, log_path=log_path)
+        result = run_json(cmd, env=local_env, timeout_s=int(_effective_budget_min * 60) + 360, log_path=log_path)
         status = "ok"
     except Exception as exc:
         result = {"error": f"{type(exc).__name__}: {exc}"}
