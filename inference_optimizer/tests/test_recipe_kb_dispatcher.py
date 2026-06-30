@@ -76,6 +76,7 @@ class GbrainRemoteRecipeClient:
         self._search_rows = search_rows or []
         self._raise = raise_exc
         self.last_search_kwargs: dict[str, Any] | None = None
+        self.search_calls: list[dict[str, Any]] = []
         self.closed = False
 
     def get_recipe(self, *, canonical_id: str, version: int | None = None) -> dict[str, Any] | None:
@@ -101,6 +102,7 @@ class GbrainRemoteRecipeClient:
             "limit": limit,
             "prefer": prefer,
         }
+        self.search_calls.append(self.last_search_kwargs)
         if self._raise is not None:
             raise self._raise
         return list(self._search_rows)
@@ -260,7 +262,7 @@ def test_get_recipe_remote_sends_5tuple_label_match(local_store: LocalRecipeStor
     remote = GbrainRemoteRecipeClient(search_rows=[])  # fast path miss -> search
     kb = RecipeKB(local=local_store, remote=remote)
     kb.get_recipe(canonical_id=cid)
-    label_match = (remote.last_search_kwargs or {}).get("label_match") or {}
+    label_match = remote.search_calls[0]["label_match"] if remote.search_calls else {}
     assert set(label_match) == {
         "model",
         "hardware",
@@ -271,6 +273,91 @@ def test_get_recipe_remote_sends_5tuple_label_match(local_store: LocalRecipeStor
         "architectures",
     }
     assert all(label_match.values()), "all cid segments must be present"
+
+
+def test_get_recipe_remote_falls_back_without_framework_version(
+    local_store: LocalRecipeStore,
+) -> None:
+    """Remote get_recipe tolerates framework-version drift after exact misses."""
+    requested = recipe_canonical_id(
+        model="test-model",
+        hardware="mi300x",
+        framework_name="sglang",
+        model_type="qwen3",
+        architectures="qwen3forcausallm",
+        framework_version="0.5.12",
+        precision="fp8",
+    )
+    sibling = recipe_canonical_id(
+        model="test-model",
+        hardware="mi300x",
+        framework_name="sglang",
+        model_type="qwen3",
+        architectures="qwen3forcausallm",
+        framework_version="0.5.11",
+        precision="fp8",
+    )
+    row = {
+        "canonical_id": sibling,
+        "version": 4,
+        "labels": {
+            "model": "test-model",
+            "hardware": "mi300x",
+            "framework_name": "sglang",
+            "framework_version": "0.5.11",
+            "precision": "fp8",
+            "model_type": "qwen3",
+            "architectures": "qwen3forcausallm",
+        },
+        "body": {"best_config": {"tp": "8"}},
+        "metrics": {"throughput": 12345.0},
+    }
+
+    class _VersionDriftRemote(GbrainRemoteRecipeClient):
+        """Remote fake that only returns a row for relaxed label matches."""
+
+        def search(self, **kwargs: Any) -> list[dict[str, Any]]:
+            super().search(**kwargs)
+            labels = kwargs.get("label_match") or {}
+            if "framework_version" in labels:
+                return []
+            return [row]
+
+    remote = _VersionDriftRemote()
+    kb = RecipeKB(local=local_store, remote=remote)
+
+    out = kb.get_recipe(canonical_id=requested)
+
+    assert out is not None
+    assert out["canonical_id"] == sibling
+    assert out["best_config"] == {"tp": "8"}
+    assert len(remote.search_calls) == 2
+    assert remote.search_calls[0]["label_match"]["framework_version"] == "0.5.12"
+    assert "framework_version" not in remote.search_calls[1]["label_match"]
+
+
+def test_get_recipe_remote_exact_search_hit_skips_version_fallback(
+    local_store: LocalRecipeStore,
+) -> None:
+    """A full label-match hit must not issue the relaxed version fallback."""
+    cid = recipe_canonical_id(
+        model="test-model",
+        hardware="mi300x",
+        framework_name="sglang",
+        model_type="qwen3",
+        architectures="qwen3forcausallm",
+        framework_version="0.5.12",
+        precision="fp8",
+    )
+    row = {"canonical_id": cid, "version": 3, "labels": {"model": "test-model"}, "body": {}, "metrics": {}}
+    remote = GbrainRemoteRecipeClient(search_rows=[row])
+    kb = RecipeKB(local=local_store, remote=remote)
+
+    out = kb.get_recipe(canonical_id=cid)
+
+    assert out is not None
+    assert out["canonical_id"] == cid
+    assert len(remote.search_calls) == 1
 
 
 def test_get_history_is_local_only(local_store: LocalRecipeStore) -> None:
