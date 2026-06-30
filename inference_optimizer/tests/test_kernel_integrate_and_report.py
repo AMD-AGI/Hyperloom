@@ -875,7 +875,14 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
 async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
     session_dir,
     tmp_path,
+    monkeypatch,
 ):
+    # This test pins the LEGACY integrate dispatch cap (retire same kernel after N
+    # attempts). The honest-E2E umbrella now defaults ON, which changes the integrate
+    # path (paired same-config A/B + high-impact infra-retry) and widens the cap. Opt
+    # the whole cohort out so we exercise the legacy capping path this test was written
+    # for; honest-E2E integrate behavior is covered in test_honest_e2e_hardening_unit.
+    monkeypatch.setenv("HL_HONEST_E2E", "0")
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     target, patch_file = _write_patch_pair(tmp_path)

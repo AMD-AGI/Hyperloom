@@ -143,6 +143,10 @@ ids = ",".join(str(i) for i in range(ng))
 os.environ["HIP_VISIBLE_DEVICES"] = ids
 os.environ["CUDA_VISIBLE_DEVICES"] = ids
 os.environ["ROCR_VISIBLE_DEVICES"] = ids
+# Mirror the Ray/CLI GEAK defaults on the Dynamo pod (both keys are in
+# SAFE_ENV_KEYS, so an explicit orchestrator-side value is forwarded over SSH and
+# wins via setdefault): the advisory profiler-mcp pass is hang-prone -> default off.
+os.environ.setdefault("GEAK_SKIP_PROFILE", "1")
 
 def fail(msg):
     print(json.dumps({"returncode": 2, "stdout_tail": "", "stderr_tail": msg,
@@ -162,6 +166,12 @@ if not re.search(r"(?m)^\s*model_class\s*:\s*litellm\s*$",
 
 cmd = [geak_bin, "-t", a.prompt, "--yolo", "--output", a.output,
        "--gpu-ids", ids, "--config", cfg]
+# Forward kernel-time scoring (the E2E-faithful default) as an explicit --target,
+# mirroring the Ray/CLI paths, so pod-side GEAK does not fall back to its --target
+# default. An explicit GEAK_SCORE_TARGET=wall (forwarded over SSH) is honored.
+_score_target = os.environ.get("GEAK_SCORE_TARGET", "kernel").strip().lower()
+if _score_target in ("wall", "kernel"):
+    cmd += ["--target", _score_target]
 if a.kernel_path:
     cmd += ["--kernel-path", a.kernel_path]
 if a.kernel_repo:

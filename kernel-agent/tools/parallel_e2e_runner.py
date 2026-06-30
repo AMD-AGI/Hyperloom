@@ -318,8 +318,15 @@ def run_one_attempt(
     if harness_path:
         cmd.extend(["--test-harness-path", harness_path])
     started = time.time()
+    # Outer-wrapper timeout must cover the ACTUAL backend's budget: GEAK runs up to
+    # --geak-budget-min (default 180 min), OOB backends up to --budget-minutes
+    # (default 60). Using backend_budget_min unconditionally would SIGKILL
+    # kernel_optimization.py ~62 min in -> GEAK never finalizes its deploy artifact
+    # and the combined-E2E/integrate A/B is skipped. Match the inner budget + a
+    # finalize grace (>= GEAK finalize_grace 300s + kill_buffer 60s).
+    _effective_budget_min = args.geak_budget_min if backend == "geak" else args.backend_budget_min
     try:
-        result = run_json(cmd, env=local_env, timeout_s=int(args.backend_budget_min * 60) + 120, log_path=log_path)
+        result = run_json(cmd, env=local_env, timeout_s=int(_effective_budget_min * 60) + 360, log_path=log_path)
         status = "ok"
     except Exception as exc:
         result = {"error": f"{type(exc).__name__}: {exc}"}
@@ -414,14 +421,17 @@ def main() -> int:
         "otherwise they iterate up to ~85%% of this budget "
         "and SIGTERM at 100%%.",
     )
-    # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 130 min.
-    _geak_budget_default = 70 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130
+    # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 180 min (3h).
+    # 180 matches GEAK's own full-mode budget (yaml run.budgets.full.total_s=10800s);
+    # the prior 130 killed GEAK ~50 min before its own deadline, mid round-2, so the
+    # deploy artifact never materialized and the combined-E2E A/B was skipped.
+    _geak_budget_default = 70 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 180
     parser.add_argument(
         "--geak-budget-min",
         type=float,
         default=_geak_budget_default,
         help="Per-attempt wall-clock budget for GEAK only "
-        "(default tracks $GEAK_RUN_MODE: full -> 130, "
+        "(default tracks $GEAK_RUN_MODE: full -> 180, "
         "quick -> 70; aligned with yaml "
         "run.budgets.<mode>.total_s + finalize_grace + "
         "kill_buffer + safety so the prompt-quoted "
