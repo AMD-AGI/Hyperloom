@@ -50,6 +50,7 @@ def test_vram_guard_off_is_identity(monkeypatch) -> None:
 
 
 def test_vram_guard_appends_when_on(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("HL_INTEGRATE_VRAM_GUARD", "1")
     monkeypatch.delenv("HL_INTEGRATE_VRAM_UTIL_CAP", raising=False)
     out = krh._vram_guarded_server_args("--trust-remote-code")
@@ -58,12 +59,14 @@ def test_vram_guard_appends_when_on(monkeypatch) -> None:
 
 
 def test_vram_guard_noop_if_already_set(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("HL_INTEGRATE_VRAM_GUARD", "1")
     existing = "--gpu-memory-utilization 0.7"
     assert krh._vram_guarded_server_args(existing) == existing
 
 
 def test_vram_guard_umbrella_and_cap(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("HL_HONEST_E2E", "1")
     monkeypatch.delenv("HL_INTEGRATE_VRAM_GUARD", raising=False)
     monkeypatch.setenv("HL_INTEGRATE_VRAM_UTIL_CAP", "0.85")
@@ -72,10 +75,19 @@ def test_vram_guard_umbrella_and_cap(monkeypatch) -> None:
 
 
 def test_vram_guard_cap_clamped(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("HL_INTEGRATE_VRAM_GUARD", "1")
     monkeypatch.setenv("HL_INTEGRATE_VRAM_UTIL_CAP", "5.0")
     out = krh._vram_guarded_server_args("")
     assert out == "--gpu-memory-utilization 0.99"
+
+
+def test_vram_guard_sglang_is_noop(monkeypatch) -> None:
+    # sglang rejects --gpu-memory-utilization; the guard must be a no-op for it.
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setenv("HL_INTEGRATE_VRAM_GUARD", "1")
+    assert krh._vram_guarded_server_args("--trust-remote-code") == "--trust-remote-code"
+    assert "gpu-memory-utilization" not in krh._vram_guarded_server_args("")
 
 
 # -- _confirm_source_imported (tri-state) ---------------------------------

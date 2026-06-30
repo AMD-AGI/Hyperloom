@@ -98,6 +98,14 @@ def _vram_guarded_server_args(extra_args: str) -> str:
     """
     if not _honest_flag("HL_INTEGRATE_VRAM_GUARD"):
         return extra_args
+    # ``--gpu-memory-utilization`` is a vLLM-only flag; sglang REJECTS it
+    # ("unrecognized arguments") and the server exits immediately, failing the
+    # integrate re-baseline for EVERY sglang workload. sglang caps memory via
+    # ``--mem-fraction-static`` (set by its launcher), so it needs no guard here.
+    # Apply the cap only for vLLM; sglang/unknown framework -> strict no-op.
+    framework = (os.environ.get("FRAMEWORK") or "").strip().lower()
+    if framework != "vllm":
+        return extra_args
     if "gpu-memory-utilization" in (extra_args or ""):
         return extra_args
     try:
