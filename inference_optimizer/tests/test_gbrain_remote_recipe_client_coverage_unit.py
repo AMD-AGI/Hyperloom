@@ -67,11 +67,44 @@ def test_mcp_call_bad_json_envelope(monkeypatch) -> None:
 
 
 def test_mcp_call_event_stream_framing_non_dict(monkeypatch) -> None:
-    # text/event-stream body whose first data line decodes to a list ->
-    # unexpected envelope type guard.
+    # text/event-stream body whose only event decodes to a JSON list (not a
+    # JSON-RPC response object) -> no parseable JSON-RPC response is selected,
+    # so the call surfaces a "bad envelope" error rather than treating the list
+    # as a result.
     _patch_raw(monkeypatch, "data: [1, 2, 3]\n\n")
-    with pytest.raises(GbrainRemoteError, match="unexpected envelope type"):
+    with pytest.raises(GbrainRemoteError, match="bad envelope"):
         _mcp().call("list_pages", {})
+
+
+def test_mcp_call_multi_event_sse_selects_result_by_id(monkeypatch) -> None:
+    # A heartbeat/notification event before the JSON-RPC result event: the old
+    # parser concatenated every data: line into one string (invalid JSON ->
+    # "bad envelope"). The per-event id selection must skip the notification and
+    # return the result event whose id matches the request.
+    body = (
+        'event: message\n'
+        'data: {"jsonrpc":"2.0","method":"notifications/ping"}\n'
+        '\n'
+        'event: message\n'
+        'data: {"jsonrpc":"2.0","id":"1",'
+        '"result":{"content":[{"text":"{\\"ok\\": true}"}]}}\n'
+        '\n'
+    )
+    _patch_raw(monkeypatch, body)
+    assert _mcp().call("get_backlinks", {"slug": "x"}) == {"ok": True}
+
+
+def test_mcp_call_multiline_data_field_joined(monkeypatch) -> None:
+    # A single SSE event whose data field is split across multiple data: lines
+    # must be joined with newlines before JSON parsing (SSE spec).
+    body = (
+        'event: message\n'
+        'data: {"jsonrpc":"2.0","id":"1","result":\n'
+        'data: {"content":[{"text":"{\\"ok\\": 1}"}]}}\n'
+        '\n'
+    )
+    _patch_raw(monkeypatch, body)
+    assert _mcp().call("get_page", {}) == {"ok": 1}
 
 
 def test_mcp_call_event_stream_returns_parsed_content(monkeypatch) -> None:
