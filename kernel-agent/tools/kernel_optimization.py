@@ -3473,6 +3473,11 @@ def run_attempt(
         "status": status,
         "error_type": status if status in {"backend_not_installed", "timeout"} else "",
         "returncode": returncode,
+        # Structured backend self-skip marker (e.g. forge bailed before any real
+        # optimization attempt: unsupported source / not a git checkout /
+        # compile-only driver). Lets the outcome classifier label the kernel as
+        # ``skip`` instead of a failure without parsing free-text stdout.
+        "skipped": bool(result.get("skipped")) if isinstance(result, dict) else False,
         "elapsed_s": elapsed,
         "prompt_path": str(prompt_file),
         "optimized_path": str(optimized_path) if optimized_path.exists() else "",
