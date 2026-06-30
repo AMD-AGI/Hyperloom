@@ -182,6 +182,7 @@ def test_submit_skips_untracked_source(tmp_path):
         candidate={},
     )
     assert res["returncode"] == 2
+    assert res["skipped"] is True
     assert "kernel_repo is not a clean git checkout" in res["stderr_tail"]
 
 
@@ -242,6 +243,15 @@ def test_submit_skips_without_harness_or_template(tmp_path):
         candidate={},
     )
     assert res["returncode"] == 2
+    assert res["skipped"] is True
+
+
+def test_normalized_skipped_flag():
+    """``_normalized`` carries the structured self-skip marker; default is False."""
+    skip = forge_submit._normalized(2, "", "forge skipped: ...", 0.1, skipped=True)
+    assert skip["skipped"] is True and skip["returncode"] == 2
+    ran = forge_submit._normalized(0, "forge done", "", 0.1)
+    assert ran["skipped"] is False
 
 
 def test_run_loop_via_cli_parses_result(tmp_path, monkeypatch):
