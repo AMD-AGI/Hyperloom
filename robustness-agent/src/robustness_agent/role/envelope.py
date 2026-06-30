@@ -203,8 +203,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # Bounded rollback ring of prior good orchestration_memory records
         # (Coordinator-only writer); mirrors upstream, locked with its parent.
         "orchestration_memory_history",
-        # FRAMEWORK_PR per-repo discovery budget (Coordinator-controlled).
-        "framework_pr_max_candidates",
+        # FRAMEWORK per-repo discovery budget (Coordinator-controlled).
+        "framework_max_candidates",
         # Advisory model-architecture profile (launcher / state.json owned).
         "model_arch",
         # Architecture-identity tags from config.json; mirrors upstream.
@@ -450,7 +450,7 @@ def build_delegate(
 
     Robustness may only delegate handle actions listed in
     :data:`ROBUSTNESS_DELEGATE_ACTIONS`. Other action names will be
-    rejected by PolicyGate's ``KERNEL_OWNED_ACTIONS`` / role check; we
+    rejected by PolicyGate's ``KERNEL_AGENT_OWNED_ACTIONS`` / role check; we
     fail fast locally to keep error context.
 
     Args:

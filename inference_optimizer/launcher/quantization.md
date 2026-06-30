@@ -16,6 +16,13 @@ inference_optimizer optimize \
 
 Rules:
 
+- **Master switch: `$HYPERLOOM_QUANTIZE_ENABLED`.** Quantization runs ONLY when
+  this env var is set to a truthy value (`1` / `true` / `yes` / `on`). This is a
+  deterministic gate: even if `--quantize` / `--quantize-scheme` is present,
+  quantization is skipped unless the env switch is on (emits
+  `QUANTIZATION_SKIPPED:` + sets `$HYPERLOOM_QUANTIZATION_SKIPPED`, then
+  continues on the un-quantized model). The frontend/launcher sets this env on
+  the sandbox to control quantization without relying on agent judgement.
 - The `--quantize` text is the request only: scheme, kv-cache, excluded layers,
   acceptable eval gap. Do not repeat the model path or export dir.
 - The adapter folds `--model` and

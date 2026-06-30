@@ -50,7 +50,7 @@ def test_compatibility_filter_no_model_path_assumes_compatible(monkeypatch) -> N
 
 
 # -- apply_runtime_benchmark_overrides ------------------------------------
-def test_runtime_overrides_model_precision_and_gpu_no_framework(monkeypatch) -> None:
+def test_runtime_overrides_model_precision_and_gpu_no_framework_agent(monkeypatch) -> None:
     monkeypatch.setenv("PRECISION", "fp8")
     for k in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC", "ROCR_VISIBLE_DEVICES"):
         monkeypatch.delenv(k, raising=False)

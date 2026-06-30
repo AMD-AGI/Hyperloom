@@ -83,7 +83,7 @@ def contribute_to_kb_for_framework(
 
 
 DOMAIN_KEYWORDS: dict[str, list[str]] = {
-    "kernel": ["kernel", "gemm", "moe", "attention", "fmoe", "ck", "triton"],
+    "kernel_agent": ["kernel_agent", "gemm", "moe", "attention", "fmoe", "ck", "triton"],
     "communication": [
         "allreduce",
         "nccl",

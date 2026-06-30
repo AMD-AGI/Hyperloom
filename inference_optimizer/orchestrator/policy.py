@@ -17,11 +17,11 @@ from ..protocol.intent import Intent, IntentType
 from ..protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     INTERNAL_ONLY_ACTION_NAMES,
-    KERNEL_OWNED_ACTIONS,
+    KERNEL_AGENT_OWNED_ACTIONS,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 from .phase_state import (
-    PHASE_KERNEL,
+    PHASE_KERNEL_AGENT,
     PHASE_NAMES,
     PHASE_SWEEP,
     is_action_allowed_in_phase,
@@ -369,7 +369,7 @@ TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
     "specialist": (WEB_TOOL_NAMES | PR_MONITOR_TOOL_NAMES | CORTEX_KB_READ_TOOL_NAMES),
     # Empty sets listed explicitly so a role-name typo is a key error, not a silent allow.
     "orchestration": frozenset(),
-    "kernel": frozenset(),
+    "kernel_agent": frozenset(),
     "critic": frozenset(),
     "robustness": frozenset(),
 }
@@ -401,7 +401,7 @@ _SPECIALIST_PSEUDO_ROLE = _SpecialistPseudoRole()
 
 # REQUEST/RESPONSE routing matrix (DESIGN §7.6 / §13.4): source role → allowed target_agents (only orchestration→kernel).
 REQUEST_ROUTING: dict[str, frozenset[str]] = {
-    "orchestration": frozenset({"kernel"}),
+    "orchestration": frozenset({"kernel_agent"}),
 }
 
 
@@ -587,8 +587,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # Coordinator-only writer (operator re-seed via env). Locked in lock-step
         # with its parent so the LLM can't forge/erase rollback snapshots.
         "orchestration_memory_history",
-        # FRAMEWORK_PR per-repo discovery budget; set once, locked against LLM inflation.
-        "framework_pr_max_candidates",
+        # FRAMEWORK per-repo discovery budget; set once, locked against LLM inflation.
+        "framework_max_candidates",
         # Advisory model-architecture profile from the SKILL launcher; locked as the sole source of truth.
         "model_arch",
         # Architecture-identity tags from config.json fanned into recipe-snapshot extras; locked against pollution.
@@ -787,7 +787,7 @@ class PolicyGate:
 
         Enforces, in order: the role's ``can_delegate_side_effects``
         capability, presence of ``action_name``, the
-        analysis/internal-only gate, the kernel-owned-action guard, and
+        analysis/internal-only gate, the kernel_agent-owned-action guard, and
         the per-action specialised paths (``specialist`` / ``dynamic_action``
         / ``integrate_patch`` / ``explore`` / ``sweep``). It then applies
         the FP8-only, gain-driven and explore-minimum kernel_opt gates, the
@@ -815,11 +815,11 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
-        # Kernel-owned actions are not directly delegatable; require a REQUEST to the kernel agent.
-        if action_name in KERNEL_OWNED_ACTIONS:
+        # Kernel-owned actions are not directly delegatable; require a REQUEST to the Kernel-agent.
+        if action_name in KERNEL_AGENT_OWNED_ACTIONS:
             raise PolicyDenied(
-                f"action={action_name!r} is owned by the kernel agent; "
-                f"emit REQUEST(target_agent='kernel', kind='...') instead "
+                f"action={action_name!r} is owned by the Kernel-agent; "
+                f"emit REQUEST(target_agent='kernel_agent', kind='...') instead "
                 f"of delegate(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
@@ -891,7 +891,7 @@ class PolicyGate:
         Requires ``action_name`` and applies the internal-only gate. The
         ActionRegistry lookup here is soft — unknown names are only
         rejected when a registry is wired and the action is neither
-        registered nor kernel-owned. Mirrors the delegate channel's
+        registered nor kernel_agent-owned. Mirrors the delegate channel's
         explore-grid, sweep-singleton, FP8-only, gain-driven /
         explore-minimum kernel_opt, phase, and external-tool collision
         gates so an LLM cannot sidestep them by proposing instead of
@@ -915,13 +915,13 @@ class PolicyGate:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
         # Kernel-owned actions are REQUEST-only — mirror the delegate guard so the
         # ownership contract is enforced on BOTH the propose and delegate channels
-        # (action_surfaces.KERNEL_OWNED_ACTIONS). Without this a propose_action
+        # (action_surfaces.KERNEL_AGENT_OWNED_ACTIONS). Without this a propose_action
         # would pass the gate and materialize as a ``kind=<kernel action>`` task
         # that bypasses the kernel REQUEST handler.
-        if action_name in KERNEL_OWNED_ACTIONS:
+        if action_name in KERNEL_AGENT_OWNED_ACTIONS:
             raise PolicyDenied(
-                f"action={action_name!r} is owned by the kernel agent; "
-                f"emit REQUEST(target_agent='kernel', kind='...') instead "
+                f"action={action_name!r} is owned by the Kernel-agent; "
+                f"emit REQUEST(target_agent='kernel_agent', kind='...') instead "
                 f"of propose_action(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
@@ -1066,8 +1066,8 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        # R1 phase_incompatible: treat REQUEST kind as the action name for kernel-owned + coordinator-internal kinds.
-        if (target == "kernel" and kind in KERNEL_OWNED_ACTIONS) or kind in COORDINATOR_INTERNAL_ACTIONS:
+        # R1 phase_incompatible: treat REQUEST kind as the action name for kernel_agent-owned + coordinator-internal kinds.
+        if (target == "kernel_agent" and kind in KERNEL_AGENT_OWNED_ACTIONS) or kind in COORDINATOR_INTERNAL_ACTIONS:
             self._validate_phase_action(role, kind, intent_kind="request")
         self._validate_fp8_only_action(kind, intent_kind="request")
         # R4 / R5 — a REQUEST.kind cannot smuggle a KB write / external tool either.
@@ -1203,9 +1203,9 @@ class PolicyGate:
                 f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
                 rule="phase_incompatible",
                 hint=(
-                    "roofline / profile / replay_warm_recipe / framework_pr "
+                    "roofline / profile / replay_warm_recipe / framework "
                     "are driven by the Coordinator (PRELUDE bootstrap, +10% "
-                    "watermark refresh, warm-recipe replay, FRAMEWORK_PR "
+                    "watermark refresh, warm-recipe replay, FRAMEWORK "
                     "pump) and never appear in any phase's LLM-proposable "
                     "set. Propose ``specialist`` or ``explore`` instead."
                 ),
@@ -1222,7 +1222,7 @@ class PolicyGate:
         # an ``explore`` grid. This denial is ALWAYS fail-closed (independent of
         # ``strict_phase``) because it reflects an explicit operator decision,
         # not the softer per-phase action contract.
-        if not explore_enabled and phase == PHASE_KERNEL and action_name == EXPLORE_ACTION_NAME:
+        if not explore_enabled and phase == PHASE_KERNEL_AGENT and action_name == EXPLORE_ACTION_NAME:
             raise PolicyDenied(
                 f"action {EXPLORE_ACTION_NAME!r} is disabled for this run "
                 f"(--no-explore); KERNEL may not borrow the interleave "
@@ -1231,7 +1231,7 @@ class PolicyGate:
                 hint=(
                     "--no-explore skips the EXPLORE phase entirely. The "
                     "phase-interleave grey channel cannot reintroduce "
-                    "`explore` into KERNEL. Use kernel-owned actions "
+                    "`explore` into KERNEL. Use kernel_agent-owned actions "
                     "(kernel_opt / integrate / ...), or `specialist` / "
                     "`integrate_patch` if you need patch research/integration."
                 ),
@@ -2555,7 +2555,7 @@ __all__ = [
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "INTERNAL_ONLY_ACTION_NAMES",
-    "KERNEL_OWNED_ACTIONS",
+    "KERNEL_AGENT_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",
     "KILL_TASK_SOURCE_ALLOWLIST",
     "PATH_LIKE_FIELDS",

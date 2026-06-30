@@ -925,7 +925,7 @@ def collect_workload(
 ) -> dict[str, Any]:
     """Collect the §2 workload-description section.
 
-    Merges framework / model / GPU / parallelism fields from ``state`` and
+    Merges framework name / model / GPU / parallelism fields from ``state`` and
     ``manifest`` (state preferred) plus the workload knobs (``conc`` / ``isl``
     / ``osl`` / ``max_model_len`` / ``precision``) nested under
     ``manifest.workload``, and the optimization objective.
@@ -942,7 +942,7 @@ def collect_workload(
     """
     wl = manifest.get("workload") or {}
     return {
-        "framework": str(state.get("framework") or manifest.get("framework") or ""),
+        "framework_name": str(state.get("framework") or manifest.get("framework") or ""),
         "framework_version": str(manifest.get("framework_version") or ""),
         "model_name": str(state.get("model_name") or manifest.get("model_name") or ""),
         "model_path": str(state.get("model_path") or manifest.get("model_path") or ""),
@@ -3814,12 +3814,12 @@ def _action_family(action: str) -> str:
 
     Returns:
         str: One of ``kernel`` / ``backends`` / ``params`` / ``validate`` /
-        ``sweep`` / ``explore`` / ``replay_warm_recipe`` / ``framework_pr`` /
+        ``sweep`` / ``explore`` / ``replay_warm_recipe`` / ``framework`` /
         ``gemm_tuning``, or ``"other"`` when unrecognized.
     """
     s = (action or "").lower()
     if s.startswith("kernel_opt") or s == "integrate":
-        return "kernel"
+        return "kernel_agent"
     # Legacy stack-entry action labels from archived sessions.
     if s == "backends":
         return "backends"
@@ -3838,10 +3838,10 @@ def _action_family(action: str) -> str:
     # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
     if s.split(":", 1)[0] == "replay_warm_recipe":
         return "replay_warm_recipe"
-    # FRAMEWORK_PR: own headline row so per-source totals reconcile against
+    # FRAMEWORK: own headline row so per-source totals reconcile against
     # validated_total_pct (else these KEEPs fell into ``other`` and vanished).
-    if s == "framework_pr":
-        return "framework_pr"
+    if s == "framework":
+        return "framework"
     # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
     # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
     if s == "gemm_tuning":
@@ -4020,7 +4020,7 @@ def collect_attribution(
     # Bucket entries by family for source_breakdown; validated total is the denominator.
     validated_total = _to_float(state.get("cumulative_gain_validated")) or 0.0
     family_totals: dict[str, float] = {
-        "kernel": 0.0,
+        "kernel_agent": 0.0,
         "sweep": 0.0,
         "other": 0.0,
         # Legacy buckets for archived (pre-merge) sessions.
@@ -4029,8 +4029,8 @@ def collect_attribution(
         "validate": 0.0,
         # unified explore family (subsumes backends + params).
         "explore": 0.0,
-        # FRAMEWORK_PR family, kept apart from ``other`` for a dedicated row.
-        "framework_pr": 0.0,
+        # FRAMEWORK family, kept apart from ``other`` for a dedicated row.
+        "framework": 0.0,
         # REPLAY_WARM_RECIPE family: warm-recipe replay, kept apart from ``other``
         # so its gain gets a dedicated headline row.
         "replay_warm_recipe": 0.0,
@@ -4048,11 +4048,11 @@ def collect_attribution(
         fam = _action_family(str(e.get("action") or ""))
         family_totals[fam] = family_totals.get(fam, 0.0) + max(delta, 0.0)
 
-    # Split "kernel" between GEAK / OOB / Forge based on adopted KEEP entries' backend
+    # Split "kernel_agent" between GEAK / OOB / Forge based on adopted KEEP entries' backend
     geak_kept_kids = {inv.get("kernel_id") for inv in geak_invocations if inv.get("decision") == "KEEP"}
     oob_kept_kids = {inv.get("kernel_id") for inv in oob_invocations if inv.get("decision") == "KEEP"}
     forge_kept_kids = {inv.get("kernel_id") for inv in forge_invocations if inv.get("decision") == "KEEP"}
-    kernel_total = family_totals.get("kernel", 0.0)
+    kernel_total = family_totals.get("kernel_agent", 0.0)
     geak_total = 0.0
     oob_total = 0.0
     forge_total = 0.0
@@ -4100,8 +4100,8 @@ def collect_attribution(
             "replay_warm_recipe_pct_of_total": round(
                 family_totals.get("replay_warm_recipe", 0.0), 2
             ),
-            # FRAMEWORK_PR row; always emitted (0.0 when disabled/empty).
-            "framework_pr_pct_of_total": round(family_totals.get("framework_pr", 0.0), 2),
+            # FRAMEWORK row; always emitted (0.0 when disabled/empty).
+            "framework_pct_of_total": round(family_totals.get("framework", 0.0), 2),
             # GEMM_TUNING row; always emitted (0.0 when non-FP8/skipped/no KEEP).
             "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
             # PerfSkills/GEAK-e2e row; always emitted (0.0 when native/no e2e win).
@@ -4135,7 +4135,7 @@ def _collect_phase_breakdown(
             ``phase_history`` is empty).
 
     Returns:
-        dict[str, Any]: Per-phase gain buckets (prelude / framework_pr /
+        dict[str, Any]: Per-phase gain buckets (prelude / framework /
         explore / kernel / gemm_tuning / sweep / close, plus a conditional
         ``unattributed``), each with a ``total_gain_pct`` and phase-specific
         sub-breakdowns.
@@ -4197,10 +4197,10 @@ def _collect_phase_breakdown(
 
     phase_buckets: dict[str, dict[str, Any]] = {
         "prelude": {"total_gain_pct": 0.0},
-        # FRAMEWORK_PR: upstream-PR bake-in phase; by_pr keyed per adopted PR.
-        "framework_pr": {"total_gain_pct": 0.0, "by_pr": {}},
+        # FRAMEWORK: upstream-PR bake-in phase; by_pr keyed per adopted PR.
+        "framework": {"total_gain_pct": 0.0, "by_pr": {}},
         "explore": {"total_gain_pct": 0.0, "by_domain": {}},
-        "kernel": {"total_gain_pct": 0.0, "by_kernel_id": {}},
+        "kernel_agent": {"total_gain_pct": 0.0, "by_kernel_id": {}},
         # GEMM_TUNING: KERNEL-entry tuner, bucketed apart; by_tuned_file keyed on the produced CSV.
         "gemm_tuning": {"total_gain_pct": 0.0, "by_tuned_file": {}},
         "sweep": {"total_gain_pct": 0.0},
@@ -4239,12 +4239,12 @@ def _collect_phase_breakdown(
         elif phase not in phase_buckets:
             if fam in ("explore", "backends", "params"):
                 phase = "explore"
-            elif fam == "kernel":
-                phase = "kernel"
+            elif fam == "kernel_agent":
+                phase = "kernel_agent"
             elif fam == "sweep":
                 phase = "sweep"
-            elif fam == "framework_pr":
-                phase = "framework_pr"
+            elif fam == "framework":
+                phase = "framework"
             else:
                 phase = "unattributed"
         bucket = phase_buckets[phase]
@@ -4271,14 +4271,14 @@ def _collect_phase_breakdown(
                 float(by_scope.get(scope_key, 0.0)) + float(delta),
                 2,
             )
-        elif phase == "kernel":
+        elif phase == "kernel_agent":
             by_kid = bucket.setdefault("by_kernel_id", {})
             kid = str(e.get("kernel_id") or e.get("action_kernel_id") or "?")
             by_kid[kid] = round(
                 float(by_kid.get(kid, 0.0)) + float(delta),
                 2,
             )
-        elif phase == "framework_pr":
+        elif phase == "framework":
             # Key on the PR ref (variant_name), falling back to ``ref`` then ``?``.
             by_pr = bucket.setdefault("by_pr", {})
             pr_key = str(e.get("variant_name") or "").strip() or str(e.get("ref") or "").strip() or "?"
@@ -6533,7 +6533,7 @@ def collect_perfskills(
 ) -> dict[str, Any]:
     """Collect the PerfSkills/GEAK-e2e KERNEL-phase section.
 
-    When the KERNEL phase is delegated to the PerfSkills e2e optimizer
+    When the KERNEL_AGENT phase is delegated to the PerfSkills e2e optimizer
     (``KERNEL_OPT_BACKEND_ORDER=perfskills``), the native kernel lifecycle is bypassed
     and the only structured record is ``state.perfskills_result`` (the normalized
     ``result.json`` plus runner metadata). This collector maps that into the

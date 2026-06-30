@@ -158,7 +158,7 @@ _FRAMEWORK_OP_ACTIONS: frozenset[str] = frozenset(
         "session_breakdown",
         # Candidate-selection gate only; patches still land through
         # integrate_patch's strict checks, so no extra approve_requires.
-        "framework_pr",
+        "framework_agent",
     }
 )
 

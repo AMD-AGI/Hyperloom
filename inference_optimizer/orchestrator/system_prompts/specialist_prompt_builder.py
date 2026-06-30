@@ -432,7 +432,7 @@ def _focus_research_scout_specialist(
         "3. **Cross-framework / NVIDIA research** — survey PRs, blogs, and",
         "   MLPerf results across frameworks and NVIDIA/TRT-LLM via",
         "   ``WebSearch`` / ``mcp__pr_monitor__*`` for proven wins. Avoid",
-        "   re-listing PRs the FRAMEWORK_PR phase already covered (the",
+        "   re-listing PRs the FRAMEWORK_AGENT phase already covered (the",
         "   Coordinator dedups by PR id, but skip obvious repeats).",
         "",
         "**Gap computation** — where you find a reference throughput,",
@@ -603,22 +603,20 @@ class SpecialistPromptInputs:
     # empty dict renders a placeholder.
     roofline_evidence: dict[str, Any] = field(default_factory=dict)
 
-    # Substrate directional lever priors (cortex ``/v2/reasoning/levers``):
-    # ``{focus, seed, summary, levers:[{knob, direction, confidence, ...}]}``.
-    # Empty dict renders a placeholder; advisory, never a gate.
-    substrate_levers: dict[str, Any] = field(default_factory=dict)
-
-    # Substrate↔gbrain dual-read cross-check (see ``substrate_dual_read``):
-    # the substrate's verdict on the gbrain warm recipe's champion config —
-    # ``{verdict, selected_source, conflicts:[...], confirmations:[...], ...}``.
-    # Empty dict renders nothing; advisory, never a gate.
-    substrate_dual_read: dict[str, Any] = field(default_factory=dict)
-
     # Recipe summary from T0 ``find-recipe``
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
     # T0 lessons — positive priors from prior KEEPs; rendered as § 5b.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
+    # KG graph-recommended knobs (cross-recipe IMPROVES candidates reached via
+    # the architecture family graph); advisory candidates rendered as § 5d.
+    # Each entry: ``{knob, expected_gain, confidence, source}``.
+    kg_recommended_knobs: list[dict[str, Any]] = field(default_factory=list)
+    # KG graph-guided config knobs (journal-derived ``KNOB_IMPROVES`` for the
+    # current arch+precision); rendered as § 5e. Unlike ``kg_recommended_knobs``
+    # these carry runnable ``args``/``envs``. Each entry:
+    # ``{knob, args, envs, name, expected_gain, confidence, source}``.
+    kg_guided_knobs: list[dict[str, Any]] = field(default_factory=list)
     # PR feed
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
@@ -1133,173 +1131,6 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# Section 4a — Roofline / TraceLens evidence
-def _section_substrate_levers(inp: SpecialistPromptInputs) -> list[str]:
-    """Render the SUBSTRATE EVIDENCE section from ``inp.substrate_levers``.
-
-    Surfaces the cortex substrate's directional lever priors for this focus so
-    the specialist steers toward measured-beneficial knobs and away from
-    measured-harmful ones *before* spending a trial. Advisory only; the Critic
-    still gates the final answer. Empty digest renders ``(none)``.
-
-    Args:
-        inp: The specialist prompt inputs (reads ``substrate_levers``).
-
-    Returns:
-        The rendered substrate-evidence section lines.
-    """
-    rows = ["## 4b. SUBSTRATE EVIDENCE (advisory)", ""]
-    dig = inp.substrate_levers or {}
-    levers = dig.get("levers") if isinstance(dig, dict) else None
-    if not isinstance(dig, dict) or not isinstance(levers, list) or not levers:
-        rows.append(
-            "(none — the cortex knowledge substrate has no calibrated or "
-            "aggregate lever priors for this model-class yet, or the KB is not "
-            "wired this session.)"
-        )
-        return rows
-
-    summary = dig.get("summary") if isinstance(dig.get("summary"), dict) else {}
-    seed = str(dig.get("seed") or "")
-    head = (
-        "Directional lever priors mined from the fleet's measured knob trials "
-        "(Phase-2 aggregate) and confirmed by calibration (Phase-3) where "
-        "available. Treat **beneficial** as a steer-toward prior and "
-        "**harmful** as a steer-away prior; **neutral** had no measurable "
-        "effect. These are advisory — justify deviations, and the Critic still "
-        "gates the final answer."
-    )
-    rows.append(head)
-    if seed:
-        rows.append("")
-        rows.append(f"Resolved subject: `{seed}`")
-    if summary:
-        rows.append("")
-        rows.append(
-            "Summary: "
-            f"beneficial={int(summary.get('beneficial', 0))}, "
-            f"neutral={int(summary.get('neutral', 0))}, "
-            f"harmful={int(summary.get('harmful', 0))}, "
-            f"calibrated={int(summary.get('calibrated', 0))}"
-        )
-    rows.append("")
-    rows.append("| knob | direction | confidence | basis | evidence |")
-    rows.append("|---|---|---:|---|---|")
-
-    _ORDER = {"beneficial": 0, "harmful": 1, "neutral": 2}
-
-    def _sort_key(lv: dict[str, Any]) -> tuple[int, float]:
-        conf = lv.get("confidence")
-        conf_f = float(conf) if isinstance(conf, (int, float)) else 0.0
-        return (_ORDER.get(str(lv.get("direction")), 3), -conf_f)
-
-    shown = sorted(
-        (lv for lv in levers if isinstance(lv, dict)), key=_sort_key
-    )[:20]
-    for lv in shown:
-        knob = str(lv.get("knob") or "")
-        direction = str(lv.get("direction") or "")
-        conf = lv.get("confidence")
-        conf_str = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "—"
-        calibrated = bool(lv.get("calibrated"))
-        verdict = str(lv.get("verdict") or "")
-        scope = str(lv.get("scope") or "")
-        basis = "calibrated" if calibrated else (f"agg:{verdict}" if verdict else "grounded")
-        if scope == "global":
-            basis += " (global)"
-        confirmed = int(lv.get("confirmed") or 0)
-        deviated = int(lv.get("deviated") or 0)
-        n = int(lv.get("evidence_count") or 0)
-        if confirmed or deviated:
-            evidence = f"+{confirmed}/-{deviated}"
-        else:
-            evidence = f"n={n}" if n else "—"
-        rows.append(f"| `{knob}` | {direction} | {conf_str} | {basis} | {evidence} |")
-    if len(levers) > len(shown):
-        rows.append("")
-        rows.append(f"(+{len(levers) - len(shown)} more lever(s) not shown)")
-    return rows
-
-
-def _section_substrate_dual_read(inp: SpecialistPromptInputs) -> list[str]:
-    """Render the SUBSTRATE × WARM-RECIPE CROSS-CHECK from ``substrate_dual_read``.
-
-    Two knowledge sources steer this specialist: the cortex substrate (§4b
-    directional priors) and the gbrain warm-start recipe (§5 champion config).
-    This block reports the substrate's verdict on that recipe — where they
-    agree, and (more importantly) where the substrate's measured evidence flags
-    a recipe lever as harmful. Conflicts are a steer-away signal; agreements
-    reinforce. Advisory only — the Critic still gates the final answer.
-
-    Empty / no-signal digests render nothing (the section is dropped).
-
-    Args:
-        inp: The specialist prompt inputs (reads ``substrate_dual_read``).
-
-    Returns:
-        The rendered cross-check section lines, or ``[]`` to omit the section.
-    """
-    dig = inp.substrate_dual_read or {}
-    if not isinstance(dig, dict) or not dig:
-        return []
-    verdict = str(dig.get("verdict") or "")
-    # Only worth showing when the two sources were actually compared.
-    if verdict in ("", "no_data", "substrate_only"):
-        return []
-
-    rows = ["## 4c. SUBSTRATE × WARM-RECIPE CROSS-CHECK (advisory)", ""]
-    selected = str(dig.get("selected_source") or "")
-    headline = {
-        "conflict": (
-            "**The cortex substrate's measured evidence CONFLICTS with the "
-            "gbrain warm-start recipe below.** Treat the flagged levers as a "
-            "steer-away signal and justify keeping them if you do."
-        ),
-        "agree": (
-            "The cortex substrate **confirms** the gbrain warm-start recipe's "
-            "levers — the two knowledge sources agree."
-        ),
-        "gbrain_only": (
-            "The gbrain warm-start recipe proposes levers the cortex substrate "
-            "has no measured basis for — use the recipe, but it is unverified."
-        ),
-        "no_basis": (
-            "The cortex substrate has no measured basis to judge the gbrain "
-            "warm-start recipe's levers."
-        ),
-    }.get(verdict, "")
-    if headline:
-        rows.append(headline)
-    rows.append("")
-    rows.append(f"Cross-check verdict: **{verdict}** (selected source: `{selected or 'none'}`)")
-
-    conflicts = dig.get("conflicts") if isinstance(dig.get("conflicts"), list) else []
-    if conflicts:
-        rows.append("")
-        rows.append("Conflicting recipe levers (substrate evidence disagrees):")
-        rows.append("")
-        rows.append("| lever | knob | status | note |")
-        rows.append("|---|---|---|---|")
-        for c in conflicts[:12]:
-            if not isinstance(c, dict):
-                continue
-            lever = str(c.get("lever") or "")
-            knob = str(c.get("knob") or "")
-            status = str(c.get("status") or "")
-            note = str(c.get("note") or "").replace("|", "/")
-            rows.append(f"| `{lever}` | `{knob}` | {status} | {note} |")
-
-    confirmations = dig.get("confirmations") if isinstance(dig.get("confirmations"), list) else []
-    if confirmations and not conflicts:
-        rows.append("")
-        confirmed_levers = ", ".join(
-            f"`{c.get('lever')}`" for c in confirmations[:8] if isinstance(c, dict) and c.get("lever")
-        )
-        if confirmed_levers:
-            rows.append(f"Substrate-confirmed recipe levers: {confirmed_levers}")
-    return rows
-
-
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -1605,6 +1436,92 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
         version_note = _format_version_note(inp, attrs)
         rows.append(f"- **{description}**{meta}{version_note}")
     if len(rows) == 2:  # only the header + blank line, all pitfalls filtered out
+        rows.append(_NONE_PLACEHOLDER)
+    return rows
+
+
+# Section 5d — KG graph-recommended knobs (advisory positive candidates)
+def _section_kg_recommended(inp: SpecialistPromptInputs) -> list[str]:
+    """Render cross-recipe ``IMPROVES`` candidates from the knowledge graph.
+
+    These are advisory priors reached via the architecture family graph
+    (``USES_ARCH`` / ``VARIANT_OF``) — knobs that improved a related
+    architecture on the same hw+fw. The specialist prioritises but never
+    blindly trusts them; the Critic still gates the final answer.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``kg_recommended_knobs``).
+
+    Returns:
+        The rendered graph-recommended-knobs section lines.
+    """
+    rows = ["## 5d. GRAPH-RECOMMENDED KNOBS (cross-recipe IMPROVES — advisory, prioritise but verify)", ""]
+    if not inp.kg_recommended_knobs:
+        rows.append(_NONE_PLACEHOLDER)
+        return rows
+    for entry in inp.kg_recommended_knobs:
+        if not isinstance(entry, dict):
+            continue
+        knob = str(entry.get("knob") or "").strip()
+        if not knob:
+            continue
+        meta_bits: list[str] = []
+        gain = entry.get("expected_gain")
+        if isinstance(gain, (int, float)) and gain:
+            meta_bits.append(f"gain={float(gain):+.1f}%")
+        conf = entry.get("confidence")
+        if isinstance(conf, (int, float)) and conf > 0:
+            meta_bits.append(f"conf={float(conf):.2f}")
+        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+        rows.append(f"- **{knob}**{meta}")
+    if len(rows) == 2:  # header + blank only; all entries filtered out
+        rows.append(_NONE_PLACEHOLDER)
+    return rows
+
+
+# Section 5e — KG graph-guided config knobs (runnable args/envs)
+def _section_kg_guided_knobs(inp: SpecialistPromptInputs) -> list[str]:
+    """Render journal-derived ``KNOB_IMPROVES`` candidates with runnable config.
+
+    These come from prior sessions' ``optimization_journal`` config knobs that
+    kept a positive gain on the same architecture+precision. Each carries the
+    exact ``args``/``envs`` to apply, so the specialist can try them directly.
+    Advisory: the specialist verifies and the Critic still gates the answer.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``kg_guided_knobs``).
+
+    Returns:
+        The rendered graph-guided-knobs section lines.
+    """
+    rows = ["## 5e. GRAPH-GUIDED CONFIG KNOBS (journal KNOB_IMPROVES — runnable, prioritise but verify)", ""]
+    if not inp.kg_guided_knobs:
+        rows.append(_NONE_PLACEHOLDER)
+        return rows
+    for entry in inp.kg_guided_knobs:
+        if not isinstance(entry, dict):
+            continue
+        args = str(entry.get("args") or "").strip()
+        envs = entry.get("envs") if isinstance(entry.get("envs"), dict) else {}
+        if not args and not envs:
+            continue
+        name = str(entry.get("name") or "").strip()
+        meta_bits: list[str] = []
+        gain = entry.get("expected_gain")
+        if isinstance(gain, (int, float)) and gain:
+            meta_bits.append(f"gain={float(gain):+.1f}%")
+        ev = entry.get("evidence_count")
+        if isinstance(ev, (int, float)) and ev:
+            meta_bits.append(f"kept={int(ev)}x")
+        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+        label = name or args
+        rows.append(f"- **{label}**{meta}")
+        if args:
+            rows.append(f"  - args: `{args}`")
+        if envs:
+            env_str = " ".join(f"{k}={v}" for k, v in envs.items())
+            rows.append(f"  - envs: `{env_str}`")
+    if len(rows) == 2:  # header + blank only; all entries filtered out
         rows.append(_NONE_PLACEHOLDER)
     return rows
 
@@ -1924,11 +1841,11 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_gap(inp),  # 1: § 2-3
         _section_kb_subgraph(inp),  # 2: § 4
         _section_roofline_evidence(inp),  # 3: § 4a
-        _section_substrate_levers(inp),  # 3a: § 4b
         _section_recipe(inp),  # 4: § 5
-        _section_substrate_dual_read(inp),  # 4a: § 4c (substrate × recipe cross-check)
         _section_lessons(inp),  # 5: § 5b
         _section_pitfalls(inp),  # 6: § 5c
+        _section_kg_recommended(inp),  # 6a: § 5d (KG graph-recommended knobs)
+        _section_kg_guided_knobs(inp),  # 6b: § 5e (KG graph-guided runnable knobs)
         _section_pr_feed(inp),  # 7: § 6
         _section_source_hint(inp),  # 8: § 7
     ]

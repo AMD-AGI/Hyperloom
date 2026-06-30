@@ -22,7 +22,7 @@ from .symptom import Symptom, SymptomSeverity
 _TRACKED_AGENTS: frozenset[str] = frozenset(
     {
         "orchestration",
-        "kernel",
+        "kernel_agent",
         "critic",
     }
 )

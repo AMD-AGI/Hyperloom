@@ -1,4 +1,4 @@
-"""Tests for the FRAMEWORK_PR authoring track."""
+"""Tests for the FRAMEWORK authoring track."""
 
 from __future__ import annotations
 
@@ -15,14 +15,14 @@ from inference_optimizer.orchestrator.coordinator import Coordinator
 
 class _StateStub:
     def __init__(self, *, authoring: bool = True) -> None:
-        self.phase = "FRAMEWORK_PR"
-        self.framework_pr_phase_done = False
-        self.framework_pr_discover_failures = 0
-        self.framework_pr_batches: list[dict[str, Any]] = []
-        self.framework_pr_phase_progress: list[dict[str, Any]] = []
-        self.framework_pr_critic_decisions: list[dict[str, Any]] = []
-        self.framework_pr_authoring_enabled = authoring
-        self.framework_pr_specialist_candidate_map: dict[str, str] = {}
+        self.phase = "FRAMEWORK_AGENT"
+        self.framework_agent_phase_done = False
+        self.framework_agent_discover_failures = 0
+        self.framework_agent_batches: list[dict[str, Any]] = []
+        self.framework_agent_phase_progress: list[dict[str, Any]] = []
+        self.framework_agent_critic_decisions: list[dict[str, Any]] = []
+        self.framework_agent_authoring_enabled = authoring
+        self.framework_agent_specialist_candidate_map: dict[str, str] = {}
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
         self.model = "test-model"
@@ -102,47 +102,47 @@ class _Stub:
 
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
-    _collect_framework_pr_priors = Coordinator._collect_framework_pr_priors
-    _unprocessed_framework_pr_candidates = Coordinator._unprocessed_framework_pr_candidates
-    _select_next_framework_pr_candidate = Coordinator._select_next_framework_pr_candidate
-    _select_best_framework_pr_candidate = Coordinator._select_best_framework_pr_candidate
-    _record_framework_pr_phase_done = Coordinator._record_framework_pr_phase_done
-    _submit_framework_pr_candidate_for_review = Coordinator._submit_framework_pr_candidate_for_review
-    _materialize_framework_pr_candidate = Coordinator._materialize_framework_pr_candidate
-    _record_framework_pr_critic_denied = Coordinator._record_framework_pr_critic_denied
-    _discover_next_framework_pr_batch = Coordinator._discover_next_framework_pr_batch
-    _enqueue_framework_pr_task = Coordinator._enqueue_framework_pr_task
-    _enqueue_framework_pr_authoring_specialist = Coordinator._enqueue_framework_pr_authoring_specialist
-    _framework_pr_authoring_inflight = Coordinator._framework_pr_authoring_inflight
-    _record_framework_pr_authored_outcome = Coordinator._record_framework_pr_authored_outcome
-    _record_framework_pr_audit_skip = Coordinator._record_framework_pr_audit_skip
-    _framework_pr_audit_seed_lines = staticmethod(Coordinator._framework_pr_audit_seed_lines)
-    _framework_audit_skip_confident = staticmethod(Coordinator._framework_audit_skip_confident)
-    _framework_roots_have_git = staticmethod(Coordinator._framework_roots_have_git)
-    _pump_framework_pr_phase = Coordinator._pump_framework_pr_phase
+    _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
+    _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
+    _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
+    _select_best_framework_agent_candidate = Coordinator._select_best_framework_agent_candidate
+    _record_framework_agent_phase_done = Coordinator._record_framework_agent_phase_done
+    _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review
+    _materialize_framework_agent_candidate = Coordinator._materialize_framework_agent_candidate
+    _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
+    _discover_next_framework_batch = Coordinator._discover_next_framework_batch
+    _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
+    _enqueue_framework_agent_authoring_specialist = Coordinator._enqueue_framework_agent_authoring_specialist
+    _framework_agent_authoring_inflight = Coordinator._framework_agent_authoring_inflight
+    _record_framework_agent_authored_outcome = Coordinator._record_framework_agent_authored_outcome
+    _record_framework_agent_audit_skip = Coordinator._record_framework_agent_audit_skip
+    _framework_agent_audit_seed_lines = staticmethod(Coordinator._framework_agent_audit_seed_lines)
+    _framework_agent_audit_skip_confident = staticmethod(Coordinator._framework_agent_audit_skip_confident)
+    _framework_agent_roots_have_git = staticmethod(Coordinator._framework_agent_roots_have_git)
+    _pump_framework_agent_phase = Coordinator._pump_framework_agent_phase
 
     def __init__(self, tmp_path: Path, *, authoring: bool = True) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub(authoring=authoring)
         self.tasks = _TasksStub()
-        self.framework_pr_discover_timeout_sec = 0.0
+        self.framework_agent_discover_timeout_sec = 0.0
         self.backends: dict[str, Any] = {"critic": _ApproveCritic()}
         self.state = SimpleNamespace(pending_proposals={})
         self.bus = _BusStub()
-        # Audit verdict the pump's _audit_framework_pr_candidate returns; default
+        # Audit verdict the pump's _audit_framework_agent_candidate returns; default
         # unknown (empty recommended_next_step) preserves legacy both-tracks.
         self._audit_verdict: dict[str, Any] = {"recommended_next_step": ""}
 
     async def _record_observation(self, *_a: Any, **_k: Any) -> None:
         return None
 
-    async def _rank_framework_pr_candidates_llm(
+    async def _rank_framework_agent_candidates_llm(
         self, candidates: list[dict[str, Any]]
     ) -> dict[str, Any] | None:
         # Hermetic: force deterministic discovery-order fallback (no LLM call).
         return None
 
-    async def _audit_framework_pr_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+    async def _audit_framework_agent_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
         v = self._audit_verdict
         try:
             candidate["_audit"] = v
@@ -154,14 +154,14 @@ class _Stub:
         # No-op: avoid pulling in KnowledgePlane in the unit test.
         return None
 
-    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
+    def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
         return [_fa_client.repo_url_for_framework(framework or "sglang")]
 
-    def _framework_pr_known_candidate_ids(self) -> set[str]:
-        return Coordinator._framework_pr_known_candidate_ids(self)  # type: ignore[arg-type]
+    def _framework_known_candidate_ids(self) -> set[str]:
+        return Coordinator._framework_known_candidate_ids(self)  # type: ignore[arg-type]
 
-    def _framework_pr_tried_refs(self) -> list[str]:
-        return Coordinator._framework_pr_tried_refs(self)  # type: ignore[arg-type]
+    def _framework_tried_refs(self) -> list[str]:
+        return Coordinator._framework_tried_refs(self)  # type: ignore[arg-type]
 
 
 _CANDIDATE = {
@@ -175,7 +175,7 @@ _CANDIDATE = {
 
 
 def _pump(stub: _Stub) -> None:
-    asyncio.run(Coordinator._pump_framework_pr_phase(stub))  # type: ignore[arg-type]
+    asyncio.run(Coordinator._pump_framework_agent_phase(stub))  # type: ignore[arg-type]
 
 
 def _pump_then_materialize(stub: _Stub) -> None:
@@ -183,17 +183,17 @@ def _pump_then_materialize(stub: _Stub) -> None:
 
     Mirrors the live async gate: the pump submits the candidate carrying its
     resolved ``audit_step``; an approve verdict materialises it via
-    ``_materialize_framework_pr_candidate``, which performs the apply/author
+    ``_materialize_framework_agent_candidate``, which performs the apply/author
     dispatch (the routing that used to live inline in the pump).
     """
-    asyncio.run(Coordinator._pump_framework_pr_phase(stub))  # type: ignore[arg-type]
+    asyncio.run(Coordinator._pump_framework_agent_phase(stub))  # type: ignore[arg-type]
     pendings = [
         p
         for p in stub.state.pending_proposals.values()
-        if getattr(p, "action_name", "") == "framework_pr" and not getattr(p, "decided", False)
+        if getattr(p, "action_name", "") == "framework_agent" and not getattr(p, "decided", False)
     ]
     for p in pendings:
-        asyncio.run(Coordinator._materialize_framework_pr_candidate(stub, p))  # type: ignore[arg-type]
+        asyncio.run(Coordinator._materialize_framework_agent_candidate(stub, p))  # type: ignore[arg-type]
         p.decided = True
 
 
@@ -203,24 +203,24 @@ def _materialize(stub: _Stub, *, audit_step: str = "") -> None:
     pending = PendingProposal(
         proposal_msg_id="m-fpr",
         from_agent="coordinator",
-        action_name="framework_pr",
+        action_name="framework_agent",
         predicted_gain_pct=0.0,
         payload={
             "candidate": dict(_CANDIDATE),
-            "framework_pr_candidate_id": _CANDIDATE["pr_url"],
+            "framework_agent_candidate_id": _CANDIDATE["pr_url"],
             "batch_id": "b1",
             "audit": {},
             "audit_step": audit_step,
         },
     )
-    asyncio.run(Coordinator._materialize_framework_pr_candidate(stub, pending))  # type: ignore[arg-type]
+    asyncio.run(Coordinator._materialize_framework_agent_candidate(stub, pending))  # type: ignore[arg-type]
 
 
 def test_pump_submits_candidate_proposal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The pump submits the candidate as a ``framework_pr`` proposal; no task is created inline."""
+    """The pump submits the candidate as a ``framework_agent`` proposal; no task is created inline."""
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
 
@@ -230,9 +230,9 @@ def test_pump_submits_candidate_proposal(
     _pump(stub)
 
     assert stub.tasks.created == []
-    pendings = [p for p in stub.state.pending_proposals.values() if p.action_name == "framework_pr"]
+    pendings = [p for p in stub.state.pending_proposals.values() if p.action_name == "framework_agent"]
     assert len(pendings) == 1
-    assert pendings[0].payload["framework_pr_candidate_id"] == _CANDIDATE["pr_url"]
+    assert pendings[0].payload["framework_agent_candidate_id"] == _CANDIDATE["pr_url"]
 
 
 def test_materialize_unknown_route_dispatches_both_tracks(
@@ -244,15 +244,15 @@ def test_materialize_unknown_route_dispatches_both_tracks(
     _materialize(stub, audit_step="")
 
     kinds = [c["kind"] for c in stub.tasks.created]
-    assert kinds.count("framework_pr") == 1
+    assert kinds.count("framework_agent") == 1
     assert kinds.count("specialist") == 1
 
     spec = next(c for c in stub.tasks.created if c["kind"] == "specialist")
     params = spec["params"]
-    assert params["framework_pr_authoring"] is True
+    assert params["framework_agent_authoring"] is True
     assert params["domain"] == "serving_specialist"
     assert params["readonly"] is False
-    assert params["framework_pr_candidate_id"] == _CANDIDATE["pr_url"]
+    assert params["framework_agent_candidate_id"] == _CANDIDATE["pr_url"]
     assert _CANDIDATE["pr_url"] in params["notes"]
     assert _CANDIDATE["diff_url"] in params["notes"]
     assert "Write" in spec["allowed_tools"]
@@ -269,22 +269,22 @@ def test_materialize_authoring_disabled_runs_diff_track_only(
     _materialize(stub, audit_step="")
 
     kinds = [c["kind"] for c in stub.tasks.created]
-    assert kinds == ["framework_pr"]
+    assert kinds == ["framework_agent"]
 
 
 def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True)
     # Set up a batch with one unprocessed candidate so the signal has a valid target.
     _CAND_ID = "https://github.com/ROCm/vllm/pull/999"
-    stub.shared_state.framework_pr_batches = [
+    stub.shared_state.framework_agent_batches = [
         {"batch_id": "b1", "candidates": [{"candidate_id": _CAND_ID}]}
     ]
-    stub.shared_state.framework_pr_phase_progress = []
+    stub.shared_state.framework_agent_phase_progress = []
 
     # Nothing in flight.
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is False
     )
@@ -294,22 +294,22 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
         SimpleNamespace(
             kind="specialist",
             task_id="s1",
-            params={"framework_pr_authoring": True, "framework_pr_candidate_id": _CAND_ID},
+            params={"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID},
         )
     )
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is True
     )
     stub.tasks._running.clear()
 
-    # A kernel-phase specialist (no framework_pr_authoring) does NOT count.
+    # A kernel-phase specialist (no framework_agent_authoring) does NOT count.
     stub.tasks._running.append(SimpleNamespace(kind="specialist", task_id="k1", params={}))
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is False
     )
@@ -320,40 +320,40 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
         SimpleNamespace(
             kind="integrate_patch",
             task_id="i1",
-            params={"framework_pr_authoring": True, "framework_pr_candidate_id": _CAND_ID},
+            params={"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID},
         )
     )
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is True
     )
     stub.tasks._queued.clear()
 
-    # A bare kernel integrate_patch task (no framework_pr_authoring) does NOT count.
+    # A bare kernel integrate_patch task (no framework_agent_authoring) does NOT count.
     stub.tasks._queued.append(
         SimpleNamespace(kind="integrate_patch", task_id="k2", params={})
     )
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is False
     )
     stub.tasks._queued.clear()
 
-    # A pending framework_pr Critic proposal for the unprocessed candidate counts.
+    # A pending framework_agent Critic proposal for the unprocessed candidate counts.
     stub.state.pending_proposals = {
         "m1": SimpleNamespace(
-            action_name="framework_pr",
+            action_name="framework_agent",
             decided=False,
-            payload={"framework_pr_candidate_id": _CAND_ID},
+            payload={"framework_agent_candidate_id": _CAND_ID},
         ),
     }
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is True
     )
@@ -363,12 +363,12 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
         "m2": SimpleNamespace(
             action_name="integrate_patch",
             decided=False,
-            payload={"params": {"framework_pr_authoring": True, "framework_pr_candidate_id": _CAND_ID}},
+            payload={"params": {"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID}},
         ),
     }
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is True
     )
@@ -383,7 +383,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     }
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is False
     )
@@ -391,14 +391,14 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     # A decided proposal does NOT count even if framework-owned.
     stub.state.pending_proposals = {
         "m4": SimpleNamespace(
-            action_name="framework_pr",
+            action_name="framework_agent",
             decided=True,
-            payload={"framework_pr_candidate_id": _CAND_ID},
+            payload={"framework_agent_candidate_id": _CAND_ID},
         ),
     }
     assert (
         asyncio.run(
-            Coordinator._framework_pr_authoring_inflight(stub)  # type: ignore[arg-type]
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is False
     )
@@ -408,14 +408,14 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
     tmp_path: Path,
 ):
     stub = _Stub(tmp_path, authoring=True)
-    stub.shared_state.framework_pr_batches = [
+    stub.shared_state.framework_agent_batches = [
         {"batch_id": "b1", "max_gain_pct_observed_in_batch": 1.0},
     ]
     task = SimpleNamespace(
         task_id="i-1",
         params={
-            "framework_pr_candidate_id": "pr-42",
-            "framework_pr_batch_id": "b1",
+            "framework_agent_candidate_id": "pr-42",
+            "framework_batch_id": "b1",
             "specialist_task_id": "s-1",
         },
     )
@@ -424,13 +424,13 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
         result={"status": "kept", "delta_pct": 6.5, "output_throughput": 1065.0},
     )
 
-    Coordinator._record_framework_pr_authored_outcome(  # type: ignore[arg-type]
+    Coordinator._record_framework_agent_authored_outcome(  # type: ignore[arg-type]
         stub,
         task=task,
         result=result,
     )
 
-    progress = stub.shared_state.framework_pr_phase_progress
+    progress = stub.shared_state.framework_agent_phase_progress
     assert len(progress) == 1
     row = progress[0]
     assert row["status"] == "kept"
@@ -438,30 +438,30 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
     assert row["provenance"] == "authored"
     assert row["candidate_id"] == "pr-42"
     assert row["gain_pct"] == pytest.approx(6.5)
-    assert stub.shared_state.framework_pr_batches[0]["max_gain_pct_observed_in_batch"] == pytest.approx(6.5)
+    assert stub.shared_state.framework_agent_batches[0]["max_gain_pct_observed_in_batch"] == pytest.approx(6.5)
 
 
 def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
     """A non-keep terminal status (apply_failed) MUST still be recorded.
 
-    Without a terminal row the FRAMEWORK_PR pump re-selects the same candidate
+    Without a terminal row the FRAMEWORK pump re-selects the same candidate
     every tick (the authoring specialist's ``patches_written`` is non-empty so
     the empty-outcome bridge does not fire). Only empty/in-progress is skipped.
     """
     stub = _Stub(tmp_path, authoring=True)
-    task = SimpleNamespace(task_id="i-2", params={"framework_pr_batch_id": "b1"})
+    task = SimpleNamespace(task_id="i-2", params={"framework_batch_id": "b1"})
     result = SimpleNamespace(
         state="succeeded",
         result={"status": "apply_failed"},
     )
 
-    Coordinator._record_framework_pr_authored_outcome(  # type: ignore[arg-type]
+    Coordinator._record_framework_agent_authored_outcome(  # type: ignore[arg-type]
         stub,
         task=task,
         result=result,
     )
 
-    rows = stub.shared_state.framework_pr_phase_progress
+    rows = stub.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
     assert rows[0]["status"] == "apply_failed"
     assert rows[0]["kept"] is False
@@ -472,25 +472,25 @@ def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path:
     back to the originating PR-URL candidate so the row matches the select key.
     """
     stub = _Stub(tmp_path, authoring=True)
-    stub.shared_state.framework_pr_specialist_candidate_map = {
+    stub.shared_state.framework_agent_specialist_candidate_map = {
         "spec-7": "https://github.com/ROCm/aiter/pull/3888",
     }
     task = SimpleNamespace(
         task_id="i-9",
-        params={"framework_pr_batch_id": "b1", "specialist_task_id": "spec-7"},
+        params={"framework_batch_id": "b1", "specialist_task_id": "spec-7"},
     )
     result = SimpleNamespace(
         state="succeeded",
         result={"status": "reverted", "delta_pct": -0.3},
     )
 
-    Coordinator._record_framework_pr_authored_outcome(  # type: ignore[arg-type]
+    Coordinator._record_framework_agent_authored_outcome(  # type: ignore[arg-type]
         stub,
         task=task,
         result=result,
     )
 
-    rows = stub.shared_state.framework_pr_phase_progress
+    rows = stub.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == "https://github.com/ROCm/aiter/pull/3888"
     assert rows[0]["status"] == "reverted"
@@ -501,7 +501,7 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
     then DROPS as unusable (missing_target), emptying patches_written. Autosubmit
     keys off patches_written so it creates NO integrate_patch — the authored
     bridge never fires. The empty-outcome bridge MUST stamp a terminal row
-    (gate on patches_written, NOT proposal_set), else the FRAMEWORK_PR pump
+    (gate on patches_written, NOT proposal_set), else the FRAMEWORK pump
     re-dispatches the candidate forever (gap-5 livelock, e.g. aiter #28067).
     """
     stub = _Stub(tmp_path, authoring=True)
@@ -509,10 +509,10 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
     task = SimpleNamespace(
         task_id="spec-28067",
         params={
-            "framework_pr_authoring": True,
-            "framework_pr_candidate_id": cand,
-            "framework_pr_batch_id": "b1",
-            "framework_pr_audit": {"semantic_status": "not_present"},
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": cand,
+            "framework_batch_id": "b1",
+            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -522,13 +522,13 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
         "summary": "patch target file absent from framework tree",
     }
 
-    Coordinator._record_framework_pr_authoring_empty_outcome(  # type: ignore[arg-type]
+    Coordinator._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
         stub,
         task=task,
         done_payload=done_payload,
     )
 
-    rows = stub.shared_state.framework_pr_phase_progress
+    rows = stub.shared_state.framework_agent_phase_progress
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == cand
     assert rows[0]["status"] == "not_applicable"
@@ -543,9 +543,9 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
     task = SimpleNamespace(
         task_id="spec-x",
         params={
-            "framework_pr_authoring": True,
-            "framework_pr_candidate_id": "pr-x",
-            "framework_pr_batch_id": "b1",
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "pr-x",
+            "framework_batch_id": "b1",
         },
     )
     done_payload = {
@@ -553,13 +553,13 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
         "proposal_set": [{"name": "v1"}],
     }
 
-    Coordinator._record_framework_pr_authoring_empty_outcome(  # type: ignore[arg-type]
+    Coordinator._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
         stub,
         task=task,
         done_payload=done_payload,
     )
 
-    assert stub.shared_state.framework_pr_phase_progress == []
+    assert stub.shared_state.framework_agent_phase_progress == []
 
 
 # Relaxed rule — config-lever deliverable is first-class -------------------
@@ -567,7 +567,7 @@ def test_config_levers_helper_extracts_from_proposal_set():
     """A proposal_set entry carrying extra_args / extra_envs is flattened into
     a config_changes dict; patches take precedence (returns {})."""
     from inference_optimizer.orchestrator.coordinator import (
-        _framework_pr_config_levers_from_done,
+        _framework_config_levers_from_done,
     )
 
     done = {
@@ -580,17 +580,17 @@ def test_config_levers_helper_extracts_from_proposal_set():
             }
         ],
     }
-    levers = _framework_pr_config_levers_from_done(done)
+    levers = _framework_config_levers_from_done(done)
     assert levers["VLLM_USE_MTP"] == "1"
     assert levers["--speculative-num-steps"] == "3"
     assert levers["--enable-mtp"] == ""
 
     # A patch deliverable is NOT a config-only outcome.
-    assert _framework_pr_config_levers_from_done(
+    assert _framework_config_levers_from_done(
         {"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}
     ) == {}
     # No levers → empty.
-    assert _framework_pr_config_levers_from_done(
+    assert _framework_config_levers_from_done(
         {"patches_written": [], "proposal_set": [{"name": "research-only"}]}
     ) == {}
 
@@ -603,10 +603,10 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
     task = SimpleNamespace(
         task_id="spec-cfg",
         params={
-            "framework_pr_authoring": True,
-            "framework_pr_candidate_id": "https://github.com/ROCm/vllm/pull/1014",
-            "framework_pr_batch_id": "b1",
-            "framework_pr_audit": {"semantic_status": "not_present"},
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "https://github.com/ROCm/vllm/pull/1014",
+            "framework_batch_id": "b1",
+            "framework_audit": {"semantic_status": "not_present"},
         },
     )
     done_payload = {
@@ -617,13 +617,13 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
         "summary": "PR maps to a config lever on this build",
     }
 
-    Coordinator._record_framework_pr_authoring_empty_outcome(  # type: ignore[arg-type]
+    Coordinator._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
         stub,
         task=task,
         done_payload=done_payload,
     )
 
-    assert stub.shared_state.framework_pr_phase_progress == []
+    assert stub.shared_state.framework_agent_phase_progress == []
 
 
 # Step 3 — audit-routed dispatch ------------------------------------------
@@ -654,7 +654,7 @@ def test_pump_audit_skip_records_terminal_row_no_tasks(
 
     assert stub.tasks.created == []  # no GPU / no specialist
     assert stub.backends["critic"].call_count == 0  # no Critic
-    prog = stub.shared_state.framework_pr_phase_progress
+    prog = stub.shared_state.framework_agent_phase_progress
     assert len(prog) == 1
     assert prog[0]["status"] == "already_present"
     assert prog[0]["provenance"] == "audit"
@@ -673,11 +673,11 @@ def test_pump_audit_direct_apply_dispatches_executor_only(
 
     monkeypatch.setattr(_fa_client, "phase_discover", _discover)
     stub = _Stub(tmp_path, authoring=True)
-    stub._framework_roots_have_git = lambda: True  # hermetic: pretend git checkout
+    stub._framework_agent_roots_have_git = lambda: True  # hermetic: pretend git checkout
     stub._audit_verdict = {
         "semantic_status": "not_present",
         "applicability": "direct_apply",
-        "recommended_next_step": "direct_framework_pr",
+        "recommended_next_step": "direct_framework",
         "confidence": 0.8,
         "evidence": [],
     }
@@ -685,7 +685,7 @@ def test_pump_audit_direct_apply_dispatches_executor_only(
     _pump_then_materialize(stub)
 
     kinds = [c["kind"] for c in stub.tasks.created]
-    assert kinds == ["framework_pr"]  # no specialist
+    assert kinds == ["framework_agent"]  # no specialist
 
 
 def test_pump_audit_direct_apply_degrades_to_author_on_wheel(
@@ -699,10 +699,10 @@ def test_pump_audit_direct_apply_degrades_to_author_on_wheel(
 
     monkeypatch.setattr(_fa_client, "phase_discover", _discover)
     stub = _Stub(tmp_path, authoring=True)
-    stub._framework_roots_have_git = lambda: False  # wheel env (no git)
+    stub._framework_agent_roots_have_git = lambda: False  # wheel env (no git)
     stub._audit_verdict = {
         "applicability": "direct_apply",
-        "recommended_next_step": "direct_framework_pr",
+        "recommended_next_step": "direct_framework",
         "confidence": 0.8,
         "evidence": [],
     }
@@ -738,7 +738,7 @@ def test_pump_audit_skip_low_confidence_downgrades_to_author(
     assert kinds == ["specialist"]  # not skipped
     # No terminal already_present row was written (it wasn't skipped).
     assert not any(
-        r.get("status") == "already_present" for r in stub.shared_state.framework_pr_phase_progress
+        r.get("status") == "already_present" for r in stub.shared_state.framework_agent_phase_progress
     )
 
 
@@ -815,7 +815,7 @@ def test_audit_candidate_reuses_cached_verdict_no_reaudit(
     cand["_audit"] = {"recommended_next_step": "skip", "semantic_status": "already_equivalent"}
 
     out = asyncio.run(
-        Coordinator._audit_framework_pr_candidate(stub, cand)  # type: ignore[arg-type]
+        Coordinator._audit_framework_agent_candidate(stub, cand)  # type: ignore[arg-type]
     )
     assert out["recommended_next_step"] == "skip"  # cached verdict honoured
     assert calls.n == 0  # phase_audit not invoked
@@ -830,18 +830,18 @@ def test_audit_candidate_calls_phase_audit_when_uncached(
 
     async def _phase_audit(**_: Any) -> dict[str, Any]:
         calls.n += 1
-        return {"recommended_next_step": "direct_framework_pr", "semantic_status": "not_present"}
+        return {"recommended_next_step": "direct_framework", "semantic_status": "not_present"}
 
     monkeypatch.setattr(_fa_client, "phase_audit", _phase_audit)
     stub = _Stub(tmp_path, authoring=True)
     cand = dict(_CANDIDATE)
 
     out = asyncio.run(
-        Coordinator._audit_framework_pr_candidate(stub, cand)  # type: ignore[arg-type]
+        Coordinator._audit_framework_agent_candidate(stub, cand)  # type: ignore[arg-type]
     )
     assert calls.n == 1
-    assert out["recommended_next_step"] == "direct_framework_pr"
-    assert cand["_audit"]["recommended_next_step"] == "direct_framework_pr"  # cached on candidate
+    assert out["recommended_next_step"] == "direct_framework"
+    assert cand["_audit"]["recommended_next_step"] == "direct_framework"  # cached on candidate
 
 
 def test_pump_audit_author_with_authoring_disabled_falls_back_to_raw(
@@ -866,4 +866,4 @@ def test_pump_audit_author_with_authoring_disabled_falls_back_to_raw(
     _pump_then_materialize(stub)
 
     kinds = [c["kind"] for c in stub.tasks.created]
-    assert kinds == ["framework_pr"]
+    assert kinds == ["framework_agent"]

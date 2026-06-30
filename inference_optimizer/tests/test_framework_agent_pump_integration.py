@@ -1,11 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Integration test for ``_pump_framework_pr_phase`` (converged async gate).
+"""Integration test for ``_pump_framework_agent_phase`` (converged async gate).
 
 The pump discovers a batch then submits the chosen candidate as a normal
-``framework_pr`` proposal; the async Critic verdict (handled on a later tick)
+``framework_agent`` proposal; the async Critic verdict (handled on a later tick)
 drives the apply/author enqueue or the ``critic_denied`` row. The pump itself
-no longer calls the Critic synchronously nor creates a ``framework_pr`` task
+no longer calls the Critic synchronously nor creates a ``framework_agent`` task
 inline.
 """
 
@@ -57,13 +57,13 @@ _FRAMEWORK_CANDIDATES: dict[str, dict[str, Any]] = {
 
 class _StateStub:
     def __init__(self, framework: str = "sglang") -> None:
-        self.phase = "FRAMEWORK_PR"
-        self.framework_pr_phase_done = False
-        self.framework_pr_authoring_enabled = False
-        self.framework_pr_discover_failures = 0
-        self.framework_pr_batches: list[dict[str, Any]] = []
-        self.framework_pr_phase_progress: list[dict[str, Any]] = []
-        self.framework_pr_critic_decisions: list[dict[str, Any]] = []
+        self.phase = "FRAMEWORK_AGENT"
+        self.framework_agent_phase_done = False
+        self.framework_agent_authoring_enabled = False
+        self.framework_agent_discover_failures = 0
+        self.framework_agent_batches: list[dict[str, Any]] = []
+        self.framework_agent_phase_progress: list[dict[str, Any]] = []
+        self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
         self.model = "test-model"
@@ -115,15 +115,15 @@ class _CoordinatorStub:
 
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
-    _collect_framework_pr_priors = Coordinator._collect_framework_pr_priors
-    _unprocessed_framework_pr_candidates = Coordinator._unprocessed_framework_pr_candidates
-    _select_next_framework_pr_candidate = Coordinator._select_next_framework_pr_candidate
-    _select_best_framework_pr_candidate = Coordinator._select_best_framework_pr_candidate
-    _record_framework_pr_phase_done = Coordinator._record_framework_pr_phase_done
-    _submit_framework_pr_candidate_for_review = Coordinator._submit_framework_pr_candidate_for_review
-    _record_framework_pr_critic_denied = Coordinator._record_framework_pr_critic_denied
-    _discover_next_framework_pr_batch = Coordinator._discover_next_framework_pr_batch
-    _enqueue_framework_pr_task = Coordinator._enqueue_framework_pr_task
+    _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
+    _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
+    _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
+    _select_best_framework_agent_candidate = Coordinator._select_best_framework_agent_candidate
+    _record_framework_agent_phase_done = Coordinator._record_framework_agent_phase_done
+    _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review
+    _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
+    _discover_next_framework_batch = Coordinator._discover_next_framework_batch
+    _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
 
     def __init__(self, tmp_path: Path, *, framework: str = "sglang") -> None:
         self.session_dir = tmp_path
@@ -131,20 +131,20 @@ class _CoordinatorStub:
         self.tasks = _TasksStub()
         self.bus = _BusStub()
         self.state = SimpleNamespace(pending_proposals={})
-        self.framework_pr_discover_timeout_sec = 0.0
+        self.framework_agent_discover_timeout_sec = 0.0
         self._framework = framework
         self.backends: dict[str, Any] = {}
 
     async def _record_observation(self, *_a: Any, **_k: Any) -> None:
         return None
 
-    async def _rank_framework_pr_candidates_llm(
+    async def _rank_framework_agent_candidates_llm(
         self, candidates: list[dict[str, Any]]
     ) -> dict[str, Any] | None:
         # Hermetic: force the deterministic discovery-order fallback.
         return None
 
-    async def _audit_framework_pr_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+    async def _audit_framework_agent_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
         v = getattr(self, "_audit_verdict", None) or {"recommended_next_step": ""}
         try:
             candidate["_audit"] = v
@@ -152,25 +152,25 @@ class _CoordinatorStub:
             pass
         return v
 
-    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
+    def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
         return [_fa_client.repo_url_for_framework(framework or self._framework)]
 
-    def _framework_pr_known_candidate_ids(self) -> set[str]:
-        return Coordinator._framework_pr_known_candidate_ids(self)  # type: ignore[arg-type]
+    def _framework_known_candidate_ids(self) -> set[str]:
+        return Coordinator._framework_known_candidate_ids(self)  # type: ignore[arg-type]
 
-    def _framework_pr_tried_refs(self) -> list[str]:
-        return Coordinator._framework_pr_tried_refs(self)  # type: ignore[arg-type]
+    def _framework_tried_refs(self) -> list[str]:
+        return Coordinator._framework_tried_refs(self)  # type: ignore[arg-type]
 
 
 def _pump(stub: _CoordinatorStub) -> None:
-    asyncio.run(Coordinator._pump_framework_pr_phase(stub))  # type: ignore[arg-type]
+    asyncio.run(Coordinator._pump_framework_agent_phase(stub))  # type: ignore[arg-type]
 
 
-def _framework_pr_pendings(stub: _CoordinatorStub) -> list[Any]:
+def _framework_agent_pendings(stub: _CoordinatorStub) -> list[Any]:
     return [
         p
         for p in stub.state.pending_proposals.values()
-        if getattr(p, "action_name", "") == "framework_pr"
+        if getattr(p, "action_name", "") == "framework_agent"
     ]
 
 
@@ -181,7 +181,7 @@ def test_pump_happy_path_discover_submits_proposal(
     monkeypatch: pytest.MonkeyPatch,
     framework: str,
 ):
-    """A single-candidate batch is submitted as one ``framework_pr`` proposal (no task, no sync Critic call)."""
+    """A single-candidate batch is submitted as one ``framework_agent`` proposal (no task, no sync Critic call)."""
     captured_framework: dict[str, str] = {}
 
     async def _discover(**kwargs: Any) -> dict[str, Any]:
@@ -197,16 +197,16 @@ def test_pump_happy_path_discover_submits_proposal(
     _pump(stub)
 
     assert captured_framework["framework"] == framework
-    assert len(stub.shared_state.framework_pr_batches) == 1
+    assert len(stub.shared_state.framework_agent_batches) == 1
     # No task is enqueued by the pump; the async verdict drives that later.
     assert stub.tasks.created == []
-    pendings = _framework_pr_pendings(stub)
+    pendings = _framework_agent_pendings(stub)
     assert len(pendings) == 1
     payload = pendings[0].payload
     assert payload["candidate"]["pr_url"] == _FRAMEWORK_CANDIDATES[framework]["pr_url"]
-    assert payload["framework_pr_candidate_id"] == _FRAMEWORK_CANDIDATES[framework]["pr_url"]
+    assert payload["framework_agent_candidate_id"] == _FRAMEWORK_CANDIDATES[framework]["pr_url"]
     # No progress rows yet (verdict/executor write those).
-    assert stub.shared_state.framework_pr_phase_progress == []
+    assert stub.shared_state.framework_agent_phase_progress == []
 
 
 def test_pump_integration_parametrised_over_all_three_frameworks():
@@ -240,34 +240,34 @@ def test_pump_reject_then_next_tick_submits_next(
     _pump(stub)
     assert discover_calls.n == 1
     assert stub.tasks.created == []
-    pendings = _framework_pr_pendings(stub)
+    pendings = _framework_agent_pendings(stub)
     assert len(pendings) == 1
     p1 = pendings[0]
-    assert p1.payload["framework_pr_candidate_id"] == "https://example.com/pr/1"
+    assert p1.payload["framework_agent_candidate_id"] == "https://example.com/pr/1"
 
     # Async reject arrives: critic_denied row + the proposal is decided.
     asyncio.run(
-        Coordinator._record_framework_pr_critic_denied(stub, p1, "out of scope")  # type: ignore[arg-type]
+        Coordinator._record_framework_agent_critic_denied(stub, p1, "out of scope")  # type: ignore[arg-type]
     )
     p1.decided = True
-    denied = [r for r in stub.shared_state.framework_pr_phase_progress if r.get("status") == "critic_denied"]
+    denied = [r for r in stub.shared_state.framework_agent_phase_progress if r.get("status") == "critic_denied"]
     assert len(denied) == 1
     assert denied[0]["candidate_id"] == "https://example.com/pr/1"
 
     # Tick 2 — selector skips the denied candidate and submits c2 (discover NOT re-called).
     _pump(stub)
     assert discover_calls.n == 1, "discover must not be called again — batch still has work"
-    new_pendings = [p for p in _framework_pr_pendings(stub) if not getattr(p, "decided", False)]
+    new_pendings = [p for p in _framework_agent_pendings(stub) if not getattr(p, "decided", False)]
     assert len(new_pendings) == 1
-    assert new_pendings[0].payload["framework_pr_candidate_id"] == "https://example.com/pr/2"
+    assert new_pendings[0].payload["framework_agent_candidate_id"] == "https://example.com/pr/2"
 
 
 # Scenario 3 — already-in-flight task → pump no-op
-def test_pump_is_noop_when_framework_pr_task_already_running(
+def test_pump_is_noop_when_framework_agent_task_already_running(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """An already-running ``framework_pr`` task makes the pump return early without discover or submit (idempotency guard)."""
+    """An already-running ``framework_agent`` task makes the pump return early without discover or submit (idempotency guard)."""
     discover_called = SimpleNamespace(n=0)
 
     async def _discover(**_: Any) -> dict[str, Any]:
@@ -277,15 +277,15 @@ def test_pump_is_noop_when_framework_pr_task_already_running(
     monkeypatch.setattr(_fa_client, "phase_discover", _discover)
     stub = _CoordinatorStub(tmp_path)
     stub.tasks._running.append(
-        SimpleNamespace(kind="framework_pr", task_id="t-existing"),
+        SimpleNamespace(kind="framework_agent", task_id="t-existing"),
     )
 
     _pump(stub)
 
     assert discover_called.n == 0
     assert stub.tasks.created == []
-    assert _framework_pr_pendings(stub) == []
-    assert stub.shared_state.framework_pr_phase_done is False
+    assert _framework_agent_pendings(stub) == []
+    assert stub.shared_state.framework_agent_phase_done is False
 
 
 # Scenario 3b — a pending candidate proposal serializes the pump (no second submit)
@@ -307,7 +307,7 @@ def test_pump_is_noop_while_candidate_proposal_pending(
 
     _pump(stub)
     _pump(stub)  # pending proposal -> serialized, no second submit
-    assert len(_framework_pr_pendings(stub)) == 1
+    assert len(_framework_agent_pendings(stub)) == 1
     assert discover_called.n == 1
 
 
@@ -316,7 +316,7 @@ def test_pump_marks_phase_done_with_history_row_on_empty_discover(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A clean empty discover payload flips ``framework_pr_phase_done`` and records a phase_history row."""
+    """A clean empty discover payload flips ``framework_agent_phase_done`` and records a phase_history row."""
 
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "", "candidates": []}
@@ -326,8 +326,8 @@ def test_pump_marks_phase_done_with_history_row_on_empty_discover(
 
     _pump(stub)
 
-    assert stub.shared_state.framework_pr_phase_done is True
-    assert _framework_pr_pendings(stub) == []
-    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_pr_phase_done"]
+    assert stub.shared_state.framework_agent_phase_done is True
+    assert _framework_agent_pendings(stub) == []
+    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"]
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_empty_payload"

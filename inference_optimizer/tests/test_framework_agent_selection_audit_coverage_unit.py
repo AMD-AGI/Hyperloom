@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Coverage for FRAMEWORK_PR agent-ranked selection, semantic-audit routing,
+"""Coverage for FRAMEWORK agent-ranked selection, semantic-audit routing,
 ranker-client plumbing, config-lever extraction, and the cyclic phase-budget
 dispatch guard added on the framework-enhance branch.
 
@@ -19,10 +19,10 @@ import pytest
 from inference_optimizer.orchestrator import coordinator as coord_mod
 from inference_optimizer.orchestrator import framework_agent_client as fa_client_mod
 from inference_optimizer.orchestrator import framework_paths as fp_mod
-from inference_optimizer.orchestrator import framework_pr_artifacts as fpa_mod
+from inference_optimizer.orchestrator import framework_agent_artifacts as fpa_mod
 from inference_optimizer.orchestrator import kb_writeback as kb_mod
 from inference_optimizer.orchestrator import phase_state as ps_mod
-from inference_optimizer.orchestrator.action_executors import framework_pr as fpr_mod
+from inference_optimizer.orchestrator.action_executors import framework_agent as fpr_mod
 from inference_optimizer.orchestrator.backends import Backend, MockBackend, ScriptedPlan
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.paths import make_session_dir
@@ -50,7 +50,7 @@ def _silent_plan() -> ScriptedPlan:
 def _build_backends() -> dict[str, Backend]:
     return {
         name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "kernel", "critic", "robustness")
+        for name in ("orchestration", "kernel_agent", "critic", "robustness")
     }
 
 
@@ -60,10 +60,10 @@ def coord(session_dir) -> Coordinator:
 
 
 # --------------------------------------------------------------------------
-# _framework_pr_config_levers_from_done
+# _framework_config_levers_from_done
 # --------------------------------------------------------------------------
 def test_config_levers_non_dict_and_patch_precedence() -> None:
-    f = coord_mod._framework_pr_config_levers_from_done
+    f = coord_mod._framework_config_levers_from_done
     assert f(None) == {}
     # A patch deliverable is NOT a config-only outcome.
     assert f({"patches_written": ["a.patch"], "proposal_set": [{"extra_envs": {"X": "1"}}]}) == {}
@@ -73,7 +73,7 @@ def test_config_levers_non_dict_and_patch_precedence() -> None:
 
 
 def test_config_levers_flatten_envs_and_args() -> None:
-    f = coord_mod._framework_pr_config_levers_from_done
+    f = coord_mod._framework_config_levers_from_done
     levers = f(
         {
             "proposal_set": [
@@ -93,35 +93,35 @@ def test_config_levers_flatten_envs_and_args() -> None:
 
 
 def test_config_levers_args_as_list() -> None:
-    f = coord_mod._framework_pr_config_levers_from_done
+    f = coord_mod._framework_config_levers_from_done
     levers = f({"proposal_set": [{"extra_args": ["--flag", "val"]}]})
     assert levers["--flag"] == "val"
 
 
 # --------------------------------------------------------------------------
-# _framework_audit_skip_confident
+# _framework_agent_audit_skip_confident
 # --------------------------------------------------------------------------
 def test_audit_skip_confident_paths(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_SKIP_MIN_CONFIDENCE", raising=False)
     # No evidence -> not confident.
-    assert coord._framework_audit_skip_confident({"confidence": 0.99}) is False
-    assert coord._framework_audit_skip_confident(None) is False
+    assert coord._framework_agent_audit_skip_confident({"confidence": 0.99}) is False
+    assert coord._framework_agent_audit_skip_confident(None) is False
     # Evidence + high confidence -> confident.
-    assert coord._framework_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.9}) is True
+    assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.9}) is True
     # Evidence but low confidence -> not.
-    assert coord._framework_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.5}) is False
+    assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.5}) is False
     # Bad confidence value -> treated as 0.0.
-    assert coord._framework_audit_skip_confident({"evidence": [{"x": 1}], "confidence": "NaNish"}) is False
+    assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": "NaNish"}) is False
 
 
 def test_audit_skip_confident_bad_floor_env(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_SKIP_MIN_CONFIDENCE", "not-a-float")
     # Floor falls back to 0.8; confidence 0.85 clears it.
-    assert coord._framework_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.85}) is True
+    assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.85}) is True
 
 
 # --------------------------------------------------------------------------
-# _framework_roots_have_git
+# _framework_agent_roots_have_git
 # --------------------------------------------------------------------------
 def test_roots_have_git_true(coord: Coordinator, monkeypatch, tmp_path) -> None:
     repo = tmp_path / "fwrepo"
@@ -129,23 +129,23 @@ def test_roots_have_git_true(coord: Coordinator, monkeypatch, tmp_path) -> None:
     subprocess.run(["git", "init", str(repo)], capture_output=True, check=True)
     missing = tmp_path / "does_not_exist"
     monkeypatch.setattr(fp_mod, "resolve_source_file_allowlist", lambda: [str(missing), str(repo)])
-    assert coord._framework_roots_have_git() is True
+    assert coord._framework_agent_roots_have_git() is True
 
 
 def test_roots_have_git_false(coord: Coordinator, monkeypatch, tmp_path) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()
     monkeypatch.setattr(fp_mod, "resolve_source_file_allowlist", lambda: [str(plain)])
-    assert coord._framework_roots_have_git() is False
+    assert coord._framework_agent_roots_have_git() is False
 
 
 # --------------------------------------------------------------------------
-# _audit_framework_pr_candidate
+# _audit_framework_agent_candidate
 # --------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_audit_candidate_cached(coord: Coordinator) -> None:
     cand = {"candidate_id": "c1", "_audit": {"recommended_next_step": "skip", "cached": True}}
-    out = await coord._audit_framework_pr_candidate(cand)
+    out = await coord._audit_framework_agent_candidate(cand)
     assert out.get("cached") is True
 
 
@@ -154,13 +154,13 @@ async def test_audit_candidate_success(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(fp_mod, "resolve_source_file_allowlist", lambda: [])
 
     async def _phase_audit(**kwargs):
-        return {"recommended_next_step": "direct_framework_pr", "semantic_status": "applies", "evidence": []}
+        return {"recommended_next_step": "direct_framework", "semantic_status": "applies", "evidence": []}
 
     monkeypatch.setattr(fa_client_mod, "phase_audit", _phase_audit)
     cand = {"candidate_id": "c2", "pr_url": "http://x/1"}
-    out = await coord._audit_framework_pr_candidate(cand)
-    assert out["recommended_next_step"] == "direct_framework_pr"
-    assert cand["_audit"]["recommended_next_step"] == "direct_framework_pr"  # cached onto candidate
+    out = await coord._audit_framework_agent_candidate(cand)
+    assert out["recommended_next_step"] == "direct_framework"
+    assert cand["_audit"]["recommended_next_step"] == "direct_framework"  # cached onto candidate
 
 
 @pytest.mark.asyncio
@@ -171,7 +171,7 @@ async def test_audit_candidate_failure_degrades_unknown(coord: Coordinator, monk
         raise RuntimeError("fa missing")
 
     monkeypatch.setattr(fa_client_mod, "phase_audit", _boom)
-    out = await coord._audit_framework_pr_candidate({"candidate_id": "c3"})
+    out = await coord._audit_framework_agent_candidate({"candidate_id": "c3"})
     assert out["semantic_status"] == "unknown"
     assert out["recommended_next_step"] == ""
 
@@ -184,20 +184,20 @@ async def test_audit_candidate_non_dict_result_coerced(coord: Coordinator, monke
         return ["not", "a", "dict"]
 
     monkeypatch.setattr(fa_client_mod, "phase_audit", _weird)
-    out = await coord._audit_framework_pr_candidate({"candidate_id": "c4"})
+    out = await coord._audit_framework_agent_candidate({"candidate_id": "c4"})
     assert out["semantic_status"] == "unknown"
 
 
 # --------------------------------------------------------------------------
-# _framework_pr_audit_seed_lines
+# _framework_agent_audit_seed_lines
 # --------------------------------------------------------------------------
 def test_audit_seed_lines_empty(coord: Coordinator) -> None:
-    assert coord._framework_pr_audit_seed_lines(None) == []
-    assert coord._framework_pr_audit_seed_lines({}) == []
+    assert coord._framework_agent_audit_seed_lines(None) == []
+    assert coord._framework_agent_audit_seed_lines({}) == []
 
 
 def test_audit_seed_lines_populated(coord: Coordinator) -> None:
-    lines = coord._framework_pr_audit_seed_lines(
+    lines = coord._framework_agent_audit_seed_lines(
         {
             "semantic_status": "needs_rewrite",
             "applicability": "needs_rewrite",
@@ -215,7 +215,7 @@ def test_audit_seed_lines_populated(coord: Coordinator) -> None:
 
 
 # --------------------------------------------------------------------------
-# _record_framework_pr_audit_skip
+# _record_framework_agent_audit_skip
 # --------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_record_audit_skip_already_present(coord: Coordinator, monkeypatch) -> None:
@@ -224,11 +224,11 @@ async def test_record_audit_skip_already_present(coord: Coordinator, monkeypatch
     async def _kb(**kwargs):
         seen.append(kwargs)
 
-    monkeypatch.setattr(kb_mod, "write_framework_pr_record", _kb)
-    coord.shared_state.framework_pr_phase_progress = None  # exercise the list-init branch
+    monkeypatch.setattr(kb_mod, "write_framework_record", _kb)
+    coord.shared_state.framework_agent_phase_progress = None  # exercise the list-init branch
     cand = {"candidate_id": "c1", "pr_url": "http://x/1", "batch_id": "b1", "head_sha": "deadbeef"}
-    await coord._record_framework_pr_audit_skip(cand, {"semantic_status": "already_merged", "confidence": 0.95})
-    prog = coord.shared_state.framework_pr_phase_progress
+    await coord._record_framework_agent_audit_skip(cand, {"semantic_status": "already_merged", "confidence": 0.95})
+    prog = coord.shared_state.framework_agent_phase_progress
     assert any(p.get("status") == "already_present" for p in prog)
     assert seen  # KB writeback fired for already_present
 
@@ -238,27 +238,27 @@ async def test_record_audit_skip_not_applicable(coord: Coordinator, monkeypatch)
     async def _kb(**kwargs):  # should NOT be called for not_applicable
         raise AssertionError("KB writeback must not fire for not_applicable")
 
-    monkeypatch.setattr(kb_mod, "write_framework_pr_record", _kb)
+    monkeypatch.setattr(kb_mod, "write_framework_record", _kb)
     cand = {"candidate_id": "c2", "batch_id": "b1"}
-    await coord._record_framework_pr_audit_skip(cand, {"semantic_status": "not_relevant", "risks": ["x"]})
-    prog = coord.shared_state.framework_pr_phase_progress
+    await coord._record_framework_agent_audit_skip(cand, {"semantic_status": "not_relevant", "risks": ["x"]})
+    prog = coord.shared_state.framework_agent_phase_progress
     assert any(p.get("status") == "not_applicable" for p in prog)
 
 
 # --------------------------------------------------------------------------
-# _collect_framework_pr_priors
+# _collect_framework_agent_candidate_priors
 # --------------------------------------------------------------------------
-def test_collect_framework_pr_priors(coord: Coordinator) -> None:
-    coord.shared_state.framework_pr_critic_decisions = [
+def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
+    coord.shared_state.framework_agent_critic_decisions = [
         "not-a-dict",  # skipped via the continue branch
         {"candidate_id": "c1", "verdict": "approve", "rationale": "looks good"},
     ]
-    coord.shared_state.framework_pr_phase_progress = [
+    coord.shared_state.framework_agent_phase_progress = [
         {"candidate_id": "c1", "status": "kept", "gain_pct": 3.2},
         {"candidate_id": "c2", "status": "in_flight"},  # non-terminal -> excluded
         {"candidate_id": "c3", "status": "critic_denied"},
     ]
-    priors = coord._collect_framework_pr_priors()
+    priors = coord._collect_framework_agent_candidate_priors()
     assert priors["recent_decisions"] == [
         {"candidate_id": "c1", "verdict": "approve", "rationale": "looks good"}
     ]
@@ -267,39 +267,39 @@ def test_collect_framework_pr_priors(coord: Coordinator) -> None:
 
 
 # --------------------------------------------------------------------------
-# _match_framework_pr_candidate
+# _match_framework_agent_candidate
 # --------------------------------------------------------------------------
 def test_match_candidate(coord: Coordinator) -> None:
     cands = [
         {"candidate_id": "id-a", "pr_number": "1015"},
         {"pr_url": "http://x/2", "pr_number": "2020"},
     ]
-    assert coord._match_framework_pr_candidate("", cands) is None
-    assert coord._match_framework_pr_candidate("id-a", cands)["candidate_id"] == "id-a"
-    assert coord._match_framework_pr_candidate("http://x/2", cands)["pr_number"] == "2020"
+    assert coord._match_framework_agent_candidate("", cands) is None
+    assert coord._match_framework_agent_candidate("id-a", cands)["candidate_id"] == "id-a"
+    assert coord._match_framework_agent_candidate("http://x/2", cands)["pr_number"] == "2020"
     # Bare PR-number fallback.
-    assert coord._match_framework_pr_candidate("PR:2020", cands)["pr_number"] == "2020"
-    assert coord._match_framework_pr_candidate("nope", cands) is None
+    assert coord._match_framework_agent_candidate("PR:2020", cands)["pr_number"] == "2020"
+    assert coord._match_framework_agent_candidate("nope", cands) is None
 
 
 # --------------------------------------------------------------------------
-# _framework_pr_ranker_model / _framework_pr_ranker_client
+# _framework_agent_ranker_model / _framework_agent_ranker_client
 # --------------------------------------------------------------------------
 def test_ranker_model_env_override(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PR_RANKER_MODEL", "my-model")
-    assert coord._framework_pr_ranker_model() == "my-model"
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_RANKER_MODEL", "my-model")
+    assert coord._framework_agent_ranker_model() == "my-model"
 
 
 def test_ranker_model_from_backend(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_PR_RANKER_MODEL", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_RANKER_MODEL", raising=False)
     coord.backends["orchestration"].model = "backend-model"  # type: ignore[attr-defined]
-    assert coord._framework_pr_ranker_model() == "backend-model"
+    assert coord._framework_agent_ranker_model() == "backend-model"
 
 
 def test_ranker_client_cached(coord: Coordinator) -> None:
     sentinel = object()
     coord._fa_ranker_client = sentinel  # type: ignore[attr-defined]
-    assert coord._framework_pr_ranker_client() is sentinel
+    assert coord._framework_agent_ranker_client() is sentinel
 
 
 def test_ranker_client_from_scorer(coord: Coordinator) -> None:
@@ -311,9 +311,9 @@ def test_ranker_client_from_scorer(coord: Coordinator) -> None:
             return fake_client
 
     coord._proposal_scorer = _Scorer()  # type: ignore[attr-defined]
-    assert coord._framework_pr_ranker_client() is fake_client
+    assert coord._framework_agent_ranker_client() is fake_client
     # Now cached.
-    assert coord._framework_pr_ranker_client() is fake_client
+    assert coord._framework_agent_ranker_client() is fake_client
 
 
 def test_ranker_client_none_without_key(coord: Coordinator, monkeypatch) -> None:
@@ -326,7 +326,7 @@ def test_ranker_client_none_without_key(coord: Coordinator, monkeypatch) -> None
     coord._proposal_scorer = _Scorer()  # type: ignore[attr-defined]
     monkeypatch.delenv("SAFE_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    assert coord._framework_pr_ranker_client() is None
+    assert coord._framework_agent_ranker_client() is None
 
 
 def test_ranker_client_builds_from_env(coord: Coordinator, monkeypatch) -> None:
@@ -335,14 +335,14 @@ def test_ranker_client_builds_from_env(coord: Coordinator, monkeypatch) -> None:
     coord._proposal_scorer = None  # type: ignore[attr-defined]
     monkeypatch.setenv("SAFE_API_KEY", "sk-test")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://gateway.example/v1")
-    client = coord._framework_pr_ranker_client()
+    client = coord._framework_agent_ranker_client()
     assert client is not None
     # Cached on the instance after a successful build.
-    assert coord._framework_pr_ranker_client() is client
+    assert coord._framework_agent_ranker_client() is client
 
 
 # --------------------------------------------------------------------------
-# _select_best_framework_pr_candidate / _rank_framework_pr_candidates_llm
+# _select_best_framework_agent_candidate / _rank_framework_agent_candidates_llm
 # --------------------------------------------------------------------------
 class _FakeDelta:
     def __init__(self, content: str | None) -> None:
@@ -398,48 +398,48 @@ class _FakeClient:
 
 
 def _install_ranker(coord: Coordinator, monkeypatch, client) -> None:
-    monkeypatch.setattr(coord, "_framework_pr_ranker_client", lambda: client)
-    monkeypatch.setattr(coord, "_framework_pr_ranker_model", lambda: "m")
+    monkeypatch.setattr(coord, "_framework_agent_ranker_client", lambda: client)
+    monkeypatch.setattr(coord, "_framework_agent_ranker_model", lambda: "m")
 
 
 @pytest.mark.asyncio
 async def test_select_best_empty_and_single(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord, "_unprocessed_framework_pr_candidates", lambda: [])
-    assert await coord._select_best_framework_pr_candidate() is None
+    monkeypatch.setattr(coord, "_unprocessed_framework_agent_candidates", lambda: [])
+    assert await coord._select_best_framework_agent_candidate() is None
     only = {"candidate_id": "solo"}
-    monkeypatch.setattr(coord, "_unprocessed_framework_pr_candidates", lambda: [only])
-    assert await coord._select_best_framework_pr_candidate() is only
+    monkeypatch.setattr(coord, "_unprocessed_framework_agent_candidates", lambda: [only])
+    assert await coord._select_best_framework_agent_candidate() is only
 
 
 @pytest.mark.asyncio
 async def test_select_best_ranker_picks(coord: Coordinator, monkeypatch) -> None:
     cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
-    monkeypatch.setattr(coord, "_unprocessed_framework_pr_candidates", lambda: cands)
+    monkeypatch.setattr(coord, "_unprocessed_framework_agent_candidates", lambda: cands)
     _install_ranker(coord, monkeypatch, _FakeClient('{"candidate_id": "c2", "reason": "moe"}'))
-    chosen = await coord._select_best_framework_pr_candidate()
+    chosen = await coord._select_best_framework_agent_candidate()
     assert chosen["candidate_id"] == "c2"
 
 
 @pytest.mark.asyncio
 async def test_select_best_ranker_failure_falls_back(coord: Coordinator, monkeypatch) -> None:
     cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
-    monkeypatch.setattr(coord, "_unprocessed_framework_pr_candidates", lambda: cands)
+    monkeypatch.setattr(coord, "_unprocessed_framework_agent_candidates", lambda: cands)
 
     async def _raise(_c):
         raise RuntimeError("rank boom")
 
-    monkeypatch.setattr(coord, "_rank_framework_pr_candidates_llm", _raise)
-    chosen = await coord._select_best_framework_pr_candidate()
+    monkeypatch.setattr(coord, "_rank_framework_agent_candidates_llm", _raise)
+    chosen = await coord._select_best_framework_agent_candidate()
     assert chosen["candidate_id"] == "c1"  # deterministic fallback (discovery order)
 
 
 @pytest.mark.asyncio
 async def test_rank_llm_no_client_or_model(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord, "_framework_pr_ranker_client", lambda: None)
-    assert await coord._rank_framework_pr_candidates_llm([{"candidate_id": "c1"}]) is None
-    monkeypatch.setattr(coord, "_framework_pr_ranker_client", lambda: _FakeClient("{}"))
-    monkeypatch.setattr(coord, "_framework_pr_ranker_model", lambda: "")
-    assert await coord._rank_framework_pr_candidates_llm([{"candidate_id": "c1"}]) is None
+    monkeypatch.setattr(coord, "_framework_agent_ranker_client", lambda: None)
+    assert await coord._rank_framework_agent_candidates_llm([{"candidate_id": "c1"}]) is None
+    monkeypatch.setattr(coord, "_framework_agent_ranker_client", lambda: _FakeClient("{}"))
+    monkeypatch.setattr(coord, "_framework_agent_ranker_model", lambda: "")
+    assert await coord._rank_framework_agent_candidates_llm([{"candidate_id": "c1"}]) is None
 
 
 @pytest.mark.asyncio
@@ -450,14 +450,14 @@ async def test_rank_llm_success_with_audit_and_context(coord: Coordinator, monke
         {"candidate_id": "c2", "title": "t2"},
     ]
     _install_ranker(coord, monkeypatch, _FakeClient('```json\n{"candidate_id": "c1", "reason": "ok"}\n```'))
-    chosen = await coord._rank_framework_pr_candidates_llm(cands)
+    chosen = await coord._rank_framework_agent_candidates_llm(cands)
     assert chosen["candidate_id"] == "c1"
 
 
 @pytest.mark.asyncio
 async def test_rank_llm_call_raises(coord: Coordinator, monkeypatch) -> None:
     _install_ranker(coord, monkeypatch, _FakeClient("", raise_exc=True))
-    assert await coord._rank_framework_pr_candidates_llm([{"candidate_id": "c1"}, {"candidate_id": "c2"}]) is None
+    assert await coord._rank_framework_agent_candidates_llm([{"candidate_id": "c1"}, {"candidate_id": "c2"}]) is None
 
 
 @pytest.mark.asyncio
@@ -465,20 +465,20 @@ async def test_rank_llm_empty_and_unknown_id(coord: Coordinator, monkeypatch) ->
     cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
     # Empty reply -> None.
     _install_ranker(coord, monkeypatch, _FakeClient("   "))
-    assert await coord._rank_framework_pr_candidates_llm(cands) is None
+    assert await coord._rank_framework_agent_candidates_llm(cands) is None
     # Valid JSON but unknown id -> None.
     _install_ranker(coord, monkeypatch, _FakeClient('{"candidate_id": "nope"}'))
-    assert await coord._rank_framework_pr_candidates_llm(cands) is None
+    assert await coord._rank_framework_agent_candidates_llm(cands) is None
     # Non-JSON text (no braces) -> None.
     _install_ranker(coord, monkeypatch, _FakeClient("no json here"))
-    assert await coord._rank_framework_pr_candidates_llm(cands) is None
+    assert await coord._rank_framework_agent_candidates_llm(cands) is None
 
 
 # --------------------------------------------------------------------------
 # _dispatch_paused_for_phase_budget
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
-# framework_pr._materialize_pr_diff_via_worktree (scripted _run_git)
+# framework._materialize_pr_diff_via_worktree (scripted _run_git)
 # --------------------------------------------------------------------------
 def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = True, worktree_add_ok: bool = True):
     def _fake(args, timeout=None):  # noqa: ANN001
@@ -573,7 +573,7 @@ async def test_phase_audit_request_optional_fields(monkeypatch, tmp_path) -> Non
 
 
 # --------------------------------------------------------------------------
-# framework_pr_artifacts.write_semantic_audit error path
+# framework_agent_artifacts.write_semantic_audit error path
 # --------------------------------------------------------------------------
 def test_write_semantic_audit_error_returns_none(tmp_path) -> None:
     # Pass a FILE as the session dir so the runs_dir mkdir fails -> exception path.
@@ -623,15 +623,15 @@ def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> Non
 
 
 # --------------------------------------------------------------------------
-# _maybe_autosubmit_framework_pr_config
+# _maybe_autosubmit_framework_config
 # --------------------------------------------------------------------------
 def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
     return types.SimpleNamespace(
         task_id=task_id,
         params={
-            "framework_pr_authoring": True,
-            "framework_pr_candidate_id": "cand-1",
-            "framework_pr_batch_id": "batch-1",
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "cand-1",
+            "framework_batch_id": "batch-1",
         },
     )
 
@@ -639,13 +639,13 @@ def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
 @pytest.mark.asyncio
 async def test_autosubmit_config_not_authoring_returns(coord: Coordinator) -> None:
     task = types.SimpleNamespace(task_id="x", params={})
-    await coord._maybe_autosubmit_framework_pr_config(task=task, done_payload={})
+    await coord._maybe_autosubmit_framework_config(task=task, done_payload={})
     assert not coord.state.pending_proposals
 
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -> None:
-    await coord._maybe_autosubmit_framework_pr_config(
+    await coord._maybe_autosubmit_framework_config(
         task=_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
     )
@@ -654,7 +654,7 @@ async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
-    await coord._maybe_autosubmit_framework_pr_config(
+    await coord._maybe_autosubmit_framework_config(
         task=_authoring_task(),
         done_payload={"proposal_set": [{"name": "n"}]},  # no extra_args/envs -> no levers
     )
@@ -669,13 +669,13 @@ async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -
         ]
     }
     before = len(coord.state.pending_proposals)
-    await coord._maybe_autosubmit_framework_pr_config(task=_authoring_task(), done_payload=done)
+    await coord._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     assert prop.action_name == "integrate_patch"
     params = (prop.payload or {}).get("params") or {}
-    assert params["framework_pr_authoring"] is True
-    assert params["framework_pr_candidate_id"] == "cand-1"
+    assert params["framework_agent_authoring"] is True
+    assert params["framework_agent_candidate_id"] == "cand-1"
     assert params["config_changes"]["VLLM_MTP"] == "1"
     assert params["config_changes"]["--speculative"] == "4"
 
@@ -686,36 +686,36 @@ async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinat
         coord.shared_state, "get_specialist_patch_verdict", lambda _sid: "approve", raising=False
     )
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
-    await coord._maybe_autosubmit_framework_pr_config(task=_authoring_task(), done_payload=done)
+    await coord._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
     assert not coord.state.pending_proposals
 
 
 # --------------------------------------------------------------------------
-# _record_framework_pr_authored_outcome
+# _record_framework_agent_authored_outcome
 # --------------------------------------------------------------------------
 def test_record_authored_outcome_non_dict_and_empty_status(coord: Coordinator) -> None:
     # result.result not a dict -> no-op.
-    coord._record_framework_pr_authored_outcome(
+    coord._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result=None),
     )
     # empty status -> no-op.
-    coord._record_framework_pr_authored_outcome(
+    coord._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result={"status": ""}),
     )
-    assert not (coord.shared_state.framework_pr_phase_progress or [])
+    assert not (coord.shared_state.framework_agent_phase_progress or [])
 
 
 def test_record_authored_outcome_kept_rolls_batch_stat(coord: Coordinator) -> None:
-    coord.shared_state.framework_pr_batches = [{"batch_id": "batch-1"}]
-    coord.shared_state.framework_pr_phase_progress = []
+    coord.shared_state.framework_agent_batches = [{"batch_id": "batch-1"}]
+    coord.shared_state.framework_agent_phase_progress = []
     task = types.SimpleNamespace(
         task_id="ip-1",
         params={
             "specialist_task_id": "spec-1",
-            "framework_pr_candidate_id": "cand-1",
-            "framework_pr_batch_id": "batch-1",
+            "framework_agent_candidate_id": "cand-1",
+            "framework_batch_id": "batch-1",
         },
     )
     result = types.SimpleNamespace(
@@ -727,51 +727,51 @@ def test_record_authored_outcome_kept_rolls_batch_stat(coord: Coordinator) -> No
             "accuracy_pass": True,
         }
     )
-    coord._record_framework_pr_authored_outcome(task=task, result=result)
-    rows = coord.shared_state.framework_pr_phase_progress
+    coord._record_framework_agent_authored_outcome(task=task, result=result)
+    rows = coord.shared_state.framework_agent_phase_progress
     assert rows[-1]["candidate_id"] == "cand-1"
     assert rows[-1]["status"] == "kept" and rows[-1]["kept"] is True
     assert rows[-1]["gain_pct"] == 4.5
-    assert coord.shared_state.framework_pr_batches[0]["max_gain_pct_observed_in_batch"] == 4.5
+    assert coord.shared_state.framework_agent_batches[0]["max_gain_pct_observed_in_batch"] == 4.5
 
 
 def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Coordinator) -> None:
-    coord.shared_state.framework_pr_specialist_candidate_map = {"spec-9": "cand-from-map"}
-    coord.shared_state.framework_pr_batches = [{"batch_id": "latest-batch"}]
-    coord.shared_state.framework_pr_phase_progress = []
+    coord.shared_state.framework_agent_specialist_candidate_map = {"spec-9": "cand-from-map"}
+    coord.shared_state.framework_agent_batches = [{"batch_id": "latest-batch"}]
+    coord.shared_state.framework_agent_phase_progress = []
     task = types.SimpleNamespace(task_id="ip-9", params={"specialist_task_id": "spec-9"})
     result = types.SimpleNamespace(result={"status": "reverted", "delta_pct": -1.0})
-    coord._record_framework_pr_authored_outcome(task=task, result=result)
-    row = coord.shared_state.framework_pr_phase_progress[-1]
+    coord._record_framework_agent_authored_outcome(task=task, result=result)
+    row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-from-map"
     assert row["batch_id"] == "latest-batch"
     assert row["status"] == "reverted"
 
 
 # --------------------------------------------------------------------------
-# _record_framework_pr_authoring_empty_outcome
+# _record_framework_agent_authoring_empty_outcome
 # --------------------------------------------------------------------------
 def _enter_fpr(coord: Coordinator) -> None:
-    coord.shared_state.phase = ps_mod.PHASE_FRAMEWORK_PR
+    coord.shared_state.phase = ps_mod.PHASE_FRAMEWORK_AGENT
 
 
 def test_record_authoring_empty_guards(coord: Coordinator) -> None:
     _enter_fpr(coord)
     # Not authoring -> no-op.
-    coord._record_framework_pr_authoring_empty_outcome(
+    coord._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(task_id="t", params={}), done_payload={}
     )
     # Patch present -> no-op (integrate_patch will own the row).
-    coord._record_framework_pr_authoring_empty_outcome(
+    coord._record_framework_agent_authoring_empty_outcome(
         task=_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
     )
     # Config-lever deliverable -> no-op (config autosubmit owns the row).
-    coord._record_framework_pr_authoring_empty_outcome(
+    coord._record_framework_agent_authoring_empty_outcome(
         task=_authoring_task(),
         done_payload={"proposal_set": [{"extra_envs": {"X": "1"}}]},
     )
-    assert not (coord.shared_state.framework_pr_phase_progress or [])
+    assert not (coord.shared_state.framework_agent_phase_progress or [])
 
 
 def test_record_authoring_empty_already_present(coord: Coordinator) -> None:
@@ -779,49 +779,49 @@ def test_record_authoring_empty_already_present(coord: Coordinator) -> None:
     task = types.SimpleNamespace(
         task_id="spec-2",
         params={
-            "framework_pr_authoring": True,
-            "framework_pr_candidate_id": "cand-2",
-            "framework_pr_batch_id": "b1",
-            "framework_pr_audit": {"semantic_status": "already_equivalent"},
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "cand-2",
+            "framework_batch_id": "b1",
+            "framework_audit": {"semantic_status": "already_equivalent"},
         },
     )
-    coord._record_framework_pr_authoring_empty_outcome(
+    coord._record_framework_agent_authoring_empty_outcome(
         task=task, done_payload={"payload": {"patches_written": [], "summary": "already there"}}
     )
-    row = coord.shared_state.framework_pr_phase_progress[-1]
+    row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-2"
     assert row["status"] == "already_present"
     # Idempotent: a second call does not append a duplicate.
-    coord._record_framework_pr_authoring_empty_outcome(
+    coord._record_framework_agent_authoring_empty_outcome(
         task=task, done_payload={"payload": {"patches_written": [], "summary": "again"}}
     )
-    assert sum(1 for p in coord.shared_state.framework_pr_phase_progress if p["candidate_id"] == "cand-2") == 1
+    assert sum(1 for p in coord.shared_state.framework_agent_phase_progress if p["candidate_id"] == "cand-2") == 1
 
 
 def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
     _enter_fpr(coord)
-    coord.shared_state.framework_pr_phase_progress = []
+    coord.shared_state.framework_agent_phase_progress = []
     # not_present -> not_applicable.
-    coord._record_framework_pr_authoring_empty_outcome(
+    coord._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(
             task_id="s-a",
             params={
-                "framework_pr_authoring": True,
-                "framework_pr_candidate_id": "na-1",
-                "framework_pr_audit": {"semantic_status": "not_present"},
+                "framework_agent_authoring": True,
+                "framework_agent_candidate_id": "na-1",
+                "framework_audit": {"semantic_status": "not_present"},
             },
         ),
         done_payload={"patches_written": [], "summary": "missing"},
     )
     # no audit -> author_empty.
-    coord._record_framework_pr_authoring_empty_outcome(
+    coord._record_framework_agent_authoring_empty_outcome(
         task=types.SimpleNamespace(
             task_id="s-b",
-            params={"framework_pr_authoring": True, "framework_pr_candidate_id": "ae-1"},
+            params={"framework_agent_authoring": True, "framework_agent_candidate_id": "ae-1"},
         ),
         done_payload={"patches_written": []},
     )
-    statuses = {p["candidate_id"]: p["status"] for p in coord.shared_state.framework_pr_phase_progress}
+    statuses = {p["candidate_id"]: p["status"] for p in coord.shared_state.framework_agent_phase_progress}
     assert statuses["na-1"] == "not_applicable"
     assert statuses["ae-1"] == "author_empty"
 
@@ -834,17 +834,17 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
 async def test_ranker_none_applicable_propagates_to_select(
     coord: Coordinator, monkeypatch
 ) -> None:
-    from inference_optimizer.orchestrator.coordinator import _FRAMEWORK_PR_NONE_APPLICABLE
+    from inference_optimizer.orchestrator.coordinator import _FRAMEWORK_AGENT_NONE_APPLICABLE
 
     cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
-    monkeypatch.setattr(coord, "_unprocessed_framework_pr_candidates", lambda: cands)
+    monkeypatch.setattr(coord, "_unprocessed_framework_agent_candidates", lambda: cands)
     _install_ranker(
         coord,
         monkeypatch,
         _FakeClient('{"applicable": false, "reason": "all off-arch"}'),
     )
-    result = await coord._select_best_framework_pr_candidate()
-    assert result is _FRAMEWORK_PR_NONE_APPLICABLE
+    result = await coord._select_best_framework_agent_candidate()
+    assert result is _FRAMEWORK_AGENT_NONE_APPLICABLE
 
 
 @pytest.mark.asyncio
@@ -853,13 +853,13 @@ async def test_pump_stamps_no_applicable_candidates_on_sentinel(
 ) -> None:
     import types as _types
 
-    from inference_optimizer.orchestrator.coordinator import _FRAMEWORK_PR_NONE_APPLICABLE
+    from inference_optimizer.orchestrator.coordinator import _FRAMEWORK_AGENT_NONE_APPLICABLE
 
     _enter_fpr(coord)
-    coord.shared_state.framework_pr_batches = [
+    coord.shared_state.framework_agent_batches = [
         {"batch_id": "bx", "candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}
     ]
-    coord.shared_state.framework_pr_phase_progress = []
+    coord.shared_state.framework_agent_phase_progress = []
 
     # Stub tasks so the pump's early-return guards pass without a real DB.
     _empty_tasks = _types.SimpleNamespace(
@@ -874,20 +874,20 @@ async def test_pump_stamps_no_applicable_candidates_on_sentinel(
     _empty_tasks.running = _empty_list
     monkeypatch.setattr(coord, "tasks", _empty_tasks)
 
-    # No pending proposals so the framework_pr proposal guard passes.
+    # No pending proposals so the framework_agent proposal guard passes.
     coord.state.pending_proposals = {}
 
     async def _none_applicable(_cands):
-        return _FRAMEWORK_PR_NONE_APPLICABLE
+        return _FRAMEWORK_AGENT_NONE_APPLICABLE
 
-    monkeypatch.setattr(coord, "_rank_framework_pr_candidates_llm", _none_applicable)
+    monkeypatch.setattr(coord, "_rank_framework_agent_candidates_llm", _none_applicable)
 
     from inference_optimizer.orchestrator.coordinator import Coordinator as _C
 
-    await _C._pump_framework_pr_phase(coord)  # type: ignore[arg-type]
+    await _C._pump_framework_agent_phase(coord)  # type: ignore[arg-type]
 
-    assert coord.shared_state.framework_pr_phase_done is True
+    assert coord.shared_state.framework_agent_phase_done is True
     history = coord.shared_state.phase_history
-    done_rows = [e for e in history if e.get("event") == "framework_pr_phase_done"]
+    done_rows = [e for e in history if e.get("event") == "framework_agent_phase_done"]
     assert done_rows, "expected a phase_done history row"
     assert done_rows[-1]["reason"] == "no_applicable_candidates"

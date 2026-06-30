@@ -291,7 +291,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
 
     # /v1/search/prs uses word-AND matching, so a long multi-keyword query can
     # filter the pool to zero even when relevant PRs exist. Fall back to
-    # label-only listing + client rerank so IO's --framework-pr-discover
+    # label-only listing + client rerank so IO's --framework-discover
     # doesn't abort with "no candidates".
     if not prs:
         prs = list_perf_prs(
@@ -304,7 +304,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
         )
 
     # Rank then trim; scores are carried on Candidate.score for IO's
-    # framework_pr arm to log.
+    # framework arm to log.
     ranked = _rank_by_keyword_overlap(prs, keywords)[:requested]
     return [
         _pr_to_candidate(

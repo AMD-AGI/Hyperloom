@@ -565,7 +565,7 @@ class TestRuntimeGeneratedKernel:
         if not markers:
             pytest.skip("no runtime markers in build")
         marker = next(iter(markers))
-        assert krh._is_runtime_generated_kernel("kernel", f"/tmp/{marker}_x.py") is True
+        assert krh._is_runtime_generated_kernel("kernel_agent", f"/tmp/{marker}_x.py") is True
 
     def test_reusable_source_root_overrides_compile_marker(self):
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
@@ -1143,12 +1143,12 @@ class TestDefaultGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
         [
-            (None, 130.0),  # unset -> full default
-            ("", 130.0),  # empty -> full default
-            ("full", 130.0),
-            ("FULL", 130.0),  # case-insensitive
-            ("  full  ", 130.0),  # whitespace tolerated
-            ("garbage", 130.0),  # unknown values fall back to full
+            (None, 180.0),  # unset -> full default
+            ("", 180.0),  # empty -> full default
+            ("full", 180.0),
+            ("FULL", 180.0),  # case-insensitive
+            ("  full  ", 180.0),  # whitespace tolerated
+            ("garbage", 180.0),  # unknown values fall back to full
             ("quick", 70.0),
             ("QUICK", 70.0),
             ("  quick  ", 70.0),
@@ -1176,7 +1176,7 @@ class TestGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
         [
-            ("full", 130.0),
+            ("full", 180.0),
             ("quick", 70.0),
         ],
     )
@@ -1194,7 +1194,7 @@ class TestGeakBudgetMinutes:
         # Pre-fix code would let "" propagate into ``float("")`` and raise.
         monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "")
         monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
-        assert krh._geak_budget_minutes({}) == 130.0
+        assert krh._geak_budget_minutes({}) == 180.0
 
 
 # _default_kernel_batch_parallel — adaptive batch fanout; the legacy 8

@@ -213,7 +213,7 @@ The quality gate format in bench output: `quality_gate_passed: true/false`. Chec
 
 ---
 
-## 7. Framework Agent Integration (FRAMEWORK_PR Phase)
+## 7. Framework Agent Integration (FRAMEWORK Phase)
 
 xDiT is fully supported by the Hyperloom framework agent's PR discovery and
 apply pipeline. Unlike serving frameworks (sglang/vllm), xDiT is a
@@ -235,7 +235,7 @@ apply pipeline. Unlike serving frameworks (sglang/vllm), xDiT is a
    the performance gaps (parallelism improvements, communication optimizations,
    compile mode changes, etc.).
 2. The Critic gate evaluates candidate relevance.
-3. `FrameworkPrExecutor` fetches the unified diff (via checkout-head worktree
+3. `FrameworkAgentExecutor` fetches the unified diff (via checkout-head worktree
    or `diff_url`), applies it to `/app/xDiT/` with `git apply`, and runs a
    Magpie benchmark against the patched source.
 4. **KEEP** (delta >= threshold): commits the patch to the live tree.
@@ -243,7 +243,7 @@ apply pipeline. Unlike serving frameworks (sglang/vllm), xDiT is a
 
 ### CLI Usage
 
-To enable framework agent PR discovery for xDiT sessions, omit `--no-framework`:
+To enable framework agent PR discovery for xDiT sessions, omit `--no-framework-agent`:
 
 ```bash
 python -m inference_optimizer.cli optimize \
@@ -256,7 +256,7 @@ python -m inference_optimizer.cli optimize \
     --max-hours 2
 ```
 
-The `--no-framework` flag disables the FRAMEWORK_PR phase entirely. Only use it
+The `--no-framework-agent` flag disables the FRAMEWORK_AGENT phase entirely. Only use it
 when the framework agent binary (`fa`) is unavailable or xDiT upstream PR
 exploration is not desired.
 

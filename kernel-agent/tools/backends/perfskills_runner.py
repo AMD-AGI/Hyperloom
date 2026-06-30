@@ -6,7 +6,7 @@
 This is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like GEAK's
 single-kernel loop). Its code lives in GEAK on the GEAK_v4 branch
 (``interface/run_e2e.py`` + ``e2e_workflow/``). Hyperloom invokes it ONCE at the
-KERNEL phase via the stable ``interface/run_e2e.py`` contract: we write a
+KERNEL_AGENT phase via the stable ``interface/run_e2e.py`` contract: we write a
 ``handoff.json`` (Hyperloom best config + workload), call the runner, and read
 back a ``result.json`` (optimized launch script + bench script + throughput +
 per-kernel report).

@@ -57,9 +57,9 @@ def test_exhausted_clusters_ignores_high_gain():
 
 def test_exhausted_clusters_none_gain():
     entries = [
-        _FakeEntry(outcome="REVERT", kind="kernel", change="patch_a"),
-        _FakeEntry(outcome="REVERT", kind="kernel", change="patch_a"),
-        _FakeEntry(outcome="REVERT", kind="kernel", change="patch_a"),
+        _FakeEntry(outcome="REVERT", kind="kernel_agent", change="patch_a"),
+        _FakeEntry(outcome="REVERT", kind="kernel_agent", change="patch_a"),
+        _FakeEntry(outcome="REVERT", kind="kernel_agent", change="patch_a"),
     ]
     dead = _exhausted_clusters(entries)
     assert len(dead) == 1

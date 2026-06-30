@@ -20,7 +20,7 @@ def _silent_coordinator(session_dir) -> Coordinator:
         session_dir,
         backends={
             "orchestration": MockBackend(silent, name="o"),
-            "kernel": MockBackend(silent, name="k"),
+            "kernel_agent": MockBackend(silent, name="k"),
             "critic": MockBackend(silent, name="c"),
             "robustness": MockBackend(silent, name="r"),
         },
@@ -288,7 +288,7 @@ def test_request_with_analysis_kind_is_denied(gate, action_name):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": action_name,
         },
     )

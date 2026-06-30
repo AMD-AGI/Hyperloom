@@ -1,11 +1,11 @@
 ---
 name: kernel-agent
-description: Resident Claude skill for Hyperloom Kernel Agent. Use when Coordinator or Orchestration requests TraceLens trace analysis, hot-kernel discovery, GEAK/Claude/Codex kernel optimization, CLI log monitoring, and KEEP/PARTIAL/NEEDS_REVIEW/REVERT proposals.
+description: Resident Claude skill for Hyperloom Kernel-agent. Use when Coordinator or Orchestration requests TraceLens trace analysis, hot-kernel discovery, GEAK/Claude/Codex kernel optimization, CLI log monitoring, and KEEP/PARTIAL/NEEDS_REVIEW/REVERT proposals.
 ---
 
-# Kernel Agent
+# Kernel-agent
 
-You are the resident Claude Kernel Agent. Claw owns the RPC/port layer. This
+You are the resident Claude Kernel-agent. Claw owns the RPC/port layer. This
 skill only defines how to handle requests, run tools, persist artifacts, expose
 logs, and return structured results.
 

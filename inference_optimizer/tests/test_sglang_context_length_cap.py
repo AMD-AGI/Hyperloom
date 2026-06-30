@@ -191,6 +191,61 @@ def test_inject_uses_cap_below_native_window(tmp_path):
     assert _context_length_value(out) == 10240
 
 
+# --max-model-len clamp (#697): the injected --context-length must never exceed
+# the run's explicit --max-model-len, otherwise sglang gets a self-contradictory
+# config (context-length above the configured max).
+def test_inject_clamps_to_max_model_len(tmp_path):
+    """#697 repro: a huge native window + ISL/OSL whose cap exceeds an explicit
+    --max-model-len must clamp --context-length down to --max-model-len."""
+    model = _write_model(tmp_path, _HUGE_MAX_POS)
+    # cap = 80000 + 2000 + 2048 = 84048, but max_model_len pins the ceiling.
+    out = inject_sglang_context_length(
+        "", "sglang", model, 80000, 2000, max_model_len=82000
+    )
+    assert _context_length_value(out) == 82000
+
+
+def test_inject_max_model_len_above_cap_is_noop(tmp_path):
+    """A max-model-len larger than the workload cap leaves the cap untouched."""
+    model = _write_model(tmp_path, _HUGE_MAX_POS)
+    # cap = 4096 + 4096 + 2048 = 10240 < max_model_len -> cap wins.
+    out = inject_sglang_context_length(
+        "", "sglang", model, 4096, 4096, max_model_len=131072
+    )
+    assert _context_length_value(out) == 10240
+
+
+def test_inject_native_window_still_wins_when_smallest(tmp_path):
+    """When max_position_embeddings is the smallest ceiling it still wins."""
+    model = _write_model(tmp_path, 4096)
+    out = inject_sglang_context_length(
+        "", "sglang", model, 80000, 2000, max_model_len=82000
+    )
+    assert _context_length_value(out) == 4096
+
+
+@pytest.mark.parametrize("bad", [None, 0, -1])
+def test_inject_ignores_absent_or_nonpositive_max_model_len(tmp_path, bad):
+    """An unset / non-positive max-model-len falls back to the prior behaviour."""
+    model = _write_model(tmp_path, _HUGE_MAX_POS)
+    out = inject_sglang_context_length(
+        "", "sglang", model, 4096, 4096, max_model_len=bad
+    )
+    assert _context_length_value(out) == 10240
+
+
+def test_materialize_sglang_clamps_context_length_to_max_model_len(tmp_path, monkeypatch):
+    """#697 end-to-end: an explicit MAX_MODEL_LEN env caps the injected
+    --context-length at the production choke point."""
+    model = _write_model(tmp_path, _HUGE_MAX_POS)
+    monkeypatch.setenv("ISL", "80000")
+    monkeypatch.setenv("OSL", "2000")
+    monkeypatch.setenv("MAX_MODEL_LEN", "82000")
+    envs = _materialize_envs(tmp_path, framework="sglang", model=model)
+    sglang_args = envs["EXTRA_SGLANG_ARGS"]
+    assert _context_length_value(sglang_args) == 82000
+
+
 @pytest.mark.parametrize(
     "existing",
     [

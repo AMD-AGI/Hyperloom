@@ -1178,7 +1178,7 @@ class IntegratePatchExecutor:
         if patch_paths and framework_root is None:
             return {
                 "status": "apply_failed",
-                "error_class": "no_framework_root",
+                "error_class": "no_framework_agent_root",
                 "error": (
                     "no framework_source_root resolved; cannot apply "
                     "patches. Configure $INFERENCEX_PATH or pass "
@@ -1195,7 +1195,7 @@ class IntegratePatchExecutor:
         if patch_paths and framework_root is not None:
             missing_records = _preflight_missing_targets(framework_root, patch_paths)
             if missing_records:
-                await self._maybe_write_framework_pr_kb_record(
+                await self._maybe_write_framework_kb_record(
                     done_payload=done_payload,
                     outcome="rejected_apply_fail",
                     tps_delta_pct=0.0,
@@ -1302,7 +1302,7 @@ class IntegratePatchExecutor:
         if apply_errors:
             # Mid-apply failure — reverse the partial set back to clean.
             reverted = self._revert_patches(framework_root, applied)
-            await self._maybe_write_framework_pr_kb_record(
+            await self._maybe_write_framework_kb_record(
                 done_payload=done_payload,
                 outcome="rejected_apply_fail",
                 tps_delta_pct=0.0,
@@ -1330,7 +1330,7 @@ class IntegratePatchExecutor:
             if artifact_apply_errors:
                 self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
-                await self._maybe_write_framework_pr_kb_record(
+                await self._maybe_write_framework_kb_record(
                     done_payload=done_payload,
                     outcome="rejected_apply_fail",
                     tps_delta_pct=0.0,
@@ -1460,9 +1460,9 @@ class IntegratePatchExecutor:
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
         # KEEP requires delta_pct ≥ keep_threshold AND the accuracy gate.
         # Step 4 / Q5: framework-authored source patches require the accuracy
-        # gate (gated on the framework_pr authoring markers so generic EXPLORE
+        # gate (gated on the framework authoring markers so generic EXPLORE
         # integrate_patch keeps its prior throughput-only behaviour).
-        fw_authored = bool(params.get("framework_pr_authoring") or params.get("framework_pr_candidate_id"))
+        fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
         acc_required = bool(params.get("require_accuracy_for_keep", fw_authored))
         acc_baseline = params.get("accuracy_baseline")
         if acc_required and not acc_baseline:
@@ -1498,7 +1498,7 @@ class IntegratePatchExecutor:
             revert_status = (
                 "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and _tput_ok) else "reverted"
             )
-            await self._maybe_write_framework_pr_kb_record(
+            await self._maybe_write_framework_kb_record(
                 done_payload=done_payload,
                 outcome="reverted_smoke_fail",
                 tps_delta_pct=float(delta_pct or 0.0),
@@ -1560,7 +1560,7 @@ class IntegratePatchExecutor:
                     if (rb_acc_block and confirm["accuracy_pass"] is None and confirm["stable"])
                     else "reverted"
                 )
-                await self._maybe_write_framework_pr_kb_record(
+                await self._maybe_write_framework_kb_record(
                     done_payload=done_payload,
                     outcome="reverted_smoke_fail",
                     tps_delta_pct=float(delta_pct or 0.0),
@@ -1590,7 +1590,7 @@ class IntegratePatchExecutor:
             if confirm["accuracy_pass"] is not None:
                 accuracy_pass = confirm["accuracy_pass"]
 
-        await self._maybe_write_framework_pr_kb_record(
+        await self._maybe_write_framework_kb_record(
             done_payload=done_payload,
             outcome="integrated",
             tps_delta_pct=float(delta_pct or 0.0),
@@ -1634,11 +1634,11 @@ class IntegratePatchExecutor:
 
     # Helpers
     @staticmethod
-    def _find_framework_pr_proposal(
+    def _find_frameworkoposal(
         done_payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         """Return the first proposal whose provenance starts with
-        ``specialist:serving:framework_pr`` (F2-5); ``None`` otherwise so
+        ``specialist:serving:framework`` (F2-5); ``None`` otherwise so
         the KB writeback hook no-ops for legacy / kernel outputs.
 
         Args:
@@ -1646,7 +1646,7 @@ class IntegratePatchExecutor:
                 ``None``.
 
         Returns:
-            The matching framework_pr proposal dict, or ``None`` when absent.
+            The matching framework proposal dict, or ``None`` when absent.
         """
         if not isinstance(done_payload, dict):
             return None
@@ -1657,11 +1657,11 @@ class IntegratePatchExecutor:
             if not isinstance(proposal, dict):
                 continue
             provenance = str(proposal.get("provenance") or "")
-            if provenance.startswith("specialist:serving:framework_pr"):
+            if provenance.startswith("specialist:serving:framework"):
                 return proposal
         return None
 
-    async def _maybe_write_framework_pr_kb_record(
+    async def _maybe_write_framework_kb_record(
         self,
         *,
         done_payload: dict[str, Any] | None,
@@ -1670,7 +1670,7 @@ class IntegratePatchExecutor:
         extra: dict[str, Any],
     ) -> None:
         """Append a JSONL record to ``lessons.jsonl`` when the patch
-        came from the FRAMEWORK_PR phase.
+        came from the FRAMEWORK_AGENT phase.
 
         No-op for other provenance or when both dedup keys (``fa_pr_url`` /
         ``fa_pr_sha``) are missing. Write errors are logged + swallowed.
@@ -1683,14 +1683,14 @@ class IntegratePatchExecutor:
             extra: The runner ``extra`` mapping (provides shared state /
                 session id).
         """
-        proposal = self._find_framework_pr_proposal(done_payload)
+        proposal = self._find_frameworkoposal(done_payload)
         if proposal is None:
             return
         pr_url = str(proposal.get("fa_pr_url") or "").strip()
         pr_sha = str(proposal.get("fa_pr_sha") or "").strip()
         if not pr_url and not pr_sha:
             log.warning(
-                "integrate_patch: framework_pr proposal lacks both fa_pr_url and fa_pr_sha; KB writeback skipped",
+                "integrate_patch: framework proposal lacks both fa_pr_url and fa_pr_sha; KB writeback skipped",
             )
             return
         patches_written = proposal.get("patches_written") or []
@@ -1702,9 +1702,9 @@ class IntegratePatchExecutor:
         if shared_state is not None:
             session_id = str(getattr(shared_state, "cortex_session_id", "") or "")
         try:
-            from ..kb_writeback import write_framework_pr_record
+            from ..kb_writeback import write_framework_record
 
-            written = await write_framework_pr_record(
+            written = await write_framework_record(
                 pr_url=pr_url,
                 pr_sha=pr_sha,
                 patch_path=patch_path,
@@ -1713,7 +1713,7 @@ class IntegratePatchExecutor:
                 session_id=session_id,
             )
             log.info(
-                "integrate_patch: wrote framework_pr KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
+                "integrate_patch: wrote framework KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
                 written,
                 outcome,
                 pr_url,
@@ -1721,7 +1721,7 @@ class IntegratePatchExecutor:
             )
         except Exception as exc:  # noqa: BLE001 — KB write is best-effort
             log.warning(
-                "integrate_patch: framework_pr KB writeback failed: %r",
+                "integrate_patch: framework KB writeback failed: %r",
                 exc,
             )
 
@@ -1957,7 +1957,7 @@ class IntegratePatchExecutor:
             ``{"RUN_EVAL": "true"}`` for framework-authored patches that have a
             positive baseline accuracy to compare against, else ``None``.
         """
-        fw_authored = bool(params.get("framework_pr_authoring") or params.get("framework_pr_candidate_id"))
+        fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
         try:
             baseline = float(params.get("accuracy_baseline") or 0.0)
         except (TypeError, ValueError):

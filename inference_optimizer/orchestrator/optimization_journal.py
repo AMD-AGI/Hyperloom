@@ -37,9 +37,10 @@ KIND_BACKEND: str = "backend"  # --attention-backend, kv_cache_dtype, ...
 KIND_PARAM: str = "param"  # --max-num-batched-tokens, --gpu-memory-utilization, ...
 KIND_ENV: str = "env"  # ROCm / vLLM env vars
 KIND_KERNEL_FILE: str = "kernel_file"  # kernel-opt patch on a specific file
-KIND_INTEGRATE: str = "integrate"  # framework PR / patch integration
+KIND_INTEGRATE: str = "integrate"  # framework / patch integration
 KIND_BASELINE: str = "baseline"
 KIND_PROFILE: str = "profile"
+KIND_GEMM_TUNING: str = "gemm_tuning"  # adopted GEMM-tuning run (GEAK / forge)
 KIND_OTHER: str = "other"
 
 
@@ -390,7 +391,7 @@ def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) 
 # operation_kind: a single stable, filterable label for "what this step did".
 # Reuses the change-kind vocabulary but renames the two kernel kinds to the
 # action names dashboards/traces filter on, and falls back to the raw action
-# for non-explore steps (baseline / profile / roofline / sweep / framework_pr).
+# for non-explore steps (baseline / profile / roofline / sweep / framework).
 _OP_KIND_RENAME: dict[str, str] = {
     KIND_KERNEL_FILE: "kernel_opt",
     KIND_INTEGRATE: "kernel_integrate",
@@ -489,6 +490,7 @@ __all__ = [
     "KIND_BACKEND",
     "KIND_BASELINE",
     "KIND_ENV",
+    "KIND_GEMM_TUNING",
     "KIND_INTEGRATE",
     "KIND_KERNEL_FILE",
     "KIND_OTHER",

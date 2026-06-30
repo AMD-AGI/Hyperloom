@@ -287,7 +287,7 @@ def _build_orchestration_prompt(
     objective: Objective,
     max_minutes: int,
     no_explore: bool = False,
-    no_framework: bool = False,
+    no_framework_agent: bool = False,
     action_registry: ActionRegistry | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
@@ -298,7 +298,7 @@ def _build_orchestration_prompt(
         objective (Objective): The run objective summarised into the prompt.
         max_minutes (int): The wall-clock budget in minutes.
         no_explore (bool): When ``True`` the EXPLORE phase is disabled.
-        no_framework (bool): When ``True`` the FRAMEWORK_PR phase is disabled.
+        no_framework_agent (bool): When ``True`` the FRAMEWORK_AGENT phase is disabled.
         action_registry (ActionRegistry | None): The action registry to use;
             a fresh loaded registry is built when ``None``.
 
@@ -314,7 +314,7 @@ def _build_orchestration_prompt(
         framework=framework,
         kernel_enabled=not no_kernel,
         explore_enabled=not no_explore,
-        framework_phase_enabled=not no_framework,
+        framework_agent_phase_enabled=not no_framework_agent,
         objective_kind=kind,
         objective_value=value,
         max_minutes=int(max_minutes),
@@ -333,7 +333,7 @@ def _load_critic_prompt() -> str:
 
 
 _DEFAULT_KERNEL_PROMPT = (
-    "You are the Kernel agent — responder-only. You receive `request`\n"
+    "You are the Kernel-agent — responder-only. You receive `request`\n"
     "events from Orchestration in your inbox.\n\n"
     "For every un-answered request, emit ONE `response` intent in reply.\n"
     "Schema:\n"
@@ -367,7 +367,18 @@ _CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, _CLAUDE_FALLBACK_MODEL)
 # Catalog probe retry contract: gateway is documented-flaky. Sleep N seconds before attempt i+1;
 # len(_CATALOG_RETRY_DELAYS_SEC) is the retry count after the initial attempt.
 _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
-_CATALOG_REQUEST_TIMEOUT_SEC = 5.0
+# Per-attempt read timeout for the gateway /models catalog probe. The AMD
+# gateway is documented-flaky; on slow/borderline days a healthy /models call
+# can take ~5.5s, straddling this cutoff and causing spurious "gateway catalog
+# unreachable" launch refusals even though the gateway is up. Allow an operator
+# override via env (default unchanged at 5.0s) for slow-gateway windows.
+try:
+    _CATALOG_REQUEST_TIMEOUT_SEC = float(
+        os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_TIMEOUT_SEC", "5.0")
+        or "5.0"
+    )
+except (TypeError, ValueError):
+    _CATALOG_REQUEST_TIMEOUT_SEC = 5.0
 
 # /dev/shm threshold: below this, next launch collides with stale vLLM/NCCL shm segments and hangs in zmq.
 _DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
@@ -757,8 +768,8 @@ def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
     operator points ``GEAK_BASE_URL`` at a reachable endpoint (e.g. a
     host-local reverse tunnel) AFTER install, the env override alone is not
     enough: the stale yaml still sends GEAK at the unreachable gateway and the
-    KERNEL phase burns budget on connection-error retries. Syncing the yaml in
-    place closes that gap so the kernel agent actually dials the operator's
+    KERNEL_AGENT phase burns budget on connection-error retries. Syncing the yaml in
+    place closes that gap so the Kernel-agent actually dials the operator's
     endpoint.
 
     Best-effort: returns ``False`` (never raises) when the path is empty, the
@@ -1130,11 +1141,11 @@ _TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_pyt
 def _tracelens_required_at_preflight(no_kernel: bool, enable_roofline: bool) -> bool:
     """Return whether the TraceLens CLI must be present at preflight (hard-fail).
 
-    TraceLens is reached both by the kernel agent AND by the PRELUDE/auto
+    TraceLens is reached both by the Kernel-agent AND by the PRELUDE/auto
     roofline (roofline -> trace_analyze -> TraceLens). ``enable_roofline``
     defaults True and is NOT disabled by ``--no-kernel``, so under ``--no-kernel``
     alone the PRELUDE roofline still invokes TraceLens. It is only truly unused
-    when the kernel role is off (``--no-kernel``) AND roofline is disabled; only
+    when the kernel_agent role is off (``--no-kernel``) AND roofline is disabled; only
     then may preflight degrade to WARN. Otherwise keep the hard-fail so a missing
     CLI fails fast at preflight instead of mid-run at the first roofline.
 
@@ -1572,7 +1583,7 @@ def _smoke_test_codex_model(
     """
     if catalog_ids is None:
         return
-    # Codex is needed by the Kernel agent (kernel-codex on) and the critic-agent review path.
+    # Codex is needed by the Kernel-agent (kernel-codex on) and the critic-agent review path.
     critic_uses_codex = args.critic_backend == "agent"
     needs_codex = critic_uses_codex or (args.kernel_codex and not getattr(args, "no_kernel", False))
     if not needs_codex:
@@ -1730,7 +1741,7 @@ def _preflight(
     # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
     # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the resolved
     # GEAK_BASE_URL above (operator tunnel override, or the gateway default)
-    # actually reaches the kernel agent instead of a stale install-time URL.
+    # actually reaches the Kernel-agent instead of a stale install-time URL.
     geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
     geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
     if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
@@ -2538,6 +2549,26 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
         )
 
 
+def _quantization_enabled_via_env() -> bool:
+    """Return ``True`` iff the deterministic quantization master switch is on.
+
+    Quantization is gated on ``$HYPERLOOM_QUANTIZE_ENABLED`` (truthy = ``1`` /
+    ``true`` / ``yes`` / ``on``, case-insensitive). This makes the on/off
+    decision a deterministic, frontend-settable env flag rather than something
+    an LLM agent infers from natural language. Anything else — including unset —
+    disables quantization.
+
+    Returns:
+        ``True`` when the env var is set to a recognized truthy value.
+    """
+    return os.environ.get("HYPERLOOM_QUANTIZE_ENABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 async def _run_quantization_prelude(args: argparse.Namespace) -> None:
     """Run the quantization-agent once before the optimization loop.
 
@@ -2604,6 +2635,22 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         return
     if getattr(args, "resume", False):
         print("Quantization prelude: skipped (--resume); using model from manifest.")
+        return
+
+    # Deterministic master switch: quantization runs ONLY when
+    # $HYPERLOOM_QUANTIZE_ENABLED is explicitly truthy. This decouples the
+    # on/off decision from any agent's natural-language judgement — even if a
+    # --quantize / --quantize-scheme flag reached us (e.g. an in-sandbox agent
+    # added it from the prompt), we refuse to quantize unless the env switch is
+    # on. Absent / false => skip and continue on the un-quantized model, made
+    # detectable via the QUANTIZATION_SKIPPED marker + $HYPERLOOM_QUANTIZATION_SKIPPED.
+    if not _quantization_enabled_via_env():
+        reason = "HYPERLOOM_QUANTIZE_ENABLED is not set to a truthy value"
+        os.environ["HYPERLOOM_QUANTIZATION_SKIPPED"] = reason
+        print(
+            f"QUANTIZATION_SKIPPED: {reason}; continuing optimization on the "
+            "un-quantized model. Set HYPERLOOM_QUANTIZE_ENABLED=1 to quantize."
+        )
         return
 
     from .paths import workspace_root
@@ -3016,22 +3063,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Honour persisted kernel_enabled on resume; CLI --no-kernel can still override.
         if not state.kernel_enabled:
             args.no_kernel = True
-            print("  kernel agent          : DISABLED (persisted from original run)")
-        # Same persistence contract for the FRAMEWORK_PR phase toggle.
-        if not bool(getattr(state, "framework_phase_enabled", True)):
-            args.no_framework = True
+            print("  Kernel-agent          : DISABLED (persisted from original run)")
+        # Same persistence contract for the FRAMEWORK_AGENT phase toggle.
+        if not bool(getattr(state, "framework_agent_phase_enabled", True)):
+            args.no_framework_agent = True
             print("  framework phase       : DISABLED (persisted from original run)")
-        elif bool(getattr(args, "no_framework", False)):
-            # Inverse (P2.d): honour --no-framework on resume only before FRAMEWORK_PR is entered.
+        elif bool(getattr(args, "no_framework_agent", False)):
+            # Inverse (P2.d): honour --no-framework-agent on resume only before FRAMEWORK is entered.
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
             if cur_phase in ("", "PRELUDE"):
-                state.framework_phase_enabled = False
+                state.framework_agent_phase_enabled = False
                 # Persist immediately; the later conditional save only runs on prior stop_reason/crash.
                 state.save(session_dir)
-                print("  framework phase       : DISABLING for resume (--no-framework + phase=PRELUDE)")
+                print("  framework phase       : DISABLING for resume (--no-framework-agent + phase=PRELUDE)")
             else:
                 print(
-                    f"  framework phase       : WARN --no-framework ignored; "
+                    f"  framework phase       : WARN --no-framework-agent ignored; "
                     f"session is already in phase={cur_phase!r} "
                     f"(cannot retroactively skip)"
                 )
@@ -3042,7 +3089,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         elif bool(getattr(args, "no_explore", False)):
             # Honour --no-explore on resume only before EXPLORE is entered.
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
-            if cur_phase in ("", "PRELUDE", "FRAMEWORK_PR"):
+            if cur_phase in ("", "PRELUDE", "FRAMEWORK"):
                 state.explore_enabled = False
                 print(f"  explore phase         : DISABLING for resume (--no-explore + phase={cur_phase or 'PRELUDE'})")
             else:
@@ -3308,7 +3355,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
     no_kernel = getattr(args, "no_kernel", False)
     no_explore = getattr(args, "no_explore", False)
-    no_framework = bool(getattr(args, "no_framework", False))
+    no_framework_agent = bool(getattr(args, "no_framework_agent", False))
     # Unconditional phase-toggle banner lines (mirror the kernel banner so all
     # three --no-xxx flags surface their ENABLED/DISABLED state at startup).
     if no_explore:
@@ -3318,10 +3365,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     else:
         print("Explore phase   : ENABLED")
-    if no_framework:
-        print("Framework phase : DISABLED (--no-framework)")
+    if no_framework_agent:
+        print("Framework-agent phase : DISABLED (--no-framework-agent)")
     else:
-        print("Framework phase : ENABLED")
+        print("Framework-agent phase : ENABLED")
     if no_explore and no_kernel:
         print(
             "WARNING: --no-explore and --no-kernel are both set; the run "
@@ -3497,7 +3544,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if no_kernel:
         from .orchestrator.agent_role import default_role_registry
 
-        role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel"}
+        role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel_agent"}
 
     coordinator = Coordinator(
         session_dir,
@@ -3551,7 +3598,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         or _build_orchestration_prompt(
             no_kernel=no_kernel,
             no_explore=no_explore,
-            no_framework=bool(getattr(args, "no_framework", False)),
+            no_framework_agent=bool(getattr(args, "no_framework_agent", False)),
             framework=framework_for_prompt,
             objective=objective,
             max_minutes=max_minutes_for_prompt,
@@ -3559,15 +3606,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
     if not no_kernel:
-        prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
+        prompts["kernel_agent"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
     # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
     try:
-        coordinator.framework_pr_discover_timeout_sec = float(
-            getattr(args, "framework_pr_discover_timeout_sec", 0.0) or 0.0
+        coordinator.framework_agent_discover_timeout_sec = float(
+            getattr(args, "framework_agent_discover_timeout_sec", 0.0) or 0.0
         )
     except (TypeError, ValueError):
-        coordinator.framework_pr_discover_timeout_sec = 0.0
+        coordinator.framework_agent_discover_timeout_sec = 0.0
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
     specialist_executor: "Any" = None
@@ -3634,6 +3681,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
         session_lock.release()
+        # Issue #464: crash-safe reports/final.json. Runs unconditionally and
+        # FIRST so a consumable machine-readable summary always exists even
+        # when the CLOSE sequencer never ran (time_exhausted / external
+        # SIGTERM) or its report task failed. Idempotent: a no-op when the
+        # full ReportExecutor already wrote final.json. coordinator.run's own
+        # finally has persisted state.json (with stop_reason) before we get
+        # here, so the fields are current.
+        try:
+            from .breakdown import write_minimal_final_json
+
+            final_json = write_minimal_final_json(session_dir)
+            print(f"Final summary     : {final_json}")
+        except Exception:  # noqa: BLE001 — safety net must never mask stop_reason
+            log.exception("crash-safe final.json write failed (non-fatal)")
         # End-of-session safety net: always materialize session_breakdown.json (best-effort; never mask stop_reason).
         # Skip when the CLOSE sequencer already wrote it (close_sequence_done is locked in CORE_STATE_FIELDS).
         sequencer_done = getattr(
@@ -4212,7 +4273,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-kernel",
         action="store_true",
         default=False,
-        help="Disable the Kernel agent entirely. The run will "
+        help="Disable the Kernel-agent entirely. The run will "
         "only do baseline + explore + sweep (pure "
         "parameter search). Useful when GEAK/OOB/GPU "
         "compile env is unavailable or you just want the "
@@ -4223,7 +4284,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Skip the EXPLORE phase entirely. PRELUDE (and "
-        "FRAMEWORK_PR, if enabled) route straight to KERNEL "
+        "FRAMEWORK, if enabled) route straight to KERNEL "
         "— or to SWEEP when --no-kernel is also set. Useful "
         "for a baseline -> kernel-only run, or to validate "
         "the current recipe via SWEEP without a serving-"
@@ -4242,7 +4303,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "stdout for stream-based parsers.",
     )
     opt.add_argument(
-        "--framework-pr-discover-timeout-sec",
+        "--framework-discover-timeout-sec",
         type=float,
         default=0.0,
         help="Override the per-call timeout for "
@@ -4250,17 +4311,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "framework_agent_client.DEFAULT_FA_PHASE_TIMEOUT_SEC "
         "(180s). The Coordinator retries discover up to "
         "DISCOVER_FAILURE_RETRY_LIMIT (3) consecutive "
-        "failures before marking FRAMEWORK_PR done.",
+        "failures before marking FRAMEWORK done.",
     )
     opt.add_argument(
-        "--no-framework",
+        "--no-framework-agent",
         action="store_true",
         default=os.environ.get(
             "INFERENCE_OPTIMIZER_NO_FRAMEWORK",
             "0",
         ).strip()
         in ("1", "true", "True", "TRUE", "yes"),
-        help="Skip the FRAMEWORK_PR phase (PRELUDE → EXPLORE "
+        help="Skip the FRAMEWORK_AGENT phase (PRELUDE → EXPLORE "
         "directly). The phase pre-scans upstream sglang/"
         "vllm PRs via framework-agent and lands KEPT "
         "patches before EXPLORE starts. Disable when "
@@ -4273,10 +4334,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--kernel-codex",
         action="store_true",
         default=True,
-        help="Use Codex backend for Kernel agent (default — faster). Pass --kernel-claude to switch.",
+        help="Use Codex backend for Kernel-agent (default — faster). Pass --kernel-claude to switch.",
     )
     opt.add_argument(
-        "--kernel-claude", action="store_false", dest="kernel_codex", help="Use Claude backend for Kernel agent"
+        "--kernel-claude", action="store_false", dest="kernel_codex", help="Use Claude backend for Kernel-agent"
     )
     # Critic backend selection; flags are aliases setting the same dest, default/conflicts resolved in _resolve_critic_choice.
     opt.add_argument(
@@ -4415,22 +4476,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
     opt.add_argument("--kernel-prompt", type=str, default=None, help="Override Kernel system prompt")
-    # Cortex KB integration flags
-    # Defaults wire Cortex on. --degraded-kb bypasses KB hooks; --cortex-kb-url overrides $CORTEX_KB_URL;
-    # --cortex-strict-fingerprint requires the manifest stack_fingerprint to match before warm_start.
+    # Cortex KB flag (Critic agent only)
+    # --degraded-kb bypasses KB hooks; --cortex-kb-url overrides $CORTEX_KB_URL.
     opt.add_argument(
         "--cortex-kb-url",
         dest="cortex_kb_url",
         type=str,
         default=None,
-        help="Remote recipe-snapshot KB URL (read-only) for this run; "
-        "also settable via $CORTEX_KB_URL. Leave it UNSET to run "
-        "fully local — there is no default endpoint, so the "
-        "optimizer never connects to a remote KB unless you pass "
-        "this explicitly. Writes always go to --local-kb-root "
-        "regardless; an explicitly-configured but unreachable URL "
-        "degrades the dispatcher to local-only transparently (no "
-        "need to also pass --degraded-kb).",
+        help="Cortex KB base URL for this run, used only by the Critic "
+        "agent's per-proposal assess enrichment (/v2/reasoning/assess); "
+        "also settable via $CORTEX_KB_URL. This is NOT the recipe KB — "
+        "recipe reads are served by gbrain ($GBRAIN_*) and writes always "
+        "go to --local-kb-root. Leave it UNSET to skip Critic assess "
+        "enrichment entirely.",
     )
     opt.add_argument(
         "--specialist-kb-mcp-url",

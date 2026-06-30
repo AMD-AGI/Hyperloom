@@ -130,7 +130,7 @@ def _cid(state: _FakeSharedState, workload: str, hw: str) -> str:
     return recipe_canonical_id(
         model=workload,
         hardware=hw,
-        framework=state.framework,
+        framework_name=state.framework,
         framework_version=state.framework_version,
         precision=state.precision,
         model_type=str(getattr(state, "model_type", "") or ""),
@@ -150,7 +150,7 @@ def test_t0_anchor_stamps_architecture_tags(kb: RecipeKB, tmp_path: Path) -> Non
         state,
         workload="Llama-3.1-8B-MyFinetune",
         hw="MI300X",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=sd,
     )
     row = kb.get_recipe(
@@ -173,7 +173,7 @@ def test_t0_anchor_skips_empty_architecture_tags(
         state,
         workload="m",
         hw="mi300x",
-        extra_attrs={"framework": "sglang"},
+        extra_attrs={"framework_name": "sglang"},
         session_dir=sd,
     )
     row = kb.get_recipe(canonical_id=_cid(state, "m", "mi300x"))

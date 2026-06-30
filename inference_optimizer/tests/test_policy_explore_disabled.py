@@ -12,7 +12,7 @@ import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.orchestrator.policy import PolicyDenied, PolicyGate
-from inference_optimizer.orchestrator.phase_state import PHASE_KERNEL
+from inference_optimizer.orchestrator.phase_state import PHASE_KERNEL_AGENT
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -44,7 +44,7 @@ def _delegate_explore() -> Intent:
 
 @pytest.mark.parametrize("strict_phase", [False, True])
 def test_kernel_explore_denied_when_explore_disabled(strict_phase):
-    state = SharedState(phase=PHASE_KERNEL, explore_enabled=False)
+    state = SharedState(phase=PHASE_KERNEL_AGENT, explore_enabled=False)
     gate = _gate(state, strict_phase=strict_phase)
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", _delegate_explore())
@@ -53,14 +53,14 @@ def test_kernel_explore_denied_when_explore_disabled(strict_phase):
 
 
 def test_kernel_explore_allowed_when_explore_enabled():
-    state = SharedState(phase=PHASE_KERNEL, explore_enabled=True)
+    state = SharedState(phase=PHASE_KERNEL_AGENT, explore_enabled=True)
     gate = _gate(state, strict_phase=False)
     # interleave enabled (fixture): explore is a valid KERNEL interleave action.
     gate.validate_intent("orchestration", _delegate_explore())
 
 
 def test_kernel_specialist_and_integrate_patch_still_allowed_when_no_explore():
-    state = SharedState(phase=PHASE_KERNEL, explore_enabled=False)
+    state = SharedState(phase=PHASE_KERNEL_AGENT, explore_enabled=False)
     gate = _gate(state, strict_phase=False)
     # specialist stays allowed (research feeds kernel patches).
     gate.validate_intent(
@@ -70,7 +70,7 @@ def test_kernel_specialist_and_integrate_patch_still_allowed_when_no_explore():
             payload={
                 "action_name": "specialist",
                 "params": {
-                    "tags": ["kernel"],
+                    "tags": ["kernel_agent"],
                     "gap_canonical_id": "gap.test.session-x",
                 },
             },
