@@ -3704,13 +3704,21 @@ def _run_combined_e2e_sync(
         return {"status": "error", "error": f"apply_and_bench import failed: {exc}"}
 
     cfg = _combined_e2e_serving_config(payload)
+    # Expose exactly the GPUs the serving TP needs. apply_and_bench sets
+    # HIP/ROCR_VISIBLE_DEVICES=gpu, so a hardcoded "0" with tp>1 makes the server
+    # request device ordinals that aren't visible -> "HIP error: invalid device
+    # ordinal" and a baseline_failed A/B. Map the first `tp` visible GPUs (clamped
+    # to n_gpus) so tp=8 serving gets "0,1,...,7".
+    _tp = int(cfg.get("tp") or 1)
+    _tp = max(1, min(_tp, int(n_gpus)))
+    _gpu_ids = ",".join(str(i) for i in range(_tp))
     kwargs: dict[str, Any] = dict(
         pairs=pairs,
         backup_root=str(session_dir / "e2e_backups"),
         model=model,
         out_dir=str(session_dir / "combined_e2e"),
         reps=int(payload.get("e2e_reps", 5)),
-        gpu="0",
+        gpu=_gpu_ids,
         aiter_rebuild=True,
     )
     # Only forward knobs we actually resolved; apply_and_bench has its own defaults.
@@ -3719,6 +3727,7 @@ def _run_combined_e2e_sync(
     for k in ("tp", "isl", "osl", "conc", "num_prompts"):
         if cfg.get(k) is not None:
             kwargs[k] = int(cfg[k])
+    kwargs["tp"] = _tp  # keep --tp consistent with the exposed GPU set
     log.info("combined_e2e: applying %d patch(es) -> E2E A/B (model=%s, cfg=%s)",
              len(pairs), model, cfg)
     try:
