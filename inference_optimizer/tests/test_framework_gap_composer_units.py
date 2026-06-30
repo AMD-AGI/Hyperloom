@@ -85,7 +85,7 @@ class TestExtractBottleneck:
             json.dumps(
                 {
                     "rows": [
-                        {"kernel_agent": "moe_ck_tile_fused"},
+                        {"kernel": "moe_ck_tile_fused"},
                     ]
                 }
             )
