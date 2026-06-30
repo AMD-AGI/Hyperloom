@@ -46,6 +46,7 @@ from ...model_config_utils import (
     _fp8_is_per_channel_per_token,
     _load_model_config_dict,
     _model_is_gemma2,
+    _model_is_gemma4,
 )
 
 log = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ _PROFILE_DEFAULT_OSL = 1024
 def _remove_moe_runner_backend_arg(args: str) -> str:
     """Remove any existing SGLang MoE runner backend flag from an args string."""
     return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
+
 
 # Warn once per process when the accuracy gate is disabled.
 _RUN_EVAL_DISABLED_WARN_EMITTED = False
@@ -762,7 +764,15 @@ def materialize_config_with_envs(
     # path once the agent knows the model loads — hence setdefault/merge,
     # never overwrite). Matched on the model basename so it fires for both
     # the HF repo id and the /wekafs/models/<org>-<repo> local path.
-    _model_basename = Path(str(model_path or os.environ.get("MODEL_PATH", ""))).name.lower()
+    _model_path_str = str(model_path or os.environ.get("MODEL_PATH", ""))
+    _model_basename = Path(_model_path_str).name.lower()
+    if "vllm" in str(bench.get("framework") or "").lower() and _model_is_gemma4(_model_path_str):
+        # Gemma4 MoE text path boots through vLLM's ROCm AITER unquantized MoE
+        # backend by default, which can abort during model-load with
+        # "device_gemm ... does not support this GEMM problem" on MI300X.
+        # Successful production retries used this narrower knob (instead of
+        # disabling all AITER) and preserved the rest of the vLLM stack.
+        envs.setdefault("VLLM_ROCM_USE_AITER_MOE", "0")
     if "kimi-k2" in _model_basename:
         # Kimi K2.x at tp8 (8 heads/GPU) takes sglang's ROCm
         # fused-decode-MLA path, whose RoPE kernel aborts during CUDA-graph
@@ -996,7 +1006,10 @@ def materialize_config_with_envs(
     # Hyperloom, strictly scoped to sglang + fp8 + gfx942 + that exact quant
     # scheme so per-tensor and block-scale FP8 are never touched. setdefault so
     # an operator-set value (YAML / extra_envs) always wins.
-    from ...cli import _resolve_amd_gpu_type
+    # Canonical single-source GPU resolver. ``cli_model_gate`` is stdlib-only
+    # (it must not import ``cli``), so this stays light enough for the hot path
+    # and unit tests while avoiding a second, drift-prone implementation.
+    from ...cli_model_gate import _resolve_amd_gpu_type
 
     _model_for_quant = str(model_path or os.environ.get("MODEL_PATH", ""))
     if (

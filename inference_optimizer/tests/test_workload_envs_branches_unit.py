@@ -6,6 +6,7 @@ sizing."""
 
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 
@@ -234,6 +235,48 @@ def test_inject_vllm_expert_parallel_unit(server_args, framework, ep, expected):
 
 
 # ---- per-model work-around: mimo-v2 ---------------------------------------
+def test_vllm_gemma4_disables_aiter_moe_by_default(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    model = tmp_path / "google-gemma-4-26B-A4B-it"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "gemma4",
+                "architectures": ["Gemma4ForConditionalGeneration"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    src = _write(tmp_path / "cfg.yaml", framework="vllm")
+
+    bench = _materialize(src, tmp_path / "out", model_path=str(model))
+
+    assert bench["envs"]["VLLM_ROCM_USE_AITER_MOE"] == "0"
+
+
+def test_vllm_gemma4_honors_explicit_aiter_moe_override(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    model = tmp_path / "google-gemma-4-26B-A4B-it"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps({"model_type": "gemma4"}),
+        encoding="utf-8",
+    )
+    src = _write(tmp_path / "cfg.yaml", framework="vllm")
+
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        model_path=str(model),
+        extra_envs={"VLLM_ROCM_USE_AITER_MOE": "1"},
+    )
+
+    assert bench["envs"]["VLLM_ROCM_USE_AITER_MOE"] == "1"
+
+
 def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")

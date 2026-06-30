@@ -78,12 +78,15 @@ def _config_architectures(config: dict) -> list[str]:
 # Single source of truth: ``cli`` reuses these for its preflight checks too.
 GEMMA2_MODEL_TYPE = "gemma2"
 GEMMA2_ARCHITECTURES = frozenset({"gemma2forcausallm"})
+GEMMA4_MODEL_TYPE = "gemma4"
+GEMMA4_ARCHITECTURES = frozenset({"gemma4forconditionalgeneration"})
 
 
 # ``gemma`` then an optional single separator then ``2`` as a standalone token
 # (start/separator on the left, separator/end on the right). Matches gemma2 /
 # gemma-2 / gemma_2 but not gemma3, gemma25, or notgemma2.
 _GEMMA2_PATH_RE = re.compile(r"(?:^|[-_.])gemma[-_.]?2(?:[-_.]|$)")
+_GEMMA4_PATH_RE = re.compile(r"(?:^|[-_.])gemma[-_.]?4(?:[-_.]|$)")
 
 
 def _path_looks_like_gemma2(model_path: str) -> bool:
@@ -102,6 +105,13 @@ def _path_looks_like_gemma2(model_path: str) -> bool:
     if not model_path:
         return False
     return _GEMMA2_PATH_RE.search(Path(model_path).name.lower()) is not None
+
+
+def _path_looks_like_gemma4(model_path: str) -> bool:
+    """Heuristic Gemma4 detection from the path when config.json is absent."""
+    if not model_path:
+        return False
+    return _GEMMA4_PATH_RE.search(Path(model_path).name.lower()) is not None
 
 
 def _config_gemma2_scopes(data: dict) -> list[dict]:
@@ -135,6 +145,16 @@ def _config_is_gemma2(data: dict) -> bool:
         if str(cfg.get("model_type") or "").strip().lower() == GEMMA2_MODEL_TYPE:
             return True
         if any(a.lower() in GEMMA2_ARCHITECTURES for a in _config_architectures(cfg)):
+            return True
+    return False
+
+
+def _config_is_gemma4(data: dict) -> bool:
+    """True when a parsed config dict declares Gemma4 (top level or text_config)."""
+    for cfg in _config_gemma2_scopes(data):
+        if str(cfg.get("model_type") or "").strip().lower() == GEMMA4_MODEL_TYPE:
+            return True
+        if any(a.lower() in GEMMA4_ARCHITECTURES for a in _config_architectures(cfg)):
             return True
     return False
 
@@ -562,3 +582,14 @@ def _model_is_gemma2(model_path: str) -> bool:
         if _config_has_model_identity(data):
             return False
     return _path_looks_like_gemma2(model_path)
+
+
+def _model_is_gemma4(model_path: str) -> bool:
+    """Best-effort detect a Gemma4 model from config.json or path heuristic."""
+    data = _load_model_config_dict(model_path)
+    if data is not None:
+        if _config_is_gemma4(data):
+            return True
+        if _config_has_model_identity(data):
+            return False
+    return _path_looks_like_gemma4(model_path)

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from inference_optimizer import model_config_utils as mcu
 from inference_optimizer.model_config_utils import summarize_model_config
 
 
@@ -202,6 +203,34 @@ def test_summary_llm_config_nesting(tmp_path: Path) -> None:
     assert out["num_hidden_layers"] == 48
     assert out["is_moe"] is True
     assert out["num_experts"] == 128
+
+
+def test_model_is_gemma4_detects_config_and_path(tmp_path: Path) -> None:
+    m = tmp_path / "google-gemma-4-26B-A4B-it"
+    _write_config(
+        m,
+        {
+            "model_type": "gemma4",
+            "architectures": ["Gemma4ForConditionalGeneration"],
+        },
+    )
+    assert mcu._model_is_gemma4(str(m)) is True
+
+    fallback = tmp_path / "google-gemma-4-27b-it"
+    fallback.mkdir()
+    assert mcu._model_is_gemma4(str(fallback)) is True
+
+
+def test_model_is_gemma4_trusts_identified_non_gemma_config(tmp_path: Path) -> None:
+    m = tmp_path / "gemma-4-distill-llama"
+    _write_config(
+        m,
+        {
+            "model_type": "llama",
+            "architectures": ["LlamaForCausalLM"],
+        },
+    )
+    assert mcu._model_is_gemma4(str(m)) is False
 
 
 def test_summary_stub_high_priority_scope_backfilled_by_lower(tmp_path: Path) -> None:
