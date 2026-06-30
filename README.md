@@ -78,8 +78,8 @@ Example images (Harbor refs for the SaFE Authoring Pod path; drop the `harbor.co
 
 - SGLang MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
 - SGLang MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
-- vLLM MI300X: `docker.io/vllm/vllm-openai-rocm:v0.21.0`
-- vLLM MI355X: `docker.io/vllm/vllm-openai-rocm:v0.21.0`
+- vLLM MI300X: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
+- vLLM MI355X: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
 
 > The SGLang `-profilerfix` images patch `libamdhip64`/`libroctracer` so rocprofiler captures kernels launched under HipGraphLaunch (issue #352). Use the stock `lmsysorg/sglang:v0.5.11-rocm720-*` images once that fix lands upstream in ROCm.
 
