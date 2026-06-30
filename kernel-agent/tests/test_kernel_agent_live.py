@@ -115,7 +115,7 @@ def write_live_files(workspace: Path) -> tuple[Path, Path, Path]:
                 "traceEvents": [
                     {
                         "name": "triton_rmsnorm_kernel",
-                        "cat": "kernel_agent",
+                        "cat": "kernel",
                         "dur": 1000,
                         "args": {
                             "source_file": str(source),
