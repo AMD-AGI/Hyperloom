@@ -63,7 +63,7 @@ def write_trace(
         "traceEvents": [
             {
                 "name": kernel_name,
-                "cat": "kernel_agent",
+                "cat": "kernel",
                 "dur": 7000,
                 "args": {
                     "source_file": source_file,
@@ -72,7 +72,7 @@ def write_trace(
             },
             {
                 "name": "aiter_moe_gemm_kernel",
-                "cat": "kernel_agent",
+                "cat": "kernel",
                 "dur": 3000,
                 "args": {
                     "source_file": f"{_FRAMEWORK_ROOT}/moe.py",
@@ -90,7 +90,7 @@ def write_vendor_trace(path: Path) -> None:
         "traceEvents": [
             {
                 "name": "hipblasLt_Cijk_Ailk_Bljk_kernel",
-                "cat": "kernel_agent",
+                "cat": "kernel",
                 "dur": 5000,
                 "args": {"shape": {"M": 128, "N": 128, "K": 128}},
             }
