@@ -960,8 +960,17 @@ class GbrainRemoteRecipeClient:
         del prefer  # client-side rerank lives in RecipeKB
         if not self.enabled:
             return []
-        rows = self._search_recipe_candidates(label_match or {}, limit=int(limit or 0)) if label_match else []
-        if not rows or (limit and len(rows) < int(limit)):
+        rows: list[dict[str, Any]] = []
+        cache_satisfied = False
+        if label_match and self._scan_cache is not None:
+            ttl = self._scan_cache_ttl()
+            cache_valid = ttl > 0.0 and time.monotonic() - self._scan_cache_ts <= ttl
+            if cache_valid and (self._scan_cache_complete or self._scan_cache):
+                rows = [r for r in self._scan_cache if _labels_match(r, label_match or {})]
+                cache_satisfied = bool(rows) or self._scan_cache_complete
+        if not cache_satisfied:
+            rows = self._search_recipe_candidates(label_match or {}, limit=int(limit or 0)) if label_match else []
+        if not cache_satisfied and (not rows or (limit and len(rows) < int(limit))):
             candidates = self._scan_recipes(limit=_RECIPE_SCAN_CAP)
             seen = {str(r.get(C.F_CANONICAL_ID) or "") for r in rows}
             rows.extend(

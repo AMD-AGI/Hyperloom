@@ -358,7 +358,7 @@ def test_partial_scan_cache_prevents_repeated_budget_scan(monkeypatch) -> None:
 
     assert len(rows) == 1
     assert rows[0]["labels"]["model"] == "cached"
-    assert [tool for tool, _ in c._mcp.calls] == ["search"]  # type: ignore[union-attr]
+    assert c._mcp.calls == []  # type: ignore[union-attr]
 
 
 def test_get_recipe_validation() -> None:
