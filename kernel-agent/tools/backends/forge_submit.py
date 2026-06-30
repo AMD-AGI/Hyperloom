@@ -1319,10 +1319,19 @@ def _export_best_artifacts(workspace: str, base_commit: str, worktree_kernel_fil
 
 
 def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float,
-                gpu_ids: str = "") -> dict:
-    """Shape the result like oob_submit/geak_submit return dicts."""
+                gpu_ids: str = "", skipped: bool = False) -> dict:
+    """Shape the result like oob_submit/geak_submit return dicts.
+
+    ``skipped=True`` marks a forge self-skip: forge bailed before any real
+    optimization attempt (unsupported source type, repo not a clean git
+    checkout, no usable harness/driver, compile-only driver, etc.). It is the
+    structured signal downstream uses to classify the kernel outcome as ``skip``
+    rather than a kernel failure; forge returns ``returncode=2`` for every such
+    path, but consumers should read this flag rather than the return code.
+    """
     return {
         "returncode": returncode,
+        "skipped": bool(skipped),
         "stdout_tail": (stdout or "")[-4000:],
         "stderr_tail": (stderr or "")[-4000:],
         "stdout": stdout or "",
@@ -1737,7 +1746,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
             2, "",
             "forge: aiter_asm prebuilt assembly compute-core (.co) is not "
             "editable from source; skipping (no rewritable kernel, no tuner)",
-            time.time() - started)
+            time.time() - started, skipped=True)
     fellow = _fellow_for_source_type(source_type)
     if kernel_kind == "aiter_ck" and fellow in ("hip-fellow", None):
         ck_fellow = _fellow_for_source_type("ck")
@@ -1748,7 +1757,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
              (candidate or {}).get("operation", ""))
     if fellow is None:
         return _normalized(2, "", f"forge stage-1 supports triton only; got source_type={source_type}",
-                           time.time() - started)
+                           time.time() - started, skipped=True)
 
     session_id = output_dir.parent.name or "forge"
     kernel_id = Path(source_file).stem
@@ -1764,14 +1773,14 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         prep = _prepare_inplace(source_file, repo, branch)
         if prep is None:
             return _normalized(2, "", "forge: editable-finder package but repo is not a usable git "
-                               "checkout; skipping", time.time() - started)
+                               "checkout; skipping", time.time() - started, skipped=True)
         workspace, worktree_kernel, restore_info = prep
         base_commit = restore_info.get("base_commit") or ""
     else:
         wt_info = _prepare_worktree(source_file, kernel_repo, output_dir, branch)
         if wt_info is None:
             return _normalized(2, "", "forge: kernel_repo is not a clean git checkout or source_file "
-                               "not tracked; skipping (live repo untouched)", time.time() - started)
+                               "not tracked; skipping (live repo untouched)", time.time() - started, skipped=True)
         workspace, worktree_kernel, base_commit = wt_info
 
     try:
@@ -1797,7 +1806,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
                     f"operation={candidate.get('operation')!r} kernel={worktree_kernel!r} "
                     f"(auto-gen supports gemm/matmul/activation/attention and HIP C++ "
                     "compile-only; other ops need a benchmark/test_command)",
-                    time.time() - started)
+                    time.time() - started, skipped=True)
             log.info("forge driver: autogen -> %s", driver)
         gpu_target = _resolve_gpu_target(candidate)
         # P0 baseline-correctness gate: a structurally broken auto-generated
@@ -1825,7 +1834,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
                         f"forge skipped: harness baseline correctness invalid "
                         f"({gate_detail}); not spinning the agent on an "
                         "unverifiable harness",
-                        time.time() - started)
+                        time.time() - started, skipped=True)
         # Compile-only drivers cannot produce a real correctness/timing signal,
         # so any KEEP they yield is based on synthesized metrics. Skip forge for
         # such kernels (they fall through to the next ladder backend / are
@@ -1848,7 +1857,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
                 "forge skipped: only a compile-only driver is available (no real "
                 "correctness/timing harness); not driving a KEEP decision off "
                 "synthesized metrics (set FORGE_ALLOW_COMPILE_ONLY=1 to override)",
-                time.time() - started)
+                time.time() - started, skipped=True)
         # GPU_TARGET is passed to Kernel-Forge's MCP server tools (build/bench/pmc)
         # via the forge-loop child env (_run_loop_via_cli sets env["GPU_TARGET"]),
         # so it is NOT written to the parent os.environ -- that would leak to the
