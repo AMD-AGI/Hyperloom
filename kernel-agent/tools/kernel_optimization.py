@@ -988,10 +988,19 @@ def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, An
             )
             if case["raw"] or case["args"]:
                 cases.append(case)
-    if not cases and isinstance(input_shapes, list) and input_shapes and not is_synthetic:
-        # Only use input_shapes when they come from a real program output
-        # (TraceLens / runtime enrichment), not from the synthetic
-        # legacy-shapes conversion in enrich_candidates_with_runtime_metadata.
+    # ``_input_shapes_synthetic`` marks input_shapes DERIVED from the trace
+    # ``shapes`` strings (enrich_candidates_with_runtime_metadata) rather than a
+    # structured capture — but the DIMS are still real when shape_provenance is
+    # ``torch_trace`` (only the tensor VALUES are synthesized by the harness,
+    # which is acceptable for timing + patched-vs-reference correctness; a real
+    # value oracle for value-dependent kernels is a separate PRELUDE capture).
+    # Across all 24h runs 100% of candidates are flagged synthetic, so excluding
+    # them here dropped real trace dims for every composite op without a
+    # task_group (e.g. fused-MoE) -> GEAK got no shapes. Use the real dims.
+    dims_real = str(candidate.get("shape_provenance") or "").strip().lower() == "torch_trace"
+    if not cases and isinstance(input_shapes, list) and input_shapes and (not is_synthetic or dims_real):
+        # Use input_shapes when they are a real program output (TraceLens /
+        # runtime enrichment) OR carry real torch_trace dims (synthetic values only).
         for idx, entry in enumerate(input_shapes):
             case = _shape_case_from_value(entry, primary=idx == 0)
             case["source"] = "input_shapes"
