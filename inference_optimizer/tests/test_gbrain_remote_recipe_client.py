@@ -96,6 +96,10 @@ def _session_slug(canonical_path: str) -> str:
     return "hyperloom-session-kb/" + canonical_path
 
 
+def _default_slug(canonical_path: str) -> str:
+    return "hyperloom-recipe-kb/" + canonical_path
+
+
 def _custom_slug(canonical_path: str) -> str:
     return "custom-recipe-kb/" + canonical_path
 
@@ -128,7 +132,7 @@ def test_page_to_recipe_projects_session_provenance() -> None:
 
     assert r is not None
     assert r["body"]["sessions"] == [{"session_id": "origin-session"}, {"session_id": "other-session"}]
-    assert r["provenance"]["source"] == "hyperloom-session-kb"
+    assert r["provenance"]["source"] == "hyperloom-recipe-kb"
     assert r["provenance"]["session_id"] == "origin-session"
     assert r["provenance"]["session_ids"] == ["origin-session", "other-session"]
 
@@ -151,7 +155,7 @@ def test_page_to_recipe_requires_identity() -> None:
 def test_get_recipe_roundtrip() -> None:
     c = _client(
         {
-            _session_slug("inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8"): (
+            _default_slug("inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8"): (
                 _recipe_page("Qwen3-32B", "mi300x", "sglang", "fp8")
             ),
         }
@@ -162,11 +166,11 @@ def test_get_recipe_roundtrip() -> None:
 
 
 def test_get_recipe_uses_direct_slug_fast_path() -> None:
-    slug = _session_slug("inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8")
+    slug = _default_slug("inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8")
     c = _client(
         {
             slug: _recipe_page("Qwen3-32B", "mi300x", "sglang", "fp8"),
-            _session_slug("inference/other/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8"): (
+            _default_slug("inference/other/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8"): (
                 _recipe_page("Other", "mi300x", "sglang", "fp8")
             ),
         }
@@ -181,7 +185,7 @@ def test_get_recipe_uses_direct_slug_fast_path() -> None:
 
 
 def test_get_recipe_unknown_version_direct_fallback() -> None:
-    slug = _session_slug("inference/qwen3-32b/mi300x/sglang/qwen3/qwen3forcausallm/unknown_version/fp8")
+    slug = _default_slug("inference/qwen3-32b/mi300x/sglang/qwen3/qwen3forcausallm/unknown_version/fp8")
     fm = _recipe_page("Qwen3-32B", "mi300x", "sglang", "fp8")
     fm["attrs"]["model_type"] = "qwen3"
     fm["attrs"]["architectures"] = ["Qwen3ForCausalLM"]
@@ -208,7 +212,7 @@ def test_get_recipe_uses_configured_slug_prefix(monkeypatch: Any) -> None:
 
 
 def test_get_recipe_miss_on_unknown() -> None:
-    c = _client({_session_slug("inference/modela/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/unknown_precision"): _recipe_page("modelA", "mi300x")})
+    c = _client({_default_slug("inference/modela/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/unknown_precision"): _recipe_page("modelA", "mi300x")})
     assert c.get_recipe(canonical_id="inference:other:mi355x:vllm:v1:fp16") is None
 
 
@@ -227,10 +231,10 @@ def _model(row: dict[str, Any]) -> str:
 def test_search_filters_by_label_match() -> None:
     c = _client(
         {
-            _session_slug("r1"): _recipe_page("Qwen3-32B", "mi300x", "sglang"),
-            _session_slug("r2"): _recipe_page("Llama-3-70B", "mi300x", "vllm"),
-            _session_slug("r3"): _recipe_page("Qwen3-32B", "mi355x", "sglang"),
-            "hyperloom-recipe-kb/legacy": _recipe_page("Qwen3-32B", "mi300x", "sglang"),
+            _default_slug("r1"): _recipe_page("Qwen3-32B", "mi300x", "sglang"),
+            _default_slug("r2"): _recipe_page("Llama-3-70B", "mi300x", "vllm"),
+            _default_slug("r3"): _recipe_page("Qwen3-32B", "mi355x", "sglang"),
+            _session_slug("legacy"): _recipe_page("Qwen3-32B", "mi300x", "sglang"),
         }
     )
     # model-only filter → both Qwen rows. The gbrain adapter returns the
@@ -263,8 +267,8 @@ def test_search_filters_by_configured_slug_prefix(monkeypatch: Any) -> None:
 def test_search_reuses_scan_cache() -> None:
     c = _client(
         {
-            _session_slug("r1"): _recipe_page("Qwen3-32B", "mi300x", "sglang"),
-            _session_slug("r2"): _recipe_page("Llama-3-70B", "mi300x", "vllm"),
+            _default_slug("r1"): _recipe_page("Qwen3-32B", "mi300x", "sglang"),
+            _default_slug("r2"): _recipe_page("Llama-3-70B", "mi300x", "vllm"),
         }
     )
 
@@ -288,7 +292,7 @@ def test_disabled_client_returns_empty() -> None:
 
 
 def test_get_history_and_attempts_are_empty() -> None:
-    c = _client({_session_slug("r1"): _recipe_page("m", "mi300x")})
+    c = _client({_default_slug("r1"): _recipe_page("m", "mi300x")})
     assert c.get_history(canonical_id="inference:m:mi300x:sglang:v:p") == []
     assert c.list_attempts(canonical_id="inference:m:mi300x:sglang:v:p") == []
     assert c.list_session_attempts(session_id="s") == []

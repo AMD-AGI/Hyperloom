@@ -13,8 +13,8 @@ Design fit: this honours the recipe_kb local-first contract verbatim —
 writes still go local-only through the dispatcher; gbrain is consulted
 for READS only.
 
-Schema adaptation (read-time): gbrain stores session-sourced recipes under
-``hyperloom-session-kb/`` by default (overridable via
+Schema adaptation (read-time): gbrain stores recipes under
+``hyperloom-recipe-kb/`` by default (overridable via
 ``GBRAIN_RECIPE_SLUG_PREFIX``) as better-landing pages (``type: recipe`` +
 ``tags: model:/gpu:/framework_name:`` + flat ``attrs``). On read we
 re-derive the 7-tuple identity from the page attrs, fall back to the
@@ -60,7 +60,7 @@ _ENVS_KEY = "extra_envs"
 _RECIPE_SCAN_CAP = 25000
 _LIST_PAGE_SIZE = 100
 _SCAN_CACHE_TTL_SEC = 60.0
-_DEFAULT_RECIPE_SLUG_PREFIX = "hyperloom-session-kb"
+_DEFAULT_RECIPE_SLUG_PREFIX = "hyperloom-recipe-kb"
 _RECIPE_SLUG_PREFIX_ENV = "GBRAIN_RECIPE_SLUG_PREFIX"
 
 # Wall-clock budget for one full ``_scan_recipes`` pass. ``search`` fetches the

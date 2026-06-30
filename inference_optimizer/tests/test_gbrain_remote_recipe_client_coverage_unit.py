@@ -52,7 +52,7 @@ def _mcp() -> grc._GbrainMcp:
 
 def _slug(name: str) -> str:
     """Build a default recipe slug for fake gbrain pages."""
-    return f"hyperloom-session-kb/{name}"
+    return f"hyperloom-recipe-kb/{name}"
 
 
 # -- _GbrainMcp.call envelope parsing -------------------------------------
