@@ -85,7 +85,7 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
         if isinstance(items, list):
             for item in items[:_MAX_KERNELS_SCANNED]:
                 if isinstance(item, dict):
-                    nm = str(item.get("name") or item.get("kernel_agent") or "").strip()
+                    nm = str(item.get("name") or item.get("kernel") or "").strip()
                     if nm:
                         candidates.append(nm.lower())
                 elif isinstance(item, str):
@@ -93,7 +93,7 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
     elif isinstance(raw, list):
         for item in raw[:_MAX_KERNELS_SCANNED]:
             if isinstance(item, dict):
-                nm = str(item.get("name") or item.get("kernel_agent") or "").strip()
+                nm = str(item.get("name") or item.get("kernel") or "").strip()
                 if nm:
                     candidates.append(nm.lower())
             elif isinstance(item, str):
