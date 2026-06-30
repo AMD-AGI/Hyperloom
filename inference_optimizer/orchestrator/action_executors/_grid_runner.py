@@ -1417,6 +1417,29 @@ def _resolve_nonneg_int_env(name: str, default: int) -> int:
     return val
 
 
+def _coerce_optional_positive_int(value: int | str | None) -> int | None:
+    """Coerce ``value`` to a positive int, or ``None`` when unset/invalid.
+
+    Used to validate an optional ``MAX_MODEL_LEN`` ceiling sourced from the
+    workload envs (where it may be an int, a numeric string, or absent) before
+    it clamps ``--context-length``.
+
+    Args:
+        value (int | str | None): Candidate ceiling.
+
+    Returns:
+        int | None: The positive integer, or ``None`` when unset, non-positive,
+        or non-integer.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def resolve_sglang_context_cap(isl: int, osl: int) -> int:
     """Resolve the sglang ``--context-length`` cap for an ISL+OSL workload.
 
@@ -1449,14 +1472,23 @@ def inject_sglang_context_length(
     model_path: str | None,
     isl: int,
     osl: int,
+    max_model_len: int | str | None = None,
 ) -> str:
     """Append ``--context-length <N>`` to ``server_args`` for sglang runs.
 
     Returns ``server_args`` unchanged when the framework is not sglang
     (empty/unknown treated as sglang), the flag is already present, or the
     model's ``max_position_embeddings`` cannot be read. Otherwise appends
-    ``min(max_pos, cap)`` from :func:`resolve_sglang_context_cap`; only this
-    flag is added.
+    ``min(max_pos, max_model_len, cap)`` from :func:`resolve_sglang_context_cap`;
+    only this flag is added.
+
+    sglang sizes its window off ``--context-length`` (it does not honor
+    ``--max-model-len``), so without this clamp a workload cap above the run's
+    explicit ``--max-model-len`` would inject a self-contradictory config (#697:
+    ``--context-length 84048`` while ``--max-model-len 82000``). The
+    ``max_model_len`` ceiling is applied only when it is a positive value;
+    an unset / non-positive value preserves the prior ``min(max_pos, cap)``
+    behaviour.
 
     Args:
         server_args (str | None): The server-arg string to augment.
@@ -1465,6 +1497,9 @@ def inject_sglang_context_length(
             ``max_position_embeddings``.
         isl (int): Input sequence length.
         osl (int): Output sequence length.
+        max_model_len (int | str | None): The run's explicit ``MAX_MODEL_LEN``
+            ceiling; clamps ``--context-length`` so it never exceeds it. Ignored
+            when unset, non-positive, or non-integer.
 
     Returns:
         str: ``server_args`` with ``--context-length`` appended, or unchanged
@@ -1484,6 +1519,9 @@ def inject_sglang_context_length(
         return args
     cap = resolve_sglang_context_cap(isl, osl)
     context_length = min(int(max_pos), cap)
+    max_model_len_int = _coerce_optional_positive_int(max_model_len)
+    if max_model_len_int is not None:
+        context_length = min(context_length, max_model_len_int)
     return merge_server_args(
         args,
         f"{_SGLANG_CONTEXT_LENGTH_FLAG} {context_length}",
