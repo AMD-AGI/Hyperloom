@@ -94,8 +94,73 @@ class GbrainRemoteError(RemoteRecipeClientError):
         super().__init__(message, category=category, **kwargs)
 
 
+def _iter_sse_objects(raw: str):
+    """Yield JSON objects decoded from an MCP HTTP response body.
+
+    Handles the three framings the gbrain ``/mcp`` endpoint uses:
+
+    * A plain JSON body (the whole payload is one object).
+    * A single ``text/event-stream`` event whose ``data`` field is split
+      across multiple ``data:`` lines (joined with ``\\n`` per the SSE spec,
+      one optional leading space after the colon stripped).
+    * **Multiple** SSE events in one response (e.g. a heartbeat / notification
+      event before the JSON-RPC result event). Each event is decoded
+      independently so a non-result event can never corrupt the result parse
+      (the previous parser concatenated every ``data:`` line in the whole body
+      into one string, so two events produced invalid JSON -> "bad envelope",
+      seen on large ``get_backlinks`` responses from gbrain >= 0.42).
+
+    Malformed / incomplete events are skipped, so this is safe to call on a
+    partially-read buffer (used by ``_read_body`` to detect arrival).
+    """
+    import re
+
+    text = raw.lstrip()
+    if text.startswith("{") or text.startswith("["):
+        try:
+            yield json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        return
+    for block in re.split(r"\r?\n\r?\n", raw):
+        parts: list[str] = []
+        for line in block.splitlines():
+            if line.startswith("data:"):
+                seg = line[5:]
+                parts.append(seg[1:] if seg.startswith(" ") else seg)
+        payload = "\n".join(parts).strip()
+        if not payload:
+            continue
+        try:
+            yield json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+
+
+def _select_jsonrpc(raw: str, want_id: Any = None) -> "dict[str, Any] | None":
+    """Pick the JSON-RPC response object from an MCP response body.
+
+    Prefers the event whose ``id`` matches ``want_id`` (the request id); falls
+    back to the first object carrying a ``result`` or ``error`` member. Returns
+    ``None`` when no parseable JSON-RPC response is present yet.
+    """
+    fallback: "dict[str, Any] | None" = None
+    for obj in _iter_sse_objects(raw):
+        if not isinstance(obj, dict):
+            continue
+        if want_id is not None and obj.get("id") == want_id:
+            return obj
+        if fallback is None and ("result" in obj or "error" in obj):
+            fallback = obj
+    return fallback
+
+
 class _GbrainMcp:
     """Minimal JSON-RPC-over-HTTP MCP client (list_pages / get_page)."""
+
+    # Request id stamped on every JSON-RPC envelope; used to select the
+    # matching response event out of a multi-event SSE stream.
+    _RPC_ID = "1"
 
     def __init__(self, base_url: str, token: str, timeout_sec: float) -> None:
         """Initialize the MCP client.
@@ -165,28 +230,19 @@ class _GbrainMcp:
                 break
             chunks.append(piece)
             buf += piece
-            # An SSE event is terminated by a blank line (``\n\n`` or, with CR,
-            # ``\r\n\r\n``). Stop at that boundary — never on a bare ``}``.
-            # gbrain >= 0.41 streams ``text/event-stream`` chunked with no
-            # Content-Length, delivering the JSON-RPC response as a single long
-            # ``data:`` line; a short socket read that happens to land on a
-            # nested ``}`` would otherwise break the loop mid-payload, truncate
-            # the JSON, and surface as a spurious "bad envelope" parse error.
-            if b"\n\n" in buf or b"\r\n\r\n" in buf:
+            # Stop as soon as the buffer holds a complete JSON-RPC response that
+            # matches our request id. ``_select_jsonrpc`` parses each SSE event
+            # independently (and the non-SSE ``{...}`` case), so:
+            #   * a short socket read landing on a nested ``}`` keeps reading
+            #     (the partial event fails json.loads -> not selected);
+            #   * a heartbeat / notification event before the result event does
+            #     not satisfy the id match, so we keep reading until the real
+            #     result arrives instead of breaking at the first ``\n\n``;
+            #   * once the matching response is complete we return immediately,
+            #     so a non-closing stream never hangs (EOF + deadline still bound
+            #     the pathological case).
+            if _select_jsonrpc(buf.decode("utf-8", "replace"), self._RPC_ID) is not None:
                 break
-            # Non-SSE JSON body with no Content-Length: stop once the buffer
-            # holds a complete JSON value. A real parse (not an
-            # ``endswith('}')`` check) means a short read landing on a nested
-            # ``}`` keeps reading instead of truncating, while a re-emitting
-            # stream cannot duplicate an already-complete payload. EOF (empty
-            # ``piece``) and the wall-clock ``deadline`` bound everything else.
-            stripped = buf.strip()
-            if stripped[:1] in (b"{", b"["):
-                try:
-                    json.loads(stripped)
-                    break
-                except ValueError:
-                    pass
         return b"".join(chunks).decode("utf-8", "replace")
 
     def call(self, tool: str, arguments: dict[str, Any]) -> Any:
@@ -206,7 +262,7 @@ class _GbrainMcp:
         """
         envelope = {
             "jsonrpc": "2.0",
-            "id": "1",
+            "id": self._RPC_ID,
             "method": "tools/call",
             "params": {"name": tool, "arguments": arguments},
         }
@@ -225,23 +281,14 @@ class _GbrainMcp:
                 raw = self._read_body(resp)
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise GbrainRemoteError(f"gbrain {tool} transport error: {exc!r}") from exc
-        try:
-            if raw.lstrip().startswith("{"):
-                obj = json.loads(raw)
-            else:  # text/event-stream framing
-                # Per the SSE spec a single event may carry multiple ``data:``
-                # lines that the client concatenates with ``\n`` (one optional
-                # leading space after the colon is stripped). gbrain emits one
-                # line today; joining keeps parsing correct if that changes.
-                parts: list[str] = []
-                for line in raw.splitlines():
-                    if line.startswith("data:"):
-                        seg = line[5:]
-                        parts.append(seg[1:] if seg.startswith(" ") else seg)
-                payload = "\n".join(parts)
-                obj = json.loads(payload) if payload.strip() else {}
-        except (json.JSONDecodeError, IndexError) as exc:
-            raise GbrainRemoteError(f"gbrain {tool} bad envelope: {exc!r}") from exc
+        # Select the JSON-RPC response event matching our request id. This
+        # tolerates plain-JSON bodies, single multi-line SSE events, and
+        # multi-event SSE streams (heartbeat / notification before the result).
+        obj = _select_jsonrpc(raw, self._RPC_ID)
+        if obj is None:
+            raise GbrainRemoteError(
+                f"gbrain {tool} bad envelope: no parseable JSON-RPC response in body"
+            )
         if not isinstance(obj, dict):
             raise GbrainRemoteError(f"gbrain {tool} unexpected envelope type: {type(obj).__name__}")
         # JSON-RPC transport-level error envelope. Without surfacing this a
