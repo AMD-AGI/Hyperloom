@@ -80,3 +80,58 @@ def test_extract_last_json_none_on_empty_or_no_brace_or_malformed():
     assert ssh_runtime._extract_last_json("") is None
     assert ssh_runtime._extract_last_json("no json here") is None
     assert ssh_runtime._extract_last_json('{"a": }') is None  # invalid JSON
+
+
+# -- GEAK pod-runner defaults (PR #768 review: kernel scoring + skip-profile) ----
+import json as _json  # noqa: E402
+import os as _os  # noqa: E402
+import stat as _stat  # noqa: E402
+import subprocess as _sp  # noqa: E402
+
+
+def _run_geak_pod_runner(tmp_path, extra_env):
+    """Execute the real GEAK _POD_RUNNER with a fake `geak` on PATH; return its JSON dict.
+
+    The fake geak echoes its argv + GEAK_SKIP_PROFILE so the test can assert both
+    the forwarded ``--target`` and the profiler default the pod runner sets.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "geak"
+    fake.write_text('#!/usr/bin/env bash\necho "ARGV:$@"\necho "SKIP=$GEAK_SKIP_PROFILE"\nexit 0\n')
+    fake.chmod(fake.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+    cfg = tmp_path / "local.yaml"
+    cfg.write_text("model_class: litellm\n")
+    prompt = tmp_path / "p.md"
+    prompt.write_text("opt this kernel")
+    outdir = tmp_path / "out"
+    outdir.mkdir()
+    runner = tmp_path / "pod_runner.py"
+    runner.write_text(ssh_runtime._POD_RUNNER)
+    env = dict(_os.environ)
+    env["PATH"] = f"{bindir}:{env.get('PATH','')}"
+    env["GEAK_CONFIG"] = str(cfg)
+    env.pop("GEAK_SCORE_TARGET", None)
+    env.pop("GEAK_SKIP_PROFILE", None)
+    env.update(extra_env)
+    proc = _sp.run(
+        [sys.executable, str(runner), "--prompt", str(prompt), "--output", str(outdir),
+         "--num-gpus", "1", "--timeout-s", "30"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    return ssh_runtime._extract_last_json(proc.stdout) or {}
+
+
+def test_geak_pod_runner_defaults_to_kernel_target_and_skip_profile(tmp_path):
+    out = _run_geak_pod_runner(tmp_path, extra_env={})
+    cmd = out.get("cmd") or []
+    assert "--target" in cmd and cmd[cmd.index("--target") + 1] == "kernel", cmd
+    # pod runner set GEAK_SKIP_PROFILE=1 by default -> visible to the geak child
+    assert "SKIP=1" in (out.get("stdout_tail") or ""), out.get("stdout_tail")
+
+
+def test_geak_pod_runner_respects_explicit_overrides(tmp_path):
+    out = _run_geak_pod_runner(tmp_path, extra_env={"GEAK_SCORE_TARGET": "wall", "GEAK_SKIP_PROFILE": "0"})
+    cmd = out.get("cmd") or []
+    assert "--target" in cmd and cmd[cmd.index("--target") + 1] == "wall", cmd
+    assert "SKIP=0" in (out.get("stdout_tail") or ""), out.get("stdout_tail")
