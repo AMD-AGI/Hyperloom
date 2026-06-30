@@ -174,6 +174,98 @@ def test_static_recon_specialist_renders_seed_checklist_and_model_info():
     assert "attention=gqa" in text
 
 
+def test_static_recon_shared_expert_model_features_line():
+    """Model-features line includes shared_expert=True and n_shared= for shared-expert MoE."""
+    domain = get_domain("static_recon_specialist")
+    assert domain is not None
+    inp = SpecialistPromptInputs(
+        task_id="task-shared-moe",
+        domain=domain,
+        max_turns=4,
+        gpu_type="MI355X",
+        precision="mxfp8",
+        model_info={
+            "attention_type": "GQA",
+            "is_moe": True,
+            "quantization": "mxfp8",
+            "has_shared_expert": True,
+            "num_shared_experts": 1,
+        },
+        workspace_path="/tmp/test/recon",
+    )
+    system, user = build_specialist_prompts(inp)
+    text = system + "\n" + user
+    assert "shared_expert=True" in text
+    assert "n_shared=1" in text
+    assert "shared-expert fusion" in text.lower()
+
+
+def test_static_recon_shared_expert_advisory_present():
+    """Fusion advisory paragraph appears when model has shared expert."""
+    domain = get_domain("static_recon_specialist")
+    assert domain is not None
+    inp = SpecialistPromptInputs(
+        task_id="task-advisory",
+        domain=domain,
+        max_turns=4,
+        gpu_type="MI355X",
+        precision="mxfp8",
+        model_info={
+            "is_moe": True,
+            "has_shared_expert": True,
+            "num_shared_experts": 2,
+        },
+        workspace_path="/tmp/test/recon",
+    )
+    system, user = build_specialist_prompts(inp)
+    text = system + "\n" + user
+    # Advisory must mention fusion and EP caveat
+    assert "grouped-gemm" in text.lower() or "grouped gemm" in text.lower()
+    assert "expert parallelism" in text.lower() or "EP" in text
+
+
+def test_static_recon_no_shared_expert_no_advisory():
+    """Neither shared_expert= nor fusion advisory must appear for plain MoE."""
+    domain = get_domain("static_recon_specialist")
+    assert domain is not None
+    inp = SpecialistPromptInputs(
+        task_id="task-plain-moe",
+        domain=domain,
+        max_turns=4,
+        gpu_type="MI355X",
+        precision="mxfp8",
+        model_info={"attention_type": "GQA", "is_moe": True, "quantization": "mxfp8"},
+        workspace_path="/tmp/test/recon",
+    )
+    system, user = build_specialist_prompts(inp)
+    text = system + "\n" + user
+    assert "shared_expert=" not in text
+    assert "shared-expert fusion advisory" not in text.lower()
+
+
+def test_static_recon_existing_markers_unaffected_by_shared_expert_change():
+    """Existing static-recon prompt markers still render regardless of shared-expert state."""
+    domain = get_domain("static_recon_specialist")
+    assert domain is not None
+    for model_info in (
+        {"is_moe": False},
+        {"is_moe": True, "has_shared_expert": True, "num_shared_experts": 1},
+    ):
+        inp = SpecialistPromptInputs(
+            task_id="task-regression",
+            domain=domain,
+            max_turns=4,
+            gpu_type="MI355X",
+            precision="mxfp8",
+            model_info=model_info,
+            workspace_path="/tmp/test/recon",
+        )
+        system, user = build_specialist_prompts(inp)
+        text = (system + "\n" + user).lower()
+        for marker in ("static-recon", "bridge_candidates", "predicate_file", "never write a patch"):
+            assert marker in text, f"regression: {marker!r} missing for model_info={model_info}"
+
+
 # 3. SpecialistRunner no longer marks any domain as "generic template"
 @pytest.mark.asyncio
 async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
