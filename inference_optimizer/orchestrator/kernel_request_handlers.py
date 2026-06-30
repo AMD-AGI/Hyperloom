@@ -59,8 +59,11 @@ def _honest_flag(specific_env: str) -> bool:
 
     Returns ``True`` when the per-fix env ``specific_env`` is truthy, OR when it
     is unset and the umbrella ``HL_HONEST_E2E`` is truthy. An explicit falsey
-    per-fix value always wins (lets one fix opt out of the umbrella). Off by
-    default so callers are byte-identical to legacy behavior when nothing is set.
+    per-fix value always wins (lets one fix opt out of the umbrella). The umbrella
+    now defaults ON: E2E-faithful verdicts (paired same-config A/B, engagement
+    gate, verified-micro promotion) are the default so a GEAK kernel win is judged
+    by real serving throughput, not a stored-scalar gain. Opt the whole cohort
+    back out with ``HL_HONEST_E2E=0`` (or a single fix via its per-fix env).
 
     Args:
         specific_env: The per-fix environment variable name.
@@ -73,7 +76,7 @@ def _honest_flag(specific_env: str) -> bool:
         return True
     if raw in _FALSEY:
         return False
-    return os.environ.get(_HONEST_E2E_UMBRELLA_ENV, "").strip().lower() in _TRUEY
+    return os.environ.get(_HONEST_E2E_UMBRELLA_ENV, "1").strip().lower() in _TRUEY
 
 
 def _vram_guarded_server_args(extra_args: str) -> str:
