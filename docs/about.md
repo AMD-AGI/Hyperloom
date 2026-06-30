@@ -16,13 +16,16 @@ A dedicated Hyperloom blog post will be linked here once published.
 
 ## License
 
-Hyperloom is released under the **Apache License 2.0**. The full license text
-is in [`LICENSE`](https://github.com/AMD-AGI/Hyperloom/blob/main/LICENSE); the
-same license is asserted in `pyproject.toml` for PyPI / sdist consumers.
+Hyperloom is released under the **MIT License**. The full license text
+is in [`LICENSE`](https://github.com/AMD-AGI/Hyperloom/blob/main/LICENSE).
 
 You may use Hyperloom commercially, modify it, and distribute it under the terms
-of Apache-2.0. Patent grants and NOTICE handling follow the standard Apache-2.0
-rules.
+of the MIT license, provided the copyright notice and the permission notice are
+retained in all copies or substantial portions of the software.
+
+Third-party tools and agents (Cursor, Visual Studio, and Claude Code) invoked by
+Hyperloom are governed by their own separate license terms and are NOT covered
+by the MIT license above; review and comply with each tool's individual license.
 
 ## Policies
 
