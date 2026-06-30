@@ -13,16 +13,15 @@ Design fit: this honours the recipe_kb local-first contract verbatim —
 writes still go local-only through the dispatcher; gbrain is consulted
 for READS only.
 
-Schema adaptation (read-time): gbrain stores recipes as better-landing
-pages (``type: recipe`` + ``tags: model:/gpu:/framework_name:`` + flat
-``attrs``). On read we re-derive the 5-tuple identity
-(``inference:model:hardware:framework_name:framework_version:precision``)
-from the page attrs, fall back to the ``unknown_*`` default slugs for
-dimensions gbrain never recorded, and project the page into the unified
-nested KB-interface envelope. The recipe corpus is small
-(tens-to-hundreds of rows), so ``search`` lists the ``recipe`` type and
-filters client-side, which sidesteps slug-scheme differences between
-gbrain tags and the canonical id.
+Schema adaptation (read-time): gbrain stores session-sourced recipes under
+``hyperloom-session-kb/`` by default (overridable via
+``GBRAIN_RECIPE_SLUG_PREFIX``) as better-landing pages (``type: recipe`` +
+``tags: model:/gpu:/framework_name:`` + flat ``attrs``). On read we
+re-derive the 7-tuple identity from the page attrs, fall back to the
+``unknown_*`` default slugs for dimensions gbrain never recorded, and
+project the page into the unified nested KB-interface envelope. ``search``
+lists the ``recipe`` type and filters client-side, restricted to the
+configured slug prefix so the legacy mirror corpus is ignored.
 
 Wire shape returned by every read is the unified nested KB-interface
 envelope (``labels`` / ``body`` / ``metrics`` / ``findings`` /
@@ -58,9 +57,11 @@ _ENVS_KEY = "extra_envs"
 # Listing the whole recipe type is a fallback path; prefer exact slug reads for
 # get_recipe and cache broad scans so one warm-start tick does not issue
 # thousands of MCP get_page calls repeatedly.
-_RECIPE_SCAN_CAP = 5000
+_RECIPE_SCAN_CAP = 25000
 _LIST_PAGE_SIZE = 100
 _SCAN_CACHE_TTL_SEC = 60.0
+_DEFAULT_RECIPE_SLUG_PREFIX = "hyperloom-session-kb"
+_RECIPE_SLUG_PREFIX_ENV = "GBRAIN_RECIPE_SLUG_PREFIX"
 
 # Wall-clock budget for one full ``_scan_recipes`` pass. ``search`` fetches the
 # whole recipe corpus (list_pages + a get_page per slug) and filters
@@ -432,6 +433,42 @@ def _best_config_from_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _session_entries_from_attrs(attrs: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Build traceability session entries from session-sourced gbrain attrs.
+
+    Args:
+        attrs: The flat gbrain attrs mapping.
+
+    Returns:
+        A list of ``{"session_id": ...}`` entries, preserving the page's
+        contributing session ids. Falls back to the canonical ``session_id``
+        when ``session_ids`` is absent.
+    """
+    raw_ids = attrs.get("session_ids")
+    ids: list[str] = []
+    if isinstance(raw_ids, list):
+        ids = [str(x).strip() for x in raw_ids if str(x or "").strip()]
+    sid = str(attrs.get("session_id") or "").strip()
+    if sid and sid not in ids:
+        ids.insert(0, sid)
+    return [{"session_id": sid_val} for sid_val in ids]
+
+
+def _provenance_from_attrs(frontmatter: Mapping[str, Any], attrs: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge page provenance with session-sourced traceability metadata."""
+    provenance = dict(frontmatter.get("provenance") or {})
+    provenance.setdefault("source", _recipe_slug_prefix())
+    sid = str(attrs.get("session_id") or "").strip()
+    if sid:
+        provenance["session_id"] = sid
+    raw_ids = attrs.get("session_ids")
+    if isinstance(raw_ids, list):
+        session_ids = [str(x).strip() for x in raw_ids if str(x or "").strip()]
+        if session_ids:
+            provenance["session_ids"] = session_ids
+    return provenance
+
+
 def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
     """Adapt a gbrain recipe page's frontmatter to the unified KB shape.
 
@@ -497,7 +534,7 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
             "best_config": _best_config_from_attrs(attrs),
             "best_throughput": throughput,
             "stack_fingerprint": dict(attrs.get("stack_fingerprint") or {}),
-            "sessions": [],
+            "sessions": _session_entries_from_attrs(attrs),
             "last_profiled": "",
             "prs_tested": _json_list(attrs.get("prs_tested")),
         },
@@ -514,7 +551,7 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
         C.F_AUTHORITY: str(frontmatter.get("authority") or C.AUTHORITY_EXPERIENTIAL),
         C.F_CONFIDENCE: _as_float(frontmatter.get("confidence")) or C.DEFAULT_CONFIDENCE,
         C.F_EVIDENCE_REFS: list(frontmatter.get("evidence_refs") or []),
-        C.F_PROVENANCE: dict(frontmatter.get("provenance") or {}),
+        C.F_PROVENANCE: _provenance_from_attrs(frontmatter, attrs),
     }
 
 
@@ -574,6 +611,22 @@ def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> 
         elif key in recipe_labels and recipe_labels[key] != want.get(key):
             return False
     return True
+
+
+def _recipe_slug_prefix() -> str:
+    """Return the configured gbrain recipe page slug prefix."""
+    raw = os.environ.get(_RECIPE_SLUG_PREFIX_ENV, "").strip().strip("/")
+    return raw or _DEFAULT_RECIPE_SLUG_PREFIX
+
+
+def _is_session_recipe_slug(slug: str) -> bool:
+    """Return whether a gbrain slug belongs to the configured recipe KB."""
+    return str(slug or "").startswith(_recipe_slug_prefix() + "/")
+
+
+def _slug_for_canonical(canonical_id: str) -> str:
+    """Build the configured gbrain slug for a canonical_id."""
+    return _recipe_slug_prefix() + "/" + canonical_id.replace(":", "/")
 
 
 class GbrainRemoteRecipeClient:
@@ -779,7 +832,6 @@ class GbrainRemoteRecipeClient:
         seen_slugs: set[str] = set()
         cap = min(int(limit) if limit and limit > 0 else _RECIPE_SCAN_CAP, _RECIPE_SCAN_CAP)
         pages = 0
-        max_pages = max(1, (_RECIPE_SCAN_CAP // _LIST_PAGE_SIZE) + 3)
         # Best-effort wall-clock budget: gbrain is a read side-channel and the
         # local store is always available, so a full corpus scan must not
         # dominate the foreground (T0 boot) loop. When the budget is exceeded we
@@ -788,7 +840,7 @@ class GbrainRemoteRecipeClient:
         budget = self._scan_budget()
         deadline = time.monotonic() + budget if budget > 0.0 else None
         budget_hit = False
-        while len(out) < cap and pages < max_pages:
+        while len(out) < cap:
             if deadline is not None and time.monotonic() >= deadline:
                 budget_hit = True
                 break
@@ -808,7 +860,7 @@ class GbrainRemoteRecipeClient:
                     budget_hit = True
                     break
                 slug = entry.get("slug") if isinstance(entry, dict) else None
-                if not slug or slug in seen_slugs:
+                if not slug or not _is_session_recipe_slug(str(slug)) or slug in seen_slugs:
                     continue
                 seen_slugs.add(slug)
                 new_slugs += 1
@@ -892,11 +944,36 @@ class GbrainRemoteRecipeClient:
             C.F_LABEL_MODEL_TYPE: model_type,
             C.F_LABEL_ARCHITECTURES: architectures,
         }
-        # Fast path: gbrain recipe slugs are the canonical id with ':' as path
-        # separators, so exact 7-tuple reads do not need a full corpus scan.
-        direct = self._get_page_recipe("hyperloom-recipe-kb/" + canonical_id.replace(":", "/"))
+        # Fast path: session-sourced gbrain recipe slugs are the canonical id
+        # with ':' as path separators, so exact 7-tuple reads do not need a
+        # full corpus scan.
+        direct = self._get_page_recipe(_slug_for_canonical(canonical_id))
         if direct is not None and direct.get(C.F_CANONICAL_ID) == canonical_id:
             return direct
+        if framework_version != C.DEFAULT_FRAMEWORK_VERSION_SLUG:
+            # Older raw sessions may not carry framework_version. The session
+            # mirror writes those pages under unknown_version; fall back there
+            # directly before paying for a corpus scan.
+            unknown_version_id = recipe_canonical_id(
+                model=model,
+                hardware=hardware,
+                framework_name=framework_name,
+                model_type=model_type,
+                architectures=architectures,
+                framework_version=C.DEFAULT_FRAMEWORK_VERSION_SLUG,
+                precision=precision,
+            )
+            direct = self._get_page_recipe(_slug_for_canonical(unknown_version_id))
+            relaxed_labels = {
+                C.F_LABEL_MODEL: model,
+                C.F_LABEL_HARDWARE: hardware,
+                C.F_LABEL_FRAMEWORK_NAME: framework_name,
+                C.F_LABEL_PRECISION: precision,
+                C.F_LABEL_MODEL_TYPE: model_type,
+                C.F_LABEL_ARCHITECTURES: architectures,
+            }
+            if direct is not None and _labels_match(direct, relaxed_labels):
+                return direct
         rows = self.search(label_match=label_match, limit=1)
         return rows[0] if rows else None
 

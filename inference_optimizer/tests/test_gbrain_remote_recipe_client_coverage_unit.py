@@ -50,6 +50,11 @@ def _mcp() -> grc._GbrainMcp:
     return grc._GbrainMcp("http://gbrain.test", "tok", 2.0)
 
 
+def _slug(name: str) -> str:
+    """Build a default recipe slug for fake gbrain pages."""
+    return f"hyperloom-session-kb/{name}"
+
+
 # -- _GbrainMcp.call envelope parsing -------------------------------------
 def test_mcp_call_transport_error(monkeypatch) -> None:
     def _boom(req, timeout=None):
@@ -374,8 +379,8 @@ def test_get_recipe_validation() -> None:
 def test_search_updated_since_and_order(monkeypatch) -> None:
     c = _client(
         {
-            "r1": _recipe_page("Qwen3-32B", "mi300x", "2026-01-01T00:00:00Z"),
-            "r2": _recipe_page("Qwen3-32B", "mi355x", "2026-03-01T00:00:00Z"),
+            _slug("r1"): _recipe_page("Qwen3-32B", "mi300x", "2026-01-01T00:00:00Z"),
+            _slug("r2"): _recipe_page("Qwen3-32B", "mi355x", "2026-03-01T00:00:00Z"),
         }
     )
     # updated_since filters out the older row
@@ -412,8 +417,8 @@ def test_label_search_uses_page_search_before_scan() -> None:
 def test_list_recent_returns_rows() -> None:
     c = _client(
         {
-            "r1": _recipe_page("m1", "mi300x", "2026-01-01T00:00:00Z"),
-            "r2": _recipe_page("m2", "mi355x", "2026-02-01T00:00:00Z"),
+            _slug("r1"): _recipe_page("m1", "mi300x", "2026-01-01T00:00:00Z"),
+            _slug("r2"): _recipe_page("m2", "mi355x", "2026-02-01T00:00:00Z"),
         }
     )
     rows = c.list_recent(limit=10)
