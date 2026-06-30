@@ -7892,6 +7892,9 @@ class Coordinator:
                 gpu_type=str(getattr(state, "gpu_type", "") or ""),
                 precision=str(getattr(state, "precision", "") or ""),
             )
+            _entries = _src_recon.filter_entries_for_model(
+                _entries, dict(getattr(state, "model_info", None) or {})
+            )
             _rendered = _src_recon.render_checklist_for_prompt(_entries)
             if _rendered:
                 params["static_recon_checklist"] = _rendered
