@@ -228,6 +228,31 @@ class _GbrainMcp:
             clen = ""
         if "text/event-stream" not in ctype and clen:
             return resp.read().decode()
+        readline = getattr(resp, "readline", None)
+        if "text/event-stream" in ctype and callable(readline):
+            # SSE is line-framed; fixed-size reads can block on an open stream
+            # after the final short chunk and return a truncated JSON event.
+            while True:
+                if time.monotonic() >= deadline:
+                    break
+                try:
+                    piece = readline()
+                except (OSError, ValueError):
+                    break
+                if not piece:
+                    break
+                chunks.append(piece)
+                buf += piece
+                if (
+                    _select_mcp_response(
+                        buf.decode("utf-8", "replace"),
+                        self._RPC_ID,
+                        allow_bare_result=allow_bare_result,
+                    )
+                    is not None
+                ):
+                    break
+            return b"".join(chunks).decode("utf-8", "replace")
         while True:
             if time.monotonic() >= deadline:
                 break
