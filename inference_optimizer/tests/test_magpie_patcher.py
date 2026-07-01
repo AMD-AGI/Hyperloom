@@ -202,19 +202,19 @@ def test_legacy_block_is_present_in_fixture():
 
 
 def test_missing_magpie_dir_returns_false(tmp_path: Path):
-    """No MAGPIE_DIR / no benchmarker.py → soft return False."""
+    """No MAGPIE_PATH / no benchmarker.py → soft return False."""
     empty = tmp_path / "no_magpie_here"
     empty.mkdir()
     assert ensure_magpie_atomic_scripts_patch(empty) is False
 
 
 def test_no_arg_and_no_env_returns_false(monkeypatch):
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     assert ensure_magpie_atomic_scripts_patch(None) is False
 
 
 def test_env_fallback_resolves_path(monkeypatch, fake_magpie: Path):
-    monkeypatch.setenv("MAGPIE_DIR", str(fake_magpie))
+    monkeypatch.setenv("MAGPIE_PATH", str(fake_magpie))
     assert ensure_magpie_atomic_scripts_patch(None) is True
 
 
@@ -635,11 +635,11 @@ class TestResolveBenchmarkerPath:
         assert mp._resolve_benchmarker_path(tmp_path) is None
 
     def test_returns_none_when_no_input_or_env(self, monkeypatch):
-        monkeypatch.delenv("MAGPIE_DIR", raising=False)
+        monkeypatch.delenv("MAGPIE_PATH", raising=False)
         assert mp._resolve_benchmarker_path(None) is None
 
     def test_env_fallback(self, monkeypatch, magpie_dir):
-        monkeypatch.setenv("MAGPIE_DIR", str(magpie_dir))
+        monkeypatch.setenv("MAGPIE_PATH", str(magpie_dir))
         out = mp._resolve_benchmarker_path(None)
         assert out is not None
 
@@ -692,7 +692,7 @@ class TestApplyPatchAtomic:
 # ensure_magpie_atomic_scripts_patch
 class TestEnsurePatch:
     def test_returns_false_without_magpie_tree(self, monkeypatch):
-        monkeypatch.delenv("MAGPIE_DIR", raising=False)
+        monkeypatch.delenv("MAGPIE_PATH", raising=False)
         assert mp.ensure_magpie_atomic_scripts_patch(None) is False
 
     def test_full_roundtrip_idempotent(self, magpie_dir):
@@ -816,6 +816,114 @@ def test_writable_target_rewrites_stale_script(fake_magpie: Path, tmp_path: Path
 def test_patched_block_skips_identical_target():
     """The patched block contains the idempotent content check (filecmp)."""
     assert "_hyperloom_filecmp" in _PATCHED_BLOCK
+
+
+# Redundant --concurrent-requests eval flag strip (Q1 long-term fix).
+_EVAL_SCRIPT_WITH_FLAG = """\
+#!/usr/bin/env bash
+if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
+    run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?
+    append_lm_eval_summary
+fi
+"""
+
+_EVAL_SCRIPT_CLEAN = """\
+#!/usr/bin/env bash
+if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
+    run_eval --framework lm-eval --port "$PORT" || exit $?
+    append_lm_eval_summary
+fi
+"""
+
+
+def _write_bench_script(root: Path, name: str, src: str) -> Path:
+    script_dir = root / "Magpie" / "scripts" / "benchmark"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    script = script_dir / name
+    script.write_text(src, encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+class TestStripEvalConcurrencyFlag:
+    def test_strips_bare_conc(self):
+        out = mp._strip_eval_concurrency_flag(_EVAL_SCRIPT_WITH_FLAG)
+        assert out is not None
+        assert "--concurrent-requests" not in out
+        assert 'run_eval --framework lm-eval --port "$PORT" || exit $?' in out
+
+    def test_strips_quoted_and_braced(self):
+        for frag in ('--concurrent-requests "$CONC"', "--concurrent-requests ${CONC}"):
+            src = f'    run_eval --framework lm-eval --port "$PORT" {frag} || exit $?\n'
+            out = mp._strip_eval_concurrency_flag(src)
+            assert out is not None
+            assert "--concurrent-requests" not in out
+            assert 'run_eval --framework lm-eval --port "$PORT" || exit $?' in out
+
+    def test_returns_none_without_marker(self):
+        assert mp._strip_eval_concurrency_flag(_EVAL_SCRIPT_CLEAN) is None
+
+    def test_returns_none_on_unrecognised_shape(self):
+        # Marker present but value isn't $CONC -> regex miss -> None (caller warns).
+        weird = '    run_eval --framework lm-eval --concurrent-requests 64 || exit $?\n'
+        assert mp._strip_eval_concurrency_flag(weird) is None
+
+
+class TestApplyEvalFlagPatch:
+    def test_strips_all_generic_scripts(self, tmp_path: Path):
+        for name in ("sglang_mi300x.sh", "vllm_mi355x.sh"):
+            _write_bench_script(tmp_path, name, _EVAL_SCRIPT_WITH_FLAG)
+        scripts_dir = tmp_path / "Magpie" / "scripts" / "benchmark"
+        assert mp._apply_eval_flag_patch_atomic(scripts_dir) is True
+        for name in ("sglang_mi300x.sh", "vllm_mi355x.sh"):
+            text = (scripts_dir / name).read_text(encoding="utf-8")
+            assert "--concurrent-requests" not in text
+
+    def test_idempotent(self, tmp_path: Path):
+        _write_bench_script(tmp_path, "sglang_mi300x.sh", _EVAL_SCRIPT_WITH_FLAG)
+        scripts_dir = tmp_path / "Magpie" / "scripts" / "benchmark"
+        assert mp._apply_eval_flag_patch_atomic(scripts_dir) is True
+        first = (scripts_dir / "sglang_mi300x.sh").read_text(encoding="utf-8")
+        assert mp._apply_eval_flag_patch_atomic(scripts_dir) is True
+        assert (scripts_dir / "sglang_mi300x.sh").read_text(encoding="utf-8") == first
+
+    def test_clean_dir_is_noop_true(self, tmp_path: Path):
+        _write_bench_script(tmp_path, "sglang_mi300x.sh", _EVAL_SCRIPT_CLEAN)
+        scripts_dir = tmp_path / "Magpie" / "scripts" / "benchmark"
+        pre = (scripts_dir / "sglang_mi300x.sh").read_text(encoding="utf-8")
+        assert mp._apply_eval_flag_patch_atomic(scripts_dir) is True
+        assert (scripts_dir / "sglang_mi300x.sh").read_text(encoding="utf-8") == pre
+
+    def test_unrecognised_shape_returns_false(self, tmp_path: Path, caplog):
+        _write_bench_script(
+            tmp_path,
+            "sglang_mi300x.sh",
+            '    run_eval --framework lm-eval --concurrent-requests 64 || exit $?\n',
+        )
+        scripts_dir = tmp_path / "Magpie" / "scripts" / "benchmark"
+        with caplog.at_level(logging.WARNING):
+            assert mp._apply_eval_flag_patch_atomic(scripts_dir) is False
+        assert any("could not be stripped" in r.getMessage() for r in caplog.records)
+
+
+def test_status_strips_eval_flag_and_reports_ok(tmp_path: Path):
+    _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
+    script = _write_bench_script(tmp_path, "sglang_mi300x.sh", _EVAL_SCRIPT_WITH_FLAG)
+    status = magpie_scripts_patch_status(tmp_path)
+    assert status.eval_flag_ok is True
+    assert "--concurrent-requests" not in script.read_text(encoding="utf-8")
+
+
+def test_status_eval_flag_false_on_unrecognised_shape(tmp_path: Path):
+    _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
+    _write_bench_script(
+        tmp_path,
+        "sglang_mi300x.sh",
+        '    run_eval --framework lm-eval --concurrent-requests 64 || exit $?\n',
+    )
+    status = magpie_scripts_patch_status(tmp_path)
+    assert status.eval_flag_ok is False
+    assert status.ok is False
 
 
 # _extract_prepare_region

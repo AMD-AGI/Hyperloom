@@ -61,7 +61,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "kernel", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "kernel_agent", "critic", "robustness")}
 
 
 def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
@@ -2516,11 +2516,11 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
-def test_optimization_wrapper_timeout_sec_geak_default_full_mode_130min(monkeypatch):
-    # Default tracks ``$GEAK_RUN_MODE`` (full -> 130 min) to match the kernel-agent defaults (PR #301).
+def test_optimization_wrapper_timeout_sec_geak_default_full_mode_180min(monkeypatch):
+    # Default tracks ``$GEAK_RUN_MODE`` (full -> 180 min / 3 h) to match the kernel-agent defaults.
     monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
     monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
-    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 130 * 60 + 180
+    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 180 * 60 + 180
 
 
 def test_optimization_wrapper_timeout_sec_geak_quick_mode_70min(monkeypatch):
@@ -2823,20 +2823,20 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
                 Intent(
                     type=IntentType.REQUEST,
                     payload={
-                        "target_agent": "kernel",
+                        "target_agent": "kernel_agent",
                         "kind": "trace_analyze",
                         "params": {"trace_input": "/tmp/fake-trace.json.gz"},
                     },
                 ),
             )
-            req_msgs = await c.bus.tail(topic="request", to_agent="kernel")
+            req_msgs = await c.bus.tail(topic="request", to_agent="kernel_agent")
             assert req_msgs, "request must be mirrored to kernel inbox"
             req_id = req_msgs[0].msg_id
 
             resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
             assert resp_msgs, "handler must emit RESPONSE without LLM"
             r = resp_msgs[0]
-            assert r.from_agent == "kernel"
+            assert r.from_agent == "kernel_agent"
             assert r.payload["kind"] == "trace_analyze_done"
             assert r.payload["status"] == "ok"
             assert r.payload["result"]["hot_kernels"] == ["kernel_a", "kernel_b"]
@@ -2860,12 +2860,12 @@ async def test_coordinator_request_unknown_kind_routes_to_llm(session_dir):
             Intent(
                 type=IntentType.REQUEST,
                 payload={
-                    "target_agent": "kernel",
+                    "target_agent": "kernel_agent",
                     "kind": "invent_brand_new_kind",  # NOT in registry
                 },
             ),
         )
-        req_msgs = await c.bus.tail(topic="request", to_agent="kernel")
+        req_msgs = await c.bus.tail(topic="request", to_agent="kernel_agent")
         assert req_msgs, "request must be mirrored even when no handler"
         # No auto-response should have been emitted.
         resp_msgs = await c.bus.tail(topic="response")
@@ -2888,7 +2888,7 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
-                    payload={"target_agent": "kernel", "kind": "trace_analyze"},
+                    payload={"target_agent": "kernel_agent", "kind": "trace_analyze"},
                 ),
             )
             resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
@@ -2956,7 +2956,7 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
                 Intent(
                     type=IntentType.REQUEST,
                     payload={
-                        "target_agent": "kernel",
+                        "target_agent": "kernel_agent",
                         "kind": "run_optimization",
                         "params": {
                             "kernel_id": "k001",
@@ -3015,7 +3015,12 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
 
     with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
         await krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy", "backend_order": "geak,claude,codex", "max_parallel": 3},
+            payload={
+                "candidates_path": "/dummy",
+                "backend_order": "geak,claude,codex",
+                "max_parallel": 3,
+                "parallel_backends": False,
+            },
             candidates=candidates,
             session_dir=session_dir,
             record_partial=record_partial,
@@ -3587,7 +3592,7 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
                 Intent(
                     type=IntentType.REQUEST,
                     payload={
-                        "target_agent": "kernel",
+                        "target_agent": "kernel_agent",
                         "kind": "integrate",
                         "params": {
                             "kernel_id": "k001",
@@ -3634,7 +3639,7 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
                 Intent(
                     type=IntentType.REQUEST,
                     payload={
-                        "target_agent": "kernel",
+                        "target_agent": "kernel_agent",
                         "kind": "integrate",
                         "params": {
                             "kernel_id": "k009",

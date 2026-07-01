@@ -11,8 +11,8 @@ from __future__ import annotations
 
 
 # Actions owned by the Kernel role. Orchestration must use
-# request{target_agent="kernel", kind=...}, not delegate/propose_action.
-KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset(
+# request{target_agent="kernel_agent", kind=...}, not delegate/propose_action.
+KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
     {
         "kernel_opt",
         "integrate",
@@ -35,14 +35,14 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
 
 
 # Kept separate because PolicyGate emits a framework-specific denial hint.
-FRAMEWORK_PR_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset(
+FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset(
     {
-        "framework_pr",
+        "framework_agent",
     }
 )
 
 
-COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES | FRAMEWORK_PR_INTERNAL_ACTION_NAMES
+COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES | FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES
 
 
 # Coordinator-internal actions that intentionally do not appear in
@@ -98,7 +98,7 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
 
 # Prompt-visible actions for --no-kernel runs. Kernel-owned request actions
 # and analysis actions that only feed kernel optimization stay hidden.
-NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
+NO_KERNEL_AGENT_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis",
     "baseline",
     "explore",
@@ -111,12 +111,12 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
 
 __all__ = [
     "COORDINATOR_INTERNAL_ACTIONS",
-    "FRAMEWORK_PR_INTERNAL_ACTION_NAMES",
+    "FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES",
     "FULL_ENABLED_ACTIONS",
     "GRID_INJECTABLE_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",
-    "KERNEL_OWNED_ACTIONS",
-    "NO_KERNEL_ENABLED_ACTIONS",
+    "KERNEL_AGENT_OWNED_ACTIONS",
+    "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "PHASE_ALLOWLIST_BYPASS_ACTIONS",
     "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
 ]

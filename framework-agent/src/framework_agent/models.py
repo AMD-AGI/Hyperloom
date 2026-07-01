@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Request and result models for framework PR/ref exploration.
+"""Request and result models for framework/ref exploration.
 
 ``ExploreRequest.gap_description`` feeds :mod:`framework_agent.keywords` for
 perf keyword extraction; ``search_modes`` is an ordered tuple of enabled
@@ -157,7 +157,7 @@ class Candidate:
     ``score`` is the gap-relevance score from
     :func:`framework_agent.keywords.score_title_with_anti_signal`; 0.0 when no
     gap-driven ranking happened. Non-load-bearing in fa itself (sort order is
-    preserved by the list); downstream IO ``framework_pr`` logs it.
+    preserved by the list); downstream IO ``framework`` logs it.
     """
 
     ref: str
@@ -297,6 +297,35 @@ class PrFilter:
 
 
 _VALID_SEARCH_MODES = frozenset({"primus_cortex", "github"})
+_VALID_PR_STATES = frozenset({"open", "merged", "closed", "all"})
+
+
+def _parse_pr_states(raw: Any) -> tuple[str, ...]:
+    """Coerce an optional ``pr_states`` field into a validated tuple.
+
+    None/empty -> ``("open",)``; string -> single; list/tuple -> items.
+
+    Args:
+        raw: The raw ``pr_states`` value.
+
+    Returns:
+        A tuple of validated PR-state names.
+
+    Raises:
+        ValueError: If ``raw`` is the wrong type or contains an unknown state.
+    """
+    if raw is None or raw == "":
+        return ("open",)
+    if isinstance(raw, str):
+        items = [raw.strip()] if raw.strip() else []
+    elif isinstance(raw, (list, tuple)):
+        items = [str(v).strip() for v in raw if str(v).strip()]
+    else:
+        raise ValueError(f"pr_states must be string or list, got {type(raw).__name__}")
+    for item in items:
+        if item not in _VALID_PR_STATES:
+            raise ValueError(f"pr_states contains unknown state {item!r}; valid values are {sorted(_VALID_PR_STATES)!r}")
+    return tuple(items) or ("open",)
 
 
 def _parse_keywords(raw: Any) -> tuple[str, ...]:
@@ -377,6 +406,10 @@ class ExploreRequest:
     # used verbatim. See ``sources._resolve_keywords``.
     keywords: tuple[str, ...] = ()
     search_modes: tuple[str, ...] = ("primus_cortex", "github")
+    # PR states to include in discovery. Default open-only; broaden to
+    # ("open","merged","closed") so semantic audit can judge backport-relevant
+    # merged PRs that may already be in the local dev build (Step 4).
+    pr_states: tuple[str, ...] = ("open",)
     # Empty string disables the KB contribute hook.
     kb_domain: str = ""
     # True: keep going past the first winner, return list sorted by
@@ -451,6 +484,7 @@ class ExploreRequest:
             gap_description=str(raw.get("gap_description") or "").strip(),
             keywords=_parse_keywords(raw.get("keywords")),
             search_modes=_parse_search_modes(raw.get("search_modes")),
+            pr_states=_parse_pr_states(raw.get("pr_states")),
             kb_domain=str(raw.get("kb_domain") or "").strip(),
             ranking_mode=bool(raw.get("ranking_mode", False)),
             keep_winner_only=bool(raw.get("keep_winner_only", False)),

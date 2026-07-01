@@ -87,6 +87,57 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
 
+    @staticmethod
+    def _write_cfg(model_dir: Path, cfg: dict) -> str:
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+        return str(model_dir)
+
+    def test_resolve_fp8_quant_type(self, tmp_path):
+        block = self._write_cfg(
+            tmp_path / "block",
+            {"hidden_size": 7168, "quantization_config": {"weight_block_size": [128, 128]}},
+        )
+        method_block = self._write_cfg(
+            tmp_path / "mblock",
+            {"quantization_config": {"quant_method": "fp8_block"}},
+        )
+        plain = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
+        assert krh._resolve_fp8_quant_type(block) == "blockscale"
+        assert krh._resolve_fp8_quant_type(method_block) == "blockscale"
+        assert krh._resolve_fp8_quant_type(plain) == "per_token"
+        # Multimodal: quantization_config nested under text_config is detected.
+        nested_block = self._write_cfg(
+            tmp_path / "nblock",
+            {"text_config": {"quantization_config": {"weight_block_size": [128, 128]}}},
+        )
+        assert krh._resolve_fp8_quant_type(nested_block) == "blockscale"
+        # Unreadable / missing config -> auto (forge sniffs the runtime log).
+        assert krh._resolve_fp8_quant_type(str(tmp_path / "missing")) == "auto"
+        assert krh._resolve_fp8_quant_type("") == "auto"
+
+    def test_resolve_forge_precision_fp8_plain_model_routes_per_token(self, tmp_path):
+        model = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
+        state = SharedState(precision="bf16", model_path=model)
+        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "per_token")
+
+    def test_resolve_forge_precision_fp8_block_model_routes_blockscale(self, tmp_path):
+        model = self._write_cfg(
+            tmp_path / "block",
+            {"hidden_size": 7168, "quantization_config": {"weight_block_size": [128, 128]}},
+        )
+        state = SharedState(precision="bf16", model_path=model)
+        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "blockscale")
+
+    def test_resolve_forge_precision_fp8_unreadable_config_keeps_auto(self):
+        # Matches the legacy contract: with no readable config, do not force a
+        # tuner from Hyperloom -- let forge sniff the kernel_signature_log.
+        state = SharedState(precision="bf16", model_path="/models/does-not-exist")
+        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
+
     def test_forge_gemm_tune_available_by_path_and_import(self, monkeypatch):
         monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-gemm-tune")
         assert krh._forge_gemm_tune_available() is True
@@ -215,6 +266,74 @@ class TestForgeGemmHelperCoverage:
 
     def test_resolve_forge_untuned_csv_no_specialist_dir(self, tmp_path):
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == ""
+
+    @staticmethod
+    def _write_model_config(model_dir: Path, hidden_size: int) -> str:
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "config.json").write_text(
+            json.dumps({"hidden_size": hidden_size}), encoding="utf-8"
+        )
+        return str(model_dir)
+
+    def test_resolve_forge_untuned_csv_rejects_model_mismatch(self, tmp_path):
+        # Repro: specialist CSV carries the AITER default DeepSeek shapes
+        # (K=7168) while the model under test has hidden_size=2048. The CSV must
+        # be rejected so forge derives correct per-model shapes from config.json.
+        self._write_aiter_csv(
+            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+        )
+        model_path = self._write_model_config(tmp_path / "model", hidden_size=2048)
+        assert (
+            krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", model_path) == ""
+        )
+
+    def test_resolve_forge_untuned_csv_accepts_model_match(self, tmp_path):
+        # A CSV whose K column includes the model hidden_size is the real
+        # per-model shape set and must be accepted.
+        expected = self._write_aiter_csv(
+            tmp_path,
+            "abc",
+            "a8w8_blockscale_untuned_gemm.csv",
+            "M,N,K\n16,6144,2048\n16,2048,8192\n",
+        )
+        model_path = self._write_model_config(tmp_path / "model", hidden_size=2048)
+        assert krh._resolve_forge_untuned_csv(
+            tmp_path, "fp8", "blockscale", model_path
+        ) == str(expected)
+
+    def test_resolve_forge_untuned_csv_no_model_path_keeps_legacy(self, tmp_path):
+        # Backward compatible: without a model_path the resolver cannot validate
+        # and keeps the legacy behaviour of returning the newest non-empty CSV.
+        expected = self._write_aiter_csv(
+            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+        )
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(expected)
+
+    def test_resolve_forge_untuned_csv_unreadable_config_keeps_csv(self, tmp_path):
+        # When config.json is missing/unreadable we cannot validate; preserve the
+        # legacy behaviour rather than dropping a possibly-valid CSV.
+        expected = self._write_aiter_csv(
+            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+        )
+        assert krh._resolve_forge_untuned_csv(
+            tmp_path, "fp8", "blockscale", str(tmp_path / "no_such_model")
+        ) == str(expected)
+
+    def test_csv_matches_model_helpers(self, tmp_path):
+        csv_mismatch = self._write_aiter_csv(
+            tmp_path, "h1", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+        )
+        csv_match = self._write_aiter_csv(
+            tmp_path, "h2", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,6144,2048\n"
+        )
+        model_path = self._write_model_config(tmp_path / "m", hidden_size=2048)
+        assert krh._model_hidden_size(model_path) == 2048
+        assert krh._csv_k_values(csv_mismatch) == {7168}
+        assert krh._csv_k_values(csv_match) == {2048}
+        assert krh._csv_matches_model(csv_mismatch, model_path) is False
+        assert krh._csv_matches_model(csv_match, model_path) is True
+        # No model_path / unreadable config -> cannot validate -> accept.
+        assert krh._csv_matches_model(csv_mismatch, "") is True
 
     def test_read_forge_result_json(self, tmp_path):
         (tmp_path / "result.json").write_text(
@@ -446,7 +565,7 @@ class TestRuntimeGeneratedKernel:
         if not markers:
             pytest.skip("no runtime markers in build")
         marker = next(iter(markers))
-        assert krh._is_runtime_generated_kernel("kernel", f"/tmp/{marker}_x.py") is True
+        assert krh._is_runtime_generated_kernel("kernel_agent", f"/tmp/{marker}_x.py") is True
 
     def test_reusable_source_root_overrides_compile_marker(self):
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
@@ -1024,12 +1143,12 @@ class TestDefaultGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
         [
-            (None, 130.0),  # unset -> full default
-            ("", 130.0),  # empty -> full default
-            ("full", 130.0),
-            ("FULL", 130.0),  # case-insensitive
-            ("  full  ", 130.0),  # whitespace tolerated
-            ("garbage", 130.0),  # unknown values fall back to full
+            (None, 180.0),  # unset -> full default
+            ("", 180.0),  # empty -> full default
+            ("full", 180.0),
+            ("FULL", 180.0),  # case-insensitive
+            ("  full  ", 180.0),  # whitespace tolerated
+            ("garbage", 180.0),  # unknown values fall back to full
             ("quick", 70.0),
             ("QUICK", 70.0),
             ("  quick  ", 70.0),
@@ -1057,7 +1176,7 @@ class TestGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
         [
-            ("full", 130.0),
+            ("full", 180.0),
             ("quick", 70.0),
         ],
     )
@@ -1075,7 +1194,7 @@ class TestGeakBudgetMinutes:
         # Pre-fix code would let "" propagate into ``float("")`` and raise.
         monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "")
         monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
-        assert krh._geak_budget_minutes({}) == 130.0
+        assert krh._geak_budget_minutes({}) == 180.0
 
 
 # _default_kernel_batch_parallel — adaptive batch fanout; the legacy 8

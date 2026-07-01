@@ -2,18 +2,21 @@
 
 Thin shim between ``cli._run_quantization_prelude`` and the standalone
 ``quantization_agent`` package. It builds an effective prompt (source model
-path + export dir + the user's ``--quantize`` text), runs
-``quantize_via_prompt`` once, and maps its ``QuantSkillRunResult.status`` to a
-concrete decision:
+path + export dir + the user's ``--quantize`` text), runs ``quantize_via_prompt``
+once, and maps its ``QuantSkillRunResult.status`` to a concrete decision:
 
   * ``success``                    -> return ``quantized_model_dir``
   * ``partial`` (model usable)     -> warn, then return ``quantized_model_dir``
   * ``partial`` (no usable model)  -> ``SystemExit(3)``
   * ``failed``                     -> ``SystemExit(3)``
 
+The decision *whether* to quantize is made upstream by the deterministic
+``$HYPERLOOM_QUANTIZE_ENABLED`` gate in ``cli._run_quantization_prelude``;
+reaching this adapter means quantization was switched on, so it runs.
+
 When the user explicitly asked for quantization we must never silently fall
-through and optimize the un-quantized source model — a quantization failure
-is a hard stop for the whole run.
+through and optimize the un-quantized source model — a quantization failure is
+a hard stop for the whole run.
 """
 
 from __future__ import annotations

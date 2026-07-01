@@ -23,7 +23,7 @@ We keep a small superset of arbor fields:
   ``updated_at`` — store-managed metadata for the atomic-archive
   contract (arbor has no version concept; we need it for
   ``history/v{N}.json`` rollbacks).
-* ``framework`` / ``framework_version`` / ``precision`` — the
+* ``framework_name`` / ``framework_version`` / ``precision`` — the
   three identity dimensions arbor doesn't have (it's a 2-tuple
   ``model``+``hardware`` while we're a 5-tuple).
 * ``lessons`` / ``authority`` / ``confidence`` / ``evidence_refs`` /
@@ -168,7 +168,7 @@ class KernelOptimization:
     """One KEEP'd kernel-optimization outcome — micro result + E2E verdict.
 
     Hyperloom superset (arbor has no kernel-level concept). Captures a
-    kernel the GEAK/kernel agent produced and KEEP'd at the micro layer,
+    kernel the GEAK/Kernel-agent produced and KEEP'd at the micro layer,
     together with the end-to-end integrate verification result when the
     optimizer actually integrated + re-benchmarked it. The point is that a
     kernel can be a genuine micro win (``micro_speedup`` > 1) yet show no
@@ -292,7 +292,7 @@ class Recipe:
     # ----- 5-tuple identity (arbor 2-tuple is model + hardware) -----
     model: str = ""
     hardware: str = ""
-    framework: str = ""
+    framework_name: str = ""
     framework_version: str = ""
     precision: str = ""
 
@@ -346,7 +346,7 @@ class Recipe:
             "updated_at": str(self.updated_at),
             "model": str(self.model),
             "hardware": str(self.hardware),
-            "framework": str(self.framework),
+            "framework_name": str(self.framework_name),
             "framework_version": str(self.framework_version),
             "precision": str(self.precision),
             "best_config": dict(self.best_config),
@@ -416,6 +416,9 @@ class Recipe:
             "updated_at",
             "model",
             "hardware",
+            "framework_name",
+            # Legacy framework-identity key (pre framework_name rename); consumed
+            # into framework_name below, listed here so it never leaks into extras.
             "framework",
             "framework_version",
             "precision",
@@ -444,7 +447,9 @@ class Recipe:
             updated_at=str(d.get("updated_at") or ""),
             model=str(d.get("model") or ""),
             hardware=str(d.get("hardware") or ""),
-            framework=str(d.get("framework") or ""),
+            # Back-compat: rows persisted before the framework_name rename stored
+            # the serving framework under the legacy ``framework`` key.
+            framework_name=str(d.get("framework_name") or d.get("framework") or ""),
             framework_version=str(d.get("framework_version") or ""),
             precision=str(d.get("precision") or ""),
             best_config=dict(d.get("best_config") or {}),

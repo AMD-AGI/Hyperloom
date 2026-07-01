@@ -9,6 +9,7 @@ TraceLens now consumes only ``analysis.md``; legacy CSV fallbacks are gone.
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import sys
@@ -299,6 +300,41 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
     # No sync poison left
     for n in kept_names:
         assert "synchronize" not in n.lower()
+
+
+# Issue #769 regression: the torch.profiler Chrome-trace category for a GPU
+# kernel is literally "kernel". A global rename (#734 / commit 33ac6cc) once
+# replaced this data-format literal with "kernel_agent", so is_kernel_event
+# matched nothing and count_gpu_kernel_events returned 0 for every healthy
+# trace -> tracelens_analysis raised "Trace contains zero GPU kernel events".
+# These assertions pin the torch convention so a future rename cannot silently
+# break GPU-kernel detection again.
+def test_issue_769_kernel_event_uses_torch_cat_kernel():
+    """A real GPU kernel uses cat=='kernel'; the renamed 'kernel_agent' is not a trace category."""
+    real_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel", "dur": 5.0}
+    assert tla.is_kernel_event(real_kernel) is True
+    # The component-name string 'kernel_agent' must never be treated as a GPU
+    # kernel trace category.
+    not_a_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel_agent", "dur": 5.0}
+    assert tla.is_kernel_event(not_a_kernel) is False
+
+
+def test_issue_769_count_gpu_kernel_events_nonzero_on_healthy_trace(tmp_path):
+    """count_gpu_kernel_events must count cat=='kernel' events in a real torch trace."""
+    trace = {
+        "traceEvents": [
+            {"name": "python_function frame", "cat": "python_function", "dur": 100.0},
+            {"name": "aten::matmul", "cat": "cpu_op", "dur": 50.0},
+            {"name": "hipDeviceSynchronize", "cat": "cuda_runtime", "dur": 92.0},
+            {"name": "void gemm_kernel<...>", "cat": "kernel", "dur": 6.0},
+            {"name": "void attn_kernel<...>", "cat": "kernel", "dur": 11.0},
+            {"name": "void rmsnorm_kernel<...>", "cat": "kernel", "dur": 3.0},
+        ]
+    }
+    trace_path = tmp_path / "healthy.trace.json.gz"
+    with gzip.open(trace_path, "wt", encoding="utf-8") as fh:
+        json.dump(trace, fh)
+    assert tla.count_gpu_kernel_events(trace_path) == 3
 
 
 # Native-only kernel-opt targeting

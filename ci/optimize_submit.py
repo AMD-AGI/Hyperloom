@@ -363,9 +363,11 @@ def _default_vllm_image() -> str:
     """Return the default vLLM server image.
 
     Returns:
-        The sync-registry vLLM image (v0.21.0).
+        The pinned ``profilerfix`` vLLM image (v0.21.0 / rocm720) whose patched
+        libamdhip64/libroctracer let rocprofiler capture kernels under
+        HipGraphLaunch (same profilerfix rationale as the SGLang image).
     """
-    return "harbor.core42.primus-safe.amd.com/sync/vllm/vllm-openai-rocm:v0.21.0"
+    return "harbor.core42.primus-safe.amd.com/sync/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix-20260627"
 
 
 # ── HuggingFace client ──────────────────────────────────────────────────────────
@@ -747,30 +749,45 @@ def detect_concurrency(tp: int, framework: str) -> int:
 def _sglang_image_for(repo_id: str = "") -> str:
     """Pick the sglang image, honoring per-model baseline-arch needs.
 
-    Default is the profilerfix image. MiMo-V2.x is the exception: the undated
-    v0.5.11 profilerfix base does NOT register ``MiMoV2ForCausalLM`` (the
-    server dies at model-loader registration, three baseline attempts in a
-    row -> ``baseline_failed``), so it needs the image that carries the dated
-    20260508 sglang arch. That image is profilerfix's two patched ROCm libs
-    (libamdhip64/libroctracer, issue #352) layered onto the dated 20260508
-    build, so rocprofiler kernel capture under HipGraphLaunch still works.
-    Must be paired with ``--attention-backend triton`` (injected in
+    Default is the v0.5.12 profilerfix image. Older branches carried a MiMo-V2
+    exception that pinned ``primussafe/sglang:v0.5.11-rocm720-mi30x-mimo-
+    profilerfix`` because the then-current profilerfix image did not register
+    ``MiMoV2ForCausalLM``. The v0.5.12 profilerfix image now includes the MiMo
+    model files, so MiMo should use the same current base as other SGLang
+    models. It is still paired with ``--attention-backend triton`` (injected in
     ``_workload_envs.materialize_config_with_envs``) to dodge the aiter
-    attention CUDA-graph-capture SIGABRT. Matched on the repo basename so it
-    fires for the HF repo id (the /wekafs/<org>-<repo> local path is derived
-    downstream from this same id).
+    attention CUDA-graph-capture SIGABRT.
 
     Args:
         repo_id (str): Model repo id, matched on its basename for overrides.
 
     Returns:
-        str: The MiMo-V2 sglang image for MiMo-V2.x repos, else the default
-        sglang image.
+        str: The default sglang image. ``repo_id`` is accepted for backward
+        compatibility (and future per-model overrides) but no longer triggers a
+        MiMo-specific image; MiMo runs on the same default base.
+    """
+    return _default_sglang_image()
+
+
+def _vllm_image_for(repo_id: str = "") -> str:
+    """Pick the vLLM image, honoring per-model baseline-arch needs.
+
+    Default is the standard vLLM image. Gemma-4 (e.g. google/gemma-4-26B-A4B-it)
+    is the exception: the stock vLLM build does not serve the gemma-4 arch, so it
+    needs the dedicated gemma4 image. Matched on the repo basename so it fires
+    for the HF repo id regardless of org casing. Only consulted on the vLLM path
+    (sglang is unaffected).
+
+    Args:
+        repo_id (str): Model repo id, matched on its basename for overrides.
+
+    Returns:
+        str: The gemma4 vLLM image for gemma-4 repos, else the default vLLM image.
     """
     basename = (repo_id or "").split("/")[-1].lower()
-    if "mimo-v2" in basename:
-        return "primussafe/sglang:v0.5.11-rocm720-mi30x-mimo-profilerfix"
-    return _default_sglang_image()
+    if "gemma-4" in basename or "gemma4" in basename:
+        return "harbor.core42.primus-safe.amd.com/sync/vllm-openai-rocm:gemma4"
+    return _default_vllm_image()
 
 
 def detect_image(framework: str, repo_id: str = "") -> str:
@@ -781,10 +798,11 @@ def detect_image(framework: str, repo_id: str = "") -> str:
         repo_id: Model repo id, used to honor per-model image overrides.
 
     Returns:
-        The default vLLM image for ``vllm``; otherwise the SGLang image chosen
-        by :func:`_sglang_image_for`.
+        The vLLM image chosen by :func:`_vllm_image_for` for ``vllm`` (gemma-4
+        gets a dedicated image); otherwise the SGLang image chosen by
+        :func:`_sglang_image_for`.
     """
-    return _default_vllm_image() if framework == "vllm" else _sglang_image_for(repo_id)
+    return _vllm_image_for(repo_id) if framework == "vllm" else _sglang_image_for(repo_id)
 
 
 def auto_detect(hf: HuggingFaceClient, repo_id: str, gpu_type: str | None = None) -> DetectedConfig | None:
@@ -1095,6 +1113,7 @@ class SafeOptimizeClient:
         max_hours: float | None = None,
         target_gain: float | None = None,
         results_path: str | None = None,
+        env: dict | None = None,
     ) -> dict:
         """Submit an optimization task to SaFE and return the API response.
 
@@ -1190,6 +1209,14 @@ class SafeOptimizeClient:
             body["promptPrefix"] = prompt_prefix
         if prompt_suffix:
             body["promptSuffix"] = prompt_suffix
+        # Optional session-scoped env forwarded to SaFE (body.env). SaFE relays
+        # it to Claw as session_env, injected into the sandbox so the
+        # inference_optimizer process sees it (e.g. CLAUDE_MODEL override).
+        # Logged so each CI job records exactly which session env it submitted,
+        # making "did the env reach Claw" verifiable from the job log alone.
+        if env:
+            body["env"] = env
+            log.info("[%s] session env forwarded to SaFE: %s", display_name, env)
         attempts = 8
         # Captured before the first POST so the dedup lookup only matches a task
         # this call created (not an unrelated older one for the same model).
@@ -1717,6 +1744,7 @@ def process_model(
     target_gain: float | None = None,
     results_path: str | None = None,
     pool_metadata: dict | None = None,
+    env: dict | None = None,
 ) -> SubmissionRecord:
     """Run the full submit flow for one model: detect, register, submit.
 
@@ -1978,6 +2006,7 @@ def process_model(
             max_hours=max_hours,
             target_gain=target_gain,
             results_path=results_path,
+            env=env,
         )
     except Exception as e:
         rec.status = "failed"
@@ -3217,6 +3246,35 @@ def _json_claw_session_id(data: dict) -> str:
     return ""
 
 
+def _resolve_record_claw_session_id(
+    safe: SafeOptimizeClient,
+    rec: SubmissionRecord,
+    last_task: dict | None = None,
+) -> str | None:
+    """Resolve a Claw session id for a submitted record.
+
+    SaFE's terminal task payload can occasionally omit ``clawSessionId`` even
+    though a subsequent task GET has it. Prefer the freshest terminal payload,
+    but fall back to the cached resolver before leaving the manifest without a
+    Claw id; otherwise Pulse classifies the dispatch as ``no_claw_session``.
+    """
+    for value in (
+        (last_task or {}).get("clawSessionId"),
+        rec.claw_session_id,
+    ):
+        sid = str(value or "").strip()
+        if sid:
+            return sid
+    if rec.task_id:
+        try:
+            sid = safe._claw_session_id_for(rec.task_id)
+            if sid:
+                return sid
+        except Exception as e:
+            log.debug("[task %s] clawSessionId fallback lookup failed: %s", rec.task_id, e)
+    return None
+
+
 def _env_truthy(name: str) -> bool:
     """Report whether an environment variable is set to a truthy value.
 
@@ -3436,6 +3494,9 @@ def _nfs_fallback_collect(
             if rec.claw_session_id != claw:
                 return
             score += 30
+        elif claw and not rec.claw_session_id:
+            rec.claw_session_id = claw
+            score += 20
         if _json_positive_perf(data):
             score += 10
         else:
@@ -3623,7 +3684,7 @@ def wait_and_collect_one(
     rec.final_status = final_status
     rec.final_phase = last_task.get("currentPhase")
     rec.final_message = (last_task.get("message") or "")[:500] or None
-    rec.claw_session_id = (last_task.get("clawSessionId") or "").strip() or None
+    rec.claw_session_id = _resolve_record_claw_session_id(safe, rec, last_task)
     rec.model_path = (last_task.get("modelPath") or "").strip() or rec.model_path
     rec.safe_user_id = (last_task.get("userId") or "").strip() or rec.safe_user_id
     rec.safe_started_at = (last_task.get("startedAt") or "").strip() or rec.safe_started_at
@@ -4112,6 +4173,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pool-batch-index", default=os.environ.get("HYPERLOOM_POOL_BATCH_INDEX", ""))
     parser.add_argument("--pool-batch-size", default=os.environ.get("HYPERLOOM_POOL_BATCH_SIZE", ""))
     parser.add_argument("--pool-source-task-id", default=os.environ.get("HYPERLOOM_POOL_SOURCE_TASK_ID", ""))
+    # HF download count for this model (carried from the candidates pool via the
+    # matrix). When it parses as an int < 100, the submit pins the orchestration
+    # model to claude-opus-4-6 via session env (CLAUDE_MODEL). Missing / non-int
+    # leaves the model unset (no-op).
+    parser.add_argument("--downloads", default=os.environ.get("HYPERLOOM_DOWNLOADS", ""))
 
     parser.add_argument(
         "--dry-run", action="store_true", help="Auto-detect and print plan without registering or submitting"
@@ -4377,6 +4443,15 @@ def main() -> int:
     for repo in repos:
         log.info("=" * 60)
         log.info("Model: %s", repo)
+        # Low-download models (HF downloads < 100) pin the orchestration model
+        # to claude-opus-4-6 via session env. A missing or non-integer downloads
+        # value is a no-op (env stays None).
+        submit_env: dict | None = None
+        try:
+            if int(str(args.downloads).strip()) < 100:
+                submit_env = {"CLAUDE_MODEL": "claude-opus-4-6"}
+        except (TypeError, ValueError):
+            submit_env = None
         rec = process_model(
             repo,
             hf,
@@ -4399,6 +4474,7 @@ def main() -> int:
             target_gain=args.target_gain,
             results_path=args.results_path,
             pool_metadata=pool_metadata,
+            env=submit_env,
         )
         records.append(rec)
 

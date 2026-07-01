@@ -1,6 +1,6 @@
 # Magpie profile config for Atom.
 # Same shape as baseline_atom.yaml but with torch_profiler ON so the run
-# produces a torch_trace dir downstream consumers (Kernel agent /
+# produces a torch_trace dir downstream consumers (Kernel-agent /
 # TraceLens) can read. `benchmark.model` and `benchmark.runner_type` are
 # OVERRIDDEN at runtime — see baseline_atom.yaml header for the full
 # rationale.

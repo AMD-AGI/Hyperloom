@@ -43,7 +43,7 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends() -> dict[str, Backend]:
     return {
-        name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel", "critic", "robustness")
+        name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel_agent", "critic", "robustness")
     }
 
 
@@ -206,10 +206,10 @@ async def test_promote_explore_with_winner(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_promote_framework_pr_kept(coord: Coordinator) -> None:
+async def test_promote_framework_kept(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     await coord._promote_to_shared_state(
-        "framework_pr",
+        "framework_agent",
         {
             "status": "kept",
             "candidate": {"candidate_id": "c1", "pr_url": "http://x/1"},
@@ -219,8 +219,8 @@ async def test_promote_framework_pr_kept(coord: Coordinator) -> None:
             "workspace": "/tmp/ws",
         },
     )
-    assert isinstance(coord.shared_state.framework_pr_phase_progress, list)
-    assert coord.shared_state.framework_pr_phase_progress[-1]["kept"] is True
+    assert isinstance(coord.shared_state.framework_agent_phase_progress, list)
+    assert coord.shared_state.framework_agent_phase_progress[-1]["kept"] is True
 
 
 # -- _compose_prompt -------------------------------------------------------
@@ -251,7 +251,7 @@ async def test_compose_prompt_robustness_and_kernel(coord: Coordinator) -> None:
     coord._run_deadline = time.monotonic() + 600.0
     coord.shared_state.max_minutes = 60
     out_rob = await coord._compose_prompt("robustness")
-    out_k = await coord._compose_prompt("kernel")
+    out_k = await coord._compose_prompt("kernel_agent")
     assert "SESSION_DIR=" in out_rob
     assert "SESSION_DIR=" in out_k
 
@@ -623,7 +623,7 @@ async def test_warm_specialist_params_fills_defaults(coord: Coordinator) -> None
     coord.shared_state.conc = 64
     coord.shared_state.isl = 256
     coord.shared_state.osl = 256
-    params: dict = {"domain": "kernel"}
+    params: dict = {"domain": "kernel_agent"}
     await coord._warm_specialist_params(params)
     assert params["gpu_type"] == "mi300x"
     assert params["tp"] == 1

@@ -112,7 +112,7 @@ def test_kernel_cannot_emit_escalate_strategy_change(gate):
     """Kernel responder-only — no scheduling-police intents."""
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
-            "kernel",
+            "kernel_agent",
             Intent(
                 type=IntentType.ESCALATE_STRATEGY_CHANGE,
                 payload={"next_action_hint": "skip_to_close"},
@@ -126,7 +126,7 @@ def test_kernel_cannot_emit_prune_branch(gate):
     """Kernel responder-only — no scheduling-police authority."""
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
-            "kernel",
+            "kernel_agent",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"family": "params", "reason": "x"},

@@ -34,23 +34,11 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Rolling downloads>100 pool: 240 models every 6 hours, firing at UTC
-  # 00:07 / 06:07 / 12:07 / 18:07 (Beijing 08:07 / 14:07 / 20:07 / 02:07).
-  # Minute is :07 (not :00) on purpose — GitHub delays cron heavily at the top
-  # of the hour when many repos fire at once; an off-peak minute reduces the lag.
-  # Each fire submits the NEXT sequential 240-model slice of the rotate pool,
-  # now hosted off-repo at
-  # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate.json
-  # (a date-less symlink that always points at the latest filtered pool;
-  # ordered not-run first; the 449 >12B multimodal models are front-loaded),
-  # stepping batch 0,1,2,... and wrapping at the pool end. Both
-  # exclude_leaderboard is OFF on schedule so the whole pool keeps cycling
-  # (re-running finished models too). exclude_active is ON to skip models
-  # already queued/running in other SaFE Optimize Submit runs.
-  # The tail batch is short (not head-wrapped) so consecutive fires never
-  # double-submit the head models. Manual workflow_dispatch is unaffected.
-  schedule:
-    - cron: '7 0,6,12,18 * * *'
+  # No schedule of its own: this is the shared EXECUTION ENGINE. The per-pool
+  # scheduler shells (optimize-sub100-part1 / -part2 / -part3) own the cron
+  # schedules and trigger this workflow via the GitHub API with their pool file,
+  # batch slice, batch_size (= max_parallel) and max_hours. Manual runs go
+  # straight through workflow_dispatch.
   workflow_dispatch:
     # ⚠️ HARD LIMIT: GitHub allows at most 25 top-level `inputs` for a
     # workflow_dispatch event (raised from 10 on 2025-12-04). Exceeding it makes
@@ -229,14 +217,15 @@ jobs:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
       HF_TOKEN_2:            ${{ secrets.HF_TOKEN_2 }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
-      # Rolling cron cycles the downloads>100 pool (every size), ordered with
-      # not-yet-run models first so the front-anchored window picks them up
-      # before the already-run tail. With exclude_leaderboard=false (see below)
-      # the pool never drains — once the front models finish and are no longer
-      # active, the window wraps and the whole 2426-model pool keeps repeating.
-      # Schedule reads the rotate pool from /wekafs (off-repo, RO-mounted on the
+      # Rolling cron cycles the hf_sub100_part1_20260626 pool (1766 models with
+      # no prior session_breakdown, compat-filtered), ordered not-yet-run-first.
+      # The rotation anchor in generate_hf_matrix was reset to 2026-06-26 12:00Z
+      # so the cycle restarts at batch 0; with batch_size=240 the pool is 8
+      # batches and a full sweep takes 8 fires (~48h). With exclude_leaderboard=
+      # false the pool never drains — once a batch finishes it wraps and repeats.
+      # Schedule reads the pool from /wekafs (off-repo, RO-mounted on the
       # hyperloom runners) so the large candidates JSON never bloats the git repo.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_downloads_gt100_rotate.json', secrets.WEKAFS_CHENYI_DIR) || github.event.inputs.candidates_file }}
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_sub100_part1_20260626.json', secrets.WEKAFS_CHENYI_DIR) || github.event.inputs.candidates_file }}
       # Schedule leaves batch_index empty so generate_hf_matrix derives a
       # SEQUENTIAL index from the scheduled-fire counter: each cron (UTC
       # 4/16) steps batch 0,1,2,... and wraps, marching the whole pool in
@@ -385,6 +374,10 @@ jobs:
           MATRIX_BATCH_INDEX:     ${{ matrix.batch_index }}
           MATRIX_BATCH_SIZE:      ${{ matrix.batch_size }}
           MATRIX_SOURCE_TASK_ID:  ${{ matrix.task_id }}
+          # HF download count carried from the candidates pool. optimize_submit.py
+          # pins CLAUDE_MODEL=claude-opus-4-6 (via session env) when this is an
+          # int < 100; missing / non-int is a no-op.
+          MATRIX_DOWNLOADS:       ${{ matrix.downloads }}
           OUTPUT_DIR:             ${{ github.workspace }}/submit-output
           ARTIFACTS_DIR:          ${{ github.workspace }}/task-artifacts
           # GitHub-issued, repo-scoped, 7-day token. We embed it into the
@@ -476,6 +469,9 @@ jobs:
           fi
           if [ -n "${MATRIX_SOURCE_TASK_ID:-}" ]; then
             ARGS+=(--pool-source-task-id "${MATRIX_SOURCE_TASK_ID}")
+          fi
+          if [ -n "${MATRIX_DOWNLOADS:-}" ]; then
+            ARGS+=(--downloads "${MATRIX_DOWNLOADS}")
           fi
           ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-420}")
           ARGS+=(--output-dir "${OUTPUT_DIR}")

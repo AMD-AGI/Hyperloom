@@ -9,9 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
-import respx
 
 from inference_optimizer.cli import (
     _build_recipe_kb_dispatcher,
@@ -19,11 +17,9 @@ from inference_optimizer.cli import (
 )
 from inference_optimizer.recipe_kb import (
     LocalRecipeStore,
+    RemoteRecipeClientError,
     cid_to_path_components,
     recipe_canonical_id,
-)
-from inference_optimizer.recipe_snapshot_constants import (
-    PATH_RECIPES_SEARCH,
 )
 
 
@@ -36,6 +32,9 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
         "USER_DATA_PATH",
         "CORTEX_KB_URL",
         "KB_SERVICE_TOKEN",
+        "GBRAIN_BASE_URL",
+        "GBRAIN_TOKEN",
+        "RECIPE_KB_MIRROR_MODE",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -56,7 +55,7 @@ def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
     cid = recipe_canonical_id(
         model="DeepSeek-R1",
         hardware="MI300X",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
@@ -108,7 +107,7 @@ def test_item3_no_central_url_reads_and_writes_go_local(
     cid = recipe_canonical_id(
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
@@ -116,7 +115,7 @@ def test_item3_no_central_url_reads_and_writes_go_local(
         canonical_id=cid,
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         best_throughput=12345.0,
@@ -130,27 +129,19 @@ def test_item3_no_central_url_reads_and_writes_go_local(
 # §4 Item 4 — Centralized KB available: reads go centralized, writes still local
 def test_item4_central_kb_reads_central_writes_local(
     env_clean: None,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Read-remote / write-local invariant when remote is healthy (respx-mocked)."""
-    central_url = "http://central-kb.test"
-    args = _ns(
-        local_kb_root=str(tmp_path),
-        cortex_kb_url=central_url,
-    )
-    kb = _build_recipe_kb_dispatcher(args)
-    assert kb.remote is not None
-    assert kb.remote.kb_url == central_url
-
+    """Read-remote / write-local invariant when the gbrain remote is healthy."""
     cid = recipe_canonical_id(
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
 
-    # Central has a stale row for this cid.
+    # The remote (gbrain) holds a stale row for this cid.
     central_payload = {
         "canonical_id": cid,
         "version": 9,
@@ -159,84 +150,101 @@ def test_item4_central_kb_reads_central_writes_local(
         "metrics": {"throughput": 99999.0},
     }
 
-    # WRITE must NOT touch central — only the /recipes/search read route is mocked,
-    # so any write HTTP call would fail as an unmatched URL.
-    with respx.mock(base_url=central_url) as mock:
-        mock.post(PATH_RECIPES_SEARCH).mock(
-            return_value=httpx.Response(200, json={"recipes": [central_payload]}),
-        )
-        kb.put_recipe(
-            canonical_id=cid,
-            model="m",
-            hardware="mi300x",
-            framework="sglang",
-            framework_version="0.4.5",
-            precision="fp8",
-            best_throughput=11111.0,
-        )
-        local_row = kb.local.get_recipe(canonical_id=cid)
-        assert local_row is not None
-        assert local_row["best_throughput"] == 11111.0
+    class _FakeGbrain:
+        enabled = True
 
-        # READ returns the CENTRAL row (wider corpus when reachable), not the local one.
-        out = kb.get_recipe(canonical_id=cid)
-        assert out is not None
-        assert out["version"] == 9
-        assert out["best_throughput"] == 99999.0  # central wins
+        def get_recipe(self, *, canonical_id: str, version: int | None = None):
+            return dict(central_payload) if canonical_id == cid else None
+
+        def search(self, **_k: Any):
+            return [dict(central_payload)]
+
+        def close(self) -> None:
+            pass
+
+    from inference_optimizer.recipe_kb import gbrain_remote_client as grc
+
+    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _FakeGbrain())
+    kb = _build_recipe_kb_dispatcher(_ns(local_kb_root=str(tmp_path)))
+    assert kb.remote is not None
+
+    # WRITE goes local only (the remote exposes no write methods by construction).
+    kb.put_recipe(
+        canonical_id=cid,
+        model="m",
+        hardware="mi300x",
+        framework_name="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
+        best_throughput=11111.0,
+    )
+    local_row = kb.local.get_recipe(canonical_id=cid)
+    assert local_row is not None
+    assert local_row["best_throughput"] == 11111.0
+
+    # READ returns the REMOTE row (wider corpus when reachable), not the local one.
+    out = kb.get_recipe(canonical_id=cid)
+    assert out is not None
+    assert out["version"] == 9
+    assert out["best_throughput"] == 99999.0  # remote wins
 
 
 # §4 Item 5 — Centralized KB unavailable: reads fall back to local, writes still local
 def test_item5_unreachable_central_falls_back_to_local(
     env_clean: None,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    central_url = "http://central-kb.test"
-    args = _ns(
-        local_kb_root=str(tmp_path),
-        cortex_kb_url=central_url,
-    )
-    kb = _build_recipe_kb_dispatcher(args)
-    # Foreground profile (1 retry, 2s timeout) so the test isn't slow.
-    kb.remote.retry_attempts = 1  # type: ignore[union-attr]
-
     cid = recipe_canonical_id(
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
+
+    class _BoomGbrain:
+        enabled = True
+
+        def get_recipe(self, *, canonical_id: str, version: int | None = None):
+            raise RemoteRecipeClientError("down", category="transport")
+
+        def search(self, **_k: Any):
+            raise RemoteRecipeClientError("down", category="transport")
+
+        def close(self) -> None:
+            pass
+
+    from inference_optimizer.recipe_kb import gbrain_remote_client as grc
+
+    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _BoomGbrain())
+    kb = _build_recipe_kb_dispatcher(_ns(local_kb_root=str(tmp_path)))
 
     # Seed the local store so the fallback has something to return.
     kb.local.put_recipe(
         canonical_id=cid,
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         best_throughput=22222.0,
     )
 
-    # Central unreachable on the search route → fall back to local.
-    with respx.mock(base_url=central_url) as mock:
-        mock.post(PATH_RECIPES_SEARCH).mock(
-            return_value=httpx.Response(503, json={"detail": "warming up"}),
-        )
-        # WRITE still goes local (central is read-only by design).
-        kb.put_recipe(
-            canonical_id=cid,
-            model="m",
-            hardware="mi300x",
-            framework="sglang",
-            framework_version="0.4.5",
-            precision="fp8",
-            best_throughput=33333.0,
-        )
-        # READ: central 503 → fall through to local (RemoteRecipeClientError absorbed).
-        out = kb.get_recipe(canonical_id=cid)
-        assert out is not None
-        assert out["best_throughput"] == 33333.0  # local hit
+    # WRITE still goes local (the remote is read-only by design).
+    kb.put_recipe(
+        canonical_id=cid,
+        model="m",
+        hardware="mi300x",
+        framework_name="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
+        best_throughput=33333.0,
+    )
+    # READ: remote raises → fall through to local (RemoteRecipeClientError absorbed).
+    out = kb.get_recipe(canonical_id=cid)
+    assert out is not None
+    assert out["best_throughput"] == 33333.0  # local hit
 
 
 # §4 Item 6 — Local recipe files or directories can disambiguate the 5-tuple
@@ -246,14 +254,14 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
     cid_v1 = recipe_canonical_id(
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
     )
     cid_v2 = recipe_canonical_id(
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.0",
         precision="fp8",
     )
@@ -261,7 +269,7 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
         canonical_id=cid_v1,
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="fp8",
         best_throughput=1.0,
@@ -270,7 +278,7 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
         canonical_id=cid_v2,
         model="m",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.0",
         precision="fp8",
         best_throughput=2.0,
@@ -294,7 +302,7 @@ def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="ver",
         precision="prec",
     )
@@ -302,7 +310,7 @@ def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="ver",
         precision="prec",
     )
@@ -317,7 +325,7 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="/hyperloom/models/Qwen-Qwen3-30B-A3B-Base",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="bf16",
     )
@@ -327,7 +335,7 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
         canonical_id=cid,
         model="/hyperloom/models/Qwen-Qwen3-30B-A3B-Base",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.4.5",
         precision="bf16",
         best_throughput=42.0,
@@ -353,7 +361,7 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="/some/path/MyModel/",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
     )
@@ -362,7 +370,7 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
         canonical_id=cid,
         model="/some/path/MyModel/",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
     )
@@ -379,7 +387,7 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
     cid = recipe_canonical_id(
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
     )
@@ -387,7 +395,7 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
         what_worked=[
@@ -409,7 +417,7 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
         what_worked=list(live.get("what_worked") or []),
@@ -439,7 +447,7 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
     )
@@ -447,7 +455,7 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
         best_throughput=1.0,
@@ -456,7 +464,7 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
         best_throughput=2.0,
@@ -474,7 +482,7 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
     )
@@ -482,7 +490,7 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
         canonical_id=cid,
         model="m",
         hardware="hw",
-        framework="fw",
+        framework_name="fw",
         framework_version="v",
         precision="p",
         best_config={"tp": "8"},

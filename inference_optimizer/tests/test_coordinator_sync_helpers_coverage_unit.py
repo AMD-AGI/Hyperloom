@@ -42,7 +42,7 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends() -> dict[str, Backend]:
     return {
-        name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel", "critic", "robustness")
+        name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel_agent", "critic", "robustness")
     }
 
 
@@ -166,8 +166,8 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
 
 # -- static / pure helpers -------------------------------------------------
 def test_gap_layer_for_action(coord: Coordinator) -> None:
-    assert coord._gap_layer_for_action("kernel_opt") == ("kernel", "kernel_switch_specialist")
-    assert coord._gap_layer_for_action("profile") == ("kernel", "kernel_switch_specialist")
+    assert coord._gap_layer_for_action("kernel_opt") == ("kernel_agent", "kernel_switch_specialist")
+    assert coord._gap_layer_for_action("profile") == ("kernel_agent", "kernel_switch_specialist")
     assert coord._gap_layer_for_action("sweep") == ("framework", "serving_specialist")
     assert coord._gap_layer_for_action("baseline") == ("system", "system_specialist")
     assert coord._gap_layer_for_action("anything-else") == ("framework", "serving_specialist")
@@ -177,7 +177,7 @@ def test_task_id_from_specialist_source(coord: Coordinator) -> None:
     from inference_optimizer.orchestrator.coordinator import SPECIALIST_FROM_AGENT_PREFIX
 
     assert coord._task_id_from_specialist_source("") == ""
-    assert coord._task_id_from_specialist_source("kernel") == ""
+    assert coord._task_id_from_specialist_source("kernel_agent") == ""
     assert (
         coord._task_id_from_specialist_source(
             f"{SPECIALIST_FROM_AGENT_PREFIX}abc",
@@ -244,7 +244,7 @@ def test_source_session_id_prefers_cortex(coord: Coordinator) -> None:
 
 def test_kernel_and_explore_enabled(coord: Coordinator) -> None:
     coord.shared_state.kernel_enabled = True
-    assert coord._kernel_enabled() == ("kernel" in coord.role_registry)
+    assert coord._kernel_enabled() == ("kernel_agent" in coord.role_registry)
     coord.shared_state.kernel_enabled = False
     assert coord._kernel_enabled() is False
 
@@ -431,9 +431,9 @@ def test_sequence_denial_for_request(coord: Coordinator) -> None:
     # non-kernel target -> not gated
     assert coord._sequence_denial_for_request("orchestration", "anything") is None
     # trace_analyze always allowed
-    assert coord._sequence_denial_for_request("kernel", "trace_analyze") is None
+    assert coord._sequence_denial_for_request("kernel_agent", "trace_analyze") is None
     # unknown handler kind -> not gated
-    assert coord._sequence_denial_for_request("kernel", "no_such_kind") is None
+    assert coord._sequence_denial_for_request("kernel_agent", "no_such_kind") is None
 
 
 def test_skip_gemm_tuning_env(coord: Coordinator, monkeypatch) -> None:
@@ -517,12 +517,12 @@ def test_kernel_opt_keep_pending(coord: Coordinator) -> None:
     assert coord._kernel_opt_keep_pending() == ""
 
 
-# -- framework_pr candidate selection -------------------------------------
-def test_select_next_framework_pr_candidate(coord: Coordinator) -> None:
+# -- framework candidate selection -------------------------------------
+def test_select_next_framework_agent_candidate(coord: Coordinator) -> None:
     ss = coord.shared_state
-    ss.framework_pr_batches = []
-    assert coord._select_next_framework_pr_candidate() is None
-    ss.framework_pr_batches = [
+    ss.framework_agent_batches = []
+    assert coord._select_next_framework_agent_candidate() is None
+    ss.framework_agent_batches = [
         {
             "candidates": [
                 {"candidate_id": "c1"},
@@ -530,21 +530,95 @@ def test_select_next_framework_pr_candidate(coord: Coordinator) -> None:
             ],
         }
     ]
-    ss.framework_pr_phase_progress = [{"candidate_id": "c1"}]
-    nxt = coord._select_next_framework_pr_candidate()
+    ss.framework_agent_phase_progress = [{"candidate_id": "c1"}]
+    nxt = coord._select_next_framework_agent_candidate()
     assert nxt == {"candidate_id": "c2"}
 
 
-def test_framework_pr_known_candidate_ids(coord: Coordinator) -> None:
+def test_unprocessed_framework_agent_candidates(coord: Coordinator) -> None:
     ss = coord.shared_state
-    ss.framework_pr_batches = [
+    ss.framework_agent_batches = [
+        {
+            "candidates": [
+                {"candidate_id": "c1"},
+                {"candidate_id": "c2"},
+                {"candidate_id": "c3"},
+            ],
+        }
+    ]
+    ss.framework_agent_phase_progress = [{"candidate_id": "c1"}]
+    out = coord._unprocessed_framework_agent_candidates()
+    assert [c["candidate_id"] for c in out] == ["c2", "c3"]
+
+
+def test_match_framework_agent_candidate_by_id_and_pr_number(coord: Coordinator) -> None:
+    cands = [
+        {"candidate_id": "https://github.com/o/r/pull/12", "pr_url": "https://github.com/o/r/pull/12", "pr_number": 12},
+        {"candidate_id": "https://github.com/o/r/pull/34", "ref": "PR:34", "pr_number": 34},
+    ]
+    # exact candidate_id
+    assert coord._match_framework_agent_candidate("https://github.com/o/r/pull/12", cands)["pr_number"] == 12
+    # ref match
+    assert coord._match_framework_agent_candidate("PR:34", cands)["pr_number"] == 34
+    # bare PR number fallback
+    assert coord._match_framework_agent_candidate("34", cands)["pr_number"] == 34
+    # unknown
+    assert coord._match_framework_agent_candidate("999", cands) is None
+    assert coord._match_framework_agent_candidate("", cands) is None
+
+
+async def test_select_best_framework_agent_candidate_falls_back_to_linear(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """With the ranker client unavailable, selection degrades to discovery order."""
+    ss = coord.shared_state
+    ss.framework_agent_batches = [
+        {"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}
+    ]
+    ss.framework_agent_phase_progress = []
+    # Force the ranker client to be unavailable.
+    monkeypatch.setattr(coord, "_framework_agent_ranker_client", lambda: None)
+    chosen = await coord._select_best_framework_agent_candidate()
+    assert chosen == {"candidate_id": "c1"}
+
+
+async def test_select_best_framework_agent_candidate_single(coord: Coordinator) -> None:
+    """A single unprocessed candidate is returned without invoking the ranker."""
+    ss = coord.shared_state
+    ss.framework_agent_batches = [{"candidates": [{"candidate_id": "only"}]}]
+    ss.framework_agent_phase_progress = []
+    chosen = await coord._select_best_framework_agent_candidate()
+    assert chosen == {"candidate_id": "only"}
+
+
+async def test_select_best_framework_agent_candidate_uses_ranker_choice(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """When the ranker returns a candidate, it is used over discovery order."""
+    ss = coord.shared_state
+    ss.framework_agent_batches = [
+        {"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}, {"candidate_id": "c3"}]}
+    ]
+    ss.framework_agent_phase_progress = []
+
+    async def _fake_rank(cands):
+        return cands[-1]  # pick the last → c3
+
+    monkeypatch.setattr(coord, "_rank_framework_agent_candidates_llm", _fake_rank)
+    chosen = await coord._select_best_framework_agent_candidate()
+    assert chosen == {"candidate_id": "c3"}
+
+
+def test_framework_known_candidate_ids(coord: Coordinator) -> None:
+    ss = coord.shared_state
+    ss.framework_agent_batches = [
         {"candidates": [{"candidate_id": "c1"}, {"pr_url": "u2"}]},
     ]
     ss.research_scout_seen_pr_ids = ["p3"]
-    ids = coord._framework_pr_known_candidate_ids()
+    ids = coord._framework_known_candidate_ids()
     assert {"c1", "u2", "p3"}.issubset(ids)
     # tried refs reflects the same set
-    assert set(coord._framework_pr_tried_refs()) == ids
+    assert set(coord._framework_tried_refs()) == ids
 
 
 # -- module-level helpers --------------------------------------------------
@@ -570,7 +644,7 @@ def test_format_inbox_event_variants() -> None:
     from inference_optimizer.orchestrator.message_bus import Message
 
     delegated = Message.new(
-        "kernel",
+        "kernel_agent",
         "orchestration",
         "delegated_result",
         {

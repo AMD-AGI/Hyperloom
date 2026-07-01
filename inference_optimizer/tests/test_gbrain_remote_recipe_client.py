@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from inference_optimizer.recipe_kb import gbrain_remote_client as grc
+from inference_optimizer.recipe_kb import recipe_canonical_id
 from inference_optimizer.recipe_kb.gbrain_remote_client import (
     GbrainRemoteError,
     GbrainRemoteRecipeClient,
@@ -17,6 +18,33 @@ from inference_optimizer.recipe_kb.gbrain_remote_client import (
     build_gbrain_remote_from_env,
 )
 from inference_optimizer.recipe_kb.remote_client import RemoteRecipeClientError
+
+
+def test_page_to_recipe_reads_legacy_framework_attr() -> None:
+    """gbrain pages authored before the framework->framework_name rename carry
+    the serving framework under the legacy ``framework`` attr. The reader must
+    fall back to it so the 5-tuple identity (and canonical id) stays correct
+    instead of degrading to the ``unknown_framework`` default slug."""
+    frontmatter = {
+        "attrs": {
+            "model": "deepseek-r1",
+            "hardware": "mi300x",
+            "framework": "sglang",  # legacy key (pre-rename pages)
+            "framework_version": "0.4.5",
+            "precision": "fp8",
+        },
+    }
+    recipe = _page_to_recipe(frontmatter)
+    assert recipe is not None
+    assert recipe["labels"]["framework_name"] == "sglang"
+    expected_cid = recipe_canonical_id(
+        model="deepseek-r1",
+        hardware="mi300x",
+        framework_name="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
+    )
+    assert recipe["canonical_id"] == expected_cid
 
 
 class _FakeMcp:
@@ -46,9 +74,9 @@ def _client(pages: dict[str, dict[str, Any]]) -> GbrainRemoteRecipeClient:
 
 
 def _recipe_page(
-    model: str, hw: str, framework: str = "sglang", precision: str = "", args: str = "", gain: float = 0.0
+    model: str, hw: str, framework_name: str = "sglang", precision: str = "", args: str = "", gain: float = 0.0
 ) -> dict[str, Any]:
-    attrs: dict[str, Any] = {"model": model, "hardware": hw, "framework": framework}
+    attrs: dict[str, Any] = {"model": model, "hardware": hw, "framework_name": framework_name}
     if precision:
         attrs["precision"] = precision
     if args:
@@ -100,11 +128,11 @@ def test_get_recipe_roundtrip() -> None:
 
 
 def test_get_recipe_uses_direct_slug_fast_path() -> None:
-    slug = "recipe-snapshot/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8"
+    slug = "hyperloom-recipe-kb/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8"
     c = _client(
         {
             slug: _recipe_page("Qwen3-32B", "mi300x", "sglang", "fp8"),
-            "recipe-snapshot/inference/other/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8": (
+            "hyperloom-recipe-kb/inference/other/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8": (
                 _recipe_page("Other", "mi300x", "sglang", "fp8")
             ),
         }
@@ -128,7 +156,7 @@ def _hw(row: dict[str, Any]) -> str:
 
 
 def _fw(row: dict[str, Any]) -> str:
-    return str((row.get("labels") or {}).get("framework") or "")
+    return str((row.get("labels") or {}).get("framework_name") or "")
 
 
 def _model(row: dict[str, Any]) -> str:
@@ -150,8 +178,8 @@ def test_search_filters_by_label_match() -> None:
     # model + hardware → exactly one
     rows = c.search(label_match={"model": "Qwen3-32B", "hardware": "mi300x"})
     assert len(rows) == 1 and _fw(rows[0]) == "sglang"
-    # framework filter
-    rows = c.search(label_match={"framework": "vllm"})
+    # framework_name filter
+    rows = c.search(label_match={"framework_name": "vllm"})
     assert len(rows) == 1 and _model(rows[0]) == "llama-3-70b"
 
 
@@ -167,7 +195,7 @@ def test_search_reuses_scan_cache() -> None:
     first_call_count = len(c._mcp.calls)  # type: ignore[union-attr]
     assert any(tool == "list_pages" for tool, _ in c._mcp.calls)  # type: ignore[union-attr]
 
-    assert len(c.search(label_match={"framework": "vllm"})) == 1
+    assert len(c.search(label_match={"framework_name": "vllm"})) == 1
     # Second search should reuse the process-local scan cache; no extra MCP
     # calls are needed.
     assert len(c._mcp.calls) == first_call_count  # type: ignore[union-attr]

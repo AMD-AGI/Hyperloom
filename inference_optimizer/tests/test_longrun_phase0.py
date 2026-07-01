@@ -133,16 +133,16 @@ async def test_prune_events_never_crosses_resume_anchor(conn):
     bus = MessageBus(conn)
     cursors = CursorStore(conn)
     for i in range(50):
-        await bus.append_and_seq(Message.new("orchestration", "kernel", "request", {"i": i}))
+        await bus.append_and_seq(Message.new("orchestration", "kernel_agent", "request", {"i": i}))
     # Two agents; the laggard cursor (kernel=20) is the safe watermark.
     await cursors.advance("orchestration", seq=50, msg_id="a")
-    await cursors.advance("kernel", seq=20, msg_id="b")
+    await cursors.advance("kernel_agent", seq=20, msg_id="b")
     await dbm.prune_events(conn, cursors, keep_recent=0)
     rows = await conn.fetchall("SELECT MIN(seq) AS m FROM events")
     # Nothing at/below the laggard's unprocessed frontier (seq>20) is removed.
     assert int(rows[0]["m"]) == 21
     # Resume replay for the laggard still sees all its unprocessed events.
-    replay = await bus.replay_for("kernel", after_seq=20)
+    replay = await bus.replay_for("kernel_agent", after_seq=20)
     assert len(replay) == 30
 
 
@@ -369,7 +369,7 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }

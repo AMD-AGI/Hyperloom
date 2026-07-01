@@ -19,8 +19,8 @@ warm-start reads):
   its 5-tuple canonical id, so re-running overwrites in place.
 
 The emitted page is the same better-landing shape the gbrain read client
-expects: ``type: recipe`` + ``tags: kind:/model:/gpu:/framework:`` +
-flat ``attrs`` (model/hardware/framework/framework_version/precision +
+expects: ``type: recipe`` + ``tags: kind:/model:/gpu:/framework_name:`` +
+flat ``attrs`` (model/hardware/framework_name/framework_version/precision +
 best_config_args / best_config_envs / best_throughput).
 """
 
@@ -250,11 +250,14 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     args, envs = _best_config_split(best_config)
     model = str(recipe.get("model") or "")
     hardware = str(recipe.get("hardware") or "")
-    framework = str(recipe.get("framework") or "")
+    # Back-compat: the batch ingest reads raw on-disk recipe.json via
+    # ``list_all_live_recipes`` (no Recipe.from_dict normalization), so rows
+    # persisted before the framework_name rename still carry the legacy key.
+    framework_name = str(recipe.get("framework_name") or recipe.get("framework") or "")
     attrs: dict[str, Any] = {
         "model": model,
         "hardware": hardware,
-        "framework": framework,
+        "framework_name": framework_name,
         "framework_version": str(recipe.get("framework_version") or ""),
         "precision": str(recipe.get("precision") or ""),
         "model_type": str(recipe.get("model_type") or ""),
@@ -271,11 +274,11 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     # dead knobs" priors. The minimal YAML emitter only handles scalar
     # lists, so structured list-of-dict fields are stored as JSON strings
     # (round-tripped by ``GbrainRemoteRecipeClient._json_list`` on read).
-    for _field in ("what_worked", "what_failed", "remaining_gaps", "pitfalls", "lessons"):
+    for _field in ("what_worked", "what_failed", "remaining_gaps", "pitfalls", "lessons", "prs_tested"):
         _value = recipe.get(_field)
         if _value:
             attrs[_field] = json.dumps(_value, ensure_ascii=False, default=str)
-    # Stack fingerprint (aiter / rocm / framework versions) rides the page as
+    # Stack fingerprint (aiter / rocm / framework_name versions) rides the page as
     # a nested dict so a gbrain warm-start can derive framework_version / rocm
     # / aiter without the local store. The reader already expects
     # attrs["stack_fingerprint"] as a dict (gbrain_remote_client._page_to_recipe);
@@ -293,7 +296,7 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "kind:recipe",
         f"model:{_tag_value(model)}",
         f"gpu:{_tag_value(hardware)}",
-        f"framework:{_tag_value(framework)}",
+        f"framework_name:{_tag_value(framework_name)}",
     ]
     if _model_type:
         tags.append(f"model_type:{_tag_value(_model_type)}")
@@ -309,13 +312,13 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "attrs": attrs,
     }
     # Stable slug from the 7-tuple canonical (colons -> path levels).
-    slug = "recipe-snapshot/" + canonical.replace(":", "/")
+    slug = "hyperloom-recipe-kb/" + canonical.replace(":", "/")
     body_lines = [
         f"# Recipe {canonical}",
         "",
         f"- model: {model}",
         f"- hardware: {hardware}",
-        f"- framework: {framework}",
+        f"- framework_name: {framework_name}",
         f"- best_throughput: {attrs['best_throughput']}",
         f"- validated_gain_pct: {attrs['validated_gain_pct']}",
         f"- best_config_args: {args}",

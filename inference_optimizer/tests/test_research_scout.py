@@ -131,7 +131,7 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle),
-        "kernel": MockBackend(idle),
+        "kernel_agent": MockBackend(idle),
         "critic": MockBackend(idle),
         "robustness": MockBackend(idle),
     }

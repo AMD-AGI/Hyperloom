@@ -685,7 +685,7 @@ class TestCriticPromptBuilder:
             "## 3. KNOWN ACTIONS",
             "## 4. DEFAULT VERDICT",
             "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
-            "## 5b. KERNEL-OWNED CARVE-OUT",
+            "## 5b. KERNEL_AGENT-OWNED CARVE-OUT",
             "## 6. RULES",
             "## 7. OUTPUT PROTOCOL",
         ):
@@ -762,7 +762,7 @@ class TestCriticPromptBuilder:
             max_minutes=60,
             rules_fragment_path=self._rules_path(),
         )
-        assert "## 5. KERNEL-OWNED CARVE-OUT" not in text
+        assert "## 5. KERNEL_AGENT-OWNED CARVE-OUT" not in text
         for name in ("kernel_opt", "integrate", "deep_kernel_analysis"):
             assert f"**{name}**" not in text, f"{name} should not appear in no-kernel catalogue"
 

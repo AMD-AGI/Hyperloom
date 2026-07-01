@@ -343,6 +343,92 @@ def test_geak_correctness_trust_requires_complete_status(tmp_path):
     assert verification["correctness_source"] == "missing"
 
 
+def _geak_partial_attempt(
+    tmp_path: Path,
+    *,
+    status: str = "incremental_after_round_1",
+    speedup: float = 2.6,
+    round_correctness: dict | None = None,
+):
+    """GEAK attempt whose run was SIGTERM'd mid-round: status=incremental_after_round_N,
+    final_report carries an explicit round_evaluation.correctness record."""
+    final = tmp_path / "geak_final_report.json"
+    report: dict = {
+        "status": status,
+        "best_patch": str(tmp_path / "patch_0.patch"),
+        "best_speedup": speedup,
+        "best_task": "tilelang-fp8-blockscale-rewrite",
+    }
+    if round_correctness is not None:
+        report["round_evaluation"] = {"round": 1, "correctness": round_correctness}
+    final.write_text(json.dumps(report), encoding="utf-8")
+    artifact = tmp_path / "worktree" / "gemm_op.py"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("import torch\ndef run_gemm(*a, **k): pass\n", encoding="utf-8")
+    return {
+        "status": "partial",
+        "attempt_id": "geak-partial",
+        "backend": "geak",
+        "optimized_path": str(artifact),
+        "backend_paths": {
+            "geak_final_report": str(final),
+            "geak_per_task_best_speedup": str(speedup),
+            "geak_per_task_best_patch": str(tmp_path / "patch_0.patch"),
+            "geak_per_task_best_worktree": str(artifact.parent.parent),
+        },
+    }
+
+
+def test_geak_partial_with_verified_round_correctness_keeps(tmp_path):
+    """#735-followup: a SIGTERM'd GEAK run (status=incremental_after_round_1) whose
+    round_evaluation shows correctness.success=True + a verified speedup must be
+    trusted and routed to KEEP — not discarded as NEEDS_REVIEW (which never reaches
+    integrate/E2E). This is the exact DeepSeek-R1 2.6x case."""
+    verification = ko.build_verification(
+        _args(source_file="/tmp/gemm_op.py"),
+        [_geak_partial_attempt(tmp_path, speedup=2.6, round_correctness={"returncode": 0, "success": True})],
+        benchmark_available=True,
+    )
+    assert verification["micro_speedup"] == 2.6
+    assert verification["correctness_passed"] is True
+    assert verification["correctness_source"] == "geak_partial_round_verified"
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "KEEP", proposal
+
+
+def test_geak_partial_without_round_correctness_stays_review(tmp_path):
+    """A partial GEAK run with NO explicit verified-correctness record must NOT be
+    trusted — stays conservative (NEEDS_REVIEW), preserving the safety gate."""
+    verification = ko.build_verification(
+        _args(source_file="/tmp/gemm_op.py"),
+        [_geak_partial_attempt(tmp_path, speedup=2.6, round_correctness=None)],
+        benchmark_available=True,
+    )
+    assert verification["correctness_passed"] is False
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "NEEDS_REVIEW"
+
+
+def test_geak_partial_with_failed_round_correctness_not_trusted(tmp_path):
+    """A partial GEAK run whose round correctness FAILED must never be trusted."""
+    verification = ko.build_verification(
+        _args(source_file="/tmp/gemm_op.py"),
+        [_geak_partial_attempt(tmp_path, speedup=2.6, round_correctness={"returncode": 1, "success": False})],
+        benchmark_available=True,
+    )
+    assert verification["correctness_passed"] is False
+
+
+def test_geak_round_correctness_passed_helper():
+    """Unit-cover the nested-record reader directly."""
+    assert ko._geak_round_correctness_passed({"round_evaluation": {"correctness": {"returncode": 0, "success": True}}})
+    assert ko._geak_round_correctness_passed({"best_round_evaluation": {"correctness": {"success": True}}})
+    assert not ko._geak_round_correctness_passed({"round_evaluation": {"correctness": {"success": False}}})
+    assert not ko._geak_round_correctness_passed({"round_evaluation": {"correctness": {"returncode": 1, "success": True}}})
+    assert not ko._geak_round_correctness_passed({"status": "incremental_after_round_1"})
+    assert not ko._geak_round_correctness_passed({})
+
+
 def test_report_correctness_passes_with_reference_language(tmp_path):
     report = tmp_path / "optimization_report.md"
     report.write_text(
@@ -801,7 +887,7 @@ def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
 
 
 def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
-    """Patch wins over stdout log; a diff has no fenced block so we return `missing` rather than promoting the log (`_candidate_artifact_paths` precedence)."""
+    """Patch wins over stdout log; with no readable original to apply against, a bare diff yields `missing` rather than promoting the marker-noise log (`_candidate_artifact_paths` precedence)."""
     patch_path = tmp_path / "patch_1.patch"
     patch_path.write_text(
         "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -1,1 +1,1 @@\n-old\n+new\n",
@@ -832,6 +918,351 @@ def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
     # Crucial: the marker-noise log is NOT silently promoted to source_file (the pre-fix bug).
     assert source == "missing"
     assert artifact_path == ""
+
+
+def test_patch_only_winner_reconstructs_full_source(tmp_path):
+    """A backend whose best artifact is a unified diff (no full-source .py, no
+    fenced block) must reconstruct the complete optimized source by applying the
+    patch to the original kernel — not defer with artifact_source='missing'.
+
+    Reproduces the DeepSeek-R1 fp8-MoE case: GEAK's winning ``asm-kernel-rewrite``
+    emitted only ``patch_0.patch`` under a ``<task-label>/`` dir (so the
+    ``parallel_<M>`` worktree mapping missed it) and a diff has no fenced block to
+    scrape, leaving the verified +8.4% kernel unverifiable. The patch + original
+    reconstruct the optimized file deterministically.
+    """
+    original = tmp_path / "fused_moe.py"
+    original.write_text(
+        "import triton\n\n\ndef helper():\n    return 1\n\n\ndef kernel():\n    return helper()\n",
+        encoding="utf-8",
+    )
+    # Unified diff that adds a cache helper (mirrors the asm-rewrite shape).
+    patch_path = tmp_path / "asm-kernel-rewrite" / "patch_0.patch"
+    patch_path.parent.mkdir(parents=True)
+    patch_path.write_text(
+        "--- a/fused_moe.py\n"
+        "+++ b/fused_moe.py\n"
+        "@@ -1,5 +1,8 @@\n"
+        " import triton\n"
+        " \n"
+        " \n"
+        "+_CACHE = {}\n"
+        "+\n"
+        "+\n"
+        " def helper():\n"
+        "     return 1\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed",
+        "attempt_id": "geak-asm",
+        "backend": "geak",
+        "backend_paths": {"geak_per_task_best_patch": str(patch_path)},
+    }
+
+    artifact_path, source, error = ko._select_source_artifact(
+        attempt,
+        target_file=str(original),
+        run_dir=tmp_path,
+    )
+
+    assert source == "reconstructed_from_patch", error
+    assert artifact_path
+    text = Path(artifact_path).read_text(encoding="utf-8")
+    # Reconstruction = original + patch (complete file, not a diff).
+    assert "_CACHE = {}" in text
+    assert "def kernel():" in text  # untouched original content preserved
+    assert "@@" not in text  # not a diff
+    # Security: nothing was written outside run_dir (no traversal escape).
+    assert Path(artifact_path).resolve().is_relative_to(tmp_path.resolve())
+
+
+def test_patch_with_absolute_path_header_is_rejected(tmp_path):
+    """A backend diff whose header targets an ABSOLUTE path must NOT reconstruct
+    (and must not write outside the work dir). Backend patches are untrusted."""
+    original = tmp_path / "fused_moe.py"
+    original.write_text("import triton\n\n\ndef kernel():\n    return 1\n", encoding="utf-8")
+    evil = tmp_path / "evil.patch"
+    evil.write_text(
+        "--- a/fused_moe.py\n"
+        "+++ /etc/cron.d/pwned\n"
+        "@@ -1,1 +1,2 @@\n"
+        " import triton\n"
+        "+# owned\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed", "attempt_id": "geak-evil", "backend": "geak",
+        "backend_paths": {"geak_per_task_best_patch": str(evil)},
+    }
+    artifact_path, source, _ = ko._select_source_artifact(
+        attempt, target_file=str(original), run_dir=tmp_path,
+    )
+    assert source == "missing"
+    assert artifact_path == ""
+
+
+def test_patch_with_parent_traversal_header_is_rejected(tmp_path):
+    """A backend diff header using ``..`` traversal must NOT reconstruct."""
+    original = tmp_path / "fused_moe.py"
+    original.write_text("import triton\n\n\ndef kernel():\n    return 1\n", encoding="utf-8")
+    evil = tmp_path / "evil.patch"
+    evil.write_text(
+        "--- a/fused_moe.py\n"
+        "+++ b/../../../../tmp/pwned.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " import triton\n"
+        "+# owned\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed", "attempt_id": "geak-evil2", "backend": "geak",
+        "backend_paths": {"geak_per_task_best_patch": str(evil)},
+    }
+    artifact_path, source, _ = ko._select_source_artifact(
+        attempt, target_file=str(original), run_dir=tmp_path,
+    )
+    assert source == "missing"
+    assert artifact_path == ""
+
+
+def test_patch_targeting_other_basename_is_rejected(tmp_path):
+    """A diff that edits a different file than the target kernel is rejected."""
+    original = tmp_path / "fused_moe.py"
+    original.write_text("import triton\n\n\ndef kernel():\n    return 1\n", encoding="utf-8")
+    other = tmp_path / "other.patch"
+    other.write_text(
+        "--- a/setup.py\n+++ b/setup.py\n@@ -1,1 +1,2 @@\n import triton\n+# x\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed", "attempt_id": "geak-other", "backend": "geak",
+        "backend_paths": {"geak_per_task_best_patch": str(other)},
+    }
+    artifact_path, source, _ = ko._select_source_artifact(
+        attempt, target_file=str(original), run_dir=tmp_path,
+    )
+    assert source == "missing"
+    assert artifact_path == ""
+
+
+_RECON_ORIGINAL = (
+    "import triton\n\n\ndef helper():\n    return 1\n\n\ndef kernel():\n    return helper()\n"
+)
+_RECON_KERNEL_SECTION = (
+    "diff --git a/fused_moe.py b/fused_moe.py\n"
+    "--- a/fused_moe.py\n"
+    "+++ b/fused_moe.py\n"
+    "@@ -1,5 +1,8 @@\n"
+    " import triton\n"
+    " \n"
+    " \n"
+    "+_CACHE = {}\n"
+    "+\n"
+    "+\n"
+    " def helper():\n"
+    "     return 1\n"
+)
+
+
+def _reconstruct(tmp_path, patch_text, *, original_name="fused_moe.py", original_text=_RECON_ORIGINAL):
+    """Run reconstruction for ``patch_text`` against a written original kernel."""
+    original = tmp_path / original_name
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_text(original_text, encoding="utf-8")
+    patch_path = tmp_path / "winner.patch"
+    patch_path.write_text(patch_text, encoding="utf-8")
+    out = tmp_path / "reconstructed.py"
+    return ko._reconstruct_source_from_patch(patch_path, str(original), out)
+
+
+def test_reconstruct_git_style_diff_with_index_header(tmp_path):
+    """A real-shape ``diff --git`` + ``index`` multi-component path reconstructs
+    via the contained ``git apply`` path (not silently falling back)."""
+    patch = (
+        "diff --git a/aiter/ops/fused_moe.py b/aiter/ops/fused_moe.py\n"
+        "index 1d75520b5..0159e0442 100644\n"
+        "--- a/aiter/ops/fused_moe.py\n"
+        "+++ b/aiter/ops/fused_moe.py\n"
+        "@@ -1,5 +1,8 @@\n"
+        " import triton\n"
+        " \n"
+        " \n"
+        "+_CACHE = {}\n"
+        "+\n"
+        "+\n"
+        " def helper():\n"
+        "     return 1\n"
+    )
+    out = _reconstruct(tmp_path, patch, original_name="aiter/ops/fused_moe.py")
+    assert out
+    text = Path(out).read_text(encoding="utf-8")
+    assert "_CACHE = {}" in text and "def kernel():" in text and "@@" not in text
+
+
+def test_reconstruct_multi_file_patch_slices_matched_target(tmp_path):
+    """Multi-file patch where only the kernel original exists: the kernel section
+    is sliced and applied (a whole-patch apply would fail on the absent files)."""
+    patch = (
+        "diff --git a/bench.py b/bench.py\n--- a/bench.py\n+++ b/bench.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+        + _RECON_KERNEL_SECTION
+        + "diff --git a/other.py b/other.py\n--- a/other.py\n+++ b/other.py\n"
+        "@@ -1 +1 @@\n-a\n+b\n"
+    )
+    out = _reconstruct(tmp_path, patch)
+    assert out
+    assert "_CACHE = {}" in Path(out).read_text(encoding="utf-8")
+
+
+def test_reconstruct_prefers_real_target_over_orig_sibling(tmp_path):
+    """A ``.orig`` sibling with the same stem must not be chosen over the real
+    kernel file."""
+    patch = (
+        "diff --git a/fused_moe.py.orig b/fused_moe.py.orig\n"
+        "--- a/fused_moe.py.orig\n+++ b/fused_moe.py.orig\n"
+        "@@ -1 +1 @@\n-junk\n+junk2\n"
+        + _RECON_KERNEL_SECTION
+    )
+    out = _reconstruct(tmp_path, patch)
+    assert out
+    assert "_CACHE = {}" in Path(out).read_text(encoding="utf-8")
+
+
+def test_reconstruct_ignores_companion_new_file_dev_null(tmp_path):
+    """A ``/dev/null`` new-file companion entry is ignored, not fatal, as long as
+    the matched kernel section has real hunks."""
+    patch = (
+        "diff --git a/new_helper.py b/new_helper.py\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/new_helper.py\n"
+        "@@ -0,0 +1 @@\n+HELPER = 1\n"
+        + _RECON_KERNEL_SECTION
+    )
+    out = _reconstruct(tmp_path, patch)
+    assert out
+    assert "_CACHE = {}" in Path(out).read_text(encoding="utf-8")
+
+
+def test_reconstruct_rejects_empty_patch(tmp_path):
+    """An empty / 0-byte patch reconstructs nothing."""
+    assert _reconstruct(tmp_path, "") == ""
+    assert _reconstruct(tmp_path, "   \n  \n") == ""
+
+
+def test_reconstruct_rejects_hunkless_patch(tmp_path):
+    """Headers present but no ``@@`` hunk (rename/mode-only shape) → nothing."""
+    patch = (
+        "diff --git a/fused_moe.py b/fused_moe.py\n"
+        "old mode 100644\nnew mode 100755\n"
+        "--- a/fused_moe.py\n+++ b/fused_moe.py\n"
+    )
+    assert _reconstruct(tmp_path, patch) == ""
+
+
+def test_reconstruct_rejects_absolute_path_patch(tmp_path):
+    """An absolute-path diff header is refused (no write outside)."""
+    victim = tmp_path / "victim.py"
+    victim.write_text("safe\n", encoding="utf-8")
+    patch = (
+        f"--- a/fused_moe.py\n+++ {victim}\n@@ -1 +1 @@\n-safe\n+PWNED\n"
+    )
+    assert _reconstruct(tmp_path, patch) == ""
+    assert victim.read_text(encoding="utf-8") == "safe\n"
+
+
+def test_reconstruct_rejects_parent_traversal_patch(tmp_path):
+    """A ``..`` traversal header is refused and writes nothing outside the dir."""
+    outside = tmp_path / "outside.py"
+    outside.write_text("safe\n", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    original = work / "fused_moe.py"
+    original.write_text(_RECON_ORIGINAL, encoding="utf-8")
+    patch_path = work / "winner.patch"
+    patch_path.write_text(
+        "--- a/fused_moe.py\n+++ b/../outside.py\n@@ -1 +1 @@\n-safe\n+PWNED\n",
+        encoding="utf-8",
+    )
+    out = ko._reconstruct_source_from_patch(patch_path, str(original), work / "out.py")
+    assert out == ""
+    assert outside.read_text(encoding="utf-8") == "safe\n"
+
+
+def test_reconstruct_no_matching_target(tmp_path):
+    """A patch that touches only unrelated files yields nothing."""
+    patch = "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-x\n+y\n"
+    assert _reconstruct(tmp_path, patch) == ""
+
+
+def test_reconstruct_double_slash_header_cannot_escape_sandbox(tmp_path):
+    """A ``b//abs/path`` header must not write outside the sandbox: the empty
+    component from ``//`` previously survived the count-based strip and produced
+    an absolute write path (``tmp / "/abs"`` resets to the absolute path). The
+    empty component is now dropped and a containment guard backstops it, so the
+    apply stays inside the temp dir and never creates the outside victim path."""
+    victim_dir = tmp_path / "OUTSIDE"
+    work = tmp_path / "work"
+    work.mkdir()
+    original = work / "fused_moe.py"
+    original.write_text(_RECON_ORIGINAL, encoding="utf-8")
+    escape = f"b/{victim_dir}/fused_moe.py"  # -> b//tmp/.../OUTSIDE/fused_moe.py
+    patch_path = work / "winner.patch"
+    patch_path.write_text(
+        f"diff --git a/fused_moe.py {escape}\n"
+        f"--- a/fused_moe.py\n+++ {escape}\n"
+        "@@ -1,5 +1,8 @@\n import triton\n \n \n+_CACHE = {}\n+\n+\n def helper():\n     return 1\n",
+        encoding="utf-8",
+    )
+    ko._reconstruct_source_from_patch(patch_path, str(original), work / "out.py")
+    # The only security property that matters: nothing written outside the dir.
+    assert not victim_dir.exists()
+
+
+def test_build_patch_snapshot_sources_worktree_and_base(tmp_path):
+    """Snapshot staging materialises byte-exact content for every write path:
+    from the worktree when present, else reconstructed from base + patch."""
+    base = tmp_path / "base" / "aiter" / "ops"
+    base.mkdir(parents=True)
+    (base / "k.py").write_text("import triton\nOLD\n")
+    worktree = tmp_path / "wt"
+    (worktree / "aiter" / "ops").mkdir(parents=True)
+    (worktree / "aiter" / "ops" / "k.py").write_text("import triton\nNEW\n")
+    (worktree / "aiter" / "ops" / "helper.py").write_text("HELP\n")
+    patch = tmp_path / "p.patch"
+    patch.write_text(
+        "diff --git a/aiter/ops/k.py b/aiter/ops/k.py\n--- a/aiter/ops/k.py\n+++ b/aiter/ops/k.py\n"
+        "@@ -1,2 +1,2 @@\n import triton\n-OLD\n+NEW\n"
+        "diff --git a/aiter/ops/helper.py b/aiter/ops/helper.py\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/aiter/ops/helper.py\n@@ -0,0 +1 @@\n+HELP\n"
+    )
+    res = ko.build_patch_snapshot(
+        str(patch), worktree=worktree, kernel_repo=str(tmp_path / "base"),
+        clean_base=str(tmp_path / "base"), out_dir=tmp_path / "snap",
+    )
+    assert res is not None
+    snap = Path(res["snapshot_dir"])
+    assert (snap / "aiter/ops/k.py").read_text() == "import triton\nNEW\n"
+    assert (snap / "aiter/ops/helper.py").read_text() == "HELP\n"
+    assert len(res["descriptors"]) == 2
+
+
+def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):
+    """If any write path can't be made byte-exact (no worktree file, no base to
+    reconstruct from), the attempt is non-deployable -> None (hard fail)."""
+    base = tmp_path / "base"
+    base.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    patch = tmp_path / "p.patch"
+    patch.write_text(
+        "diff --git a/helper.py b/helper.py\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/helper.py\n@@ -0,0 +1 @@\n+HELP\n"
+    )
+    res = ko.build_patch_snapshot(
+        str(patch), worktree=worktree, kernel_repo=str(base),
+        clean_base=str(base), out_dir=tmp_path / "snap",
+    )
+    assert res is None
 
 
 # Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must keep matching both legacy `_optimized.<suffix>` and new `_stdout.log` names (kernel-agent/SKILL.md § Per-attempt stdout file naming).
@@ -1263,7 +1694,7 @@ def test_build_hypothesis_block_renders_when_only_identification_present():
     """A P-item with only Identification still produces a block (GEAK needs the source pointer)."""
     block = ko._build_hypothesis_block(
         {
-            "name": "kernel",
+            "name": "kernel_agent",
             "identification": "Three ops flagged. (source: gemm_metrics.json)",
         }
     )
@@ -1326,7 +1757,7 @@ def test_build_hypothesis_block_renders_all_pitem_prose_when_function_spans_pite
 def test_build_hypothesis_block_falls_back_to_flat_prose_for_single_pitem():
     """Single-entry ``all_pitem_prose`` → legacy flat layout (common case, avoids header noise)."""
     candidate = {
-        "name": "kernel",
+        "name": "kernel_agent",
         "reasoning_for_slowdown": "Memory-bound.",
         "resolution": "Fuse with neighbour.",
         "task_group": {
@@ -1493,7 +1924,7 @@ def test_build_prompt_omits_benchmark_cases_for_legacy_candidates():
 
 # PR-B §3: bound-keyed optimization priority block in build_prompt
 def test_build_priority_block_empty_when_no_bound_info():
-    block = ko._build_priority_block({"name": "kernel", "source_type": "triton"})
+    block = ko._build_priority_block({"name": "kernel_agent", "source_type": "triton"})
     assert block == ""
 
 
@@ -1525,7 +1956,7 @@ def test_build_priority_block_compute_bound_leads_with_compute_utilization():
 def test_build_priority_block_unknown_bound_uses_default_order():
     block = ko._build_priority_block(
         {
-            "name": "kernel",
+            "name": "kernel_agent",
             "bound_type": "mixed",
         }
     )

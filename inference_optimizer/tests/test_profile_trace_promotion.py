@@ -28,7 +28,7 @@ def _silent_coordinator(session_dir) -> Coordinator:
         session_dir,
         backends={
             "orchestration": MockBackend(silent, name="o"),
-            "kernel": MockBackend(silent, name="k"),
+            "kernel_agent": MockBackend(silent, name="k"),
             "critic": MockBackend(silent, name="c"),
             "robustness": MockBackend(silent, name="r"),
         },
@@ -80,7 +80,7 @@ async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch)
 
 
 def test_capture_sidecar_traces_excludes_main_trace(tmp_path):
-    """#575: capture sidecar scan finds bs_*/graph_capture but not *.trace.json.gz."""
+    """#575/#735: capture scan finds everything under capture_traces/ but no real trace."""
     from inference_optimizer.orchestrator.action_executors.profile import (
         _capture_sidecar_traces_for_dir,
     )
@@ -90,12 +90,39 @@ def test_capture_sidecar_traces_excludes_main_trace(tmp_path):
     (cap / "bs_1_rank0.json.gz").write_bytes(b"x")
     (cap / "bs_512_rank0.json.gz").write_bytes(b"x")
     (cap / "graph_capture_rank_0.json.gz").write_bytes(b"x")
-    # A real main trace must NOT be returned by the sidecar scan.
+    # #735: vLLM capture sidecar that DOES end in .trace.json.gz — must still
+    # be treated as a capture sidecar (it lives under capture_traces/).
+    (cap / "graph_capture_rank_0.123.pt.trace.json.gz").write_bytes(b"x")
+    # A real main trace (NOT under capture_traces/) must NOT be returned.
     (tmp_path / "torch_trace" / "merged-foo.trace.json.gz").write_bytes(b"x")
 
     out = _capture_sidecar_traces_for_dir(tmp_path / "torch_trace")
     names = {p.name for p in out}
-    assert names == {"bs_1_rank0.json.gz", "bs_512_rank0.json.gz", "graph_capture_rank_0.json.gz"}
+    assert names == {
+        "bs_1_rank0.json.gz",
+        "bs_512_rank0.json.gz",
+        "graph_capture_rank_0.json.gz",
+        "graph_capture_rank_0.123.pt.trace.json.gz",
+    }
+
+
+def test_trace_files_for_dir_excludes_capture_traces(tmp_path):
+    """#735: vLLM graph_capture_*.trace.json.gz under capture_traces/ is NOT a primary trace."""
+    from inference_optimizer.orchestrator.action_executors.profile import (
+        _trace_files_for_dir,
+    )
+
+    tt = tmp_path / "torch_trace"
+    cap = tt / "capture_traces"
+    cap.mkdir(parents=True)
+    # vLLM capture sidecar: ends in .trace.json.gz but lives under capture_traces/.
+    (cap / "graph_capture_rank_0.123.pt.trace.json.gz").write_bytes(b"x")
+    # A real annotated serving trace at the top level.
+    real = tt / "dp0_pp0_tp0_rank0.456.pt.trace.json.gz"
+    real.write_bytes(b"x")
+
+    out = _trace_files_for_dir(tt)
+    assert out == [real]  # capture sidecar excluded despite matching *.trace.json.gz
 
 
 @pytest.mark.asyncio

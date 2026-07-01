@@ -1,6 +1,6 @@
 """Workload sweep that relaunches the PerfSkills-optimized server.
 
-When the KERNEL phase is delegated to PerfSkills
+When the KERNEL_AGENT phase is delegated to PerfSkills
 (``KERNEL_OPT_BACKEND_ORDER=perfskills``), the optimized server is reproduced
 from PerfSkills' own ``bench_e2e.sh`` plus the built overlay/flags/env recorded
 in ``result.json``. Each grid point relaunches the optimized server through
@@ -133,12 +133,12 @@ async def sweep_via_perfskills(
     backend = (os.environ.get("FRAMEWORK", "") or "sglang").strip()
     tp = int(os.environ.get("TP", "1") or 1)
     gpus = _serving_gpus(tp)
-    # Reuse the SAME bench client the KERNEL phase measured with (recorded in
+    # Reuse the SAME bench client the KERNEL_AGENT phase measured with (recorded in
     # result.json) so sweep numbers stay 口径-consistent with the headline result.
     bench_client = str(result.get("bench_client") or "native").strip() or "native"
 
     # ── Forward the validated measurement 口径 + client trust onto every variant ──
-    # The sweep must measure on the SAME workload shape the KERNEL phase
+    # The sweep must measure on the SAME workload shape the KERNEL_AGENT phase
     # accepted, otherwise bench_e2e.sh falls back to its own standalone defaults
     # (notably RANDOM_RANGE_RATIO=1 => fixed full-length prompts) and the grid
     # is no longer 口径-comparable to the baseline/final. Prefer an explicit

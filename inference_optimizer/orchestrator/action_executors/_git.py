@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Shared low-level git subprocess primitives for framework_pr / integrate_patch.
+"""Shared low-level git subprocess primitives for framework / integrate_patch.
 
 ``_run_git`` → ``(ok, stdout, stderr)``; ``_run_git_cp`` → the raw
 CompletedProcess (or None on spawn/timeout) for callers that must inspect

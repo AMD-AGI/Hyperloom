@@ -81,7 +81,7 @@ class BenchmarkAnalyzer:
 
     PERF_DECORATORS = {"perftest", "benchmark"}
     REF_HINTS = {"torch", "ref", "native", "baseline", "reference", "gold"}
-    KERNEL_HINTS = {"ck", "hip", "triton", "kernel", "optimized", "custom", "fused"}
+    KERNEL_HINTS = {"ck", "hip", "triton", "kernel_agent", "optimized", "custom", "fused"}
 
     def __init__(self, source: str, source_file_module: str = ""):
         """Parse the benchmark source into an AST for later queries.
@@ -465,6 +465,32 @@ def _default_configs() -> tuple[str, str, str]:
         "M, N, dtype = cfg",
         'f"M={M} N={N} {dtype}"',
     )
+
+
+def _is_heterogeneous_multi_tensor(candidate: dict) -> bool:
+    """True when the candidate's input_shapes describe several distinct tensors.
+
+    The generic ``_build_configs`` path assumes a single GEMM-like operand whose
+    leading dim is swept (M×N×K). When TraceLens captures an op with several
+    *different-rank* tensors (e.g. paged attention: query (b,h,d), KV cache
+    (pages,1,h,d), kv_indptr (n,), workspace (bytes,) ...) that assumption is
+    wrong: ``_build_configs`` keeps only the highest-rank shapes and drops the
+    rest, silently fabricating a GEMM harness that mismeasures the real op. We
+    detect that here so the caller can REFUSE to fabricate rather than guess.
+
+    Heuristic: >=2 input_shapes with >=2 distinct ranks (dim counts). Same-rank
+    multi-shape (a normal shape sweep) is fine and returns False.
+    """
+    shapes = candidate.get("input_shapes")
+    if not isinstance(shapes, list) or len(shapes) < 2:
+        return False
+    ranks: set[int] = set()
+    for entry in shapes:
+        shape_str = entry.get("shape", "") if isinstance(entry, dict) else str(entry)
+        dims, _ = _parse_shape_string(shape_str)
+        if dims:
+            ranks.add(len(dims))
+    return len(ranks) >= 2
 
 
 def _parse_shape_string(s: str) -> tuple[tuple[int, ...], str]:
@@ -864,6 +890,17 @@ REPO_ROOT = os.environ.get(
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+# aiter JIT routing (no-op for non-aiter kernels; only aiter's JIT reads these).
+# aiter is installed EDITABLE via a sys.meta_path finder, so `import aiter` resolves
+# to the ORIGINAL repo regardless of sys.path order, and its JIT compiles
+# AITER_CSRC_DIR=$AITER_META_DIR/csrc. Without overriding AITER_META_DIR the JIT
+# builds the BASELINE csrc/*.cu -> every speedup is ~1.00x and correctness is blind
+# to the patch (the worktree-bypass bug). AITER_JIT_DIR routes build output to a
+# per-worktree dir so artifacts don't pollute the source package and parallel slots
+# don't collide on a shared build/.so/ninja-lock. Both MUST be set BEFORE import aiter.
+os.environ.setdefault("AITER_META_DIR", REPO_ROOT)
+os.environ.setdefault("AITER_JIT_DIR", os.path.join(REPO_ROOT, "_aiter_jit"))
+
 WARMUP = 50
 ITERATIONS = int(os.environ.get("GEAK_BENCHMARK_ITERATIONS", "200"))
 
@@ -1062,6 +1099,15 @@ import sys
 _GEAK_WORK_DIR = os.environ.get("GEAK_WORK_DIR", "")
 if _GEAK_WORK_DIR and _GEAK_WORK_DIR not in sys.path:
     sys.path.insert(0, _GEAK_WORK_DIR)
+# aiter JIT routing (no-op for non-aiter kernels; only aiter's JIT reads these).
+# aiter is editable via a sys.meta_path finder, so `import aiter` resolves to the
+# ORIGINAL repo regardless of sys.path; its JIT compiles AITER_CSRC_DIR=$AITER_META_DIR/csrc.
+# Without overriding AITER_META_DIR the JIT builds the BASELINE csrc/*.cu -> ~1.00x and
+# correctness is blind to the patch. AITER_JIT_DIR routes build output to a per-worktree
+# dir (no source-repo pollution, no parallel-slot collisions). Set BEFORE import aiter.
+if _GEAK_WORK_DIR:
+    os.environ.setdefault("AITER_META_DIR", _GEAK_WORK_DIR)
+    os.environ.setdefault("AITER_JIT_DIR", os.path.join(_GEAK_WORK_DIR, "_aiter_jit"))
 # GEAK controls benchmark iteration count via this env var.
 GEAK_BENCHMARK_ITERATIONS = int(os.environ.get("GEAK_BENCHMARK_ITERATIONS", "30"))
 
@@ -1479,6 +1525,26 @@ def maybe_generate_harness(
         if aiter_hr is not None:
             return aiter_hr
         _log("could not identify kernel or reference function")
+        return None
+
+    # Refuse to fabricate a GEMM harness for a heterogeneous multi-tensor op.
+    # _build_configs would keep only the highest-rank shapes and drop the rest,
+    # silently mismeasuring (this is what broke paged-attention: the flat
+    # multi-tensor shapes were flattened to M/N/K -> broken unpack). First RETRY
+    # via the op_test idiom (reuses the kernel's own @perftest/@benchmark fn,
+    # which builds the real multi-tensor inputs); only if that also fails do we
+    # refuse, so the caller skips-with-reason instead of dispatching a blind one.
+    if _is_heterogeneous_multi_tensor(candidate):
+        _log("heterogeneous multi-tensor input_shapes; GEMM config builder "
+             "unsafe, retrying via op_test idiom")
+        aiter_hr = _try_generate_aiter_harness(
+            analyzer, decorated, candidate, source_file, benchmark_path,
+            out_dir, _log,
+        )
+        if aiter_hr is not None:
+            return aiter_hr
+        _log("HARNESS_SPEC_INSUFFICIENT: heterogeneous multi-tensor op with no "
+             "usable op_test idiom; refusing to fabricate a GEMM harness")
         return None
 
     all_configs, cfg_unpack, config_str_code = _build_configs(candidate)

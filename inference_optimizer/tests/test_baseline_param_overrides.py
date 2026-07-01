@@ -25,6 +25,14 @@ from inference_optimizer.orchestrator.action_executors.baseline import (
 )
 
 
+_CLI_STUB = SimpleNamespace(
+    _load_model_max_position_embeddings=lambda _model: 32768,
+    _model_has_dual_chunk_attention=lambda _model: False,
+    _model_is_moe=lambda _model: False,
+    _resolve_amd_gpu_type=lambda gpu: str(gpu or "").lower(),
+)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so the artifact harvest does not scrape the host's real ``/workspace``."""
@@ -168,16 +176,51 @@ def test_kimi_materialize_enables_remote_client_trust(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    materialized = materialize_config_with_envs(
-        base,
-        out,
-        model_path="/wekafs/models/moonshotai-Kimi-K2.6",
-        gpu_type="mi300x",
-    )
+    with patch.dict("sys.modules", {"inference_optimizer.cli": _CLI_STUB}):
+        materialized = materialize_config_with_envs(
+            base,
+            out,
+            model_path="/wekafs/models/moonshotai-Kimi-K2.6",
+            gpu_type="mi300x",
+        )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
     assert envs["SGLANG_ROCM_FUSED_DECODE_MLA"] == "0"
     assert envs["MAGPIE_TRUST_REMOTE_CODE"] == "1"
+    assert "--trust-remote-code" in envs["EXTRA_SGLANG_ARGS"]
+
+
+def test_custom_tokenizer_auto_map_enables_client_and_server_trust(tmp_path):
+    model = tmp_path / "custom-tokenizer-model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        """
+        {
+          "model_type": "custom_text",
+          "architectures": ["CustomForCausalLM"],
+          "auto_map": {"AutoTokenizer": ["tokenization_custom.CustomTokenizer", null]}
+        }
+        """,
+        encoding="utf-8",
+    )
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, model=str(model))
+    out = tmp_path / "out"
+    out.mkdir()
+
+    with patch.dict("sys.modules", {"inference_optimizer.cli": _CLI_STUB}):
+        materialized = materialize_config_with_envs(
+            base,
+            out,
+            model_path=str(model),
+            gpu_type="mi300x",
+        )
+    envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
+
+    assert envs["MAGPIE_TRUST_REMOTE_CODE"] == "1"
+    assert envs["BENCH_TRUST_REMOTE_CODE"] == "1"
+    assert envs["HF_HUB_TRUST_REMOTE_CODE"] == "1"
+    assert "--trust-remote-code" in envs["EXTRA_SGLANG_ARGS"]
 
 
 def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
@@ -190,12 +233,13 @@ def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    materialized = materialize_config_with_envs(
-        base,
-        out,
-        model_path="/wekafs/models/Qwen-Qwen3.6-35B-A3B",
-        gpu_type="mi300x",
-    )
+    with patch.dict("sys.modules", {"inference_optimizer.cli": _CLI_STUB}):
+        materialized = materialize_config_with_envs(
+            base,
+            out,
+            model_path="/wekafs/models/Qwen-Qwen3.6-35B-A3B",
+            gpu_type="mi300x",
+        )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
     assert envs["MAGPIE_TRUST_REMOTE_CODE"] == "1"

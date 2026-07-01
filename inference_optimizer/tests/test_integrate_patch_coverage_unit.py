@@ -94,7 +94,7 @@ async def test_missing_specialist_task_id(tmp_path):
 
 # ---- no framework root ----
 @pytest.mark.asyncio
-async def test_no_framework_root(tmp_path, monkeypatch):
+async def test_no_framework_agent_root(tmp_path, monkeypatch):
     session = tmp_path / "s"
     session.mkdir()
     _write_workspace(session, "spec")
@@ -105,7 +105,7 @@ async def test_no_framework_root(tmp_path, monkeypatch):
     ex = IntegratePatchExecutor(session_dir=session)
     res = await ex(_make_ctx("t", {"specialist_task_id": "spec"}))
     assert res["status"] == "apply_failed"
-    assert res["error_class"] == "no_framework_root"
+    assert res["error_class"] == "no_framework_agent_root"
 
 
 # ---- rejected by critic ----
@@ -267,6 +267,80 @@ async def test_revert_when_rebench_accuracy_fails(tmp_path, monkeypatch):
     assert "accuracy regression on rebench" in res["reason"]
 
 
+# ---- REVERT when a framework-authored rebench loses its accuracy verdict ----
+@pytest.mark.asyncio
+async def test_revert_when_rebench_accuracy_missing_with_baseline(tmp_path, monkeypatch):
+    """First bench passes accuracy, but the stable rebench produces NO accuracy
+    verdict. For a framework-authored patch with a baseline accuracy, the gate
+    must reject (mirrors the first-bench accuracy_keep_block) rather than KEEP on
+    the stale first-bench pass."""
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": True}),
+    )
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_confirm_stack_rebench",
+        _stub_confirm(
+            {"stable": True, "tput": 190.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": None}
+        ),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+                "framework_agent_authoring": True,
+                "accuracy_baseline": 0.8,
+            },
+        )
+    )
+    assert res["status"] == "accuracy_unavailable_reject"
+    assert "no eval result" in res["reason"]
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_keep_when_rebench_accuracy_missing_but_not_required(tmp_path, monkeypatch):
+    """A generic (non-framework-authored) integrate_patch with no baseline still
+    KEEPs on a stable rebench with a missing accuracy verdict — the rebench gate
+    only tightens the required+baseline case."""
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
+    )
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_confirm_stack_rebench",
+        _stub_confirm(
+            {"stable": True, "tput": 190.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": None}
+        ),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
+        )
+    )
+    assert res["status"] == "kept"
+
+
 # ---- REVERT path (low throughput) ----
 @pytest.mark.asyncio
 async def test_revert_low_throughput(tmp_path, monkeypatch):
@@ -377,15 +451,15 @@ async def test_bench_script_mismatch_reverts(tmp_path, monkeypatch):
     assert res["error_class"] == "framework_script_mismatch"
 
 
-# ---- framework_pr KB writeback on KEEP ----
+# ---- framework KB writeback on KEEP ----
 @pytest.mark.asyncio
-async def test_framework_pr_kb_writeback(tmp_path, monkeypatch):
+async def test_framework_kb_writeback(tmp_path, monkeypatch):
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
     _init_git_repo(repo)
     proposal = {
-        "provenance": "specialist:serving:framework_pr:x",
+        "provenance": "specialist:serving:framework:x",
         "fa_pr_url": "https://example/pr/1",
         "fa_pr_sha": "deadbeef",
         "patches_written": ["patches/001.patch"],
@@ -399,7 +473,7 @@ async def test_framework_pr_kb_writeback(tmp_path, monkeypatch):
         return "/tmp/lessons.jsonl"
 
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.kb_writeback.write_framework_pr_record",
+        "inference_optimizer.orchestrator.kb_writeback.write_framework_record",
         _fake_write,
     )
     ex = IntegratePatchExecutor(session_dir=session)
@@ -428,9 +502,9 @@ async def test_framework_pr_kb_writeback(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     ex = IntegratePatchExecutor(session_dir=tmp_path)
-    payload = {"proposal_set": [{"provenance": "specialist:serving:framework_pr"}]}
+    payload = {"proposal_set": [{"provenance": "specialist:serving:framework"}]}
     # No fa_pr_url / fa_pr_sha -> early return, no exception.
-    await ex._maybe_write_framework_pr_kb_record(
+    await ex._maybe_write_framework_kb_record(
         done_payload=payload,
         outcome="integrated",
         tps_delta_pct=1.0,
@@ -438,12 +512,12 @@ async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     )
 
 
-def test_find_framework_pr_proposal():
-    assert IntegratePatchExecutor._find_framework_pr_proposal(None) is None
-    assert IntegratePatchExecutor._find_framework_pr_proposal({"proposal_set": "x"}) is None
-    assert IntegratePatchExecutor._find_framework_pr_proposal({"proposal_set": [{"provenance": "kernel:x"}]}) is None
-    found = IntegratePatchExecutor._find_framework_pr_proposal(
-        {"proposal_set": [{"provenance": "specialist:serving:framework_pr:y", "id": 1}]}
+def test_find_frameworkoposal():
+    assert IntegratePatchExecutor._find_frameworkoposal(None) is None
+    assert IntegratePatchExecutor._find_frameworkoposal({"proposal_set": "x"}) is None
+    assert IntegratePatchExecutor._find_frameworkoposal({"proposal_set": [{"provenance": "kernel:x"}]}) is None
+    found = IntegratePatchExecutor._find_frameworkoposal(
+        {"proposal_set": [{"provenance": "specialist:serving:framework:y", "id": 1}]}
     )
     assert found["id"] == 1
 
@@ -526,7 +600,7 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd: {"accuracy": 0.9})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.9})
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     bench, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.8},
@@ -548,7 +622,7 @@ async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
     # A large accuracy drop must fail the gate (exercises real key + arg order).
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd: {"accuracy": 0.50})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.50})
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     _, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.95},
@@ -569,7 +643,7 @@ async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeyp
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd: {"accuracy": 0.9})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.9})
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     with caplog.at_level("WARNING"):
         _, gate = await ex._bench_patch(

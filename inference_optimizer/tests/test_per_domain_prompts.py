@@ -46,9 +46,10 @@ def test_every_domain_has_focus_template():
 
 
 def test_specialist_domains_m5_covers_all_active_domains():
-    """The M5 active set covers the full catalogue (seven entries after session_steward_specialist was retired)."""
+    """The M5 active set covers the full catalogue (eight entries: seven legacy
+    domains + the static_recon_specialist added in explore-opt-5)."""
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
-    assert len(SPECIALIST_DOMAINS_M5) == 7
+    assert len(SPECIALIST_DOMAINS_M5) == 8
 
 
 # 2. Per-domain content checks — each template mentions its signature
@@ -136,6 +137,41 @@ def test_pr_intel_specialist_mentions_cross_repo_research():
         "do NOT propose source patches",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
+
+
+def test_static_recon_specialist_mentions_reconnaissance_and_bridge_candidates():
+    """The static-recon focus must steer read-only source grep for disabled switches and a bridge_candidates output block."""
+    text = _build("static_recon_specialist")
+    for marker in (
+        "static-recon",
+        "read-only",
+        "_supported()",
+        "bridge_candidates",
+        "predicate_file",
+        "Never write a patch",
+    ):
+        assert marker.lower() in text.lower(), f"missing {marker!r}"
+
+
+def test_static_recon_specialist_renders_seed_checklist_and_model_info():
+    """When a seed checklist + model_info are supplied they render into the prompt."""
+    domain = get_domain("static_recon_specialist")
+    assert domain is not None
+    inp = SpecialistPromptInputs(
+        task_id="task-recon",
+        domain=domain,
+        max_turns=4,
+        gpu_type="MI300X",
+        precision="fp8",
+        model_info={"attention_type": "GQA", "is_moe": False, "quantization": "fp8"},
+        static_recon_checklist="- **rocm.fp8.cutlass_only_guard** (domain_hint=`freeform`)\n  - detect: grep cutlass_fp8_supported",
+        workspace_path="/tmp/test/recon",
+    )
+    system, user = build_specialist_prompts(inp)
+    text = (system + "\n" + user).lower()
+    assert "rocm.fp8.cutlass_only_guard" in text
+    assert "seed checklist" in text
+    assert "attention=gqa" in text
 
 
 # 3. SpecialistRunner no longer marks any domain as "generic template"
@@ -285,9 +321,9 @@ def _valid_done_payload(
 
 
 # 1. specialist_domains catalogue
-def test_specialist_domains_catalogue_has_seven_entries():
-    """session_steward_specialist was retired; the active catalogue has seven entries."""
-    assert len(SPECIALIST_DOMAINS) == 7
+def test_specialist_domains_catalogue_has_eight_entries():
+    """Eight entries: seven legacy domains + static_recon_specialist (explore-opt-5)."""
+    assert len(SPECIALIST_DOMAINS) == 8
     assert SPECIALIST_DOMAIN_KEYS == frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 
@@ -867,7 +903,7 @@ def test_note_specialist_dispatched_resets_only_its_anchor():
     s.note_specialist_dispatched("serving_specialist")
     assert s.rounds_since_last_specialist["framework"] == 0
     # A different anchor is untouched.
-    assert s.rounds_since_last_specialist["kernel"] == 2
+    assert s.rounds_since_last_specialist["kernel_agent"] == 2
     # keep counter is independent of the dispatch reset.
     assert s.rounds_since_last_keep["framework"] == 2
 
@@ -900,7 +936,7 @@ def test_stalled_domains_reports_over_threshold_widest_first():
     s.note_domain_keep("framework")
     stalled = s.stalled_domains(specialist_threshold=3, keep_threshold=3)
     assert "framework" not in stalled
-    assert "kernel" in stalled  # never dispatched/kept -> at 5
+    assert "kernel_agent" in stalled  # never dispatched/kept -> at 5
     # Ordering: widest gap first, ties broken by anchor name.
     assert stalled == sorted(
         stalled,

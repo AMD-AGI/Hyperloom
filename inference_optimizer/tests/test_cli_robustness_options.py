@@ -35,12 +35,16 @@ def _clear_workload_env(monkeypatch):
     for key in _WORKLOAD_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("ROBUSTNESS_SERVER_URL", raising=False)
+    # _build_robustness_options falls back to $FRAMEWORK for the scriptable
+    # server-probe default; clear it so framework-unset tests are deterministic.
+    monkeypatch.delenv("FRAMEWORK", raising=False)
 
 
 def _ns(**overrides) -> argparse.Namespace:
     """Build a namespace matching what the argparse parser would produce."""
     base = dict(
         nodes=1,
+        framework=None,
         robustness_server_url=None,
         robustness_llm_rca=None,
         robustness_backend=None,
@@ -128,6 +132,33 @@ def test_single_node_explicit_keep_server_probe():
     """``--no-robustness-disable-server-probe`` forces the probe ON explicitly."""
     options = _build_robustness_options(
         _ns(nodes=1, robustness_disable_server_probe=False),
+    )
+    assert options["auto_probe_inference_server"] is True
+
+
+def test_scriptable_framework_disables_server_probe_via_arg():
+    """A scriptable (server-less) framework defaults the 8888 probe OFF."""
+    options = _build_robustness_options(_ns(nodes=1, framework="xdit"))
+    assert options["auto_probe_inference_server"] is False
+
+
+def test_scriptable_framework_disables_server_probe_via_env(monkeypatch):
+    """$FRAMEWORK=xdit (resume path, args.framework unset) also defaults OFF."""
+    monkeypatch.setenv("FRAMEWORK", "xdit")
+    options = _build_robustness_options(_ns(nodes=1, framework=None))
+    assert options["auto_probe_inference_server"] is False
+
+
+def test_serving_framework_keeps_server_probe_default():
+    """A serving framework leaves the probe untouched (key absent) on single-node."""
+    options = _build_robustness_options(_ns(nodes=1, framework="sglang"))
+    assert "auto_probe_inference_server" not in options
+
+
+def test_scriptable_framework_explicit_keep_overrides():
+    """``--no-robustness-disable-server-probe`` wins over the scriptable default."""
+    options = _build_robustness_options(
+        _ns(nodes=1, framework="xdit", robustness_disable_server_probe=False),
     )
     assert options["auto_probe_inference_server"] is True
 

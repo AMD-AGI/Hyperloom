@@ -138,6 +138,34 @@ def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
 
 
 # 1. Patch path resolution
+# G2 — force RUN_EVAL for framework-authored source patches (only with a baseline)
+def test_framework_run_eval_envs_forces_for_authored_with_baseline():
+    assert IntegratePatchExecutor._framework_run_eval_envs(
+        {"framework_agent_authoring": True, "accuracy_baseline": 0.8}
+    ) == {"RUN_EVAL": "true"}
+    assert IntegratePatchExecutor._framework_run_eval_envs(
+        {"framework_agent_candidate_id": "c1", "accuracy_baseline": 0.8}
+    ) == {"RUN_EVAL": "true"}
+
+
+def test_framework_run_eval_envs_no_force_without_baseline():
+    # baseline eval never produced a score -> nothing to gate against -> don't
+    # force eval on the candidate (matches the framework path / G1 degrade).
+    assert IntegratePatchExecutor._framework_run_eval_envs({"framework_agent_authoring": True}) is None
+    assert (
+        IntegratePatchExecutor._framework_run_eval_envs(
+            {"framework_agent_authoring": True, "accuracy_baseline": 0.0}
+        )
+        is None
+    )
+
+
+def test_framework_run_eval_envs_none_for_generic_explore():
+    # Generic EXPLORE integrate_patch (no framework markers) -> untouched.
+    assert IntegratePatchExecutor._framework_run_eval_envs({"specialist_task_id": "s1", "accuracy_baseline": 0.8}) is None
+    assert IntegratePatchExecutor._framework_run_eval_envs({}) is None
+
+
 def test_resolve_patch_paths_prefers_explicit_param(tmp_path: Path):
     workspace = _write_specialist_workspace(tmp_path, "t-a", patch_contents=[_VALID_PATCH])
     explicit = [str(workspace / "worktree" / "patches" / "001_test.patch")]

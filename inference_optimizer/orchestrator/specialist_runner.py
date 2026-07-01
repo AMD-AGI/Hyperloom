@@ -12,6 +12,7 @@ outcome for the audit trail.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import json
 import logging
@@ -520,15 +521,20 @@ class SpecialistRunner:
                 kb_subgraph=dict(params.get("kb_subgraph") or {}),
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
+                sub_kind=str(params.get("sub_kind") or ""),
                 extra_focus_tags=_extra_focus_tags(params, domain),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(params.get("warm_start_pitfalls") or []),
                 warm_start_lessons=list(params.get("warm_start_lessons") or []),
+                kg_recommended_knobs=[p for p in (params.get("kg_recommended_knobs") or []) if isinstance(p, dict)],
+                kg_guided_knobs=[p for p in (params.get("kg_guided_knobs") or []) if isinstance(p, dict)],
                 pr_feed=list(params.get("pr_feed") or []),
                 pr_monitor_available=bool(params.get("pr_monitor_available", True)),
                 framework=str(params.get("framework") or ""),
                 framework_source_roots=tuple(params.get("framework_source_roots") or ()),
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
+                model_info=dict(params.get("model_info") or {}),
+                static_recon_checklist=str(params.get("static_recon_checklist") or ""),
                 gpu_type=str(params.get("gpu_type") or ""),
                 allocated_gpu_ids=allocated_gpu_ids,
                 tp=int(params.get("tp") or 0),

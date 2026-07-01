@@ -164,10 +164,7 @@ class IntentRouter:
                     ),
                 },
             )
-        denied = self._sequence_denial_for_action(
-            action_name,
-            proposed_params=intent.payload.get("params"),
-        )
+        denied = self._sequence_denial_for_action(action_name)
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
@@ -220,6 +217,7 @@ class IntentRouter:
             verdict = (
                 "approve" if "approve" in sub_verdicts
                 else "reject" if "reject" in sub_verdicts
+                else "advise" if "advise" in sub_verdicts
                 else "needs_review"
             )
         await self._coord._handle_single_verdict(
@@ -237,12 +235,12 @@ class IntentRouter:
         verdict: str,
         reasoning: str,
     ) -> None:
-        """Single-verdict handler (approve materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate.
+        """Single-verdict handler (approve/advise materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate.
 
         Args:
             source: The agent emitting the verdict.
             pending: The pending proposal the verdict targets.
-            verdict: The collapsed verdict (approve / reject / needs_review).
+            verdict: The collapsed verdict (approve / advise / reject / needs_review).
             reasoning: Free-text reasoning recorded with the verdict.
         """
         pending.decided = True
@@ -286,7 +284,12 @@ class IntentRouter:
                     "failed to mirror critic verdict for specialist task=%s",
                     sid_candidate,
                 )
-        if verdict == "approve":
+        # Critic contract (critic-agent/references/verdict_schema.md): both
+        # `approve` and `advise` mean "dispatch may proceed" (advise = proceed
+        # with advisory notes). Treat them identically for materialization so an
+        # `advise` verdict is not silently dropped (which previously stranded
+        # FRAMEWORK config-lever deliverables — routed but never benched).
+        if verdict in ("approve", "advise"):
             await self._materialize_approved_proposal(pending)
 
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
@@ -318,10 +321,7 @@ class IntentRouter:
                     ),
                 },
             )
-        denied = self._sequence_denial_for_action(
-            action_name,
-            proposed_params=intent.payload.get("params"),
-        )
+        denied = self._sequence_denial_for_action(action_name)
         if denied is not None:
             await self._record_policy_denied(
                 source, intent, denied, action_name=action_name,
@@ -540,7 +540,7 @@ class IntentRouter:
             return
 
         # Programmatic shortcut: run a registered kernel handler inline + emit RESPONSE so a deterministic shell-tool invocation doesn't burn an LLM turn (see kernel_request_handlers.py).
-        if target_agent == "kernel":
+        if target_agent == "kernel_agent":
             handler = get_handler(kind)
             if handler is not None:
                 params = intent.payload.get("params") or {}
@@ -674,7 +674,7 @@ class IntentRouter:
                             duration_s=time.monotonic() - _lc_t0,
                         )
                 await self.bus.append_and_seq(Message.new(
-                    "kernel", source, "response",
+                    "kernel_agent", source, "response",
                     {
                         "in_reply_to": request_msg.msg_id,
                         "kind": f"{kind}_done",
@@ -720,7 +720,7 @@ class IntentRouter:
                                 result["gap_canonical_id"] = payload_gap
                         await self._record_integrate_keep(result)
                     self.shared_state.save(self.session_dir)
-                # Advance the kernel cursor past this request seq so the LLM kernel agent doesn't re-answer it next tick.
+                # Advance the kernel cursor past this request seq so the LLM Kernel-agent doesn't re-answer it next tick.
                 await self.cursors.advance(
                     target_agent,
                     seq=request_msg.seq,
@@ -834,7 +834,7 @@ class IntentRouter:
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
             ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
             PHASE_EXPLORE,
-            PHASE_KERNEL,
+            PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
             is_pause_specialist_hint,
             is_valid_escalate_hint,
@@ -854,7 +854,7 @@ class IntentRouter:
             return
         if hint == ESCALATE_HINT_EXTEND_KERNEL_BUDGET:
             self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
-                self.shared_state.phase_budget_pct, phase=PHASE_KERNEL,
+                self.shared_state.phase_budget_pct, phase=PHASE_KERNEL_AGENT,
             )
             self.shared_state.last_consumed_escalate_hint = hint
             self.shared_state.last_consumed_escalate_hint_ts = now_ts

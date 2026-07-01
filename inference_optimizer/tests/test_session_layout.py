@@ -219,7 +219,7 @@ def test_magpie_dir_is_pod_local_and_decoupled_from_user_data(tmp_path, monkeypa
     # NOT under $USER_DATA_PATH/runtime, so script + runtime agree on one checkout.
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "shared"))
     monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     monkeypatch.setenv("TMPDIR", str(tmp_path / "podlocal"))
     expected = tmp_path / "podlocal" / "hyperloom" / "open-source-repos"
     assert paths.open_source_root() == expected
@@ -230,13 +230,13 @@ def test_magpie_dir_is_pod_local_and_decoupled_from_user_data(tmp_path, monkeypa
 def test_open_source_root_honours_explicit_override(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "custom"))
     monkeypatch.setenv("TMPDIR", str(tmp_path / "ignored"))
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     assert paths.open_source_root() == tmp_path / "custom"
     assert paths.magpie_dir() == tmp_path / "custom" / "Magpie"
 
 
 def test_magpie_dir_honours_explicit_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("MAGPIE_DIR", str(tmp_path / "operator-magpie"))
+    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "operator-magpie"))
     monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "ignored"))
     assert paths.magpie_dir() == tmp_path / "operator-magpie"
 
@@ -275,7 +275,7 @@ def test_manifest_records_dependencies_block_empty_when_envs_unset(
     monkeypatch,
 ):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     sd = paths.make_session_dir()
     m = write_manifest(sd, args=None, session_id="empty-deps")
@@ -312,7 +312,7 @@ def test_manifest_records_dependencies_block_picks_up_git_metadata(
     _init_repo(fake_infx, "https://example.test/InferenceX.git", "i")
 
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
-    monkeypatch.setenv("MAGPIE_DIR", str(fake_magpie))
+    monkeypatch.setenv("MAGPIE_PATH", str(fake_magpie))
     monkeypatch.setenv("INFERENCEX_PATH", str(fake_infx))
 
     sd = paths.make_session_dir()
@@ -335,7 +335,7 @@ def test_manifest_dependencies_block_is_fail_soft_on_non_repo_paths(
     not_a_repo = tmp_path / "plain_dir"
     not_a_repo.mkdir()
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
-    monkeypatch.setenv("MAGPIE_DIR", str(not_a_repo))
+    monkeypatch.setenv("MAGPIE_PATH", str(not_a_repo))
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
 
     sd = paths.make_session_dir()
@@ -360,15 +360,15 @@ def test_manifest_pod_local_dependency_warning_matches_default_policy(
     from inference_optimizer import manifest
 
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
-    monkeypatch.setenv("MAGPIE_DIR", "/workspace/hyperloom_runtime_smoke/Magpie")
+    monkeypatch.setenv("MAGPIE_PATH", "/workspace/hyperloom_runtime_smoke/Magpie")
 
     with caplog.at_level(logging.WARNING, logger="inference_optimizer.manifest"):
-        manifest._describe_dep("MAGPIE_DIR")
+        manifest._describe_dep("MAGPIE_PATH")
 
-    messages = [r.message for r in caplog.records if "MAGPIE_DIR" in r.message]
+    messages = [r.message for r in caplog.records if "MAGPIE_PATH" in r.message]
     assert messages
     assert "defaults open-source dependencies to pod-local storage" in messages[0]
-    assert "point MAGPIE_DIR back" not in messages[0]
+    assert "point MAGPIE_PATH back" not in messages[0]
 
 
 def test_build_session_id_includes_uuid_and_model(monkeypatch):
@@ -479,7 +479,7 @@ def test_policy_path_inside_session_dir_passes(tmp_path):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": str(tmp_path / "runs" / "profile" / "x.json.gz")},
         },
@@ -492,7 +492,7 @@ def test_policy_path_outside_session_dir_denied(tmp_path):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": "/tmp/some-trace.json.gz"},
         },
@@ -516,7 +516,7 @@ def test_policy_source_file_allowlist_passes(tmp_path):
             },
         },
     )
-    gate.validate_intent("kernel", intent)
+    gate.validate_intent("kernel_agent", intent)
 
 
 def test_policy_source_file_outside_allowlist_denied(tmp_path):
@@ -534,7 +534,7 @@ def test_policy_source_file_outside_allowlist_denied(tmp_path):
         },
     )
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("kernel", intent)
+        gate.validate_intent("kernel_agent", intent)
     assert exc.value.rule == "source_file_not_allowlisted"
 
 
@@ -543,7 +543,7 @@ def test_policy_strict_off_skips_path_check(tmp_path):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": "/tmp/anywhere.json"},
         },
@@ -561,7 +561,7 @@ def test_policy_env_var_enables_strict(tmp_path, monkeypatch):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": "/tmp/x.json"},
         },

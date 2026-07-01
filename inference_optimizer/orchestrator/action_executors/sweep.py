@@ -252,7 +252,7 @@ class SweepExecutor:
                 ``workspace``.
         """
         params = ctx.task.params or {}
-        # PerfSkills reuse path: when the KERNEL phase was delegated to
+        # PerfSkills reuse path: when the KERNEL_AGENT phase was delegated to
         # PerfSkills, sweep the optimized server via PerfSkills' own bench_e2e.sh
         # + the already-built overlay (no overlay reconstruction).
         ps_result = params.get("perfskills_result") or {}

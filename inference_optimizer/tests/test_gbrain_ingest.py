@@ -20,7 +20,7 @@ def _recipe(**over: Any) -> dict[str, Any]:
         "canonical_id": "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:0_5_11:fp8",
         "model": "Qwen3-32B",
         "hardware": "mi300x",
-        "framework": "sglang",
+        "framework_name": "sglang",
         "framework_version": "0_5_11",
         "precision": "fp8",
         "best_config": {"extra_server_args": "--cuda-graph-max-bs 256", "FOO": "1"},
@@ -31,6 +31,25 @@ def _recipe(**over: Any) -> dict[str, Any]:
     }
     base.update(over)
     return base
+
+
+def test_recipe_to_page_reads_legacy_framework_key() -> None:
+    """The batch ingest reads raw on-disk recipe.json (no Recipe normalization),
+    so rows persisted before the framework_name rename still carry the legacy
+    ``framework`` key. The emitted page must surface it as ``framework_name``
+    (attr + tag) instead of an empty framework dimension."""
+    import yaml
+
+    legacy = _recipe()
+    legacy.pop("framework_name")
+    legacy["framework"] = "sglang"
+    slug, content = recipe_to_page(legacy)
+    assert slug.split("/")[4] == "sglang"
+    fm = yaml.safe_load(content.split("---", 2)[1])
+    assert fm["attrs"]["framework_name"] == "sglang"
+    assert "framework_name:sglang" in fm["tags"]
+    recovered = _page_to_recipe(fm)
+    assert recovered["labels"]["framework_name"] == "sglang"
 
 
 def test_scalar_quotes_risky_keeps_barewords() -> None:
@@ -49,7 +68,7 @@ def test_scalar_quotes_risky_keeps_barewords() -> None:
 
 def test_recipe_to_page_roundtrips_via_reader() -> None:
     slug, content = recipe_to_page(_recipe())
-    assert slug == "recipe-snapshot/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/0_5_11/fp8"
+    assert slug == "hyperloom-recipe-kb/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/0_5_11/fp8"
     # Check version token quoting survived
     assert content.startswith("---\ntype: recipe\n")
     # the version token must be quoted so it survives YAML parse
@@ -58,7 +77,7 @@ def test_recipe_to_page_roundtrips_via_reader() -> None:
         "attrs": {
             "model": "Qwen3-32B",
             "hardware": "mi300x",
-            "framework": "sglang",
+            "framework_name": "sglang",
             "framework_version": "0_5_11",
             "precision": "fp8",
             "best_config_args": "--cuda-graph-max-bs 256",
@@ -202,7 +221,7 @@ def test_ingest_counts_and_gates(monkeypatch) -> None:
         _recipe(),
         _recipe(canonical_id="inference:a:b:c:d:e", best_config={}),  # anchor -> mirror
         _recipe(canonical_id="", best_config={}),  # no cid -> skip
-        _recipe(canonical_id="inference:m2:mi355x:vllm:v1:fp16", model="m2", hardware="mi355x", framework="vllm"),
+        _recipe(canonical_id="inference:m2:mi355x:vllm:v1:fp16", model="m2", hardware="mi355x", framework_name="vllm"),
     ]
     mcp = _FakeMcp()
     stats = ingest_local_to_gbrain(recipes=recipes, mcp=mcp, dry_run=False)

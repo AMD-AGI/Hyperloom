@@ -153,7 +153,7 @@ def test_validator_warns_on_extend_decode_files_without_steady_state(
     _validate_trace_structure(trace_dir, "sglang")
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("profile_by_stage=True leaked through" in m for m in msgs), msgs
-    assert any("$MAGPIE_DIR/InferenceX" in m for m in msgs), (
+    assert any("$MAGPIE_PATH/InferenceX" in m for m in msgs), (
         "warning message should point operators at the #210 fix surface"
     )
 
@@ -219,7 +219,7 @@ def test_validator_no_warning_when_execute_star_present_without_user_annotation(
         "traceEvents": [
             {"name": "cpu_op", "ph": "X", "ts": 0, "dur": 1},
             {
-                "name": "kernel",
+                "name": "kernel_agent",
                 "ph": "X",
                 "args": {"label": "execute_16384_context_16(sq16384sk16384)"},
             },

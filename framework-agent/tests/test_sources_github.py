@@ -60,6 +60,19 @@ def test_build_query_falls_back_to_perf_terms_when_empty() -> None:
         assert t in q
 
 
+def test_build_query_open_only_keeps_is_open() -> None:
+    """Default (open-only) keeps the is:open qualifier (G4)."""
+    q = gh._build_query("sgl-project/sglang", "fp8", states=("open",))
+    assert "is:open" in q
+
+
+def test_build_query_broad_states_drop_is_open() -> None:
+    """Including merged/closed broadens to all PR states (no is:open) (G4)."""
+    q = gh._build_query("sgl-project/sglang", "fp8", states=("open", "merged", "closed"))
+    assert "is:open" not in q
+    assert "is:pr" in q
+
+
 # search_perf_prs --------------------------------------------------------
 
 

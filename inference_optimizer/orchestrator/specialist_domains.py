@@ -66,12 +66,12 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "Reads sglang/vllm source, focuses on scheduler, cuda graph, "
             "kv cache, batching, chunked prefill, max-num-seqs."
         ),
-        # Upstream PR discovery runs as the standalone FRAMEWORK_PR phase.
+        # Upstream PR discovery runs as the standalone FRAMEWORK_AGENT phase.
     ),
     SpecialistDomain(
         key="kernel_switch_specialist",
         layer="aiter / sglang kernels / triton",
-        kb_anchor="kernel",
+        kb_anchor="kernel_agent",
         pr_repos=("ROCm/aiter", "triton-lang/triton"),
         available_in="M6",
         description=(
@@ -115,7 +115,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         description=(
             "EXPLORE-phase per-gap PR top-up. Surveys PRs across known "
             "repos and feeds refs to other specialists. The bulk pre-scan "
-            "runs in the dedicated FRAMEWORK_PR phase; this domain is for "
+            "runs in the dedicated FRAMEWORK_AGENT phase; this domain is for "
             "narrow follow-ups discovered mid-EXPLORE. Dispatch sparingly "
             "(one every K rounds)."
         ),
@@ -141,6 +141,24 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "optimizations, then writes prioritised research_hints with "
             "sources. Never benchmarks, applies patches, or decides "
             "KEEP/REVERT."
+        ),
+    ),
+    SpecialistDomain(
+        key="static_recon_specialist",
+        layer="framework source static reconnaissance / un-bridged switches",
+        kb_anchor="static_recon",
+        pr_repos=("ROCm/vllm", "sgl-project/sglang", "ROCm/aiter"),
+        available_in="M6",
+        description=(
+            "Read-only static-source reconnaissance dispatched at PRELUDE. "
+            "Greps the framework source tree (vLLM / SGLang) for un-bridged "
+            "capability switches — fast paths that should be enabled for the "
+            "current (model, GPU, precision) but are silently disabled by a "
+            "predicate (e.g. a CUDA-only *_supported() returning False on "
+            "ROCm). Seeded with a curated checklist; emits bridge-patch "
+            "candidates as gap seeds. Never benchmarks, applies patches, or "
+            "decides KEEP/REVERT — the EXPLORE freeform specialist authors the "
+            "actual patch under the normal KEEP gate."
         ),
     ),
 )

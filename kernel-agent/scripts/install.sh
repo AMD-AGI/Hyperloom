@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-# Kernel Agent installer.
+# Kernel-agent installer.
 #
 # Base install is intentionally small and deterministic:
 #   - ray[default]==2.44.1 + click<8.3.0
@@ -16,12 +16,23 @@ set -euo pipefail
 # /usr/bin even when callers only prepend /opt/venv/bin. Prepend the
 # standard system bins so multi-node RayJob children resolve them.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
-export PATH="/opt/venv/bin:$PATH"
+# Re-assert the active virtualenv ahead of the system bins prepended above.
+# Callers may only put the venv on PATH (e.g. /venv/bin) or activate it via
+# $VIRTUAL_ENV; otherwise the system-bins prepend shadows the venv python3
+# with /usr/bin/python3, whose apt-managed packages (e.g. packaging) have no
+# RECORD file and break `pip install`/uninstall. Probe the activated venv
+# first, then the common ROCm image locations (/opt/venv, /venv).
+for _venv_bin in "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}" /opt/venv/bin /venv/bin; do
+  if [ -n "${_venv_bin}" ] && [ -x "${_venv_bin}/python" ]; then
+    export PATH="${_venv_bin}:$PATH"
+    break
+  fi
+done
 
 # Default every writable artefact location under $USER_DATA_PATH so a single
 # session-dir move relocates Magpie / source mirrors / GEAK config / the
 # kernel-agent env file. Operators can still pin individual paths via env
-# overrides (HYPERLOOM_ROOT, MAGPIE_DIR, etc.) — the defaults below take
+# overrides (HYPERLOOM_ROOT, MAGPIE_PATH, etc.) — the defaults below take
 # effect only when the corresponding env var is unset.
 #
 # REPO_ROOT / KERNEL_AGENT_ROOT default to the on-disk source location
@@ -54,13 +65,15 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
 _open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/hyperloom}"
-MAGPIE_DIR="${MAGPIE_DIR:-${_open_source_root}/Magpie}"
+# MAGPIE_PATH is the single override shared with the Python runtime; a standalone
+# run never clones upstream Magpie when MAGPIE_PATH is set.
+MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
 # Resolve MAGPIE_PYTHON dynamically. The previous default
-# ${MAGPIE_DIR}/venv/bin/python assumed a Magpie-private venv, but
+# ${MAGPIE_PATH}/venv/bin/python assumed a Magpie-private venv, but
 # inference_optimizer/scripts/install.sh's ensure_magpie() does
-# `pip install -e $MAGPIE_DIR` into the driver Python's site-packages
+# `pip install -e $MAGPIE_PATH` into the driver Python's site-packages
 # (or the container image pre-installs it that way) — no venv is ever
-# created at $MAGPIE_DIR/venv. Mirrors _resolve_magpie_python() in
+# created at $MAGPIE_PATH/venv. Mirrors _resolve_magpie_python() in
 # inference_optimizer/orchestrator/action_executors/_grid_runner.py:
 #   $MAGPIE_PYTHON env > python3 on PATH that can `import Magpie`
 #     > /opt/venv/bin/python (if it exists) > python3 on PATH.
@@ -82,7 +95,7 @@ _resolve_magpie_python() {
   printf '%s' "${candidate:-/opt/venv/bin/python}"
 }
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
-PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
+PYTHONPATH="${MAGPIE_PATH}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
@@ -138,7 +151,7 @@ GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 GEAK_REF="${GEAK_REF:-v3.2.2}"
 # e2e whole-pipeline optimizer (formerly the standalone PerfSkills repo). Its
 # code has MIGRATED INTO GEAK on the GEAK_v4 branch (interface/run_e2e.py +
-# e2e_workflow/). Hyperloom calls interface/run_e2e.py at the KERNEL phase when
+# e2e_workflow/). Hyperloom calls interface/run_e2e.py at the KERNEL_AGENT phase when
 # KERNEL_OPT_BACKEND_ORDER=perfskills. This is a SECOND GEAK checkout pinned to the
 # e2e branch, kept SEPARATE from the single-kernel GEAK checkout above. The
 # PERFSKILLS_* names are retained as the stable handle for this optimizer;
@@ -1303,7 +1316,7 @@ write_env_file() {
     [ -n "${KERNEL_AGENT_ENV:-}" ] && echo "export KERNEL_AGENT_ENV='${KERNEL_AGENT_ENV}'"
     [ -n "${HYPERLOOM_KERNEL_AGENT_ROOT:-}" ] && echo "export HYPERLOOM_KERNEL_AGENT_ROOT='${HYPERLOOM_KERNEL_AGENT_ROOT}'"
     [ -n "${KERNEL_AGENT_ROOT:-}" ] && echo "export KERNEL_AGENT_ROOT='${KERNEL_AGENT_ROOT}'"
-    [ -n "${MAGPIE_DIR:-}" ] && echo "export MAGPIE_DIR='${MAGPIE_DIR}'"
+    [ -n "${MAGPIE_PATH:-}" ] && echo "export MAGPIE_PATH='${MAGPIE_PATH}'"
     [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"

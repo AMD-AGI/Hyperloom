@@ -31,9 +31,9 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
         "PRELUDE",
-        "FRAMEWORK_PR",
+        "FRAMEWORK_AGENT",
         "EXPLORE",
-        "KERNEL",
+        "KERNEL_AGENT",
         "SWEEP",
         "CLOSE",
     )
@@ -43,15 +43,15 @@ def test_phase_names_are_monotonic():
 
 
 def test_allowed_actions_disjoint_phases():
-    # recover is in every phase; kernel-owned actions only in KERNEL (Inv-2.1).
+    # recover is in every phase; kernel_agent-owned actions only in KERNEL (Inv-2.1).
     for phase in phase_state.PHASE_NAMES:
         allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
         assert "recover" in allowed
     assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["PRELUDE"]
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
-    assert "kernel_opt" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL"]
+    assert "kernel_opt" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
     assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
-    assert "gemm_tuning" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL"]
+    assert "gemm_tuning" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
     assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
     assert "sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
     assert "sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
@@ -84,14 +84,14 @@ def test_llm_proposable_set_drops_coordinator_internal_actions():
         # never LLM-proposable by Orchestration.
         assert "recover" in allowed
         assert "recover" not in proposable
-    # The advertised analysis / framework_pr names are never proposable.
+    # The advertised analysis / framework names are never proposable.
     explore = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["EXPLORE"]
     assert "roofline" not in explore
     assert "profile" not in explore
     assert "explore" in explore and "specialist" in explore
-    framework_pr = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["FRAMEWORK_PR"]
-    assert "framework_pr" not in framework_pr
-    assert "integrate_patch" in framework_pr
+    framework = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["FRAMEWORK_AGENT"]
+    assert "framework" not in framework
+    assert "integrate_patch" in framework
 
 
 def test_is_action_llm_proposable_in_phase_handles_unknowns():
@@ -100,7 +100,7 @@ def test_is_action_llm_proposable_in_phase_handles_unknowns():
     # roofline lives in the allowlist but is never LLM-proposable.
     assert phase_state.is_action_allowed_in_phase("roofline", "EXPLORE")
     assert not phase_state.is_action_llm_proposable_in_phase("roofline", "EXPLORE")
-    assert not phase_state.is_action_llm_proposable_in_phase("framework_pr", "FRAMEWORK_PR")
+    assert not phase_state.is_action_llm_proposable_in_phase("framework_agent", "FRAMEWORK_AGENT")
     # Unknown phase / empty action → deny by default.
     assert not phase_state.is_action_llm_proposable_in_phase("baseline", "UNKNOWN")
     assert not phase_state.is_action_llm_proposable_in_phase("", "PRELUDE")
@@ -124,7 +124,7 @@ def test_phase_interleave_off_matches_default_proposable_set():
             )
             == base
         )
-    # And kernel-owned actions are denied in EXPLORE under default mode.
+    # And kernel_agent-owned actions are denied in EXPLORE under default mode.
     assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
         "kernel_opt",
         "EXPLORE",
@@ -132,13 +132,13 @@ def test_phase_interleave_off_matches_default_proposable_set():
     )
     assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
         "explore",
-        "KERNEL",
+        "KERNEL_AGENT",
         interleave=False,
     )
 
 
 def test_phase_interleave_on_widens_explore_and_kernel():
-    """With interleave=True, EXPLORE gains kernel-owned actions and KERNEL gains explore/specialist/integrate_patch."""
+    """With interleave=True, EXPLORE gains kernel_agent-owned actions and KERNEL gains explore/specialist/integrate_patch."""
     explore = phase_state.llm_proposable_actions_for_with_interleave(
         "EXPLORE",
         interleave=True,
@@ -149,15 +149,15 @@ def test_phase_interleave_on_widens_explore_and_kernel():
     assert "explore" in explore  # native EXPLORE actions still present
     assert "specialist" in explore
     kernel = phase_state.llm_proposable_actions_for_with_interleave(
-        "KERNEL",
+        "KERNEL_AGENT",
         interleave=True,
     )
     assert "explore" in kernel
     assert "specialist" in kernel
     assert "integrate_patch" in kernel
     assert "kernel_opt" in kernel  # native KERNEL actions still present
-    # SWEEP / CLOSE / PRELUDE / FRAMEWORK_PR are unchanged.
-    for phase in ("PRELUDE", "FRAMEWORK_PR", "SWEEP", "CLOSE"):
+    # SWEEP / CLOSE / PRELUDE / FRAMEWORK are unchanged.
+    for phase in ("PRELUDE", "FRAMEWORK_AGENT", "SWEEP", "CLOSE"):
         base = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS.get(
             phase,
             frozenset(),
@@ -217,9 +217,9 @@ def test_phase_exit_reasons_includes_required_vocab():
         "explore_force_exit_low_budget",
         "explore_no_more_leverage",
         "kernel_no_more_leverage",
-        "framework_pr_phase_done",
-        "framework_pr_plateau",
-        "framework_pr_force_exit_low_budget",
+        "framework_agent_phase_done",
+        "framework_agent_plateau",
+        "framework_agent_force_exit_low_budget",
         "cycle_reloop",
         "global_converged",
         "robustness_escalated",
@@ -297,7 +297,7 @@ def test_exit_normal_prelude_triggers_on_baseline_tput():
 
 
 def test_exit_normal_prelude_blocked_while_warm_replay_in_flight():
-    """PRELUDE must not advance to FRAMEWORK_PR until warm-replay settles."""
+    """PRELUDE must not advance to FRAMEWORK until warm-replay settles."""
     state = SimpleNamespace(
         baseline_tput=1234.5,
         warm_replay_outcome={"status": "in_flight", "replay_task_id": "abc"},
@@ -532,7 +532,7 @@ def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
 def test_policy_gate_phase_interleave_off_denies_kernel_request_in_explore(
     monkeypatch,
 ):
-    """With interleave off, a kernel-owned REQUEST in EXPLORE is denied by R1."""
+    """With interleave off, a kernel_agent-owned REQUEST in EXPLORE is denied by R1."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "0")
     state = SharedState()
     state.record_phase_transition(
@@ -550,7 +550,7 @@ def test_policy_gate_phase_interleave_off_denies_kernel_request_in_explore(
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "kernel_opt",
             "params": {},
         },
@@ -563,7 +563,7 @@ def test_policy_gate_phase_interleave_off_denies_kernel_request_in_explore(
 def test_policy_gate_phase_interleave_on_allows_kernel_request_in_explore(
     monkeypatch,
 ):
-    """With interleave on, EXPLORE widens to kernel-owned kinds, so R1 lets the REQUEST through."""
+    """With interleave on, EXPLORE widens to kernel_agent-owned kinds, so R1 lets the REQUEST through."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
     state = SharedState()
     state.record_phase_transition(
@@ -581,7 +581,7 @@ def test_policy_gate_phase_interleave_on_allows_kernel_request_in_explore(
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "kernel_opt",
             "params": {},
         },
@@ -596,7 +596,7 @@ def test_policy_gate_phase_interleave_on_allows_explore_propose_in_kernel(
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
     state = SharedState()
     state.record_phase_transition(
-        to_phase="KERNEL",
+        to_phase="KERNEL_AGENT",
         reason="plateau_explore",
         evidence={},
         ts="2026-05-19T00:00:00+00:00",
@@ -663,7 +663,7 @@ def coordinator_with_mocks(session_dir):
     )
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -677,8 +677,10 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     row = c.shared_state.phase_history[0]
     assert row["to_phase"] == "PRELUDE"
     assert row["reason"] == "phase_entered"
-    # Budget rebalance: EXPLORE/KERNEL carry a larger slice; PRELUDE 3%, SWEEP 12%; sum stays 1.0.
-    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.45
+    # Budget rebalance: FRAMEWORK now carries 0.15 (0.075 each from EXPLORE
+    # 0.375 and KERNEL 0.305); PRELUDE 3%, SWEEP 12%, CLOSE 2%; sum stays 1.0.
+    assert c.shared_state.phase_budget_pct["FRAMEWORK_AGENT"] == 0.15
+    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.375
     assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.03
 
 
@@ -689,14 +691,14 @@ async def test_coordinator_advances_to_explore_when_baseline_present(
 ):
     c = coordinator_with_mocks
     try:
-        # Skip FRAMEWORK_PR so this exercises the legacy PRELUDE→EXPLORE contract.
-        c.shared_state.framework_phase_enabled = False
+        # Skip FRAMEWORK so this exercises the legacy PRELUDE→EXPLORE contract.
+        c.shared_state.framework_agent_phase_enabled = False
         # Simulate baseline KEEP: write the event that triggers prelude_done.
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)
         assert c.shared_state.phase == "EXPLORE"
-        # 2 rows: PRELUDE entry + PRELUDE→EXPLORE (FRAMEWORK_PR skipped).
+        # 2 rows: PRELUDE entry + PRELUDE→EXPLORE (FRAMEWORK skipped).
         assert len(c.shared_state.phase_history) == 2
         last = c.shared_state.phase_history[-1]
         assert last["from_phase"] == "PRELUDE"
@@ -713,7 +715,7 @@ async def test_coordinator_phase_idempotent_within_same_tick(
 ):
     c = coordinator_with_mocks
     try:
-        c.shared_state.framework_phase_enabled = False
+        c.shared_state.framework_agent_phase_enabled = False
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)

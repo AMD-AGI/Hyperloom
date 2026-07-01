@@ -17,6 +17,7 @@ import asyncio
 import functools
 import importlib.util
 import json
+import sys
 import logging
 import os
 import re
@@ -40,6 +41,130 @@ log = logging.getLogger(__name__)
 _BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
+
+# ---------------------------------------------------------------------------
+# "Honest E2E" hardening flags (v4-parity). Every behavior below is OFF by
+# default, so with no env set this module is byte-identical to before. The
+# umbrella flag ``HL_HONEST_E2E`` turns the whole cohesive mode on; each fix
+# also has a per-fix override that wins over the umbrella (set it to an
+# explicit falsey value to opt a single fix back out of the umbrella).
+# ---------------------------------------------------------------------------
+_HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
+_TRUEY = {"1", "true", "yes", "on"}
+_FALSEY = {"0", "false", "no", "off"}
+
+
+def _honest_flag(specific_env: str) -> bool:
+    """Resolve a per-fix honest-E2E flag against the umbrella flag.
+
+    Returns ``True`` when the per-fix env ``specific_env`` is truthy, OR when it
+    is unset and the umbrella ``HL_HONEST_E2E`` is truthy. An explicit falsey
+    per-fix value always wins (lets one fix opt out of the umbrella). The umbrella
+    now defaults ON: E2E-faithful verdicts (paired same-config A/B, engagement
+    gate, verified-micro promotion) are the default so a GEAK kernel win is judged
+    by real serving throughput, not a stored-scalar gain. Opt the whole cohort
+    back out with ``HL_HONEST_E2E=0`` (or a single fix via its per-fix env).
+
+    Args:
+        specific_env: The per-fix environment variable name.
+
+    Returns:
+        bool: Whether the gated behavior should be enabled.
+    """
+    raw = os.environ.get(specific_env, "").strip().lower()
+    if raw in _TRUEY:
+        return True
+    if raw in _FALSEY:
+        return False
+    return os.environ.get(_HONEST_E2E_UMBRELLA_ENV, "1").strip().lower() in _TRUEY
+
+
+def _vram_guarded_server_args(extra_args: str) -> str:
+    """Optionally cap ``--gpu-memory-utilization`` for the integrate re-baseline.
+
+    v4-parity VRAM barrier: when ``HL_INTEGRATE_VRAM_GUARD`` (or the umbrella)
+    is on and the caller has NOT already pinned ``--gpu-memory-utilization``,
+    append a conservative cap (``HL_INTEGRATE_VRAM_UTIL_CAP``, default 0.90) so a
+    re-baseline server launched on a node with less headroom than the original
+    roofline cannot OOM. Deterministic (no live VRAM probe), additive, and a
+    strict no-op when the flag is off or a util is already specified — so the
+    returned string is byte-identical to the input on the legacy path.
+
+    Args:
+        extra_args: The resolved ``extra_server_args`` string for the server.
+
+    Returns:
+        str: ``extra_args`` unchanged, or with a util cap appended.
+    """
+    if not _honest_flag("HL_INTEGRATE_VRAM_GUARD"):
+        return extra_args
+    # ``--gpu-memory-utilization`` is a vLLM-only flag; sglang REJECTS it
+    # ("unrecognized arguments") and the server exits immediately, failing the
+    # integrate re-baseline for EVERY sglang workload. sglang caps memory via
+    # ``--mem-fraction-static`` (set by its launcher), so it needs no guard here.
+    # Apply the cap only for vLLM; sglang/unknown framework -> strict no-op.
+    framework = (os.environ.get("FRAMEWORK") or "").strip().lower()
+    if framework != "vllm":
+        return extra_args
+    if "gpu-memory-utilization" in (extra_args or ""):
+        return extra_args
+    try:
+        cap = float(os.environ.get("HL_INTEGRATE_VRAM_UTIL_CAP", "0.90") or 0.90)
+    except (TypeError, ValueError):
+        cap = 0.90
+    cap = min(max(cap, 0.1), 0.99)
+    addition = f"--gpu-memory-utilization {cap:g}"
+    return f"{extra_args} {addition}".strip() if extra_args else addition
+
+
+def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> bool | None:
+    """Best-effort confirm the patched source was actually imported/compiled.
+
+    v4-parity import-grep: greps the re-baseline server log for evidence the
+    patched module's basename was imported/loaded/compiled by the served
+    process, so a measured E2E delta is attributed to code the workload really
+    ran (not a phantom win on an un-imported patch). Returns a *tri-state*:
+
+    * ``True``  — the module basename appears in import/load/compile context.
+    * ``False`` — the server log is readable and the basename never appears
+      anywhere (positive evidence the patched file was not exercised).
+    * ``None``  — unknown (no source_file, no readable log) — never penalized.
+
+    Args:
+        source_file: Resolved path of the patched kernel source.
+        workspace: Re-baseline workspace dir (holds ``server.log``).
+
+    Returns:
+        bool | None: Tri-state confirmation as described above.
+    """
+    if not source_file or not workspace:
+        return None
+    ws = Path(workspace)
+    logs = [p for p in (ws / "server.log", ws.parent / "server.log") if p.exists()]
+    if not logs:
+        try:
+            logs = sorted(ws.rglob("server.log"))[:1]
+        except Exception:
+            logs = []
+    if not logs:
+        return None
+    stem = Path(source_file).stem
+    if not stem:
+        return None
+    try:
+        text = logs[0].read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+    if stem not in text:
+        return False
+    # Confirmed only when the basename co-occurs with an import/compile cue.
+    for line in text.splitlines():
+        if stem in line and re.search(r"import|load|compil|build|\.py", line, re.IGNORECASE):
+            return True
+    # Basename present but not in an obvious import context — treat as unknown
+    # rather than penalize (avoids false negatives on terse logs).
+    return None
+
 
 # kernel_optimization attempt backends whose stdout log we mine for token
 # usage. ``geak`` uses litellm (OpenAI-shape usage); ``oob`` runs ``oob run
@@ -143,13 +268,19 @@ _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
 
 @functools.lru_cache(maxsize=1)
 def _default_geak_budget_minutes() -> float:
-    """Default per-GEAK-attempt budget tracking ``$GEAK_RUN_MODE`` (quick→70, full→130); mirrors kernel-agent tool defaults.
+    """Default per-GEAK-attempt budget tracking ``$GEAK_RUN_MODE`` (quick→70, full→180); mirrors kernel-agent tool defaults.
+
+    Full mode gets 180 min (3 h) so preprocess (CK/.cu harness build) + the
+    optimization round + the post-round FULL_BENCHMARK verification all fit;
+    at 130 min the verification step was being starved and every attempt
+    finalized as an unverified NEEDS_REVIEW. Matches the kernel-agent tool
+    default (kernel_optimization.py).
 
     Returns:
         The default per-attempt GEAK budget in minutes.
     """
     raw = (os.environ.get("GEAK_RUN_MODE") or "").strip().lower()
-    return 70.0 if raw == "quick" else 130.0
+    return 70.0 if raw == "quick" else 180.0
 
 
 def _visible_gpu_count() -> int | None:
@@ -888,6 +1019,10 @@ def _maybe_apply_kernel_patch(
     kid = str(kernel_id or payload.get("kernel_id") or "")
     backup_root = payload.get("backup_root") or (patches_dir(session_dir, kid or "anon") / "backup")
     tool = _load_apply_tool()
+    # Snapshot mode (content-addressed deploy): when a snapshot dir of byte-exact
+    # final files is present, the patch lands atomically across all its files.
+    snapshot_dir = str(payload.get("snapshot_dir") or "").strip() or None
+    repo_root = str(payload.get("kernel_repo") or payload.get("repo") or "").strip() or None
     return tool.apply_kernel_patch(
         patch_path=patch_path,
         target_file=target_file,
@@ -899,6 +1034,8 @@ def _maybe_apply_kernel_patch(
         skip_rebuild=bool(payload.get("skip_rebuild", False)),
         allow_unknown_target=bool(payload.get("allow_unknown_target", False)),
         dry_run=bool(payload.get("dry_run_patch", False)),
+        snapshot_dir=snapshot_dir,
+        repo_root=repo_root,
     )
 
 
@@ -1010,6 +1147,14 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     last_kernel = state.last_kernel_opt or {}
 
     if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
+        # Snapshot deploy: prefer the original patch (manifest) + its byte-exact
+        # snapshot dir so the WHOLE multi-file patch lands atomically.
+        if not resolved.get("snapshot_dir") and last_kernel.get("deploy_snapshot_dir"):
+            resolved["snapshot_dir"] = str(last_kernel["deploy_snapshot_dir"])
+            if last_kernel.get("deploy_patch_path") and not resolved.get("patch_path"):
+                resolved["patch_path"] = str(last_kernel["deploy_patch_path"])
+            if last_kernel.get("deploy_repo_root") and not resolved.get("kernel_repo"):
+                resolved["kernel_repo"] = str(last_kernel["deploy_repo_root"])
         if not resolved.get("patch_path"):
             artifact = (
                 last_kernel.get("best_artifact_path")
@@ -1024,6 +1169,12 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     # Multi-KEEP queue fallback: ``last_kernel_opt`` holds only the strongest pending KEEP, so pull patch_path/source_file from the per-kernel ledger for other queued KEEPs.
     if kernel_id:
         attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        if not resolved.get("snapshot_dir") and attempt.get("last_snapshot_dir"):
+            resolved["snapshot_dir"] = str(attempt["last_snapshot_dir"])
+            if attempt.get("last_deploy_patch_path") and not resolved.get("patch_path"):
+                resolved["patch_path"] = str(attempt["last_deploy_patch_path"])
+            if attempt.get("last_deploy_repo_root") and not resolved.get("kernel_repo"):
+                resolved["kernel_repo"] = str(attempt["last_deploy_repo_root"])
         if not resolved.get("patch_path") and attempt.get("last_artifact_path"):
             resolved["patch_path"] = str(attempt["last_artifact_path"])
         if not resolved.get("source_file") and attempt.get("last_source_file"):
@@ -1355,13 +1506,18 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     if quantization_arg == "fp8":
         precision = "fp8"
-        # Only explicit per-token env should route to per_token.
-        # Otherwise keep auto so forge can inspect kernel_signature_log
-        # for QuantType.per_Token / blockscale detection.
+        # Hand forge the fp8 GEMM path the model actually runs instead of letting
+        # it fall back to its internal blockscale default. Explicit per-token env
+        # wins; otherwise derive from the checkpoint's static format (config.json
+        # quantization_config). Unreadable config -> "auto" so forge sniffs the
+        # kernel_signature_log (keeps the legacy no-config behaviour unchanged).
         if per_token_signal:
             quant_type = "per_token"
         else:
-            quant_type = "auto"
+            model_path = str(
+                payload.get("model_path") or getattr(state, "model_path", "") or ""
+            ).strip()
+            quant_type = _resolve_fp8_quant_type(model_path)
         return precision, quant_type
 
     if quantization_arg in ("fp4", "mxfp4"):
@@ -1523,7 +1679,127 @@ def _csv_has_data_rows(path: Path) -> bool:
     return False
 
 
-def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: str) -> str:
+def _csv_k_values(path: Path) -> set[int]:
+    """Return the distinct integer ``K`` (contraction-dim) values in a CSV.
+
+    The aiter recorder writes a header containing ``M,N,K`` (optionally with
+    extra columns such as ``q_dtype_w``). ``K`` is the GEMM contraction dim,
+    which for a transformer layer equals its input dim (``hidden_size`` for
+    QKV/gate-up/o projections, ``intermediate_size`` for the down projection).
+    """
+    ks: set[int] = set()
+    try:
+        with path.open(encoding="utf-8", errors="replace") as f:
+            header = f.readline().strip().split(",")
+            cols = {name.strip().upper(): i for i, name in enumerate(header)}
+            kidx = cols.get("K")
+            if kidx is None:
+                return ks
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) <= kidx:
+                    continue
+                try:
+                    ks.add(int(float(parts[kidx])))
+                except ValueError:
+                    continue
+    except OSError:
+        return ks
+    return ks
+
+
+def _read_model_config(model_path: str) -> dict | None:
+    """Load a HF ``config.json`` as a dict; ``None`` when unavailable/unreadable."""
+    if not model_path:
+        return None
+    cfg = Path(model_path) / "config.json"
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _model_hidden_size(model_path: str) -> int | None:
+    """Read ``hidden_size`` from a HF ``config.json``; ``None`` when unavailable."""
+    data = _read_model_config(model_path)
+    if data is None:
+        return None
+    candidates: list[dict] = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg_dict in candidates:
+        for key in ("hidden_size", "n_embd", "d_model", "hidden_dim"):
+            val = cfg_dict.get(key)
+            if isinstance(val, int) and val > 0:
+                return val
+    return None
+
+
+def _resolve_fp8_quant_type(model_path: str) -> str:
+    """Pick the fp8 dense tuner quant_type from the checkpoint's static format.
+
+    forge accepts an explicit ``quant_type``; rather than letting it fall back to
+    its internal blockscale default, hand it the path the model actually runs:
+
+    - ``blockscale`` only when the checkpoint ships block-quantized weights
+      (``config.json`` ``quantization_config.weight_block_size`` or a block-style
+      ``quant_method``) -- the a8w8 blockscale GEMM path.
+    - ``per_token`` for a plain fp16/bf16 checkpoint served under dynamic
+      ``--quantization fp8`` (the a8w8 per-token path).
+    - ``auto`` when ``config.json`` cannot be read, so forge sniffs the
+      ``kernel_signature_log`` itself (preserves the legacy behaviour and keeps
+      the no-readable-config case unchanged).
+    """
+    data = _read_model_config(model_path)
+    if data is None:
+        return "auto"
+    # Check both the top-level config and a nested ``text_config`` (multimodal
+    # checkpoints sometimes carry the quantization_config there), mirroring
+    # ``_model_hidden_size``.
+    candidates: list[dict] = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg_dict in candidates:
+        qc = cfg_dict.get("quantization_config")
+        if isinstance(qc, dict):
+            if qc.get("weight_block_size"):
+                return "blockscale"
+            method = str(qc.get("quant_method") or qc.get("fmt") or "").lower()
+            if "block" in method:
+                return "blockscale"
+    return "per_token"
+
+
+def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
+    """Return True when an untuned CSV plausibly belongs to ``model_path``.
+
+    A real per-model dense untuned CSV always contains GEMMs whose ``K`` equals
+    the model ``hidden_size`` (QKV / gate-up / o-proj are column-parallel, so
+    their contraction dim stays ``hidden_size`` regardless of TP). When the
+    model's ``hidden_size`` is known and absent from the CSV's ``K`` column, the
+    CSV was recorded for a different model (e.g. AITER's checked-in DeepSeek
+    default with ``K=7168``) and must be rejected so forge derives shapes from
+    the model config instead of "tuning" mismatched shapes to a 1.0x no-op.
+
+    Returns True when validation is not possible (``hidden_size`` unreadable or
+    the CSV exposes no ``K`` column) to preserve existing behaviour and avoid
+    false rejections.
+    """
+    hidden = _model_hidden_size(model_path)
+    if hidden is None:
+        return True
+    k_values = _csv_k_values(csv_path)
+    if not k_values:
+        return True
+    return hidden in k_values
+
+
+def _resolve_forge_untuned_csv(
+    session_dir: Path, precision: str, quant_type: str, model_path: str = ""
+) -> str:
     """Find an aiter untuned-GEMM CSV recorded by the specialist phase.
 
     Dense fp8/fp4 forge tuners (a8w8*/a4w4*) skip themselves unless real GEMM
@@ -1531,6 +1807,12 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
     to ``runs/specialist/<hash>/worktree/aiter/configs/*_untuned_gemm.csv`` in
     forge's ``M,N,K`` format. This resolver picks the newest non-empty CSV
     matching the resolved quant type and wires it into the forge tuners.
+
+    When ``model_path`` is given, candidate CSVs whose GEMM shapes do not match
+    the model (the AITER repo default carries fixed DeepSeek shapes, ``K=7168``,
+    regardless of the model under test) are rejected. Returning "" then lets
+    forge derive correct per-model shapes from ``config.json`` rather than
+    tuning mismatched shapes that always yield ``improved=0/0, 1.0x``.
 
     Returns the CSV path, or "" when none is available (bf16 derives shapes from
     config.json and needs no CSV).
@@ -1557,6 +1839,8 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
     best_mtime = -1.0
     for csv_path in specialist_dir.glob(f"*/worktree/aiter/configs/{fname}"):
         if not _csv_has_data_rows(csv_path):
+            continue
+        if not _csv_matches_model(csv_path, model_path):
             continue
         try:
             mtime = csv_path.stat().st_mtime
@@ -1734,7 +2018,7 @@ async def _run_forge_gemm_tuning(
         # Guard against inline content / stale paths handed in as untuned_csv.
         untuned_csv = ""
     if not untuned_csv and not shapes_json:
-        untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type)
+        untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type, model_path)
 
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
@@ -2515,7 +2799,7 @@ def perfskills_selected(payload: dict | None = None) -> bool:
     """Whether ``perfskills`` is requested in the kernel backend order.
 
     ``perfskills`` is not a per-kernel backend: when it appears in the order it
-    means "delegate the whole KERNEL phase to the PerfSkills e2e optimizer".
+    means "delegate the whole KERNEL_AGENT phase to the PerfSkills e2e optimizer".
     It therefore *owns* the phase whenever present (any other backends in the
     order are ignored for the kernel phase), so an order of just ``perfskills``
     runs only PerfSkills.
@@ -2800,13 +3084,30 @@ def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) ->
     last_decision = str(entry.get("last_decision") or "").strip()
     last_status = str(entry.get("last_status") or "").lower()
     rejected_reason = str(entry.get("rejected_reason") or "").strip()
-    if (
-        failure_count < max_failures
-        and last_decision == ""
-        and last_status in {"failed", "error", "timeout"}
-        and not rejected_reason
-    ):
+    is_retryable_infra = (
+        last_decision == "" and last_status in {"failed", "error", "timeout"} and not rejected_reason
+    )
+    if failure_count < max_failures and is_retryable_infra:
         return max_failures
+    # High-impact infra-retry (flag-gated, default off): a high-GPU%-share kernel
+    # that keeps infra-failing ("didn't finish") gets extra attempts to COMPLETE
+    # before retirement, mirroring the retirement-side cap in record_kernel_opt so
+    # dispatch / record / kernel_work_pending agree. Off => unchanged.
+    if is_retryable_infra and _honest_flag("HL_INFRA_RETRY_HIGH_IMPACT"):
+        try:
+            impact_pct = float(entry.get("last_gpu_pct") or 0.0)
+        except (TypeError, ValueError):
+            impact_pct = 0.0
+        try:
+            min_gpu = float(os.environ.get("HL_INFRA_RETRY_MIN_GPU_PCT", "5.0") or 5.0)
+        except ValueError:
+            min_gpu = 5.0
+        try:
+            infra_max = int(os.environ.get("HL_INFRA_RETRY_MAX", "4") or 4)
+        except ValueError:
+            infra_max = 4
+        if impact_pct >= min_gpu and failure_count < infra_max:
+            return infra_max
     return _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
 
 
@@ -2968,6 +3269,10 @@ def _batch_kernel_candidates(
         selected.append(item)
 
     # Legacy per-kernel pass for reusable kernels not absorbed into a task_group.
+    # Collect the eligible (live, reusable, source-resolved) ungrouped rows first;
+    # the per-row min_gpu_pct gate / selection is applied below so the optional
+    # op-fanout de-dup can sum sibling GPU% before gating.
+    legacy_eligible: list[tuple[str, dict[str, Any], float]] = []
     for item in kernels:
         if not isinstance(item, dict):
             continue
@@ -2989,6 +3294,40 @@ def _batch_kernel_candidates(
             row_pct = float(item.get("gpu_pct") or 0.0)
         except (TypeError, ValueError):
             row_pct = 0.0
+        legacy_eligible.append((kernel_id, item, row_pct))
+
+    if _honest_flag("HL_KERNEL_OPFANOUT_DEDUP"):
+        # Op-fanout de-dup (flag-gated): one logical kernel (same source_file)
+        # often shows up as many op-instance rows, so each would dispatch
+        # separately and its trace impact would be split across rows. Collapse
+        # same-source rows into a single representative (the highest-GPU% row)
+        # carrying the SUMMED GPU% of the fanned siblings, so the min_gpu_pct
+        # gate and downstream impact ranking see the kernel's true aggregate
+        # share. Off => the per-row loop below is byte-identical to legacy.
+        by_source: dict[str, list[tuple[str, dict[str, Any], float]]] = {}
+        order: list[str] = []
+        for kid, item, row_pct in legacy_eligible:
+            src = str(item.get("source_file") or "")
+            if src not in by_source:
+                by_source[src] = []
+                order.append(src)
+            by_source[src].append((kid, item, row_pct))
+        deduped: list[tuple[str, dict[str, Any], float]] = []
+        for src in order:
+            rows = by_source[src]
+            summed_pct = sum(p for _, _, p in rows)
+            rep_kid, rep_item, _ = max(rows, key=lambda r: r[2])
+            if len(rows) > 1:
+                rep_item = dict(rep_item)
+                rep_item["gpu_pct"] = summed_pct
+                rep_item["opfanout_collapsed_ids"] = [k for k, _, _ in rows]
+                for k, _, _ in rows:
+                    if k != rep_kid:
+                        skipped.setdefault(k, f"opfanout_merged_into={rep_kid}")
+            deduped.append((rep_kid, rep_item, summed_pct))
+        legacy_eligible = deduped
+
+    for kernel_id, item, row_pct in legacy_eligible:
         if row_pct < min_gpu_pct:
             skipped[kernel_id] = f"below_min_gpu_pct={min_gpu_pct}"
             continue
@@ -3021,12 +3360,34 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
         non-KEEP, and higher ``micro_speedup`` breaks ties.
     """
     if not isinstance(result, dict):
-        return (0, 0.0)
+        return (0, 0, 0.0)
     proposal = result.get("proposal") or {}
     verification = result.get("verification") or {}
     keep = 1 if (result.get("status") == "ok" and proposal.get("decision") == "KEEP") else 0
     micro = float(verification.get("micro_speedup") or 0.0)
-    return (keep, micro)
+    # GEAK-only middle tier (flag-gated, default off): a correctness-verified, high-micro
+    # NEEDS_REVIEW from the GEAK backend is promotable above a bare non-KEEP — GEAK emits
+    # NEEDS_REVIEW (no auto-correctness-KEEP) so its real wins otherwise always lose to any
+    # Claude/Codex/forge KEEP. Scoped to backend=="geak" so OOB backends are byte-identical;
+    # off => verified_nr is always 0 => 3-tuple sorts exactly as the old 2-tuple.
+    _promote = _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
+    try:
+        _thr = float(os.environ.get("HL_VERIFIED_MICRO_PROMOTE_THRESHOLD", "1.10") or 1.10)
+    except ValueError:
+        _thr = 1.10
+    _backend = str(verification.get("best_backend") or result.get("backend") or "").lower()
+    verified_nr = (
+        1
+        if (
+            _promote
+            and keep == 0
+            and _backend == "geak"
+            and verification.get("correctness_passed") is True
+            and micro >= _thr
+        )
+        else 0
+    )
+    return (keep, verified_nr, micro)
 
 
 async def _run_backend_ladder(
@@ -3238,6 +3599,218 @@ async def _run_kernel_backend_sequence(
     return best
 
 
+def _resolve_local_model_path(model: str) -> str:
+    """Map a model name/path to a local weights directory the server can load.
+
+    A bare HF id like ``meta-llama-Llama-3.1-8B-Instruct`` passed straight to
+    sglang/vllm triggers a HuggingFace fetch (401 for gated repos), so resolve it
+    to a local directory first. Reuses the existing kernel-agent resolver
+    (``tracelens_analysis._candidate_model_config_paths``, honouring
+    ``$HYPERLOOM_MODELS_ROOT``, default ``/wekafs/models``): the directory holding
+    the first existing ``config.json`` wins. Returns the input unchanged when it
+    is already a directory or nothing resolves (caller/serve layer decides).
+
+    Args:
+        model: A model name or filesystem path.
+
+    Returns:
+        str: A local weights directory if one resolves, else ``model`` unchanged.
+    """
+    if not model:
+        return model
+    if Path(model).is_dir():
+        return model
+    try:
+        tool = _kernel_agent_tool_path("tracelens_analysis.py")
+        tools_dir = str(tool.parent)
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)  # tracelens_analysis imports sibling tools-dir modules
+        import tracelens_analysis as _tla  # type: ignore[import-not-found]
+        for cfg in _tla._candidate_model_config_paths(model):
+            if Path(cfg).is_file():
+                return str(Path(cfg).parent)
+    except Exception as exc:  # noqa: BLE001  # resolution is best-effort; fall back to the raw value
+        log.info("combined_e2e: model-path resolve failed (%s); using raw '%s'", exc, model)
+    return model
+
+
+def _collect_combined_e2e_pairs(results: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Collect (best_patch, target_source) pairs from a batch's per-kernel results.
+
+    Uses each kernel's BEST microbench patch (``geak_per_task_best_patch``)
+    regardless of the per-kernel KEEP/REVERT verdict -- the combined E2E applies
+    ALL optimized patches together and lets the end-to-end A/B be the arbiter.
+    Kernels with no usable patch (e.g. a kernel that produced none) are skipped.
+
+    Args:
+        results: The batch's per-kernel result dicts (``out["batch_results"]``).
+
+    Returns:
+        list[tuple[str, str]]: ``(patch_path, target_source_file)`` pairs, one
+            per kernel that produced a best patch.
+    """
+    pairs: list[tuple[str, str]] = []
+    for r in results or []:
+        if not isinstance(r, dict):
+            continue
+        kid = str(r.get("kernel_id") or "?")
+        target = str(r.get("source_file") or "")
+        best_patch = ""
+        for att in r.get("attempts") or []:
+            bp = att.get("backend_paths") if isinstance(att, dict) else None
+            if isinstance(bp, dict) and bp.get("geak_per_task_best_patch"):
+                best_patch = str(bp["geak_per_task_best_patch"])
+                break
+        if best_patch and target:
+            pairs.append((best_patch, target))
+            log.info("combined_e2e: kernel %s -> patch %s on %s", kid, best_patch, target)
+        else:
+            log.info("combined_e2e: kernel %s skipped (no best patch / target)", kid)
+    return pairs
+
+
+def _combined_e2e_serving_config(payload: dict) -> dict[str, Any]:
+    """Resolve serving knobs (tp/isl/osl/conc/num_prompts/framework) for combined E2E.
+
+    Precedence: explicit ``payload['serving_config']`` dict (what the driver
+    passes, parsed from its --serving-config) -> the materialized workload
+    metadata resolver -> apply_and_bench's own defaults (left unset here).
+    Never hardcodes workload-specific values.
+
+    Args:
+        payload: The run_optimization request payload.
+
+    Returns:
+        dict[str, Any]: Keys among {tp, isl, osl, conc, num_prompts, framework}
+            that were resolved; missing keys fall back to apply_and_bench defaults.
+    """
+    cfg: dict[str, Any] = {}
+    explicit = payload.get("serving_config")
+    if isinstance(explicit, dict):
+        for k in ("tp", "isl", "osl", "conc", "num_prompts", "framework"):
+            if explicit.get(k) is not None:
+                cfg[k] = explicit[k]
+    if "framework" not in cfg and payload.get("framework"):
+        cfg["framework"] = str(payload["framework"]).strip().lower()
+    # Fall back to materialized workload metadata for any unset numeric knob.
+    config_path = str(payload.get("config_path") or "")
+    if config_path:
+        meta = _load_materialized_workload_metadata(config_path)
+        wl = (meta.get("runtime_args") or {}).get("workload") if isinstance(meta, dict) else None
+        if isinstance(wl, dict):
+            for k in ("tp", "isl", "osl", "conc", "num_prompts"):
+                if k not in cfg and wl.get(k) is not None:
+                    cfg[k] = wl[k]
+    return cfg
+
+
+def _run_combined_e2e_sync(
+    results: list[dict[str, Any]], payload: dict, session_dir: Path
+) -> dict[str, Any] | None:
+    """Apply ALL of a GEAK batch's best patches together and measure E2E (blocking).
+
+    GEAK-only, opt-in. Returns None (skip, no-op) unless: ``payload['combined_e2e']``
+    is truthy, the effective backend is geak, a servable ``model_path`` is present,
+    and >=1 GPU is visible. Reuses the gate-less ``apply_and_bench`` primitive (the
+    single shared apply->rebuild->serve->A/B->revert mechanism). Never raises.
+
+    Args:
+        results: The batch's per-kernel result dicts.
+        payload: The run_optimization request payload.
+        session_dir: Session directory (E2E artifacts written under it).
+
+    Returns:
+        dict | None: The apply_and_bench result dict, an ``{status:error}`` dict,
+            or ``None`` when the step is skipped.
+    """
+    if not payload.get("combined_e2e"):
+        return None
+    order = _backend_order(payload)
+    if "geak" not in [b.lower() for b in (order or [])]:
+        log.info("combined_e2e: skipped (backend is not geak: %s)", order)
+        return None
+    model = _resolve_local_model_path(str(payload.get("model_path") or "").strip())
+    if not model:
+        log.info("combined_e2e: skipped (no model_path to serve)")
+        return None
+    n_gpus = _visible_gpu_count()
+    if not n_gpus or n_gpus < 1:
+        log.info("combined_e2e: skipped (no visible GPU)")
+        return None
+    pairs = _collect_combined_e2e_pairs(results)
+    if not pairs:
+        log.info("combined_e2e: skipped (no kernel produced a patch)")
+        return None
+
+    try:
+        tool = _kernel_agent_tool_path("apply_and_bench.py")
+    except RuntimeError as exc:
+        return {"status": "error", "error": f"apply_and_bench tool not found: {exc}"}
+    spec = importlib.util.spec_from_file_location("apply_and_bench", str(tool))
+    if spec is None or spec.loader is None:
+        return {"status": "error", "error": "could not load apply_and_bench module"}
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:  # noqa: BLE001  # module import failure is non-fatal to the batch
+        return {"status": "error", "error": f"apply_and_bench import failed: {exc}"}
+
+    cfg = _combined_e2e_serving_config(payload)
+    # Expose exactly the GPUs the serving TP needs. apply_and_bench sets
+    # HIP/ROCR_VISIBLE_DEVICES=gpu, so a hardcoded "0" with tp>1 makes the server
+    # request device ordinals that aren't visible -> "HIP error: invalid device
+    # ordinal" and a baseline_failed A/B. Map the first `tp` visible GPUs (clamped
+    # to n_gpus) so tp=8 serving gets "0,1,...,7".
+    _tp = int(cfg.get("tp") or 1)
+    _tp = max(1, min(_tp, int(n_gpus)))
+    _gpu_ids = ",".join(str(i) for i in range(_tp))
+    kwargs: dict[str, Any] = dict(
+        pairs=pairs,
+        backup_root=str(session_dir / "e2e_backups"),
+        model=model,
+        out_dir=str(session_dir / "combined_e2e"),
+        reps=int(payload.get("e2e_reps", 5)),
+        gpu=_gpu_ids,
+        aiter_rebuild=True,
+    )
+    # Only forward knobs we actually resolved; apply_and_bench has its own defaults.
+    if cfg.get("framework"):
+        kwargs["backend"] = cfg["framework"]
+    for k in ("tp", "isl", "osl", "conc", "num_prompts"):
+        if cfg.get(k) is not None:
+            kwargs[k] = int(cfg[k])
+    kwargs["tp"] = _tp  # keep --tp consistent with the exposed GPU set
+    log.info("combined_e2e: applying %d patch(es) -> E2E A/B (model=%s, cfg=%s)",
+             len(pairs), model, cfg)
+    try:
+        return mod.apply_and_bench(**kwargs)
+    except Exception as exc:  # noqa: BLE001  # serving/bench failure must not fail the opt result
+        return {"status": "error", "error": f"apply_and_bench raised: {exc}"}
+
+
+async def _maybe_run_combined_e2e(
+    results: list[dict[str, Any]], payload: dict, session_dir: Path
+) -> dict[str, Any] | None:
+    """Async wrapper: run the blocking combined-E2E in an executor (off the loop).
+
+    Args:
+        results: The batch's per-kernel result dicts.
+        payload: The run_optimization request payload.
+        session_dir: Session directory for E2E artifacts.
+
+    Returns:
+        dict | None: As :func:`_run_combined_e2e_sync`; never raises.
+    """
+    try:
+        # get_running_loop() is the correct call inside an async def (the deprecated
+        # get_event_loop() raises "no current event loop" under Python 3.11 when no
+        # loop is set on the thread). We are always inside the orchestrator's loop here.
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _run_combined_e2e_sync, results, payload, session_dir)
+    except Exception as exc:  # noqa: BLE001  # belt-and-suspenders: never fail the batch
+        return {"status": "error", "error": f"combined_e2e wrapper failed: {exc}"}
+
+
 async def _run_optimization_batch(
     payload: dict,
     candidates: list[dict[str, Any]],
@@ -3354,6 +3927,12 @@ async def _run_optimization_batch(
     out["max_parallel"] = max_parallel
     out["parallel_backends"] = parallel_backends
     out["batch_results"] = results
+    # Autonomous combined E2E (GEAK-only, opt-in): once all kernels are optimized,
+    # apply ALL their best patches together and remeasure end-to-end throughput, with
+    # no manual step. Skipped (returns None) unless explicitly requested + servable.
+    combined = await _maybe_run_combined_e2e(results, payload, session_dir)
+    if combined is not None:
+        out["combined_e2e"] = combined
     return out
 
 
@@ -4195,6 +4774,9 @@ async def integrate_handler(
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
     extra_args = read_extra_server_args(payload).strip()
+    # VRAM barrier (flag-gated, default off): cap re-baseline util so the
+    # integrate server cannot OOM on a tighter node. No-op when off.
+    extra_args = _vram_guarded_server_args(extra_args)
 
     # Wrap BaselineExecutor in a Task/RunnerContext; extra_server_args goes via task params (forward compat).
     from ..session_paths import runs_dir
@@ -4374,10 +4956,117 @@ async def integrate_handler(
         if (gain_pct > keep_threshold_pct or stack_positive_keep)
         else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
     )
+
+    # import-grep source confirmation (flag-gated, default off). Advisory by
+    # default: annotate whether the served process actually imported/compiled the
+    # patched source. Only the *strict* sub-flag enforces it, and only on
+    # positive non-import evidence (confirmed is False) — an "unknown" (None)
+    # never penalizes a real win. Off => no annotation, decision unchanged.
+    source_import_confirmed: bool | None = None
+    source_not_imported_downgrade = False
+    if _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
+        _src = str(payload.get("target_file") or payload.get("source_file") or "")
+        source_import_confirmed = _confirm_source_imported(_src, bench_result.get("workspace"))
+        if (
+            decision == "KEEP"
+            and source_import_confirmed is False
+            and _honest_flag("HL_CONFIRM_SOURCE_IMPORTED_STRICT")
+        ):
+            decision = "NEEDS_REVIEW"
+            source_not_imported_downgrade = True
+
+    # Paired same-config A/B confirmation (Tier-2; opt-in via its OWN explicit
+    # flag, deliberately NOT enabled by the HL_HONEST_E2E umbrella — it does a
+    # second server launch and revert/re-apply, so it stays opt-in until a full
+    # workload run validates it). The gain above is vs a STORED base_tput scalar
+    # (possibly a different config/run). When a candidate clears KEEP against the
+    # stored scalar, re-confirm it against a PAIRED pristine baseline measured
+    # under the *same* config in this call: revert -> measure pristine ->
+    # recompute gain. A confirmed KEEP is re-applied; a disconfirmed KEEP drops
+    # to NEEDS_REVIEW (never a false KEEP). ANY failure restores the applied
+    # state and falls back to the stored-scalar decision, so it never breaks a run.
+    paired_ab: dict[str, Any] | None = None
+    paired_pristine_revert: HandlerResult | None = None
+    if (
+        os.environ.get("HL_INTEGRATE_PAIRED_AB", "").strip().lower() in _TRUEY
+        and decision == "KEEP"
+        and apply_result.get("status") == "ok"
+    ):
+        paired_ab = {"status": "attempted"}
+        try:
+            paired_pristine_revert = _maybe_revert_kernel_patch(apply_result)
+            paired_ws = runs_dir(session_dir, "integrate", f"{fake_task_id}-pairedbase")
+            paired_ws.mkdir(parents=True, exist_ok=True)
+            paired_task = Task(
+                task_id=f"{fake_task_id}-pairedbase",
+                kind="baseline",
+                state="running",
+                params={
+                    "config_path": payload.get("config_path"),
+                    "output_dir": str(paired_ws),
+                    "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
+                    "extra_server_args": extra_args,
+                    "extra_envs": dict(payload.get("extra_envs") or {}),
+                },
+                idempotency_key=f"{fake_task_id}-pairedbase",
+            )
+            paired_bench = await BaselineExecutor(session_dir=session_dir)(RunnerContext(task=paired_task, lease=None))
+            if is_valid_measurement(paired_bench):
+                paired_base_tput = float(paired_bench.get("output_throughput") or 0.0)
+                paired_gain = gain_pct_or_zero(new_tput, paired_base_tput)
+                paired_ab.update(
+                    {
+                        "status": "ok",
+                        "paired_base_tput": paired_base_tput,
+                        "paired_gain_pct": paired_gain,
+                        "stored_base_tput": base_tput,
+                        "stored_gain_pct": gain_pct,
+                    }
+                )
+                if paired_gain > keep_threshold_pct:
+                    # Confirmed: re-apply so the KEEP lands the patch.
+                    reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
+                    if reapply.get("status") == "ok":
+                        apply_result = reapply
+                        paired_pristine_revert = None  # patch is back; normal revert logic applies
+                        base_tput = paired_base_tput
+                        gain_pct = paired_gain
+                        paired_ab["confirmed"] = True
+                    else:
+                        paired_ab.update({"confirmed": False, "reapply_failed": True})
+                        decision = "NEEDS_REVIEW"
+                else:
+                    # Disconfirmed: leave reverted, drop to NEEDS_REVIEW.
+                    base_tput = paired_base_tput
+                    gain_pct = paired_gain
+                    decision = "NEEDS_REVIEW"
+                    paired_ab["confirmed"] = False
+            else:
+                # Paired measurement failed: restore applied state, keep stored decision.
+                reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
+                if reapply.get("status") == "ok":
+                    apply_result = reapply
+                    paired_pristine_revert = None
+                paired_ab["status"] = "measurement_failed"
+        except Exception as exc:  # noqa: BLE001 — never break integrate on paired-AB
+            log.exception("paired A/B confirmation failed; falling back to stored-scalar decision")
+            try:
+                reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
+                if reapply.get("status") == "ok":
+                    apply_result = reapply
+                    paired_pristine_revert = None
+            except Exception:  # noqa: BLE001
+                pass
+            paired_ab = {"status": "error", "error": repr(exc)}
+
     revert_result = (
         {"status": "skipped", "reason": "KEEP decision"}
         if decision == "KEEP"
-        else _maybe_revert_kernel_patch(apply_result)
+        # If the paired pass already reverted (disconfirmed KEEP), reuse that
+        # result instead of double-reverting an already-reverted manifest.
+        else (
+            paired_pristine_revert if paired_pristine_revert is not None else _maybe_revert_kernel_patch(apply_result)
+        )
     )
 
     # After KEEP, schedule rocprof so integrate returns without waiting
@@ -4410,6 +5099,14 @@ async def integrate_handler(
         result["decision_reason"] = "stack_positive_increment"
         result["stack_incremental_gain_pct"] = stack_incremental_gain_pct
         result["stack_incremental_keep_threshold_pct"] = STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
+    if source_import_confirmed is not None:
+        result["source_import_confirmed"] = source_import_confirmed
+    if source_not_imported_downgrade:
+        result["decision_reason"] = "source_not_confirmed_imported"
+    if paired_ab is not None:
+        result["paired_ab"] = paired_ab
+        if paired_ab.get("confirmed") is False:
+            result["decision_reason"] = "paired_ab_disconfirmed"
     if rocprof_after_info:
         result["rocprof_after_kernel_opt"] = rocprof_after_info
     return result
@@ -4865,6 +5562,9 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     except (TypeError, ValueError):
         micro_float = 0.0
     best_artifact_path = str(verification.get("best_artifact_path", "") or "")
+    deploy_snapshot_dir = str(verification.get("deploy_snapshot_dir", "") or "")
+    deploy_patch_path = str(verification.get("deploy_patch_path", "") or "")
+    deploy_repo_root = str(verification.get("deploy_repo_root", "") or "")
     source_file = str(
         result.get("source_file")
         or (result.get("candidate") or {}).get("source_file")
@@ -4922,7 +5622,15 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     entry["last_status"] = status
     entry["last_micro_speedup"] = micro_float
     entry["last_artifact_path"] = best_artifact_path
+    entry["last_snapshot_dir"] = deploy_snapshot_dir
+    entry["last_deploy_patch_path"] = deploy_patch_path
+    entry["last_deploy_repo_root"] = deploy_repo_root
     entry["last_source_file"] = source_file
+    # Record backend + correctness so the GEAK-only verified-NEEDS_REVIEW promotion gate
+    # (next_pending_keep_kernel_id) can identify a correctness-verified GEAK win. Additive;
+    # consumed only when HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW is enabled.
+    entry["last_backend"] = str(verification.get("best_backend") or "")
+    entry["last_correctness_passed"] = verification.get("correctness_passed")
     entry["last_ts"] = ts
     entry["history"] = history
     if test_command:
@@ -4948,6 +5656,9 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "compile_passed": verification.get("compile_passed"),
             "correctness_passed": verification.get("correctness_passed"),
             "best_artifact_path": best_artifact_path,
+            "deploy_snapshot_dir": deploy_snapshot_dir,
+            "deploy_patch_path": deploy_patch_path,
+            "deploy_repo_root": deploy_repo_root,
             "source_file": source_file,
             "ts": ts,
         }
@@ -4965,10 +5676,38 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     # REVERT still retires immediately below, but infra failures get a retry.
     max_failures = resolve_kernel_opt_max_failures()
 
+    # High-impact infra-retry (flag-gated, default off). An infra non-finish
+    # (timeout / preprocess / agent-crash; no verdict) means the attempt "didn't
+    # finish", NOT that the kernel "can't be improved" — evidence: the same FP8
+    # blockscale GEMM that infra-failed-then-was-retired on one workload won 2.9x
+    # on another once GEAK completed. So a high-GPU%-share kernel should not be
+    # permanently retired after only ``max_failures`` non-finishes the way a
+    # REVERT is; give it more attempts to COMPLETE (pairs with GEAK adaptive
+    # budget). REVERT / partial retirement is unchanged; off => byte-identical.
+    infra_failure_cap = max_failures
+    if _honest_flag("HL_INFRA_RETRY_HIGH_IMPACT"):
+        try:
+            _impact_pct = float(_kernel_trace_impact_pct(state, kernel_id) or 0.0)
+        except Exception:  # noqa: BLE001 - impact is best-effort
+            _impact_pct = 0.0
+        # Stamp impact so the dispatch-side cap (_kernel_dispatch_attempt_cap)
+        # widens consistently from the same record.
+        entry["last_gpu_pct"] = _impact_pct
+        try:
+            _min_gpu = float(os.environ.get("HL_INFRA_RETRY_MIN_GPU_PCT", "5.0") or 5.0)
+        except ValueError:
+            _min_gpu = 5.0
+        try:
+            _infra_max = int(os.environ.get("HL_INFRA_RETRY_MAX", "4") or 4)
+        except ValueError:
+            _infra_max = 4
+        if _impact_pct >= _min_gpu:
+            infra_failure_cap = max(max_failures, _infra_max)
+
     should_reject = (
         decision == "REVERT"
         or int(entry.get("partial_count", 0)) >= max_partial
-        or int(entry.get("failure_count", 0)) >= max_failures
+        or int(entry.get("failure_count", 0)) >= infra_failure_cap
     )
     if should_reject:
         if kernel_id not in state.rejected_kernel_ids:
@@ -5166,7 +5905,27 @@ def pending_keep_kernel_ids(state) -> list[str]:
     for kid, entry in (state.kernel_opt_attempts or {}).items():
         if not isinstance(entry, dict):
             continue
-        if str(entry.get("last_decision", "")).upper() != "KEEP":
+        _dec = str(entry.get("last_decision", "")).upper()
+        # GEAK-only verified-NEEDS_REVIEW promotion (flag-gated, default off): admit a
+        # correctness-verified, high-micro GEAK NEEDS_REVIEW into the integrate queue so its
+        # win is actually E2E-measured. Off => only KEEP queues (today's behavior, byte-identical).
+        _promote = _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
+        try:
+            _thr = float(os.environ.get("HL_VERIFIED_MICRO_PROMOTE_THRESHOLD", "1.10") or 1.10)
+        except ValueError:
+            _thr = 1.10
+        try:
+            _m = float(entry.get("last_micro_speedup") or 0.0)
+        except (TypeError, ValueError):
+            _m = 0.0
+        _geak_nr = (
+            _promote
+            and _dec == "NEEDS_REVIEW"
+            and str(entry.get("last_backend") or "").lower() == "geak"
+            and entry.get("last_correctness_passed") is True
+            and _m >= _thr
+        )
+        if _dec != "KEEP" and not _geak_nr:
             continue
         if kid in integrated_ids or kid in attempted_ids or kid in rejected:
             continue

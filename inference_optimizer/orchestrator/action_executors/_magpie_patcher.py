@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -50,7 +51,7 @@ log = logging.getLogger(__name__)
 _ATOMIC_REASON_APPLIED = "applied"  # legacy block rewritten this run
 _ATOMIC_REASON_ALREADY_PATCHED = "already_patched"  # sentinel already present
 _ATOMIC_REASON_UPSTREAM_ATOMIC = "upstream_atomic"  # Magpie already atomic
-_ATOMIC_REASON_MISSING = "missing"  # MAGPIE_DIR unset / file absent
+_ATOMIC_REASON_MISSING = "missing"  # MAGPIE_PATH unset / file absent
 _ATOMIC_REASON_UNRECOGNIZED_SHAPE = "unrecognized_shape"  # genuine: unpatched
 _ATOMIC_REASON_IO_ERROR = "io_error"  # read/write failed mid-patch
 
@@ -121,6 +122,22 @@ _REMOTE_DIRECT_PATCHED_BLOCK = (
     "    fi\n"
 )
 
+# --- Redundant eval-concurrency flag strip -------------------------------
+# Magpie's generic ``{framework}_{gpu}.sh`` scripts call
+# ``run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC``.
+# But InferenceX's ``run_lm_eval`` (benchmark_lib.sh) does NOT accept
+# ``--concurrent-requests`` — its arg parser rejects any unknown flag with
+# ``Unknown parameter`` and ``return 1``. It already derives concurrency from
+# ``EVAL_CONCURRENT_REQUESTS``/``CONC`` env. So the flag is redundant AND fatal:
+# ``run_eval`` exits non-zero, the ``|| exit $?`` aborts the whole benchmark
+# script, and an otherwise-healthy throughput baseline is thrown away. Strip the
+# flag at install time (concurrency still flows via the ``CONC`` env). Matches
+# ``$CONC`` / ``"$CONC"`` / ``${CONC}`` and the surrounding space. Idempotent:
+# the absence of ``--concurrent-requests`` IS the patched state, so a re-run /
+# already-fixed upstream script is a no-op.
+_EVAL_CONCURRENCY_FLAG_MARKER = "--concurrent-requests"
+_EVAL_CONCURRENCY_FLAG_RE = re.compile(r"\s*--concurrent-requests\s+(?:\"\$CONC\"|\$\{CONC\}|\$CONC)")
+
 # Name of the upstream atomic-copy helper; its presence signals Magpie already
 # copies benchmark scripts atomically.
 _UPSTREAM_ATOMIC_HELPER = "_copy_benchmark_script_atomic"
@@ -145,7 +162,7 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
     patching).
 
     Args:
-        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
             falsy.
 
     Returns:
@@ -156,7 +173,7 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
     if magpie_dir:
         root = Path(magpie_dir)
     else:
-        env = (os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or "").strip()
+        env = (os.environ.get("MAGPIE_PATH") or "").strip()
         if env:
             root = Path(env)
     if root is None:
@@ -171,7 +188,7 @@ def _resolve_sglang_mi300x_script_path(
     """Resolve Magpie's generic SGLang MI300X benchmark script when present.
 
     Args:
-        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
             falsy.
 
     Returns:
@@ -182,13 +199,117 @@ def _resolve_sglang_mi300x_script_path(
     if magpie_dir:
         root = Path(magpie_dir)
     else:
-        env = os.environ.get("MAGPIE_DIR", "").strip()
+        env = os.environ.get("MAGPIE_PATH", "").strip()
         if env:
             root = Path(env)
     if root is None:
         return None
     candidate = root / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh"
     return candidate if candidate.is_file() else None
+
+
+def _resolve_benchmark_scripts_dir(
+    magpie_dir: Path | str | None,
+) -> Path | None:
+    """Resolve Magpie's ``scripts/benchmark`` directory when present.
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
+            falsy.
+
+    Returns:
+        The resolved ``scripts/benchmark`` directory, or ``None`` when
+        unconfigured or absent on disk.
+    """
+    root: Path | None = None
+    if magpie_dir:
+        root = Path(magpie_dir)
+    else:
+        env = os.environ.get("MAGPIE_PATH", "").strip()
+        if env:
+            root = Path(env)
+    if root is None:
+        return None
+    candidate = root / "Magpie" / "scripts" / "benchmark"
+    return candidate if candidate.is_dir() else None
+
+
+def _strip_eval_concurrency_flag(text: str) -> str | None:
+    """Return ``text`` with the redundant ``--concurrent-requests <CONC>`` flag
+    removed, or ``None`` when nothing needed changing.
+
+    Args:
+        text: The benchmark-script source text to scrub.
+
+    Returns:
+        The scrubbed text when at least one occurrence was removed, else
+        ``None`` (no marker present / already patched).
+    """
+    if _EVAL_CONCURRENCY_FLAG_MARKER not in text:
+        return None
+    patched = _EVAL_CONCURRENCY_FLAG_RE.sub("", text)
+    if patched == text:
+        # Marker present but in an unexpected shape (e.g. a literal value we
+        # don't recognise). Leave it untouched and let the caller report a
+        # genuine miss rather than silently no-op.
+        return None
+    return patched
+
+
+def _apply_eval_flag_patch_atomic(scripts_dir: Path) -> bool:
+    """Strip the redundant ``--concurrent-requests`` eval flag from every
+    generic Magpie benchmark script under ``scripts_dir``.
+
+    Idempotent: scripts without the marker (already patched / upstream fixed)
+    are skipped. A script whose marker is present but in an unrecognised shape
+    (regex miss) makes this return ``False`` so the caller can warn that the
+    fatal-eval flag may still be live.
+
+    Args:
+        scripts_dir: Magpie ``scripts/benchmark`` directory to scan.
+
+    Returns:
+        ``True`` when every script is either clean or successfully scrubbed,
+        ``False`` when a marker survived (unrecognised shape) or an IO step
+        failed.
+    """
+    ok = True
+    for script in sorted(scripts_dir.glob("*.sh")):
+        try:
+            original = script.read_text(encoding="utf-8")
+        except OSError as e:
+            log.warning("_magpie_patcher: cannot read %s: %s", script, e)
+            ok = False
+            continue
+        if _EVAL_CONCURRENCY_FLAG_MARKER not in original:
+            continue
+        patched = _strip_eval_concurrency_flag(original)
+        if patched is None:
+            log.warning(
+                "_magpie_patcher: %s still contains '%s' in an unrecognised "
+                "shape; the redundant eval flag could not be stripped and "
+                "RUN_EVAL=true baselines may abort on 'Unknown parameter'. "
+                "Review the script's run_eval line.",
+                script,
+                _EVAL_CONCURRENCY_FLAG_MARKER,
+            )
+            ok = False
+            continue
+        if not atomic_write_text(
+            script,
+            patched,
+            tmp_prefix=f".{script.name}.hyperloom_",
+            log_prefix="_magpie_patcher",
+        ):
+            ok = False
+            continue
+        log.info(
+            "_magpie_patcher: stripped redundant '%s' eval flag from %s "
+            "(concurrency still flows via the CONC env)",
+            _EVAL_CONCURRENCY_FLAG_MARKER,
+            script,
+        )
+    return ok
 
 
 @contextmanager
@@ -478,16 +599,22 @@ class MagpiePatchStatus:
     # an EXPECTED no-op (upstream-atomic / already-patched / missing tree) apart
     # from a GENUINE failure where bugs.md §C #1 is unmitigated.
     atomic_reason: str = _ATOMIC_REASON_MISSING
+    # Whether the redundant ``--concurrent-requests`` eval flag was stripped
+    # from every generic benchmark script (or none needed it). ``False`` means
+    # a script kept the flag in an unrecognised shape, so RUN_EVAL=true
+    # baselines may still abort on InferenceX's ``Unknown parameter``. Defaults
+    # True (not-applicable / no scripts dir) so it never falsely fails install.
+    eval_flag_ok: bool = True
 
     @property
     def ok(self) -> bool:
         """Whether the patch result is fully successful.
 
         Returns:
-            ``True`` only when both the atomic write and remote-trust
-            checks succeeded.
+            ``True`` only when the atomic write, remote-trust, and
+            eval-flag-strip checks all succeeded.
         """
-        return self.atomic_ok and self.remote_trust_ok
+        return self.atomic_ok and self.remote_trust_ok and self.eval_flag_ok
 
     @property
     def atomic_genuine_failure(self) -> bool:
@@ -512,7 +639,7 @@ def magpie_scripts_patch_status(
     ``ensure_magpie_atomic_scripts_patch`` wrapper remains for compatibility.
 
     Args:
-        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
             falsy.
 
     Returns:
@@ -522,17 +649,19 @@ def magpie_scripts_patch_status(
     src = _resolve_benchmarker_path(magpie_dir)
     if src is None:
         log.info(
-            "_magpie_patcher: MAGPIE_DIR unset or benchmarker.py missing — skipping patch (fine for tests / dry-runs)",
+            "_magpie_patcher: MAGPIE_PATH unset or benchmarker.py missing — skipping patch (fine for tests / dry-runs)",
         )
         # remote_trust_ok=True here means "not applicable / not checked"
         # (no Magpie tree to inspect), NOT "trust patch verified". It is set
         # True only so this no-op path does not emit a spurious remote-trust
         # warning. atomic_ok=False + reason=missing keeps the legacy fail-soft
         # (install.sh warns, does not abort) but is NOT a genuine failure.
+        # eval_flag_ok=True is likewise "not applicable" (no scripts to scrub).
         return MagpiePatchStatus(
             atomic_ok=False,
             remote_trust_ok=True,
             atomic_reason=_ATOMIC_REASON_MISSING,
+            eval_flag_ok=True,
         )
 
     with _file_lock(_LOCK_PATH):
@@ -554,10 +683,18 @@ def magpie_scripts_patch_status(
                 "MAGPIE_TRUST_REMOTE_CODE=1 will not reach remote "
                 "benchmark_serving.py for custom-code models",
             )
+        scripts_dir = _resolve_benchmark_scripts_dir(magpie_dir)
+        if scripts_dir is None:
+            # No scripts/benchmark dir (reduced test layout / dry run): nothing
+            # to scrub, so the redundant-flag patch is not-applicable.
+            eval_flag_ok = True
+        else:
+            eval_flag_ok = _apply_eval_flag_patch_atomic(scripts_dir)
         return MagpiePatchStatus(
             atomic_ok=atomic_ok,
             remote_trust_ok=remote_trust_ok,
             atomic_reason=atomic_reason,
+            eval_flag_ok=eval_flag_ok,
         )
 
 
@@ -580,7 +717,7 @@ def ensure_magpie_atomic_scripts_patch(
     and check ``remote_trust_ok`` / ``ok`` (install.sh does this).
 
     Args:
-        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
             falsy.
 
     Returns:

@@ -1,6 +1,6 @@
 # Magpie profile config for vLLM.
 # Same shape as baseline_vllm.yaml but with torch_profiler ON so the run
-# produces a torch_trace dir downstream consumers (Kernel agent /
+# produces a torch_trace dir downstream consumers (Kernel-agent /
 # TraceLens) can read. `benchmark.model` and `benchmark.runner_type` are
 # OVERRIDDEN at runtime — see baseline_sglang.yaml header for the full
 # rationale.
@@ -63,7 +63,7 @@ benchmark:
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
-  timeout_seconds: 2400              # 40 min hard cap (profile adds ~30-90s vs plain baseline)
+  timeout_seconds: 7200              # 2 h hard cap; profiling a large MoE (e.g. DeepSeek-R1 671B) adds far more than the ~30-90s seen on small models; stays < the WARM 7800s outer wall cap
 
   profiler:
     torch_profiler:

@@ -432,7 +432,7 @@ def _focus_research_scout_specialist(
         "3. **Cross-framework / NVIDIA research** — survey PRs, blogs, and",
         "   MLPerf results across frameworks and NVIDIA/TRT-LLM via",
         "   ``WebSearch`` / ``mcp__pr_monitor__*`` for proven wins. Avoid",
-        "   re-listing PRs the FRAMEWORK_PR phase already covered (the",
+        "   re-listing PRs the FRAMEWORK_AGENT phase already covered (the",
         "   Coordinator dedups by PR id, but skip obvious repeats).",
         "",
         "**Gap computation** — where you find a reference throughput,",
@@ -458,6 +458,86 @@ def _focus_research_scout_specialist(
     ]
 
 
+def _focus_static_recon_specialist(
+    inp: SpecialistPromptInputs,
+) -> list[str]:
+    """Build the focus section for the static-recon specialist prompt.
+
+    Steers a read-only sub-agent to grep the framework source tree for
+    un-bridged capability switches (predicates that silently disable a fast
+    path for the current GPU/precision), seeded with a curated checklist, and to
+    emit structured bridge candidates rather than patches.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        Prompt lines describing the recon task, the seed checklist, and the
+        ``recon`` output block schema.
+    """
+    checklist_lines: list[str] = []
+    if inp.static_recon_checklist:
+        checklist_lines = [
+            "**Seed checklist (known un-bridged switches for this "
+            "(model, GPU, precision)) — verify each against the LIVE source; "
+            "do not assume it still applies:**",
+            inp.static_recon_checklist,
+            "",
+        ]
+    model_info_line = ""
+    if inp.model_info:
+        try:
+            attn = str(inp.model_info.get("attention_type") or "").strip()
+            is_moe = bool(inp.model_info.get("is_moe"))
+            quant = str(inp.model_info.get("quantization") or "").strip()
+            model_info_line = (
+                "Model features: "
+                f"attention={attn or '?'} moe={is_moe} quant={quant or '?'}."
+            )
+        except Exception:  # noqa: BLE001 — advisory rendering only
+            model_info_line = ""
+    return [
+        "You are the **static-recon specialist** — a read-only reconnaissance",
+        "agent. You do NOT benchmark, apply patches, build a worktree, or",
+        "decide KEEP/REVERT. Your single deliverable is a prioritised list of",
+        "**bridge candidates**: fast paths that *should* be enabled for this",
+        f"GPU ({inp.gpu_type or '?'}) + precision ({inp.precision or '?'}) but",
+        "are silently disabled in the LIVE framework source.",
+        "",
+        *( [model_info_line, ""] if model_info_line else [] ),
+        *checklist_lines,
+        "**How to hunt (read the LIVE source under the source roots / hint",
+        "directories in Section 7):**",
+        "1. grep for capability predicates — ``*_supported()`` /",
+        "   ``*_enabled()`` / ``is_*()`` guards and feature gates in the",
+        "   quantization, linear, fused_moe and attention dispatch paths.",
+        "2. For each, determine whether it returns False (or routes to a slow",
+        "   fallback) on THIS hardware/precision when a faster path exists",
+        "   (e.g. a CUDA-only ``cutlass_*_supported()`` that is always False on",
+        "   ROCm and so disqualifies an AITER kernel).",
+        "3. Trace the consequence: which GEMM / kernel / backend the code then",
+        "   falls back to, and why that is slower.",
+        "4. Confirm the bridge is plausible (the faster path exists and only",
+        "   the guard / scale-granularity / activation-config blocks it).",
+        "",
+        "**Output protocol** — emit ONE ``specialist_done`` carrying a",
+        "``recon`` block with ``bridge_candidates``: a list of",
+        "``{id, predicate_file, predicate_name, why_disabled_here, consequence,",
+        "bridge_sketch, domain_hint, confidence}``. ``id`` is a short slug",
+        "(reuse the seed checklist id when verifying one), ``predicate_file`` is",
+        "the source path you read, ``why_disabled_here`` explains the False",
+        "branch on this hardware, ``bridge_sketch`` is the proposed fix (a",
+        "sketch — you do NOT write the patch), and ``domain_hint`` is the",
+        "EXPLORE specialist that should author it (``freeform`` keeps the whole",
+        "mandate). A candidate without ``predicate_file`` + ``why_disabled_here``",
+        "is dropped.",
+        "",
+        "**Iron rule** — read-only. Never write a patch, never launch a",
+        "benchmark, never recommend a phase transition. Turn verified source",
+        "findings into structured bridge candidates and stop.",
+    ]
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "kernel_switch_specialist": _focus_kernel_switch_specialist,
@@ -466,6 +546,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "system_specialist": _focus_system_specialist,
     "pr_intel_specialist": _focus_pr_intel_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
+    "static_recon_specialist": _focus_static_recon_specialist,
 }
 
 
@@ -527,9 +608,21 @@ class SpecialistPromptInputs:
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
     # T0 lessons — positive priors from prior KEEPs; rendered as § 5b.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
+    # KG graph-recommended knobs (cross-recipe IMPROVES candidates reached via
+    # the architecture family graph); advisory candidates rendered as § 5d.
+    # Each entry: ``{knob, expected_gain, confidence, source}``.
+    kg_recommended_knobs: list[dict[str, Any]] = field(default_factory=list)
+    # KG graph-guided config knobs (journal-derived ``KNOB_IMPROVES`` for the
+    # current arch+precision); rendered as § 5e. Unlike ``kg_recommended_knobs``
+    # these carry runnable ``args``/``envs``. Each entry:
+    # ``{knob, args, envs, name, expected_gain, confidence, source}``.
+    kg_guided_knobs: list[dict[str, Any]] = field(default_factory=list)
     # PR feed
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
+
+    # Generic sub_kind passthrough so ``_focus_*`` helpers can specialise.
+    sub_kind: str = ""
 
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
@@ -537,6 +630,17 @@ class SpecialistPromptInputs:
     # Local source navigation hint
     framework_source_roots: tuple[str, ...] = ()
     source_hint_directories: tuple[str, ...] = ()
+
+    # Structured model architecture features (attention_type / is_moe /
+    # num_experts / quantization, etc.) mirrored from SharedState.model_info.
+    # Richer + machine-parseable companion to ``arch_notes`` (the compact
+    # string); consumed by the static-recon focus block to gate checklist
+    # entries. Empty dict => not warmed.
+    model_info: dict[str, Any] = field(default_factory=dict)
+    # Pre-rendered static-recon checklist block (Markdown) seeded by
+    # ``static_recon_checklist`` for the current (model, gpu, precision). Only
+    # populated for the static_recon_specialist dispatch; empty otherwise.
+    static_recon_checklist: str = ""
 
     # Workspace path (for transcript / heartbeat instructions)
     workspace_path: str = ""
@@ -1027,7 +1131,6 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# Section 4a — Roofline / TraceLens evidence
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -1333,6 +1436,92 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
         version_note = _format_version_note(inp, attrs)
         rows.append(f"- **{description}**{meta}{version_note}")
     if len(rows) == 2:  # only the header + blank line, all pitfalls filtered out
+        rows.append(_NONE_PLACEHOLDER)
+    return rows
+
+
+# Section 5d — KG graph-recommended knobs (advisory positive candidates)
+def _section_kg_recommended(inp: SpecialistPromptInputs) -> list[str]:
+    """Render cross-recipe ``IMPROVES`` candidates from the knowledge graph.
+
+    These are advisory priors reached via the architecture family graph
+    (``USES_ARCH`` / ``VARIANT_OF``) — knobs that improved a related
+    architecture on the same hw+fw. The specialist prioritises but never
+    blindly trusts them; the Critic still gates the final answer.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``kg_recommended_knobs``).
+
+    Returns:
+        The rendered graph-recommended-knobs section lines.
+    """
+    rows = ["## 5d. GRAPH-RECOMMENDED KNOBS (cross-recipe IMPROVES — advisory, prioritise but verify)", ""]
+    if not inp.kg_recommended_knobs:
+        rows.append(_NONE_PLACEHOLDER)
+        return rows
+    for entry in inp.kg_recommended_knobs:
+        if not isinstance(entry, dict):
+            continue
+        knob = str(entry.get("knob") or "").strip()
+        if not knob:
+            continue
+        meta_bits: list[str] = []
+        gain = entry.get("expected_gain")
+        if isinstance(gain, (int, float)) and gain:
+            meta_bits.append(f"gain={float(gain):+.1f}%")
+        conf = entry.get("confidence")
+        if isinstance(conf, (int, float)) and conf > 0:
+            meta_bits.append(f"conf={float(conf):.2f}")
+        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+        rows.append(f"- **{knob}**{meta}")
+    if len(rows) == 2:  # header + blank only; all entries filtered out
+        rows.append(_NONE_PLACEHOLDER)
+    return rows
+
+
+# Section 5e — KG graph-guided config knobs (runnable args/envs)
+def _section_kg_guided_knobs(inp: SpecialistPromptInputs) -> list[str]:
+    """Render journal-derived ``KNOB_IMPROVES`` candidates with runnable config.
+
+    These come from prior sessions' ``optimization_journal`` config knobs that
+    kept a positive gain on the same architecture+precision. Each carries the
+    exact ``args``/``envs`` to apply, so the specialist can try them directly.
+    Advisory: the specialist verifies and the Critic still gates the answer.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``kg_guided_knobs``).
+
+    Returns:
+        The rendered graph-guided-knobs section lines.
+    """
+    rows = ["## 5e. GRAPH-GUIDED CONFIG KNOBS (journal KNOB_IMPROVES — runnable, prioritise but verify)", ""]
+    if not inp.kg_guided_knobs:
+        rows.append(_NONE_PLACEHOLDER)
+        return rows
+    for entry in inp.kg_guided_knobs:
+        if not isinstance(entry, dict):
+            continue
+        args = str(entry.get("args") or "").strip()
+        envs = entry.get("envs") if isinstance(entry.get("envs"), dict) else {}
+        if not args and not envs:
+            continue
+        name = str(entry.get("name") or "").strip()
+        meta_bits: list[str] = []
+        gain = entry.get("expected_gain")
+        if isinstance(gain, (int, float)) and gain:
+            meta_bits.append(f"gain={float(gain):+.1f}%")
+        ev = entry.get("evidence_count")
+        if isinstance(ev, (int, float)) and ev:
+            meta_bits.append(f"kept={int(ev)}x")
+        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+        label = name or args
+        rows.append(f"- **{label}**{meta}")
+        if args:
+            rows.append(f"  - args: `{args}`")
+        if envs:
+            env_str = " ".join(f"{k}={v}" for k, v in envs.items())
+            rows.append(f"  - envs: `{env_str}`")
+    if len(rows) == 2:  # header + blank only; all entries filtered out
         rows.append(_NONE_PLACEHOLDER)
     return rows
 
@@ -1655,6 +1844,8 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_recipe(inp),  # 4: § 5
         _section_lessons(inp),  # 5: § 5b
         _section_pitfalls(inp),  # 6: § 5c
+        _section_kg_recommended(inp),  # 6a: § 5d (KG graph-recommended knobs)
+        _section_kg_guided_knobs(inp),  # 6b: § 5e (KG graph-guided runnable knobs)
         _section_pr_feed(inp),  # 7: § 6
         _section_source_hint(inp),  # 8: § 7
     ]

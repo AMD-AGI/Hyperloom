@@ -46,11 +46,15 @@ LESSONS_FILE: str = "lessons.jsonl"
 OUTCOME_INTEGRATED: str = "integrated"
 OUTCOME_REVERTED_SMOKE_FAIL: str = "reverted_smoke_fail"
 OUTCOME_REJECTED_APPLY_FAIL: str = "rejected_apply_fail"
+# Step 3: candidate skipped because the semantic audit found it already present
+# in the live tree (cross-session dedup so later runs don't re-audit it).
+OUTCOME_ALREADY_PRESENT: str = "already_present"
 ALLOWED_OUTCOMES: frozenset[str] = frozenset(
     {
         OUTCOME_INTEGRATED,
         OUTCOME_REVERTED_SMOKE_FAIL,
         OUTCOME_REJECTED_APPLY_FAIL,
+        OUTCOME_ALREADY_PRESENT,
     }
 )
 
@@ -111,7 +115,7 @@ def _append_record_sync(record: dict) -> Path:
     return path
 
 
-async def write_framework_pr_record(
+async def write_framework_record(
     *,
     pr_url: str,
     pr_sha: str,
@@ -131,7 +135,7 @@ async def write_framework_pr_record(
     * ``session_id`` — orchestrator session id.
     """
     if outcome not in ALLOWED_OUTCOMES:
-        raise ValueError(f"write_framework_pr_record: outcome={outcome!r} must be one of {sorted(ALLOWED_OUTCOMES)!r}")
+        raise ValueError(f"write_framework_record: outcome={outcome!r} must be one of {sorted(ALLOWED_OUTCOMES)!r}")
     record = _record(
         pr_url=pr_url,
         pr_sha=pr_sha,
@@ -145,10 +149,11 @@ async def write_framework_pr_record(
 
 __all__ = [
     "ALLOWED_OUTCOMES",
+    "OUTCOME_ALREADY_PRESENT",
     "KB_ROOT",
     "LESSONS_FILE",
     "OUTCOME_INTEGRATED",
     "OUTCOME_REJECTED_APPLY_FAIL",
     "OUTCOME_REVERTED_SMOKE_FAIL",
-    "write_framework_pr_record",
+    "write_framework_record",
 ]

@@ -8,7 +8,9 @@ from pathlib import Path
 
 from inference_optimizer.breakdown.reporters import render_session_report
 from inference_optimizer.breakdown.reporters._renderers.decision_journal import render as render_dj
+from inference_optimizer.breakdown.reporters._renderers.invocations import render_geak, render_oob
 from inference_optimizer.breakdown.reporters._renderers.kernel_profiling import render as render_kp
+from inference_optimizer.breakdown.reporters._renderers.phase_timeline import render as render_phase_timeline
 
 
 def _base_breakdown(**overrides):
@@ -149,6 +151,71 @@ def test_kernel_profiling_standard_hides_cli_log_tail(tmp_path: Path) -> None:
     )
     sec = render_kp(bd)
     assert "secret-tail-line" not in sec.markdown_block
+
+
+def test_invocation_renderer_normalizes_and_caps_attempt_rows() -> None:
+    attempts = [{"ts": f"t{i}", "kernel_id": f"k{i}", "decision": "REVERT"} for i in range(26)]
+    attempts.extend(
+        [
+            "legacy-kernel-id",
+            {
+                "ts": "done",
+                "kernel_name": "named-kernel",
+                "decision": "KEEP",
+                "micro_speedup": 1.25,
+                "workspace_path": "/tmp/ws",
+                "error": "x" * 100,
+            },
+            {"kernel_id": "failed-kernel", "decision": "FAILED"},
+            {"kernel_id": "error-kernel", "decision": "ERROR"},
+        ]
+    )
+
+    sec = render_geak({"invocations": {"geak": attempts}})
+
+    assert not sec.skipped
+    assert any("30 invocation(s), 1 KEEP, 2 FAILED" in fact for fact in sec.key_facts)
+    assert sec.decisions[0].kind == "kept"
+    assert "_Showing last 25 of 30 attempts._" in sec.markdown_block
+    assert "legacy-kernel-id" in sec.markdown_block
+    assert "named-kernel" in sec.markdown_block
+    assert "/tmp/ws" in sec.markdown_block
+    assert "x" * 80 in sec.markdown_block
+    assert "x" * 81 not in sec.markdown_block
+
+
+def test_oob_invocation_renderer_uses_legacy_top_level_key() -> None:
+    sec = render_oob({"oob_invocations": [{"kernel_id": "k-oob", "decision": "ERROR"}]})
+
+    assert not sec.skipped
+    assert sec.section_id == "oob_invocations"
+    assert sec.decisions[0].kind == "attempted"
+    assert "0 KEEP / 1 FAILED across 1 attempts" in sec.decisions[0].rationale
+    assert "k-oob" in sec.markdown_block
+
+
+def test_phase_timeline_renderer_renders_capped_histogram() -> None:
+    events = ["bootstrap"]
+    events.extend(
+        {
+            "ts": f"t{i}",
+            "action": f"action-{i}",
+            "decision": "KEEP" if i % 2 == 0 else "REVERT",
+            "task_id": f"task-{i}",
+            "error_class": "RuntimeError" if i == 30 else "",
+        }
+        for i in range(31)
+    )
+
+    sec = render_phase_timeline({"phase_timeline": events})
+
+    assert not sec.skipped
+    assert any("Recorded 32 phase event(s); newest = `action-30` (KEEP)." in fact for fact in sec.key_facts)
+    assert any("KEEP=16" in fact and "REVERT=15" in fact and "(none)=1" in fact for fact in sec.key_facts)
+    assert "_Showing last 30 of 32 events._" in sec.markdown_block
+    assert "action-0" not in sec.markdown_block
+    assert "action-30" in sec.markdown_block
+    assert "RuntimeError" in sec.markdown_block
 
 
 def test_compose_includes_v1_1_sections_in_report() -> None:

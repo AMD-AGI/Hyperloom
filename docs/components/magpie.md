@@ -5,7 +5,7 @@ correctness and performance on AMD (HIP) and NVIDIA (CUDA) GPUs. It exposes
 three evaluation modes — Analyze, Compare, and Benchmark — plus framework-level
 (vLLM / SGLang / Atom) benchmarking with built-in TraceLens trace analysis.
 
-Within Hyperloom, Magpie is the **benchmark engine**. The kernel agent and the
+Within Hyperloom, Magpie is the **benchmark engine**. The Kernel-agent and the
 optimization loop drive Magpie to spin up a serving framework, run the workload,
 collect traces, and emit a structured `benchmark_report.json`; those traces are
 the input that [TraceLens](tracelens.md) then analyzes. Magpie relies on
@@ -52,7 +52,7 @@ pip install -e .
 ```{note}
 Hyperloom installs Magpie for you during install/preflight rather than via
 `local_setup.sh`. `inference_optimizer/scripts/install.sh` clones it (pinned to
-`MAGPIE_REF`, default under `$MAGPIE_DIR`) and editable-installs it, while also
+`MAGPIE_REF`, default under `$MAGPIE_PATH`) and editable-installs it, while also
 applying the Hyperloom atomic benchmark-script patch when needed.
 `inference_optimizer/cli.py` can also clone + `pip install -e` Magpie on
 preflight if it is not importable; that fallback clone uses the repository

@@ -96,11 +96,11 @@ def _build_cmd(
     """
     cmd = [_find_geak_bin(), "-t", str(prompt_file), "--yolo", "--output", str(output_dir), "--gpu-ids", gpu_ids]
     cmd.extend(["--config", str(_resolve_geak_config())])
-    # GEAK's --target defaults to "wall" and that default has precedence over
-    # $GEAK_SCORE_TARGET (mini.py: ``scoring_target or env or "wall"``), so the env
-    # alone never switches scoring. Pass it explicitly when set so kernel_ms scoring
-    # is deterministic across the Ray boundary.
-    _score_target = os.environ.get("GEAK_SCORE_TARGET", "").strip().lower()
+    # Default to kernel-time scoring and forward it as an explicit --target so it is
+    # deterministic across the Ray boundary (current GEAK defaults to kernel via the
+    # env, but passing it explicitly also pins older GEAK builds whose --target
+    # defaulted to "wall" and silently overrode the env). Valid GEAK values: wall|kernel.
+    _score_target = os.environ.get("GEAK_SCORE_TARGET", "kernel").strip().lower()
     if _score_target in {"wall", "kernel"}:
         cmd.extend(["--target", _score_target])
     if kernel_path:
@@ -211,6 +211,11 @@ def run_via_ray(
             _cdir = _os.path.join(output_dir_str, ".cache", _sub)
             _os.makedirs(_cdir, exist_ok=True)
             _os.environ[_var] = _cdir
+        # GEAK's profiler-mcp pass is advisory only (a roofline hint) and is
+        # hang-prone on busy hosts, where it can eat the whole preprocess budget
+        # before any optimization round runs. Default it off for HL-launched GEAK;
+        # an operator can opt back in with GEAK_SKIP_PROFILE=0.
+        _os.environ.setdefault("GEAK_SKIP_PROFILE", "1")
         geak_bin = _shutil.which("geak") or _shutil.which("mini") or "geak"
         cmd = [geak_bin, "-t", prompt_file_str, "--yolo", "--output", output_dir_str, "--gpu-ids", gpu_ids]
         geak_config = _os.environ.get("GEAK_CONFIG", "").strip()
@@ -251,9 +256,9 @@ def run_via_ray(
                 "cmd": cmd,
             }
         cmd.extend(["--config", str(geak_config_path)])
-        # GEAK's --target default ("wall") outranks $GEAK_SCORE_TARGET; pass it
-        # explicitly so kernel_ms scoring survives the Ray boundary (see _build_cmd).
-        _score_target = _os.environ.get("GEAK_SCORE_TARGET", "").strip().lower()
+        # Default to kernel-time scoring; pass it explicitly so kernel_ms scoring
+        # survives the Ray boundary regardless of GEAK build (see _build_cmd).
+        _score_target = _os.environ.get("GEAK_SCORE_TARGET", "kernel").strip().lower()
         if _score_target in {"wall", "kernel"}:
             cmd.extend(["--target", _score_target])
         if kernel_path:
@@ -331,6 +336,9 @@ def run_via_cli(
     """
     # Child env with ROCR→logical GPU mapping; avoids leaking GPU vars to later steps.
     child_env = os.environ.copy()
+    # Advisory, hang-prone profiler-mcp pass off by default for HL-launched GEAK
+    # (operator can opt back in with GEAK_SKIP_PROFILE=0). See run_via_ray path.
+    child_env.setdefault("GEAK_SKIP_PROFILE", "1")
     rocr_raw = child_env.get("ROCR_VISIBLE_DEVICES", "")
     if rocr_raw:
         n_visible = len([x for x in rocr_raw.split(",") if x.strip()])

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Opt-in live tests for Kernel Agent tools.
+"""Opt-in live tests for Kernel-agent tools.
 
 Run with:
   KERNEL_AGENT_RUN_LIVE=1 \

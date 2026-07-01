@@ -3,7 +3,7 @@
 """Acceptance tests for the long-run optimization refinements.
 
 Covers the decaying acceptance curve, decaying-gain convergence, the absolute
-per-phase wall-clock cap (incl. the unbounded 14-day ceiling), the FRAMEWORK_PR
+per-phase wall-clock cap (incl. the unbounded 14-day ceiling), the FRAMEWORK
 reloop target, and the trailing-window crash-rate emergency stop.
 
 All deterministic + offline.
@@ -122,19 +122,21 @@ def test_saturation_convergence_env_can_disable(monkeypatch):
 # Absolute per-phase cap + 14-day ceiling for unbounded runs
 # ==========================================================================
 def test_phase_cap_binds_on_session_term_for_short_runs():
-    # 2h bounded run: proportional term (2h*0.45) < 24h*0.45 cap → proportional.
+    # 2h bounded run: proportional term < 24h cap → proportional.
+    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
     st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=120)
     cap = ps.phase_cap_seconds(st)
-    assert cap == pytest.approx(120 * 60 * 0.45)
+    assert cap == pytest.approx(120 * 60 * pct)
 
 
 def test_phase_cap_binds_on_24h_reference_for_unbounded_runs():
     import math
 
+    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
     st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=0)
     cap = ps.phase_cap_seconds(st)
-    # 24h * 0.45 (ceil to minutes) is far below the 14-day proportional term.
-    assert cap == pytest.approx(math.ceil(24 * 60 * 0.45) * 60)
+    # 24h * pct (ceil to minutes) is far below the 14-day proportional term.
+    assert cap == pytest.approx(math.ceil(24 * 60 * pct) * 60)
 
 
 def test_effective_max_minutes_unbounded_is_14_days():

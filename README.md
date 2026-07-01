@@ -78,8 +78,8 @@ Example images (Harbor refs for the SaFE Authoring Pod path; drop the `harbor.co
 
 - SGLang MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
 - SGLang MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
-- vLLM MI300X: `docker.io/vllm/vllm-openai-rocm:v0.21.0`
-- vLLM MI355X: `docker.io/vllm/vllm-openai-rocm:v0.21.0`
+- vLLM MI300X: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
+- vLLM MI355X: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
 
 > The SGLang `-profilerfix` images patch `libamdhip64`/`libroctracer` so rocprofiler captures kernels launched under HipGraphLaunch (issue #352). Use the stock `lmsysorg/sglang:v0.5.11-rocm720-*` images once that fix lands upstream in ROCm.
 
@@ -333,7 +333,7 @@ or open an issue if your organization needs a quote.
 
 For higher limits, dedicated capacity, or air-gapped deployment, self-host
 Hyperloom in your own cluster following [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
-Self-hosted Hyperloom is Apache-2.0 licensed (see
+Self-hosted Hyperloom is MIT licensed (see
 [Licensing](#licensing)); there is no per-seat or per-session fee.
 
 ---
@@ -365,12 +365,12 @@ Hyperloom/
 │   │   └── system_prompts/               # Orchestration prompt construction
 │   ├── scripts/                          # Install scripts, baseline/profile configs
 │   └── tests/                            # Inference optimizer unit and regression tests
-├── kernel-agent/                         # Kernel Agent toolkit (TraceLens/GEAK/OOB tools)
-│   ├── SKILL.md                          # Kernel Agent operation spec
+├── kernel-agent/                         # Kernel-agent toolkit (TraceLens/GEAK/OOB tools)
+│   ├── SKILL.md                          # Kernel-agent operation spec
 │   ├── tools/                            # TraceLens analysis, kernel optimization, patch apply
 │   │   └── backends/                     # GEAK/OOB submission (Ray-scheduled)
 │   ├── scripts/                          # Runtime setup scripts: install.sh, etc.
-│   └── tests/                            # Kernel Agent tool tests
+│   └── tests/                            # Kernel-agent tool tests
 ├── critic-agent/                         # Critic-agent subprocess runtime (proposal review)
 ├── robustness-agent/                     # Robustness-agent subprocess runtime (health/RCA)
 ├── ci/                                   # CI orchestration (PR submitter, AB test)
@@ -379,7 +379,7 @@ Hyperloom/
 ├── .env.template                         # Environment variables
 ├── CHANGELOG.md                          # Per-release notes
 ├── CONTRIBUTING.md                       # Contribution guidelines
-├── LICENSE                               # Apache-2.0
+├── LICENSE                               # MIT
 ├── SECURITY.md                           # Vulnerability disclosure policy
 └── README.md
 ```
@@ -388,13 +388,19 @@ Hyperloom/
 
 ## Licensing
 
-Hyperloom is released under the **Apache License 2.0**. The full
-license text is in [`LICENSE`](LICENSE); the same license is asserted
-in [`pyproject.toml`](pyproject.toml) for PyPI / sdist consumers.
+Hyperloom is released under the **MIT License**. The full license text
+is in [`LICENSE`](LICENSE).
 
 You may use Hyperloom commercially, modify it, and distribute it under
-the terms of Apache-2.0. Patent grants and NOTICE handling follow the
-standard Apache-2.0 rules.
+the terms of the MIT license, provided the copyright notice and the
+permission notice are retained in all copies or substantial portions of
+the software.
+
+Third-party tools and agents (Cursor, Visual Studio, and Claude Code)
+that Hyperloom invokes are governed by their own separate license terms
+and are NOT covered by the MIT license above — see the "Third-Party
+Tools and Agents" section in [`LICENSE`](LICENSE). You are responsible
+for reviewing and complying with each tool's individual license.
 
 For security-relevant issues, see [`SECURITY.md`](SECURITY.md). For
 contribution conventions, see [`CONTRIBUTING.md`](CONTRIBUTING.md).

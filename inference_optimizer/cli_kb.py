@@ -51,9 +51,9 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
 
     Each recipe-snapshot remote read (``get_recipe`` / ``search``) is appended
     to ``recipe_snapshot/.audit.jsonl`` so the trace records whether the
-    snapshot KB (gbrain / cortex) was consulted, the request, and how it
-    resolved. Best-effort and never raises into the KB op. No-op without a
-    session dir or when the dispatcher predates ``audit_hook``.
+    gbrain snapshot KB was consulted, the request, and how it resolved.
+    Best-effort and never raises into the KB op. No-op without a session dir
+    or when the dispatcher predates ``audit_hook``.
 
     Args:
         kb (Any): The RecipeKB dispatcher (or a mirroring wrapper around it).
@@ -96,17 +96,20 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
 def _build_recipe_kb_dispatcher(
     args: argparse.Namespace,
 ) -> Any:
-    """Build the local-write / remote-read RecipeKB dispatcher. Local store
-    always wired; remote half enabled only when not --degraded-kb and a URL
-    resolves (foreground 2s + 1-retry; no hard-coded default endpoint).
+    """Build the local-write / gbrain-read RecipeKB dispatcher. Local store is
+    always wired; the read-side remote is the gbrain page store (``GBRAIN_*``),
+    enabled unless ``--degraded-kb`` is set or gbrain is unconfigured.
+
+    Writes stay local-only; gbrain serves the read side (and an optional
+    in-process mirror of each local write via ``RECIPE_KB_MIRROR_MODE=inline``).
 
     Args:
-        args: Parsed CLI arguments (``degraded_kb``, ``cortex_kb_url``, etc.).
+        args: Parsed CLI arguments (``degraded_kb`` etc.).
 
     Returns:
         Any: A configured ``RecipeKB`` dispatcher (optionally gbrain-mirroring).
     """
-    from .recipe_kb import LocalRecipeStore, RecipeKB, RemoteRecipeClient
+    from .recipe_kb import LocalRecipeStore, RecipeKB
 
     local_root = _resolve_local_kb_root(args)
     local_store = LocalRecipeStore(root=local_root)
@@ -114,92 +117,29 @@ def _build_recipe_kb_dispatcher(
     if bool(getattr(args, "degraded_kb", False)):
         return RecipeKB(local=local_store, remote=None)  # opt-out: no network
 
-    # Read-remote mode. Default is ``auto`` (unset): dual gbrain+cortex reads
-    # whenever BOTH are configured, otherwise fall through to the single
-    # configured remote (or local-only) — i.e. dual-read is the default without
-    # destabilising the single-remote contract when only one KB is wired.
-    # Explicit overrides: ``both`` always composites the configured source(s);
-    # ``gbrain`` reads gbrain only; any other explicit value (e.g. ``cortex``)
-    # / empty-string forces the single cortex remote path below.
-    kb_remote_mode = (os.environ.get("RECIPE_KB_REMOTE", "") or "").strip().lower() or "auto"
+    # Read-side remote is gbrain only. Writes stay local-only; gbrain is
+    # consulted for READS and (optionally) mirrored to on local write.
+    from .recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
 
-    # Aggregated read remote. Fans reads across gbrain (GBRAIN_*) and the cortex
-    # kb-service (--cortex-kb-url / $CORTEX_KB_URL), then dedups/field-merges
-    # same-cid rows. Writes remain local-only; mirroring is the gbrain-only path.
-    if kb_remote_mode in ("both", "auto"):
-        from .recipe_kb.composite_remote import CompositeRemoteRecipeClient
-        from .recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
+    gbrain_remote = build_gbrain_remote_from_env()
+    if gbrain_remote is None or not gbrain_remote.enabled:
+        return RecipeKB(local=local_store, remote=None)  # gbrain unconfigured: local-only
 
-        sources: list[Any] = []
-        names: list[str] = []
-        gbrain_remote = build_gbrain_remote_from_env()
-        if gbrain_remote is not None and gbrain_remote.enabled:
-            sources.append(gbrain_remote)
-            names.append("gbrain")
-        cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
-        if not cortex_url:
-            cortex_url = (os.environ.get("CORTEX_KB_URL", "") or "").strip()
-        if cortex_url:
-            sources.append(RemoteRecipeClient(kb_url=cortex_url, foreground=True, enabled=True))
-            names.append("cortex")
-        if kb_remote_mode == "both":
-            # Explicit: always composite around whatever is configured (even a
-            # single source); local-only when nothing is wired.
-            if sources:
-                return RecipeKB(
-                    local=local_store,
-                    remote=CompositeRemoteRecipeClient(sources, names=names),
-                )
-            return RecipeKB(local=local_store, remote=None)
-        # auto: only composite when ≥2 remotes are reachable; a single remote
-        # keeps its bare client (preserves the single-remote read contract),
-        # and zero remotes falls through to the local-only path below.
-        if len(sources) >= 2:
-            return RecipeKB(
-                local=local_store,
-                remote=CompositeRemoteRecipeClient(sources, names=names),
-            )
-        if len(sources) == 1:
-            return RecipeKB(local=local_store, remote=sources[0])
-        return RecipeKB(local=local_store, remote=None)
+    kb = RecipeKB(local=local_store, remote=gbrain_remote)
+    # RECIPE_KB_MIRROR_MODE (default ``external``): external => an out-of-band
+    # CronJob ingests the local store into gbrain (gbrain off the write path);
+    # ``inline`` => best-effort mirror each local write into gbrain in-process
+    # (local write stays authoritative).
+    mirror_mode = os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
+    if mirror_mode == "inline":
+        from .recipe_kb.gbrain_ingest import (
+            GbrainMirroringRecipeKB,
+            build_mirror_mcp_from_env,
+        )
 
-    # gbrain read-side remote (opt-in: RECIPE_KB_REMOTE=gbrain + GBRAIN_*).
-    # Writes stay local-only; gbrain serves the read side only.
-    if os.environ.get("RECIPE_KB_REMOTE", "").strip().lower() == "gbrain":
-        from .recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
-
-        gbrain_remote = build_gbrain_remote_from_env()
-        if gbrain_remote is not None and gbrain_remote.enabled:
-            kb = RecipeKB(local=local_store, remote=gbrain_remote)
-            # RECIPE_KB_MIRROR_MODE (default ``external``): external => an
-            # out-of-band CronJob ingests the local store into gbrain (gbrain
-            # off the write path); ``inline`` => best-effort mirror each local
-            # write into gbrain in-process (local write stays authoritative).
-            mirror_mode = os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
-            if mirror_mode == "inline":
-                from .recipe_kb.gbrain_ingest import (
-                    GbrainMirroringRecipeKB,
-                    build_mirror_mcp_from_env,
-                )
-
-                mirror_mcp = build_mirror_mcp_from_env()
-                return GbrainMirroringRecipeKB(kb, mirror_mcp) if mirror_mcp is not None else kb
-            return kb  # external (default): no in-process mirror
-        # Selected but not configured: stay local-only.
-        return RecipeKB(local=local_store, remote=None)
-
-    cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
-    if not cortex_url:
-        cortex_url = (os.environ.get("CORTEX_KB_URL", "") or "").strip()
-    if not cortex_url:
-        return RecipeKB(local=local_store, remote=None)  # no URL: local-only
-
-    remote = RemoteRecipeClient(
-        kb_url=cortex_url,
-        foreground=True,
-        enabled=True,
-    )
-    return RecipeKB(local=local_store, remote=remote)
+        mirror_mcp = build_mirror_mcp_from_env()
+        return GbrainMirroringRecipeKB(kb, mirror_mcp) if mirror_mcp is not None else kb
+    return kb  # external (default): no in-process mirror
 
 
 def _bootstrap_cortex_kb(

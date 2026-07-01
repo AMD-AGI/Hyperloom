@@ -388,7 +388,7 @@ def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
     # Both deps pinned to a full 40-char SHA, operator-overridable; immune to HEAD drift (bugs.md §C #1).
     text = IO_INSTALL.read_text(encoding="utf-8")
     assert '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"' in text
-    assert 'MAGPIE_DIR="${MAGPIE_DIR:-${_open_source_root}/Magpie}"' in text
+    assert 'MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"' in text
     assert 'INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX}"' in text
     assert "export HYPERLOOM_OPEN_SOURCE_ROOT" not in text
     assert re.search(r'^MAGPIE_REF="\$\{MAGPIE_REF:-[0-9a-fA-F]{40}\}"', text, re.M), (
@@ -405,7 +405,7 @@ def test_io_install_uses_sha_aware_fetch_checkout_for_both_deps() -> None:
     assert "^[0-9a-fA-F]{7,40}$" in text, "missing raw-SHA detection regex"
     assert 'fetch --depth 1 origin "$ref"' in text, "missing shallow SHA fetch"
     assert "checkout -q FETCH_HEAD" in text, "missing detached SHA checkout"
-    assert 'git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_DIR" "$MAGPIE_REF" "Magpie"' in text, (
+    assert 'git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_PATH" "$MAGPIE_REF" "Magpie"' in text, (
         "ensure_magpie must clone via the pinned fetch-checkout helper"
     )
     assert 'git_fetch_pinned "$INFERENCEX_REPO" "$INFERENCEX_PATH" "$INFERENCEX_REF" "InferenceX"' in text, (

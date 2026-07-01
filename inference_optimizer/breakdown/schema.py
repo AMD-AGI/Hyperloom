@@ -89,13 +89,13 @@ class WorkloadObjective(TypedDict, total=False):
 
 
 class Workload(TypedDict, total=False):
-    """Model, framework, and serving configuration under optimization.
+    """Model, framework name, and serving configuration under optimization.
 
-    Describes the inference workload (model + framework + parallelism + shape)
+    Describes the inference workload (model + framework name + parallelism + shape)
     plus the objective that defines success for the run.
 
     Attributes:
-        framework (str): Serving framework (``sglang`` / ``vllm`` / ``atom``).
+        framework_name (str): Serving framework name (``sglang`` / ``vllm`` / ``atom``).
         framework_version (str): Version string of the framework.
         model_name (str): Human-readable model name.
         model_path (str): Filesystem or registry path to the model weights.
@@ -110,7 +110,7 @@ class Workload(TypedDict, total=False):
         objective (WorkloadObjective): The optimization goal for the run.
     """
 
-    framework: str  # sglang / vllm / atom
+    framework_name: str  # sglang / vllm / atom
     framework_version: str
     model_name: str
     model_path: str
@@ -323,7 +323,7 @@ class PhaseEvent(TypedDict, total=False):
             ``params`` / ``sweep`` / ``validate_stack`` / ``kernel_opt`` /
             ``trace_analyze`` / ``integrate``).
         task_id (str): Orchestrator task id.
-        kernel_id (str | None): Kernel id for kernel-owned actions, else None.
+        kernel_id (str | None): Kernel id for kernel_agent-owned actions, else None.
         status (str): Outcome (``succeeded`` / ``failed``).
         decision (str): Decision label (``promoted`` / ``discarded`` /
             ``salvaged`` / ``no_promote`` / ``error`` / ``KEEP`` / ``PARTIAL`` /
@@ -346,7 +346,7 @@ class PhaseEvent(TypedDict, total=False):
         str  # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / trace_analyze / integrate
     )
     task_id: str
-    kernel_id: str | None  # only for kernel-owned actions
+    kernel_id: str | None  # only for kernel_agent-owned actions
     status: str  # succeeded / failed
     decision: str  # promoted / discarded / salvaged / no_promote / error / KEEP / PARTIAL / REVERT
     key_metric: float | None
@@ -953,13 +953,13 @@ class Sweep(TypedDict, total=False):
 class Perfskills(TypedDict, total=False):
     """PerfSkills/GEAK-e2e KERNEL-phase section (``KERNEL_OPT_BACKEND_ORDER=perfskills``).
 
-    Emitted only when the KERNEL phase was delegated to the PerfSkills e2e
+    Emitted only when the KERNEL_AGENT phase was delegated to the PerfSkills e2e
     optimizer; ``{}`` (section omitted) on native sessions. Mirrors the
     normalized ``result.json`` recorded in ``state.perfskills_result`` plus the
     budget-cap audit. See ``collectors.collect_perfskills``.
 
     Attributes:
-        engaged (bool): True when PerfSkills owned the KERNEL phase.
+        engaged (bool): True when PerfSkills owned the KERNEL_AGENT phase.
         status (str): ``ok`` / ``no_gain`` / ``error`` / ``timeout`` /
             ``skipped`` / ``missing`` / ``unknown``.
         error_class (str | None): Normalized failure class (None on success),
@@ -1183,7 +1183,7 @@ class SourceBreakdown(TypedDict, total=False):
         explore_pct_of_total (float): Gain share from the primary explore family.
         replay_warm_recipe_pct_of_total (float): Gain share from warm-recipe
             replay (cortex best_config replay); 0.0 when none was adopted.
-        framework_pr_pct_of_total (float): Gain share from FRAMEWORK_PR bake-ins.
+        framework_pct_of_total (float): Gain share from FRAMEWORK bake-ins.
         gemm_tuning_pct_of_total (float): Gain share from the FP8 GEMM tuner
             (0.0 on non-FP8 workloads or when the tuner produced no KEEP).
         backends_pct_of_total (float): Gain share from backend exploration.
@@ -1200,9 +1200,9 @@ class SourceBreakdown(TypedDict, total=False):
     # bucketed separately so its gain reconciles against validated_total_pct
     # instead of vanishing into the non-emitted ``other`` family.
     replay_warm_recipe_pct_of_total: float
-    # FRAMEWORK_PR phase contribution (upstream-PR bake-ins), bucketed
+    # FRAMEWORK_AGENT phase contribution (upstream-PR bake-ins), bucketed
     # separately so per-source totals reconcile against validated_total_pct.
-    framework_pr_pct_of_total: float
+    framework_pct_of_total: float
     # GEMM_TUNING (deterministic FP8 GEMM tuner) gain, split from the
     # kernel family; always emitted (0.0 when it skipped / no KEEP).
     gemm_tuning_pct_of_total: float
@@ -1236,8 +1236,8 @@ class PhaseBreakdownKernel(TypedDict, total=False):
     by_kernel_id: dict[str, float]
 
 
-class PhaseBreakdownFrameworkPr(TypedDict, total=False):
-    """FRAMEWORK_PR phase gain split by adopted PR; ``by_pr`` keys on ``variant_name`` (``"?"`` when empty)."""
+class PhaseBreakdownFramework(TypedDict, total=False):
+    """FRAMEWORK_AGENT phase gain split by adopted PR; ``by_pr`` keys on ``variant_name`` (``"?"`` when empty)."""
 
     total_gain_pct: float
     by_pr: dict[str, float]
@@ -1258,9 +1258,9 @@ class PhaseBreakdown(TypedDict, total=False):
 
     Attributes:
         prelude (PhaseBreakdownExplore): PRELUDE phase gain (always 0 by definition).
-        framework_pr (PhaseBreakdownFrameworkPr): FRAMEWORK_PR phase gain.
+        framework (PhaseBreakdownFramework): FRAMEWORK_AGENT phase gain.
         explore (PhaseBreakdownExplore): EXPLORE phase gain by domain.
-        kernel (PhaseBreakdownKernel): KERNEL phase gain by ``kernel_id``.
+        kernel (PhaseBreakdownKernel): KERNEL_AGENT phase gain by ``kernel_id``.
         gemm_tuning (PhaseBreakdownGemmTuning): KERNEL-entry GEMM-tuning gain,
             bucketed separately from source-level kernel rewrites.
         sweep (PhaseBreakdownExplore): SWEEP phase gain (usually 0; measurement).
@@ -1269,7 +1269,7 @@ class PhaseBreakdown(TypedDict, total=False):
     """
 
     prelude: PhaseBreakdownExplore  # always 0 by definition
-    framework_pr: PhaseBreakdownFrameworkPr  # PRELUDE → FRAMEWORK_PR → EXPLORE
+    framework: PhaseBreakdownFramework  # PRELUDE → FRAMEWORK_AGENT → EXPLORE
     explore: PhaseBreakdownExplore
     kernel: PhaseBreakdownKernel
     # GEMM_TUNING bucketed separately from source-level GEAK/OOB rewrite gain.
@@ -1307,7 +1307,7 @@ class PhaseSegment(TypedDict, total=False):
     the entry evidence and the events that fell within the segment window.
 
     Attributes:
-        phase (str): Phase name (``PRELUDE`` / ``FRAMEWORK_PR`` / ``EXPLORE`` /
+        phase (str): Phase name (``PRELUDE`` / ``FRAMEWORK`` / ``EXPLORE`` /
             ``KERNEL`` / ``SWEEP`` / ``CLOSE``).
         from_phase (str): Previous phase (empty for the first segment).
         entered_ts (str): ISO UTC timestamp of entry.
@@ -1319,7 +1319,7 @@ class PhaseSegment(TypedDict, total=False):
         elapsed_seconds (float | None): Segment duration in seconds, or None.
     """
 
-    phase: str  # PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE
+    phase: str  # PRELUDE / FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP / CLOSE
     from_phase: str  # previous phase (empty for first segment)
     entered_ts: str  # iso UTC of entry
     entered_unix: float | None
@@ -1928,7 +1928,7 @@ class TokenUsage(TypedDict, total=False):
         by_component (dict[str, TokenUsageBucket]): Per-agent breakdown
             (orchestration / kernel / critic / specialist / proposal_scorer / ...).
         by_phase (dict[str, TokenUsageBucket]): Per-phase breakdown
-            (PRELUDE / FRAMEWORK_PR / EXPLORE / SWEEP / ...).
+            (PRELUDE / FRAMEWORK_AGENT / EXPLORE / SWEEP / ...).
         attribution (TokenUsageAttribution): Decision-attributed vs unattributed.
         timeline (list[TokenUsageTimelineEntry]): ``action_timeline`` rows with
             their token spend joined on ``task_id``.

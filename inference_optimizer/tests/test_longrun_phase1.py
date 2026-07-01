@@ -160,7 +160,8 @@ def test_per_cycle_budget_shrinks_phase_window():
     )
     whole_run = SharedState(**common, cycle_minutes=0.0)
     per_cycle = SharedState(**common, cycle_minutes=360.0)  # 6h cycle
-    budget = dict(ps.DEFAULT_PHASE_BUDGET_PCT)  # EXPLORE = 0.45
+    budget = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
+    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
 
     rem_run = ps.phase_budget_remaining_seconds(
         whole_run,
@@ -172,9 +173,9 @@ def test_per_cycle_budget_shrinks_phase_window():
         budget_pct=budget,
         now_unix=now,
     )
-    # whole-run: 96h*0.45; per-cycle: 6h*0.45 → much smaller.
-    assert rem_run == pytest.approx(96 * 3600 * 0.45)
-    assert rem_cycle == pytest.approx(6 * 3600 * 0.45)
+    # whole-run: 96h*pct; per-cycle: 6h*pct → much smaller.
+    assert rem_run == pytest.approx(96 * 3600 * pct)
+    assert rem_cycle == pytest.approx(6 * 3600 * pct)
     assert rem_cycle < rem_run
 
 
@@ -216,7 +217,7 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -240,10 +241,10 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
 
     await c._advance_phase_if_needed()
 
-    # Reloop targets the highest-leverage layer (FRAMEWORK_PR enabled by default).
+    # Reloop targets the highest-leverage layer (FRAMEWORK enabled by default).
     # The phase is re-opened on reloop (phase_done reset to False), so the entry
     # pump runs a fresh discover; with no new PRs it fast-exits next tick.
-    assert st.phase == ps.PHASE_FRAMEWORK_PR
+    assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1
     # Per-cycle sweep markers cleared so the new cycle's SWEEP runs fresh.
     assert st.last_sweep == {}
@@ -254,7 +255,7 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
     # The loopback transition row is stamped with the new cycle number
     # (the entry pump may append later non-transition rows).
     loopback_row = next(r for r in reversed(st.phase_history) if r.get("to_phase"))
-    assert loopback_row["to_phase"] == "FRAMEWORK_PR"
+    assert loopback_row["to_phase"] == "FRAMEWORK_AGENT"
     assert loopback_row["cycle"] == 1
 
 

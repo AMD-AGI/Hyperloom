@@ -47,7 +47,7 @@ def _args(**overrides):
         explore_variant_timeout_sec="bad",
         explore_variant_timeout_safety_margin="bad",
         enable_roofline=False,
-        no_framework=True,
+        no_framework_agent=True,
         no_explore=True,
         research_scout=False,
         research_scout_interval=0,
@@ -115,13 +115,97 @@ def test_seed_shared_state_populates_perfskills_and_cli_overrides(
     assert state.explore_overtime_kill_ratio == 2.0
     assert state.explore_variant_timeout_sec_override == 0
     assert state.explore_variant_timeout_safety_margin == 0.5
-    assert state.framework_phase_enabled is False
+    assert state.framework_agent_phase_enabled is False
     assert state.explore_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
     assert state.conc_sweep_total_budget_sec == 120
     assert state.conc_sweep_variant_timeout_sec == 30
     assert state.reference_server_args == "--block-size 64"
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
+
+
+def test_seed_shared_state_preserves_quantized_model_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Regression: after the quantize prelude pins ``args.model_display_name``,
+    ``SharedState.model_name`` must use it rather than the collapsed
+    ``<...>/quantized`` path basename."""
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
+    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
+    monkeypatch.setattr(
+        cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""),
+    )
+
+    from inference_optimizer.orchestrator import policy
+
+    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
+
+    args = _args(
+        model="/root/quantization/google-gemma-4-26B-A4B-it/quantized",
+        model_display_name="google-gemma-4-26B-A4B-it-quantized",
+    )
+    state = cb._seed_shared_state(tmp_path, args, session_id="s-q")
+
+    assert state.model_name == "google-gemma-4-26B-A4B-it-quantized"
+    assert state.model_name != "quantized"
+
+
+def test_seed_shared_state_falls_back_to_path_basename(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Without a pinned display name (the common, non-quantized path) the model
+    name is still the plain model-path basename."""
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
+    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
+    monkeypatch.setattr(
+        cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""),
+    )
+
+    from inference_optimizer.orchestrator import policy
+
+    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
+
+    state = cb._seed_shared_state(
+        tmp_path, _args(model="/models/Qwen3-32B"), session_id="s-plain",
+    )
+    assert state.model_name == "Qwen3-32B"
+
+
+def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
+    """Regression: ``manifest.json`` ``model_name`` must honor the pinned
+    display name from the quantize prelude, not the collapsed path basename."""
+    from inference_optimizer import manifest as m
+
+    args = _args(
+        model="/root/quantization/google-gemma-4-26B-A4B-it/quantized",
+        model_display_name="google-gemma-4-26B-A4B-it-quantized",
+    )
+    built = m.build_manifest(tmp_path, args=args, session_id="s-q")
+    assert built["model_name"] == "google-gemma-4-26B-A4B-it-quantized"
+    assert built["model_name"] != "quantized"
+    # the real path is still recorded faithfully
+    assert built["model_path"].endswith("/quantized")
+
+
+def test_resolve_model_display_name_helper() -> None:
+    """Unit cover for the identity resolver: pinned override wins, else basename."""
+    plain = SimpleNamespace(model="/models/Qwen3-32B")
+    assert cb.resolve_model_display_name(plain) == "Qwen3-32B"
+
+    pinned = SimpleNamespace(
+        model="/root/quantization/x/quantized",
+        model_display_name="x-quantized",
+    )
+    assert cb.resolve_model_display_name(pinned) == "x-quantized"
+
+    empty_override = SimpleNamespace(model="/models/Foo", model_display_name="")
+    assert cb.resolve_model_display_name(empty_override) == "Foo"
 
 
 def test_target_summary_and_conc_sweep_parser(caplog) -> None:
@@ -193,11 +277,11 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     monkeypatch,
     capsys,
 ) -> None:
-    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "kernel": ""})
+    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "kernel_agent": ""})
     assert (tmp_path / "agents" / "orch" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "hello"
-    assert (tmp_path / "agents" / "kernel" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "kernel_agent" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "(empty)"
 
@@ -313,11 +397,11 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     monkeypatch,
     capsys,
 ) -> None:
-    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "kernel": ""})
+    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "kernel_agent": ""})
     assert (tmp_path / "agents" / "orch" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "hello"
-    assert (tmp_path / "agents" / "kernel" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "kernel_agent" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "(empty)"
 

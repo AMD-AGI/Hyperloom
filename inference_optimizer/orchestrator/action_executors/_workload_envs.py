@@ -79,6 +79,33 @@ _RUN_EVAL_DISABLED_WARN_EMITTED = False
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
 
+def _model_requires_remote_code(model_path: str | None) -> bool:
+    """Return whether benchmark server/client must trust custom HF code.
+
+    Kimi K2.6 exposes its tokenizer through custom model code
+    (``model_type=kimi_k25`` / ``KimiK25ForConditionalGeneration``). The
+    benchmark client and the server must both pass trust-remote-code or baseline
+    fails before producing a usable measurement. Generalize the guard to any
+    local config that advertises a custom AutoTokenizer so future custom-code
+    tokenizers do not need per-model special cases.
+    """
+    model = str(model_path or "").strip()
+    if not model:
+        return False
+    data = _load_model_config_dict(model)
+    basename = Path(model).name.lower()
+    if data is None:
+        # Fallback for mounted model dirs whose config is temporarily
+        # unreadable. Keep this narrow so ordinary models are untouched.
+        return "kimi-k2" in basename or "kimi_k2" in basename
+    model_type = str(data.get("model_type") or "").lower()
+    archs = {str(a).lower() for a in data.get("architectures") or []}
+    if model_type == "kimi_k25" or "kimik25forconditionalgeneration" in archs:
+        return True
+    auto_map = data.get("auto_map")
+    return isinstance(auto_map, dict) and bool(auto_map.get("AutoTokenizer"))
+
+
 def inject_vllm_expert_parallel(
     server_args: str | None,
     framework: Any,
@@ -204,6 +231,8 @@ def default_baseline_config() -> Path:
         name = "baseline_atom.yaml"
     elif fw == "vllm":
         name = "baseline_vllm.yaml"
+    elif fw == "xdit":
+        name = "baseline_xdit.yaml"
     else:
         name = "baseline_sglang.yaml"
     return asset_root() / "scripts" / "configs" / name
@@ -222,6 +251,7 @@ def materialize_config_with_envs(
     reference_server_args: str = "",
     reference_envs: dict[str, Any] | None = None,
     out_name: str = "baseline_config.with_envs.yaml",
+    establish_quality_ref: bool = False,
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -250,6 +280,10 @@ def materialize_config_with_envs(
         inferencex_path: Explicit InferenceX checkout to pin into the YAML.
         benchmark_script: Pre-sanitized benchmark script name to re-pin.
         out_name: File name for the materialized YAML.
+        establish_quality_ref: When True (baseline only) the scriptable
+            image-quality reference is ESTABLISHED (written) by this run;
+            otherwise the run only COMPARES against it. See the quality-
+            reference wiring block below.
 
     Returns:
         The materialized YAML path (stable file name across calls).
@@ -291,7 +325,9 @@ def materialize_config_with_envs(
     # custom/non-prefixed scripts are not falsely rejected.
     _script = str(bench.get("benchmark_script") or "").lower()
     _fw = str(bench.get("framework") or "").lower()
-    _known_fw = ("sglang", "vllm", "atom")
+    from ... import framework_registry
+
+    _known_fw = framework_registry.names()
     if _script and _fw in _known_fw:
         _other = [k for k in _known_fw if k != _fw and _script.startswith(f"{k}_")]
         if _other:
@@ -661,6 +697,63 @@ def materialize_config_with_envs(
             envs[framework_env] = server_args
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
+    # ── Quality-reference wiring (scriptable / server-less workloads) ──────
+    # Magpie forwards ONLY ``benchmark.envs`` to the wrapper subprocess, so an
+    # operator's ``XDIT_QUALITY_REF`` set in the process env never reaches it:
+    # the shipped YAML default (``XDIT_QUALITY_REF: ""``) wins and the image-
+    # quality gate is silently SKIPPED on every variant (fail-open). Re-inject
+    # the reference here — the single choke point every scriptable bench path
+    # funnels through — so the wrapper actually compares. Authoritative over the
+    # YAML/caller because the empty YAML default is precisely the bug.
+    #   * BASELINE (establish_quality_ref=True): force COMPARE off + WRITE the
+    #     fresh reference, so a stale file from a previous session cannot make
+    #     the baseline gate against the wrong truth.
+    #   * Every other variant: COMPARE only and force the write path empty so a
+    #     degraded variant can never overwrite the baseline reference and pass
+    #     itself (benchmark.envs overrides the inherited process env).
+    #   * Profiling / roofline (is_profile): no correctness gate AND must never
+    #     write — an inherited write path would let a reduced-step profile image
+    #     clobber the baseline reference.
+    if framework_registry.is_scriptable(bench.get("framework")):
+        _qref = os.environ.get("XDIT_QUALITY_REF", "").strip()
+        if is_profile:
+            envs["XDIT_QUALITY_REF"] = ""
+            envs["XDIT_QUALITY_REF_WRITE"] = ""
+        elif _qref:
+            if establish_quality_ref:
+                envs["XDIT_QUALITY_REF"] = ""
+                envs["XDIT_QUALITY_REF_WRITE"] = (
+                    os.environ.get("XDIT_QUALITY_REF_WRITE", "").strip() or _qref
+                )
+            else:
+                envs["XDIT_QUALITY_REF"] = _qref
+                envs["XDIT_QUALITY_REF_WRITE"] = ""
+        # ── Model-arg wiring (scriptable xDiT registry resolution) ────────
+        # The xDiT runner resolves models via MODEL_REGISTRY keys (e.g.
+        # "Qwen-Image", "FLUX.1-dev"), NOT arbitrary filesystem paths. The
+        # bench wrapper's XDIT_MODEL_ARG selects whether it passes the model
+        # basename ("name", registry-correct) or the full path ("path", which
+        # fails registry lookup -> "Model <path> not found in registry"). The
+        # operator pins the correct mode in the process env; force it onto
+        # benchmark.envs here (the single scriptable choke point) so per-task
+        # agent overrides cannot silently break model resolution. Default to
+        # "name" because registry lookup keys on the basename.
+        envs["XDIT_MODEL_ARG"] = (
+            os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
+        )
+        # ── Baseline attention-backend guard (scriptable xDiT) ────────────
+        # The baseline must measure the clean, verified reference config. The
+        # orchestration agent sometimes injects experimental extra_envs while
+        # trying to escape a failure loop (e.g. XDIT_ATTENTION_BACKEND=torch,
+        # which xDiT rejects: "Invalid attention backend: torch"). For the
+        # baseline only, force the operator-pinned backend (default 'aiter',
+        # the MI300X-verified path) so an invalid agent override cannot
+        # poison the reference measurement. Explore/sweep variants keep their
+        # freedom to try alternative backends.
+        if establish_quality_ref:
+            envs["XDIT_ATTENTION_BACKEND"] = (
+                os.environ.get("XDIT_ATTENTION_BACKEND", "").strip() or "aiter"
+            )
     # ── Per-model MI300X baseline work-arounds ─────────────────────────
     # A handful of flagship models SIGABRT during CUDA-graph capture on the
     # sglang ROCm image because their DEFAULT fused kernels are buggy on
@@ -686,10 +779,10 @@ def materialize_config_with_envs(
         # gfx942 (mimo_v2.py forward -> GPU coredump -> "Rank N scheduler
         # died during initialization (exit code: -6)"). Pin the triton
         # attention backend, which sidesteps the buggy aiter fused-attention
-        # path. Pairs with the mimo-profilerfix image (the undated v0.5.11
-        # profilerfix base does not register MiMoV2ForCausalLM at all; the
-        # image picked in optimize_submit._sglang_image_for carries the
-        # dated 20260508 arch). Merge (never overwrite) and skip when the
+        # path. Pairs with the default sglang image picked in
+        # optimize_submit._sglang_image_for (v0.5.12 profilerfix now registers
+        # MiMoV2ForCausalLM, so the old v0.5.11 mimo-profilerfix override was
+        # dropped). Merge (never overwrite) and skip when the
         # caller already pinned an --attention-backend so explore variants
         # can re-test the fused path once the model is known to load.
         from ._grid_runner import merge_server_args
@@ -735,7 +828,7 @@ def materialize_config_with_envs(
     # server_args + extra_envs merges above) so any operator-pinned flag (via
     # extra_server_args, extra_envs, or the YAML) is honored and never doubled.
     # Both are no-ops for vllm/atom. This is the single choke point every
-    # benchmark path (baseline / profile / sweep / explore / framework_pr /
+    # benchmark path (baseline / profile / sweep / explore / framework /
     # conc_sweep) funnels through before the YAML is handed to Magpie, so the
     # flags reach every sglang launch.
     #
@@ -743,9 +836,11 @@ def materialize_config_with_envs(
     #    max_total_tokens off the model's max_position_embeddings; a huge
     #    native window (e.g. Mistral-Nemo's 1024000) balloons the aiter
     #    workspace_buffer past GPU memory -> HIP OOM -> baseline_failed. We cap
-    #    to ISL+OSL+headroom (floored, clamped to the native window). vllm
-    #    already passes --max-model-len $MAX_MODEL_LEN, so this only fixes the
-    #    sglang asymmetry; sglang ignores MAX_MODEL_LEN entirely.
+    #    to ISL+OSL+headroom (floored, clamped to the native window AND to the
+    #    run's MAX_MODEL_LEN). sglang sizes its window off --context-length, so
+    #    when MAX_MODEL_LEN is below the workload cap we must clamp here or the
+    #    injected --context-length would exceed the configured max-model-len
+    #    (#697: --context-length 84048 > --max-model-len 82000).
     # 2. MI300X cold-compile guard: ensure sglang's scheduler watchdog is long
     #    enough to survive the first-request aiter ``mha_batch_prefill`` JIT
     #    compile. sglang's 300s default fires SIGQUIT mid-warmup on a cold
@@ -758,6 +853,7 @@ def materialize_config_with_envs(
         bench.get("model"),
         isl_val,
         osl_val,
+        max_model_len=envs.get("MAX_MODEL_LEN") or os.environ.get("MAX_MODEL_LEN"),
     )
     resolved_server_args = inject_sglang_watchdog_timeout(
         resolved_server_args,
@@ -819,7 +915,7 @@ def materialize_config_with_envs(
     # (seen on Kimi-K2 / Qwen3.6 / any custom-code model). Mirror it onto every
     # client-trust env so custom-code models work WITHOUT per-model special-
     # casing. This is the single choke point every bench path (baseline /
-    # profile / sweep / explore / framework_pr / conc_sweep) funnels through.
+    # profile / sweep / explore / framework / conc_sweep) funnels through.
     # setdefault never overrides an operator's deliberate opt-out (e.g.
     # extra_envs={"BENCH_TRUST_REMOTE_CODE": "0"}).
     for _trust_key in (
@@ -828,6 +924,16 @@ def materialize_config_with_envs(
         "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
     ):
         envs.setdefault(_trust_key, "1")
+    if _model_requires_remote_code(model_path or bench.get("model")):
+        _remote_code_existing = str(envs.get(framework_env, "")).strip()
+        if "trust-remote-code" not in _remote_code_existing:
+            from ._grid_runner import merge_server_args
+
+            envs[framework_env] = (
+                merge_server_args(_remote_code_existing, "--trust-remote-code")
+                if _remote_code_existing
+                else "--trust-remote-code"
+            )
     # Server-side trust-remote-code for custom-code models (Qwen3.6 MoE): the
     # checkpoint ships a custom text-generation implementation behind a config
     # that advertises vision_config, so the SERVER must also load remote code

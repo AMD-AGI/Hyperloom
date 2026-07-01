@@ -161,7 +161,7 @@ schedules on the same XCD); `current_best` cannot detect this
 pollution after the fact.
 > Inside a running session, the equivalent guard is Kernel-agent IR-4
 > (`kill_server` + `check_gpu_memory` before every server (re)start —
-> see `orchestrator/system_prompts/kernel.md`). IR-1 above is the
+> see `orchestrator/system_prompts/kernel_agent.md`). IR-1 above is the
 > *outer* gate that fires before the optimizer process exists.
 
 ### IR-2 — install.sh MUST succeed before every launch
@@ -237,26 +237,31 @@ brief:
 - **IR-6 HARD force-exit**: EXPLORE exits the moment wall-clock remaining
   < `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase
   budget < `--explore-force-exit-budget-pct` (default 20%). Non-negotiable
-  — leaves buffer for KERNEL → SWEEP → CLOSE + report.
-- **Plateau advisory**: EXPLORE / KERNEL / FRAMEWORK_PR plateau signals
+  — leaves buffer for KERNEL_AGENT → SWEEP → CLOSE + report.
+- **Plateau advisory**: EXPLORE / KERNEL_AGENT / FRAMEWORK plateau signals
   are computed every tick and rendered as advisory in the orchestration
   prompt. They do NOT drive phase advance — the LLM may emit
   `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
   when it judges further effort unproductive. IR-6 force-exit and the
   per-phase budget remain the only hard advance gates.
 
-### FRAMEWORK_PR phase (Coordinator-internal)
+### FRAMEWORK_AGENT phase (Coordinator-internal)
 
-Inserted between PRELUDE and EXPLORE (`--no-framework` opts out). The
+Inserted between PRELUDE and EXPLORE (`--no-framework-agent` opts out). The
 Coordinator owns the loop end-to-end — the LLM never proposes the
-`framework_pr` action. Per tick it discovers a candidate batch via
-`fa phase-discover`, Critic-gates each candidate, then `git apply`s the
-diff against the live framework_source_roots and benchmarks it; KEEP
-commits to the live tree (next candidate stacks on top), REVERT does
-`git reset --hard`. Exits on low budget (<0.6 × max_hours), plateau
-(3 batches < 1% gain), or an empty discovery batch. Resume skips
-completed candidates by idempotency key. The launcher only chooses
-whether the phase runs (`--no-framework`).
+`framework` action. It discovers a candidate batch **once** via
+`fa phase-discover`; then each exploration processes exactly **one**
+candidate, with the agent ranking the still-available candidates and
+picking the one most likely to raise throughput (LLM ranker, with a
+deterministic discovery-order fallback). The chosen candidate is
+Critic-gated, then `git apply`d against the live framework_source_roots
+and benchmarked; KEEP commits to the live tree (next candidate stacks on
+top), REVERT does `git reset --hard`. Exits on low budget
+(<0.6 × max_hours), **plateau (3 consecutive benchmarked candidate tests
+with no KEEP** — env `INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK`),
+or an empty discovery batch. Resume skips completed candidates by
+idempotency key. The launcher only chooses whether the phase runs
+(`--no-framework-agent`).
 
 ### IR-8 — `--framework atom` is single-node only
 
@@ -277,19 +282,19 @@ unified specialist-informed `explore` flow. Do not recreate the retired
 
 Rules that look reasonable but break the current flow:
 
-- **No `framework_pr first-explore priority` rule** in
+- **No `framework first-explore priority` rule** in
   `system_prompts/orchestration.md` — conflicts with the EXPLORE
   specialist-informed flow.
-  Framework-agent runs in the dedicated **FRAMEWORK_PR** phase
-  before EXPLORE; the LLM never proposes the `framework_pr`
+  Framework-agent runs in the dedicated **FRAMEWORK** phase
+  before EXPLORE; the LLM never proposes the `framework`
   action — it is Coordinator-managed and absent from
   `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any
   LLM-side propose / delegate with `rule='phase_incompatible'`.
-  Use `--no-framework` to skip the phase entirely.
+  Use `--no-framework-agent` to skip the phase entirely.
 - **`kernel_opt` sequencing** is no longer gated by an
   explore-minimum check (the
   `explore_attempts_minimum_before_kernel_opt` rule was retired
-  in loosen_plan P1_06). KERNEL phase may propose `kernel_opt`
+  in loosen_plan P1_06). KERNEL_AGENT phase may propose `kernel_opt`
   directly; the `trace_analyze → run_optimization` data
   dependency (P2_11 handler-level check) and the reusable
   `kernel_id` validation still keep the inputs valid.
@@ -334,8 +339,8 @@ remember). Direct steps in `inference_optimizer/scripts/install.sh`:
 | Component | Provided by |
 |---|---|
 | `inference_optimizer` pkg + `claude_agent_sdk` extras (`pip install -e .[test]`) | `ensure_inference_optimizer` |
-| **Magpie** (`git clone --depth 1 $MAGPIE_REPO $MAGPIE_DIR` + `pip install -e`; default `$MAGPIE_DIR=$HYPERLOOM_RUNTIME_DIR/Magpie`) | `ensure_magpie` |
-| `INFERENCEX_PATH` resolution (scans `$MAGPIE_DIR/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
+| **Magpie** (`git clone --depth 1 $MAGPIE_REPO $MAGPIE_PATH` + `pip install -e`; default `$MAGPIE_PATH=$HYPERLOOM_RUNTIME_DIR/Magpie`) | `ensure_magpie` |
+| `INFERENCEX_PATH` resolution (scans `$MAGPIE_PATH/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
 Chained from `kernel-agent/scripts/install.sh` (single chain at the end

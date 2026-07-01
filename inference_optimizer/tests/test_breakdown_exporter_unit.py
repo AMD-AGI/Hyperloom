@@ -160,6 +160,94 @@ def test_write_minimal_final_report_with_attempts(tmp_path):
     assert "last_baseline" in text
 
 
+# ---- write_minimal_final_json (issue #464) ----
+
+
+def test_write_minimal_final_json_creates(tmp_path):
+    target = ex.write_minimal_final_json(tmp_path)
+    assert target.name == "final.json"
+    assert target.is_file()
+    data = json.loads(target.read_text(encoding="utf-8"))
+    # Crash-safe fallback marker so consumers can tell this apart from the
+    # full ReportExecutor output.
+    assert data["safety_net"] is True
+    assert data["report_complete"] is False
+    # Headline fields the downstream stats pipeline keys off must be present
+    # (even when null on an empty session).
+    for key in ("session_id", "model_name", "stop_reason", "baseline_tput"):
+        assert key in data
+
+
+def test_write_minimal_final_json_idempotent(tmp_path):
+    # A pre-existing (e.g. full ReportExecutor) final.json must never be
+    # clobbered by the minimal fallback.
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "final.json").write_text('{"full_report": true}', encoding="utf-8")
+    again = ex.write_minimal_final_json(tmp_path)
+    assert json.loads(again.read_text(encoding="utf-8")) == {"full_report": True}
+
+
+def test_write_minimal_final_json_refreshes_stale_fallback(tmp_path):
+    # A prior crash-safe fallback (safety_net=true) is stale after --resume and
+    # must be overwritten with the current state, NOT preserved.
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "final.json").write_text(
+        '{"safety_net": true, "stop_reason": "time_exhausted", "baseline_tput": 1.0}',
+        encoding="utf-8",
+    )
+
+    state = SharedState.load_or_init(tmp_path)
+    state.set_stop_reason("signal")
+    state.baseline_tput = 42.0
+    state.save(tmp_path)
+
+    again = ex.write_minimal_final_json(tmp_path)
+    data = json.loads(again.read_text(encoding="utf-8"))
+    assert data["stop_reason"] == "signal"
+    assert data["baseline_tput"] == 42.0
+
+
+def test_write_minimal_final_json_recovers_corrupt(tmp_path):
+    # A non-empty but invalid final.json (e.g. a full-report write killed
+    # mid-flush) must be backed up and replaced with a consumable fallback,
+    # not left in place as garbled JSON downstream can't read.
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "final.json").write_text('{"baseline_tput": 35.83, "trunc', encoding="utf-8")
+
+    target = ex.write_minimal_final_json(tmp_path)
+    data = json.loads(target.read_text(encoding="utf-8"))  # must now parse
+    assert data["safety_net"] is True
+    # Original (corrupt) bytes preserved for forensics.
+    corrupt = reports / "final.json.corrupt"
+    assert corrupt.is_file()
+    assert corrupt.read_text(encoding="utf-8") == '{"baseline_tput": 35.83, "trunc'
+
+
+def test_write_minimal_final_json_fields(tmp_path):
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(tmp_path)
+    state.session_id = "sess-464"
+    state.model_name = "command-a-plus"
+    state.set_stop_reason("time_exhausted")
+    state.baseline_tput = 35.83
+    state.current_best = {"action": "baseline", "tput": 35.83}
+    state.save(tmp_path)
+
+    target = ex.write_minimal_final_json(tmp_path)
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert data["session_id"] == "sess-464"
+    assert data["model_name"] == "command-a-plus"
+    assert data["stop_reason"] == "time_exhausted"
+    assert data["baseline_tput"] == 35.83
+    assert data["current_best"] == {"action": "baseline", "tput": 35.83}
+
+
 def test_patch_breakdown_langfuse_success(tmp_path):
     from inference_optimizer.orchestrator.trace.langfuse_emitter import _receipt_path
 

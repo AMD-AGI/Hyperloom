@@ -54,7 +54,7 @@ _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # Floor on the per-repo framework-PR discover timeout so a slow repo still gets a
 # usable budget even when the phase timeout is spread thin across many repos.
-_FRAMEWORK_PR_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
+_FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
 _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # Default resume-drift floor (%): a re-measured current_best below this fraction
@@ -62,6 +62,8 @@ _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 from . import phase_state as _phase_state
 from .optimization_journal import (
+    KIND_GEMM_TUNING,
+    OUTCOME_KEEP,
     Journal,
     JournalEntry,
     classify_change_kind,
@@ -118,7 +120,7 @@ from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
 log = logging.getLogger(__name__)
 
 
-# Audit-trail kinds (must match shared_state._AUDIT_ACTIONS); kernel-owned actions excluded.
+# Audit-trail kinds (must match shared_state._AUDIT_ACTIONS); kernel_agent-owned actions excluded.
 _AUDIT_ACTIONS: frozenset[str] = frozenset(
     {
         "baseline",
@@ -130,8 +132,83 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
     }
 )
 
-# Default per-repo candidate cap for ``fa phase-discover`` (FRAMEWORK_PR).
-DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES: int = 8
+# Default per-repo candidate cap for ``fa phase-discover`` (FRAMEWORK).
+DEFAULT_FRAMEWORK_MAX_CANDIDATES: int = 8
+
+
+def _framework_config_levers_from_done(
+    done_payload: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Extract a config-lever set from a FRAMEWORK specialist deliverable.
+
+    A specialist may translate an upstream PR into a CONFIG win (serving flags /
+    env vars already reachable on this build) instead of a source patch. Such a
+    deliverable is a first-class FRAMEWORK result: it flows through the
+    existing ``integrate_patch`` ``config_changes`` channel (apply + bench +
+    accuracy gate), NOT an authored_empty skip.
+
+    The levers are read from the FIRST ``proposal_set`` entry that carries
+    ``extra_args`` and/or ``extra_envs`` (the standard explore-variant schema).
+    ``extra_args`` (a server-arg string or list) and ``extra_envs`` (a mapping)
+    are flattened into a single ``{KEY: value}`` config-changes dict that
+    ``integrate_patch`` layers onto the launch env. Returns ``{}`` when no
+    config lever is present (the caller then treats the deliverable as a patch
+    or an empty outcome as before).
+
+    Args:
+        done_payload: The specialist ``specialist_done`` payload (already
+            unwrapped of any envelope).
+
+    Returns:
+        dict[str, str]: The flattened config-change mapping, or ``{}``.
+    """
+    if not isinstance(done_payload, dict):
+        return {}
+    # A patch deliverable takes precedence — it is not a config-only outcome.
+    patches = done_payload.get("patches_written") or []
+    if isinstance(patches, list) and patches:
+        return {}
+    proposals = done_payload.get("proposal_set") or []
+    if not isinstance(proposals, list):
+        return {}
+    for entry in proposals:
+        if not isinstance(entry, dict):
+            continue
+        levers: dict[str, str] = {}
+        envs = entry.get("extra_envs")
+        if isinstance(envs, dict):
+            for k, v in envs.items():
+                key = str(k).strip()
+                if key:
+                    levers[key] = str(v)
+        args = entry.get("extra_args")
+        arg_tokens: list[str] = []
+        if isinstance(args, str) and args.strip():
+            arg_tokens = args.split()
+        elif isinstance(args, (list, tuple)):
+            arg_tokens = [str(a) for a in args if str(a).strip()]
+        # Fold ``--flag value`` / ``--flag=value`` / bare ``--flag`` pairs into
+        # the config dict so integrate_patch can re-emit them as server args.
+        i = 0
+        while i < len(arg_tokens):
+            tok = arg_tokens[i].strip()
+            if not tok:
+                i += 1
+                continue
+            if "=" in tok and tok.startswith("-"):
+                k, _, v = tok.partition("=")
+                levers[k.strip()] = v.strip()
+                i += 1
+                continue
+            if tok.startswith("-") and i + 1 < len(arg_tokens) and not arg_tokens[i + 1].startswith("-"):
+                levers[tok] = str(arg_tokens[i + 1]).strip()
+                i += 2
+                continue
+            levers[tok] = ""
+            i += 1
+        if levers:
+            return levers
+    return {}
 
 # Hard-trigger thresholds: EXPLORE rounds a domain may go without a
 # specialist dispatch / a KEEP before the Coordinator force-dispatches one (a
@@ -606,6 +683,17 @@ class Coordinator:
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
+        # Minimum ticks between orchestration-memory compactions. A compaction
+        # resets the persistent conversation and forces a full SEED re-push next
+        # tick, so allowing two compactions back-to-back can wedge the run in a
+        # checkpoint-every-tick loop (the SEED's own tokens re-trip the budget).
+        # A true near-window emergency bypasses this floor (see _maybe_checkpoint).
+        try:
+            self._checkpoint_min_tick_gap: int = max(
+                1, int(os.environ.get("INFERENCE_OPTIMIZER_CHECKPOINT_MIN_TICK_GAP", "").strip() or 3)
+            )
+        except (TypeError, ValueError):
+            self._checkpoint_min_tick_gap = 3
         # Consecutive degenerate checkpoint replies (#1); resets on a good one.
         self._consec_degenerate_ckpt: int = 0
         # Disable checkpointing entirely via env.
@@ -727,8 +815,8 @@ class Coordinator:
             self._backend_error_streak_threshold = 5
 
         # Stable tick order from the live role_registry (NOT the cached
-        # module-level roles_for_run, which keeps "kernel" under --no-kernel).
-        _CANONICAL_ORDER = ("orchestration", "kernel", "critic", "robustness")
+        # module-level roles_for_run, which keeps "kernel_agent" under --no-kernel).
+        _CANONICAL_ORDER = ("orchestration", "kernel_agent", "critic", "robustness")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
         # Action registry — yaml catalogue mapping action_name → metadata;
@@ -1064,6 +1152,37 @@ class Coordinator:
         # Hard context-token guardrail: near the window we MUST compact even when
         # the LLM summary is degenerate (deterministic fallback) to avoid overflow.
         hard = self._checkpoint_policy.is_hard_compaction(tracker.context_tokens_now)
+        # Anti-thrash floor for the TOKEN-budget triggers only. A compaction
+        # RESETS the persistent conversation, so the next tick re-sends the full
+        # SEED whose own token cost re-trips the soft/hard budget — looping
+        # forever (checkpoint every tick → conversation never persists →
+        # orchestration loses cross-tick memory and re-does discovery instead of
+        # progressing). When the token budget is what's firing, require a minimum
+        # tick gap between compactions; genuine cadence triggers (every_ticks /
+        # minutes / chars / phase boundary) are unaffected. A true near-window
+        # emergency (>= 98% of the window — unreachable by a single SEED) always
+        # bypasses the floor so we never overflow the context window.
+        suppress_token_trigger = False
+        if not force and ticks_since < max(1, int(getattr(self, "_checkpoint_min_tick_gap", 2) or 2)):
+            ctx_token_hard = int(getattr(self._checkpoint_policy, "context_token_hard", 0) or 0)
+            ctx_token_soft = int(getattr(self._checkpoint_policy, "context_token_soft", 0) or 0)
+            ctx_now = int(tracker.context_tokens_now)
+            token_due = (
+                (ctx_token_hard > 0 and ctx_now >= ctx_token_hard)
+                or (ctx_token_soft > 0 and ctx_now >= ctx_token_soft)
+            )
+            emergency_ceiling = (
+                int(ctx_token_hard / max(0.01, _orch_mem.DEFAULT_CONTEXT_TOKEN_HARD_FRACTION) * 0.98)
+                if ctx_token_hard > 0
+                else 0
+            )
+            in_emergency = emergency_ceiling > 0 and ctx_now >= emergency_ceiling
+            suppress_token_trigger = token_due and not in_emergency
+            if suppress_token_trigger:
+                # Suppress the token-driven hard flag so the freshly-seeded
+                # conversation can persist; fall through to the cadence check,
+                # which will return False unless a non-token trigger fired.
+                hard = False
         # Authoritative growth signal is the context-token water level; the char
         # count is a fallback for backends that don't report token usage.
         if (
@@ -1074,7 +1193,10 @@ class Coordinator:
                 minutes_since_last=minutes_since,
                 chars_since_last=tracker.chars_since_last,
                 phase_changed=phase_changed,
-                context_tokens_now=tracker.context_tokens_now,
+                # During the anti-thrash window, zero out the token level so the
+                # soft-token trigger can't re-fire the compaction we just
+                # suppressed; cadence triggers still evaluate normally.
+                context_tokens_now=0 if suppress_token_trigger else tracker.context_tokens_now,
             )
         ):
             return False
@@ -1404,7 +1526,7 @@ class Coordinator:
                 f"{getattr(denied, 'rule', '')!s} — "
                 f"{str(getattr(denied, 'hint', denied))[:200]})"
             )
-        seq_denied = self._sequence_denial_for_action(action_name, params)
+        seq_denied = self._sequence_denial_for_action(action_name)
         if seq_denied is not None:
             await self._record_policy_denied(
                 "orchestration",
@@ -1746,7 +1868,7 @@ class Coordinator:
 
         Args:
             kind: The originating action kind (``integrate_patch`` / ``explore``
-                / ``framework_pr``).
+                / ``framework``).
             result: The recorded delegated result payload for that KEEP.
 
         Returns:
@@ -1878,7 +2000,7 @@ class Coordinator:
         single-variant bench + accuracy gate passed and the patch was committed),
         so a kept-but-absent one is a crash before the append landed → replay it
         (idempotent), unless its run workspace is gone → discard + alert. ``explore``
-        / ``framework_pr`` KEEPs are ambiguous (KEEP_UNSTABLE eviction can drop a
+        / ``framework`` KEEPs are ambiguous (KEEP_UNSTABLE eviction can drop a
         kept explore variant from the stack), so they are surfaced as a
         ``medium`` alert rather than resurrected. Whatever the stack ends up as
         is re-validated by the Gap A full-stack rebench.
@@ -1902,7 +2024,7 @@ class Coordinator:
                     continue
                 if kind == "integrate_patch":
                     variant = str(res.get("specialist_task_id") or "")
-                elif kind == "framework_pr":
+                elif kind == "framework_agent":
                     cand = res.get("candidate") or {}
                     variant = str(
                         (cand.get("candidate_id") if isinstance(cand, dict) else "")
@@ -1950,7 +2072,7 @@ class Coordinator:
                             {"kind": "orphaned_keep_replay_noop", "orphan_kind": kind, "variant": variant}
                         )
                 else:
-                    # explore / framework_pr: ambiguous vs eviction — never
+                    # explore / framework: ambiguous vs eviction — never
                     # resurrect; surface for the operator.
                     report["warnings"].append(
                         {
@@ -2115,7 +2237,7 @@ class Coordinator:
         # marathon_dispatch_id mirrors the cli path: the hyperloom-internal manifest session id.
         extra_attrs = {
             "marathon_dispatch_id": getattr(state, "session_id", "") or "",
-            "framework": getattr(state, "framework", "") or "",
+            "framework_name": getattr(state, "framework", "") or "",
             "model_class": getattr(state, "model_class", "") or "",
             "claw_session_id": getattr(state, "claw_session_id", "") or "",
             "sandbox_user_id": getattr(state, "sandbox_user_id", "") or "",
@@ -2143,14 +2265,14 @@ class Coordinator:
             )
 
     def _kernel_enabled(self) -> bool:
-        """Whether the kernel role is registered and enabled.
+        """Whether the kernel_agent role is registered and enabled.
 
         Returns:
-            ``True`` if the kernel role exists and the persisted
+            ``True`` if the kernel_agent role exists and the persisted
             ``kernel_enabled`` flag is set.
         """
-        # Mirror persisted kernel_enabled flag; --no-kernel removes the kernel role.
-        return "kernel" in self.role_registry and bool(getattr(self.shared_state, "kernel_enabled", True))
+        # Mirror persisted kernel_enabled flag; --no-kernel removes the kernel_agent role.
+        return "kernel_agent" in self.role_registry and bool(getattr(self.shared_state, "kernel_enabled", True))
 
     def _explore_enabled(self) -> bool:
         """Whether the EXPLORE phase is enabled for this run.
@@ -2176,8 +2298,8 @@ class Coordinator:
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
-            # Default True to match SharedState.framework_phase_enabled + the cli resume fallback.
-            framework_phase_enabled=bool(getattr(state, "framework_phase_enabled", True)),
+            # Default True to match SharedState.framework_agent_phase_enabled + the cli resume fallback.
+            framework_agent_phase_enabled=bool(getattr(state, "framework_agent_phase_enabled", True)),
             explore_enabled=self._explore_enabled(),
             max_hours=max_hours_arg,
         )
@@ -2449,10 +2571,10 @@ class Coordinator:
         return "\n".join(lines)
 
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
-        """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK_PR or EXPLORE).
+        """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK or EXPLORE).
 
         Increments ``macro_cycle``, persists the no-gain streak + the per-cycle
-        gain anchor, resets per-cycle counters (including re-opening FRAMEWORK_PR)
+        gain anchor, resets per-cycle counters (including re-opening FRAMEWORK)
         so the new cycle gets a fresh budget / plateau evaluation. The explore
         ledger is preserved; its already-KEEP entries stay blocked while
         sub-threshold ones may unblock as the KEEP bar decays.
@@ -2490,14 +2612,14 @@ class Coordinator:
             state.reset_explore_plateau_proxy()
         except Exception:  # noqa: BLE001 — resets are best-effort
             log.exception("Coordinator: per-cycle reset failed on reloop")
-        # Re-open FRAMEWORK_PR for the new cycle so the loopback target does not
+        # Re-open FRAMEWORK for the new cycle so the loopback target does not
         # instantly self-skip as "already done". Already-tested PRs are still
-        # skipped: framework_pr_batches (and the per-candidate progress rows that
+        # skipped: framework_agent_batches (and the per-candidate progress rows that
         # dedup within them) are preserved, so a fresh discover only surfaces PRs
         # merged upstream since, and fast-exits via
         # ``discover_returned_no_new_candidates`` when there are none.
-        state.framework_pr_phase_done = False
-        state.framework_pr_discover_failures = 0
+        state.framework_agent_phase_done = False
+        state.framework_agent_discover_failures = 0
         # Clear the per-cycle SWEEP completion markers: exit_normal_sweep keys off
         # last_sweep / last_conc_sweep status, so a stale "succeeded" from the
         # prior cycle would make the next cycle's SWEEP exit instantly without
@@ -2658,11 +2780,11 @@ class Coordinator:
             log.exception("Coordinator: phase-boundary checkpoint failed")
 
         target = (to_phase or "").upper()
-        if target == _phase_state.PHASE_FRAMEWORK_PR:
-            await self._on_enter_framework_pr(from_phase=from_phase)
+        if target == _phase_state.PHASE_FRAMEWORK_AGENT:
+            await self._on_enter_framework(from_phase=from_phase)
         elif target == _phase_state.PHASE_EXPLORE:
             await self._on_enter_explore(from_phase=from_phase)
-        elif target == _phase_state.PHASE_KERNEL:
+        elif target == _phase_state.PHASE_KERNEL_AGENT:
             await self._on_enter_kernel(from_phase=from_phase)
         elif target == _phase_state.PHASE_SWEEP:
             await self._on_enter_sweep(from_phase=from_phase)
@@ -2717,61 +2839,99 @@ class Coordinator:
                 exc,
             )
 
-    async def _on_enter_framework_pr(self, *, from_phase: str) -> None:
-        """FRAMEWORK_PR entry hook: trigger the per-batch pump once on entry (best-effort; later batches driven from the main tick).
+    async def _on_enter_framework(self, *, from_phase: str) -> None:
+        """FRAMEWORK entry hook: trigger the per-batch pump once on entry (best-effort; later batches driven from the main tick).
 
         Args:
             from_phase: The phase being left, used only for logging.
         """
         log.info(
-            "FRAMEWORK_PR entry (from=%s): pumping initial batch",
+            "FRAMEWORK entry (from=%s): pumping initial batch",
             from_phase or "<unknown>",
         )
         try:
-            await self._pump_framework_pr_phase()
+            await self._pump_framework_agent_phase()
         except Exception as exc:  # noqa: BLE001 — defensive
-            log.warning("FRAMEWORK_PR entry pump failed: %r", exc)
+            log.warning("FRAMEWORK entry pump failed: %r", exc)
 
-    async def _pump_framework_pr_phase(self) -> None:
-        """Drive the FRAMEWORK_PR phase: enqueue the next candidate. Idempotent; a discover failure flips framework_pr_phase_done so the phase advances rather than wedging."""
+    async def _pump_framework_agent_phase(self) -> None:
+        """Drive the FRAMEWORK_AGENT phase: enqueue the next candidate. Idempotent; a discover failure flips framework_agent_phase_done so the phase advances rather than wedging."""
         state = self.shared_state
-        if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_PR:
+        if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        if bool(getattr(state, "framework_pr_phase_done", False)):
+        if bool(getattr(state, "framework_agent_phase_done", False)):
             return
-        # Skip if a framework_pr task is already queued or running.
+        # Skip if a framework task is already queued or running.
         try:
             queued = await self.tasks.queued()
             running = await self.tasks.running()
         except Exception:  # noqa: BLE001 — defensive
             queued, running = [], []
         for t in (*queued, *running):
-            if getattr(t, "kind", "") == "framework_pr":
+            if getattr(t, "kind", "") == "framework_agent":
                 return
-        # Find the next un-dispatched candidate, or request a new batch if exhausted.
-        next_candidate = self._select_next_framework_pr_candidate()
+        # An authoring specialist (or its downstream integrate_patch) for the
+        # current candidate may still be running. The authoring track records
+        # its terminal progress row only when the dispatcher harvests the
+        # specialist/integrate_patch result; until then the candidate has no
+        # progress row and ``_select_next_framework_agent_candidate`` would
+        # re-select it every tick, re-auditing and re-dispatching the same
+        # candidate forever (observed: pull/1015 re-dispatched 30+ times while
+        # its specialist had already finished but the result was not yet
+        # harvested). Wait only on a live TASK (queued/running) — NOT on a
+        # pending Critic proposal: a stuck/orphaned pending proposal in the
+        # in-memory registry never represents active GPU work and must not
+        # wedge the pump (observed: pump silent for 30+ min after a revert
+        # while 0 tasks ran). The proposal-pending case is still covered by the
+        # original ``next_candidate is None`` inflight wait below.
+        if getattr(state, "framework_agent_authoring_enabled", False):
+            try:
+                _q = await self.tasks.queued()
+                _r = await self.tasks.running()
+            except Exception:  # noqa: BLE001 — defensive
+                _q, _r = [], []
+            if any(getattr(t, "kind", "") in ("specialist", "integrate_patch") for t in (*_q, *_r)):
+                return
+            # Proposal-window guard: the task check above misses the interval
+            # between a specialist completing (config-lever / patch deliverable)
+            # and its integrate_patch becoming a live TASK — during that window
+            # the deliverable exists only as a pending Critic proposal. Without
+            # this guard the pump re-selects the same candidate (it has no
+            # progress row yet) and routes a SECOND integrate_patch of the same
+            # deliverable (observed: vllm/pull/1007 benched twice -> 2 no-KEEP
+            # rows -> premature FRAMEWORK plateau after only 2 distinct
+            # candidates). ``_framework_agent_authoring_inflight`` also covers
+            # pending integrate_patch proposals, so waiting here serializes one
+            # candidate's author->integrate->KEEP/REVERT lifecycle before the
+            # next is selected. No livelock risk: the row is stamped when the
+            # integrate_patch resolves, which clears the inflight signal.
+            if await self._framework_agent_authoring_inflight():
+                return
+        # Pick the most promising un-dispatched candidate (agent-ranked), or
+        # request a new batch if exhausted.
+        next_candidate = await self._select_best_framework_agent_candidate()
         if next_candidate is None:
             # Hold the phase open while authored patches are still benched/critic-reviewed (gains must land before plateau judge); gated by authoring flag.
             # Only wait when the pump itself discovered a PR batch to author against:
             # an empty batch list means no pump-initiated authoring is outstanding, so
-            # an LLM-proposed integrate_patch must NOT keep FRAMEWORK_PR open (else the
+            # an LLM-proposed integrate_patch must NOT keep FRAMEWORK open (else the
             # phase livelocks under a large budget — no discover, no done, no advance).
-            discovered_batch = bool(getattr(self.shared_state, "framework_pr_batches", None) or [])
+            discovered_batch = bool(getattr(self.shared_state, "framework_agent_batches", None) or [])
             if (
                 discovered_batch
-                and getattr(self.shared_state, "framework_pr_authoring_enabled", False)
-                and await self._framework_pr_authoring_inflight()
+                and getattr(self.shared_state, "framework_agent_authoring_enabled", False)
+                and await self._framework_agent_authoring_inflight()
             ):
                 return
             # Discover a fresh batch; only DISCOVER_FAILURE_RETRY_LIMIT consecutive failures or an empty-but-valid payload mark the phase done.
             from . import framework_agent_client as _fa_client
 
-            ok = await self._discover_next_framework_pr_batch()
+            ok = await self._discover_next_framework_batch()
             if not ok:
-                failures = int(getattr(state, "framework_pr_discover_failures", 0) or 0)
+                failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0)
                 if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT or failures == 0:
                     # Retries exhausted or clean empty payload — both real exits; stamp a summary row.
-                    self._record_framework_pr_phase_done(
+                    self._record_framework_agent_phase_done(
                         reason=(
                             "discover_retries_exhausted"
                             if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
@@ -2779,30 +2939,64 @@ class Coordinator:
                         ),
                         failure_count=failures,
                     )
-                    state.framework_pr_phase_done = True
-                    state.save(self.session_dir)
-                return
-            next_candidate = self._select_next_framework_pr_candidate()
-            if next_candidate is None:
-                self._record_framework_pr_phase_done(
-                    reason="discover_returned_no_new_candidates",
-                    failure_count=int(
-                        getattr(state, "framework_pr_discover_failures", 0) or 0,
-                    ),
-                )
-                state.framework_pr_phase_done = True
+                state.framework_agent_phase_done = True
                 state.save(self.session_dir)
                 return
+            next_candidate = await self._select_best_framework_agent_candidate()
+            if next_candidate is None:
+                self._record_framework_agent_phase_done(
+                    reason="discover_returned_no_new_candidates",
+                    failure_count=int(
+                        getattr(state, "framework_agent_discover_failures", 0) or 0,
+                    ),
+                )
+                state.framework_agent_phase_done = True
+                state.save(self.session_dir)
+                return
+        # Step 3: semantic audit BEFORE the Critic/apply. A confident verdict
+        # routes the candidate (skip already-present, raw-diff for direct_apply,
+        # authoring-with-evidence for needs_rewrite); an unknown / unavailable
+        # audit preserves the legacy both-tracks behaviour (zero regression).
+        audit = await self._audit_framework_agent_candidate(next_candidate)
+        audit_step = str((audit or {}).get("recommended_next_step") or "")
+        _cand_id_log = str(
+            next_candidate.get("candidate_id") or next_candidate.get("pr_url") or next_candidate.get("ref") or ""
+        )
+        # G5: only honour a skip when the audit is confident AND evidence-backed;
+        # otherwise fall through to authoring (never silently skip a GPU test on
+        # a low-confidence already-present claim).
+        if audit_step == "skip" and not self._framework_agent_audit_skip_confident(audit):
+            log.info(
+                "FRAMEWORK: audit skip downgraded (low confidence / no evidence) candidate=%s conf=%s",
+                _cand_id_log,
+                (audit or {}).get("confidence"),
+            )
+            audit_step = "author_via_specialist"
+        if audit_step == "skip":
+            await self._record_framework_agent_audit_skip(next_candidate, audit)
+            state.save(self.session_dir)
+            return
+        # G3: direct_apply needs a clean git checkout to apply / commit / reset.
+        # On a wheel install (no git tree among the framework source roots)
+        # degrade to authoring so the candidate still progresses instead of
+        # failing at ``git apply`` in the executor.
+        if audit_step == "direct_framework" and not self._framework_agent_roots_have_git():
+            log.info(
+                "FRAMEWORK: direct_apply downgraded to authoring "
+                "(no git checkout among framework source roots) candidate=%s",
+                _cand_id_log,
+            )
+            audit_step = "author_via_specialist"
         # Critic gate before apply: reject short-circuits with a critic_denied row; approve/abstain enqueues.
-        verdict = await self._critic_review_framework_pr_candidate(next_candidate)
+        verdict = await self._critic_review_framework_agent_candidate(next_candidate)
         if verdict.get("verdict") == "reject":
             cand_id = str(
                 next_candidate.get("candidate_id") or next_candidate.get("pr_url") or "",
             )
-            progress = getattr(state, "framework_pr_phase_progress", None)
+            progress = getattr(state, "framework_agent_phase_progress", None)
             if not isinstance(progress, list):
                 progress = []
-                state.framework_pr_phase_progress = progress
+                state.framework_agent_phase_progress = progress
             progress.append(
                 {
                     "candidate_id": cand_id,
@@ -2813,29 +3007,60 @@ class Coordinator:
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
             )
+            try:
+                from .framework_agent_artifacts import write_decision_json
+
+                write_decision_json(
+                    self.session_dir,
+                    candidate_id=cand_id,
+                    batch_id=str(next_candidate.get("batch_id") or ""),
+                    status="critic_denied",
+                    kept=False,
+                    provenance="critic",
+                    reason=str(verdict.get("rationale") or ""),
+                )
+            except Exception:  # noqa: BLE001 — observability is best-effort
+                log.debug("FRAMEWORK: critic_denied decision.json write failed", exc_info=True)
             state.save(self.session_dir)
             log.info(
-                "FRAMEWORK_PR: critic rejected candidate=%s batch=%s rationale=%r",
+                "FRAMEWORK: critic rejected candidate=%s batch=%s rationale=%r",
                 cand_id,
                 next_candidate.get("batch_id") or "",
                 str(verdict.get("rationale") or "")[:200],
             )
             return
-        await self._enqueue_framework_pr_task(next_candidate)
-        # Authoring track: also hand the PR to a write-capable specialist to author its own patch.
-        if getattr(state, "framework_pr_authoring_enabled", False):
+        # Route dispatch by the audit verdict (Step 3). ``direct_framework``
+        # -> raw-diff executor only; ``author_via_specialist`` -> authoring
+        # specialist only, seeded with audit evidence; unknown / other ->
+        # legacy both-tracks. A candidate routed to authoring while authoring is
+        # disabled falls back to the raw-diff executor so it still gets a
+        # terminal row (no re-audit loop).
+        authoring_enabled = bool(getattr(state, "framework_agent_authoring_enabled", False))
+        want_raw = audit_step == "direct_framework"
+        want_author = audit_step == "author_via_specialist"
+        if audit_step not in ("direct_framework", "author_via_specialist"):
+            want_raw = True
+            want_author = True
+        if want_author and not authoring_enabled:
+            want_raw = True
+            want_author = False
+        if want_raw:
+            await self._enqueue_framework_agent_task(next_candidate)
+        # Authoring track (PR-G): hand the PR to a write-capable specialist to author its own patch.
+        if want_author and authoring_enabled:
             try:
-                await self._enqueue_framework_pr_authoring_specialist(
+                await self._enqueue_framework_agent_authoring_specialist(
                     next_candidate,
+                    audit=audit,
                 )
             except Exception as exc:  # noqa: BLE001 — never wedge the pump
                 log.warning(
-                    "FRAMEWORK_PR: authoring specialist dispatch failed: %r",
+                    "FRAMEWORK: authoring specialist dispatch failed: %r",
                     exc,
                 )
 
-    async def _framework_pr_authoring_inflight(self) -> bool:
-        """True while a FRAMEWORK_PR-authored patch is still in flight (specialist/integrate_patch task or pending integrate_patch proposal); pump waits before advancing.
+    async def _framework_agent_authoring_inflight(self) -> bool:
+        """True while a FRAMEWORK-authored patch is still in flight (specialist/integrate_patch task or pending integrate_patch proposal); pump waits before advancing.
 
         Returns:
             ``True`` if a specialist/integrate_patch task is queued or running,
@@ -2859,56 +3084,318 @@ class Coordinator:
             pass
         return False
 
-    async def _enqueue_framework_pr_authoring_specialist(
-        self,
-        candidate: dict[str, Any],
-    ) -> None:
-        """Dispatch a write-capable specialist seeded with ``candidate`` (flows through autosubmit → Critic → integrate_patch → bench → KEEP/REVERT).
+    @staticmethod
+    def _framework_agent_audit_skip_confident(audit: dict[str, Any] | None) -> bool:
+        """True iff an ``already_*`` skip is safe: concrete evidence + confidence ≥ floor (G5).
+
+        Floor is ``INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_SKIP_MIN_CONFIDENCE``
+        (default 0.8). A low-confidence / evidence-free skip must not silently
+        bypass the GPU test.
 
         Args:
-            candidate: The discovered FRAMEWORK_PR candidate (PR url, title,
-                diff url, batch/candidate ids) used to seed the specialist's
-                authoring task and provenance markers.
+            audit: The semantic-audit verdict.
+
+        Returns:
+            ``True`` when the skip is confident and evidence-backed.
+        """
+        if not isinstance(audit, dict) or not (audit.get("evidence") or []):
+            return False
+        try:
+            conf = float(audit.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        try:
+            floor = float(os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_SKIP_MIN_CONFIDENCE", "0.8"))
+        except (TypeError, ValueError):
+            floor = 0.8
+        return conf >= floor
+
+    @staticmethod
+    def _framework_agent_roots_have_git() -> bool:
+        """True iff any resolved framework source root is a git work tree (G3 preflight).
+
+        A wheel install (dist-packages, no ``.git``) yields ``False`` → the pump
+        degrades ``direct_apply`` to authoring (the executor's git apply / commit
+        / reset would otherwise fail).
+
+        Returns:
+            ``True`` when at least one source root is inside a git work tree.
+        """
+        import subprocess
+
+        from .framework_paths import resolve_source_file_allowlist
+
+        for root in resolve_source_file_allowlist():
+            p = Path(str(root))
+            if not p.is_dir():
+                continue
+            try:
+                cp = subprocess.run(
+                    ["git", "-C", str(p), "rev-parse", "--is-inside-work-tree"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return False
+            if cp.returncode == 0 and cp.stdout.strip() == "true":
+                return True
+        return False
+
+    async def _audit_framework_agent_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        """Run ``fa phase-audit`` for a candidate; degrade to ``unknown`` on any failure.
+
+        A cached verdict stamped on the candidate (``_audit``) is reused so a
+        re-pump / resume never re-audits. An unavailable audit returns an
+        ``unknown`` verdict with an empty ``recommended_next_step`` so the pump
+        falls back to legacy both-tracks routing.
+
+        Args:
+            candidate: The discovered candidate row.
+
+        Returns:
+            The semantic-audit verdict dict.
+        """
+        cached = candidate.get("_audit") if isinstance(candidate, dict) else None
+        if isinstance(cached, dict) and cached.get("recommended_next_step") is not None:
+            return cached
+        state = self.shared_state
+        unknown: dict[str, Any] = {
+            "semantic_status": "unknown",
+            "applicability": "needs_human_review",
+            "recommended_next_step": "",
+            "confidence": 0.0,
+            "evidence": [],
+            "risks": ["audit unavailable"],
+            "source": "audit_unavailable",
+        }
+        try:
+            import os
+
+            from . import framework_agent_client as _fa_client
+            from .framework_paths import resolve_source_file_allowlist
+
+            roots = list(resolve_source_file_allowlist())
+            audit = await _fa_client.phase_audit(
+                candidate=candidate,
+                framework=str(getattr(state, "framework", "") or ""),
+                framework_source_roots=roots,
+                session_dir=self.session_dir,
+                repo_url=str(candidate.get("repo") or ""),
+                diff_url=str(candidate.get("diff_url") or ""),
+                primus_cortex_url=os.environ.get("PRIMUS_CORTEX_PR_API", "").strip(),
+                use_llm=False,
+                timeout_sec=getattr(
+                    self,
+                    "framework_audit_timeout_sec",
+                    _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — audit is advisory; never wedge the pump
+            log.warning("FRAMEWORK: phase-audit failed (%r); routing as unknown", exc)
+            audit = dict(unknown)
+        if not isinstance(audit, dict):
+            audit = dict(unknown)
+        try:
+            candidate["_audit"] = audit
+        except Exception:  # noqa: BLE001 — caching is best-effort
+            pass
+        # G9: persist the verdict next to the candidate's decision.json.
+        try:
+            from .framework_agent_artifacts import write_semantic_audit
+
+            write_semantic_audit(
+                self.session_dir,
+                candidate_id=str(
+                    candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or ""
+                ),
+                verdict=audit,
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("FRAMEWORK: write_semantic_audit failed", exc_info=True)
+        log.info(
+            "FRAMEWORK: audit candidate=%s status=%s appl=%s next=%s",
+            candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "",
+            audit.get("semantic_status"),
+            audit.get("applicability"),
+            audit.get("recommended_next_step"),
+        )
+        return audit
+
+    @staticmethod
+    def _framework_agent_audit_seed_lines(audit: dict[str, Any] | None) -> list[str]:
+        """Render audit evidence as authoring-seed lines (empty when no audit)."""
+        if not isinstance(audit, dict) or not audit:
+            return []
+        lines = [
+            "",
+            "AUDIT EVIDENCE (from fa phase-audit — author against the LIVE source):",
+            f"- semantic_status: {audit.get('semantic_status') or 'unknown'}",
+            f"- applicability: {audit.get('applicability') or 'unknown'}"
+            " (raw upstream diff likely needs rewriting to fit the local tree)",
+        ]
+        evidence = audit.get("evidence") or []
+        if isinstance(evidence, list):
+            for ev in evidence[:8]:
+                if not isinstance(ev, dict):
+                    continue
+                local_file = str(ev.get("local_file") or "").strip()
+                symbol = str(ev.get("symbol") or "").strip()
+                reason = str(ev.get("reason") or "").strip()
+                if local_file or symbol or reason:
+                    lines.append(
+                        f"  • {local_file or '(file?)'}"
+                        + (f" [{symbol}]" if symbol else "")
+                        + (f": {reason}" if reason else "")
+                    )
+        risks = audit.get("risks") or []
+        if isinstance(risks, list) and risks:
+            lines.append("- risks: " + "; ".join(str(r) for r in risks[:4]))
+        return lines
+
+    async def _record_framework_agent_audit_skip(
+        self,
+        candidate: dict[str, Any],
+        audit: dict[str, Any] | None,
+    ) -> None:
+        """Record a terminal progress row + decision.json (+ KB) for an audit-skipped candidate.
+
+        Called when the audit's ``recommended_next_step == "skip"`` (already
+        present / not applicable): no Critic, no GPU, no specialist. Writes the
+        candidate's fate so the batch advances and a later session can dedup.
+
+        Args:
+            candidate: The skipped candidate row.
+            audit: The semantic-audit verdict driving the skip.
         """
         state = self.shared_state
         cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
         batch_id = str(candidate.get("batch_id") or "")
-        gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework_pr.{cand_id}"
+        semantic = str((audit or {}).get("semantic_status") or "")
+        status = "already_present" if semantic.startswith("already_") else "not_applicable"
+        progress = getattr(state, "framework_agent_phase_progress", None)
+        if not isinstance(progress, list):
+            progress = []
+            state.framework_agent_phase_progress = progress
+        progress.append(
+            {
+                "candidate_id": cand_id,
+                "pr_url": str(candidate.get("pr_url") or ""),
+                "status": status,
+                "kept": False,
+                "provenance": "audit",
+                "semantic_status": semantic,
+                "confidence": float((audit or {}).get("confidence") or 0.0),
+                "batch_id": batch_id,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        try:
+            from .framework_agent_artifacts import write_decision_json
+
+            write_decision_json(
+                self.session_dir,
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status=status,
+                kept=False,
+                provenance="audit",
+                reason="; ".join(str(r) for r in ((audit or {}).get("risks") or [])) or semantic,
+                extra={
+                    "semantic_status": semantic,
+                    "applicability": (audit or {}).get("applicability"),
+                    "confidence": (audit or {}).get("confidence"),
+                    "evidence": (audit or {}).get("evidence") or [],
+                },
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("FRAMEWORK: audit-skip decision.json write failed", exc_info=True)
+        if status == "already_present":
+            try:
+                from .kb_writeback import OUTCOME_ALREADY_PRESENT, write_framework_record
+
+                await write_framework_record(
+                    pr_url=str(candidate.get("pr_url") or ""),
+                    pr_sha=str(candidate.get("head_sha") or ""),
+                    patch_path="",
+                    outcome=OUTCOME_ALREADY_PRESENT,
+                    tps_delta_pct=0.0,
+                    session_id=str(getattr(state, "session_id", "") or ""),
+                )
+            except Exception:  # noqa: BLE001 — KB writeback is best-effort
+                log.debug("FRAMEWORK: audit-skip KB writeback failed", exc_info=True)
+        log.info(
+            "FRAMEWORK: audit skip candidate=%s status=%s (semantic=%s)",
+            cand_id,
+            status,
+            semantic,
+        )
+
+    async def _enqueue_framework_agent_authoring_specialist(
+        self,
+        candidate: dict[str, Any],
+        audit: dict[str, Any] | None = None,
+    ) -> None:
+        """Dispatch a write-capable specialist seeded with ``candidate`` (flows through autosubmit → Critic → integrate_patch → bench → KEEP/REVERT).
+
+        Args:
+            candidate: The discovered FRAMEWORK candidate (PR url, title,
+                diff url, batch/candidate ids) used to seed the specialist's
+                authoring task and provenance markers.
+            audit: Optional ``fa phase-audit`` verdict; its evidence (local
+                symbols / why the raw diff doesn't fit / where the change
+                should land) is injected into the seed so the specialist
+                authors against the live source instead of re-discovering it.
+        """
+        state = self.shared_state
+        cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
+        batch_id = str(candidate.get("batch_id") or "")
+        gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.{cand_id}"
         title = str(candidate.get("title") or "").strip()
         pr_url = str(candidate.get("pr_url") or "").strip()
         diff_url = str(candidate.get("diff_url") or "").strip()
-        notes = "\n".join(
+        notes_lines = [
+            "FRAMEWORK AUTHORING TASK.",
+            "",
+            "A candidate upstream PR was discovered as a lead for this gap.",
+            "Study it as INSPIRATION, then deliver the BEST win for this model /",
+            "hardware / workload. You are NOT limited to copying the PR's diff — go",
+            "beyond it where the live source + profile evidence justify a",
+            "stronger or more targeted change. If, after reading the source,",
+            "the upstream change is already optimal, you may reproduce its",
+            "essential edit, but prefer a change tailored to this model /",
+            "hardware / workload.",
+            "",
+            f"- PR title: {title or '(none)'}",
+            f"- PR url: {pr_url or '(none)'}",
+            f"- Unified diff: {diff_url or '(none)'} (fetch with WebFetch to read the upstream change)",
+        ]
+        notes_lines.extend(self._framework_agent_audit_seed_lines(audit))
+        notes_lines.extend(
             [
-                "FRAMEWORK_PR AUTHORING TASK.",
                 "",
-                "A candidate upstream PR was discovered as a lead for this gap.",
-                "Study it as INSPIRATION, then author your OWN source patch into",
-                "your worktree. You are NOT limited to copying the PR's diff — go",
-                "beyond it where the live source + profile evidence justify a",
-                "stronger or more targeted change. If, after reading the source,",
-                "the upstream change is already optimal, you may reproduce its",
-                "essential edit, but prefer a patch tailored to this model /",
-                "hardware / workload.",
-                "",
-                f"- PR title: {title or '(none)'}",
-                f"- PR url: {pr_url or '(none)'}",
-                f"- Unified diff: {diff_url or '(none)'} (fetch with WebFetch to read the upstream change)",
-                "",
-                "Deliverable: a unified-diff patch file in your worktree, listed in",
-                "``patches_written``. The Coordinator applies + benches it and",
-                "decides KEEP/REVERT; you do not benchmark.",
+                "Deliverable — EITHER is valid (pick what actually moves throughput):",
+                "- a unified-diff source patch in your worktree (``patches_written``), OR",
+                "- when the PR's benefit is reachable via serving flags / env vars on",
+                "  this build (e.g. an MTP toggle), a ``proposal_set`` entry carrying",
+                "  ``extra_args`` / ``extra_envs``.",
+                "The Coordinator applies + benches it and decides KEEP/REVERT; you do",
+                "not benchmark. A config-lever deliverable is a full result, not empty.",
             ]
         )
+        notes = "\n".join(notes_lines)
         params: dict[str, Any] = {
             "domain": "serving_specialist",
             "gap_canonical_id": gap_cid,
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
             "gap_layer": "framework",
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
-            # Provenance markers so the dispatcher-side bridge recognises an authored FRAMEWORK_PR patch.
-            "framework_pr_authoring": True,
-            "framework_pr_candidate_id": cand_id,
-            "framework_pr_batch_id": batch_id,
+            # Provenance markers so the dispatcher-side bridge recognises an authored FRAMEWORK patch.
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": cand_id,
+            "framework_batch_id": batch_id,
+            "framework_audit": (audit if isinstance(audit, dict) else {}),
             "source": "coordinator_internal",
             "readonly": False,
             "notes": notes,
@@ -2917,11 +3404,11 @@ class Coordinator:
             await self._warm_specialist_params(params)
         except Exception:  # noqa: BLE001 — best-effort warmup
             log.debug(
-                "FRAMEWORK_PR authoring: warm specialist params failed",
+                "FRAMEWORK authoring: warm specialist params failed",
                 exc_info=True,
             )
-        idem = f"framework_pr_authoring:{batch_id}:{cand_id}"
-        await self.tasks.create_or_return_existing(
+        idem = f"framework_agent_authoring:{batch_id}:{cand_id}"
+        spec_task, _spec_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             idempotency_key=idem,
@@ -2939,44 +3426,349 @@ class Coordinator:
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=3600,
         )
+        # Livelock break (cross-resume): if the authoring specialist for this
+        # candidate ALREADY exists in a TERMINAL state but the candidate still
+        # has no ``framework_agent_phase_progress`` row, its empty deliverable was
+        # never harvested into a terminal row (the dispatcher only harvests
+        # specialists that complete IN the current process — a specialist that
+        # finished before a resume is returned here by idempotency key without
+        # re-running, so the harvest hook never fires). Without a terminal row
+        # ``_select_best_framework_agent_candidate`` re-selects this candidate every
+        # tick and we re-log "dispatched" forever (observed: pull/1022 dispatched
+        # 30+ times across resumes). Stamp the terminal author_empty row now and
+        # skip the (no-op) re-dispatch so the pump advances to the next candidate.
+        from .task_registry import TERMINAL_STATES as _TERMINAL_STATES
+
+        if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
+            already_rows = {
+                str(p.get("candidate_id") or "")
+                for p in (getattr(state, "framework_agent_phase_progress", None) or [])
+                if isinstance(p, dict)
+            }
+            # Only stamp when the authored deliverable is genuinely NOT in flight.
+            # A specialist that produced a config-lever / patch deliverable routes
+            # it to an integrate_patch (often first as a pending Critic proposal,
+            # which the pump's task-only inflight guard does not see). That
+            # integrate_patch owns the terminal row — stamping author_empty here
+            # would prematurely mislabel a candidate that is actually being
+            # benchmarked. ``_framework_agent_authoring_inflight`` checks pending
+            # integrate_patch proposals too, so it distinguishes the true
+            # cross-resume harvest-miss (nothing in flight) from a deliverable
+            # still being benched.
+            authoring_inflight = await self._framework_agent_authoring_inflight()
+            if cand_id and cand_id not in already_rows and not authoring_inflight:
+                log.info(
+                    "FRAMEWORK: authoring specialist already terminal w/o progress "
+                    "row (cross-resume harvest miss) candidate=%s state=%s — stamping "
+                    "author_empty to break re-dispatch livelock",
+                    cand_id,
+                    getattr(spec_task, "state", ""),
+                )
+                try:
+                    self._record_framework_agent_authoring_empty_outcome(
+                        task=spec_task,
+                        done_payload={},
+                    )
+                except Exception:  # noqa: BLE001 — never wedge the pump
+                    log.exception(
+                        "FRAMEWORK: livelock-break empty-outcome stamp failed candidate=%s",
+                        cand_id,
+                    )
+                return
+        # Remember which candidate this specialist task authors for. The
+        # downstream integrate_patch task only carries ``specialist_task_id``,
+        # so the authored-outcome bridge resolves the PR-URL candidate id from
+        # this map (else the progress row is keyed on a task_id that never
+        # matches the select key -> FRAMEWORK pump re-dispatches forever).
+        try:
+            spec_tid = str(getattr(spec_task, "task_id", "") or "")
+            if spec_tid and cand_id:
+                if not isinstance(
+                    getattr(state, "framework_agent_specialist_candidate_map", None), dict
+                ):
+                    state.framework_agent_specialist_candidate_map = {}
+                state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
+                state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — best-effort provenance
+            log.debug(
+                "FRAMEWORK authoring: specialist->candidate map write failed",
+                exc_info=True,
+            )
         log.info(
-            "FRAMEWORK_PR: dispatched authoring specialist candidate=%s batch=%s gap=%s",
+            "FRAMEWORK: dispatched authoring specialist candidate=%s batch=%s gap=%s",
             cand_id,
             batch_id,
             gap_cid,
         )
 
-    def _select_next_framework_pr_candidate(self) -> dict[str, Any] | None:
-        """Return the next unprocessed candidate in the latest batch (processed = has progress entry).
+    def _unprocessed_framework_agent_candidates(self) -> list[dict[str, Any]]:
+        """Return all not-yet-processed candidates in the latest batch (order preserved).
+
+        Processed = the candidate id already appears in
+        ``framework_agent_phase_progress``.
 
         Returns:
-            The next candidate dict not yet recorded in the phase progress, or
-            ``None`` when no batch exists or all are processed.
+            The list of candidate dicts lacking a progress row (possibly empty).
         """
         state = self.shared_state
-        batches = getattr(state, "framework_pr_batches", None) or []
+        batches = getattr(state, "framework_agent_batches", None) or []
         if not batches:
-            return None
+            return []
         latest = batches[-1]
         if not isinstance(latest, dict):
-            return None
+            return []
         candidates = latest.get("candidates") or []
         if not isinstance(candidates, list):
-            return None
+            return []
         processed = {
             str(p.get("candidate_id") or "")
-            for p in (getattr(state, "framework_pr_phase_progress", None) or [])
+            for p in (getattr(state, "framework_agent_phase_progress", None) or [])
             if isinstance(p, dict)
         }
+        out: list[dict[str, Any]] = []
         for cand in candidates:
             if not isinstance(cand, dict):
                 continue
             cand_id = str(cand.get("candidate_id") or cand.get("pr_url") or cand.get("ref") or "")
             if cand_id and cand_id not in processed:
-                return cand
+                out.append(cand)
+        return out
+
+    def _select_next_framework_agent_candidate(self) -> dict[str, Any] | None:
+        """Return the next unprocessed candidate in the latest batch (linear order).
+
+        Used for existence checks and as the deterministic fallback when the
+        agent-driven ranker (:meth:`_select_best_framework_agent_candidate`) is
+        unavailable.
+
+        Returns:
+            The first candidate dict not yet recorded in the phase progress, or
+            ``None`` when no batch exists or all are processed.
+        """
+        unprocessed = self._unprocessed_framework_agent_candidates()
+        return unprocessed[0] if unprocessed else None
+
+    async def _select_best_framework_agent_candidate(self) -> dict[str, Any] | None:
+        """Pick the single most promising unprocessed candidate via the agent.
+
+        The batch is discovered once; each FRAMEWORK exploration then asks the
+        agent (LLM) to choose — among the *currently available* candidates — the
+        one most likely to improve serving throughput for this workload, instead
+        of grinding through the batch in discovery order. Degrades safely: any
+        ranker failure falls back to the first unprocessed candidate so the pump
+        never wedges.
+
+        Returns:
+            The chosen candidate dict, or ``None`` when none remain.
+        """
+        unprocessed = self._unprocessed_framework_agent_candidates()
+        if not unprocessed:
+            return None
+        if len(unprocessed) == 1:
+            return unprocessed[0]
+        try:
+            chosen = await self._rank_framework_agent_candidates_llm(unprocessed)
+        except Exception:  # noqa: BLE001 — ranking is advisory; never wedge the pump
+            log.debug("FRAMEWORK: agent candidate ranking failed", exc_info=True)
+            chosen = None
+        if chosen is not None:
+            return chosen
+        # Deterministic fallback: discovery order.
+        return unprocessed[0]
+
+    async def _rank_framework_agent_candidates_llm(
+        self,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Ask the agent to choose the most promising candidate; ``None`` on any failure.
+
+        Builds a compact workload-context + candidate-list prompt and requests a
+        single ``candidate_id``. Matches the reply back to a candidate (exact id
+        or PR number). Best-effort: returns ``None`` (caller falls back) when the
+        client/model is unavailable, the call errors/times out, or the reply
+        can't be parsed.
+
+        Args:
+            candidates: The unprocessed candidates to rank.
+
+        Returns:
+            The chosen candidate dict, or ``None``.
+        """
+        import json as _json
+
+        client = self._framework_agent_ranker_client()
+        if client is None:
+            return None
+        model = self._framework_agent_ranker_model()
+        if not model:
+            return None
+        state = self.shared_state
+        # Workload context.
+        ctx_lines = [
+            "You are selecting ONE upstream PR to integrate next, to maximize "
+            "LLM serving throughput (tokens/s) for this exact workload:",
+            f"- model: {getattr(state, 'model', '') or getattr(state, 'model_path', '')}",
+            f"- framework: {getattr(state, 'framework', '')}",
+            f"- gpu_type: {getattr(state, 'gpu_type', '')}",
+            f"- precision: {getattr(state, 'precision', '')}",
+            f"- tensor_parallel: {getattr(state, 'tp', '')}",
+        ]
+        best = getattr(state, "best_throughput", None) or getattr(state, "baseline_throughput", None)
+        if best:
+            ctx_lines.append(f"- current_best_throughput_tok_s: {best}")
+        # Candidate list (cap to keep the prompt bounded).
+        cap = 60
+        listed = candidates[:cap]
+        ctx_lines.append("")
+        ctx_lines.append("Candidates (choose the ONE most likely to raise throughput):")
+        for i, c in enumerate(listed):
+            cid = str(c.get("candidate_id") or c.get("pr_url") or c.get("ref") or "")
+            title = str(c.get("title") or "").strip()
+            repo = str(c.get("repo") or c.get("discovered_repo_url") or "").strip()
+            audit = c.get("_audit") if isinstance(c.get("_audit"), dict) else None
+            appl = str((audit or {}).get("applicability") or "") if audit else ""
+            extra = f" [audit_applicability={appl}]" if appl else ""
+            ctx_lines.append(f"{i}. id={cid} repo={repo} title={title!r}{extra}")
+        ctx_lines.append("")
+        ctx_lines.append(
+            "Prefer PRs that target this model's architecture/precision/GPU and "
+            "the serving hot path (MoE/FP8/attention/GEMM/KV-cache/scheduling). "
+            "Deprioritize PRs scoped to unrelated models, archs, or GPUs. "
+            'Reply with ONLY compact JSON: {"candidate_id": "<id>", "reason": "<short>"}.'
+        )
+        prompt = "\n".join(ctx_lines)
+
+        # The Primus-Safe/Vertex proxy rejects non-streaming predictions with an
+        # opaque 400 INVALID_ARGUMENT; only streamed requests are accepted (same
+        # constraint ProposalScorer hit). Stream and accumulate the deltas. The
+        # deadline wraps BOTH stream creation and the chunk loop so a proxy that
+        # opens the stream then stalls mid-body can't hang the ranker.
+        async def _read_stream() -> str:
+            parts: list[str] = []
+            stream = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_completion_tokens=400,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            async for chunk in stream:
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta is not None and delta.content:
+                        parts.append(delta.content)
+            return "".join(parts)
+
+        try:
+            text = (
+                await asyncio.wait_for(
+                    _read_stream(),
+                    timeout=float(getattr(self, "framework_ranker_timeout_sec", 60.0) or 60.0),
+                )
+            ).strip()
+        except Exception as exc:  # noqa: BLE001 — degrade to fallback
+            log.debug("FRAMEWORK: ranker LLM call failed (%r)", exc)
+            return None
+        if not text:
+            return None
+        # Extract the JSON object (tolerate code fences / surrounding prose).
+        chosen_id = ""
+        reason = ""
+        try:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                obj = _json.loads(text[start : end + 1])
+                chosen_id = str(obj.get("candidate_id") or "").strip()
+                reason = str(obj.get("reason") or "").strip()
+        except Exception:  # noqa: BLE001
+            chosen_id = ""
+        if not chosen_id:
+            return None
+        match = self._match_framework_agent_candidate(chosen_id, candidates)
+        if match is None:
+            log.debug("FRAMEWORK: ranker chose unknown id=%s; falling back", chosen_id)
+            return None
+        log.info(
+            "FRAMEWORK: agent selected candidate=%s (of %d) reason=%s",
+            str(match.get("candidate_id") or match.get("pr_url") or ""),
+            len(candidates),
+            reason[:160],
+        )
+        return match
+
+    @staticmethod
+    def _match_framework_agent_candidate(
+        chosen_id: str,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Map a model-chosen id back to a candidate (exact id, url, ref, or PR number)."""
+        chosen = (chosen_id or "").strip()
+        if not chosen:
+            return None
+        for c in candidates:
+            for key in ("candidate_id", "pr_url", "ref"):
+                if str(c.get(key) or "").strip() == chosen:
+                    return c
+        # Fallback: bare PR number match (e.g. model replied "1015" or "PR:1015").
+        digits = "".join(ch for ch in chosen if ch.isdigit())
+        if digits:
+            for c in candidates:
+                if str(c.get("pr_number") or "").strip() == digits:
+                    return c
         return None
 
-    def _framework_pr_known_candidate_ids(self) -> set[str]:
+    def _framework_agent_ranker_model(self) -> str:
+        """Model slug for the candidate ranker (env override → orchestration model)."""
+        import os
+
+        env_model = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_RANKER_MODEL", "").strip()
+        if env_model:
+            return env_model
+        backend = self.backends.get("orchestration")
+        return str(getattr(backend, "model", "") or "").strip()
+
+    def _framework_agent_ranker_client(self) -> Any:
+        """Return an OpenAI-compatible async client for ranking, or ``None``.
+
+        Reuses the ProposalScorer's client when present (same gateway/auth);
+        otherwise builds one from ``SAFE_API_KEY``/``OPENAI_API_KEY`` +
+        ``OPENAI_BASE_URL``. Cached on first successful build.
+        """
+        import os
+
+        cached = getattr(self, "_fa_ranker_client", None)
+        if cached is not None:
+            return cached
+        scorer = getattr(self, "_proposal_scorer", None)
+        ensure = getattr(scorer, "_ensure_client", None)
+        if callable(ensure):
+            try:
+                client = ensure()
+                if client is not None:
+                    self._fa_ranker_client = client
+                    return client
+            except Exception:  # noqa: BLE001 — fall through to direct build
+                log.debug("FRAMEWORK: scorer client unavailable for ranker", exc_info=True)
+        try:
+            from openai import AsyncOpenAI  # type: ignore[import-not-found]
+        except ImportError:
+            return None
+        api_key = os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return None
+        base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url.strip()
+        try:
+            client = AsyncOpenAI(**kwargs)
+        except Exception:  # noqa: BLE001
+            return None
+        self._fa_ranker_client = client
+        return client
+
+    def _framework_known_candidate_ids(self) -> set[str]:
         """All candidate ids already discovered into any prior batch (dedup for new batches).
 
         Returns:
@@ -2985,7 +3777,7 @@ class Coordinator:
         """
         state = self.shared_state
         ids: set[str] = set()
-        batches = getattr(state, "framework_pr_batches", None) or []
+        batches = getattr(state, "framework_agent_batches", None) or []
         if not isinstance(batches, list):
             return ids
         for batch in batches:
@@ -3009,20 +3801,20 @@ class Coordinator:
                 ids.add(pid)
         return ids
 
-    def _framework_pr_tried_refs(self) -> list[str]:
+    def _framework_tried_refs(self) -> list[str]:
         """Refs already discovered this phase (fed to compose_gap to bias away from prior PR categories).
 
         Returns:
             A list of already-known candidate id refs.
         """
         refs: list[str] = []
-        for cid in self._framework_pr_known_candidate_ids():
+        for cid in self._framework_known_candidate_ids():
             if cid:
                 refs.append(cid)
         return refs
 
-    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
-        """Repo URLs to query for the FRAMEWORK_PR batch: framework's own repo + pr_intel_specialist cross-repo set, dedup preserving order.
+    def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
+        """Repo URLs to query for the FRAMEWORK batch: framework's own repo + pr_intel_specialist cross-repo set, dedup preserving order.
 
         Args:
             framework: The framework name whose own repo seeds the query.
@@ -3068,13 +3860,137 @@ class Coordinator:
             _add(_fa_client.repo_url_for_framework(framework or "sglang"))
         return urls
 
-    def _record_framework_pr_phase_done(
+    def _write_prs_tested_from_framework_agent(
+        self, *, task: "Task", result: Any, kept: bool,
+    ) -> None:
+        """Write framework KEEP/REVERT patch into recipe.prs_tested for warm-replay reuse."""
+        if self.cortex_kb is None:
+            return
+        result_dict = result.result if hasattr(result, "result") else (result or {})
+        if not isinstance(result_dict, dict):
+            return
+        status = str(result_dict.get("status") or "")
+        if status not in ("kept", "reverted"):
+            return
+        # Extract patch info from result
+        patches_applied = result_dict.get("patches_applied") or []
+        patch_path = patches_applied[0] if patches_applied else ""
+        delta_pct = result_dict.get("delta_pct") or 0.0
+        candidate = result_dict.get("candidate") or {}
+        pr_url = candidate.get("pr_url") or candidate.get("url") or ""
+        repo = candidate.get("repo") or ""
+        error_class = result_dict.get("error_class") or ""
+        # Build prs_tested entry
+        outcome = "KEEP" if status == "kept" else "REVERT"
+        ss = self.shared_state
+        entry = {
+            "repo": repo or (pr_url.split("/")[3] + "/" + pr_url.split("/")[4] if pr_url and len(pr_url.split("/")) > 4 else "unknown"),
+            "number": int(candidate.get("pr_number") or candidate.get("number") or 0),
+            "outcome": outcome,
+            "patch_file": str(patch_path),
+            "measured_gain_pct": float(delta_pct or 0.0),
+            "applicable_arch": list(getattr(ss, "model_architectures", None) or []),
+            "applicable_precision": str(getattr(ss, "precision", "") or ""),
+            "applicable_platform": "rocm",
+            "error_class": error_class if outcome == "REVERT" else "",
+            "notes": f"{outcome}: {candidate.get('title', patch_path)} ({delta_pct:+.1f}%)",
+            "source_session_id": self._source_session_id(),
+            "tested_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        # Read-modify-write prs_tested
+        try:
+            live = self._read_local_recipe_row()
+            existing_prs = list(live.get("prs_tested") or [])
+            existing_prs.append(entry)
+            self._kb_amend_recipe(recipe_overrides={"prs_tested": existing_prs})
+            log.info(
+                "framework: wrote prs_tested[%s] for %s (gain=%+.1f%%)",
+                outcome, patch_path, delta_pct,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("framework: prs_tested write failed")
+        # Real-time KG write-back: reflect this KEEP/REVERT as native link-graph
+        # edge(s) immediately so the live graph is queryable before the next
+        # mirror cron. Best-effort and native-only (see _emit_kg_decision).
+        self._emit_kg_decision(
+            patch_file=str(patch_path),
+            outcome=outcome,
+            gain_pct=float(delta_pct or 0.0),
+            error_class=str(error_class or ""),
+            archs=list(entry.get("applicable_arch") or []),
+        )
+
+    def _emit_kg_decision(
+        self,
+        *,
+        patch_file: str,
+        outcome: str,
+        gain_pct: float,
+        error_class: str,
+        archs: list[Any],
+    ) -> None:
+        """Emit a real-time KG edge for a KEEP/REVERT patch decision.
+
+        Mirrors the bulk kb-mirror's recipe edge mapping (a KEEP with a
+        positive gain becomes ``patch IMPROVES arch``; a REVERT becomes
+        ``patch REVERTED_ON arch``) so the live link graph reflects the
+        decision immediately, instead of only after the next mirror cron.
+
+        Native-only and best-effort: ``get_kg_client`` returns a native
+        client only when ``GBRAIN_KG_NATIVE`` is set (otherwise edges would
+        be written as a ``## Facts`` fence that gbrain ingest discards), and
+        all failures degrade silently via the ``*_safe`` wrappers so a KG
+        hiccup never affects the run.
+
+        Args:
+            patch_file: The patch identifier (edge subject).
+            outcome: ``KEEP`` or ``REVERT``.
+            gain_pct: Measured throughput delta (signed percent).
+            error_class: Failure class for a REVERT (edge ``error`` property).
+            archs: Applicable architectures (one edge per arch).
+        """
+        if not patch_file or not archs:
+            return
+        try:
+            from ..recipe_kb.kg_client import get_kg_client
+
+            kg = get_kg_client()
+            if kg is None or not getattr(kg, "_native", False) or not kg.is_available():
+                return
+            ss = self.shared_state
+            hw = str(getattr(ss, "gpu_type", "") or getattr(ss, "hardware", "") or "")
+            fw = str(getattr(ss, "framework", "") or "")
+            for raw_arch in archs:
+                arch = str(raw_arch or "").strip()
+                if not arch:
+                    continue
+                if outcome == "KEEP" and gain_pct > 0:
+                    kg.emit_fact_safe(
+                        page_slug="",
+                        subject=patch_file,
+                        predicate="IMPROVES",
+                        object=arch,
+                        properties={"gain": f"{gain_pct:+.1f}%", "hw": hw, "fw": fw},
+                    )
+                elif outcome == "REVERT":
+                    kg.emit_fact_safe(
+                        page_slug="",
+                        subject=patch_file,
+                        predicate="REVERTED_ON",
+                        object=arch,
+                        properties={"loss": f"{gain_pct:.1f}%", "error": error_class, "hw": hw, "fw": fw},
+                    )
+            log.info("kg write-back: emitted %s edge(s) for %s [%s]", len(archs), patch_file, outcome)
+        except Exception as exc:  # noqa: BLE001 - write-back is advisory
+            log.warning("kg write-back degraded: %s", exc)
+
+    def _record_framework_agent_phase_done(
         self,
         *,
         reason: str,
         failure_count: int,
     ) -> None:
-        """Append a framework_pr_phase_done row to phase_history describing why the pump gave up.
+        """Append a framework_agent_phase_done row to phase_history describing why the pump gave up.
 
         Args:
             reason: Human-readable reason the phase ended.
@@ -3086,21 +4002,59 @@ class Coordinator:
             if not isinstance(history, list):
                 return
             from . import framework_agent_client as _fa_client
+            from .framework_agent_artifacts import summarize_candidate_outcomes
+
+            # Step 1: classify this phase's candidate outcomes so the report /
+            # robustness can tell "discovered nothing" (empty_discovery) apart
+            # from "tested candidates but none kept" (tested_no_keep).
+            summary = summarize_candidate_outcomes(
+                getattr(state, "framework_agent_phase_progress", None),
+            )
+            outcome_class = str(summary.get("outcome_class") or "empty_discovery")
+
+            # Consecutive empty-discovery tracking → advisory ("framework phase
+            # ineffective"). Reset the streak the moment a phase tested anything.
+            prev_empty = int(getattr(state, "framework_consecutive_empty_discoveries", 0) or 0)
+            if outcome_class == "empty_discovery":
+                consecutive_empty = prev_empty + 1
+            else:
+                consecutive_empty = 0
+            state.framework_consecutive_empty_discoveries = consecutive_empty
+
+            advisory = ""
+            if outcome_class == "empty_discovery" and consecutive_empty >= 2:
+                advisory = (
+                    f"framework phase ineffective: {consecutive_empty} consecutive "
+                    "macro-cycles discovered zero candidates"
+                )
+            elif outcome_class == "tested_no_keep":
+                advisory = (
+                    "framework phase tested candidates but none cleared the gate "
+                    f"(tested={summary.get('tested')}, keeps=0)"
+                )
+            if advisory:
+                log.warning("FRAMEWORK advisory: %s", advisory)
 
             history.append(
                 {
-                    "event": "framework_pr_phase_done",
+                    "event": "framework_agent_phase_done",
                     "reason": reason,
                     "failure_count": int(failure_count),
                     "retry_limit": int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
-                    "batches_discovered": len(getattr(state, "framework_pr_batches", None) or []),
+                    "batches_discovered": len(getattr(state, "framework_agent_batches", None) or []),
+                    "outcome_class": outcome_class,
+                    "candidate_outcomes": summary.get("by_status") or {},
+                    "keeps": int(summary.get("keeps") or 0),
+                    "tested": int(summary.get("tested") or 0),
+                    "consecutive_empty_discoveries": consecutive_empty,
+                    "advisory": advisory,
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
             )
         except Exception:  # noqa: BLE001 — defensive
             pass
 
-    async def _discover_next_framework_pr_batch(self) -> bool:
+    async def _discover_next_framework_batch(self) -> bool:
         """Call ``fa phase-discover`` and append a batch to SharedState. Returns True iff a non-empty batch was appended; transient failures return False (see DISCOVER_FAILURE_RETRY_LIMIT).
 
         Returns:
@@ -3164,13 +4118,13 @@ class Coordinator:
         if not gaps:
             gaps = [{"gap_canonical_id": "", "gap_description": ""}]
         timeout_sec = float(
-            getattr(self, "framework_pr_discover_timeout_sec", 0.0) or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
+            getattr(self, "framework_agent_discover_timeout_sec", 0.0) or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
         )
         max_candidates = (
-            int(getattr(state, "framework_pr_max_candidates", 0) or 0) or DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES
+            int(getattr(state, "framework_max_candidates", 0) or 0) or DEFAULT_FRAMEWORK_MAX_CANDIDATES
         )
         # Cross-repo: query every pr_intel_specialist repo so discovery isn't confined to one framework repo.
-        repo_urls = self._framework_pr_discover_repo_urls(framework)
+        repo_urls = self._framework_agent_discover_repo_urls(framework)
         payload: dict[str, Any] | None = None
         merged_candidates: list[dict[str, Any]] = []
         batch_id = ""
@@ -3178,7 +4132,7 @@ class Coordinator:
         last_exc: Exception | None = None
         # Spread the phase timeout across repos so one slow repo can't blow the whole budget.
         per_repo_timeout = timeout_sec / float(len(repo_urls)) if repo_urls else timeout_sec
-        per_repo_timeout = max(per_repo_timeout, _FRAMEWORK_PR_MIN_PER_REPO_TIMEOUT_SEC)
+        per_repo_timeout = max(per_repo_timeout, _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC)
         for repo_url in repo_urls:
             try:
                 repo_payload = await _fa_client.phase_discover(
@@ -3190,6 +4144,7 @@ class Coordinator:
                     repo_url=repo_url,
                     keywords=directed_keywords,
                     max_candidates=max_candidates,
+                    pr_states=["open", "merged", "closed"],
                     timeout_sec=per_repo_timeout,
                 )
             except Exception as exc:  # noqa: BLE001 — defensive
@@ -3209,8 +4164,8 @@ class Coordinator:
             if isinstance(repo_cands, list):
                 merged_candidates.extend(c for c in repo_cands if isinstance(c, dict))
         if not any_call_ok:
-            failures = int(getattr(state, "framework_pr_discover_failures", 0) or 0) + 1
-            state.framework_pr_discover_failures = failures
+            failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0) + 1
+            state.framework_agent_discover_failures = failures
             log.warning(
                 "fa phase-discover failed across all %d repo(s) (attempt %d/%d): %r",
                 len(repo_urls),
@@ -3223,7 +4178,7 @@ class Coordinator:
                 if isinstance(history, list):
                     history.append(
                         {
-                            "event": "framework_pr_discover_failed",
+                            "event": "framework_agent_discover_failed",
                             "attempt": failures,
                             "limit": _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
                             "error": repr(last_exc),
@@ -3236,13 +4191,13 @@ class Coordinator:
             return False
         # Successful call — reset failure counter regardless of whether
         # the payload contained candidates.
-        if int(getattr(state, "framework_pr_discover_failures", 0) or 0) != 0:
-            state.framework_pr_discover_failures = 0
+        if int(getattr(state, "framework_agent_discover_failures", 0) or 0) != 0:
+            state.framework_agent_discover_failures = 0
         if not merged_candidates:
             return False
         batch_id = str((payload or {}).get("batch_id") or "")
         # Cross-batch + cross-repo de-dup so the new batch only carries genuinely new PRs.
-        seen_ids = self._framework_pr_known_candidate_ids()
+        seen_ids = self._framework_known_candidate_ids()
         primary_repo_url = repo_urls[0] if repo_urls else ""
         # Normalise each candidate for consistent executor fields + a stable progress-ledger id.
         norm: list[dict[str, Any]] = []
@@ -3272,22 +4227,22 @@ class Coordinator:
             "candidates": norm,
             "max_gain_pct_observed_in_batch": 0.0,
         }
-        if not isinstance(state.framework_pr_batches, list):
-            state.framework_pr_batches = []
-        state.framework_pr_batches.append(batch_entry)
+        if not isinstance(state.framework_agent_batches, list):
+            state.framework_agent_batches = []
+        state.framework_agent_batches.append(batch_entry)
         state.save(self.session_dir)
         log.info(
-            "FRAMEWORK_PR: discovered batch=%s with %d candidates",
+            "FRAMEWORK: discovered batch=%s with %d candidates",
             batch_id or "<unset>",
             len(norm),
         )
         return True
 
-    async def _enqueue_framework_pr_task(self, candidate: dict[str, Any]) -> None:
-        """Enqueue a single ``framework_pr`` task for ``candidate``.
+    async def _enqueue_framework_agent_task(self, candidate: dict[str, Any]) -> None:
+        """Enqueue a single ``framework`` task for ``candidate``.
 
         Builds the task params (candidate, batch id, baseline throughput,
-        framework) and creates an idempotent ``framework_pr`` task holding the
+        framework) and creates an idempotent ``framework`` task holding the
         server / workspace / benchmark lanes. On enqueue failure, records an
         ``enqueue_failed`` progress row so the pump skips the candidate next
         tick instead of spinning.
@@ -3302,12 +4257,15 @@ class Coordinator:
             "batch_id": candidate.get("batch_id") or "",
             "base_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
+            # Step 4 / Q5: source patches require the accuracy gate for KEEP.
+            "require_accuracy_for_keep": True,
+            "accuracy_baseline": float(getattr(state, "baseline_accuracy", 0.0) or 0.0),
         }
         cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or "")
-        idem = f"framework_pr:{candidate.get('batch_id', '')}:{cand_id}"
+        idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
         try:
             await self.tasks.create_or_return_existing(
-                kind="framework_pr",
+                kind="framework_agent",
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=[
@@ -3317,21 +4275,21 @@ class Coordinator:
                 ],
             )
             log.info(
-                "FRAMEWORK_PR: enqueued candidate=%s batch=%s",
+                "FRAMEWORK: enqueued candidate=%s batch=%s",
                 cand_id,
                 candidate.get("batch_id") or "",
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.warning(
-                "FRAMEWORK_PR: failed to enqueue candidate=%s: %r",
+                "FRAMEWORK: failed to enqueue candidate=%s: %r",
                 cand_id,
                 exc,
             )
             # Record enqueue_failed progress row so the candidate is skipped next tick (else the loop spins).
-            progress = getattr(state, "framework_pr_phase_progress", None)
+            progress = getattr(state, "framework_agent_phase_progress", None)
             if not isinstance(progress, list):
                 progress = []
-                state.framework_pr_phase_progress = progress
+                state.framework_agent_phase_progress = progress
             progress.append(
                 {
                     "candidate_id": cand_id,
@@ -3347,7 +4305,7 @@ class Coordinator:
     _CRITIC_PRIORS_DECISION_TAIL: int = 5
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
 
-    def _collect_framework_pr_priors(self) -> dict[str, Any]:
+    def _collect_framework_agent_candidate_priors(self) -> dict[str, Any]:
         """Return compact session-local priors for the Critic gate (recent_decisions + recent_outcomes); best-effort.
 
         Returns:
@@ -3358,7 +4316,7 @@ class Coordinator:
         state = self.shared_state
         decisions: list[dict[str, Any]] = []
         try:
-            raw_decisions = getattr(state, "framework_pr_critic_decisions", None) or []
+            raw_decisions = getattr(state, "framework_agent_critic_decisions", None) or []
             for row in raw_decisions[-self._CRITIC_PRIORS_DECISION_TAIL :]:
                 if not isinstance(row, dict):
                     continue
@@ -3373,7 +4331,7 @@ class Coordinator:
             decisions = []
         outcomes: list[dict[str, Any]] = []
         try:
-            raw_progress = getattr(state, "framework_pr_phase_progress", None) or []
+            raw_progress = getattr(state, "framework_agent_phase_progress", None) or []
             terminal = {"kept", "reverted", "no_patch", "enqueue_failed", "critic_denied"}
             tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
             for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
@@ -3391,14 +4349,14 @@ class Coordinator:
             "recent_outcomes": outcomes,
         }
 
-    async def _critic_review_framework_pr_candidate(
+    async def _critic_review_framework_agent_candidate(
         self,
         candidate: dict[str, Any],
     ) -> dict[str, str]:
         """Ask the Critic backend whether to apply ``candidate``.
 
         Returns {"verdict": "approve"|"reject"|"abstain", "rationale": str}. abstain is the safe degraded
-        path (treated as approve by caller); decisions cached in framework_pr_critic_decisions for resume.
+        path (treated as approve by caller); decisions cached in framework_agent_critic_decisions for resume.
 
         Args:
             candidate: The discovered PR candidate to review.
@@ -3413,7 +4371,7 @@ class Coordinator:
             candidate.get("candidate_id") or candidate.get("pr_url") or "",
         )
         # Resume-safe cache lookup.
-        cached = getattr(state, "framework_pr_critic_decisions", None)
+        cached = getattr(state, "framework_agent_critic_decisions", None)
         if isinstance(cached, list):
             for row in cached:
                 if not isinstance(row, dict):
@@ -3429,10 +4387,10 @@ class Coordinator:
         # Proposal-formatted prompt for both Mock + Agent critic backends; deterministic all-hex msg_id
         # from candidate id so MockCriticBackend's [a-f0-9]+ regex + dedupe set stay consistent.
         msg_id = hashlib.md5(
-            f"framework_pr:{cand_id}".encode(),
+            f"framework:{cand_id}".encode(),
         ).hexdigest()
         payload = {
-            "action": "framework_pr",
+            "action": "framework_agent",
             "candidate": {
                 "candidate_id": cand_id,
                 "pr_url": str(candidate.get("pr_url") or ""),
@@ -3446,7 +4404,7 @@ class Coordinator:
             },
             "batch_id": candidate.get("batch_id") or "",
             # Session-local priors (classified candidates + apply/bench outcomes); bounded to keep prompt compact.
-            "priors": self._collect_framework_pr_priors(),
+            "priors": self._collect_framework_agent_candidate_priors(),
         }
         prompt = f"seq=1 msg_id={msg_id} from=coordinator topic=proposal payload={json.dumps(payload, sort_keys=True)}"
         verdict_row: dict[str, str] = {
@@ -3462,7 +4420,7 @@ class Coordinator:
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.warning(
-                "FRAMEWORK_PR: critic call failed for candidate=%s: %r",
+                "FRAMEWORK: critic call failed for candidate=%s: %r",
                 cand_id,
                 exc,
             )
@@ -3496,10 +4454,10 @@ class Coordinator:
                     ),
                 }
                 break
-        decisions = getattr(state, "framework_pr_critic_decisions", None)
+        decisions = getattr(state, "framework_agent_critic_decisions", None)
         if not isinstance(decisions, list):
             decisions = []
-            state.framework_pr_critic_decisions = decisions
+            state.framework_agent_critic_decisions = decisions
         decisions.append(
             {
                 "candidate_id": cand_id,
@@ -3513,29 +4471,33 @@ class Coordinator:
         return verdict_row
 
     async def _maybe_reprofile_for_kernel(self) -> None:
-        """Re-run profile+TraceLens inline on any change in projected tput vs the last profiled snapshot, so GEAK targets the current bottleneck."""
-        last_rl = float(getattr(self.shared_state, "last_roofline_tput", 0.0) or 0.0)
+        """Reprofile inline when projected tput diverges from the last measured trace, so GEAK targets the live bottleneck."""
+        before = self._last_measured_roofline_tput()
         cur = self._current_tput_from_validated_gain()
-        if last_rl <= 0 or cur <= 0:
+        if cur <= 0:
             return
-        # Reprofile on ANY material change (rise or fall) since the last roofline;
-        # a stack revert can lower validated tput, which must also re-target GEAK.
-        if abs(cur - last_rl) / last_rl < self._REPROFILE_CHANGE_TOL:
+        # With a measured trace, reprofile only on a material change; with none,
+        # fall through so GEAK still gets a real trace.
+        if before > 0 and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL:
             return
-        # State-version the idempotency reason on the validated-gain stack so a
-        # genuine change re-runs (new key) while an unchanged state dedupes.
         stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
         try:
             await self.sub.run_task(
                 await self._enqueue_internal_analysis_task(reason=f"kernel_entry_g{stack_len}")
             )
-            self.shared_state.last_roofline_tput = self._current_tput_from_validated_gain()
-            self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
             log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
+            return
+        # Advance the anchor only when a new snapshot actually landed.
+        after = self._last_measured_roofline_tput()
+        if after > 0 and after != before:
+            self.shared_state.last_roofline_tput = after
+            self.shared_state.save(self.session_dir)
+        else:
+            log.warning("kernel-entry reprofile produced no new snapshot; GEAK targets existing trace")
 
     def _perfskills_enabled(self) -> bool:
-        """Whether the KERNEL phase is delegated to the PerfSkills e2e optimizer.
+        """Whether the KERNEL_AGENT phase is delegated to the PerfSkills e2e optimizer.
 
         The single source of truth is the kernel backend order
         (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``): when
@@ -3570,7 +4532,7 @@ class Coordinator:
             )
             return
         if self._perfskills_enabled():
-            # PerfSkills owns the whole KERNEL phase: one in-process e2e run
+            # PerfSkills owns the whole KERNEL_AGENT phase: one in-process e2e run
             # seeded with the EXPLORE best config, then hand straight to SWEEP
             # (which reuses PerfSkills' final_launch.sh + bench_e2e.sh).
             await self._run_perfskills_kernel_phase(from_phase=from_phase)
@@ -3610,7 +4572,7 @@ class Coordinator:
         status = str(result.get("status") or "unknown")
         await self.bus.append_and_seq(
             Message.new(
-                "kernel",
+                "kernel_agent",
                 "orchestration",
                 "response",
                 {
@@ -3644,7 +4606,7 @@ class Coordinator:
         knobs Magpie benched with) and falls back to the process env. Returns
         only the keys that resolve so absent values leave PerfSkills on its own
         standalone defaults. Never raises — 口径 propagation must not block the
-        KERNEL phase.
+        KERNEL_AGENT phase.
         """
         envs: dict[str, Any] = {}
         try:
@@ -3685,7 +4647,7 @@ class Coordinator:
     def _perfskills_timeouts(self) -> tuple[int, int, bool]:
         """Resolve the PerfSkills e2e timeouts from the live run budget.
 
-        The KERNEL phase-entry hook runs PerfSkills synchronously, so a fixed
+        The KERNEL_AGENT phase-entry hook runs PerfSkills synchronously, so a fixed
         subprocess default would (a) ignore ``--max-hours`` / the run deadline
         and (b) keep the tick loop from reaching the deadline → closing-phase
         check until it returns. To stay inside the budget we cap the run so it
@@ -3705,7 +4667,7 @@ class Coordinator:
         # deadline is set (budget_known=False) — e.g. a unit test invoking the
         # hook directly, or PerfSkills run outside an orchestrated session. When
         # Hyperloom DRIVES the run (deadline known) the budget MUST come from
-        # Hyperloom's live deadline / KERNEL phase allocation, so this default
+        # Hyperloom's live deadline / KERNEL_AGENT phase allocation, so this default
         # never caps a Hyperloom-driven run (a long --max-hours session can
         # legitimately allot KERNEL more than 12h).
         env_default_timeout = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "43200"))
@@ -3720,7 +4682,7 @@ class Coordinator:
         # Reserve the closing window: the subprocess (incl. result.json flush)
         # must be killed with at least ``grace`` left so closing can still run.
         kill_budget = remaining - grace
-        # Also honour the KERNEL phase's own wall-clock budget: PerfSkills runs
+        # Also honour the KERNEL_AGENT phase's own wall-clock budget: PerfSkills runs
         # synchronously inside the phase-entry hook, so a run longer than the
         # phase allocation would overrun the phase budget the same way it would
         # overrun the session deadline. Cap by min(session, kernel_phase).
@@ -3738,7 +4700,7 @@ class Coordinator:
         return runner_timeout, kill_timeout, True
 
     async def _run_perfskills_kernel_phase(self, *, from_phase: str) -> None:
-        """Delegate the KERNEL phase to PerfSkills (one whole-pipeline e2e run).
+        """Delegate the KERNEL_AGENT phase to PerfSkills (one whole-pipeline e2e run).
 
         Builds a handoff from the EXPLORE best config, runs the PerfSkills
         runner out-of-process (it owns all Claude-SDK / Workflow detail),
@@ -3945,7 +4907,7 @@ class Coordinator:
                         kill_timeout)
             # The graceful SIGTERM gives run_e2e a window to flush result.json
             # (recover-from-disk). If it landed a real win, keep it instead of
-            # discarding the whole KERNEL phase as a timeout.
+            # discarding the whole KERNEL_AGENT phase as a timeout.
             recovered = _read_perfskills_result(result_path)
             if recovered.get("status") == "ok":
                 log.info("PerfSkills flushed an OK result.json under SIGTERM "
@@ -3997,7 +4959,7 @@ class Coordinator:
         })
         state.save(self.session_dir)
         await self.bus.append_and_seq(Message.new(
-            "kernel", "orchestration", "response",
+            "kernel_agent", "orchestration", "response",
             {
                 "in_reply_to": "",
                 "kind": "perfskills_e2e_done",
@@ -4320,6 +5282,65 @@ class Coordinator:
             self._promote_gemm_tuning_keep(result)
         self.shared_state.save(self.session_dir)
 
+    def _journal_gemm_tuning_keep(
+        self,
+        entry: dict[str, Any],
+        *,
+        task_id: str = "",
+    ) -> None:
+        """Mirror an adopted GEMM-tuning stack entry as an optimization_journal KEEP row.
+
+        GEMM-tuning adoptions previously landed only in ``optimization_stack``
+        / ``roofline_progress.trajectory`` and never as a ``phase_timeline``
+        event. As a result the run's serving throughput was invisible to the
+        timeline (and to downstream throughput-attempt series that read the
+        flat phase_timeline). Emitting a KEEP journal row — carrying the
+        end-to-end ``throughput_after`` plus the originating ``task_id`` for
+        token attribution — closes that gap so the GEMM tuning point shows up
+        alongside every other attempt. Best-effort: journaling failures never
+        abort the run.
+
+        Args:
+            entry: The ``optimization_stack`` entry just appended for this
+                GEMM-tuning adoption (carries variant_name / tput / gain_pct /
+                backend / tuned_file / ts).
+            task_id: Originating task id used to join per-step token spend.
+        """
+        try:
+            journal = self._ensure_journal()
+            variant_name = str(entry.get("variant_name") or "gemm_tuning")
+            backend = str(entry.get("backend") or "").strip().lower()
+            try:
+                tput = float(entry["tput"]) if entry.get("tput") is not None else None
+            except (TypeError, ValueError):
+                tput = None
+            try:
+                gain_pct = float(entry["gain_pct"]) if entry.get("gain_pct") is not None else None
+            except (TypeError, ValueError):
+                gain_pct = None
+            metrics: dict[str, Any] = {}
+            if entry.get("tuned_file"):
+                metrics["tuned_file"] = str(entry.get("tuned_file"))
+            journal.append_entry(
+                JournalEntry(
+                    phase=self._journal_entry_phase(),
+                    iter=int(self.shared_state.tick or 0),
+                    kind=KIND_GEMM_TUNING,
+                    change=variant_name,
+                    outcome=OUTCOME_KEEP,
+                    gain_pct=gain_pct,
+                    throughput_after=tput,
+                    task_id=str(task_id or ""),
+                    variant_name=variant_name,
+                    ts=str(entry.get("ts") or ""),
+                    provenance=f"gemm_tuning:{backend}" if backend else "gemm_tuning",
+                    tick=int(self.shared_state.tick or 0),
+                    metrics=metrics,
+                )
+            )
+        except Exception:  # noqa: BLE001 — journaling is best-effort
+            log.exception("gemm_tuning journal append failed")
+
     def _promote_gemm_tuning_keep(self, result: dict[str, Any]) -> None:
         """Promote a successful GEMM tuning run into the main gain ledger.
 
@@ -4414,6 +5435,9 @@ class Coordinator:
                 variant_name=variant_name,
                 new_tput=tuned_tput,
                 ts=ts,
+            )
+            self._journal_gemm_tuning_keep(
+                entry, task_id=str(result.get("task_id") or ""),
             )
         self.shared_state.current_best = {
             "action": "gemm_tuning",
@@ -4591,6 +5615,9 @@ class Coordinator:
                     new_tput=new_tput,
                     ts=ts,
                 )
+                self._journal_gemm_tuning_keep(
+                    entry, task_id=f"gemm_tune_e2e_{tuner_name}",
+                )
             else:
                 reverted.append({**cand, "reason": f"decision={decision}, gain={gain_pct:.2f}%"})
 
@@ -4685,7 +5712,7 @@ class Coordinator:
             }
         await self.bus.append_and_seq(
             Message.new(
-                "kernel",
+                "kernel_agent",
                 "orchestration",
                 "response",
                 {
@@ -4728,6 +5755,20 @@ class Coordinator:
         except (TypeError, ValueError):
             gain = 0.0
         return base * (1.0 + gain / 100.0)
+
+    def _last_measured_roofline_tput(self) -> float:
+        """Measured tok/s of the most recent roofline snapshot; 0.0 when none."""
+        snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
+        for snap in reversed(snaps):
+            if not isinstance(snap, dict):
+                continue
+            try:
+                tput = float(snap.get("achieved_tok_per_sec") or 0.0)
+            except (TypeError, ValueError):
+                tput = 0.0
+            if tput > 0:
+                return tput
+        return 0.0
 
     def _needs_roofline_for_watermark(self) -> bool:
         """True iff projected tput crossed the 10% watermark over ``last_roofline_tput`` (bootstrap guard: False until PRELUDE roofline ran; re-arm guard: False while auto_roofline_pending_task_id is in-flight).
@@ -4930,6 +5971,81 @@ class Coordinator:
         state.warm_history_injected = True
         return added
 
+    def _filter_warm_patches_with_kg(
+        self,
+        patches: list,
+        advisory_blocked: list,
+        state: Any,
+    ) -> list:
+        """Filter replay patches using KG advisory blocks, expiry, conflicts.
+
+        Removes patches that are (a) advisory-blocked at/above the
+        configurable confidence threshold, (b) flagged ``expired`` by the
+        warm-start validity check, or (c) in a ``CONFLICTS_WITH`` relation
+        with another patch in the set. Best-effort: any failure returns the
+        input patches unchanged so replay never breaks on a KG hiccup.
+
+        Args:
+            patches: The candidate replay patches from ``recommended_replay``.
+            advisory_blocked: The ``advisory_blocked_patches`` list from the
+                warm-start context.
+            state: The live SharedState (for hardware/framework conditions).
+
+        Returns:
+            The filtered patch list.
+        """
+        if not patches:
+            return patches
+        try:
+            threshold = float(os.environ.get("WARM_REPLAY_ADVISORY_CONFIDENCE", "0.75"))
+        except (TypeError, ValueError):
+            threshold = 0.75
+
+        def _norm(value: Any) -> str:
+            return str(value or "").strip().replace(" ", "_").replace("/", "_").lower()
+
+        try:
+            advisory_drop = {
+                _norm(ab.get("patch_file"))
+                for ab in (advisory_blocked or [])
+                if isinstance(ab, dict) and float(ab.get("confidence") or 0.0) >= threshold
+            }
+            kept = [
+                p
+                for p in patches
+                if isinstance(p, dict)
+                and not p.get("expired")
+                and _norm(p.get("patch_file")) not in advisory_drop
+            ]
+            for p in patches:
+                if isinstance(p, dict) and _norm(p.get("patch_file")) in advisory_drop:
+                    log.info("warm-replay advisory block (conf>=%.2f): %s", threshold, p.get("patch_file"))
+
+            if len(kept) >= 2:
+                from ..recipe_kb.kg_client import get_kg_client
+
+                kg = get_kg_client()
+                if kg is not None and kg.is_available():
+                    knobs = [str(p.get("patch_file") or "") for p in kept]
+                    conflicts = kg.find_conflicts_safe(
+                        knobs=knobs,
+                        hardware=str(getattr(state, "gpu_type", "") or getattr(state, "hardware", "") or ""),
+                        framework=str(getattr(state, "framework", "") or ""),
+                    )
+                    drop = {_norm(c.get("knob")) for c in conflicts}
+                    if drop:
+                        for c in conflicts:
+                            log.info(
+                                "warm-replay conflict: %s conflicts_with %s",
+                                c.get("knob"),
+                                c.get("conflicts_with"),
+                            )
+                        kept = [p for p in kept if _norm(p.get("patch_file")) not in drop]
+            return kept
+        except Exception as exc:  # noqa: BLE001 - filtering is advisory only
+            log.warning("warm-replay KG patch filtering degraded: %s", exc)
+            return patches
+
     async def _maybe_enqueue_warm_replay(
         self,
         *,
@@ -5035,7 +6151,15 @@ class Coordinator:
             }
             state.warm_replay_attempted = True
             return None
-        if not bc_args and not bc_envs:
+        # Extract code patches from warm_start_context (populated by T0).
+        wsc_patches = (wsc.get("recommended_replay") or {}).get("patches") or [] if isinstance(wsc, dict) else []
+        wsc_blocked = wsc.get("blocked_patches") or [] if isinstance(wsc, dict) else []
+        wsc_advisory = wsc.get("advisory_blocked_patches") or [] if isinstance(wsc, dict) else []
+        # KG-driven filtering: drop high-confidence advisory blocks, expired
+        # patches, and graph-detected conflicts before replay. Best-effort —
+        # falls back to the unfiltered list on any KG failure.
+        wsc_patches = self._filter_warm_patches_with_kg(wsc_patches, wsc_advisory, state)
+        if not bc_args and not bc_envs and not wsc_patches:
             state.warm_replay_outcome = {
                 "status": "skipped",
                 "reason": "best_config_empty",
@@ -5086,6 +6210,9 @@ class Coordinator:
             "config_donor_tier": config_tier,
             "config_source": config_source,
             "baseline_tput_anchor": float(baseline_tput),
+            # Code patches to apply before server launch (from prs_tested[KEEP]).
+            "patches": list(wsc_patches),
+            "blocked_patches": list(wsc_blocked),
         }
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="replay_warm_recipe",
@@ -5183,6 +6310,25 @@ class Coordinator:
             outcome["reason"] = f"invalid_tput tput={single_round_tput} baseline={baseline_tput}"
             state.warm_replay_outcome = outcome
             state.save(self.session_dir)
+            return
+        # R3 — warm_replay reuses the BaselineExecutor but is an optimization
+        # candidate, not the baseline, so it must clear the image-quality gate
+        # against the pure baseline reference before promotion. A scriptable run
+        # whose gate ran and FAILED (passed=False / threshold violation vs the
+        # baseline reference) is rejected so a faster but quality-degrading warm
+        # config is never pushed onto the stack/current_best. ``require=False``
+        # keeps a missing/skipped gate non-blocking (parity with
+        # ``is_valid_measurement`` and the serving no-baseline accuracy skip).
+        from .action_executors._accuracy_gate import quality_gate_passed
+
+        qg = result.get("quality_gate")
+        if qg is not None and not quality_gate_passed(qg, require=False):
+            outcome["status"] = "quality_failed"
+            outcome["reason"] = "image-quality gate failed vs baseline reference"
+            outcome["quality_gate"] = qg
+            state.warm_replay_outcome = outcome
+            state.save(self.session_dir)
+            log.info("warm-replay REJECTED by quality gate: %s", qg)
             return
         measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
         min_reproduce = float(
@@ -6640,7 +7786,7 @@ class Coordinator:
             return None
         idempotency_key = f"internal-research-scout-round{int(round_id)}"
         try:
-            seen = sorted(self._framework_pr_known_candidate_ids())
+            seen = sorted(self._framework_known_candidate_ids())
         except Exception:  # noqa: BLE001 — defensive
             seen = list(getattr(self.shared_state, "research_scout_seen_pr_ids", []) or [])
         params: dict[str, Any] = {
@@ -6740,6 +7886,112 @@ class Coordinator:
     def _aggregate_research_evidence(self, done_payload: dict[str, Any]) -> None:
         """Thin forwarding shim — implementation in :class:`ResultRecorder`."""
         return self.recorder._aggregate_research_evidence(done_payload)
+
+    async def _enqueue_internal_static_recon_task(
+        self,
+        *,
+        reason: str,
+    ) -> "Task | None":
+        """Enqueue the Coordinator-owned read-only static-recon specialist task.
+
+        Mirrors :meth:`_enqueue_internal_research_scout_task` but seeds a source
+        -code reconnaissance mandate: the specialist greps the framework source
+        tree for un-bridged capability switches (predicates that silently
+        disable a faster path for the current model/GPU/precision). Read-only —
+        produces bridge candidates only; the EXPLORE freeform specialist authors
+        any patch under the normal KEEP gate. Idempotency keyed to the session
+        (PRELUDE one-shot). Returns None when disabled or enqueue fails.
+
+        Args:
+            reason: Tag distinguishing the enqueue site, recorded on the task.
+
+        Returns:
+            The created (or existing) specialist :class:`Task`, or ``None`` when
+            static-recon is disabled or enqueue fails.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "static_recon_enabled", True)):
+            return None
+        idempotency_key = "internal-static-recon-prelude"
+        params: dict[str, Any] = {
+            "domain": "static_recon_specialist",
+            "gap_canonical_id": "gap.static_recon.prelude",
+            "gap_symptom": (
+                "Grep the framework source for un-bridged capability switches "
+                "(predicates that silently disable a faster path for this "
+                "model/GPU/precision) and emit bridge candidates; do not "
+                "benchmark or patch."
+            ),
+            "gap_layer": "static_recon",
+            "source": "coordinator_internal",
+            "reason": str(reason),
+            # Read-only research lane (no worktree, no GPU lease).
+            "readonly": True,
+            "scope": "domain",
+            "mode": "research",
+            "lane": "cpu",
+        }
+        # Seed the curated checklist + its rendered prompt block for the current
+        # (model_class, gpu, precision). Best-effort; an empty checklist still
+        # runs a generic recon pass.
+        try:
+            from . import static_recon_checklist as _src_recon
+
+            _entries = _src_recon.entries_for(
+                model_class=str(getattr(state, "model_class", "") or ""),
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                precision=str(getattr(state, "precision", "") or ""),
+            )
+            _rendered = _src_recon.render_checklist_for_prompt(_entries)
+            if _rendered:
+                params["static_recon_checklist"] = _rendered
+            _dicts = _src_recon.checklist_as_dicts(_entries)
+            if _dicts:
+                params["static_recon_checklist_entries"] = _dicts
+        except Exception:  # noqa: BLE001 — advisory; never block dispatch
+            log.exception("static-recon: checklist seeding failed")
+        await self._warm_specialist_params(params)
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=params,
+                idempotency_key=idempotency_key,
+                requires_lanes=["research_lane"],
+                allowed_tools=[
+                    "Read",
+                    "Grep",
+                    "Glob",
+                    "Write",
+                ],
+                side_effects=["writes_results"],
+                lease_ttl_sec=1800,
+            )
+        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
+            log.exception("static-recon: enqueue failed")
+            return None
+        if not was_existing:
+            try:
+                state.static_recon_runs = int(getattr(state, "static_recon_runs", 0) or 0) + 1
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive bookkeeping
+                log.exception("static-recon: bookkeeping save failed")
+            log.info(
+                "static-recon dispatched: task_id=%s reason=%s",
+                task.task_id,
+                reason,
+            )
+        return task
+
+    async def _maybe_enqueue_prelude_static_recon(self) -> None:
+        """Force-dispatch the PRELUDE static-recon specialist (not LLM-proposable)."""
+        if not bool(getattr(self.shared_state, "static_recon_enabled", True)):
+            return
+        try:
+            await self._enqueue_internal_static_recon_task(
+                reason="prelude_initial",
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("static-recon: PRELUDE dispatch failed")
 
     async def _maybe_force_stalled_domain_specialist(self) -> None:
         """Hard-trigger: force-dispatch a domain specialist for a
@@ -6949,6 +8201,74 @@ class Coordinator:
                     cid,
                 )
 
+    def _consume_static_recon(self, done_payload: dict[str, Any]) -> None:
+        """Seed static-recon bridge candidates into gaps[] (idempotent, fail-soft).
+
+        Reads the specialist's ``recon`` block, validates each
+        ``bridge_candidate``, and upserts one gap per candidate so the EXPLORE
+        freeform specialist later dispatches against it with a precise mandate
+        (predicate location + consequence + bridge sketch). Read-only producer:
+        no patch is applied here; the normal KEEP gate still governs landing.
+
+        Args:
+            done_payload: The completed static-recon task payload; its ``recon``
+                block carries ``bridge_candidates``.
+        """
+        block = done_payload.get("recon")
+        if not isinstance(block, dict):
+            return
+        candidates = block.get("bridge_candidates")
+        if not isinstance(candidates, list):
+            return
+        seeded = 0
+        for idx, cand in enumerate(candidates):
+            if not isinstance(cand, dict):
+                continue
+            predicate_file = str(cand.get("predicate_file") or "").strip()
+            why = str(cand.get("why_disabled_here") or "").strip()
+            # Mirror the specialist's drop rule: a candidate without a source
+            # anchor + an explanation of the disabled branch is not actionable.
+            if not predicate_file or not why:
+                continue
+            raw_id = str(cand.get("id") or f"cand{idx}").strip() or f"cand{idx}"
+            slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw_id)[:80]
+            cid = f"gap.static_recon.{slug}"
+            predicate_name = str(cand.get("predicate_name") or "").strip()
+            consequence = str(cand.get("consequence") or "").strip()
+            bridge_sketch = str(cand.get("bridge_sketch") or "").strip()
+            domain_hint = str(cand.get("domain_hint") or "freeform").strip() or "freeform"
+            symptom_parts = [
+                f"Un-bridged switch in {predicate_file}"
+                + (f" ({predicate_name})" if predicate_name else "")
+                + f": {why}",
+            ]
+            if consequence:
+                symptom_parts.append(f"Consequence: {consequence}")
+            if bridge_sketch:
+                symptom_parts.append(f"Bridge: {bridge_sketch}")
+            symptom = " ".join(symptom_parts)[:1200]
+            try:
+                self.shared_state.upsert_gap(
+                    {
+                        "canonical_id": cid,
+                        "symptom": symptom,
+                        "layer": "static_recon",
+                        "severity": "medium",
+                        "domain_hint": domain_hint,
+                        "source": "static_recon",
+                        "provenance": predicate_file,
+                    }
+                )
+                seeded += 1
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("static-recon: upsert_gap failed for %s", cid)
+        if seeded:
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("static-recon: SharedState.save after seeding failed")
+        log.info("static-recon consumed: bridge_candidates_seeded=%d", seeded)
+
     async def _enqueue_internal_session_breakdown_task(
         self,
         *,
@@ -7084,17 +8404,17 @@ class Coordinator:
         await self.replay_for_resume()
         await self._resume_consistency_pass()
 
-    async def _pump_framework_pr_phase_safely(self, *, caller: str) -> None:
-        """Best-effort FRAMEWORK_PR pump wrapper shared by tick and run.
+    async def _pump_framework_agent_phase_safely(self, *, caller: str) -> None:
+        """Best-effort FRAMEWORK pump wrapper shared by tick and run.
 
         Args:
             caller: Label identifying the caller ("tick" / "run"), used only in
                 the failure log.
         """
         try:
-            await self._pump_framework_pr_phase()
+            await self._pump_framework_agent_phase()
         except Exception:  # noqa: BLE001 — defensive
-            log.exception("FRAMEWORK_PR pump (%s) failed", caller)
+            log.exception("FRAMEWORK pump (%s) failed", caller)
 
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for every agent (P0-3/P0-5/P1-4 tests); dispatcher pumps at pass end, lazy resume replay on tick 1.
@@ -7108,8 +8428,8 @@ class Coordinator:
             for name in self._tick_roles:
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
-            # FRAMEWORK_PR phase pump: enqueue next candidate / fetch next batch. Best-effort.
-            await self._pump_framework_pr_phase_safely(caller="tick")
+            # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch. Best-effort.
+            await self._pump_framework_agent_phase_safely(caller="tick")
             # phase machine advance at tick boundary.
             await self._advance_phase_if_needed()
 
@@ -7243,9 +8563,9 @@ class Coordinator:
                                 log.exception("Coordinator.run: orchestration checkpoint raised")
                     if not self._stop.is_set():
                         await self._pump_dispatcher_once()
-                    # FRAMEWORK_PR phase pump: see ``tick()`` for rationale.
+                    # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
                     if not in_closing:
-                        await self._pump_framework_pr_phase_safely(caller="run")
+                        await self._pump_framework_agent_phase_safely(caller="run")
                     # phase machine advance at tick boundary; runs even in_closing so CLOSE is recorded.
                     try:
                         await self._advance_phase_if_needed()
@@ -8093,14 +9413,11 @@ class Coordinator:
     def _sequence_denial_for_action(
         self,
         action_name: str,
-        proposed_params: dict[str, Any] | None = None,
     ) -> PolicyDenied | None:
-        """Reject orchestration action/delegate attempts before baseline. Only invariant: nothing runs until baseline_tput > 0 (a data-dependency). proposed_params kept for signature compat.
+        """Reject orchestration action/delegate attempts before baseline. Only invariant: nothing runs until baseline_tput > 0 (a data-dependency).
 
         Args:
             action_name: The proposed/delegated action name.
-            proposed_params: Optional action params; kept for signature
-                compatibility and not currently inspected.
 
         Returns:
             A :class:`PolicyDenied` when the action must wait for baseline, else
@@ -8137,7 +9454,7 @@ class Coordinator:
         """Reject kernel requests that skip the baseline prerequisite (invariant: nothing kernel-side runs before baseline_tput > 0).
 
         Args:
-            target_agent: The request's target agent; only ``"kernel"`` is
+            target_agent: The request's target agent; only ``"kernel_agent"`` is
                 gated.
             kind: The kernel request kind; ``trace_analyze`` and unknown kinds
                 are exempt.
@@ -8148,7 +9465,7 @@ class Coordinator:
         """
         target = str(target_agent or "").strip()
         req_kind = str(kind or "").strip()
-        if target != "kernel" or self.shared_state.stop_reason:
+        if target != "kernel_agent" or self.shared_state.stop_reason:
             return None
         if req_kind == "trace_analyze":
             return None
@@ -8272,7 +9589,7 @@ class Coordinator:
         return recipe_canonical_id(
             model=workload,
             hardware=hw,
-            framework=framework,
+            framework_name=framework,
             framework_version=framework_version,
             precision=precision,
             model_type=model_type,
@@ -8437,7 +9754,7 @@ class Coordinator:
             "updated_at",
             "model",
             "hardware",
-            "framework",
+            "framework_name",
             "framework_version",
             "precision",
             "best_config",
@@ -8471,7 +9788,7 @@ class Coordinator:
             "canonical_id": cid,
             "model": ss.model_name or "unknown_model",
             "hardware": ss.gpu_type or "unknown_gpu",
-            "framework": framework,
+            "framework_name": framework,
             "framework_version": framework_version,
             "precision": precision,
             "best_config": overrides.get("best_config")
@@ -8782,16 +10099,16 @@ class Coordinator:
         """Thin forwarding shim — implementation lives in :class:`IntentRouter`."""
         return await self.router._handle_delegate(source, intent)
 
-    def _record_framework_pr_authored_outcome(
+    def _record_framework_agent_authored_outcome(
         self,
         *,
         task: "Task",
         result: Any,
     ) -> None:
-        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK_PR progress ledger (else the gain is invisible). Attributed to the latest batch; only kept/reverted rows.
+        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger (else the gain is invisible). Attributed to the latest batch; only kept/reverted rows.
 
         Args:
-            task: The integrate_patch task carrying the FRAMEWORK_PR authoring
+            task: The integrate_patch task carrying the FRAMEWORK authoring
                 provenance markers.
             result: The task result; only ``kept``/``reverted`` statuses are
                 recorded.
@@ -8800,18 +10117,37 @@ class Coordinator:
         if not isinstance(res, dict):
             return
         status = str(res.get("status") or "")
-        if status not in ("kept", "reverted"):
+        # Record EVERY terminal integrate_patch outcome — not just keep/revert.
+        # A patch that fails to apply / bench (``apply_failed`` /
+        # ``bench_reverted`` / ``error`` …) is still a terminal verdict for the
+        # candidate; without a progress row the FRAMEWORK pump re-selects the
+        # same candidate every tick and livelocks (the authoring specialist's
+        # ``patches_written`` is non-empty so the empty-outcome bridge does not
+        # fire either). Only an empty / in-progress status is skipped.
+        if not status:
             return
         params = getattr(task, "params", None) or {}
+        # Resolve the FRAMEWORK candidate id (a PR URL) that this authored
+        # patch belongs to. The integrate_patch task carries only
+        # ``specialist_task_id``; map that back to the originating candidate via
+        # the dispatch-time map so the progress row is keyed on the same PR URL
+        # that ``_select_next_framework_agent_candidate`` checks. Falling back to a
+        # task_id here would leave the candidate looking unprocessed forever.
+        spec_tid = str(params.get("specialist_task_id") or "")
+        cand_map = getattr(self.shared_state, "framework_agent_specialist_candidate_map", None)
+        mapped_cand = ""
+        if isinstance(cand_map, dict) and spec_tid:
+            mapped_cand = str(cand_map.get(spec_tid) or "")
         cand_id = str(
-            params.get("framework_pr_candidate_id")
-            or params.get("specialist_task_id")
+            params.get("framework_agent_candidate_id")
+            or mapped_cand
+            or spec_tid
             or getattr(task, "task_id", "")
             or ""
         )
-        batch_id = str(params.get("framework_pr_batch_id") or "")
+        batch_id = str(params.get("framework_batch_id") or "")
         if not batch_id:
-            batches = getattr(self.shared_state, "framework_pr_batches", None) or []
+            batches = getattr(self.shared_state, "framework_agent_batches", None) or []
             if isinstance(batches, list) and batches and isinstance(batches[-1], dict):
                 batch_id = str(batches[-1].get("batch_id") or "")
         delta_pct = res.get("delta_pct")
@@ -8829,11 +10165,28 @@ class Coordinator:
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
-        if not isinstance(self.shared_state.framework_pr_phase_progress, list):
-            self.shared_state.framework_pr_phase_progress = []
-        self.shared_state.framework_pr_phase_progress.append(progress_entry)
+        if not isinstance(self.shared_state.framework_agent_phase_progress, list):
+            self.shared_state.framework_agent_phase_progress = []
+        self.shared_state.framework_agent_phase_progress.append(progress_entry)
+        try:
+            from .framework_agent_artifacts import write_decision_json
+
+            write_decision_json(
+                self.session_dir,
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status=status,
+                kept=status == "kept",
+                provenance="authored",
+                reason=str(res.get("reason") or ""),
+                gain_pct=gain,
+                accuracy_pass=res.get("accuracy_pass"),
+                extra={"specialist_task_id": str(params.get("specialist_task_id") or "")},
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("FRAMEWORK: authored decision.json write failed", exc_info=True)
         # Roll the batch max-gain stat the plateau judge reads.
-        batches = getattr(self.shared_state, "framework_pr_batches", None) or []
+        batches = getattr(self.shared_state, "framework_agent_batches", None) or []
         if isinstance(batches, list) and batch_id:
             for entry in reversed(batches):
                 if isinstance(entry, dict) and str(entry.get("batch_id") or "") == batch_id:
@@ -8845,15 +10198,132 @@ class Coordinator:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
-                "FRAMEWORK_PR authored-outcome: save failed for task=%s",
+                "FRAMEWORK authored-outcome: save failed for task=%s",
                 getattr(task, "task_id", "?"),
             )
         log.info(
-            "FRAMEWORK_PR: authored patch outcome candidate=%s batch=%s status=%s gain=%.2f%%",
+            "FRAMEWORK: authored patch outcome candidate=%s batch=%s status=%s gain=%.2f%%",
             cand_id,
             batch_id,
             status,
             gain,
+        )
+
+    def _record_framework_agent_authoring_empty_outcome(
+        self,
+        *,
+        task: "Task",
+        done_payload: dict[str, Any] | None,
+    ) -> None:
+        """Record a terminal FRAMEWORK row when an authoring specialist finishes WITHOUT a patch.
+
+        The authored-patch bridge (`_record_framework_agent_authored_outcome`)
+        only fires on a following ``integrate_patch`` task. An *empty*
+        deliverable (specialist judged the PR already-present / not-applicable,
+        ``patches_written == []``) never produces an ``integrate_patch``, so
+        without this hook the candidate is never marked processed and
+        `_select_next_framework_agent_candidate` re-selects it every tick (the
+        FRAMEWORK pump livelocks re-dispatching the same candidate). Here we
+        stamp a `framework_agent_phase_progress` row + `decision.json` so the pump
+        advances. Idempotent: a candidate that already has a row is skipped.
+
+        Args:
+            task: The completed authoring specialist task (carries the
+                ``framework_*`` provenance markers).
+            done_payload: The specialist's ``specialist_done`` payload.
+        """
+        params = getattr(task, "params", None) or {}
+        if not bool(params.get("framework_agent_authoring")):
+            return
+        if (self.shared_state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return
+        payload = done_payload if isinstance(done_payload, dict) else {}
+        inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
+        # The downstream integrate_patch (and thus the authored-outcome bridge
+        # that owns the terminal row) is created by
+        # ``_maybe_autosubmit_specialist_patches``, which fires IFF
+        # ``patches_written`` (post safety-vetting) is non-empty. So this
+        # empty-outcome bridge MUST use the SAME signal: if ``patches_written``
+        # is non-empty an integrate_patch will follow and owns the row — do
+        # nothing here. If it is empty we must stamp the terminal row, REGARDLESS
+        # of ``proposal_set``. The dangerous case this guards: a specialist
+        # authors a patch (proposal_set non-empty) that safety-vetting then
+        # DROPS as unusable (missing_target / forbidden_fields), emptying
+        # ``patches_written``. Autosubmit then creates no integrate_patch, so
+        # without stamping here the candidate has no terminal row and the
+        # FRAMEWORK pump re-dispatches it forever (gap-5 livelock).
+        patches = inner.get("patches_written") or []
+        if isinstance(patches, list) and patches:
+            return
+        # Relaxed FRAMEWORK rule: a config-lever deliverable (proposal_set
+        # carrying extra_args / extra_envs) is a FULL result, not "empty". When
+        # one exists, ``_maybe_autosubmit_framework_config`` routes it through
+        # integrate_patch (which owns the terminal row), so do NOT stamp an
+        # authored_empty row here.
+        if _framework_config_levers_from_done(inner):
+            return
+        cand_id = str(params.get("framework_agent_candidate_id") or "")
+        if not cand_id:
+            return
+        batch_id = str(params.get("framework_batch_id") or "")
+        if not isinstance(self.shared_state.framework_agent_phase_progress, list):
+            self.shared_state.framework_agent_phase_progress = []
+        already = {
+            str(p.get("candidate_id") or "")
+            for p in self.shared_state.framework_agent_phase_progress
+            if isinstance(p, dict)
+        }
+        if cand_id in already:
+            return
+        # Map the cached audit verdict to a terminal status.
+        audit = params.get("framework_audit") if isinstance(params.get("framework_audit"), dict) else {}
+        sem = str((audit or {}).get("semantic_status") or "").strip().lower()
+        if sem in ("already_equivalent", "already_superset"):
+            status = "already_present"
+        elif sem in ("not_present", "partially_present"):
+            status = "not_applicable"
+        else:
+            status = "author_empty"
+        reason = str(inner.get("summary") or "").strip()[:500]
+        progress_entry = {
+            "candidate_id": cand_id,
+            "pr_url": "",
+            "status": status,
+            "provenance": "authored_empty",
+            "kept": False,
+            "gain_pct": 0.0,
+            "batch_id": batch_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        self.shared_state.framework_agent_phase_progress.append(progress_entry)
+        try:
+            from .framework_agent_artifacts import write_decision_json
+
+            write_decision_json(
+                self.session_dir,
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status=status,
+                kept=False,
+                provenance="authored_empty",
+                reason=reason,
+                gain_pct=0.0,
+                extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("FRAMEWORK: authored-empty decision.json write failed", exc_info=True)
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "FRAMEWORK authored-empty: save failed for task=%s",
+                getattr(task, "task_id", "?"),
+            )
+        log.info(
+            "FRAMEWORK: authoring specialist empty deliverable candidate=%s batch=%s status=%s",
+            cand_id,
+            batch_id,
+            status,
         )
 
     async def _fan_out_specialist_wave(
@@ -9095,6 +10565,20 @@ class Coordinator:
             params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
         if state.warm_start_lessons and "warm_start_lessons" not in params:
             params["warm_start_lessons"] = list(state.warm_start_lessons)
+        # KG graph-recommended knobs (cross-recipe IMPROVES candidates from the
+        # T0 warm-start context); advisory positive priors for the specialist.
+        if "kg_recommended_knobs" not in params:
+            wsc = getattr(state, "warm_start_context", None) or {}
+            kg_knobs = wsc.get("recommended_knobs") if isinstance(wsc, dict) else None
+            if kg_knobs:
+                params["kg_recommended_knobs"] = [k for k in kg_knobs if isinstance(k, dict)]
+        # KG graph-guided config knobs (journal KNOB_IMPROVES, runnable args/envs);
+        # only present when GBRAIN_KG_GUIDED enabled the T0 enhancement.
+        if "kg_guided_knobs" not in params:
+            wsc = getattr(state, "warm_start_context", None) or {}
+            guided = wsc.get("graph_guided_knobs") if isinstance(wsc, dict) else None
+            if guided:
+                params["kg_guided_knobs"] = [k for k in guided if isinstance(k, dict)]
         # runtime framework/version so the prompt's _format_version_note annotates version-mismatched lessons.
         if "framework" not in params:
             fw = str(getattr(state, "framework", "") or "").strip()
@@ -9109,7 +10593,7 @@ class Coordinator:
                     if v and v != "unknown":
                         params["framework_version"] = v
 
-        # Local-source navigation hint — same source the kernel agent uses for source_file containment.
+        # Local-source navigation hint — same source the Kernel-agent uses for source_file containment.
         if "framework_source_roots" not in params:
             try:
                 from .framework_paths import resolve_source_file_allowlist
@@ -9148,6 +10632,30 @@ class Coordinator:
             _arch_notes = render_model_arch_compact(getattr(state, "model_arch", None))
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
+
+        # Static-recon specialist extras: structured model_info (machine-parseable
+        # companion to arch_notes) + checklist-derived source-hint directories so
+        # the recon focus block can gate + navigate. Other domains unaffected.
+        if domain == "static_recon_specialist":
+            if "model_info" not in params:
+                _minfo = getattr(state, "model_info", None)
+                if isinstance(_minfo, dict) and _minfo:
+                    params["model_info"] = dict(_minfo)
+            if "source_hint_directories" not in params:
+                try:
+                    from . import static_recon_checklist as _src_recon
+
+                    _dirs = _src_recon.source_hint_directories_for(
+                        model_class=str(getattr(state, "model_class", "") or ""),
+                        gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                        precision=str(getattr(state, "precision", "") or ""),
+                    )
+                    if _dirs:
+                        params["source_hint_directories"] = list(_dirs)
+                except Exception:  # noqa: BLE001 — advisory; never block dispatch
+                    log.exception(
+                        "static-recon: source_hint_directories lookup failed",
+                    )
 
         if "target_gap_notes" not in params:
             try:
@@ -9219,7 +10727,7 @@ class Coordinator:
                 "hot_kernels_top15": hot_kernels,
             }
 
-        # PR discovery lives in the FRAMEWORK_PR phase pump.
+        # PR discovery lives in the FRAMEWORK_AGENT phase pump.
 
         # proposal_set cap into params so SpecialistRunner reads it; setdefault lets a delegate shrink it.
         from inference_optimizer.orchestrator.policy import (
@@ -9406,9 +10914,9 @@ class Coordinator:
         """
         a = str(action or "").strip().lower()
         if a in {"kernel_opt", "integrate", "trace_analyze", "run_gemm_tuning", "run_optimization"}:
-            return ("kernel", "kernel_switch_specialist")
+            return ("kernel_agent", "kernel_switch_specialist")
         if a in {"profile", "roofline"}:
-            return ("kernel", "kernel_switch_specialist")
+            return ("kernel_agent", "kernel_switch_specialist")
         if a in {"sweep", "explore"}:
             return ("framework", "serving_specialist")
         if a in {"baseline"}:
@@ -9613,11 +11121,11 @@ class Coordinator:
         return await self.recorder._record_specialist_result(task=task, done_payload=done_payload, source=source)
 
     def _plateau_advisory_block(self) -> str:
-        """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK_PR). Returns "" when no plateau signal is active.
+        """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK). Returns "" when no plateau signal is active.
 
-        KERNEL / FRAMEWORK_PR plateaus are advisory only (never auto-exit the
+        KERNEL / FRAMEWORK plateaus are advisory only (never auto-exit the
         phase). An EXPLORE plateau is advisory in non-cyclic mode, but in cyclic
-        mode (default) it deterministically advances EXPLORE → KERNEL via
+        mode (default) it deterministically advances EXPLORE → KERNEL_AGENT via
         ``explore_no_more_leverage`` (a non-terminal lever switch); the rendered
         footer states which regime is active.
 
@@ -9662,7 +11170,7 @@ class Coordinator:
                     f"empty_streak={evidence.get('empty_streak', 0)} "
                     f"streak_threshold={evidence.get('empty_streak_threshold', 0)}"
                 )
-        elif phase == _phase_state.PHASE_KERNEL:
+        elif phase == _phase_state.PHASE_KERNEL_AGENT:
             triggered, evidence = _phase_state.compute_plateau_kernel(
                 state,
                 lookback=int(
@@ -9685,7 +11193,7 @@ class Coordinator:
                 ),
             )
             if triggered:
-                lines.append("KERNEL plateau detected: REVERT streak or low recent KEEP gain.")
+                lines.append("KERNEL_AGENT plateau detected: REVERT streak or low recent KEEP gain.")
                 lines.append(
                     "  revert_streak="
                     f"{evidence.get('revert_streak', 0)} "
@@ -9693,24 +11201,24 @@ class Coordinator:
                     f"recent_keep_gain_pct={evidence.get('recent_keep_gain_pct', 0.0)} "
                     f"keep_gain_threshold_pct={evidence.get('keep_gain_threshold_pct', 0.0)}"
                 )
-        elif phase == _phase_state.PHASE_FRAMEWORK_PR:
-            triggered, evidence = _phase_state.compute_plateau_framework_pr(
+        elif phase == _phase_state.PHASE_FRAMEWORK_AGENT:
+            triggered, evidence = _phase_state.compute_plateau_framework_agent(
                 state,
                 lookback=int(
                     overrides.get(
-                        "framework_pr_lookback",
-                        _phase_state.DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
+                        "framework_lookback",
+                        _phase_state.DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK,
                     )
                 ),
                 keep_gain_threshold_pct=float(
                     overrides.get(
-                        "framework_pr_keep_gain_pct",
-                        _phase_state.DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
+                        "framework_keep_gain_pct",
+                        _phase_state.DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT,
                     )
                 ),
             )
             if triggered:
-                lines.append("FRAMEWORK_PR plateau detected: recent batches all below keep-gain threshold.")
+                lines.append("FRAMEWORK_AGENT plateau detected: recent batches all below keep-gain threshold.")
                 lines.append(
                     "  lookback="
                     f"{evidence.get('lookback', 0)} "
@@ -9722,7 +11230,7 @@ class Coordinator:
         if phase == _phase_state.PHASE_EXPLORE and _phase_state.is_cyclic_phases_enabled():
             lines.append(
                 "Note: in cyclic mode a detected EXPLORE plateau "
-                "deterministically advances EXPLORE → KERNEL (non-terminal "
+                "deterministically advances EXPLORE → KERNEL_AGENT (non-terminal "
                 "lever switch, reason=explore_no_more_leverage); it does not "
                 "end the run. You may still request an earlier advance with an "
                 "escalate_strategy_change hint, or keep exploring until the "
@@ -10078,15 +11586,41 @@ class Coordinator:
         patch_name = ""
         if isinstance(proposals, list) and proposals:
             patch_name = str((proposals[0] or {}).get("name") or "")
+        integrate_params: dict[str, Any] = {
+            "specialist_task_id": sid,
+            "provenance": "specialist",
+            "patch_name": patch_name,
+        }
+        # FRAMEWORK authoring provenance passthrough: a candidate dispatched
+        # to the authoring specialist carries its originating PR candidate/batch
+        # id in the specialist task params. Propagate them onto the synthetic
+        # integrate_patch task so ``_record_framework_agent_authored_outcome`` can
+        # key the progress row on the real candidate id (a PR URL). Without this
+        # the bridge falls back to the integrate_patch task_id, the progress row
+        # never matches ``_select_next_framework_agent_candidate``'s candidate id,
+        # and the FRAMEWORK pump re-dispatches the same candidate forever
+        # (livelock observed in the 84-candidate batch run).
+        try:
+            spec_params = getattr(task, "params", None) or {}
+            if bool(spec_params.get("framework_agent_authoring")):
+                integrate_params["framework_agent_authoring"] = True
+                fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
+                fa_batch = str(spec_params.get("framework_batch_id") or "")
+                if fa_cand:
+                    integrate_params["framework_agent_candidate_id"] = fa_cand
+                if fa_batch:
+                    integrate_params["framework_batch_id"] = fa_batch
+        except Exception:  # noqa: BLE001 — provenance passthrough is best-effort
+            log.debug(
+                "FRAMEWORK: authoring provenance passthrough failed for task=%s",
+                sid,
+                exc_info=True,
+            )
         propose_payload = {
             "action_name": "integrate_patch",
             "provenance": "specialist",
             "predicted_gain_pct": 0.0,
-            "params": {
-                "specialist_task_id": sid,
-                "provenance": "specialist",
-                "patch_name": patch_name,
-            },
+            "params": integrate_params,
         }
         msg = Message.new(
             "coordinator",
@@ -10119,6 +11653,122 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
                 "save after specialist patch autosubmit failed for task=%s",
+                sid,
+            )
+
+    async def _maybe_autosubmit_framework_config(
+        self,
+        *,
+        task: "Task",
+        done_payload: dict[str, Any],
+    ) -> None:
+        """Route a FRAMEWORK config-lever deliverable through integrate_patch.
+
+        Companion to :meth:`_maybe_autosubmit_specialist_patches`. That bridge
+        fires only on ``patches_written``; this one fires when a FRAMEWORK
+        *authoring* specialist returns NO source patch but a config-lever
+        ``proposal_set`` (extra_args / extra_envs) — the relaxed FRAMEWORK
+        rule that lets a PR's benefit land as serving flags / env vars (e.g. an
+        MTP toggle) without writing source. The levers go into integrate_patch's
+        existing ``config_changes`` channel (apply + bench + accuracy gate +
+        KEEP/REVERT); integrate_patch owns the terminal FRAMEWORK row via
+        ``_record_framework_agent_authored_outcome``. Idempotent per specialist.
+
+        Args:
+            task: The completed authoring specialist task.
+            done_payload: Its ``specialist_done`` payload.
+        """
+        spec_params = getattr(task, "params", None) or {}
+        if not bool(spec_params.get("framework_agent_authoring")):
+            return
+        # A patch deliverable is handled by the patch autosubmit bridge.
+        patches = done_payload.get("patches_written") or []
+        if isinstance(patches, list) and patches:
+            return
+        config_changes = _framework_config_levers_from_done(done_payload)
+        if not config_changes:
+            return
+        sid = str(task.task_id or "").strip()
+        if not sid:
+            return
+        # Already ruled on (e.g. after resume) — nothing to do.
+        try:
+            if self.shared_state.get_specialist_patch_verdict(sid):
+                return
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+        # A synthetic review for this specialist is already in flight.
+        for p in self.state.pending_proposals.values():
+            try:
+                if getattr(p, "action_name", "") != "integrate_patch":
+                    continue
+                pl = getattr(p, "payload", {}) or {}
+                if (pl.get("params") or {}).get("specialist_task_id") == sid:
+                    return
+            except Exception:  # noqa: BLE001 — defensive
+                continue
+        proposals = done_payload.get("proposal_set") or []
+        patch_name = ""
+        if isinstance(proposals, list) and proposals and isinstance(proposals[0], dict):
+            patch_name = str(proposals[0].get("name") or "")
+        integrate_params: dict[str, Any] = {
+            "specialist_task_id": sid,
+            "provenance": "specialist",
+            "patch_name": patch_name,
+            "config_changes": dict(config_changes),
+        }
+        # FRAMEWORK authoring provenance passthrough so the authored-outcome
+        # bridge keys the terminal row on the real PR candidate id.
+        fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
+        fa_batch = str(spec_params.get("framework_batch_id") or "")
+        integrate_params["framework_agent_authoring"] = True
+        if fa_cand:
+            integrate_params["framework_agent_candidate_id"] = fa_cand
+        if fa_batch:
+            integrate_params["framework_batch_id"] = fa_batch
+        propose_payload = {
+            "action_name": "integrate_patch",
+            "provenance": "specialist",
+            "predicted_gain_pct": 0.0,
+            "params": integrate_params,
+        }
+        msg = Message.new(
+            "coordinator",
+            "*",
+            "proposal",
+            {**propose_payload, "needs_review": True},
+            priority=1,
+        )
+        await self.bus.append_and_seq(msg)
+        self.state.pending_proposals[msg.msg_id] = PendingProposal(
+            proposal_msg_id=msg.msg_id,
+            from_agent="coordinator",
+            action_name="integrate_patch",
+            predicted_gain_pct=0.0,
+            payload=dict(propose_payload),
+        )
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "framework_config_autosubmitted_for_review",
+                "specialist_task_id": sid,
+                "proposal_msg_id": msg.msg_id,
+                "candidate_id": fa_cand,
+                "config_changes": dict(config_changes),
+            },
+        )
+        log.info(
+            "FRAMEWORK: config-lever deliverable routed to integrate_patch "
+            "candidate=%s keys=%s",
+            fa_cand or sid,
+            sorted(config_changes.keys()),
+        )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "FRAMEWORK: save after config autosubmit failed for task=%s",
                 sid,
             )
 
@@ -10373,7 +12023,7 @@ class Coordinator:
         single source of truth for KEEP'd kernels not yet integrated/rejected,
         which **includes** kernels whose only prior integrate attempts were
         un-exhausted integration *faults* (retryable). This lets an integration
-        fault be retried inside the KERNEL phase rather than waiting for the
+        fault be retried inside the KERNEL_AGENT phase rather than waiting for the
         SWEEP-entry drain.
 
         Duplicate dispatch is guarded per kernel_id by the recorded
@@ -10411,7 +12061,7 @@ class Coordinator:
             await self.bus.append_and_seq(
                 Message.new(
                     "orchestration",
-                    "kernel",
+                    "kernel_agent",
                     "request",
                     {
                         "kind": "integrate",
@@ -10596,7 +12246,7 @@ class Coordinator:
                 extras=audit_extras,
             )
             any_changed = True
-        # Global rolling failure log (every kind, including kernel-owned).
+        # Global rolling failure log (every kind, including kernel_agent-owned).
         self.shared_state.record_action_failure(
             action=task.kind,
             task_id=task.task_id,
@@ -10681,6 +12331,43 @@ class Coordinator:
                 )
             )
 
+    # Phases whose long, serially-drained GPU grids must not starve the
+    # per-phase cyclic budget exit. PRELUDE (baseline/roofline bootstrap),
+    # SWEEP, CLOSE, RECOVER own mandatory work and keep draining normally.
+    _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"EXPLORE", "KERNEL_AGENT", "FRAMEWORK_AGENT"})
+
+    def _dispatch_paused_for_phase_budget(self) -> bool:
+        """True when the current phase's cyclic budget is spent, so the dispatcher should stop launching NEW phase-scoped variants.
+
+        Without this, a long interleaved EXPLORE/KERNEL grid (each variant a
+        ~30-min 671B server reboot + benchmark) drains serially inside
+        ``_pump_dispatcher_once`` for hours; because the pump only returns once
+        all dispatchable work is drained, the tick never reaches
+        ``_advance_phase_if_needed`` and the (correctly computed)
+        ``kernel/explore_phase_budget_exhausted`` exit is never applied — the
+        phase machine stalls and the cyclic reloop never fires. Pausing new
+        spawns lets in-flight tasks finish, the pump return, and the phase
+        advance. Scoped to cyclic long-runs + the discretionary search phases so
+        bounded short runs and bootstrap/sweep phases are unaffected.
+
+        Returns:
+            ``True`` when new phase-scoped dispatch should pause for budget.
+        """
+        state = self.shared_state
+        phase = (getattr(state, "phase", "") or "").upper()
+        if phase not in self._BUDGET_GATED_DISPATCH_PHASES:
+            return False
+        try:
+            if not _phase_state.is_cyclic_phases_enabled() or not _phase_state.is_long_run(state):
+                return False
+            remaining = _phase_state.phase_budget_remaining_seconds(
+                state,
+                budget_pct=self._phase_budget_pct,
+            )
+        except Exception:  # noqa: BLE001 — never let the guard wedge dispatch
+            return False
+        return remaining is not None and remaining <= 0.0
+
     async def _pump_dispatcher_once(self) -> None:
         """Dispatch queued tasks respecting per-lane capacity, re-scanning for
         newly-fittable tasks while in-flight tasks run.
@@ -10690,9 +12377,36 @@ class Coordinator:
         queued GPU task (e.g. an explore round) starts the moment its lane frees
         rather than waiting out a long specialist / integrate_patch that was
         already being awaited. The pump still fully drains all currently
-        dispatchable work before returning (one pump per tick). Each GPU lease
-        is bound to its task_id and released by the runner.
+        dispatchable work before returning (one-pump-per-tick semantics
+        preserved). Each GPU lease is bound to its task_id and released by the
+        runner (Inv-7.3).
+
+        Budget guard: once the current phase's cyclic budget is spent
+        (:meth:`_dispatch_paused_for_phase_budget`), stop spawning NEW
+        phase-scoped variants — drain in-flight, then return so the tick reaches
+        ``_advance_phase_if_needed`` and the phase advances (prevents the
+        KERNEL/EXPLORE interleave grid from stalling the phase machine).
         """
+        # Dead-holder self-heal (runs EVERY tick, before scanning the queue):
+        # a crashed worker leaves its serving lanes leased and its task stuck
+        # 'running' until the multi-hour TTL fires — which strands every queued
+        # GPU task behind it and makes the explore-dedup deny new delegates as
+        # duplicates of a zombie. Detect the dead PID immediately so the lanes
+        # free and the stuck task fails (retry-eligible) this same tick.
+        try:
+            dead_tasks = await self.tasks.reclaim_dead_running(reason="dead_holder_pump")
+            if dead_tasks:
+                log.warning(
+                    "dispatcher: reclaimed %d running task(s) with dead holders: %s",
+                    len(dead_tasks),
+                    ", ".join(t[:12] for t in dead_tasks),
+                )
+        except Exception:  # noqa: BLE001 — self-heal never aborts the pump
+            log.exception("dispatcher: dead-running task reclaim failed")
+        try:
+            await self.locks.reap_dead_holders()
+        except Exception:  # noqa: BLE001
+            log.exception("dispatcher: dead-holder lease reap failed")
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set: a
         # fast task can complete and be reaped (leaving ``inflight``) before its
@@ -10702,9 +12416,13 @@ class Coordinator:
         # lane-freed tasks carry ids absent from this set and still get picked up.
         dispatched_ids: set[str] = set()
         while True:
-            spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
-            dispatched_ids.update(t.task_id for t, _, _ in spawned)
-            inflight.extend(spawned)
+            # Budget guard: stop launching NEW phase-scoped variants once the
+            # phase's cyclic budget is spent; drain in-flight then return so the
+            # tick can advance the phase (KERNEL/EXPLORE stall fix).
+            if not self._dispatch_paused_for_phase_budget():
+                spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
+                dispatched_ids.update(t.task_id for t, _, _ in spawned)
+                inflight.extend(spawned)
             if not inflight:
                 return
             done, _pending = await asyncio.wait(
@@ -11090,6 +12808,21 @@ class Coordinator:
                             "specialist bookkeeping hook failed for task=%s",
                             task.task_id,
                         )
+                    # FRAMEWORK authoring bridge for an EMPTY deliverable: a
+                    # specialist that authored no patch never spawns an
+                    # integrate_patch, so the authored-outcome bridge below never
+                    # fires. Without a terminal progress row the candidate is
+                    # re-selected every tick (pump livelock). Stamp it here.
+                    try:
+                        self._record_framework_agent_authoring_empty_outcome(
+                            task=task,
+                            done_payload=done_payload,
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "FRAMEWORK authoring empty-outcome bridge failed for task=%s",
+                            task.task_id,
+                        )
                 # Bump the per-EXPLORE specialist dispatch counter (Robustness reads it to detect storms).
                 try:
                     self.shared_state.bump_specialist_dispatched()
@@ -11106,23 +12839,23 @@ class Coordinator:
                     )
             # integrate_patch completion handling.
             if task.kind == "integrate_patch":
-                # FRAMEWORK_PR authoring bridge: record authored-patch KEEP/REVERT into framework_pr_phase_progress.
+                # FRAMEWORK authoring bridge: record authored-patch KEEP/REVERT into framework_agent_phase_progress.
                 if (
                     getattr(
                         self.shared_state,
-                        "framework_pr_authoring_enabled",
+                        "framework_agent_authoring_enabled",
                         False,
                     )
-                    and (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_PR
+                    and (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT
                 ):
                     try:
-                        self._record_framework_pr_authored_outcome(
+                        self._record_framework_agent_authored_outcome(
                             task=task,
                             result=result,
                         )
                     except Exception:  # noqa: BLE001 — defensive
                         log.exception(
-                            "FRAMEWORK_PR authored-outcome bridge failed for task=%s",
+                            "FRAMEWORK authored-outcome bridge failed for task=%s",
                             task.task_id,
                         )
             # Auto-promote succeeded results into CORE_STATE_FIELDS (Coordinator-only writer); promotion needs task-specific invariants beyond no-throw.
@@ -11159,6 +12892,15 @@ class Coordinator:
                     self._record_coordinator_exception(
                         stage="dispatcher_fact_write",
                         exc=exc,
+                    )
+            # Framework prs_tested write-back: record KEEP/REVERT patches into recipe.
+            if task.kind == "framework_agent":
+                try:
+                    self._write_prs_tested_from_framework_agent(task=task, result=result, kept=kept)
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "dispatcher: prs_tested write-back failed for task=%s",
+                        task.task_id,
                     )
                     continue
             # explore-round gap update: append per-variant KEEP/REVERT to the gap, then re-run the global refresh.
@@ -11754,6 +13496,10 @@ class Coordinator:
                 )
                 # Step 4 — research scout (parallel, read-only, CPU-only).
                 await self._maybe_enqueue_prelude_research_scout()
+                # Step 5 — static-recon (parallel, read-only, CPU-only): grep
+                # the framework source for un-bridged capability switches and
+                # seed bridge candidates as gaps[] before EXPLORE starts.
+                await self._maybe_enqueue_prelude_static_recon()
         elif task_kind == "replay_warm_recipe":
             # separate promote path so replay doesn't overwrite baseline_tput/current_best via the baseline branch.
             try:
@@ -12090,8 +13836,8 @@ class Coordinator:
                 "patches_applied": result.get("patches_applied") or [],
                 "patches_reverted": result.get("patches_reverted") or [],
             }
-        elif task_kind == "framework_pr":
-            # FRAMEWORK_PR per-candidate result: append a progress row, update the batch max-gain stat, and on
+        elif task_kind == "framework_agent":
+            # FRAMEWORK per-candidate result: append a progress row, update the batch max-gain stat, and on
             # KEEP lift to current_best + optimization_stack + cumulative_gain_validated + watermark roofline.
             status = str(result.get("status") or "")
             candidate = result.get("candidate") or {}
@@ -12111,11 +13857,28 @@ class Coordinator:
                 "batch_id": batch_id,
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
-            if not isinstance(self.shared_state.framework_pr_phase_progress, list):
-                self.shared_state.framework_pr_phase_progress = []
-            self.shared_state.framework_pr_phase_progress.append(progress_entry)
+            if not isinstance(self.shared_state.framework_agent_phase_progress, list):
+                self.shared_state.framework_agent_phase_progress = []
+            self.shared_state.framework_agent_phase_progress.append(progress_entry)
+            try:
+                from .framework_agent_artifacts import write_decision_json
+
+                write_decision_json(
+                    self.session_dir,
+                    candidate_id=cand_id,
+                    batch_id=batch_id,
+                    status=status,
+                    kept=kept_flag,
+                    provenance="raw_diff",
+                    reason=str(result.get("reason") or ""),
+                    gain_pct=(float(delta_pct) if isinstance(delta_pct, (int, float)) else None),
+                    accuracy_pass=result.get("accuracy_pass"),
+                    extra={"workspace": str(result.get("workspace") or "")},
+                )
+            except Exception:  # noqa: BLE001 — observability is best-effort
+                log.debug("FRAMEWORK: executor decision.json write failed", exc_info=True)
             # Update batch max-gain rolling stat (for the plateau judge).
-            batches = getattr(self.shared_state, "framework_pr_batches", None) or []
+            batches = getattr(self.shared_state, "framework_agent_batches", None) or []
             if isinstance(batches, list) and batches:
                 for entry in reversed(batches):
                     if isinstance(entry, dict) and str(entry.get("batch_id") or "") == batch_id:
@@ -12127,13 +13890,13 @@ class Coordinator:
             changed = True
             if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
                 lift = {
-                    "name": f"framework-pr:{cand_id}",
+                    "name": f"framework:{cand_id}",
                     "variant_name": cand_id,
                     "candidate_extra_server_args": "",
                     "extra_envs": {},
                     "workspace": result.get("workspace"),
                 }
-                self._lift_to_current_best("framework_pr", float(new_tput), lift)
+                self._lift_to_current_best("framework", float(new_tput), lift)
                 if self.shared_state.baseline_tput > 0:
                     validated_gain = (
                         (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
@@ -12142,7 +13905,7 @@ class Coordinator:
                     self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
                     self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
                     await self._maybe_enqueue_watermark_roofline(
-                        reason="framework_pr_keep_watermark",
+                        reason="framework_keep_watermark",
                     )
             audit_decision = "promoted" if kept_flag else "discarded"
             audit_extras = {

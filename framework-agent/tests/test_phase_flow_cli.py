@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for the FRAMEWORK_PR phase-discover subcommand. Hermetic - stubs ``sources.enumerate_candidates`` so no network/git is required."""
+"""Tests for the FRAMEWORK_AGENT phase-discover subcommand. Hermetic - stubs ``sources.enumerate_candidates`` so no network/git is required."""
 
 from __future__ import annotations
 
@@ -82,6 +82,67 @@ def test_phase_discover_happy_path(monkeypatch, tmp_path: Path, capsys) -> None:
     assert pr1["pr_number"] == 1234
     # Each candidate stamped with the gap it surfaced under.
     assert all("gap_canonical_id" in c for c in payload["candidates"])
+
+
+def test_phase_discover_enables_search_perf_prs(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Regression: phase-discover MUST set search_perf_prs=True (else
+    enumerate_candidates short-circuits to explicit-refs-only and always returns
+    0 candidates) and degrade to GitHub-only when no primus URL is configured."""
+    monkeypatch.delenv("PRIMUS_CORTEX_PR_API", raising=False)
+    captured: dict[str, object] = {}
+
+    import framework_agent.sources as src
+
+    def fake_enum(r):
+        captured["search_perf_prs"] = r.search_perf_prs
+        captured["search_modes"] = list(r.search_modes)
+        return [
+            Candidate(ref="PR:42", repo="ROCm/vllm", source="github",
+                      title="perf: moe fp8", html_url="https://github.com/ROCm/vllm/pull/42", score=0.9),
+        ]
+
+    monkeypatch.setattr(src, "enumerate_candidates", fake_enum)
+    req = {
+        "model": "/m/DeepSeek", "framework": "vllm", "gpu_type": "mi300x",
+        "repo_url": "https://github.com/ROCm/vllm.git",
+        "gaps": [{"gap_canonical_id": "g1", "gap_description": "moe fp8 decode"}],
+        "max_search_candidates": 5, "batch_id": "b1",
+    }
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+
+    rc = cli.main(["phase-discover", "--request", str(req_path)])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert captured["search_perf_prs"] is True
+    # No primus URL configured -> GitHub-only (no SourceConfigError raise).
+    assert captured["search_modes"] == ["github"]
+    assert payload["candidate_count"] == 1
+
+
+def test_phase_discover_uses_primus_when_url_present(monkeypatch, tmp_path: Path, capsys) -> None:
+    """With a primus_cortex_url in the request, both modes are enabled."""
+    captured: dict[str, object] = {}
+    import framework_agent.sources as src
+
+    def fake_enum(r):
+        captured["search_modes"] = list(r.search_modes)
+        captured["primus_cfg"] = r.primus_cortex is not None
+        return []
+
+    monkeypatch.setattr(src, "enumerate_candidates", fake_enum)
+    req = {
+        "model": "/m/x", "framework": "vllm", "gpu_type": "mi300x",
+        "repo_url": "https://github.com/ROCm/vllm.git",
+        "gaps": [{"gap_canonical_id": "g1", "gap_description": "x"}],
+        "primus_cortex_url": "http://primus.local/v1", "batch_id": "b1",
+    }
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+    rc = cli.main(["phase-discover", "--request", str(req_path)])
+    assert rc == 0
+    assert captured["search_modes"] == ["primus_cortex", "github"]
+    assert captured["primus_cfg"] is True
 
 
 def test_phase_discover_missing_request_exits_two(tmp_path: Path) -> None:

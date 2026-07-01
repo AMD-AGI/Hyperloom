@@ -87,6 +87,28 @@ def test_slot_other_tz_is_normalized():
     assert br.scheduled_slot(datetime(2026, 6, 25, 11, 7, tzinfo=tz8), max_hours=12) == 0
 
 
+def test_slot_custom_anchor_overrides_default():
+    # A caller-supplied anchor restarts the sweep at that instant (slot 0),
+    # independent of the shared ROTATE_ANCHOR_UTC. Same `now` yields a different
+    # slot under the default vs the custom anchor.
+    anchor = _utc2(2026, 6, 26, 13, 0)
+    assert br.scheduled_slot(_utc2(2026, 6, 26, 13, 7), max_hours=6, anchor=anchor) == 0
+    assert br.scheduled_slot(_utc2(2026, 6, 26, 19, 7), max_hours=6, anchor=anchor) == 1
+    # Same instant under the default anchor is well past slot 0.
+    assert br.scheduled_slot(_utc2(2026, 6, 26, 13, 7), max_hours=6) > 0
+
+
+def test_resolve_batch_index_custom_anchor():
+    # tiny dispatcher use: anchor at the next fire -> batch 0 there, +6h -> 1.
+    anchor = _utc2(2026, 6, 26, 13, 0)
+    assert br.resolve_batch_index(2121, 240, event="schedule", batch_index=None,
+                                  now=_utc2(2026, 6, 26, 13, 7), max_hours=6,
+                                  anchor=anchor) == 0
+    assert br.resolve_batch_index(2121, 240, event="schedule", batch_index=None,
+                                  now=_utc2(2026, 6, 26, 19, 7), max_hours=6,
+                                  anchor=anchor) == 1
+
+
 # ── resolve_batch_index ─────────────────────────────────────────────────────
 
 
@@ -137,3 +159,40 @@ def test_slice_bounds_last_partial_batch():
     # 900 models, batch 14 -> 840..900 (full); 901 models -> batch 15 -> 900..901.
     assert br.slice_bounds(14, 60, 900) == (840, 900)
     assert br.slice_bounds(15, 60, 901) == (900, 901)
+
+
+# ── _step_hours error branch + main() CLI ───────────────────────────────────
+
+
+def test_step_hours_invalid_falls_back():
+    # Non-floatable input hits the except branch and falls back to the default.
+    assert br._step_hours("not-a-number") == br.DEFAULT_MAX_HOURS
+    assert br._step_hours(None) == br.DEFAULT_MAX_HOURS
+    assert br._step_hours(6) == 6.0
+
+
+def test_main_emits_tsv(capsys):
+    rc = br.main([
+        "--count", "900",
+        "--batch-size", "60",
+        "--event", "schedule",
+        "--now-iso", "2026-06-25T15:07:00+00:00",
+        "--max-hours", "12",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    # "<batch_index>\t<count>\t<batches>\t<start>\t<end>"
+    assert out == "1\t900\t15\t60\t120"
+
+
+def test_main_with_custom_anchor(capsys):
+    rc = br.main([
+        "--count", "120",
+        "--batch-size", "60",
+        "--event", "schedule",
+        "--now-iso", "2026-06-26T13:07:00+00:00",
+        "--max-hours", "6",
+        "--anchor", "2026-06-26T13:00:00+00:00",
+    ])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "0\t120\t2\t0\t60"

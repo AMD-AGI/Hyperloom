@@ -119,12 +119,12 @@ def test_manifest_warns_when_dependency_is_pod_local(
     # The dir need not exist; the escape guard runs before the is_dir gate.
     pod_local = "/workspace/hyperloom_runtime_smoke/Magpie"
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(user_data))
-    monkeypatch.setenv("MAGPIE_DIR", pod_local)
+    monkeypatch.setenv("MAGPIE_PATH", pod_local)
 
     with caplog.at_level(logging.WARNING, logger="inference_optimizer.manifest"):
-        manifest._describe_dep("MAGPIE_DIR")
+        manifest._describe_dep("MAGPIE_PATH")
 
-    assert any("MAGPIE_DIR" in r.message and "pod-local" in r.message for r in caplog.records), (
+    assert any("MAGPIE_PATH" in r.message and "pod-local" in r.message for r in caplog.records), (
         "expected a loud pod-local escape warning"
     )
 
@@ -164,10 +164,10 @@ def test_manifest_does_not_warn_when_dependency_under_user_data(
     magpie = user_data / "runtime" / "Magpie"
     magpie.mkdir(parents=True)
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(user_data))
-    monkeypatch.setenv("MAGPIE_DIR", str(magpie))
+    monkeypatch.setenv("MAGPIE_PATH", str(magpie))
 
     with caplog.at_level(logging.WARNING, logger="inference_optimizer.manifest"):
-        dep = manifest._describe_dep("MAGPIE_DIR")
+        dep = manifest._describe_dep("MAGPIE_PATH")
 
     assert dep["path"] == str(magpie)
-    assert not [r for r in caplog.records if "MAGPIE_DIR" in r.message]
+    assert not [r for r in caplog.records if "MAGPIE_PATH" in r.message]

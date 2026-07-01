@@ -122,23 +122,37 @@ class _FakeCompletions:
         self._b = behaviour
         self.calls = []
 
-    async def create(self, *, model, messages, max_completion_tokens):
+    async def create(self, *, model, messages, max_completion_tokens,
+                     stream=False, stream_options=None):
         self.calls.append(model)
         r = self._b.get(model)
         if isinstance(r, BaseException):
             raise r
 
-        class _Msg:
-            content = r or ""
+        text = r or ""
+
+        class _Delta:
+            content = text
 
         class _Choice:
-            message = _Msg()
+            delta = _Delta()
 
-        class _Resp:
+        class _Chunk:
             choices = [_Choice()]
             usage = None
 
-        return _Resp()
+        class _Stream:
+            def __aiter__(self):
+                self._done = False
+                return self
+
+            async def __anext__(self):
+                if self._done:
+                    raise StopAsyncIteration
+                self._done = True
+                return _Chunk()
+
+        return _Stream()
 
 
 class _FakeClient:
