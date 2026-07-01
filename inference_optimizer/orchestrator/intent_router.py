@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..protocol.intent import Intent, IntentType
-from .coordinator_helpers import format_exc_brief
+from .coordinator_helpers import format_exc_brief, serialize_verdict_advisory
 from .message_bus import Message
 from .policy import PolicyDenied
 from .task_registry import Task
@@ -90,8 +90,6 @@ class IntentRouter:
                 await self._coord._handle_kill_task(source, intent)
             elif it == IntentType.PRUNE_BRANCH:
                 await self._coord._handle_prune_branch(source, intent)
-            elif it == IntentType.FORCE_DISPATCH:
-                await self._coord._handle_force_dispatch(source, intent)
             elif it == IntentType.ESCALATE_STRATEGY_CHANGE:
                 await self._coord._handle_escalate_strategy_change(source, intent)
             elif it == IntentType.SEND_MESSAGE:
@@ -104,7 +102,7 @@ class IntentRouter:
                 # Terminal specialist intent (R3 already validated); handler only bookkeeps. Defense-in-depth.
                 await self._coord._handle_specialist_done(source, intent)
             else:
-                # ASK_QUESTION / ANSWER / UPDATE_PERSONA — record for replay
+                # Unknown / unhandled intent — record for replay (defensive).
                 await self._record_observation(
                     source, "observation",
                     {"intent": it.value, "payload": intent.payload},
@@ -225,6 +223,7 @@ class IntentRouter:
             pending=pending,
             verdict=verdict,
             reasoning=str(intent.payload.get("reasoning") or ""),
+            advisory=serialize_verdict_advisory(intent.payload),
         )
 
     async def _handle_single_verdict(
@@ -234,6 +233,7 @@ class IntentRouter:
         pending: "PendingProposal",  # noqa: F821 - deferred ref; imported lazily in handlers to avoid import cycle.
         verdict: str,
         reasoning: str,
+        advisory: dict[str, Any] | None = None,
     ) -> None:
         """Single-verdict handler (approve/advise materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate.
 
@@ -242,16 +242,34 @@ class IntentRouter:
             pending: The pending proposal the verdict targets.
             verdict: The collapsed verdict (approve / advise / reject / needs_review).
             reasoning: Free-text reasoning recorded with the verdict.
+            advisory: Pre-serialised advisory fields (``required_evidence`` /
+                ``risks`` / ``advice_text`` / ``alternative_action`` /
+                ``notes`` / ``kb_evidence`` / ``packet_evidence``) to carry on
+                the rebroadcast payload so the full Critic context reaches the
+                orchestration inbox and downstream consumers.
         """
         pending.decided = True
         pending.verdict = verdict
+        if pending.action_name == "framework_agent":
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind":            "framework_agent_verdict_received",
+                    "proposal_msg_id": pending.proposal_msg_id,
+                    "candidate_id":    str((pending.payload or {}).get("framework_agent_candidate_id") or ""),
+                    "verdict":         verdict,
+                },
+            )
+        rebroadcast_payload: dict[str, Any] = {
+            "target_proposal_msg_id": pending.proposal_msg_id,
+            "verdict":                verdict,
+            "reasoning":              reasoning,
+        }
+        if advisory:
+            rebroadcast_payload.update(advisory)
         await self.bus.append_and_seq(Message.new(
             source, pending.from_agent, "review_verdict",
-            {
-                "target_proposal_msg_id": pending.proposal_msg_id,
-                "verdict":                verdict,
-                "reasoning":              reasoning,
-            },
+            rebroadcast_payload,
             priority=0 if verdict == "reject" else 1,
             in_reply_to=pending.proposal_msg_id,
         ))
@@ -291,6 +309,15 @@ class IntentRouter:
         # FRAMEWORK config-lever deliverables — routed but never benched).
         if verdict in ("approve", "advise"):
             await self._materialize_approved_proposal(pending)
+        elif verdict == "reject" and pending.action_name == "framework_agent":
+            # Record the critic_denied row so the framework_agent pump advances.
+            await self._coord._record_framework_agent_critic_denied(
+                pending, reasoning,
+            )
+        elif verdict == "needs_review":
+            await self._coord._maybe_reauthor_from_critic_feedback(
+                pending, advisory,
+            )
 
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task.
@@ -796,22 +823,6 @@ class IntentRouter:
             source, "*", "event",
             {"kind": "prune_branch", "family": family,
              "cancelled_task_ids": cancelled,
-             "reason": intent.payload.get("reason")},
-        ))
-
-    async def _handle_force_dispatch(self, source: str, intent: Intent) -> None:
-        """Handle a ``force_dispatch`` intent by emitting an event.
-
-        Currently this only broadcasts a ``force_dispatch`` event; dispatcher
-        reordering is not yet implemented.
-
-        Args:
-            source: Identifier of the intent's originating agent.
-            intent: The ``force_dispatch`` intent carrying ``task_id``.
-        """
-        await self.bus.append_and_seq(Message.new(
-            source, "*", "event",
-            {"kind": "force_dispatch", "task_id": intent.payload["task_id"],
              "reason": intent.payload.get("reason")},
         ))
 

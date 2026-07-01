@@ -46,11 +46,10 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
                 "request:{target_agent,kind}, response:{in_reply_to,kind}, "
                 "review_verdict:{target_proposal_msg_id,verdict ∈ "
                 "approve|reject|redirect|advise|needs_review}, "
-                "kill_task:{task_id,reason}, force_dispatch:{task_id,reason}, "
+                "kill_task:{task_id,reason}, "
                 "prune_branch:{family,reason}, escalate_strategy_change:"
                 "{reason,next_action_hint}, update_state:{changes}, "
-                "update_persona:{body_md}, ask_question:{topic,question}, "
-                "answer:{in_reply_to,answer}, alert:{severity,summary}."
+                "alert:{severity,summary}."
             ),
         },
     },
