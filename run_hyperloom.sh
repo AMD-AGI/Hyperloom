@@ -20,9 +20,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE="hyperloom-vl-vllm-local-${USER}"
+# Published registry image. Override with IMAGE=... env or --image flag.
+IMAGE="${IMAGE:-amdsiloai/vllm-private:mlperf6.1-q3vl-r72-w4a4-fusemoe-20260620-hyperloom}"
 CONTAINER="hyperloom-vl-vllm-local-${USER}"
 EXTRA_MOUNTS=()   # populated by --mount flags
+FORCE_BUILD=0     # set by --build to force a local rebuild
 # Auto-detect AMD API port from ANTHROPIC_BASE_URL on the host (e.g. http://127.0.0.1:41829/Anthropic).
 # Falls back to 9443 (standard SSH RemoteForward). Override with --api-port.
 _detect_api_port() {
@@ -71,11 +73,32 @@ exec_into() {
 }
 
 build_image() {
-  log "image $IMAGE not found — building ..."
+  log "building $IMAGE from Dockerfile in $SCRIPT_DIR ..."
   [[ -n "${SSH_AUTH_SOCK:-}" ]] || die "SSH_AUTH_SOCK is not set. Run: ssh-add \$HOME/.ssh/id_amd"
   DOCKER_BUILDKIT=1 docker build --ssh default \
     -t "$IMAGE" \
     "$SCRIPT_DIR"
+}
+
+ensure_image() {
+  if [[ "$FORCE_BUILD" == "1" ]]; then
+    log "--build requested — forcing local rebuild"
+    build_image
+    return 0
+  fi
+  if image_exists; then
+    log "image present locally: $IMAGE"
+    return 0
+  fi
+  # Not local — try pulling the published image first.
+  log "image $IMAGE not found locally — pulling from registry ..."
+  if docker pull "$IMAGE"; then
+    log "pulled $IMAGE"
+    return 0
+  fi
+  # Pull failed — fall back to building from the local Dockerfile.
+  log "pull failed — falling back to local build"
+  build_image
 }
 
 start_container() {
@@ -140,7 +163,7 @@ do_start() {
     docker rm -f "$CONTAINER" 2>/dev/null || true
   fi
 
-  image_exists || build_image
+  ensure_image
   start_container
   log "container started"
   exec_into
@@ -173,6 +196,16 @@ while [[ $i -lt ${#args[@]} ]]; do
       [[ "$AMD_API_PORT" =~ ^[0-9]+$ ]] || die "--api-port must be a number, got: ${AMD_API_PORT}"
       log "AMD API port set to ${AMD_API_PORT}"
       ;;
+    --image)
+      i=$(( i + 1 ))
+      [[ $i -lt ${#args[@]} ]] || die "--image requires an IMAGE argument"
+      IMAGE="${args[$i]}"
+      log "using image ${IMAGE}"
+      ;;
+    --build)
+      # Force a local rebuild even if the image is already present.
+      FORCE_BUILD=1
+      ;;
     --mount)
       i=$(( i + 1 ))
       [[ $i -lt ${#args[@]} ]] || die "--mount requires a PATH argument"
@@ -185,19 +218,23 @@ while [[ $i -lt ${#args[@]} ]]; do
       log "will mount ${host_path} -> /mnt/${mount_name} (read-only)"
       ;;
     -h|--help)
-      echo "Usage: $0 [--start|--stop] [--api-port PORT] [--mount PATH] ..."
+      echo "Usage: $0 [--start|--stop] [--build] [--image IMG] [--api-port PORT] [--mount PATH] ..."
       echo ""
       echo "  --start            (default) Start container and exec into bash"
+      echo "                     Uses local image if present, else pulls from registry,"
+      echo "                     else builds from the Dockerfile."
       echo "  --stop             Stop and remove the container"
-      echo "  --api-port PORT    AMD LLM API tunnel port on the host (default: 9443)"
-      echo "                     Use 9444 for amd-llm-proxy (Shadeform / no-sudo nodes)"
+      echo "  --build            Force a local rebuild from the Dockerfile"
+      echo "  --image IMG        Use a specific image ref (default: published registry image)"
+      echo "  --api-port PORT    AMD LLM API tunnel port (default: auto-detected from"
+      echo "                     \$ANTHROPIC_BASE_URL, else 9443)"
       echo "  --mount PATH       Mount PATH read-only at /mnt/<basename> inside the container"
       echo "                     Can be repeated for multiple repos"
       echo ""
       echo "Examples:"
-      echo "  $0                                          # default port 9443"
-      echo "  $0 --api-port 9444                         # amd-llm-proxy port"
-      echo "  $0 --api-port 9444 --mount ~/workspace/ml-perf"
+      echo "  $0                                          # pull-or-run published image"
+      echo "  $0 --build                                 # rebuild locally"
+      echo "  $0 --mount ~/workspace/ml-perf"
       echo "  $0 --stop"
       exit 0 ;;
     "") ;;
