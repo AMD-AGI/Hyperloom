@@ -54,12 +54,194 @@ def test_collect_perfskills_empty_result_no_flag(tmp_path: Path) -> None:
 
 
 def test_collect_perfskills_engaged_without_result(tmp_path: Path) -> None:
+    # No on-disk perfskills/ tree → nothing to reconstruct → legacy ``missing``.
     warnings: list[str] = []
     out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, warnings)
     assert out["engaged"] is True
     assert out["status"] == "missing"
     assert out["error_class"] == "no_result"
     assert out["accepted_kernels"] == []
+    assert "recovered_from_disk" not in out
+
+
+def test_collect_perfskills_reconstructs_from_disk_when_result_missing(
+    tmp_path: Path,
+) -> None:
+    # Reproduce the incident: perfskills was engaged and the runner produced an
+    # on-disk working tree, but ``perfskills_result`` never reached state (an
+    # external kill before the tick-boundary save, then resume past KERNEL).
+    # The collector must reconstruct the run from disk instead of a bare miss.
+    pf = tmp_path / "perfskills"
+    pf.mkdir()
+    (pf / "handoff.json").write_text(
+        json.dumps(
+            {
+                "model_path": "/wekafs/models/Qwen-Qwen3-0.6B",
+                "framework": "vllm",
+                "gpu_type": "mi300x",
+                "tp": 1,
+                "workload": {"isl": 1024, "osl": 1024, "conc": 64},
+                "accepted_flags": "--kv-cache-dtype fp8",
+                "raw_baseline_tput": 10434.27,
+            }
+        ),
+        encoding="utf-8",
+    )
+    exp = pf / "e2e_Qwen-Qwen3-0.6B_20260629T174250Z"
+    (exp / "baseline").mkdir(parents=True)
+    (exp / "kernels" / "paged_attention_task").mkdir(parents=True)
+    (exp / "kernels" / "_exp").mkdir(parents=True)
+    (exp / "strategy.md").write_text("# strategy", encoding="utf-8")
+    (exp / "kernel_journey.json").write_text(
+        json.dumps(
+            {
+                "kernels": [
+                    {
+                        "kernel_id": "k002",
+                        "name": "rocm_unquantized_gemm",
+                        "gpu_pct": 17.0,
+                        "e2e": {
+                            "decision": "KEEP",
+                            "integrated": True,
+                            "e2e_gain_pct": 2.2,
+                            "validated": True,
+                            "target_file": "gemm.cu",
+                            "extra_server_args": "",
+                        },
+                        "backend_result": {"verification": {"best_backend": "geak"}},
+                        "dispatch": {"backends": ["geak"]},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    warnings: list[str] = []
+    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, warnings)
+
+    assert out["engaged"] is True
+    assert out["status"] == "no_result_recovered_from_disk"
+    assert out["error_class"] == "no_result"
+    assert out["recovered_from_disk"] is True
+    # Handoff evidence proves HL handed off (vs a silent miss).
+    assert out["handoff"]["framework"] == "vllm"
+    assert out["handoff"]["workload"] == {"isl": 1024, "osl": 1024, "conc": 64}
+    # exp_root is relativized under the session dir.
+    assert out["exp_root"] == "perfskills/e2e_Qwen-Qwen3-0.6B_20260629T174250Z"
+    # Stages the runner reached are surfaced for forensics.
+    for stage in ("handoff", "baseline", "kernels", "opbench", "strategy",
+                  "kernel_journey"):
+        assert stage in out["stages_reached"]
+    assert out["kernels_attempted"] == [{"name": "paged_attention_task"}]
+    # Per-kernel attribution is backfilled from the surviving journey.
+    assert out["accepted_kernels_source"] == "kernel_journey_backfill"
+    assert [k["kernel_id"] for k in out["accepted_kernels"]] == ["k002"]
+    assert out["accepted_kernels"][0]["backend"] == "geak_v4"
+    assert out["kernels_optimized"] == 1
+    assert out["last_artifact_ts"] is not None
+
+
+def test_collect_perfskills_reconstruct_surfaces_opbench_logs_and_cause(
+    tmp_path: Path,
+) -> None:
+    # The incident shape: the e2e ran the op-bench bake-off (no editable winner
+    # > 1.0x) and was then killed before flushing a result/journey. The
+    # reconstruction must surface the op-bench verdicts (WHY no win), the runner
+    # log tails (the lost stdout/stderr proxy), and classify the cause.
+    pf = tmp_path / "perfskills"
+    exp = pf / "e2e_run"
+    (exp / "baseline").mkdir(parents=True)
+    task = exp / "kernels" / "rocm_unquantized_gemm_decode_family_task"
+    task.mkdir(parents=True)
+    (exp / "kernels" / "_exp").mkdir(parents=True)
+    (pf / "handoff.json").write_text(json.dumps({"framework": "vllm"}), encoding="utf-8")
+    (task / "opbench_result.json").write_text(
+        json.dumps(
+            {
+                "task": "rocm_unquantized_gemm_decode_family_task",
+                "winner_backend": "hipblaslt",
+                "isolated_speedup": 1.0,
+                "winner_editable": False,
+                "winner_kind": "none",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (exp / "logs").mkdir()
+    (exp / "logs" / "opbench_gemm.log").write_text(
+        "OPBENCH winner=hipblaslt speedup=1.0x editable=False\n", encoding="utf-8"
+    )
+
+    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, [])
+
+    assert out["status"] == "no_result_recovered_from_disk"
+    assert out["opbench_results"][0]["winner_backend"] == "hipblaslt"
+    assert out["opbench_results"][0]["isolated_speedup"] == 1.0
+    assert out["opbench_results"][0]["winner_editable"] is False
+    assert "opbench_gemm.log" in out["runner_log_tails"]
+    assert "OPBENCH" in out["runner_log_tails"]["opbench_gemm.log"]
+    # op-bench ran, no editable winner, no journey/result → ran-no-winner.
+    assert out["likely_cause"] == "ran_no_deployable_winner"
+
+
+def test_collect_perfskills_reconstruct_cause_killed_before_flush(tmp_path: Path) -> None:
+    # Stages reached (baseline/kernels) but neither a journey nor a result.json
+    # nor any op-bench verdict landed → the in-flight result died with the
+    # process (SIGKILL / budget / hang).
+    pf = tmp_path / "perfskills"
+    exp = pf / "e2e_run"
+    (exp / "baseline").mkdir(parents=True)
+    (exp / "kernels" / "paged_attention_task").mkdir(parents=True)
+    (pf / "handoff.json").write_text(json.dumps({"framework": "vllm"}), encoding="utf-8")
+
+    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, [])
+
+    assert out["status"] == "no_result_recovered_from_disk"
+    assert out["opbench_results"] == []
+    assert out["likely_cause"] == "killed_before_flush"
+
+
+def test_collect_perfskills_reconstruct_cause_runner_reported_failure(tmp_path: Path) -> None:
+    # A non-ok result.json was flushed (the runner itself reported the failure):
+    # the cause is the reported failure, not a silent kill.
+    pf = tmp_path / "perfskills"
+    pf.mkdir()
+    (pf / "handoff.json").write_text(json.dumps({"framework": "vllm"}), encoding="utf-8")
+    (pf / "result.json").write_text(
+        json.dumps({"status": "error", "error_class": "timeout"}), encoding="utf-8"
+    )
+
+    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, [])
+
+    assert out["status"] == "no_result_recovered_from_disk"
+    assert out["flushed_result_status"] == "error"
+    assert out["likely_cause"] == "runner_reported_failure"
+
+
+def test_collect_perfskills_reconstruct_handoff_only(tmp_path: Path) -> None:
+    # Only the handoff landed (runner killed before writing any e2e output):
+    # still recoverable — proves engagement + handoff without an e2e exp_root.
+    pf = tmp_path / "perfskills"
+    pf.mkdir()
+    (pf / "handoff.json").write_text(
+        json.dumps({"framework": "sglang", "workload": {"conc": 32}}),
+        encoding="utf-8",
+    )
+    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, [])
+    assert out["status"] == "no_result_recovered_from_disk"
+    assert out["recovered_from_disk"] is True
+    assert out["stages_reached"] == ["handoff"]
+    assert out["exp_root"] is None
+    assert out["accepted_kernels"] == []
+
+
+def test_collect_perfskills_empty_dir_falls_back_to_missing(tmp_path: Path) -> None:
+    # An empty perfskills/ dir carries no evidence → legacy ``missing`` section.
+    (tmp_path / "perfskills").mkdir()
+    out = collect_perfskills(tmp_path, {"kernel_optimizer": "perfskills"}, [])
+    assert out["status"] == "missing"
+    assert "recovered_from_disk" not in out
 
 
 def test_collect_perfskills_full_success_maps_fields(tmp_path: Path) -> None:
