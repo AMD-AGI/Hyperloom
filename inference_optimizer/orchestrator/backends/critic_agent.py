@@ -440,10 +440,13 @@ class CriticAgentBackend:
                 from openai import AsyncOpenAI  # type: ignore[import-not-found]
             except ImportError as exc:  # pragma: no cover
                 raise BackendError("openai SDK not installed; run `pip install openai>=1.50`") from exc
-            api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("OPENAI_API_KEY")
+            # Codex review reasoning speaks the OpenAI protocol, so prefer the
+            # OpenAI-side key (split entrypoints); ANTHROPIC_AUTH_TOKEN is the
+            # single-gateway fallback.
+            api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
             if not api_key:
                 raise BackendError(
-                    "ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY not set "
+                    "OPENAI_API_KEY / ANTHROPIC_AUTH_TOKEN not set "
                     "(CriticAgentBackend cannot reach Codex for review reasoning)"
                 )
             base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
