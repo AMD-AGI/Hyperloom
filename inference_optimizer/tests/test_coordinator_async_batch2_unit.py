@@ -2074,3 +2074,31 @@ async def test_pump_framework_agent_approve_enqueues(coord: Coordinator, monkeyp
     monkeypatch.setattr(coord, "_enqueue_framework_agent_task", _enqueue)
     await coord._pump_framework_agent_phase()
     assert enq
+
+
+# -- _session_integrated_kernel_patch (post-opt roofline gate) ---------------
+@pytest.mark.parametrize(
+    "action",
+    ["integrate", "integrate_patch", "gemm_tuning", "perfskills_e2e"],
+)
+def test_post_opt_roofline_gate_true_for_kernel_level_actions(coord: Coordinator, action: str) -> None:
+    """Any kernel-level optimization (source patch, GEMM tuning, perfskills) gates the post-opt roofline on."""
+    coord.shared_state.optimization_stack = [{"action": action}]
+    assert coord._session_integrated_kernel_patch() is True
+
+
+def test_post_opt_roofline_gate_false_for_param_search_only(coord: Coordinator) -> None:
+    """Pure param-search (explore/sweep) does not trigger the extra profile."""
+    coord.shared_state.optimization_stack = [{"action": "explore"}, {"action": "sweep"}]
+    assert coord._session_integrated_kernel_patch() is False
+
+
+def test_post_opt_roofline_gate_false_for_empty_stack(coord: Coordinator) -> None:
+    coord.shared_state.optimization_stack = []
+    assert coord._session_integrated_kernel_patch() is False
+
+
+def test_post_opt_roofline_gate_ignores_non_dict_entries(coord: Coordinator) -> None:
+    """Malformed (non-dict) stack entries are skipped without raising."""
+    coord.shared_state.optimization_stack = ["bad", {"action": "gemm_tuning"}]
+    assert coord._session_integrated_kernel_patch() is True

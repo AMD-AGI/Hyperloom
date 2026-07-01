@@ -436,6 +436,35 @@ def _kernel_agent_root_error() -> str | None:
     return None
 
 
+def _resolve_tracelens_root() -> Path:
+    """Resolve the TraceLens checkout, independent of inherited env.
+
+    Falls back to the install-script-derived pod-local path so trace analysis
+    works even when the coordinator process did not source kernel-agent.env.sh.
+
+    Returns:
+        Path: The resolved TraceLens root (may not exist yet; callers validate).
+    """
+    from inference_optimizer import paths
+
+    return paths.tracelens_root()
+
+
+def _tracelens_root_error(root: Path) -> str | None:
+    """Validate that the resolved TraceLens root exists on disk.
+
+    Returns:
+        str | None: A human-readable error when the checkout is missing, or
+            ``None`` when it is present and usable.
+    """
+    if not root.is_dir():
+        return (
+            f"TraceLens root not found: {root}; run kernel-agent/scripts/install.sh "
+            "or set TRACELENS_ROOT to an existing checkout"
+        )
+    return None
+
+
 def _kernel_agent_tool_path(tool_name: str) -> Path:
     """Resolve the absolute path to a kernel-agent shell tool.
 
@@ -2327,6 +2356,12 @@ async def trace_analyze_handler(
     root_err = _kernel_agent_root_error()
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
+    # Resolve TraceLens root independently of inherited env (the coordinator may
+    # not have sourced kernel-agent.env.sh) and fail fast before launching the tool.
+    tracelens_root = _resolve_tracelens_root()
+    tl_err = _tracelens_root_error(tracelens_root)
+    if tl_err:
+        return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
 
     # Pass the session root so artefacts settle at ``<session_dir>/kernel-agent/runs/...`` (the suffix is hardcoded in the tool).
     workspace_path = payload.get("workspace_path") or str(session_dir)
@@ -2358,6 +2393,10 @@ async def trace_analyze_handler(
         str(payload.get("top_k", 10)),
         "--workspace-path",
         workspace_path,
+        # Pass the resolved root explicitly so the tool never depends on the
+        # subprocess inheriting TRACELENS_ROOT from the coordinator env.
+        "--tracelens-root",
+        str(tracelens_root),
     ]
     if model_name:
         cmd += ["--model-name", str(model_name)]
@@ -2397,6 +2436,11 @@ async def trace_analyze_handler(
     )
     if analysis_route in ("deterministic", "agent"):
         cmd += ["--analysis-route", analysis_route]
+    # Post-kernel-opt roofline writes a separate report so it never overwrites
+    # the baseline kernel_roofline.json; the chart diffs the two snapshots.
+    roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
+    if roofline_output_name:
+        cmd += ["--roofline-output-name", roofline_output_name]
     # A stale ``--roofline-json`` payload key is silently ignored.
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
