@@ -262,9 +262,6 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # backend TRITON) — the unrecognized arch leaves an empty model type.
 # deepseek_v4: confirmed from DeepSeek-V4-Flash server.log ModelConfig
 # validation failure.
-# glm_moe_dsa: confirmed from zai-org-GLM-5.1 server.log ("model type
-# `glm_moe_dsa` but Transformers does not recognize this architecture" →
-# ModelConfig ValidationError in engine init).
 # gemma4: removed from the blocklist. The original entry assumed the framework
 # did not recognize gemma4, but the current runtime (transformers 5.5.0 +
 # vLLM 0.18.2rc1 rocm721) registers it: CONFIG_MAPPING contains "gemma4",
@@ -272,12 +269,19 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # "Gemma4ForConditionalGeneration" (runner_type=generate) without a
 # validation/registry error. The wrapper carries vision_config, so it now
 # falls through to the text_coercible degraded-mode path instead.
+# glm_moe_dsa: removed from the blocklist (same rationale as gemma4). The
+# original entry was confirmed from a zai-org-GLM-5.1 server.log ModelConfig
+# ValidationError, but the current runtime (transformers 5.12.1 + vLLM 0.24.0)
+# now supports it: AutoConfig resolves GlmMoeDsaConfig ("glm_moe_dsa") and
+# vLLM's ModelRegistry registers "GlmMoeDsaForCausalLM" (runner reuses the
+# deepseek_v2 module; gfx942 sparse-MLA ops fall back to Triton via
+# vllm-project/vllm#45782). Keeping it here would falsely block GLM-5.x.
 _UNRECOGNIZED_MODEL_TYPES = frozenset({
-    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash", "glm_moe_dsa",
+    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash",
 })
 _UNRECOGNIZED_ARCHITECTURES = frozenset({
     "deepseekv4forcausallm", "glm4moeliteforcausallm",
-    "mimov2flashforcausallm", "glmmoedsaforcausallm",
+    "mimov2flashforcausallm",
 })
 # Some model_type values only appear inside nested decoder configs carried by a
 # wrapper. A bare top-level type is left to the framework unless we have a direct
