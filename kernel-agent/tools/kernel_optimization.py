@@ -4497,8 +4497,8 @@ def build_verification(
                     "patch_path": deploy_patch_path,
                     "repo_root": deploy_repo_root,
                     "descriptors": descriptors,
-                    "write_paths": [d.get("path") for d in descriptors if d.get("op") == "write"],
-                    "delete_paths": [d.get("path") for d in descriptors if d.get("op") == "delete"],
+                    "write_paths": [d["path"] for d in descriptors if d.get("op") == "write" and d.get("path")],
+                    "delete_paths": [d["path"] for d in descriptors if d.get("op") == "delete" and d.get("path")],
                 }
     correctness_signal = getattr(args, "correctness_passed", None)
     correctness_source = "cli_override" if correctness_signal is not None else "missing"

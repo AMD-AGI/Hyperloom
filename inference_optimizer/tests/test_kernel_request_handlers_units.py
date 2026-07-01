@@ -46,6 +46,29 @@ class TestForgeGemmHelperCoverage:
     def test_truthy_env_value_false(self, value):
         assert krh._truthy_env_value(value) is False
 
+    def test_trace_analysis_route_blocks_env_only_deterministic(self, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "deterministic")
+        monkeypatch.delenv("HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS", raising=False)
+
+        assert krh._resolve_trace_analysis_route({}) == "agent"
+
+    def test_trace_analysis_route_allows_env_deterministic_with_opt_in(self, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "deterministic")
+        monkeypatch.setenv("HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS", "true")
+
+        assert krh._resolve_trace_analysis_route({}) == "deterministic"
+
+    def test_trace_analysis_route_payload_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "deterministic")
+        monkeypatch.setenv("HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS", "1")
+
+        assert krh._resolve_trace_analysis_route({"analysis_route": "agent"}) == "agent"
+
+    def test_trace_analysis_route_ignores_invalid_env(self, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "bogus")
+
+        assert krh._resolve_trace_analysis_route({}) == ""
+
     def test_resolve_forge_server_log_priority(self, tmp_path):
         state = SharedState()
         baseline = tmp_path / "baseline"
@@ -1737,3 +1760,51 @@ class TestKernelOptArtifactBundleRecording:
 
         assert state.kernel_opt_attempts["k001"]["last_artifact_bundle"] == bundle
         assert state.last_kernel_opt["best_artifact_bundle"] == bundle
+
+    def test_resolve_integrate_payload_uses_last_kernel_artifact_bundle(self, tmp_path):
+        bundle = {
+            "type": "patch_snapshot",
+            "snapshot_dir": "/tmp/snap",
+            "patch_path": "/tmp/best.patch",
+            "repo_root": "/repo",
+        }
+        state = SharedState.load_or_init(tmp_path)
+        state.last_kernel_opt = {
+            "kernel_id": "k001",
+            "source_file": "/repo/aiter/ops/moe.py",
+            "best_artifact_bundle": bundle,
+        }
+        state.save(tmp_path)
+
+        resolved, error = krh._resolve_integrate_payload({"kernel_id": "k001"}, session_dir=tmp_path)
+
+        assert error is None
+        assert resolved["snapshot_dir"] == "/tmp/snap"
+        assert resolved["patch_path"] == "/tmp/best.patch"
+        assert resolved["kernel_repo"] == "/repo"
+        assert resolved["source_file"] == "/repo/aiter/ops/moe.py"
+
+    def test_resolve_integrate_payload_uses_per_kernel_artifact_bundle(self, tmp_path):
+        bundle = {
+            "type": "patch_snapshot",
+            "snapshot_dir": "/tmp/snap2",
+            "patch_path": "/tmp/queued.patch",
+            "repo_root": "/repo2",
+        }
+        state = SharedState.load_or_init(tmp_path)
+        state.last_kernel_opt = {"kernel_id": "other"}
+        state.kernel_opt_attempts = {
+            "k002": {
+                "last_source_file": "/repo2/aiter/ops/queued.py",
+                "last_artifact_bundle": bundle,
+            }
+        }
+        state.save(tmp_path)
+
+        resolved, error = krh._resolve_integrate_payload({"kernel_id": "k002"}, session_dir=tmp_path)
+
+        assert error is None
+        assert resolved["snapshot_dir"] == "/tmp/snap2"
+        assert resolved["patch_path"] == "/tmp/queued.patch"
+        assert resolved["kernel_repo"] == "/repo2"
+        assert resolved["source_file"] == "/repo2/aiter/ops/queued.py"
