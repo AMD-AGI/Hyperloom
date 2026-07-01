@@ -15,7 +15,7 @@ from ._time import now_iso
 
 TOPIC_ALLOWLIST = frozenset({
     # Optimization-loop topics
-    "proposal", "question", "answer",
+    "proposal",
     "observation", "event", "decision",
     "alert",
     "historical_warning", "reflection_tick",
@@ -24,7 +24,7 @@ TOPIC_ALLOWLIST = frozenset({
     "delegated_result", "intent_emitted", "rca_done",
     # Robustness KILL_TASK audit broadcast (write-only; no consumer keys off
     # it, but it must be allow-listed or ``append_and_seq`` rejects it as an
-    # unknown topic — siblings prune_branch/force_dispatch ride "event").
+    # unknown topic — sibling prune_branch rides "event").
     "kill",
     # Storage-layer events
     "lease_expired", "lease_acquire_failed",

@@ -37,10 +37,7 @@ The Critic runtime never produces this JSON itself — it builds it via
 |---|---|
 | `review_verdict` | `target_proposal_msg_id`, `verdict` |
 | `send_message` | `topic` |
-| `ask_question` | `topic`, `question` |
-| `answer` | `in_reply_to`, `answer` |
 | `alert` | `severity`, `summary` |
-| `update_persona` | `body_md` |
 
 ## Validation
 

@@ -53,7 +53,12 @@ Verdict rules:
   policy-backed rejection and `packet_evidence` for packet-local facts.
 - `redirect`: include `alternative_action` with a registered action owned by the
   same agent family.
-- `advise`: dispatch may proceed. Include non-empty `advice_text`.
+- `advise`: dispatch may proceed. Include non-empty `advice_text`. The
+  text may also be supplied via a matching `advice[]` entry in a
+  `coordinator_inbox` review; the commit adapter merges any `advice[]`
+  bodies for the same `target_proposal_msg_id` into this `advice_text`
+  (verdict's own text first, then the `advice[]` bodies, joined with a
+  blank line).
 - `needs_review`: dispatch must not proceed. Use for high-risk mock, timeout,
   unavailable, or insufficient-evidence cases.
 
