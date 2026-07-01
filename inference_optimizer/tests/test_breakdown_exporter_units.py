@@ -282,3 +282,75 @@ class TestCollectGemmTuning:
         out = col.collect_gemm_tuning(state)
         assert len(out["runs"]) == 1
         assert out["runs"][0]["engine"] == "forge"
+
+
+# _collect_recovery + collect_session.recovery
+
+
+class TestCollectRecovery:
+    def test_clean_run_reports_not_recovered(self):
+        rec = col._collect_recovery({})
+        assert rec["recovered"] is False
+        assert rec["crash_count"] == 0
+        assert rec["crash_timestamps"] == []
+        assert rec["last_tick_exception"] is None
+        assert rec["steward_infra_failures_total"] == 0
+
+    def test_crash_and_resume_signals_surface(self):
+        # The incident shape: crashed + steward-continued + accepted stack awaits
+        # post-resume revalidation. All must show, and epoch crash timestamps are
+        # rendered as ISO UTC.
+        state = {
+            "crash_count": 2,
+            "crash_timestamps": [1782800000.0, 1782803600.5],
+            "degraded_mode": True,
+            "steward_continuation_used": True,
+            "resume_pending_revalidation": True,
+            "steward_infra_failures_by_round": {"12": 1, "13": 2},
+            "last_tick_exception": {
+                "tick": 12,
+                "ts": "2026-06-29T22:25:00Z",
+                "stage": "kernel_opt",
+                "agent": "kernel_agent",
+                "type": "TimeoutError",
+                "message": "x" * 900,
+                "traceback": "y" * 5000,
+            },
+        }
+        rec = col._collect_recovery(state)
+        assert rec["recovered"] is True
+        assert rec["crash_count"] == 2
+        assert len(rec["crash_timestamps"]) == 2
+        assert all(ts.endswith("+00:00") for ts in rec["crash_timestamps"])
+        assert rec["degraded_mode"] is True
+        assert rec["steward_continuation_used"] is True
+        assert rec["resume_pending_revalidation"] is True
+        assert rec["steward_infra_failures_total"] == 3
+        assert rec["steward_infra_failures_by_round"] == {"12": 1, "13": 2}
+        # Compact exception header; traceback dropped, message capped.
+        assert rec["last_tick_exception"]["type"] == "TimeoutError"
+        assert rec["last_tick_exception"]["tick"] == 12
+        assert "traceback" not in rec["last_tick_exception"]
+        assert len(rec["last_tick_exception"]["message"]) == 500
+
+    def test_malformed_signals_are_skipped_not_raised(self):
+        rec = col._collect_recovery(
+            {
+                "crash_count": "not-int",
+                "crash_timestamps": ["bad", None, 1782800000.0],
+                "steward_infra_failures_by_round": {"r": "x", "s": 4},
+                "last_tick_exception": "not-a-dict",
+            }
+        )
+        assert rec["crash_count"] == 0
+        assert len(rec["crash_timestamps"]) == 1  # only the parseable epoch
+        assert rec["steward_infra_failures_total"] == 4
+        assert rec["last_tick_exception"] is None
+
+    def test_collect_session_embeds_recovery_block(self, tmp_path):
+        warnings: list[str] = []
+        state = {"session_id": "s1", "crash_count": 1, "steward_continuation_used": True}
+        out = col.collect_session(tmp_path, state, {}, warnings)
+        assert "recovery" in out
+        assert out["recovery"]["recovered"] is True
+        assert out["recovery"]["crash_count"] == 1
