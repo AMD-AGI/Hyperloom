@@ -2909,6 +2909,36 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     )
 
 
+def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
+    """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
+
+    Keys MUST be the canonical phase names from
+    :mod:`inference_optimizer.orchestrator.phase_state`; otherwise
+    :func:`normalize_budget_pct` silently drops the entry and the phase falls
+    back to its library default.
+    """
+    from .orchestrator.phase_state import (
+        PHASE_CLOSE,
+        PHASE_EXPLORE,
+        PHASE_KERNEL_AGENT,
+        PHASE_PRELUDE,
+        PHASE_SWEEP,
+    )
+
+    phase_budget_pct: dict[str, float] = {}
+    for cli_field, phase_name in (
+        ("phase_budget_prelude_pct", PHASE_PRELUDE),
+        ("phase_budget_explore_pct", PHASE_EXPLORE),
+        ("phase_budget_kernel_pct", PHASE_KERNEL_AGENT),
+        ("phase_budget_sweep_pct", PHASE_SWEEP),
+        ("phase_budget_close_pct", PHASE_CLOSE),
+    ):
+        val = getattr(args, cli_field, None)
+        if val is not None:
+            phase_budget_pct[phase_name] = float(val)
+    return phase_budget_pct
+
+
 def _export_workload_envs_for_optimize(
     args: argparse.Namespace,
     *,
@@ -3217,8 +3247,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print("  explore phase         : DISABLED (persisted from original run)")
         elif bool(getattr(args, "no_explore", False)):
             # Honour --no-explore on resume only before EXPLORE is entered.
+            # Phases preceding EXPLORE are PRELUDE and FRAMEWORK_AGENT (the
+            # latter renamed from the legacy "FRAMEWORK" in commit 33ac6ccc).
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
-            if cur_phase in ("", "PRELUDE", "FRAMEWORK"):
+            if cur_phase in ("", "PRELUDE", "FRAMEWORK_AGENT"):
                 state.explore_enabled = False
                 print(f"  explore phase         : DISABLING for resume (--no-explore + phase={cur_phase or 'PRELUDE'})")
             else:
@@ -3656,17 +3688,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
 
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
-    phase_budget_pct: dict[str, float] = {}
-    for cli_field, phase_name in (
-        ("phase_budget_prelude_pct", "PRELUDE"),
-        ("phase_budget_explore_pct", "EXPLORE"),
-        ("phase_budget_kernel_pct", "KERNEL"),
-        ("phase_budget_sweep_pct", "SWEEP"),
-        ("phase_budget_close_pct", "CLOSE"),
-    ):
-        val = getattr(args, cli_field, None)
-        if val is not None:
-            phase_budget_pct[phase_name] = float(val)
+    phase_budget_pct = _build_phase_budget_pct(args)
 
     # When kernel is disabled, strip it from the role registry (no tick / no backend expectation).
     role_registry = None
@@ -5290,8 +5312,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # phase budget percentages
     # Each phase claims a fraction of the wall-clock budget (caps; may exit earlier). Sum need not equal 1.0.
+    # Both spellings are accepted for every phase: the legacy ``--max-minutes-*-pct``
+    # and the newer ``--phase-budget-*-pct`` (matches the ``phase_budget_*`` dest).
     opt.add_argument(
         "--max-minutes-prelude-pct",
+        "--phase-budget-prelude-pct",
         dest="phase_budget_prelude_pct",
         type=float,
         default=None,
@@ -5299,20 +5324,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--max-minutes-explore-pct",
+        "--phase-budget-explore-pct",
         dest="phase_budget_explore_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for EXPLORE. Default: 0.45.",
+        help="Wall-clock budget cap for EXPLORE. Default: 0.375.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
+        "--phase-budget-kernel-pct",
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL. Default: 0.38.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.305.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
+        "--phase-budget-sweep-pct",
         dest="phase_budget_sweep_pct",
         type=float,
         default=None,
@@ -5320,6 +5348,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--max-minutes-close-pct",
+        "--phase-budget-close-pct",
         dest="phase_budget_close_pct",
         type=float,
         default=None,
