@@ -426,14 +426,13 @@ KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
 ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
     {
-        IntentType.FORCE_DISPATCH,
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }
 )
 ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 
-# Per-intent source override: PRUNE_BRANCH + ESCALATE_STRATEGY_CHANGE widen to orchestration; FORCE_DISPATCH stays robustness-only.
+# Per-intent source override: PRUNE_BRANCH + ESCALATE_STRATEGY_CHANGE widen to orchestration.
 _ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
     IntentType.PRUNE_BRANCH: frozenset({"robustness", "orchestration"}),
     IntentType.ESCALATE_STRATEGY_CHANGE: frozenset(
@@ -703,7 +702,7 @@ class PolicyGate:
             self._validate_kill_task(role, payload)
         elif intent.type in ROBUSTNESS_ONLY_INTENTS:
             self._validate_robustness_only(role, intent.type, payload)
-        # ANSWER / ASK_QUESTION / UPDATE_PERSONA / ALERT carry no extra checks beyond the role gate.
+        # ALERT carries no extra checks beyond the role gate.
 
         # Path-containment guard for PATH_LIKE_FIELDS in the payload.
         self._validate_payload_paths(role, intent.type, payload)
@@ -729,10 +728,7 @@ class PolicyGate:
             return None
         if intent.type in (
             IntentType.SEND_MESSAGE,
-            IntentType.UPDATE_PERSONA,
             IntentType.ALERT,
-            IntentType.ASK_QUESTION,
-            IntentType.ANSWER,
         ):
             return None
         if intent.type == IntentType.PROPOSE_ACTION and (intent.payload or {}).get("action_name") == "report":
