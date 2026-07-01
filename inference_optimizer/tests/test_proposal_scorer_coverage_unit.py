@@ -88,6 +88,34 @@ def test_ensure_client_builds_with_key(monkeypatch):
     assert scorer._ensure_client() is sentinel
 
 
+def test_ensure_client_prefers_explicit_openai_key(monkeypatch):
+    """Plan B: explicit OPENAI_API_KEY wins over SAFE-filled ANTHROPIC_AUTH_TOKEN."""
+    import openai
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-user-key")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "safe-filled")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://proxy")
+    captured: dict = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw) or object())
+    scorer = ProposalScorer(models=("m",))
+    scorer._ensure_client()
+    assert captured["api_key"] == "openai-user-key"
+
+
+def test_ensure_client_falls_back_to_anthropic_token(monkeypatch):
+    """Single-gateway: only ANTHROPIC_AUTH_TOKEN set still builds a client."""
+    import openai
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "safe-filled")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://proxy")
+    captured: dict = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw) or object())
+    scorer = ProposalScorer(models=("m",))
+    scorer._ensure_client()
+    assert captured["api_key"] == "safe-filled"
+
+
 # ---- score: proposal cap + timeout + no-usable ----
 class _FakeCompletions:
     def __init__(self, behaviour):

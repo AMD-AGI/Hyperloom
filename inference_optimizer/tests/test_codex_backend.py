@@ -181,3 +181,41 @@ def test_construct_without_creds_raises_backend_error(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(BackendError, match="not set"):
         CodexBackend(client_factory=None)
+
+
+def _construct_real_codex_capturing_kwargs(monkeypatch):
+    """Build a CodexBackend through the real SDK path, capturing AsyncOpenAI kwargs."""
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.AsyncOpenAI = _FakeAsyncOpenAI
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    CodexBackend(client_factory=None)
+    return captured
+
+
+def test_codex_prefers_explicit_openai_key_over_safe_filled_anthropic(monkeypatch):
+    """Plan B: a user-set OPENAI_API_KEY wins over SAFE-filled ANTHROPIC_AUTH_TOKEN."""
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "safe-key-from-safe")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-user-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    captured = _construct_real_codex_capturing_kwargs(monkeypatch)
+    assert captured["api_key"] == "openai-user-key"
+    assert captured["base_url"] == "https://api.openai.com/v1"
+
+
+def test_codex_falls_back_to_anthropic_token_when_no_openai_key(monkeypatch):
+    """Single-gateway: with only ANTHROPIC_AUTH_TOKEN set, Codex still auths."""
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "safe-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
+    captured = _construct_real_codex_capturing_kwargs(monkeypatch)
+    assert captured["api_key"] == "safe-key"
