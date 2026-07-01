@@ -4896,6 +4896,7 @@ class Coordinator:
         self._record_phase_entry_evidence(
             gemm_tuning={"status": "running", "source": "kernel_entry_auto"},
         )
+        run_gemm_tuning_handler = None
         try:
             from .kernel_request_handlers import run_gemm_tuning_handler
 
@@ -4915,6 +4916,40 @@ class Coordinator:
                 "error": repr(exc),
             }
         await self._handle_gemm_tuning_result(result)
+
+        if (
+            run_gemm_tuning_handler is not None
+            and self._should_run_bf16_dense_gemm_fallback(result)
+            and str(result.get("decision") or "").strip().upper() != "KEEP"
+        ):
+            log.info(
+                "KERNEL entry: forge fp8 GEMM tuning found no candidate; "
+                "trying bf16 dense fallback"
+            )
+            try:
+                result = await run_gemm_tuning_handler(
+                    {
+                        "task_id": "kernel_entry_gemm_tuning_bf16_fallback",
+                        "reason": "fp8_no_improvement_bf16_fallback",
+                        "precision": "bf16",
+                        "tuner": "sglang_dense_bf16",
+                    },
+                    session_dir=self.session_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.exception("KERNEL entry GEMM bf16 fallback failed")
+                result = {
+                    "status": "failed",
+                    "decision": "REVERT",
+                    "error_class": exc.__class__.__name__,
+                    "error": repr(exc),
+                    "backend": "forge",
+                    "precision": "bf16",
+                    "framework": getattr(self.shared_state, "framework", ""),
+                    "source": "fp8_no_improvement_bf16_fallback",
+                }
+            await self._handle_gemm_tuning_result(result)
+
         status = str(result.get("status") or "unknown")
         await self.bus.append_and_seq(
             Message.new(
@@ -4943,6 +4978,44 @@ class Coordinator:
         await self._maybe_reprofile_for_kernel()
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
+
+    def _should_run_bf16_dense_gemm_fallback(self, result: dict[str, Any]) -> bool:
+        """Return True when a forge fp8 run should try bf16 dense GEMM tuning.
+
+        Recent production runs showed the automatic KERNEL-entry GEMM step can
+        stop after a single fp8 a8w8/a8w8_blockscale no-op. Historical wins came
+        from a follow-up ``sglang_dense_bf16`` run, so make that fallback
+        deterministic when the fp8 tuner produced no E2E-validatable candidate.
+        """
+        if not isinstance(result, dict):
+            return False
+        if str(result.get("backend") or "").strip().lower() != "forge":
+            return False
+        if str(result.get("precision") or "").strip().lower() != "fp8":
+            return False
+        framework = str(
+            result.get("framework") or getattr(self.shared_state, "framework", "") or ""
+        ).strip().lower()
+        if framework != "sglang":
+            return False
+        if str(result.get("micro_decision") or "").strip().lower() != "no_improvement":
+            return False
+        if result.get("recommended_env") or result.get("extra_envs"):
+            return False
+        for tuner in result.get("tuners_run") or []:
+            if not isinstance(tuner, dict):
+                continue
+            if str(tuner.get("status") or "").strip().lower() != "ok":
+                continue
+            try:
+                improved = int(tuner.get("improved_shapes") or 0)
+            except (TypeError, ValueError):
+                improved = 0
+            if improved > 0 and str(tuner.get("env_var") or "").strip() and str(
+                tuner.get("env_value") or ""
+            ).strip():
+                return False
+        return True
 
     @staticmethod
     def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
