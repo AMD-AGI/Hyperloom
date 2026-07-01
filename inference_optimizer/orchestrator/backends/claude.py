@@ -59,8 +59,8 @@ Tool input shape:
 
   {{
     "intent_type": "<one of send_message|delegate|propose_action|request|"
-                   "response|review_verdict|update_state|update_persona|"
-                   "ask_question|answer|alert|kill_task|force_dispatch|"
+                   "response|review_verdict|update_state|"
+                   "alert|kill_task|"
                    "prune_branch|escalate_strategy_change>",
     "payload": {{ /* per-intent fields — see tool description */ }}
   }}

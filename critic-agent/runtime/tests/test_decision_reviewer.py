@@ -175,6 +175,18 @@ def test_prepare_review_framework_op_emits_empty_approve_requires(reviewer):
     assert constraints["proposal_action_classes"] == {"baseA": "framework_op"}
 
 
+def test_classify_framework_agent_is_framework_op():
+    """FRAMEWORK pre-screen candidates classify as framework_op (no extra approve_requires)."""
+    from runtime.decision_reviewer import (
+        _APPROVE_REQUIRES_BY_CLASS,
+        ACTION_CLASS_FRAMEWORK_OP,
+        classify_proposal_action,
+    )
+
+    assert classify_proposal_action("framework_agent") == ACTION_CLASS_FRAMEWORK_OP
+    assert _APPROVE_REQUIRES_BY_CLASS[ACTION_CLASS_FRAMEWORK_OP] == ()
+
+
 def test_prepare_review_mixed_batch_uses_strictest_class(reviewer):
     rev, _, _ = reviewer
     bundle = rev.prepare_review(_coordinator_request(_mixed_prompt(), "sess_mix"))
@@ -318,6 +330,95 @@ def test_commit_review_for_coordinator_inbox_emits_intent_envelope(reviewer):
     assert sorted(verdicts) == ["approve", "reject"]
     assert sm.is_msg_already_reviewed("sess_c", "aaa1")
     assert sm.is_msg_already_reviewed("sess_c", "bbb2")
+
+
+def _verdict_intent_for(intents: list[dict], target: str) -> dict:
+    for intent in intents:
+        if intent["intent_type"] == "review_verdict" and intent["payload"]["target_proposal_msg_id"] == target:
+            return intent
+    raise AssertionError(f"no review_verdict intent for {target!r}")
+
+
+def test_commit_review_backfills_advice_text_from_advice_entry(reviewer):
+    rev, kb, sm = reviewer
+    rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_advice"))
+    review = {
+        "review_verdicts": [
+            {
+                "target_proposal_msg_id": "aaa1",
+                "verdict": "advise",
+                "reasoning": "proceed with caveats",
+            }
+        ],
+        "advice": [
+            {
+                "target_proposal_msg_id": "aaa1",
+                "body_md": "Re-run the sweep at higher concurrency before promotion.",
+            }
+        ],
+    }
+    outcome = rev.commit_review(
+        _coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_advice"),
+        review,
+    )
+    intents = outcome.intent_envelope["intents"]
+    verdict_intent = _verdict_intent_for(intents, "aaa1")
+    assert verdict_intent["payload"]["advice_text"] == "Re-run the sweep at higher concurrency before promotion."
+    # The standalone advice broadcast is preserved alongside the backfill.
+    advice_intents = [
+        i for i in intents if i["intent_type"] == "send_message" and i["payload"].get("topic") == "advice"
+    ]
+    assert len(advice_intents) == 1
+    assert advice_intents[0]["payload"]["body_md"] == "Re-run the sweep at higher concurrency before promotion."
+
+
+def test_commit_review_merges_inline_and_advice_entries(reviewer):
+    rev, kb, sm = reviewer
+    rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_merge"))
+    review = {
+        "review_verdicts": [
+            {
+                "target_proposal_msg_id": "aaa1",
+                "verdict": "advise",
+                "reasoning": "proceed with caveats",
+                "advice_text": "Inline advice.",
+            }
+        ],
+        "advice": [
+            {"target_proposal_msg_id": "aaa1", "body_md": "First broadcast advice."},
+            {"target_proposal_msg_id": "aaa1", "body_md": "Second broadcast advice."},
+        ],
+    }
+    outcome = rev.commit_review(
+        _coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_merge"),
+        review,
+    )
+    intents = outcome.intent_envelope["intents"]
+    verdict_intent = _verdict_intent_for(intents, "aaa1")
+    assert verdict_intent["payload"]["advice_text"] == (
+        "Inline advice.\n\nFirst broadcast advice.\n\nSecond broadcast advice."
+    )
+
+
+def test_commit_review_keeps_advice_text_empty_when_no_advice(reviewer):
+    rev, kb, sm = reviewer
+    rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_empty"))
+    review = {
+        "review_verdicts": [
+            {
+                "target_proposal_msg_id": "aaa1",
+                "verdict": "approve",
+                "reasoning": "ok",
+            }
+        ]
+    }
+    outcome = rev.commit_review(
+        _coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_empty"),
+        review,
+    )
+    intents = outcome.intent_envelope["intents"]
+    verdict_intent = _verdict_intent_for(intents, "aaa1")
+    assert verdict_intent["payload"]["advice_text"] == ""
 
 
 def test_commit_review_invalid_verdict_raises(reviewer):

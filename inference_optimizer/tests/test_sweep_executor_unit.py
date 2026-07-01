@@ -49,6 +49,32 @@ def test_build_grid_basic():
     assert v.extra_envs["NUM_PROMPTS"] == "20"
 
 
+def test_build_grid_disables_eval_by_default(monkeypatch):
+    """Sweep variants skip the (concurrency-invariant) accuracy eval by default."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL", raising=False)
+    grid, _ = sw._build_grid(
+        conc_values=[4, 16],
+        isl_osl_configs=["1024:1024"],
+        num_prompts_factor=5,
+        base_extra_args="",
+    )
+    assert grid
+    assert all(v.extra_envs.get("RUN_EVAL") == "false" for v in grid)
+
+
+def test_build_grid_eval_opt_in(monkeypatch):
+    """INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1 re-enables the per-point accuracy gate."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL", "true")
+    grid, _ = sw._build_grid(
+        conc_values=[4, 16],
+        isl_osl_configs=["1024:1024"],
+        num_prompts_factor=5,
+        base_extra_args="",
+    )
+    assert grid
+    assert all("RUN_EVAL" not in v.extra_envs for v in grid)
+
+
 def test_build_grid_malformed_io_skipped():
     grid, skipped = sw._build_grid(
         conc_values=[4],
