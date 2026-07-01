@@ -35,8 +35,8 @@ Critic review is required for:
 - Orchestration `propose_action` where `family in {"deep_kernel", "long"}`.
 - Kernel `response` where `kind="integrate"` and `status="keep_proposed"`.
 
-Critic does not block Robustness emergency actions such as `kill_task`,
-`prune_branch`, or `force_dispatch`. Review those only after the fact as advice.
+Critic does not block Robustness emergency actions such as `kill_task`
+or `prune_branch`. Review those only after the fact as advice.
 
 ## Review Steps
 

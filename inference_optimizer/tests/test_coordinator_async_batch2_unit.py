@@ -1658,7 +1658,6 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
     routes = {
         IntentType.KILL_TASK: "_handle_kill_task",
         IntentType.PRUNE_BRANCH: "_handle_prune_branch",
-        IntentType.FORCE_DISPATCH: "_handle_force_dispatch",
         IntentType.ALERT: "_handle_alert",
         IntentType.UPDATE_STATE: "_handle_update_state",
         IntentType.SPECIALIST_DONE: "_handle_specialist_done",
@@ -2022,7 +2021,36 @@ async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_agent_critic_rejects(coord: Coordinator, monkeypatch) -> None:
+async def test_pump_framework_agent_submits_candidate_proposal(coord: Coordinator, monkeypatch) -> None:
+    """The pump submits the candidate as a ``framework_agent`` proposal (async gate) instead of enqueuing inline."""
+    _enter_framework(coord)
+
+    async def _select():
+        return {"candidate_id": "c1", "pr_url": "https://example.com/pr/1", "batch_id": "b1"}
+
+    monkeypatch.setattr(coord, "_select_best_framework_agent_candidate", _select)
+
+    async def _audit(cand):
+        return {"recommended_next_step": "direct_framework"}
+
+    monkeypatch.setattr(coord, "_audit_framework_agent_candidate", _audit)
+    monkeypatch.setattr(coord, "_framework_agent_roots_have_git", lambda: True)
+
+    await coord._pump_framework_agent_phase()
+
+    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_agent"]
+    assert len(pendings) == 1
+    payload = pendings[0].payload
+    assert payload["framework_agent_candidate_id"] == "c1"
+    assert payload["audit_step"] == "direct_framework"
+    # No framework_agent task is created synchronously; the verdict drives it later.
+    queued = await coord.tasks.queued()
+    assert not [t for t in queued if getattr(t, "kind", "") == "framework_agent"]
+
+
+@pytest.mark.asyncio
+async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, monkeypatch) -> None:
+    """A candidate already awaiting its verdict is not re-submitted on the next tick."""
     _enter_framework(coord)
 
     async def _select():
@@ -2031,48 +2059,64 @@ async def test_pump_framework_agent_critic_rejects(coord: Coordinator, monkeypat
     monkeypatch.setattr(coord, "_select_best_framework_agent_candidate", _select)
 
     async def _audit(cand):
-        return {"recommended_next_step": ""}  # unknown -> proceed to Critic
-
-    monkeypatch.setattr(coord, "_audit_framework_agent_candidate", _audit)
-
-    async def _review(cand):
-        return {"verdict": "reject", "rationale": "unsafe"}
-
-    monkeypatch.setattr(coord, "_critic_review_framework_agent_candidate", _review)
-    await coord._pump_framework_agent_phase()
-    prog = coord.shared_state.framework_agent_phase_progress
-    assert any(p.get("status") == "critic_denied" for p in prog)
-
-
-@pytest.mark.asyncio
-async def test_pump_framework_agent_approve_enqueues(coord: Coordinator, monkeypatch) -> None:
-    _enter_framework(coord)
-
-    async def _select():
-        return {"candidate_id": "c2", "batch_id": "b2"}
-
-    monkeypatch.setattr(coord, "_select_best_framework_agent_candidate", _select)
-
-    async def _audit(cand):
-        # direct_apply -> raw-diff executor only (keeps this test hermetic).
         return {"recommended_next_step": "direct_framework"}
 
     monkeypatch.setattr(coord, "_audit_framework_agent_candidate", _audit)
-    # direct_apply requires a git checkout; force the preflight True so the
-    # candidate routes to the raw-diff executor instead of degrading to authoring.
     monkeypatch.setattr(coord, "_framework_agent_roots_have_git", lambda: True)
 
-    async def _review(cand):
-        return {"verdict": "approve"}
+    await coord._pump_framework_agent_phase()
+    await coord._pump_framework_agent_phase()  # pending proposal -> no second submit
+    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_agent"]
+    assert len(pendings) == 1
 
-    monkeypatch.setattr(coord, "_critic_review_framework_agent_candidate", _review)
+
+@pytest.mark.asyncio
+async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) -> None:
+    """A reject verdict on a framework_agent candidate proposal writes a critic_denied progress row."""
+    from inference_optimizer.orchestrator.coordinator import PendingProposal
+
+    pending = PendingProposal(
+        proposal_msg_id="m1",
+        from_agent="coordinator",
+        action_name="framework_agent",
+        predicted_gain_pct=0.0,
+        payload={"framework_agent_candidate_id": "c1", "batch_id": "b1"},
+    )
+    coord.state.pending_proposals["m1"] = pending
+    await coord._handle_single_verdict(
+        source="critic", pending=pending, verdict="reject", reasoning="unsafe",
+    )
+    prog = coord.shared_state.framework_agent_phase_progress
+    assert any(p.get("status") == "critic_denied" and p.get("candidate_id") == "c1" for p in prog)
+
+
+@pytest.mark.asyncio
+async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, monkeypatch) -> None:
+    """An approve verdict routes a ``direct_framework`` candidate to the raw-diff enqueue helper."""
+    from inference_optimizer.orchestrator.coordinator import PendingProposal
+
     enq: list = []
 
     async def _enqueue(cand):
         enq.append(cand)
 
     monkeypatch.setattr(coord, "_enqueue_framework_agent_task", _enqueue)
-    await coord._pump_framework_agent_phase()
+    pending = PendingProposal(
+        proposal_msg_id="m2",
+        from_agent="coordinator",
+        action_name="framework_agent",
+        predicted_gain_pct=0.0,
+        payload={
+            "framework_agent_candidate_id": "c2",
+            "batch_id": "b2",
+            "candidate": {"candidate_id": "c2", "batch_id": "b2"},
+            "audit_step": "direct_framework",
+        },
+    )
+    coord.state.pending_proposals["m2"] = pending
+    await coord._handle_single_verdict(
+        source="critic", pending=pending, verdict="approve", reasoning="ok",
+    )
     assert enq
 
 

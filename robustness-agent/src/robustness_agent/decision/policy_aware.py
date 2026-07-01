@@ -150,8 +150,6 @@ class PolicyAware:
             self._check_escalate(payload)
         elif intent.type == IntentType.KILL_TASK:
             self._check_kill_task(payload)
-        elif intent.type == IntentType.FORCE_DISPATCH:
-            self._check_force_dispatch(payload)
         elif intent.type == IntentType.PRUNE_BRANCH:
             self._check_prune_branch(payload)
         elif intent.type == IntentType.DELEGATE:
@@ -240,22 +238,6 @@ class PolicyAware:
                 rule="kill_scope",
                 hint="upstream v0.6 keeps server / process kills out per IR-5",
             )
-
-    def _check_force_dispatch(self, payload: dict[str, Any]) -> None:
-        """Validate a ``force_dispatch`` payload.
-
-        Args:
-            payload (dict[str, Any]): The force_dispatch intent payload.
-
-        Raises:
-            PolicyViolation: If task_id or reason is empty.
-        """
-        task_id = str(payload.get("task_id", "")).strip()
-        if not task_id:
-            raise PolicyViolation("force_dispatch.task_id must be non-empty", rule="payload")
-        reason = str(payload.get("reason", "")).strip()
-        if not reason:
-            raise PolicyViolation("force_dispatch.reason must be non-empty", rule="payload")
 
     def _check_prune_branch(self, payload: dict[str, Any]) -> None:
         """Validate a ``prune_branch`` payload.
