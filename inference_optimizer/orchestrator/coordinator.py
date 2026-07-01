@@ -7406,17 +7406,24 @@ class Coordinator:
             break
         return "time_exhausted"
 
+    # optimization_stack actions that change kernel-level performance and thus
+    # warrant a post-opt roofline: source-patch integrate plus GEMM tuning and
+    # perfskills. Pure param-search (explore/sweep) is excluded.
+    _POST_OPT_ROOFLINE_ACTIONS = frozenset(
+        {"integrate", "integrate_patch", "gemm_tuning", "perfskills_e2e"}
+    )
+
     def _session_integrated_kernel_patch(self) -> bool:
-        """True iff this session integrated a kernel/source patch (optimization_stack has an integrate/integrate_patch entry). Gates the CLOSE post-opt roofline so pure param-search sessions skip the extra profile.
+        """True iff this session landed a kernel-level optimization (optimization_stack has an integrate/gemm_tuning/perfskills entry). Gates the CLOSE post-opt roofline so pure param-search sessions skip the extra profile.
 
         Returns:
-            ``True`` when at least one integrate-class optimization landed.
+            ``True`` when at least one kernel-level optimization landed.
         """
         stack = getattr(self.shared_state, "optimization_stack", None) or []
         if not isinstance(stack, list):
             return False
         for entry in stack:
-            if isinstance(entry, dict) and str(entry.get("action") or "") in {"integrate", "integrate_patch"}:
+            if isinstance(entry, dict) and str(entry.get("action") or "") in self._POST_OPT_ROOFLINE_ACTIONS:
                 return True
         return False
 
