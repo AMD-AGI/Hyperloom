@@ -1701,3 +1701,87 @@ class TestTracelensRootResolution:
         )
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
+
+
+class TestKernelOptArtifactBundleRecording:
+    def test_record_kernel_opt_persists_best_artifact_bundle(self):
+        state = SharedState()
+        bundle = {
+            "type": "patch_snapshot",
+            "snapshot_dir": "/tmp/snap",
+            "patch_path": "/tmp/best.patch",
+            "repo_root": "/repo",
+            "write_paths": ["aiter/ops/moe.py", "benchmarks/bench_moe.py"],
+            "delete_paths": [],
+        }
+        krh.record_kernel_opt(
+            state,
+            {
+                "status": "completed",
+                "kernel_id": "k001",
+                "source_file": "/repo/aiter/ops/moe.py",
+                "verification": {
+                    "micro_speedup": 1.25,
+                    "compile_passed": True,
+                    "correctness_passed": True,
+                    "best_backend": "geak",
+                    "best_artifact_path": "/repo/aiter/ops/moe.py",
+                    "best_artifact_bundle": bundle,
+                    "deploy_snapshot_dir": "/tmp/snap",
+                    "deploy_patch_path": "/tmp/best.patch",
+                    "deploy_repo_root": "/repo",
+                },
+                "proposal": {"decision": "KEEP", "reasons": ["ok"]},
+            },
+        )
+
+        assert state.kernel_opt_attempts["k001"]["last_artifact_bundle"] == bundle
+        assert state.last_kernel_opt["best_artifact_bundle"] == bundle
+
+    def test_resolve_integrate_payload_uses_last_kernel_artifact_bundle(self, tmp_path):
+        bundle = {
+            "type": "patch_snapshot",
+            "snapshot_dir": "/tmp/snap",
+            "patch_path": "/tmp/best.patch",
+            "repo_root": "/repo",
+        }
+        state = SharedState.load_or_init(tmp_path)
+        state.last_kernel_opt = {
+            "kernel_id": "k001",
+            "source_file": "/repo/aiter/ops/moe.py",
+            "best_artifact_bundle": bundle,
+        }
+        state.save(tmp_path)
+
+        resolved, error = krh._resolve_integrate_payload({"kernel_id": "k001"}, session_dir=tmp_path)
+
+        assert error is None
+        assert resolved["snapshot_dir"] == "/tmp/snap"
+        assert resolved["patch_path"] == "/tmp/best.patch"
+        assert resolved["kernel_repo"] == "/repo"
+        assert resolved["source_file"] == "/repo/aiter/ops/moe.py"
+
+    def test_resolve_integrate_payload_uses_per_kernel_artifact_bundle(self, tmp_path):
+        bundle = {
+            "type": "patch_snapshot",
+            "snapshot_dir": "/tmp/snap2",
+            "patch_path": "/tmp/queued.patch",
+            "repo_root": "/repo2",
+        }
+        state = SharedState.load_or_init(tmp_path)
+        state.last_kernel_opt = {"kernel_id": "other"}
+        state.kernel_opt_attempts = {
+            "k002": {
+                "last_source_file": "/repo2/aiter/ops/queued.py",
+                "last_artifact_bundle": bundle,
+            }
+        }
+        state.save(tmp_path)
+
+        resolved, error = krh._resolve_integrate_payload({"kernel_id": "k002"}, session_dir=tmp_path)
+
+        assert error is None
+        assert resolved["snapshot_dir"] == "/tmp/snap2"
+        assert resolved["patch_path"] == "/tmp/queued.patch"
+        assert resolved["kernel_repo"] == "/repo2"
+        assert resolved["source_file"] == "/repo2/aiter/ops/queued.py"
