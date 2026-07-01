@@ -27,6 +27,7 @@ from .action_executors._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
+    sweep_run_eval_enabled,
 )
 from .roofline_ceiling import (
     compute_compute_bound_ceiling_tok_per_sec,
@@ -97,6 +98,13 @@ def _build_grid(
         ("baseline", "", {}),
         ("optimized", optimized_args, dict(optimized_envs)),
     ]
+    # Accuracy eval is concurrency-invariant, so skip it per conc point by
+    # default — a full GSM8K pass per point is pure waste and at low CONC takes
+    # 30+ min, blowing the per-variant timeout / total budget (every optimized
+    # pair then fails -> successful_pairs=0). Opt back in via
+    # INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1. extra_envs wins in
+    # _build_variant_yaml, so this overrides the RUN_EVAL=true default.
+    skip_eval = not sweep_run_eval_enabled()
     out: list[GridVariant] = []
     for arm_name, arm_args, arm_envs in arms:
         for conc in concs:
@@ -110,6 +118,8 @@ def _build_grid(
                     "NUM_PROMPTS": str(num_prompts),
                 }
             )
+            if skip_eval:
+                envs["RUN_EVAL"] = "false"
             out.append(
                 GridVariant(
                     name=f"{arm_name}_conc{conc}",

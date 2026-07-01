@@ -390,7 +390,7 @@ on the next tick.
   round. A `code_patch` KEEP resets the consecutive counter.
 * **You CANNOT** delegate kernel_agent-owned actions; mutate core state fields
   (`current_best` / `stop_reason` / `baseline_tput` / ...); emit
-  `kill_task` / `force_dispatch` (Robustness-only); read or write KB
+  `kill_task` (Robustness-only); read or write KB
   directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
   with a phase-advance / budget hint (`skip_to_kernel` / `skip_to_sweep`
   / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —

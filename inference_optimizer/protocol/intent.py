@@ -28,9 +28,6 @@ class IntentType(str, Enum):
     DELEGATE = "delegate"
     PROPOSE_ACTION = "propose_action"
     UPDATE_STATE = "update_state"
-    UPDATE_PERSONA = "update_persona"
-    ASK_QUESTION = "ask_question"
-    ANSWER = "answer"
     ALERT = "alert"
     # Bidirectional agent-to-agent RPC; PolicyGate restricts (source,
     # target_agent) pairs and `kind` per pair.
@@ -39,7 +36,6 @@ class IntentType(str, Enum):
     REVIEW_VERDICT = "review_verdict"  # Critic-only
     KILL_TASK = "kill_task"  # Robustness-only; payload.scope must be "task"
     # Robustness-only scheduling police.
-    FORCE_DISPATCH = "force_dispatch"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
     # specialist exit: one per task.
@@ -91,9 +87,6 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.DELEGATE: ("action_name",),
     IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
     IntentType.UPDATE_STATE: ("changes",),
-    IntentType.UPDATE_PERSONA: ("body_md",),
-    IntentType.ASK_QUESTION: ("topic", "question"),
-    IntentType.ANSWER: ("in_reply_to", "answer"),
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     IntentType.RESPONSE: ("in_reply_to", "kind"),
@@ -101,7 +94,6 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     # _validate_review_verdict_payload; only the structural field required here.
     IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
     IntentType.KILL_TASK: ("task_id", "reason"),
-    IntentType.FORCE_DISPATCH: ("task_id", "reason"),
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
     # specialist exit envelope; per-variant schema enforced by PolicyGate R3
@@ -132,9 +124,8 @@ EMIT_INTENT_TOOL_SCHEMA: dict[str, Any] = {
                     "propose_action: {action_name, predicted_gain_pct, "
                     "reason?}; delegate: {action_name, params?, "
                     "idempotency_key?}; alert: {severity, summary, detail?}; "
-                    "update_state: {changes}; update_persona: {body_md}; "
-                    "ask_question: {topic, question}; answer: {in_reply_to, "
-                    "answer}; request: {target_agent, kind, params?, "
+                    "update_state: {changes}; "
+                    "request: {target_agent, kind, params?, "
                     "reason?}; response: {in_reply_to, kind, status?, "
                     "result?}; review_verdict: {target_proposal_msg_id, "
                     "verdict ∈ approve/reject/redirect/advise/needs_review, "
@@ -143,7 +134,7 @@ EMIT_INTENT_TOOL_SCHEMA: dict[str, Any] = {
                     "{variant_name: {verdict, rationale?}}} for batch "
                     "explore review (v0.8 KB_gaps/Gap-11); the two "
                     "shapes are mutually exclusive — Critic-only; "
-                    "kill_task / force_dispatch / prune_branch / "
+                    "kill_task / prune_branch / "
                     "escalate_strategy_change — Robustness-only (PolicyGate); "
                     "specialist_done: {gap_canonical_id, domain, "
                     "proposal_set: [variant...], empty, summary, "

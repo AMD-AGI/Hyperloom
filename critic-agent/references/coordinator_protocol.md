@@ -59,7 +59,7 @@ The intent envelope shape is:
 
 | Field | Values | Source |
 |---|---|---|
-| `intent_type` (Critic) | `review_verdict`, `send_message`, `update_persona`, `ask_question`, `answer`, `alert` | `inference_optimizer.orchestrator.agent_role._CRITIC_INTENTS` |
+| `intent_type` (Critic) | `review_verdict`, `send_message`, `alert` | `inference_optimizer.orchestrator.agent_role._CRITIC_INTENTS` |
 | `verdict` | `approve`, `reject`, `redirect`, `advise`, `needs_review` | `policy.REVIEW_VERDICTS` |
 | `source` | `critic`, `mock`, `timeout`, `critic_unavailable` | `references/verdict_schema.md` |
 

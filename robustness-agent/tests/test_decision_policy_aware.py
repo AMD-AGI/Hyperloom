@@ -13,7 +13,6 @@ from robustness_agent.role.envelope import (
     build_alert,
     build_delegate,
     build_escalate,
-    build_force_dispatch,
     build_heartbeat,
     build_kill_task,
     build_prune_branch,
@@ -51,10 +50,6 @@ def test_escalate_passes(policy: PolicyAware):
 
 def test_kill_task_passes(policy: PolicyAware):
     policy.assert_payload_complete(build_kill_task("t1", "stuck"))
-
-
-def test_force_dispatch_passes(policy: PolicyAware):
-    policy.assert_payload_complete(build_force_dispatch("t1", "blocked"))
 
 
 def test_prune_branch_passes(policy: PolicyAware):
@@ -154,13 +149,6 @@ def test_kill_task_bad_scope_uses_kill_scope_rule(policy: PolicyAware):
     with pytest.raises(PolicyViolation) as excinfo:
         policy.assert_payload_complete(intent)
     assert excinfo.value.rule == "kill_scope"
-
-
-def test_force_dispatch_required_fields(policy: PolicyAware):
-    intent = Intent(type=IntentType.FORCE_DISPATCH, payload={"task_id": ""})
-    with pytest.raises(PolicyViolation) as excinfo:
-        policy.assert_payload_complete(intent)
-    assert excinfo.value.rule == "payload"
 
 
 def test_prune_branch_required_fields(policy: PolicyAware):
