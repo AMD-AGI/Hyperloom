@@ -3,7 +3,7 @@
 """Critic-driven specialist re-author loop.
 
 A ``needs_review`` verdict carrying non-empty ``required_evidence`` for a
-framework_pr candidate / authoring proposal triggers exactly one re-authoring
+framework_agent candidate / authoring proposal triggers exactly one re-authoring
 round, seeded with that evidence and dispatched under an idempotency key with a
 ``reauthor:{n}`` suffix. ``advise`` proceeds and never re-authors; the per-candidate
 cap is the loop guard.
@@ -44,7 +44,7 @@ def _build_backends() -> dict[str, Backend]:
     plan = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         name: MockBackend(plan, name=name)
-        for name in ("orchestration", "kernel", "critic", "robustness")
+        for name in ("orchestration", "kernel_agent", "critic", "robustness")
     }
 
 
@@ -73,15 +73,15 @@ _ADVISORY = {
 }
 
 
-def _framework_pr_pending() -> PendingProposal:
+def _framework_agent_pending() -> PendingProposal:
     return PendingProposal(
         proposal_msg_id="m-fpr",
         from_agent="coordinator",
-        action_name="framework_pr",
+        action_name="framework_agent",
         predicted_gain_pct=0.0,
         payload={
             "candidate": dict(_CANDIDATE),
-            "framework_pr_candidate_id": _CANDIDATE["candidate_id"],
+            "framework_agent_candidate_id": _CANDIDATE["candidate_id"],
             "batch_id": "batch-1",
             "audit": {"recommended_next_step": "author_via_specialist"},
             "audit_step": "author_via_specialist",
@@ -110,14 +110,14 @@ def _record_reauthor_calls(coord: Coordinator) -> list[dict[str, Any]]:
         )
         return f"spec-{len(calls)}"
 
-    coord._enqueue_framework_pr_authoring_specialist = _fake_enqueue  # type: ignore[method-assign]
+    coord._enqueue_framework_agent_authoring_specialist = _fake_enqueue  # type: ignore[method-assign]
     return calls
 
 
 @pytest.mark.asyncio
 async def test_needs_review_with_evidence_reauthors_once(coord: Coordinator) -> None:
     calls = _record_reauthor_calls(coord)
-    pending = _framework_pr_pending()
+    pending = _framework_agent_pending()
 
     await coord._handle_single_verdict(
         source="critic",
@@ -163,7 +163,7 @@ async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
     for _ in range(3):
         await coord._handle_single_verdict(
             source="critic",
-            pending=_framework_pr_pending(),
+            pending=_framework_agent_pending(),
             verdict="needs_review",
             reasoning="needs more evidence",
             advisory=dict(_ADVISORY),
@@ -190,7 +190,7 @@ async def test_reauthor_skipped_when_candidate_already_materializing(
     live = SimpleNamespace(
         kind="integrate_patch",
         task_id="i-live",
-        params={"framework_pr_candidate_id": _CANDIDATE["candidate_id"]},
+        params={"framework_agent_candidate_id": _CANDIDATE["candidate_id"]},
     )
 
     async def _queued() -> list[Any]:
@@ -204,7 +204,7 @@ async def test_reauthor_skipped_when_candidate_already_materializing(
 
     await coord._handle_single_verdict(
         source="critic",
-        pending=_framework_pr_pending(),
+        pending=_framework_agent_pending(),
         verdict="needs_review",
         reasoning="needs more evidence",
         advisory=dict(_ADVISORY),
@@ -231,12 +231,12 @@ async def test_authoring_integrate_patch_reauthors_and_records_old_task(
     async def _get(task_id: str) -> Any:
         return SimpleNamespace(
             params={
-                "framework_pr_candidate_id": _CANDIDATE["candidate_id"],
-                "framework_pr_batch_id": "batch-1",
+                "framework_agent_candidate_id": _CANDIDATE["candidate_id"],
+                "framework_agent_batch_id": "batch-1",
                 "gap_symptom": "perf: speed up moe",
                 "framework": "sglang",
                 "gap_canonical_id": "gap.x",
-                "framework_pr_audit": {"recommended_next_step": "author_via_specialist"},
+                "framework_agent_audit": {"recommended_next_step": "author_via_specialist"},
             }
         )
 
@@ -249,7 +249,7 @@ async def test_authoring_integrate_patch_reauthors_and_records_old_task(
         action_name="integrate_patch",
         predicted_gain_pct=0.0,
         payload={
-            "params": {"framework_pr_authoring": True, "specialist_task_id": "spec-old"}
+            "params": {"framework_agent_authoring": True, "specialist_task_id": "spec-old"}
         },
     )
 
@@ -272,7 +272,7 @@ async def test_advise_verdict_does_not_reauthor(coord: Coordinator) -> None:
         materialized.append(pending)
 
     coord._materialize_approved_proposal = _fake_materialize  # type: ignore[method-assign]
-    pending = _framework_pr_pending()
+    pending = _framework_agent_pending()
 
     await coord._handle_single_verdict(
         source="critic",
@@ -293,7 +293,7 @@ async def test_needs_review_without_required_evidence_no_reauthor(
     coord: Coordinator,
 ) -> None:
     calls = _record_reauthor_calls(coord)
-    pending = _framework_pr_pending()
+    pending = _framework_agent_pending()
 
     await coord._handle_single_verdict(
         source="critic",
@@ -308,14 +308,14 @@ async def test_needs_review_without_required_evidence_no_reauthor(
 
 
 @pytest.mark.asyncio
-async def test_non_framework_pr_proposal_does_not_reauthor(coord: Coordinator) -> None:
+async def test_non_framework_agent_proposal_does_not_reauthor(coord: Coordinator) -> None:
     calls = _record_reauthor_calls(coord)
     pending = PendingProposal(
         proposal_msg_id="m-other",
         from_agent="coordinator",
         action_name="integrate_patch",
         predicted_gain_pct=0.0,
-        payload={"params": {"specialist_task_id": "s-1"}},  # not framework_pr authoring
+        payload={"params": {"specialist_task_id": "s-1"}},  # not framework_agent authoring
     )
 
     await coord._maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))

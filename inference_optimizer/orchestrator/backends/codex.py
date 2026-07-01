@@ -109,7 +109,9 @@ class CodexBackend:
     """Production Codex backend. Implements :class:`Backend`."""
 
     model: str = "gpt-5.4"
-    api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
+    # Codex speaks the OpenAI protocol, so prefer the OpenAI-side key/URL; the
+    # AMD single-gateway ANTHROPIC_* vars remain accepted as fallbacks below.
+    api_key_env: str = "OPENAI_API_KEY"
     base_url_env: str = "OPENAI_BASE_URL"
     max_completion_tokens: int = 2000
     name: str = "codex"
@@ -148,7 +150,11 @@ class CodexBackend:
         except ImportError as exc:  # pragma: no cover
             raise BackendError("openai SDK not installed; run `pip install openai>=1.50`") from exc
 
-        api_key = os.environ.get(self.api_key_env) or os.environ.get("OPENAI_API_KEY")
+        api_key = (
+            os.environ.get(self.api_key_env)
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        )
         if not api_key:
             raise BackendError(f"{self.api_key_env} not set in env (CodexBackend cannot auth)")
         base_url = (

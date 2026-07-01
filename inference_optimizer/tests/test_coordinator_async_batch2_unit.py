@@ -44,7 +44,7 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends() -> dict[str, Backend]:
     return {
-        name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel", "critic", "robustness")
+        name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel_agent", "critic", "robustness")
     }
 
 
@@ -61,7 +61,7 @@ def test_context_inbox_reader_empty(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_context_inbox_reader_with_events(coord: Coordinator) -> None:
-    await coord.bus.append_and_seq(Message.new("kernel", "orchestration", "heartbeat", {"body_md": "hi"}))
+    await coord.bus.append_and_seq(Message.new("kernel_agent", "orchestration", "heartbeat", {"body_md": "hi"}))
     out = coord._context_inbox_reader()
     assert "(no inbox events)" not in out
     assert isinstance(out, str)
@@ -75,7 +75,7 @@ def test_recent_outcomes_reader_empty(coord: Coordinator) -> None:
 @pytest.mark.asyncio
 async def test_recent_outcomes_reader_with_rows(coord: Coordinator) -> None:
     await coord.bus.append_and_seq(
-        Message.new("kernel", "*", "delegated_result", {"action_name": "explore", "status": "succeeded"})
+        Message.new("kernel_agent", "*", "delegated_result", {"action_name": "explore", "status": "succeeded"})
     )
     out = coord._context_recent_outcomes_reader(top_k=4)
     assert "Recent action outcomes" in out
@@ -632,9 +632,9 @@ def test_progress_signal_flags_stall(coord: Coordinator) -> None:
 # -- replay_for_resume ------------------------------------------------------
 @pytest.mark.asyncio
 async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator) -> None:
-    p1 = Message.new("kernel", "orchestration", "proposal", {"action_name": "explore", "predicted_gain_pct": 3.0})
+    p1 = Message.new("kernel_agent", "orchestration", "proposal", {"action_name": "explore", "predicted_gain_pct": 3.0})
     await coord.bus.append_and_seq(p1)
-    p2 = Message.new("kernel", "orchestration", "proposal", {"action_name": "baseline", "predicted_gain_pct": 1.0})
+    p2 = Message.new("kernel_agent", "orchestration", "proposal", {"action_name": "baseline", "predicted_gain_pct": 1.0})
     await coord.bus.append_and_seq(p2)
     # A verdict that decides p2 only.
     await coord.bus.append_and_seq(
@@ -650,7 +650,7 @@ async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator
 
 @pytest.mark.asyncio
 async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> None:
-    p1 = Message.new("kernel", "orchestration", "proposal", {"action_name": "explore"})
+    p1 = Message.new("kernel_agent", "orchestration", "proposal", {"action_name": "explore"})
     await coord.bus.append_and_seq(p1)
     # Legacy verdict event: no 'verdict' summary but a verdict_map dict.
     await coord.bus.append_and_seq(
@@ -758,7 +758,7 @@ async def test_pump_dispatcher_specialist_bookkeeping(coord: Coordinator, monkey
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "0")
     await coord.tasks.create(
         kind="specialist",
-        params={"domain": "kernel"},
+        params={"domain": "kernel_agent"},
         idempotency_key="disp-spec",
     )
 
@@ -1253,13 +1253,13 @@ async def test_promote_explore_discovered_flags_and_bad_winner(
 
 
 @pytest.mark.asyncio
-async def test_promote_framework_pr_updates_batch_max_gain(coord: Coordinator) -> None:
+async def test_promote_framework_updates_batch_max_gain(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
-    coord.shared_state.framework_pr_batches = [
+    coord.shared_state.framework_agent_batches = [
         {"batch_id": "b1", "max_gain_pct_observed_in_batch": 1.0},
     ]
     await coord._promote_to_shared_state(
-        "framework_pr",
+        "framework_agent",
         {
             "status": "kept",
             "candidate": {"candidate_id": "c1", "pr_url": "http://x/1"},
@@ -1268,7 +1268,7 @@ async def test_promote_framework_pr_updates_batch_max_gain(coord: Coordinator) -
             "output_throughput": 856.0,
         },
     )
-    assert coord.shared_state.framework_pr_batches[0]["max_gain_pct_observed_in_batch"] == 7.0
+    assert coord.shared_state.framework_agent_batches[0]["max_gain_pct_observed_in_batch"] == 7.0
 
 
 @pytest.mark.asyncio
@@ -1335,7 +1335,7 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
         "orchestration",
         intent,
         {
-            "domain": "kernel",
+            "domain": "kernel_agent",
             "tasks": [
                 {"task_description": "scout fused moe", "task_summary": "moe", "mode": "patch", "lane": "gpu"},
             ],
@@ -1367,7 +1367,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
         lambda cid: {
             "symptom": "mem bound",
             "layer": "attention",
-            "domain_hint": "kernel",
+            "domain_hint": "kernel_agent",
             "severity": "high",
             "attempts": [{"r": 1}],
         },
@@ -1383,7 +1383,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
 
     monkeypatch.setattr(fp, "resolve_source_file_allowlist", lambda: ["/src/root"])
 
-    params: dict = {"domain": "kernel", "gap_canonical_id": "g1"}
+    params: dict = {"domain": "kernel_agent", "gap_canonical_id": "g1"}
     await coord._warm_specialist_params(params)
     assert params["framework_version"] == "0.4.1"
     assert params["target_gap_notes"] == "GAP-NOTES"
@@ -1445,7 +1445,7 @@ async def test_plateau_advisory_explore_triggered(coord: Coordinator, monkeypatc
     assert "EXPLORE plateau detected" in out
     # Cyclic mode (default): footer must state the deterministic EXPLORE→KERNEL
     # advance, not the stale "informational only" claim.
-    assert "advances EXPLORE" in out and "KERNEL" in out
+    assert "advances EXPLORE" in out and "KERNEL_AGENT" in out
     assert "informational" not in out
 
 
@@ -1453,22 +1453,22 @@ async def test_plateau_advisory_explore_triggered(coord: Coordinator, monkeypatc
 async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
 
-    coord.shared_state.phase = ps.PHASE_KERNEL
+    coord.shared_state.phase = ps.PHASE_KERNEL_AGENT
     monkeypatch.setattr(ps, "compute_plateau_kernel", lambda *a, **k: (True, {"revert_streak": 4}))
     out = coord._plateau_advisory_block()
-    assert "KERNEL plateau detected" in out
+    assert "KERNEL_AGENT plateau detected" in out
 
 
 @pytest.mark.asyncio
-async def test_plateau_advisory_framework_pr_triggered(coord: Coordinator, monkeypatch) -> None:
+async def test_plateau_advisory_framework_triggered(coord: Coordinator, monkeypatch) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
 
-    coord.shared_state.phase = ps.PHASE_FRAMEWORK_PR
+    coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     monkeypatch.setattr(
-        ps, "compute_plateau_framework_pr", lambda *a, **k: (True, {"lookback": 3, "batch_max_gains": [0.1]})
+        ps, "compute_plateau_framework_agent", lambda *a, **k: (True, {"lookback": 3, "batch_max_gains": [0.1]})
     )
     out = coord._plateau_advisory_block()
-    assert "FRAMEWORK_PR plateau detected" in out
+    assert "FRAMEWORK_AGENT plateau detected" in out
 
 
 # -- _record_specialist_result ----------------------------------------------
@@ -1478,7 +1478,7 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
     await coord._record_specialist_result(
         task=task,
         done_payload={
-            "domain": "kernel",
+            "domain": "kernel_agent",
             "gap_canonical_id": "g1",
             "proposal_set": [{"name": "fuse-moe"}],
             "summary": "found one",
@@ -1504,7 +1504,7 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
         await coord._record_specialist_result(
             task=task,
             done_payload={
-                "domain": "kernel",
+                "domain": "kernel_agent",
                 "proposal_set": [{"name": "p1"}],
             },
             source="specialist:rec-spec-dead",
@@ -1541,7 +1541,7 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
     await coord._record_specialist_result(
         task=task,
         done_payload={
-            "domain": "kernel",
+            "domain": "kernel_agent",
             "proposal_set": [{"name": "p1"}],
         },
         source="specialist:rec-spec-3",
@@ -1977,122 +1977,122 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
     assert coord.shared_state.stop_reason  # derived stop reason persisted
 
 
-# -- _pump_framework_pr_phase -----------------------------------------------
-def _enter_framework_pr(coord: Coordinator) -> None:
+# -- _pump_framework_agent_phase -----------------------------------------------
+def _enter_framework(coord: Coordinator) -> None:
     import inference_optimizer.orchestrator.phase_state as ps
 
-    coord.shared_state.phase = ps.PHASE_FRAMEWORK_PR
-    coord.shared_state.framework_pr_phase_done = False
+    coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
+    coord.shared_state.framework_agent_phase_done = False
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_wrong_phase_noop(coord: Coordinator) -> None:
+async def test_pump_framework_agent_wrong_phase_noop(coord: Coordinator) -> None:
     coord.shared_state.phase = "EXPLORE"
-    await coord._pump_framework_pr_phase()  # early return
+    await coord._pump_framework_agent_phase()  # early return
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_phase_done_noop(coord: Coordinator) -> None:
-    _enter_framework_pr(coord)
-    coord.shared_state.framework_pr_phase_done = True
-    await coord._pump_framework_pr_phase()  # early return
+async def test_pump_framework_agent_phase_done_noop(coord: Coordinator) -> None:
+    _enter_framework(coord)
+    coord.shared_state.framework_agent_phase_done = True
+    await coord._pump_framework_agent_phase()  # early return
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_skips_when_task_inflight(coord: Coordinator) -> None:
-    _enter_framework_pr(coord)
-    await coord.tasks.create(kind="framework_pr", params={}, idempotency_key="fpr-inflight")
-    await coord._pump_framework_pr_phase()  # a framework_pr task exists -> return
+async def test_pump_framework_agent_skips_when_task_inflight(coord: Coordinator) -> None:
+    _enter_framework(coord)
+    await coord.tasks.create(kind="framework_agent", params={}, idempotency_key="fpr-inflight")
+    await coord._pump_framework_agent_phase()  # a framework task exists -> return
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_discover_empty_marks_done(coord: Coordinator, monkeypatch) -> None:
-    _enter_framework_pr(coord)
-    coord.shared_state.framework_pr_discover_failures = 0
-    monkeypatch.setattr(coord, "_select_next_framework_pr_candidate", lambda: None)
+async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator, monkeypatch) -> None:
+    _enter_framework(coord)
+    coord.shared_state.framework_agent_discover_failures = 0
+    monkeypatch.setattr(coord, "_select_next_framework_agent_candidate", lambda: None)
 
     async def _disc():
         return False
 
-    monkeypatch.setattr(coord, "_discover_next_framework_pr_batch", _disc)
-    monkeypatch.setattr(coord, "_record_framework_pr_phase_done", lambda **k: None)
-    await coord._pump_framework_pr_phase()
-    assert coord.shared_state.framework_pr_phase_done is True
+    monkeypatch.setattr(coord, "_discover_next_framework_batch", _disc)
+    monkeypatch.setattr(coord, "_record_framework_agent_phase_done", lambda **k: None)
+    await coord._pump_framework_agent_phase()
+    assert coord.shared_state.framework_agent_phase_done is True
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_submits_candidate_proposal(coord: Coordinator, monkeypatch) -> None:
-    """The pump submits the candidate as a ``framework_pr`` proposal (async gate) instead of enqueuing inline."""
-    _enter_framework_pr(coord)
+async def test_pump_framework_agent_submits_candidate_proposal(coord: Coordinator, monkeypatch) -> None:
+    """The pump submits the candidate as a ``framework_agent`` proposal (async gate) instead of enqueuing inline."""
+    _enter_framework(coord)
 
     async def _select():
         return {"candidate_id": "c1", "pr_url": "https://example.com/pr/1", "batch_id": "b1"}
 
-    monkeypatch.setattr(coord, "_select_best_framework_pr_candidate", _select)
+    monkeypatch.setattr(coord, "_select_best_framework_agent_candidate", _select)
 
     async def _audit(cand):
-        return {"recommended_next_step": "direct_framework_pr"}
+        return {"recommended_next_step": "direct_framework"}
 
-    monkeypatch.setattr(coord, "_audit_framework_pr_candidate", _audit)
-    monkeypatch.setattr(coord, "_framework_roots_have_git", lambda: True)
+    monkeypatch.setattr(coord, "_audit_framework_agent_candidate", _audit)
+    monkeypatch.setattr(coord, "_framework_agent_roots_have_git", lambda: True)
 
-    await coord._pump_framework_pr_phase()
+    await coord._pump_framework_agent_phase()
 
-    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_pr"]
+    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_agent"]
     assert len(pendings) == 1
     payload = pendings[0].payload
-    assert payload["framework_pr_candidate_id"] == "c1"
-    assert payload["audit_step"] == "direct_framework_pr"
-    # No framework_pr task is created synchronously; the verdict drives it later.
+    assert payload["framework_agent_candidate_id"] == "c1"
+    assert payload["audit_step"] == "direct_framework"
+    # No framework_agent task is created synchronously; the verdict drives it later.
     queued = await coord.tasks.queued()
-    assert not [t for t in queued if getattr(t, "kind", "") == "framework_pr"]
+    assert not [t for t in queued if getattr(t, "kind", "") == "framework_agent"]
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_pr_dedup_does_not_resubmit(coord: Coordinator, monkeypatch) -> None:
+async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, monkeypatch) -> None:
     """A candidate already awaiting its verdict is not re-submitted on the next tick."""
-    _enter_framework_pr(coord)
+    _enter_framework(coord)
 
     async def _select():
         return {"candidate_id": "c1", "batch_id": "b1"}
 
-    monkeypatch.setattr(coord, "_select_best_framework_pr_candidate", _select)
+    monkeypatch.setattr(coord, "_select_best_framework_agent_candidate", _select)
 
     async def _audit(cand):
-        return {"recommended_next_step": "direct_framework_pr"}
+        return {"recommended_next_step": "direct_framework"}
 
-    monkeypatch.setattr(coord, "_audit_framework_pr_candidate", _audit)
-    monkeypatch.setattr(coord, "_framework_roots_have_git", lambda: True)
+    monkeypatch.setattr(coord, "_audit_framework_agent_candidate", _audit)
+    monkeypatch.setattr(coord, "_framework_agent_roots_have_git", lambda: True)
 
-    await coord._pump_framework_pr_phase()
-    await coord._pump_framework_pr_phase()  # pending proposal -> no second submit
-    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_pr"]
+    await coord._pump_framework_agent_phase()
+    await coord._pump_framework_agent_phase()  # pending proposal -> no second submit
+    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_agent"]
     assert len(pendings) == 1
 
 
 @pytest.mark.asyncio
-async def test_framework_pr_reject_records_critic_denied(coord: Coordinator) -> None:
-    """A reject verdict on a framework_pr candidate proposal writes a critic_denied progress row."""
+async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) -> None:
+    """A reject verdict on a framework_agent candidate proposal writes a critic_denied progress row."""
     from inference_optimizer.orchestrator.coordinator import PendingProposal
 
     pending = PendingProposal(
         proposal_msg_id="m1",
         from_agent="coordinator",
-        action_name="framework_pr",
+        action_name="framework_agent",
         predicted_gain_pct=0.0,
-        payload={"framework_pr_candidate_id": "c1", "batch_id": "b1"},
+        payload={"framework_agent_candidate_id": "c1", "batch_id": "b1"},
     )
     coord.state.pending_proposals["m1"] = pending
     await coord._handle_single_verdict(
         source="critic", pending=pending, verdict="reject", reasoning="unsafe",
     )
-    prog = coord.shared_state.framework_pr_phase_progress
+    prog = coord.shared_state.framework_agent_phase_progress
     assert any(p.get("status") == "critic_denied" and p.get("candidate_id") == "c1" for p in prog)
 
 
 @pytest.mark.asyncio
-async def test_framework_pr_approve_routes_to_enqueue(coord: Coordinator, monkeypatch) -> None:
-    """An approve verdict routes a ``direct_framework_pr`` candidate to the raw-diff enqueue helper."""
+async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, monkeypatch) -> None:
+    """An approve verdict routes a ``direct_framework`` candidate to the raw-diff enqueue helper."""
     from inference_optimizer.orchestrator.coordinator import PendingProposal
 
     enq: list = []
@@ -2100,17 +2100,17 @@ async def test_framework_pr_approve_routes_to_enqueue(coord: Coordinator, monkey
     async def _enqueue(cand):
         enq.append(cand)
 
-    monkeypatch.setattr(coord, "_enqueue_framework_pr_task", _enqueue)
+    monkeypatch.setattr(coord, "_enqueue_framework_agent_task", _enqueue)
     pending = PendingProposal(
         proposal_msg_id="m2",
         from_agent="coordinator",
-        action_name="framework_pr",
+        action_name="framework_agent",
         predicted_gain_pct=0.0,
         payload={
-            "framework_pr_candidate_id": "c2",
+            "framework_agent_candidate_id": "c2",
             "batch_id": "b2",
             "candidate": {"candidate_id": "c2", "batch_id": "b2"},
-            "audit_step": "direct_framework_pr",
+            "audit_step": "direct_framework",
         },
     )
     coord.state.pending_proposals["m2"] = pending
@@ -2118,3 +2118,31 @@ async def test_framework_pr_approve_routes_to_enqueue(coord: Coordinator, monkey
         source="critic", pending=pending, verdict="approve", reasoning="ok",
     )
     assert enq
+
+
+# -- _session_integrated_kernel_patch (post-opt roofline gate) ---------------
+@pytest.mark.parametrize(
+    "action",
+    ["integrate", "integrate_patch", "gemm_tuning", "perfskills_e2e"],
+)
+def test_post_opt_roofline_gate_true_for_kernel_level_actions(coord: Coordinator, action: str) -> None:
+    """Any kernel-level optimization (source patch, GEMM tuning, perfskills) gates the post-opt roofline on."""
+    coord.shared_state.optimization_stack = [{"action": action}]
+    assert coord._session_integrated_kernel_patch() is True
+
+
+def test_post_opt_roofline_gate_false_for_param_search_only(coord: Coordinator) -> None:
+    """Pure param-search (explore/sweep) does not trigger the extra profile."""
+    coord.shared_state.optimization_stack = [{"action": "explore"}, {"action": "sweep"}]
+    assert coord._session_integrated_kernel_patch() is False
+
+
+def test_post_opt_roofline_gate_false_for_empty_stack(coord: Coordinator) -> None:
+    coord.shared_state.optimization_stack = []
+    assert coord._session_integrated_kernel_patch() is False
+
+
+def test_post_opt_roofline_gate_ignores_non_dict_entries(coord: Coordinator) -> None:
+    """Malformed (non-dict) stack entries are skipped without raising."""
+    coord.shared_state.optimization_stack = ["bad", {"action": "gemm_tuning"}]
+    assert coord._session_integrated_kernel_patch() is True

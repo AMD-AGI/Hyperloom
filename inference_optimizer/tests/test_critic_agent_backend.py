@@ -377,6 +377,29 @@ def test_construct_no_creds_no_factory_raises(monkeypatch, tmp_path: Path):
         )
 
 
+def test_construct_prefers_explicit_openai_key_over_anthropic_token(monkeypatch, tmp_path: Path):
+    """Plan B: explicit OPENAI_API_KEY wins over SAFE-filled ANTHROPIC_AUTH_TOKEN for Codex auth."""
+    import openai
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-user-key")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "safe-filled")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    captured: dict = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw) or object())
+
+    root = tmp_path / "critic-agent"
+    (root / "runtime").mkdir(parents=True)
+    (root / "runtime" / "cli.py").write_text("# stub", encoding="utf-8")
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    CriticAgentBackend(
+        critic_agent_root=root,
+        session_dir=sd,
+        runtime_caller_factory=lambda: lambda call: None,
+    )
+    assert captured["api_key"] == "openai-user-key"
+
+
 def test_reviewed_msg_ids_from_bundle_dedups_and_orders():
     bundle = {"proposals": [
         {"msg_id": "m1"}, {"msg_id": "m2"}, {"msg_id": "m1"},  # dup dropped
@@ -1267,7 +1290,7 @@ async def test_critic_agent_real_runtime_clears_proposal(
             ),
             name="orchestration",
         ),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }
@@ -1352,7 +1375,7 @@ async def test_critic_agent_heartbeat_when_no_proposal(
             ScriptedPlan(turns=[], default_intent=_heartbeat()),
             name="orchestration",
         ),
-        "kernel": MockKernelBackend(),
+        "kernel_agent": MockKernelBackend(),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }

@@ -253,10 +253,10 @@ def _safe_name(value: str) -> str:
         value (str): The raw string to sanitize.
 
     Returns:
-        str: A filesystem-safe identifier, or ``"kernel"`` when empty.
+        str: A filesystem-safe identifier, or ``"kernel_agent"`` when empty.
     """
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
-    return cleaned[:80] or "kernel"
+    return cleaned[:80] or "kernel_agent"
 
 
 def _path_hash(path: Path) -> str:

@@ -119,7 +119,7 @@ def test_decision_trace_resolves_proposer_kind_and_scores(tmp_path: Path) -> Non
 def test_decision_trace_routes_overhead_vs_unattributed(tmp_path: Path) -> None:
     # A specialist + scorer call both keyed to t1 (attributed); an
     # orchestration + critic call with no key (overhead); a stray keyless
-    # 'kernel' call (genuinely unattributed).
+    # 'kernel_agent' call (genuinely unattributed).
     trace = tmp_path / "reports" / "trace"
     trace.mkdir(parents=True, exist_ok=True)
     (tmp_path / "reports" / "optimization_journal.json").write_text(
@@ -139,7 +139,7 @@ def test_decision_trace_routes_overhead_vs_unattributed(tmp_path: Path) -> None:
          "ts": "2026-06-12T00:00:00Z"},
         {"component": "critic", "input_tokens": 8, "output_tokens": 4,
          "ts": "2026-06-12T00:00:00Z"},
-        {"component": "kernel", "input_tokens": 100, "output_tokens": 50,
+        {"component": "kernel_agent", "input_tokens": 100, "output_tokens": 50,
          "ts": "2026-06-12T00:00:00Z"},
     ]
     (trace / "llm_calls.jsonl").write_text(

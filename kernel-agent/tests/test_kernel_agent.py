@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Local tests for Kernel Agent tools (fixtures generated at runtime; no large trace files in repo)."""
+"""Local tests for Kernel-agent tools (fixtures generated at runtime; no large trace files in repo)."""
 
 from __future__ import annotations
 

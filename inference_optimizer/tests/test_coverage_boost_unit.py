@@ -51,7 +51,7 @@ async def test_kb_writeback_rejects_unknown_outcome() -> None:
     from inference_optimizer.orchestrator import kb_writeback
 
     with pytest.raises(ValueError):
-        await kb_writeback.write_framework_pr_record(
+        await kb_writeback.write_framework_record(
             pr_url="u",
             pr_sha="s",
             patch_path="p",
@@ -65,7 +65,7 @@ async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
     from inference_optimizer.orchestrator import kb_writeback
 
     monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "fa")
-    path = await kb_writeback.write_framework_pr_record(
+    path = await kb_writeback.write_framework_record(
         pr_url="https://x/pr/1",
         pr_sha="abc",
         patch_path="/tmp/p.patch",
@@ -375,57 +375,6 @@ def test_paths_asset_root_missing_override(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv(paths.ENV_OVERRIDE_ASSET_ROOT, str(tmp_path / "nope"))
     with pytest.raises(paths.AssetRootNotFound):
         paths.asset_root()
-
-
-# --------------------------------------------------------------------------- #
-# orchestrator.substrate_levers_client                                        #
-# --------------------------------------------------------------------------- #
-def test_substrate_levers_client_construction(monkeypatch) -> None:
-    from inference_optimizer.orchestrator.substrate_levers_client import SubstrateLeversClient
-
-    with pytest.raises(ValueError):
-        SubstrateLeversClient("")  # line 57
-
-    # from_env: no URL -> None.
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
-    assert SubstrateLeversClient.from_env() is None
-
-    # from_env: bad timeout falls back (lines 78-79).
-    monkeypatch.setenv("CORTEX_KB_URL", "http://kb.local")
-    monkeypatch.setenv("CORTEX_KB_HTTP_TIMEOUT_SEC", "not-a-float")
-    client = SubstrateLeversClient.from_env()
-    assert client is not None
-    assert client.timeout_sec == SubstrateLeversClient.from_env().timeout_sec
-
-    # recommend with no model -> None (best-effort guard).
-    assert client.recommend(focus={}) is None
-
-
-def test_substrate_levers_recommend_with_token(monkeypatch) -> None:
-    from inference_optimizer.orchestrator import substrate_levers_client as slc
-
-    captured = {}
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return b'{"levers": []}'
-
-    def fake_urlopen(req, timeout=None):
-        captured["auth"] = req.headers.get("Authorization")
-        return _Resp()
-
-    monkeypatch.setattr(slc.urllib.request, "urlopen", fake_urlopen)
-    client = slc.SubstrateLeversClient("http://kb.local", token="secret")
-    out = client.recommend(focus={"model": "m"})
-    assert out == {"levers": []}
-    # Authorization header set when a token is present (line 102).
-    assert captured["auth"] == "Bearer secret"
 
 
 # --------------------------------------------------------------------------- #

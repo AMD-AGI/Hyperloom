@@ -241,6 +241,22 @@ def test_magpie_dir_honours_explicit_override(tmp_path, monkeypatch):
     assert paths.magpie_dir() == tmp_path / "operator-magpie"
 
 
+# TraceLens root resolution: mirrors magpie_dir so trace analysis resolves the
+# same checkout as install.sh even when TRACELENS_ROOT was not inherited.
+def test_tracelens_root_derives_from_open_source_root_when_env_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "podlocal"))
+    expected = tmp_path / "podlocal" / "hyperloom" / "open-source-repos" / "TraceLens"
+    assert paths.tracelens_root() == expected
+
+
+def test_tracelens_root_honours_explicit_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "operator-tracelens"))
+    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "ignored"))
+    assert paths.tracelens_root() == tmp_path / "operator-tracelens"
+
+
 # manifest
 def test_write_manifest_writes_v1_schema(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
@@ -463,7 +479,7 @@ def test_policy_path_inside_session_dir_passes(tmp_path):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": str(tmp_path / "runs" / "profile" / "x.json.gz")},
         },
@@ -476,7 +492,7 @@ def test_policy_path_outside_session_dir_denied(tmp_path):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": "/tmp/some-trace.json.gz"},
         },
@@ -500,7 +516,7 @@ def test_policy_source_file_allowlist_passes(tmp_path):
             },
         },
     )
-    gate.validate_intent("kernel", intent)
+    gate.validate_intent("kernel_agent", intent)
 
 
 def test_policy_source_file_outside_allowlist_denied(tmp_path):
@@ -518,7 +534,7 @@ def test_policy_source_file_outside_allowlist_denied(tmp_path):
         },
     )
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("kernel", intent)
+        gate.validate_intent("kernel_agent", intent)
     assert exc.value.rule == "source_file_not_allowlisted"
 
 
@@ -527,7 +543,7 @@ def test_policy_strict_off_skips_path_check(tmp_path):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": "/tmp/anywhere.json"},
         },
@@ -545,7 +561,7 @@ def test_policy_env_var_enables_strict(tmp_path, monkeypatch):
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
-            "target_agent": "kernel",
+            "target_agent": "kernel_agent",
             "kind": "trace_analyze",
             "params": {"trace_input": "/tmp/x.json"},
         },

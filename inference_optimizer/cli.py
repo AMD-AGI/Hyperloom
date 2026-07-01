@@ -287,7 +287,7 @@ def _build_orchestration_prompt(
     objective: Objective,
     max_minutes: int,
     no_explore: bool = False,
-    no_framework: bool = False,
+    no_framework_agent: bool = False,
     action_registry: ActionRegistry | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
@@ -298,7 +298,7 @@ def _build_orchestration_prompt(
         objective (Objective): The run objective summarised into the prompt.
         max_minutes (int): The wall-clock budget in minutes.
         no_explore (bool): When ``True`` the EXPLORE phase is disabled.
-        no_framework (bool): When ``True`` the FRAMEWORK_PR phase is disabled.
+        no_framework_agent (bool): When ``True`` the FRAMEWORK_AGENT phase is disabled.
         action_registry (ActionRegistry | None): The action registry to use;
             a fresh loaded registry is built when ``None``.
 
@@ -314,7 +314,7 @@ def _build_orchestration_prompt(
         framework=framework,
         kernel_enabled=not no_kernel,
         explore_enabled=not no_explore,
-        framework_phase_enabled=not no_framework,
+        framework_agent_phase_enabled=not no_framework_agent,
         objective_kind=kind,
         objective_value=value,
         max_minutes=int(max_minutes),
@@ -333,7 +333,7 @@ def _load_critic_prompt() -> str:
 
 
 _DEFAULT_KERNEL_PROMPT = (
-    "You are the Kernel agent — responder-only. You receive `request`\n"
+    "You are the Kernel-agent — responder-only. You receive `request`\n"
     "events from Orchestration in your inbox.\n\n"
     "For every un-answered request, emit ONE `response` intent in reply.\n"
     "Schema:\n"
@@ -367,7 +367,18 @@ _CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, _CLAUDE_FALLBACK_MODEL)
 # Catalog probe retry contract: gateway is documented-flaky. Sleep N seconds before attempt i+1;
 # len(_CATALOG_RETRY_DELAYS_SEC) is the retry count after the initial attempt.
 _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
-_CATALOG_REQUEST_TIMEOUT_SEC = 5.0
+# Per-attempt read timeout for the gateway /models catalog probe. The AMD
+# gateway is documented-flaky; on slow/borderline days a healthy /models call
+# can take ~5.5s, straddling this cutoff and causing spurious "gateway catalog
+# unreachable" launch refusals even though the gateway is up. Allow an operator
+# override via env (default unchanged at 5.0s) for slow-gateway windows.
+try:
+    _CATALOG_REQUEST_TIMEOUT_SEC = float(
+        os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_TIMEOUT_SEC", "5.0")
+        or "5.0"
+    )
+except (TypeError, ValueError):
+    _CATALOG_REQUEST_TIMEOUT_SEC = 5.0
 
 # /dev/shm threshold: below this, next launch collides with stale vLLM/NCCL shm segments and hangs in zmq.
 _DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
@@ -757,8 +768,8 @@ def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
     operator points ``GEAK_BASE_URL`` at a reachable endpoint (e.g. a
     host-local reverse tunnel) AFTER install, the env override alone is not
     enough: the stale yaml still sends GEAK at the unreachable gateway and the
-    KERNEL phase burns budget on connection-error retries. Syncing the yaml in
-    place closes that gap so the kernel agent actually dials the operator's
+    KERNEL_AGENT phase burns budget on connection-error retries. Syncing the yaml in
+    place closes that gap so the Kernel-agent actually dials the operator's
     endpoint.
 
     Best-effort: returns ``False`` (never raises) when the path is empty, the
@@ -819,12 +830,43 @@ def _derive_anthropic_base_url(openai_base_url: str) -> str:
     return urlunparse(parsed._replace(path=path))
 
 
-def _reset_claude_config_to_upstream(safe_key: str, anthropic_base_url: str) -> None:
+def _resolve_llm_endpoints() -> tuple[str, str]:
+    """Resolve ``(anthropic_base_url, openai_base_url)`` for split entrypoints.
+
+    Each side keeps an explicit operator value; a missing side falls back to
+    the other so the legacy single-gateway setup (only ``OPENAI_BASE_URL``)
+    keeps working and both Claude and Codex still reach an endpoint. Known
+    stale auth-proxy leftovers (127.0.0.1:4002) are treated as unset so they
+    are re-derived rather than preserved.
+    """
+    openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+    if _is_stale_proxy_url(openai_url):
+        openai_url = ""
+    if _is_stale_proxy_url(anthropic_url):
+        anthropic_url = ""
+
+    if anthropic_url and openai_url:
+        # Both explicitly configured: respect each as-is (true dual entry).
+        return anthropic_url, openai_url
+    if openai_url and not anthropic_url:
+        # Single OpenAI-style gateway: derive the Anthropic base from it.
+        return _derive_anthropic_base_url(openai_url), openai_url
+    if anthropic_url and not openai_url:
+        # Anthropic-only entry: let the OpenAI/Codex side reuse the same URL.
+        return anthropic_url, anthropic_url
+    return "", ""
+
+
+def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: str) -> None:
     """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway (stale 127.0.0.1:4002 would fail).
 
     Args:
-        safe_key (str): The primary API key to write; blank leaves any
-            existing key untouched.
+        primary_api_key (str): The Claude CLI primary API key to write; blank
+            leaves any existing key untouched. Callers should pass the
+            Anthropic-side key (explicit ANTHROPIC_API_KEY wins, SAFE_API_KEY
+            is the fallback) so a split-entrypoint deploy authenticates Claude
+            with its own key rather than the shared gateway key.
         anthropic_base_url (str): The upstream gateway URL; blank is a no-op.
     """
     import json as _json
@@ -845,8 +887,8 @@ def _reset_claude_config_to_upstream(safe_key: str, anthropic_base_url: str) -> 
 
     config_data.setdefault("theme", "dark")
     config_data.setdefault("hasCompletedOnboarding", True)
-    if safe_key:
-        config_data["primaryApiKey"] = safe_key
+    if primary_api_key:
+        config_data["primaryApiKey"] = primary_api_key
     elif "primaryApiKey" not in config_data:
         config_data["primaryApiKey"] = ""
     config_data["customApiUrl"] = anthropic_base_url
@@ -860,14 +902,29 @@ def _reset_claude_config_to_upstream(safe_key: str, anthropic_base_url: str) -> 
 
 
 def _validate_credentials() -> None:
-    """Fail fast when SAFE_API_KEY or OPENAI_BASE_URL is missing; strict by design (no bypass)."""
-    missing: list[str] = []
-    if not os.environ.get("SAFE_API_KEY"):
-        missing.append("SAFE_API_KEY")
-    if not os.environ.get("OPENAI_BASE_URL"):
-        missing.append("OPENAI_BASE_URL")
-    if not missing:
+    """Fail fast when no usable LLM endpoint/key is configured.
+
+    Accepts either the legacy single-gateway pair (``SAFE_API_KEY`` +
+    ``OPENAI_BASE_URL``) or the split Anthropic/OpenAI entrypoints: at least
+    one base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``) and at least
+    one key (``SAFE_API_KEY`` / ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` /
+    ``ANTHROPIC_AUTH_TOKEN``).
+    """
+    has_url = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL"))
+    has_key = bool(
+        os.environ.get("SAFE_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    )
+    if has_url and has_key:
         return
+
+    missing: list[str] = []
+    if not has_url:
+        missing.append("a base URL (OPENAI_BASE_URL or ANTHROPIC_BASE_URL)")
+    if not has_key:
+        missing.append("an API key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)")
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
     env_status = "present" if env_file.exists() else "not found"
@@ -877,12 +934,13 @@ def _validate_credentials() -> None:
         "Tried loading from:\n"
         "  - shell environment\n"
         f"  - $REPO_ROOT/.env  ({env_status}: {env_file})\n\n"
-        "Fix one of:\n"
-        "  1. Copy .env from a working worktree into this one:\n"
-        f"       cp /path/to/main-worktree/.env {env_file}\n"
-        "  2. Export directly into the shell before re-running:\n"
+        "Configure ONE of:\n"
+        "  1. Single gateway (AMD / LiteLLM-style):\n"
         "       export SAFE_API_KEY=sk-xxxxx\n"
-        "       export OPENAI_BASE_URL=https://gateway.example.com/v1",
+        "       export OPENAI_BASE_URL=https://gateway.example.com/v1\n"
+        "  2. Split entrypoints (native Anthropic + OpenAI):\n"
+        "       export ANTHROPIC_BASE_URL=https://api.anthropic.com  ANTHROPIC_API_KEY=sk-ant-xxx\n"
+        "       export OPENAI_BASE_URL=https://api.openai.com/v1      OPENAI_API_KEY=sk-xxx",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -903,8 +961,21 @@ def _is_placeholder_tracelens_path(value: str) -> bool:
 
 
 def _load_dotenv_fallback() -> None:
-    """Source missing keys from ``$REPO_ROOT/.env`` when SAFE_API_KEY/OPENAI_BASE_URL absent; env always wins."""
-    if os.environ.get("SAFE_API_KEY") and os.environ.get("OPENAI_BASE_URL"):
+    """Source missing vars from ``$REPO_ROOT/.env`` until a usable LLM endpoint+key is present; env always wins.
+
+    Skips loading only when both a base URL (OPENAI_BASE_URL / ANTHROPIC_BASE_URL)
+    and a key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY /
+    ANTHROPIC_AUTH_TOKEN) are already set, so split-entrypoint shells that
+    export only the Anthropic side still pull the missing OpenAI vars from .env.
+    """
+    has_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
+    has_key = (
+        os.environ.get("SAFE_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    )
+    if has_url and has_key:
         return
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
@@ -1130,11 +1201,11 @@ _TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_pyt
 def _tracelens_required_at_preflight(no_kernel: bool, enable_roofline: bool) -> bool:
     """Return whether the TraceLens CLI must be present at preflight (hard-fail).
 
-    TraceLens is reached both by the kernel agent AND by the PRELUDE/auto
+    TraceLens is reached both by the Kernel-agent AND by the PRELUDE/auto
     roofline (roofline -> trace_analyze -> TraceLens). ``enable_roofline``
     defaults True and is NOT disabled by ``--no-kernel``, so under ``--no-kernel``
     alone the PRELUDE roofline still invokes TraceLens. It is only truly unused
-    when the kernel role is off (``--no-kernel``) AND roofline is disabled; only
+    when the kernel_agent role is off (``--no-kernel``) AND roofline is disabled; only
     then may preflight degrade to WARN. Otherwise keep the hard-fail so a missing
     CLI fails fast at preflight instead of mid-run at the first roofline.
 
@@ -1287,9 +1358,9 @@ def _emit_preflight_diagnostics(
             "ROCR_VISIBLE_DEVICES)"
         )
     if anthropic_base_url:
-        print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url} (direct to gateway)")
+        print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url}")
     else:
-        print("  ANTHROPIC_BASE_URL  = <unset> — OPENAI_BASE_URL missing; Claude SDK will fail")
+        print("  ANTHROPIC_BASE_URL  = <unset> — no LLM base URL resolved; Claude SDK will fail")
     if args is not None:
         kb_enabled = bool(getattr(args, "cortex_enabled", True))
         pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
@@ -1503,21 +1574,59 @@ def _validate_and_resolve_claude_model(
         )
         sys.exit(2)
 
-    # Catalog probe GETs <base>/models; INFERENCE_OPTIMIZER_CATALOG_PROBE_URL overrides the host.
-    base_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip() or os.environ.get(
-        "OPENAI_BASE_URL", ""
-    )
-    if not base_url and resolved_urls is not None:
-        base_url = resolved_urls[1]
+    # Catalog probe GETs <base>/models. The orchestration model is a Claude
+    # model, so probe the Anthropic side first; if that side has no reachable
+    # catalog (e.g. native api.anthropic.com without a LiteLLM /models route)
+    # fall back to the OpenAI side. INFERENCE_OPTIMIZER_CATALOG_PROBE_URL
+    # overrides the host outright (single probe, no fallback).
+    catalog_ids = None
+    override_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
+    if override_url:
+        api_key = (
+            os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("SAFE_API_KEY", "")
+            or os.environ.get("OPENAI_API_KEY", "")
+        )
+        catalog_ids = _probe_llm_catalog(base_url=override_url, api_key=api_key)
+    else:
+        anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+        openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+        if not anthropic_url and resolved_urls is not None:
+            anthropic_url = resolved_urls[0]
+        if not openai_url and resolved_urls is not None:
+            openai_url = resolved_urls[1]
+        anthropic_key = (
+            os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("SAFE_API_KEY", "")
+        )
+        openai_key = (
+            os.environ.get("OPENAI_API_KEY", "")
+            or os.environ.get("SAFE_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+        )
+        # (url, key) candidates in priority order; skip blanks and dedupe so a
+        # single-gateway deploy (same URL both sides) probes only once.
+        seen_urls: set[str] = set()
+        for cand_url, cand_key in ((anthropic_url, anthropic_key), (openai_url, openai_key)):
+            if not cand_url or cand_url in seen_urls:
+                continue
+            seen_urls.add(cand_url)
+            catalog_ids = _probe_llm_catalog(base_url=cand_url, api_key=cand_key)
+            if catalog_ids is not None:
+                break
 
-    api_key = (
-        os.environ.get("SAFE_API_KEY", "")
-        or os.environ.get("OPENAI_API_KEY", "")
-        or os.environ.get("ANTHROPIC_API_KEY", "")
-    )
-
-    catalog_ids = _probe_llm_catalog(base_url=base_url, api_key=api_key)
     if catalog_ids is None:
+        # #340: a custom-model deploy may sit behind a gateway without a
+        # /models route; don't hard-block — warn and trust the operator id.
+        if allow_custom:
+            print(
+                f"Preflight: WARNING — gateway catalog unreachable; cannot verify "
+                f"--claude-model={chosen!r}. Proceeding under "
+                f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 (trusting the operator id)."
+            )
+            return None
         print(
             "ERROR: gateway catalog unreachable after retries; cannot "
             "verify Claude model availability. Refusing to start.",
@@ -1559,24 +1668,47 @@ def _validate_and_resolve_claude_model(
 
 def _smoke_test_codex_model(
     args: argparse.Namespace,
-    catalog_ids: set[str] | None,
+    resolved_urls: tuple[str, str] | None,
 ) -> None:
     """WARN-only catalog check for ``--codex-model`` (no hard gate); flags typos before Coordinator starts.
+
+    Probes the OpenAI-side catalog independently of the Claude check: in a
+    split-entrypoint deploy the Claude catalog lives on the Anthropic gateway
+    and would not list ``gpt-*``, so reusing it would always false-warn.
 
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads
             ``codex_model`` / ``critic_backend`` / ``kernel_codex`` /
             ``no_kernel``).
-        catalog_ids (set[str] | None): The gateway catalog id set; ``None``
-            skips the check.
+        resolved_urls (tuple[str, str] | None): ``(anthropic_url, openai_url)``
+            from preflight; the OpenAI side is probed for the Codex catalog.
     """
-    if catalog_ids is None:
-        return
-    # Codex is needed by the Kernel agent (kernel-codex on) and the critic-agent review path.
+    # Codex is needed by the Kernel-agent (kernel-codex on) and the critic-agent review path.
     critic_uses_codex = args.critic_backend == "agent"
     needs_codex = critic_uses_codex or (args.kernel_codex and not getattr(args, "no_kernel", False))
     if not needs_codex:
         return
+
+    openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
+    if not openai_url:
+        openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    if not openai_url and resolved_urls is not None:
+        openai_url = resolved_urls[1]
+    openai_key = (
+        os.environ.get("OPENAI_API_KEY", "")
+        or os.environ.get("SAFE_API_KEY", "")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    )
+    catalog_ids = _probe_llm_catalog(base_url=openai_url, api_key=openai_key)
+    if catalog_ids is None:
+        # WARN-only path: don't block startup just because the OpenAI catalog
+        # is unreachable (the Claude gate already validated reachability).
+        print(
+            "Preflight: WARNING — OpenAI-side catalog unreachable; skipping "
+            "--codex-model verification (CodexBackend may fail at first turn)."
+        )
+        return
+
     chosen = (args.codex_model or "").strip()
     if chosen in catalog_ids:
         print(f"Preflight: Codex model {chosen!r} confirmed in gateway catalog")
@@ -1670,9 +1802,9 @@ def _preflight(
 ) -> tuple[str, str] | None:
     """Auto-install missing runtime deps and export auth aliases.
 
-    Credentials fallback → auth aliases → SDK install → ANTHROPIC_BASE_URL resolve + ~/.claude reset →
+    Credentials fallback → auth aliases → SDK install → Anthropic/OpenAI base URL resolve + ~/.claude reset →
     ROCm hygiene → ray/Magpie/InferenceX install → CLI presence checks → diagnostics. Returns
-    ``(anthropic_base_url, openai_base_url)`` or ``None`` when ``OPENAI_BASE_URL`` is missing.
+    ``(anthropic_base_url, openai_base_url)`` or ``None`` when no LLM base URL is configured.
 
     Args:
         args (argparse.Namespace | None): Parsed CLI args, used for the
@@ -1680,7 +1812,7 @@ def _preflight(
 
     Returns:
         tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
-            ``None`` when ``OPENAI_BASE_URL`` is missing.
+            ``None`` when neither base URL is configured.
     """
     _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
@@ -1689,8 +1821,9 @@ def _preflight(
     _validate_credentials()
 
     # --- Auth alias export ---
+    # SAFE_API_KEY only FILLS gaps now: an operator who set a provider-specific
+    # key (OPENAI_API_KEY / ANTHROPIC_API_KEY) for split entrypoints keeps it.
     safe_key = os.environ.get("SAFE_API_KEY", "")
-    base_url = os.environ.get("OPENAI_BASE_URL", "")
     if safe_key:
         for alias in (
             "OPENAI_API_KEY",
@@ -1701,41 +1834,9 @@ def _preflight(
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
         ):
-            if os.environ.get(alias) != safe_key:
+            if not os.environ.get(alias):
                 os.environ[alias] = safe_key
-                print(f"Preflight: refreshed {alias} from SAFE_API_KEY")
-    # OOB / GEAK / LLM_API_BASE default to the upstream gateway URL, but an
-    # INTENTIONAL operator override is preserved. This matters for #521: GEAK
-    # runs in a separate network namespace that frequently cannot route to the
-    # gateway directly, while the orchestrator reaches it via a host-local
-    # reverse tunnel. Pointing GEAK_BASE_URL (or OOB_BASE_URL) at that tunnel
-    # only works if preflight does NOT clobber the operator's value back to the
-    # direct gateway URL. We still force-rewrite the known-stale legacy
-    # auth-proxy URL (127.0.0.1:4002) so leftovers from a removed component
-    # can never reach the CLIs.
-    if base_url:
-        for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
-            current = os.environ.get(alias, "").strip()
-            if current and current != base_url and not _is_stale_proxy_url(current):
-                # Operator pinned a distinct, non-stale endpoint (e.g. a tunnel
-                # at 127.0.0.1:18444 for #521); respect it.
-                print(f"Preflight: {alias} kept at {current} (operator override; not forced to gateway)")
-                continue
-            if os.environ.get(alias) != base_url:
-                prev = os.environ.get(alias, "")
-                os.environ[alias] = base_url
-                why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "direct to gateway"
-                print(f"Preflight: {alias} {prev or '<unset>'} -> {base_url} ({why})")
-
-    # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
-    # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the resolved
-    # GEAK_BASE_URL above (operator tunnel override, or the gateway default)
-    # actually reaches the kernel agent instead of a stale install-time URL.
-    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
-    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
-    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
-        print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
-
+                print(f"Preflight: filled {alias} from SAFE_API_KEY")
     # --- Resolve install interpreters ---
     from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
 
@@ -1750,24 +1851,62 @@ def _preflight(
     # Must precede Coordinator import (ClaudeBackend lazy-imports the SDK); sys.executable matches imports.
     _ensure_python_sdks(sys.executable, pip_extra)
 
-    # --- Resolve ANTHROPIC_BASE_URL + reset ~/.claude/config.json ---
-    # Force-override both URL vars so stale 127.0.0.1:4002 leftovers can't reach the CLIs.
+    # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) ---
+    # Explicit operator values on each side are preserved; a missing side falls
+    # back to the other (legacy single-gateway stays one URL). We still rewrite
+    # known-stale 127.0.0.1:4002 leftovers so they can't reach the CLIs.
     resolved_urls: tuple[str, str] | None = None
-    if base_url:
-        anthropic_url = _derive_anthropic_base_url(base_url)
-        orig_anthropic = os.environ.get("ANTHROPIC_BASE_URL", "")
-        orig_openai = os.environ.get("OPENAI_BASE_URL", "")
-        for var, want, prev in (
-            ("ANTHROPIC_BASE_URL", anthropic_url, orig_anthropic),
-            ("OPENAI_BASE_URL", base_url, orig_openai),
+    anthropic_url, openai_url = _resolve_llm_endpoints()
+    if anthropic_url or openai_url:
+        for var, want in (
+            ("ANTHROPIC_BASE_URL", anthropic_url),
+            ("OPENAI_BASE_URL", openai_url),
         ):
-            if os.environ.get(var) != want:
+            if not want:
+                continue
+            prev = os.environ.get(var, "")
+            if prev != want:
+                why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "resolved endpoint"
                 os.environ[var] = want
-                print(f"Preflight: {var} {prev or '<unset>'} -> {want} (direct to gateway)")
-        _reset_claude_config_to_upstream(safe_key, anthropic_url)
-        resolved_urls = (anthropic_url, base_url)
+                print(f"Preflight: {var} {prev or '<unset>'} -> {want} ({why})")
+        # Claude CLI primary key: prefer the explicit Anthropic-side key so a
+        # split-entrypoint deploy auths Claude with its own key; SAFE_API_KEY
+        # (single-gateway) is the fallback.
+        claude_primary_key = (
+            os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or safe_key
+        )
+        _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
+        resolved_urls = (anthropic_url, openai_url)
+
+        # OOB / GEAK / LLM_API_BASE default to the resolved OpenAI-compatible
+        # gateway URL, but an INTENTIONAL operator override is preserved (#521:
+        # GEAK runs in a separate network namespace reached via a host-local
+        # reverse tunnel). We still force-rewrite the known-stale legacy
+        # auth-proxy URL (127.0.0.1:4002) so leftovers can't reach the CLIs.
+        gateway_url = openai_url or anthropic_url
+        if gateway_url:
+            for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+                current = os.environ.get(alias, "").strip()
+                if current and current != gateway_url and not _is_stale_proxy_url(current):
+                    print(f"Preflight: {alias} kept at {current} (operator override; not forced to gateway)")
+                    continue
+                if os.environ.get(alias) != gateway_url:
+                    prev = os.environ.get(alias, "")
+                    os.environ[alias] = gateway_url
+                    why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "direct to gateway"
+                    print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} ({why})")
+
+        # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
+        # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the
+        # resolved GEAK_BASE_URL above actually reaches the kernel agent.
+        geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
+        geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
+        if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
+            print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
     else:
-        print("Preflight: WARNING — OPENAI_BASE_URL unset; Claude/Codex SDKs will fail at first call")
+        print("Preflight: WARNING — no LLM base URL set; Claude/Codex SDKs will fail at first call")
 
     # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
     _unset_hip_visible_devices()
@@ -2538,6 +2677,26 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
         )
 
 
+def _quantization_enabled_via_env() -> bool:
+    """Return ``True`` iff the deterministic quantization master switch is on.
+
+    Quantization is gated on ``$HYPERLOOM_QUANTIZE_ENABLED`` (truthy = ``1`` /
+    ``true`` / ``yes`` / ``on``, case-insensitive). This makes the on/off
+    decision a deterministic, frontend-settable env flag rather than something
+    an LLM agent infers from natural language. Anything else — including unset —
+    disables quantization.
+
+    Returns:
+        ``True`` when the env var is set to a recognized truthy value.
+    """
+    return os.environ.get("HYPERLOOM_QUANTIZE_ENABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 async def _run_quantization_prelude(args: argparse.Namespace) -> None:
     """Run the quantization-agent once before the optimization loop.
 
@@ -2604,6 +2763,22 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         return
     if getattr(args, "resume", False):
         print("Quantization prelude: skipped (--resume); using model from manifest.")
+        return
+
+    # Deterministic master switch: quantization runs ONLY when
+    # $HYPERLOOM_QUANTIZE_ENABLED is explicitly truthy. This decouples the
+    # on/off decision from any agent's natural-language judgement — even if a
+    # --quantize / --quantize-scheme flag reached us (e.g. an in-sandbox agent
+    # added it from the prompt), we refuse to quantize unless the env switch is
+    # on. Absent / false => skip and continue on the un-quantized model, made
+    # detectable via the QUANTIZATION_SKIPPED marker + $HYPERLOOM_QUANTIZATION_SKIPPED.
+    if not _quantization_enabled_via_env():
+        reason = "HYPERLOOM_QUANTIZE_ENABLED is not set to a truthy value"
+        os.environ["HYPERLOOM_QUANTIZATION_SKIPPED"] = reason
+        print(
+            f"QUANTIZATION_SKIPPED: {reason}; continuing optimization on the "
+            "un-quantized model. Set HYPERLOOM_QUANTIZE_ENABLED=1 to quantize."
+        )
         return
 
     from .paths import workspace_root
@@ -2876,8 +3051,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     resolved_urls = _preflight(args)
 
     # Hard-gate Claude model before any session work (mutates args.claude_model on fallback; sys.exit(2) on failure).
-    catalog_ids = _validate_and_resolve_claude_model(args, resolved_urls)
-    _smoke_test_codex_model(args, catalog_ids)
+    _validate_and_resolve_claude_model(args, resolved_urls)
+    # Codex smoke probes the OpenAI side independently (split entrypoints).
+    _smoke_test_codex_model(args, resolved_urls)
 
     # `--resume-from <path>` implies `--resume` (operator convenience).
     if args.resume_from and not args.resume:
@@ -3016,22 +3192,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Honour persisted kernel_enabled on resume; CLI --no-kernel can still override.
         if not state.kernel_enabled:
             args.no_kernel = True
-            print("  kernel agent          : DISABLED (persisted from original run)")
-        # Same persistence contract for the FRAMEWORK_PR phase toggle.
-        if not bool(getattr(state, "framework_phase_enabled", True)):
-            args.no_framework = True
+            print("  Kernel-agent          : DISABLED (persisted from original run)")
+        # Same persistence contract for the FRAMEWORK_AGENT phase toggle.
+        if not bool(getattr(state, "framework_agent_phase_enabled", True)):
+            args.no_framework_agent = True
             print("  framework phase       : DISABLED (persisted from original run)")
-        elif bool(getattr(args, "no_framework", False)):
-            # Inverse (P2.d): honour --no-framework on resume only before FRAMEWORK_PR is entered.
+        elif bool(getattr(args, "no_framework_agent", False)):
+            # Inverse (P2.d): honour --no-framework-agent on resume only before FRAMEWORK is entered.
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
             if cur_phase in ("", "PRELUDE"):
-                state.framework_phase_enabled = False
+                state.framework_agent_phase_enabled = False
                 # Persist immediately; the later conditional save only runs on prior stop_reason/crash.
                 state.save(session_dir)
-                print("  framework phase       : DISABLING for resume (--no-framework + phase=PRELUDE)")
+                print("  framework phase       : DISABLING for resume (--no-framework-agent + phase=PRELUDE)")
             else:
                 print(
-                    f"  framework phase       : WARN --no-framework ignored; "
+                    f"  framework phase       : WARN --no-framework-agent ignored; "
                     f"session is already in phase={cur_phase!r} "
                     f"(cannot retroactively skip)"
                 )
@@ -3042,7 +3218,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         elif bool(getattr(args, "no_explore", False)):
             # Honour --no-explore on resume only before EXPLORE is entered.
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
-            if cur_phase in ("", "PRELUDE", "FRAMEWORK_PR"):
+            if cur_phase in ("", "PRELUDE", "FRAMEWORK"):
                 state.explore_enabled = False
                 print(f"  explore phase         : DISABLING for resume (--no-explore + phase={cur_phase or 'PRELUDE'})")
             else:
@@ -3308,7 +3484,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
     no_kernel = getattr(args, "no_kernel", False)
     no_explore = getattr(args, "no_explore", False)
-    no_framework = bool(getattr(args, "no_framework", False))
+    no_framework_agent = bool(getattr(args, "no_framework_agent", False))
     # Unconditional phase-toggle banner lines (mirror the kernel banner so all
     # three --no-xxx flags surface their ENABLED/DISABLED state at startup).
     if no_explore:
@@ -3318,10 +3494,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     else:
         print("Explore phase   : ENABLED")
-    if no_framework:
-        print("Framework phase : DISABLED (--no-framework)")
+    if no_framework_agent:
+        print("Framework-agent phase : DISABLED (--no-framework-agent)")
     else:
-        print("Framework phase : ENABLED")
+        print("Framework-agent phase : ENABLED")
     if no_explore and no_kernel:
         print(
             "WARNING: --no-explore and --no-kernel are both set; the run "
@@ -3497,7 +3673,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if no_kernel:
         from .orchestrator.agent_role import default_role_registry
 
-        role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel"}
+        role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel_agent"}
 
     coordinator = Coordinator(
         session_dir,
@@ -3551,7 +3727,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         or _build_orchestration_prompt(
             no_kernel=no_kernel,
             no_explore=no_explore,
-            no_framework=bool(getattr(args, "no_framework", False)),
+            no_framework_agent=bool(getattr(args, "no_framework_agent", False)),
             framework=framework_for_prompt,
             objective=objective,
             max_minutes=max_minutes_for_prompt,
@@ -3559,15 +3735,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
     if not no_kernel:
-        prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
+        prompts["kernel_agent"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
     # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
     try:
-        coordinator.framework_pr_discover_timeout_sec = float(
-            getattr(args, "framework_pr_discover_timeout_sec", 0.0) or 0.0
+        coordinator.framework_agent_discover_timeout_sec = float(
+            getattr(args, "framework_agent_discover_timeout_sec", 0.0) or 0.0
         )
     except (TypeError, ValueError):
-        coordinator.framework_pr_discover_timeout_sec = 0.0
+        coordinator.framework_agent_discover_timeout_sec = 0.0
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
     specialist_executor: "Any" = None
@@ -3634,6 +3810,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
         session_lock.release()
+        # Issue #464: crash-safe reports/final.json. Runs unconditionally and
+        # FIRST so a consumable machine-readable summary always exists even
+        # when the CLOSE sequencer never ran (time_exhausted / external
+        # SIGTERM) or its report task failed. Idempotent: a no-op when the
+        # full ReportExecutor already wrote final.json. coordinator.run's own
+        # finally has persisted state.json (with stop_reason) before we get
+        # here, so the fields are current.
+        try:
+            from .breakdown import write_minimal_final_json
+
+            final_json = write_minimal_final_json(session_dir)
+            print(f"Final summary     : {final_json}")
+        except Exception:  # noqa: BLE001 — safety net must never mask stop_reason
+            log.exception("crash-safe final.json write failed (non-fatal)")
         # End-of-session safety net: always materialize session_breakdown.json (best-effort; never mask stop_reason).
         # Skip when the CLOSE sequencer already wrote it (close_sequence_done is locked in CORE_STATE_FIELDS).
         sequencer_done = getattr(
@@ -4212,7 +4402,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-kernel",
         action="store_true",
         default=False,
-        help="Disable the Kernel agent entirely. The run will "
+        help="Disable the Kernel-agent entirely. The run will "
         "only do baseline + explore + sweep (pure "
         "parameter search). Useful when GEAK/OOB/GPU "
         "compile env is unavailable or you just want the "
@@ -4223,7 +4413,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Skip the EXPLORE phase entirely. PRELUDE (and "
-        "FRAMEWORK_PR, if enabled) route straight to KERNEL "
+        "FRAMEWORK, if enabled) route straight to KERNEL "
         "— or to SWEEP when --no-kernel is also set. Useful "
         "for a baseline -> kernel-only run, or to validate "
         "the current recipe via SWEEP without a serving-"
@@ -4242,7 +4432,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "stdout for stream-based parsers.",
     )
     opt.add_argument(
-        "--framework-pr-discover-timeout-sec",
+        "--framework-discover-timeout-sec",
         type=float,
         default=0.0,
         help="Override the per-call timeout for "
@@ -4250,17 +4440,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "framework_agent_client.DEFAULT_FA_PHASE_TIMEOUT_SEC "
         "(180s). The Coordinator retries discover up to "
         "DISCOVER_FAILURE_RETRY_LIMIT (3) consecutive "
-        "failures before marking FRAMEWORK_PR done.",
+        "failures before marking FRAMEWORK done.",
     )
     opt.add_argument(
-        "--no-framework",
+        "--no-framework-agent",
         action="store_true",
         default=os.environ.get(
             "INFERENCE_OPTIMIZER_NO_FRAMEWORK",
             "0",
         ).strip()
         in ("1", "true", "True", "TRUE", "yes"),
-        help="Skip the FRAMEWORK_PR phase (PRELUDE → EXPLORE "
+        help="Skip the FRAMEWORK_AGENT phase (PRELUDE → EXPLORE "
         "directly). The phase pre-scans upstream sglang/"
         "vllm PRs via framework-agent and lands KEPT "
         "patches before EXPLORE starts. Disable when "
@@ -4273,10 +4463,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--kernel-codex",
         action="store_true",
         default=True,
-        help="Use Codex backend for Kernel agent (default — faster). Pass --kernel-claude to switch.",
+        help="Use Codex backend for Kernel-agent (default — faster). Pass --kernel-claude to switch.",
     )
     opt.add_argument(
-        "--kernel-claude", action="store_false", dest="kernel_codex", help="Use Claude backend for Kernel agent"
+        "--kernel-claude", action="store_false", dest="kernel_codex", help="Use Claude backend for Kernel-agent"
     )
     # Critic backend selection; flags are aliases setting the same dest, default/conflicts resolved in _resolve_critic_choice.
     opt.add_argument(
@@ -4415,22 +4605,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
     opt.add_argument("--kernel-prompt", type=str, default=None, help="Override Kernel system prompt")
-    # Cortex KB integration flags
-    # Defaults wire Cortex on. --degraded-kb bypasses KB hooks; --cortex-kb-url overrides $CORTEX_KB_URL;
-    # --cortex-strict-fingerprint requires the manifest stack_fingerprint to match before warm_start.
+    # Cortex KB flag (Critic agent only)
+    # --degraded-kb bypasses KB hooks; --cortex-kb-url overrides $CORTEX_KB_URL.
     opt.add_argument(
         "--cortex-kb-url",
         dest="cortex_kb_url",
         type=str,
         default=None,
-        help="Remote recipe-snapshot KB URL (read-only) for this run; "
-        "also settable via $CORTEX_KB_URL. Leave it UNSET to run "
-        "fully local — there is no default endpoint, so the "
-        "optimizer never connects to a remote KB unless you pass "
-        "this explicitly. Writes always go to --local-kb-root "
-        "regardless; an explicitly-configured but unreachable URL "
-        "degrades the dispatcher to local-only transparently (no "
-        "need to also pass --degraded-kb).",
+        help="Cortex KB base URL for this run, used only by the Critic "
+        "agent's per-proposal assess enrichment (/v2/reasoning/assess); "
+        "also settable via $CORTEX_KB_URL. This is NOT the recipe KB — "
+        "recipe reads are served by gbrain ($GBRAIN_*) and writes always "
+        "go to --local-kb-root. Leave it UNSET to skip Critic assess "
+        "enrichment entirely.",
     )
     opt.add_argument(
         "--specialist-kb-mcp-url",

@@ -59,7 +59,7 @@ def _make_repo(tmp: Path) -> dict:
     other.write_text("committed_v1\nPRE_EXISTING_DIRTY\n")
     # Pre-existing untracked file (must never be touched).
     (repo / "untracked.txt").write_text("untracked\n")
-    return {"repo": r, "kernel": kernel, "config": config, "other": other, "untracked": repo / "untracked.txt"}
+    return {"repo": r, "kernel_agent": kernel, "config": config, "other": other, "untracked": repo / "untracked.txt"}
 
 
 def test_export_and_restore_cover_sibling_file():
@@ -68,7 +68,7 @@ def test_export_and_restore_cover_sibling_file():
         env = _make_repo(tmp)
         repo, kernel, config, other, untracked = (
             env["repo"],
-            env["kernel"],
+            env["kernel_agent"],
             env["config"],
             env["other"],
             env["untracked"],
@@ -132,7 +132,7 @@ def test_restore_from_detached_head_preserves_dirty():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         env = _make_repo(tmp)
-        repo, kernel, config, other = (env["repo"], env["kernel"], env["config"], env["other"])
+        repo, kernel, config, other = (env["repo"], env["kernel_agent"], env["config"], env["other"])
         branch = "forge/test/kernel"
         # Detach HEAD at the current commit (the run6 sglang scenario).
         head = _git(repo, "rev-parse", "HEAD")
@@ -174,7 +174,7 @@ def test_prepare_inplace_autorecovers_from_stale_forge_branch():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         env = _make_repo(tmp)
-        repo, kernel = env["repo"], env["kernel"]
+        repo, kernel = env["repo"], env["kernel_agent"]
 
         # Simulate the crashed run: strand HEAD on a forge/ temp branch whose tip
         # carries a leftover (never-restored) optimization.

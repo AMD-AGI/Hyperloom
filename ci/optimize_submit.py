@@ -1113,6 +1113,7 @@ class SafeOptimizeClient:
         max_hours: float | None = None,
         target_gain: float | None = None,
         results_path: str | None = None,
+        env: dict | None = None,
     ) -> dict:
         """Submit an optimization task to SaFE and return the API response.
 
@@ -1208,6 +1209,14 @@ class SafeOptimizeClient:
             body["promptPrefix"] = prompt_prefix
         if prompt_suffix:
             body["promptSuffix"] = prompt_suffix
+        # Optional session-scoped env forwarded to SaFE (body.env). SaFE relays
+        # it to Claw as session_env, injected into the sandbox so the
+        # inference_optimizer process sees it (e.g. CLAUDE_MODEL override).
+        # Logged so each CI job records exactly which session env it submitted,
+        # making "did the env reach Claw" verifiable from the job log alone.
+        if env:
+            body["env"] = env
+            log.info("[%s] session env forwarded to SaFE: %s", display_name, env)
         attempts = 8
         # Captured before the first POST so the dedup lookup only matches a task
         # this call created (not an unrelated older one for the same model).
@@ -1735,6 +1744,7 @@ def process_model(
     target_gain: float | None = None,
     results_path: str | None = None,
     pool_metadata: dict | None = None,
+    env: dict | None = None,
 ) -> SubmissionRecord:
     """Run the full submit flow for one model: detect, register, submit.
 
@@ -1996,6 +2006,7 @@ def process_model(
             max_hours=max_hours,
             target_gain=target_gain,
             results_path=results_path,
+            env=env,
         )
     except Exception as e:
         rec.status = "failed"
@@ -4162,6 +4173,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pool-batch-index", default=os.environ.get("HYPERLOOM_POOL_BATCH_INDEX", ""))
     parser.add_argument("--pool-batch-size", default=os.environ.get("HYPERLOOM_POOL_BATCH_SIZE", ""))
     parser.add_argument("--pool-source-task-id", default=os.environ.get("HYPERLOOM_POOL_SOURCE_TASK_ID", ""))
+    # HF download count for this model (carried from the candidates pool via the
+    # matrix). When it parses as an int < 100, the submit pins the orchestration
+    # model to claude-opus-4-6 via session env (CLAUDE_MODEL). Missing / non-int
+    # leaves the model unset (no-op).
+    parser.add_argument("--downloads", default=os.environ.get("HYPERLOOM_DOWNLOADS", ""))
 
     parser.add_argument(
         "--dry-run", action="store_true", help="Auto-detect and print plan without registering or submitting"
@@ -4427,6 +4443,15 @@ def main() -> int:
     for repo in repos:
         log.info("=" * 60)
         log.info("Model: %s", repo)
+        # Low-download models (HF downloads < 100) pin the orchestration model
+        # to claude-opus-4-6 via session env. A missing or non-integer downloads
+        # value is a no-op (env stays None).
+        submit_env: dict | None = None
+        try:
+            if int(str(args.downloads).strip()) < 100:
+                submit_env = {"CLAUDE_MODEL": "claude-opus-4-6"}
+        except (TypeError, ValueError):
+            submit_env = None
         rec = process_model(
             repo,
             hf,
@@ -4449,6 +4474,7 @@ def main() -> int:
             target_gain=args.target_gain,
             results_path=args.results_path,
             pool_metadata=pool_metadata,
+            env=submit_env,
         )
         records.append(rec)
 

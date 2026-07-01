@@ -47,7 +47,7 @@ def _args(**overrides):
         explore_variant_timeout_sec="bad",
         explore_variant_timeout_safety_margin="bad",
         enable_roofline=False,
-        no_framework=True,
+        no_framework_agent=True,
         no_explore=True,
         research_scout=False,
         research_scout_interval=0,
@@ -115,7 +115,7 @@ def test_seed_shared_state_populates_perfskills_and_cli_overrides(
     assert state.explore_overtime_kill_ratio == 2.0
     assert state.explore_variant_timeout_sec_override == 0
     assert state.explore_variant_timeout_safety_margin == 0.5
-    assert state.framework_phase_enabled is False
+    assert state.framework_agent_phase_enabled is False
     assert state.explore_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
     assert state.conc_sweep_total_budget_sec == 120
@@ -277,11 +277,11 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     monkeypatch,
     capsys,
 ) -> None:
-    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "kernel": ""})
+    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "kernel_agent": ""})
     assert (tmp_path / "agents" / "orch" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "hello"
-    assert (tmp_path / "agents" / "kernel" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "kernel_agent" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "(empty)"
 
@@ -397,11 +397,11 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     monkeypatch,
     capsys,
 ) -> None:
-    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "kernel": ""})
+    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "kernel_agent": ""})
     assert (tmp_path / "agents" / "orch" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "hello"
-    assert (tmp_path / "agents" / "kernel" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "kernel_agent" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "(empty)"
 

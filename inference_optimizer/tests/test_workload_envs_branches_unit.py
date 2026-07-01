@@ -103,7 +103,7 @@ def test_default_baseline_config(monkeypatch):
 
 
 # ---- precision + gpu_type without framework -------------------------------
-def test_precision_and_gpu_type_no_framework(monkeypatch, tmp_path):
+def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("PRECISION", "fp8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")

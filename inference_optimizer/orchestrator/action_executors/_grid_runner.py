@@ -508,6 +508,129 @@ def _probe_sglang_help_text() -> str:
     return _probe_server_help_text("sglang")
 
 
+# ── Env-flag capability probe (build-accurate, not version-string based) ──
+# A serving env flag can be *defined* in the framework build yet still crash
+# the server at engine init because the code path it activates imports a module
+# that this particular build did not package (e.g. the vLLM ``+rocm722`` wheel
+# defines ``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS`` but its aiter
+# shared-expert router lazily imports ``...fused_moe.rocm_aiter_fused_moe``,
+# which was moved to ``...fused_moe.experts.rocm_aiter_moe`` in 0.22+ and is
+# absent from that wheel). Knowing the flag *name* exists (envs.py) does not
+# tell us the flag *works*; only the installed build does. We probe the build
+# directly instead of maintaining a version→flag table (which would misfire
+# since the flag name is identical across 0.21 and 0.24).
+_UNSET = object()
+
+# Sentinel-cached probe result, keyed by framework. Value is ``None`` (flag
+# usable / not applicable) or a reason string (flag would crash the server).
+_CAP_PROBE_CACHE: dict[str, str | None] = {}
+
+# Subprocess probe: locate the installed vLLM package WITHOUT executing its
+# heavy ``__init__`` (``find_spec('vllm')`` resolves the top-level package
+# without importing it), read the aiter shared-expert router source, extract the
+# ``fused_moe.*`` modules it imports, and verify each resolves to a real file in
+# THIS build. Prints a single JSON line; any failure => ``status=unknown`` so
+# the caller conservatively does NOT drop the variant.
+_AITER_SHARED_EXPERT_PROBE_SCRIPT = (
+    "import importlib.util as u, os, re, json\n"
+    "def go():\n"
+    "    try:\n"
+    "        spec = u.find_spec('vllm')\n"
+    "    except Exception:\n"
+    "        return {'status': 'unknown'}\n"
+    "    if not spec or not spec.origin:\n"
+    "        return {'status': 'unknown'}\n"
+    "    vdir = os.path.dirname(spec.origin)\n"
+    "    router = os.path.join(vdir, 'model_executor', 'layers', 'fused_moe',\n"
+    "                          'router', 'aiter_shared_routed_fused_moe_router.py')\n"
+    "    if not os.path.exists(router):\n"
+    "        return {'status': 'unknown'}\n"
+    "    try:\n"
+    "        text = open(router, encoding='utf-8').read()\n"
+    "    except Exception:\n"
+    "        return {'status': 'unknown'}\n"
+    "    mods = re.findall(r'from\\s+(vllm\\.model_executor\\.layers\\.fused_moe\\.[A-Za-z0-9_.]+)\\s+import', text)\n"
+    "    missing = []\n"
+    "    for m in sorted(set(mods)):\n"
+    "        rel = m[len('vllm.'):].replace('.', os.sep)\n"
+    "        if not (os.path.exists(os.path.join(vdir, rel + '.py'))\n"
+    "                or os.path.exists(os.path.join(vdir, rel, '__init__.py'))):\n"
+    "            missing.append(m)\n"
+    "    return {'status': 'unsupported', 'missing': missing} if missing else {'status': 'ok'}\n"
+    "print(json.dumps(go()))\n"
+)
+
+
+def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
+    """Return a drop reason if the installed vLLM build can't honour the aiter
+    shared-expert fusion flag, else ``None``.
+
+    Build-accurate: checks that every ``fused_moe.*`` module the installed
+    aiter shared-expert router imports actually exists on disk. Best-effort —
+    ``unknown`` results (vLLM absent / router absent / probe error) return
+    ``None`` (do NOT drop) and are NOT cached so a transient failure re-probes.
+    Definitive ``ok`` / ``unsupported`` results are cached for the session.
+
+    Returns:
+        str | None: A human-readable reason when the flag would crash the
+        server on this build, else ``None``.
+    """
+    cached = _CAP_PROBE_CACHE.get("vllm", _UNSET)
+    if cached is not _UNSET:
+        return cached  # type: ignore[return-value]
+    try:
+        proc = subprocess.run(
+            ["python3", "-c", _AITER_SHARED_EXPERT_PROBE_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+        payload = json.loads(lines[-1]) if lines else {}
+    except Exception:  # noqa: BLE001 — best-effort probe, never crash the grid
+        return None
+    status = payload.get("status")
+    if status == "ok":
+        _CAP_PROBE_CACHE["vllm"] = None
+        return None
+    if status == "unsupported":
+        missing = ", ".join(payload.get("missing") or []) or "(unknown module)"
+        reason = (
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS enabled but the installed "
+            "vLLM build's aiter shared-expert router imports missing module(s): "
+            f"{missing}. Flag unusable on this build (server crashes at engine "
+            "init); upgrade vLLM to a build that ships the module."
+        )
+        _CAP_PROBE_CACHE["vllm"] = reason
+        return reason
+    return None  # unknown => conservative, do not drop or cache
+
+
+def unsupported_capability_reason(variant: "GridVariant") -> str | None:
+    """Return a drop reason if a variant sets an env flag the installed
+    framework build cannot honour, else ``None``.
+
+    Mirrors :func:`xdit_blacklist_reason`: pure per-variant inspection plus a
+    cached build probe. Conservative — returns ``None`` (do NOT drop) whenever
+    the probe cannot positively confirm the flag is broken.
+
+    Args:
+        variant (GridVariant): The candidate variant to inspect.
+
+    Returns:
+        str | None: A human-readable reason when the variant should be
+        fast-failed before booting a server, else ``None``.
+    """
+    fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
+    if fw != "vllm":
+        return None
+    envs = {str(k): str(v) for k, v in (getattr(variant, "extra_envs", None) or {}).items()}
+    val = envs.get("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS")
+    if val is None or not _is_truthy_env(val):
+        return None
+    return _probe_vllm_aiter_shared_expert_unsupported()
+
+
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     """Heuristic detect of (is_mla_model, is_moe_model) from model path.
 
@@ -1417,6 +1540,29 @@ def _resolve_nonneg_int_env(name: str, default: int) -> int:
     return val
 
 
+def _coerce_optional_positive_int(value: int | str | None) -> int | None:
+    """Coerce ``value`` to a positive int, or ``None`` when unset/invalid.
+
+    Used to validate an optional ``MAX_MODEL_LEN`` ceiling sourced from the
+    workload envs (where it may be an int, a numeric string, or absent) before
+    it clamps ``--context-length``.
+
+    Args:
+        value (int | str | None): Candidate ceiling.
+
+    Returns:
+        int | None: The positive integer, or ``None`` when unset, non-positive,
+        or non-integer.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def resolve_sglang_context_cap(isl: int, osl: int) -> int:
     """Resolve the sglang ``--context-length`` cap for an ISL+OSL workload.
 
@@ -1449,14 +1595,23 @@ def inject_sglang_context_length(
     model_path: str | None,
     isl: int,
     osl: int,
+    max_model_len: int | str | None = None,
 ) -> str:
     """Append ``--context-length <N>`` to ``server_args`` for sglang runs.
 
     Returns ``server_args`` unchanged when the framework is not sglang
     (empty/unknown treated as sglang), the flag is already present, or the
     model's ``max_position_embeddings`` cannot be read. Otherwise appends
-    ``min(max_pos, cap)`` from :func:`resolve_sglang_context_cap`; only this
-    flag is added.
+    ``min(max_pos, max_model_len, cap)`` from :func:`resolve_sglang_context_cap`;
+    only this flag is added.
+
+    sglang sizes its window off ``--context-length`` (it does not honor
+    ``--max-model-len``), so without this clamp a workload cap above the run's
+    explicit ``--max-model-len`` would inject a self-contradictory config (#697:
+    ``--context-length 84048`` while ``--max-model-len 82000``). The
+    ``max_model_len`` ceiling is applied only when it is a positive value;
+    an unset / non-positive value preserves the prior ``min(max_pos, cap)``
+    behaviour.
 
     Args:
         server_args (str | None): The server-arg string to augment.
@@ -1465,6 +1620,9 @@ def inject_sglang_context_length(
             ``max_position_embeddings``.
         isl (int): Input sequence length.
         osl (int): Output sequence length.
+        max_model_len (int | str | None): The run's explicit ``MAX_MODEL_LEN``
+            ceiling; clamps ``--context-length`` so it never exceeds it. Ignored
+            when unset, non-positive, or non-integer.
 
     Returns:
         str: ``server_args`` with ``--context-length`` appended, or unchanged
@@ -1484,6 +1642,9 @@ def inject_sglang_context_length(
         return args
     cap = resolve_sglang_context_cap(isl, osl)
     context_length = min(int(max_pos), cap)
+    max_model_len_int = _coerce_optional_positive_int(max_model_len)
+    if max_model_len_int is not None:
+        context_length = min(context_length, max_model_len_int)
     return merge_server_args(
         args,
         f"{_SGLANG_CONTEXT_LENGTH_FLAG} {context_length}",
@@ -2114,6 +2275,42 @@ async def run_grid(
 
     for i, variant in enumerate(grid):
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
+        # Capability fast-fail: drop a variant whose env flag the installed
+        # framework build cannot honour BEFORE booting a (doomed) server. Turns
+        # a ~multi-minute server-boot crash into a sub-second skip while still
+        # recording the failure in the ledger so the LLM learns not to re-pick
+        # it. See ``unsupported_capability_reason``.
+        cap_reason = unsupported_capability_reason(variant)
+        if cap_reason:
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: capability_unsupported: %s",
+                i + 1,
+                len(grid),
+                variant.name,
+                cap_reason,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="capability_unsupported",
+                error_summary=cap_reason,
+                extra_args=variant.extra_server_args,
+            )
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    error=cap_reason,
+                    error_class="capability_unsupported",
+                    note=variant.note,
+                )
+            )
+            await _pulse_after_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
         try:
             cfg_path = _build_variant_yaml(
                 base_yaml_path,

@@ -853,7 +853,7 @@ def materialize_config_with_envs(
     # server_args + extra_envs merges above) so any operator-pinned flag (via
     # extra_server_args, extra_envs, or the YAML) is honored and never doubled.
     # Both are no-ops for vllm/atom. This is the single choke point every
-    # benchmark path (baseline / profile / sweep / explore / framework_pr /
+    # benchmark path (baseline / profile / sweep / explore / framework /
     # conc_sweep) funnels through before the YAML is handed to Magpie, so the
     # flags reach every sglang launch.
     #
@@ -861,9 +861,11 @@ def materialize_config_with_envs(
     #    max_total_tokens off the model's max_position_embeddings; a huge
     #    native window (e.g. Mistral-Nemo's 1024000) balloons the aiter
     #    workspace_buffer past GPU memory -> HIP OOM -> baseline_failed. We cap
-    #    to ISL+OSL+headroom (floored, clamped to the native window). vllm
-    #    already passes --max-model-len $MAX_MODEL_LEN, so this only fixes the
-    #    sglang asymmetry; sglang ignores MAX_MODEL_LEN entirely.
+    #    to ISL+OSL+headroom (floored, clamped to the native window AND to the
+    #    run's MAX_MODEL_LEN). sglang sizes its window off --context-length, so
+    #    when MAX_MODEL_LEN is below the workload cap we must clamp here or the
+    #    injected --context-length would exceed the configured max-model-len
+    #    (#697: --context-length 84048 > --max-model-len 82000).
     # 2. MI300X cold-compile guard: ensure sglang's scheduler watchdog is long
     #    enough to survive the first-request aiter ``mha_batch_prefill`` JIT
     #    compile. sglang's 300s default fires SIGQUIT mid-warmup on a cold
@@ -876,6 +878,7 @@ def materialize_config_with_envs(
         bench.get("model"),
         isl_val,
         osl_val,
+        max_model_len=envs.get("MAX_MODEL_LEN") or os.environ.get("MAX_MODEL_LEN"),
     )
     resolved_server_args = inject_sglang_watchdog_timeout(
         resolved_server_args,
@@ -937,7 +940,7 @@ def materialize_config_with_envs(
     # (seen on Kimi-K2 / Qwen3.6 / any custom-code model). Mirror it onto every
     # client-trust env so custom-code models work WITHOUT per-model special-
     # casing. This is the single choke point every bench path (baseline /
-    # profile / sweep / explore / framework_pr / conc_sweep) funnels through.
+    # profile / sweep / explore / framework / conc_sweep) funnels through.
     # setdefault never overrides an operator's deliberate opt-out (e.g.
     # extra_envs={"BENCH_TRUST_REMOTE_CODE": "0"}).
     for _trust_key in (

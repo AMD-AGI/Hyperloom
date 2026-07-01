@@ -175,7 +175,7 @@ def test_prepare_review_framework_op_emits_empty_approve_requires(reviewer):
     assert constraints["proposal_action_classes"] == {"baseA": "framework_op"}
 
 
-def test_classify_framework_pr_is_framework_op():
+def test_classify_framework_agent_is_framework_op():
     """FRAMEWORK_PR pre-screen candidates classify as framework_op (no extra approve_requires)."""
     from runtime.decision_reviewer import (
         _APPROVE_REQUIRES_BY_CLASS,
@@ -183,7 +183,7 @@ def test_classify_framework_pr_is_framework_op():
         classify_proposal_action,
     )
 
-    assert classify_proposal_action("framework_pr") == ACTION_CLASS_FRAMEWORK_OP
+    assert classify_proposal_action("framework_agent") == ACTION_CLASS_FRAMEWORK_OP
     assert _APPROVE_REQUIRES_BY_CLASS[ACTION_CLASS_FRAMEWORK_OP] == ()
 
 

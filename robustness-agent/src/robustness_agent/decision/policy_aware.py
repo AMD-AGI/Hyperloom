@@ -274,7 +274,7 @@ class PolicyAware:
                 f"robustness; allowed: "
                 f"{sorted(ROBUSTNESS_DELEGATE_ACTIONS)!r}",
                 rule="delegate_action",
-                hint="kernel-owned actions go via REQUEST(target_agent='kernel')",
+                hint="kernel_agent-owned actions go via REQUEST(target_agent='kernel_agent')",
             )
 
     def _check_update_state(self, payload: dict[str, Any]) -> None:

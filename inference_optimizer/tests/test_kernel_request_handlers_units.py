@@ -565,7 +565,7 @@ class TestRuntimeGeneratedKernel:
         if not markers:
             pytest.skip("no runtime markers in build")
         marker = next(iter(markers))
-        assert krh._is_runtime_generated_kernel("kernel", f"/tmp/{marker}_x.py") is True
+        assert krh._is_runtime_generated_kernel("kernel_agent", f"/tmp/{marker}_x.py") is True
 
     def test_reusable_source_root_overrides_compile_marker(self):
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
@@ -1143,12 +1143,12 @@ class TestDefaultGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
         [
-            (None, 130.0),  # unset -> full default
-            ("", 130.0),  # empty -> full default
-            ("full", 130.0),
-            ("FULL", 130.0),  # case-insensitive
-            ("  full  ", 130.0),  # whitespace tolerated
-            ("garbage", 130.0),  # unknown values fall back to full
+            (None, 180.0),  # unset -> full default
+            ("", 180.0),  # empty -> full default
+            ("full", 180.0),
+            ("FULL", 180.0),  # case-insensitive
+            ("  full  ", 180.0),  # whitespace tolerated
+            ("garbage", 180.0),  # unknown values fall back to full
             ("quick", 70.0),
             ("QUICK", 70.0),
             ("  quick  ", 70.0),
@@ -1176,7 +1176,7 @@ class TestGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
         [
-            ("full", 130.0),
+            ("full", 180.0),
             ("quick", 70.0),
         ],
     )
@@ -1194,7 +1194,7 @@ class TestGeakBudgetMinutes:
         # Pre-fix code would let "" propagate into ``float("")`` and raise.
         monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "")
         monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
-        assert krh._geak_budget_minutes({}) == 130.0
+        assert krh._geak_budget_minutes({}) == 180.0
 
 
 # _default_kernel_batch_parallel — adaptive batch fanout; the legacy 8
@@ -1664,3 +1664,40 @@ class TestBatchKernelCandidatesRetryBudget:
         out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
 
         assert [item["kernel_id"] for item in out] == ["k001"]
+
+
+class TestTracelensRootResolution:
+    """TraceLens root is resolved/validated independently of inherited env so
+    trace analysis does not silently fail when TRACELENS_ROOT is missing."""
+
+    def test_resolve_uses_explicit_env_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "tl"))
+        assert krh._resolve_tracelens_root() == tmp_path / "tl"
+
+    def test_resolve_derives_from_open_source_root_when_env_unset(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+        monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
+        monkeypatch.setenv("TMPDIR", str(tmp_path / "podlocal"))
+        expected = tmp_path / "podlocal" / "hyperloom" / "open-source-repos" / "TraceLens"
+        assert krh._resolve_tracelens_root() == expected
+
+    def test_root_error_none_when_present(self, tmp_path):
+        (tmp_path / "tl").mkdir()
+        assert krh._tracelens_root_error(tmp_path / "tl") is None
+
+    def test_root_error_message_when_missing(self, tmp_path):
+        err = krh._tracelens_root_error(tmp_path / "ghost")
+        assert err is not None
+        assert "TraceLens root not found" in err
+
+    def test_trace_analyze_handler_fails_fast_when_root_missing(self, tmp_path, monkeypatch):
+        # kernel-agent root present so we reach the TraceLens check.
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+        monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
+        monkeypatch.setenv("TMPDIR", str(tmp_path / "no-tracelens-here"))
+        out = asyncio.run(
+            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
+        )
+        assert out["status"] == "failed"
+        assert out["error_class"] == "tracelens_root_missing"

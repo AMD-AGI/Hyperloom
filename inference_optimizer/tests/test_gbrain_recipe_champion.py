@@ -1,11 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Parity tests: gbrain vs cortex recipe-KB backends on the 5-tuple.
+"""Champion-level coverage for the gbrain recipe-KB backend on the 5-tuple.
 
-Both remote backends plug into the same ``RecipeKB`` dispatcher and must
-surface the SAME champion for a given canonical id. Equivalence is
-champion-level (canonical id, best_config, best_throughput, experiential-list
-presence). No network: gbrain gets a fake MCP, cortex a fake HTTP transport.
+gbrain is the sole remote backend behind the ``RecipeKB`` dispatcher. These
+tests lock that a champion survives the dispatcher's ``_v2_to_arbor``
+projection, stays warm-replay consumable, and degrades to the local store on a
+gbrain failure. No network: gbrain gets a fake MCP.
 """
 
 from __future__ import annotations
@@ -15,12 +15,7 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer import recipe_snapshot_constants as C
-from inference_optimizer.recipe_kb import (
-    LocalRecipeStore,
-    RecipeKB,
-    RemoteRecipeClient,
-)
+from inference_optimizer.recipe_kb import LocalRecipeStore, RecipeKB
 from inference_optimizer.recipe_kb.canonical_id import (
     cid_to_path_components,
     recipe_canonical_id,
@@ -32,16 +27,15 @@ from inference_optimizer.recipe_kb.gbrain_remote_client import (
 _ARGS_KEY = "extra_server_args"
 
 
-# Source-of-truth recipe specs (one logical recipe per 5-tuple)
 class _Spec:
-    """A single logical recipe expressed once, rendered into both shapes."""
+    """A single logical recipe expressed once, rendered into the gbrain shape."""
 
     def __init__(
         self,
         *,
         model: str,
         hardware: str,
-        framework: str,
+        framework_name: str,
         framework_version: str,
         precision: str,
         args: str,
@@ -53,7 +47,7 @@ class _Spec:
     ) -> None:
         self.model = model
         self.hardware = hardware
-        self.framework = framework
+        self.framework_name = framework_name
         self.framework_version = framework_version
         self.precision = precision
         self.args = args
@@ -68,7 +62,7 @@ class _Spec:
         return recipe_canonical_id(
             model=self.model,
             hardware=self.hardware,
-            framework=self.framework,
+            framework_name=self.framework_name,
             framework_version=self.framework_version,
             precision=self.precision,
         )
@@ -87,7 +81,7 @@ class _Spec:
         attrs: dict[str, Any] = {
             "model": self.model,
             "hardware": self.hardware,
-            "framework": self.framework,
+            "framework_name": self.framework_name,
             "framework_version": self.framework_version,
             "precision": self.precision,
             "best_throughput": self.throughput,
@@ -115,7 +109,7 @@ class _Spec:
             "labels": {
                 "model": model_s,
                 "hardware": hw_s,
-                "framework": fw_s,
+                "framework_name": fw_s,
                 "framework_version": fwv_s,
                 "precision": prec_s,
                 "model_type": mt_s,
@@ -142,7 +136,7 @@ SPECS = [
     _Spec(
         model="Qwen/Qwen3-32B",
         hardware="mi300x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.11",
         precision="fp8",
         args="--cuda-graph-max-bs 256",
@@ -155,7 +149,7 @@ SPECS = [
     _Spec(
         model="meta-llama/Llama-3-70B",
         hardware="mi300x",
-        framework="vllm",
+        framework_name="vllm",
         framework_version="0.6.0",
         precision="fp16",
         args="--max-num-seqs 512",
@@ -168,7 +162,7 @@ SPECS = [
     _Spec(
         model="Qwen/Qwen3-32B",
         hardware="mi355x",
-        framework="sglang",
+        framework_name="sglang",
         framework_version="0.5.11",
         precision="fp8",
         args="--attention-backend fa3",
@@ -181,7 +175,6 @@ SPECS = [
 ]
 
 
-# Fakes (no network)
 class _FakeMcp:
     """Stand-in for the gbrain MCP: canned list_pages / get_page."""
 
@@ -199,35 +192,6 @@ class _FakeMcp:
         return {}
 
 
-class _FakeCortexTransport:
-    """Stand-in for the cortex kb-service HTTP transport: filters v2 rows by ``label_match``."""
-
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self.rows = rows
-
-    def request(
-        self,
-        method: str,
-        path: str,
-        *,
-        body: dict[str, Any] | None = None,
-        params: dict[str, Any] | None = None,
-        allow_404: bool = False,
-    ) -> dict[str, Any] | None:
-        if method == "POST" and path == C.PATH_RECIPES_SEARCH:
-            body = body or {}
-            lm = body.get(C.F_LABEL_MATCH) or {}
-            limit = int(body.get(C.F_LIMIT, 50) or 50)
-            matched = [
-                r for r in self.rows if all(str((r.get("labels") or {}).get(k, "")) == str(v) for k, v in lm.items())
-            ]
-            return {C.F_RECIPES: matched[: limit if limit > 0 else None]}
-        return {}
-
-    def close(self) -> None:
-        pass
-
-
 def _gbrain_dispatcher(local: LocalRecipeStore) -> RecipeKB:
     client = GbrainRemoteRecipeClient(
         base_url="http://gbrain.test",
@@ -240,84 +204,41 @@ def _gbrain_dispatcher(local: LocalRecipeStore) -> RecipeKB:
     return RecipeKB(local=local, remote=client)
 
 
-def _cortex_dispatcher(local: LocalRecipeStore) -> RecipeKB:
-    client = RemoteRecipeClient(
-        kb_url="http://cortex.test",
-        enabled=True,
-        foreground=True,
-    )
-    client._transport = _FakeCortexTransport(  # type: ignore[assignment]
-        [s.cortex_v2_row() for s in SPECS]
-    )
-    return RecipeKB(local=local, remote=client)
-
-
-def _champion(row: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Project a dispatcher row down to the warm-start-relevant champion."""
-    if not row:
-        return None
-    return {
-        "canonical_id": row.get("canonical_id"),
-        "best_config": dict(row.get("best_config") or {}),
-        "best_throughput": round(float(row.get("best_throughput") or 0.0), 6),
-        "has_what_worked": bool(row.get("what_worked")),
-        "has_pitfalls": bool(row.get("pitfalls")),
-        "has_lessons": bool(row.get("lessons")),
-    }
-
-
-# Tests
 @pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.cid)
-def test_get_recipe_champion_parity(spec: _Spec, tmp_path) -> None:
-    """Same 5-tuple → identical champion through both backends."""
+def test_get_recipe_champion(spec: _Spec, tmp_path) -> None:
+    """An exact 5-tuple resolves to its champion through the gbrain dispatcher."""
     local = LocalRecipeStore(root=tmp_path)
-    kb_g = _gbrain_dispatcher(local)
-    kb_c = _cortex_dispatcher(local)
+    row = _gbrain_dispatcher(local).get_recipe(canonical_id=spec.cid)
 
-    row_g = kb_g.get_recipe(canonical_id=spec.cid)
-    row_c = kb_c.get_recipe(canonical_id=spec.cid)
-
-    assert row_g is not None, "gbrain dispatcher missed an exact 5-tuple"
-    assert row_c is not None, "cortex dispatcher missed an exact 5-tuple"
-    assert _champion(row_g) == _champion(row_c)
-    assert _champion(row_g) == {
-        "canonical_id": spec.cid,
-        "best_config": spec.best_config,
-        "best_throughput": round(spec.throughput, 6),
-        "has_what_worked": bool(spec.what_worked),
-        "has_pitfalls": bool(spec.pitfalls),
-        "has_lessons": bool(spec.lessons),
-    }
+    assert row is not None, "gbrain dispatcher missed an exact 5-tuple"
+    assert row.get("canonical_id") == spec.cid
+    assert dict(row.get("best_config") or {}) == spec.best_config
+    assert round(float(row.get("best_throughput") or 0.0), 6) == round(spec.throughput, 6)
+    assert bool(row.get("what_worked")) == bool(spec.what_worked)
+    assert bool(row.get("pitfalls")) == bool(spec.pitfalls)
+    assert bool(row.get("lessons")) == bool(spec.lessons)
 
 
-def test_search_subset_label_parity(tmp_path) -> None:
-    """A model-only label filter resolves to the same 5-tuples on both."""
+def test_search_subset_label(tmp_path) -> None:
+    """A model-only label filter resolves to the expected 5-tuples."""
     local = LocalRecipeStore(root=tmp_path)
-    kb_g = _gbrain_dispatcher(local)
-    kb_c = _cortex_dispatcher(local)
+    kb = _gbrain_dispatcher(local)
 
     model_slug = cid_to_path_components(SPECS[0].cid)[0]
-    rows_g = kb_g.search(label_match={"model": model_slug})
-    rows_c = kb_c.search(label_match={"model": model_slug})
+    rows = kb.search(label_match={"model": model_slug})
 
-    cids_g = sorted(r["canonical_id"] for r in rows_g)
-    cids_c = sorted(r["canonical_id"] for r in rows_c)
+    cids = sorted(r["canonical_id"] for r in rows)
     expected = sorted(s.cid for s in SPECS if cid_to_path_components(s.cid)[0] == model_slug)
-    assert cids_g == cids_c == expected
-    by_g = {r["canonical_id"]: _champion(r) for r in rows_g}
-    by_c = {r["canonical_id"]: _champion(r) for r in rows_c}
-    assert by_g == by_c
+    assert cids == expected
 
 
-def test_miss_parity(tmp_path) -> None:
-    """An unknown 5-tuple is a miss on both backends (no local seed)."""
+def test_miss_returns_none(tmp_path) -> None:
+    """An unknown 5-tuple is a miss (no local seed)."""
     local = LocalRecipeStore(root=tmp_path)
-    kb_g = _gbrain_dispatcher(local)
-    kb_c = _cortex_dispatcher(local)
+    kb = _gbrain_dispatcher(local)
 
     unknown = "inference:does-not-exist:mi325x:trtllm:unknown_model_type:unknown_arch:9.9.9:int4"
-    assert kb_g.get_recipe(canonical_id=unknown) is None
-    assert kb_c.get_recipe(canonical_id=unknown) is None
+    assert kb.get_recipe(canonical_id=unknown) is None
 
 
 def test_gbrain_dispatcher_preserves_champion_regression(tmp_path) -> None:
@@ -365,7 +286,7 @@ def test_gbrain_transport_error_falls_back_to_local(tmp_path) -> None:
         canonical_id=spec.cid,
         model=model_s,
         hardware=hw_s,
-        framework=fw_s,
+        framework_name=fw_s,
         framework_version=fwv_s,
         precision=prec_s,
         best_config=spec.best_config,

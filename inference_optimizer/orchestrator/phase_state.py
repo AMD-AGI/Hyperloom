@@ -3,7 +3,7 @@
 """Phase state machine.
 
 Pure functions over a frozen SharedState; Coordinator is the only writer.
-Monotonic chain PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE
+Monotonic chain PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE
 (any phase → CLOSE on terminal/abort); ``recover`` is phase-orthogonal.
 """
 
@@ -15,24 +15,24 @@ from typing import Any
 
 from ..protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
-    KERNEL_OWNED_ACTIONS,
+    KERNEL_AGENT_OWNED_ACTIONS,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 
 
 # Phase identifiers + ordering (monotonic chain)
 PHASE_PRELUDE = "PRELUDE"
-PHASE_FRAMEWORK_PR = "FRAMEWORK_PR"
+PHASE_FRAMEWORK_AGENT = "FRAMEWORK_AGENT"
 PHASE_EXPLORE = "EXPLORE"
-PHASE_KERNEL = "KERNEL"
+PHASE_KERNEL_AGENT = "KERNEL_AGENT"
 PHASE_SWEEP = "SWEEP"
 PHASE_CLOSE = "CLOSE"
 
 PHASE_NAMES: tuple[str, ...] = (
     PHASE_PRELUDE,
-    PHASE_FRAMEWORK_PR,
+    PHASE_FRAMEWORK_AGENT,
     PHASE_EXPLORE,
-    PHASE_KERNEL,
+    PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     PHASE_CLOSE,
 )
@@ -63,10 +63,10 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "recover",
         }
     ),
-    PHASE_FRAMEWORK_PR: frozenset(
+    PHASE_FRAMEWORK_AGENT: frozenset(
         {
             # Coordinator-internal; integrate_patch is the Critic-gated consume side.
-            "framework_pr",
+            "framework_agent",
             "integrate_patch",
             "roofline",
             "profile",
@@ -86,9 +86,9 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "recover",
         }
     ),
-    PHASE_KERNEL: frozenset(
+    PHASE_KERNEL_AGENT: frozenset(
         {
-            # KERNEL_OWNED_ACTIONS from policy.py.
+            # KERNEL_AGENT_OWNED_ACTIONS from policy.py.
             "kernel_opt",
             "integrate",
             "deep_kernel_analysis",
@@ -189,8 +189,8 @@ def llm_proposable_actions_for(phase: str) -> tuple[str, ...]:
 # Interleave mode (env-flagged): widen EXPLORE/KERNEL proposable sets; chain stays monotonic.
 PHASE_INTERLEAVE_ENV: str = "INFERENCE_OPTIMIZER_PHASE_INTERLEAVE"
 
-# EXPLORE interleave adds KERNEL_OWNED_ACTIONS so kernel REQUESTs pass R1.
-_INTERLEAVE_EXPLORE_EXTRAS: frozenset[str] = KERNEL_OWNED_ACTIONS
+# EXPLORE interleave adds KERNEL_AGENT_OWNED_ACTIONS so kernel REQUESTs pass R1.
+_INTERLEAVE_EXPLORE_EXTRAS: frozenset[str] = KERNEL_AGENT_OWNED_ACTIONS
 
 # KERNEL interleave adds the explore-side proposable triple.
 _INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset(
@@ -226,7 +226,7 @@ def llm_proposable_actions_for_with_interleave(
     interleave: bool | None = None,
     explore_enabled: bool = True,
 ) -> frozenset[str]:
-    """Return the active LLM-proposable set for ``phase`` (when interleave on, EXPLORE adds kernel-owned names, KERNEL adds the explore triple).
+    """Return the active LLM-proposable set for ``phase`` (when interleave on, EXPLORE adds kernel_agent-owned names, KERNEL adds the explore triple).
 
     When ``explore_enabled`` is False (``--no-explore``), the ``explore``
     grid-runner is stripped from the KERNEL interleave extras so the
@@ -253,7 +253,7 @@ def llm_proposable_actions_for_with_interleave(
         return base
     if key == PHASE_EXPLORE:
         return base | _INTERLEAVE_EXPLORE_EXTRAS
-    if key == PHASE_KERNEL:
+    if key == PHASE_KERNEL_AGENT:
         kernel_extras = _INTERLEAVE_KERNEL_EXTRAS
         if not explore_enabled:
             kernel_extras = kernel_extras - {"explore"}
@@ -334,23 +334,23 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "explore_phase_budget_exhausted",
         "kernel_phase_budget_exhausted",
         "explore_budget_cap",  # EXPLORE → next phase at the absolute per-phase wall-clock cap (long/unbounded runs)
-        "kernel_budget_cap",  # KERNEL → SWEEP at the absolute per-phase wall-clock cap
+        "kernel_budget_cap",  # KERNEL_AGENT → SWEEP at the absolute per-phase wall-clock cap
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
         "sweep_done",
         "conc_sweep_done",  # SWEEP → CLOSE when conc_sweep settles
         "sweep_budget_exhausted",
         "no_kernel_skipped",  # EXPLORE → SWEEP when kernel disabled
-        "kernel_phase_aborted_no_trace",  # KERNEL → SWEEP when profile fails
+        "kernel_phase_aborted_no_trace",  # KERNEL_AGENT → SWEEP when profile fails
         "explore_force_exit_low_budget",  # EXPLORE → next phase below operator force-exit thresholds
-        "explore_no_more_leverage",  # EXPLORE → KERNEL (non-terminal): plateau / skip_to_sweep exhausts the explore lever
-        "kernel_no_more_leverage",  # KERNEL → SWEEP (non-terminal) via skip_to_sweep
-        # FRAMEWORK_PR phase transitions.
-        "framework_pr_phase_done",  # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
-        "framework_pr_plateau",  # FRAMEWORK_PR → EXPLORE; N consecutive benchmarked candidate tests with no KEEP
-        "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
-        "framework_pr_budget_cap",  # FRAMEWORK_PR → EXPLORE; per-phase wall-clock budget fraction reached
+        "explore_no_more_leverage",  # EXPLORE → KERNEL_AGENT (non-terminal): plateau / skip_to_sweep exhausts the explore lever
+        "kernel_no_more_leverage",  # KERNEL_AGENT → SWEEP (non-terminal) via skip_to_sweep
+        # FRAMEWORK_AGENT phase transitions.
+        "framework_agent_phase_done",  # FRAMEWORK_AGENT → EXPLORE normal completion (no more candidates)
+        "framework_agent_plateau",  # FRAMEWORK_AGENT → EXPLORE; N consecutive benchmarked candidate tests with no KEEP
+        "framework_agent_force_exit_low_budget",  # FRAMEWORK_AGENT → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
+        "framework_agent_budget_cap",  # FRAMEWORK_AGENT → EXPLORE; per-phase wall-clock budget fraction reached
         # Cyclic phase machine back-edge reasons (transitions that reopen a macro-cycle).
-        "cycle_reloop",  # SWEEP → FRAMEWORK_PR/EXPLORE; opens a new macro-cycle while budget + leverage remain
+        "cycle_reloop",  # SWEEP → FRAMEWORK/EXPLORE; opens a new macro-cycle while budget + leverage remain
         "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
         # Terminal exits (any phase → CLOSE)
         "robustness_escalated",
@@ -405,9 +405,9 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "sweep_done",
         "conc_sweep_done",
         "explore_force_exit_low_budget",
-        "framework_pr_phase_done",
-        "framework_pr_plateau",
-        "framework_pr_force_exit_low_budget",
+        "framework_agent_phase_done",
+        "framework_agent_plateau",
+        "framework_agent_force_exit_low_budget",
         # R7: cyclic phase machine exhausted leverage across macro-cycles.
         "global_converged",
         # Context-window preflight: max_position_embeddings can't hold ISL+OSL.
@@ -459,14 +459,14 @@ def is_valid_phase_exit_reason(value: str) -> bool:
     return (value or "").strip() in PHASE_EXIT_REASONS
 
 
-# Default phase budgets (% of wall-clock). IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK_PR uses a time wall.
+# Default phase budgets (% of wall-clock). IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK uses a time wall.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
-    # FRAMEWORK_PR 0.15 deducted 0.075 each from EXPLORE / KERNEL so the phase
+    # FRAMEWORK 0.15 deducted 0.075 each from EXPLORE / KERNEL so the phase
     # self-caps instead of monopolising the run.
-    PHASE_FRAMEWORK_PR: 0.15,
+    PHASE_FRAMEWORK_AGENT: 0.15,
     PHASE_EXPLORE: 0.375,
-    PHASE_KERNEL: 0.305,
+    PHASE_KERNEL_AGENT: 0.305,
     PHASE_SWEEP: 0.12,
     PHASE_CLOSE: 0.02,
 }
@@ -496,24 +496,24 @@ DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
 # When EXPLORE↔KERNEL interleave is on, kernel work runs *inside* EXPLORE, so the
 # time gate only needs to guarantee SWEEP → CLOSE + report can finish: it collapses
-# to a small CLOSE-buffer instead of reserving time for a separate KERNEL phase. The phase-budget
+# to a small CLOSE-buffer instead of reserving time for a separate KERNEL_AGENT phase. The phase-budget
 # fraction gate is disabled in this mode for the same reason (EXPLORE legitimately
 # spends the bulk of the budget because it is also doing KERNEL work). Both are
 # overridable via the explicit thresholds the caller passes.
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE: float = 1.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE: float = 0.0
 
-# FRAMEWORK_PR plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
-DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK: int = 3
-DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT: float = 1.0
-DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
-# FRAMEWORK_PR per-candidate plateau: after this many consecutive *benchmarked*
+# FRAMEWORK plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
+DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 3
+DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
+DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
+# FRAMEWORK per-candidate plateau: after this many consecutive *benchmarked*
 # candidate tests (status ``reverted``/``kept``) without a KEEP, the phase has
 # shown no leverage on the current batch and exits to EXPLORE. Non-benchmarked
 # outcomes (``not_applicable``/``apply_failed``/``already_present``/audit-skip/
 # critic_denied) are neither a test nor a reset — they're skipped. A KEEP resets
-# the streak. Overridable via ``INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK``.
-DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK: int = 3
+# the streak. Overridable via ``INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK``.
+DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -1134,7 +1134,7 @@ def should_force_exit_explore(
 
     Fix B (interleave-aware IR-6): when EXPLORE↔KERNEL interleave is enabled
     and the caller is using the default thresholds, narrow them to a
-    CLOSE-buffer (the "reserve 3h for a separate KERNEL phase" rationale no
+    CLOSE-buffer (the "reserve 3h for a separate KERNEL_AGENT phase" rationale no
     longer applies because kernel work runs inside EXPLORE). Explicit
     non-default thresholds from the caller always win.
 
@@ -1623,7 +1623,7 @@ def exit_normal_explore(
             "hint": hint,
         }
     # A detected EXPLORE plateau is not terminal: exhausted leverage at this
-    # layer means switch lever (→ KERNEL), flagging that the next macro-cycle
+    # layer means switch lever (→ KERNEL_AGENT), flagging that the next macro-cycle
     # should steer off the plateaued bottleneck. Advisory-only off cyclic mode.
     if is_cyclic_phases_enabled():
         plateaued, plateau_ev = compute_plateau_explore(state)
@@ -1760,14 +1760,14 @@ def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     return dict(overrides) if isinstance(overrides, dict) else {}
 
 
-def _framework_pr_batch_is_complete(
+def _framework_batch_is_complete(
     batch: dict[str, Any],
     progress_by_batch: dict[str, int],
 ) -> bool:
-    """A FRAMEWORK_PR batch is complete iff every candidate has a terminal-status row in ``framework_pr_phase_progress`` (guards the plateau judge).
+    """A FRAMEWORK batch is complete iff every candidate has a terminal-status row in ``framework_agent_phase_progress`` (guards the plateau judge).
 
     Args:
-        batch (dict[str, Any]): A FRAMEWORK_PR batch carrying ``candidates`` and
+        batch (dict[str, Any]): A FRAMEWORK batch carrying ``candidates`` and
             ``batch_id``.
         progress_by_batch (dict[str, int]): Per-batch count of recorded progress
             rows, keyed by batch id.
@@ -1787,20 +1787,20 @@ def _framework_pr_batch_is_complete(
     return processed >= total
 
 
-def compute_plateau_framework_pr(
+def compute_plateau_framework_agent(
     state: Any,
     *,
-    lookback: int = DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
-    keep_gain_threshold_pct: float = DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
+    lookback: int = DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK,
+    keep_gain_threshold_pct: float = DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT,
 ) -> tuple[bool, dict[str, Any]]:
-    """Pure plateau judgment for FRAMEWORK_PR → ``(triggered, evidence)``.
+    """Pure plateau judgment for FRAMEWORK_AGENT → ``(triggered, evidence)``.
 
     Triggers when the last ``lookback`` fully-processed batches each carry
     ``max_gain_pct_observed_in_batch < keep_gain_threshold_pct``. Advisory-only.
 
     Args:
-        state (Any): Frozen SharedState view exposing ``framework_pr_batches``
-            and ``framework_pr_phase_progress``.
+        state (Any): Frozen SharedState view exposing ``framework_agent_batches``
+            and ``framework_agent_phase_progress``.
         lookback (int): Number of fully-processed trailing batches to inspect;
             non-positive disables the judgment.
         keep_gain_threshold_pct (float): Per-batch max-gain floor each batch
@@ -1810,7 +1810,7 @@ def compute_plateau_framework_pr(
         tuple[bool, dict[str, Any]]: ``(triggered, evidence)`` — whether the
         plateau fired, and the supporting evidence map.
     """
-    batches = getattr(state, "framework_pr_batches", None) or []
+    batches = getattr(state, "framework_agent_batches", None) or []
     lookback_int = int(lookback or 0)
     base_evidence = {
         "lookback": lookback_int,
@@ -1819,7 +1819,7 @@ def compute_plateau_framework_pr(
     }
     if not isinstance(batches, list) or lookback_int <= 0 or len(batches) < lookback_int:
         return False, base_evidence
-    progress = getattr(state, "framework_pr_phase_progress", None) or []
+    progress = getattr(state, "framework_agent_phase_progress", None) or []
     progress_by_batch: dict[str, int] = {}
     for row in progress:
         if isinstance(row, dict):
@@ -1829,7 +1829,7 @@ def compute_plateau_framework_pr(
     for entry in reversed(batches):
         if not isinstance(entry, dict):
             continue
-        if _framework_pr_batch_is_complete(entry, progress_by_batch):
+        if _framework_batch_is_complete(entry, progress_by_batch):
             complete_tail.append(entry)
             if len(complete_tail) >= lookback_int:
                 break
@@ -1849,20 +1849,20 @@ def compute_plateau_framework_pr(
     }
 
 
-def _framework_pr_pending_candidate_count(state: Any) -> int:
+def _framework_agent_pending_candidate_count(state: Any) -> int:
     """Count candidates discovered into a batch but missing a progress row.
 
     Args:
-        state (Any): Frozen SharedState view exposing ``framework_pr_batches``
-            and ``framework_pr_phase_progress``.
+        state (Any): Frozen SharedState view exposing ``framework_agent_batches``
+            and ``framework_agent_phase_progress``.
 
     Returns:
         int: Total candidates across all batches that lack a progress row.
     """
-    batches = getattr(state, "framework_pr_batches", None) or []
+    batches = getattr(state, "framework_agent_batches", None) or []
     if not isinstance(batches, list) or not batches:
         return 0
-    progress = getattr(state, "framework_pr_phase_progress", None) or []
+    progress = getattr(state, "framework_agent_phase_progress", None) or []
     progress_by_batch: dict[str, int] = {}
     for row in progress:
         if isinstance(row, dict):
@@ -1882,10 +1882,10 @@ def _framework_pr_pending_candidate_count(state: Any) -> int:
     return pending
 
 
-def _framework_pr_consecutive_no_keep(state: Any) -> int:
+def _framework_agent_consecutive_no_keep(state: Any) -> int:
     """Count trailing consecutive resolved candidates that did not KEEP.
 
-    Walks ``framework_pr_phase_progress`` newest-first: a KEEP row breaks the
+    Walks ``framework_agent_phase_progress`` newest-first: a KEEP row breaks the
     streak; any other terminal row increments it — both ``reverted`` (applied +
     benchmarked, below floor) and the non-benchmarked terminal outcomes
     (``not_applicable`` / ``apply_failed`` / ``authored_empty`` / ``no_patches``
@@ -1894,12 +1894,12 @@ def _framework_pr_consecutive_no_keep(state: Any) -> int:
 
     Args:
         state (Any): Frozen SharedState view exposing
-            ``framework_pr_phase_progress``.
+            ``framework_agent_phase_progress``.
 
     Returns:
         int: Number of trailing consecutive resolved candidates without a KEEP.
     """
-    progress = getattr(state, "framework_pr_phase_progress", None) or []
+    progress = getattr(state, "framework_agent_phase_progress", None) or []
     if not isinstance(progress, list):
         return 0
     count = 0
@@ -1907,12 +1907,12 @@ def _framework_pr_consecutive_no_keep(state: Any) -> int:
         if not isinstance(row, dict):
             continue
         status = str(row.get("status") or "").strip().lower()
-        # Macro-cycle boundary: framework_pr_phase_progress is preserved across
+        # Macro-cycle boundary: framework_agent_phase_progress is preserved across
         # cyclic reloops (for candidate dedup), but the consecutive-no-keep
         # plateau gate must only see the CURRENT cycle's rows. A boundary marker
         # appended at reloop (_apply_macro_cycle_reloop) stops the streak walk so
         # a prior cycle's trailing no-KEEP rows cannot instantly re-plateau the
-        # next cycle's FRAMEWORK_PR (observed: cycle 1 plateaued the same tick it
+        # next cycle's FRAMEWORK_AGENT (observed: cycle 1 plateaued the same tick it
         # selected its first candidate).
         if status == "cycle_boundary":
             break
@@ -1923,41 +1923,41 @@ def _framework_pr_consecutive_no_keep(state: Any) -> int:
     return count
 
 
-def _framework_pr_plateau_streak_threshold() -> int:
+def _framework_agent_plateau_streak_threshold() -> int:
     """Resolve the consecutive-no-keep plateau threshold (env-overridable)."""
     import os
 
     try:
         val = int(
             os.environ.get(
-                "INFERENCE_OPTIMIZER_FRAMEWORK_PR_PLATEAU_STREAK",
-                DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK,
+                "INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK",
+                DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK,
             )
         )
     except (TypeError, ValueError):
-        return DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK
-    return val if val > 0 else DEFAULT_FRAMEWORK_PR_PLATEAU_NO_KEEP_STREAK
+        return DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    return val if val > 0 else DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
-def exit_normal_framework_pr(
+def exit_normal_framework_agent(
     state: Any,
     *,
     max_hours: float | None = None,
     now_unix: float | None = None,
-    force_exit_hours_remaining_ratio: float = (DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO),
+    force_exit_hours_remaining_ratio: float = (DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO),
     budget_pct: dict[str, float] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    """FRAMEWORK_PR normal exit.
+    """FRAMEWORK normal exit.
 
     Priority: 0. HARD force-exit when remaining < ratio*max_hours →
-    ``framework_pr_force_exit_low_budget``; 0.5. per-phase budget cap reached →
-    ``framework_pr_budget_cap``; 1. plateau when
-    :func:`_framework_pr_consecutive_no_keep` ≥ threshold →
-    ``framework_pr_plateau``; 2. ``framework_pr_phase_done``; else ``None``.
+    ``framework_agent_force_exit_low_budget``; 0.5. per-phase budget cap reached →
+    ``framework_agent_budget_cap``; 1. plateau when
+    :func:`_framework_agent_consecutive_no_keep` ≥ threshold →
+    ``framework_agent_plateau``; 2. ``framework_agent_phase_done``; else ``None``.
 
     Args:
         state (Any): Frozen SharedState view; may expose a ``remaining_minutes``
-            callable and ``framework_pr_phase_done`` flag.
+            callable and ``framework_agent_phase_done`` flag.
         max_hours (float | None): Session wall-clock budget in hours; enables
             the force-exit gate when positive.
         now_unix (float | None): Override for the current time.
@@ -1968,7 +1968,7 @@ def exit_normal_framework_pr(
 
     Returns:
         tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the
-        FRAMEWORK_PR exit, or ``None`` when the phase should continue.
+        FRAMEWORK exit, or ``None`` when the phase should continue.
     """
     if max_hours and max_hours > 0:
         remaining_min_fn = getattr(state, "remaining_minutes", None)
@@ -1983,45 +1983,45 @@ def exit_normal_framework_pr(
             remaining_minutes = float("inf")
         threshold_minutes = float(force_exit_hours_remaining_ratio) * float(max_hours) * 60.0
         if remaining_minutes < threshold_minutes:
-            return "framework_pr_force_exit_low_budget", {
+            return "framework_agent_force_exit_low_budget", {
                 "evidence": "force_exit",
                 "remaining_minutes": remaining_minutes,
                 "threshold_minutes": threshold_minutes,
                 "hours_remaining_ratio": float(force_exit_hours_remaining_ratio),
                 "max_hours": float(max_hours),
-                "pending_candidate_count": _framework_pr_pending_candidate_count(state),
+                "pending_candidate_count": _framework_agent_pending_candidate_count(state),
             }
 
-    # Per-phase wall-clock budget cap: now that FRAMEWORK_PR carries a budget
+    # Per-phase wall-clock budget cap: now that FRAMEWORK carries a budget
     # fraction (DEFAULT_PHASE_BUDGET_PCT), rotate to EXPLORE once the phase has
     # burned its share — guarantees the phase cannot monopolise the run even if
     # neither plateau nor force-exit fires (e.g. a long stream of slow but
     # technically-distinct candidates).
     if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
         cap = phase_cap_seconds(state, budget_pct=budget_pct)
-        return "framework_pr_budget_cap", {
+        return "framework_agent_budget_cap", {
             "evidence": "phase_budget_cap",
             "phase_cap_seconds": cap,
             "phase_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "pending_candidate_count": _framework_pr_pending_candidate_count(state),
+            "pending_candidate_count": _framework_agent_pending_candidate_count(state),
         }
 
     # Per-candidate plateau: N consecutive benchmarked tests with no KEEP means
     # the current batch is not yielding leverage — exit to EXPLORE rather than
     # grind through the remaining candidates.
-    streak = _framework_pr_consecutive_no_keep(state)
-    threshold = _framework_pr_plateau_streak_threshold()
+    streak = _framework_agent_consecutive_no_keep(state)
+    threshold = _framework_agent_plateau_streak_threshold()
     if streak >= threshold:
-        return "framework_pr_plateau", {
+        return "framework_agent_plateau", {
             "evidence": "consecutive_no_keep",
             "consecutive_no_keep": streak,
             "threshold": threshold,
-            "pending_candidate_count": _framework_pr_pending_candidate_count(state),
+            "pending_candidate_count": _framework_agent_pending_candidate_count(state),
         }
 
-    batches = getattr(state, "framework_pr_batches", None) or []
-    if bool(getattr(state, "framework_pr_phase_done", False)):
-        return "framework_pr_phase_done", {
+    batches = getattr(state, "framework_agent_batches", None) or []
+    if bool(getattr(state, "framework_agent_phase_done", False)):
+        return "framework_agent_phase_done", {
             "evidence": "no_more_candidates",
             "batch_count": len(batches) if isinstance(batches, list) else 0,
         }
@@ -2030,21 +2030,21 @@ def exit_normal_framework_pr(
 
 
 def _post_prelude_target(*, explore_enabled: bool, kernel_enabled: bool) -> str:
-    """First active phase after PRELUDE / FRAMEWORK_PR: EXPLORE, else KERNEL,
+    """First active phase after PRELUDE / FRAMEWORK: EXPLORE, else KERNEL,
     else SWEEP (``--no-explore`` / ``--no-kernel`` collapse the chain).
 
     Args:
         explore_enabled (bool): Whether the EXPLORE phase is enabled.
-        kernel_enabled (bool): Whether the KERNEL phase is enabled.
+        kernel_enabled (bool): Whether the KERNEL_AGENT phase is enabled.
 
     Returns:
-        str: ``PHASE_EXPLORE``, ``PHASE_KERNEL``, or ``PHASE_SWEEP`` depending on
+        str: ``PHASE_EXPLORE``, ``PHASE_KERNEL_AGENT``, or ``PHASE_SWEEP`` depending on
         which phases are enabled.
     """
     if explore_enabled:
         return PHASE_EXPLORE
     if kernel_enabled:
-        return PHASE_KERNEL
+        return PHASE_KERNEL_AGENT
     return PHASE_SWEEP
 
 
@@ -2054,7 +2054,7 @@ def compute_next_phase(
     kernel_enabled: bool = True,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
-    framework_phase_enabled: bool = False,
+    framework_agent_phase_enabled: bool = False,
     explore_enabled: bool = True,
     max_hours: float | None = None,
 ) -> tuple[str, str, dict[str, Any]] | None:
@@ -2064,15 +2064,15 @@ def compute_next_phase(
 
     Args:
         state (Any): Frozen SharedState view exposing the current ``phase``.
-        kernel_enabled (bool): Whether the KERNEL phase is enabled.
+        kernel_enabled (bool): Whether the KERNEL_AGENT phase is enabled.
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
             to ``state.phase_budget_pct`` when None.
         now_unix (float | None): Override for the current time.
-        framework_phase_enabled (bool): Whether the FRAMEWORK_PR phase runs
+        framework_agent_phase_enabled (bool): Whether the FRAMEWORK_AGENT phase runs
             after PRELUDE.
         explore_enabled (bool): Whether the EXPLORE phase is enabled.
         max_hours (float | None): Session wall-clock budget in hours (used by
-            the FRAMEWORK_PR force-exit gate).
+            the FRAMEWORK force-exit gate).
 
     Returns:
         tuple[str, str, dict[str, Any]] | None: ``(next_phase, reason,
@@ -2096,8 +2096,8 @@ def compute_next_phase(
             return PHASE_CLOSE, term[0], {"terminal": True, **term[1]}
         norm = exit_normal_prelude(state)
         if norm is not None:
-            if framework_phase_enabled:
-                return PHASE_FRAMEWORK_PR, norm[0], norm[1]
+            if framework_agent_phase_enabled:
+                return PHASE_FRAMEWORK_AGENT, norm[0], norm[1]
             # Framework off → first active phase; ``explore_skipped`` stamped
             # when EXPLORE is bypassed.
             target = _post_prelude_target(
@@ -2110,21 +2110,21 @@ def compute_next_phase(
             return target, norm[0], evidence
         return None
 
-    if current == PHASE_FRAMEWORK_PR:
-        norm = exit_normal_framework_pr(
+    if current == PHASE_FRAMEWORK_AGENT:
+        norm = exit_normal_framework_agent(
             state,
             max_hours=max_hours,
             now_unix=now_unix,
             force_exit_hours_remaining_ratio=float(
                 overrides.get(
-                    "framework_pr_force_exit_hours_ratio",
-                    DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO,
+                    "framework_agent_force_exit_hours_ratio",
+                    DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO,
                 )
             ),
             budget_pct=budget_pct,
         )
         if norm is not None:
-            # FRAMEWORK_PR → EXPLORE (or KERNEL/SWEEP when collapsed).
+            # FRAMEWORK_AGENT → EXPLORE (or KERNEL/SWEEP when collapsed).
             target = _post_prelude_target(
                 explore_enabled=explore_enabled,
                 kernel_enabled=kernel_enabled,
@@ -2158,7 +2158,7 @@ def compute_next_phase(
             # terminal: switch lever by advancing to KERNEL rather than skipping
             # it. Only when KERNEL is disabled does EXPLORE wind down to SWEEP.
             if kernel_enabled:
-                return PHASE_KERNEL, norm[0], norm[1]
+                return PHASE_KERNEL_AGENT, norm[0], norm[1]
             return (
                 PHASE_SWEEP,
                 "no_kernel_skipped",
@@ -2169,7 +2169,7 @@ def compute_next_phase(
             )
         return None
 
-    if current == PHASE_KERNEL:
+    if current == PHASE_KERNEL_AGENT:
         norm = exit_normal_kernel(
             state,
             budget_pct=budget_pct,
@@ -2186,12 +2186,12 @@ def compute_next_phase(
             # while budget remains and the run hasn't globally converged (R7);
             # otherwise wind down to CLOSE (the monotonic-chain behaviour).
             reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
-            if reloop and (framework_phase_enabled or explore_enabled):
-                # Reloop to the highest-leverage layer still available: FRAMEWORK_PR
+            if reloop and (framework_agent_phase_enabled or explore_enabled):
+                # Reloop to the highest-leverage layer still available: FRAMEWORK
                 # (also picks up newly-merged upstream PRs) when enabled, else
                 # EXPLORE. The Coordinator resets that phase's per-cycle state so
                 # it does not instantly self-skip as "already done".
-                reloop_target = PHASE_FRAMEWORK_PR if framework_phase_enabled else PHASE_EXPLORE
+                reloop_target = PHASE_FRAMEWORK_AGENT if framework_agent_phase_enabled else PHASE_EXPLORE
                 return (
                     reloop_target,
                     "cycle_reloop",
@@ -2302,9 +2302,9 @@ LIFECYCLE_STATUSES: frozenset[str] = frozenset(
 # Human-friendly labels for the six coordinator phases.
 PHASE_HUMAN_LABELS: dict[str, str] = {
     PHASE_PRELUDE: "Prelude (baseline + roofline)",
-    PHASE_FRAMEWORK_PR: "Framework PR",
+    PHASE_FRAMEWORK_AGENT: "Framework",
     PHASE_EXPLORE: "Explore (params / backends)",
-    PHASE_KERNEL: "Kernel optimization",
+    PHASE_KERNEL_AGENT: "Kernel optimization",
     PHASE_SWEEP: "Concurrency sweep",
     PHASE_CLOSE: "Close (report)",
 }
@@ -2570,19 +2570,19 @@ __all__ = [
     "PHASE_CLOSE",
     "PHASE_EXIT_REASONS",
     "PHASE_EXPLORE",
-    "PHASE_FRAMEWORK_PR",
+    "PHASE_FRAMEWORK_AGENT",
     "PHASE_HUMAN_LABELS",
     "PHASE_INDEX",
-    "PHASE_KERNEL",
+    "PHASE_KERNEL_AGENT",
     "PHASE_NAMES",
     "PHASE_PRELUDE",
     "PHASE_SWEEP",
     "STOP_REASON_VOCAB",
     "lifecycle_label",
     "make_lifecycle_event",
-    "DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK",
-    "DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT",
-    "DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO",
+    "DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK",
+    "DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT",
+    "DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO",
     "DEFAULT_MAX_MACRO_CYCLES",
     "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
@@ -2597,10 +2597,10 @@ __all__ = [
     "apply_escalate_budget_bump",
     "compute_next_phase",
     "compute_plateau_explore",
-    "compute_plateau_framework_pr",
+    "compute_plateau_framework_agent",
     "compute_plateau_kernel",
     "exit_normal_explore",
-    "exit_normal_framework_pr",
+    "exit_normal_framework_agent",
     "exit_normal_kernel",
     "exit_normal_prelude",
     "exit_normal_sweep",
