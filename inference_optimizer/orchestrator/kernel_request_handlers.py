@@ -1550,36 +1550,6 @@ def _truthy_env_value(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _resolve_trace_analysis_route(payload: dict[str, Any]) -> str:
-    """Resolve TraceLens analysis route without ambient env bypassing the agent.
-
-    The deterministic route is a debug/degraded no-LLM path. It must be an
-    explicit coordinator payload request, or the environment must also set
-    ``HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS=1``. This prevents a
-    cluster-level ``HYPERLOOM_TRACE_ANALYSIS_ROUTE=deterministic`` from
-    silently bypassing TraceLens agentic reports for every run (#664).
-    """
-    payload_route = payload.get("analysis_route")
-    if isinstance(payload_route, str):
-        route = payload_route.strip().lower()
-        if route in {"deterministic", "agent"}:
-            return route
-
-    env_route = os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "").strip().lower()
-    if env_route == "deterministic":
-        if _truthy_env_value(os.environ.get("HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS")):
-            return "deterministic"
-        log.warning(
-            "Ignoring HYPERLOOM_TRACE_ANALYSIS_ROUTE=deterministic because "
-            "HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS is not enabled; "
-            "using TraceLens agent route."
-        )
-        return "agent"
-    if env_route == "agent":
-        return "agent"
-    return ""
-
-
 def _resolve_forge_server_log(state, session_dir: Path) -> str:
     """Find the server log matching the current runtime configuration.
 
@@ -2472,9 +2442,12 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Forward the analysis route switch (deterministic vs agent) after resolving
-    # whether an ambient env override is allowed to use the deterministic path.
-    analysis_route = _resolve_trace_analysis_route(payload)
+    # Forward the analysis route switch (deterministic vs agent). Coerce to str
+    # first (mirrors steady_state_mode) so a non-string payload value (e.g. a
+    # bool/list emitted by the LLM) cannot raise AttributeError here.
+    analysis_route = (
+        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
+    )
     if analysis_route in ("deterministic", "agent"):
         cmd += ["--analysis-route", analysis_route]
     # Post-kernel-opt roofline writes a separate report so it never overwrites

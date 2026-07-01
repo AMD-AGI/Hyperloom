@@ -26,27 +26,6 @@ import tracelens_analysis as tla  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
 
-def test_default_analysis_route_blocks_env_only_deterministic(monkeypatch):
-    monkeypatch.setenv(tla.ANALYSIS_ROUTE_ENV, tla.ANALYSIS_ROUTE_DETERMINISTIC)
-    monkeypatch.delenv(tla.ANALYSIS_ROUTE_ALLOW_ENV, raising=False)
-
-    assert tla.resolve_default_analysis_route_from_env() == tla.ANALYSIS_ROUTE_AGENT
-
-
-def test_default_analysis_route_allows_explicit_env_opt_in(monkeypatch):
-    monkeypatch.setenv(tla.ANALYSIS_ROUTE_ENV, tla.ANALYSIS_ROUTE_DETERMINISTIC)
-    monkeypatch.setenv(tla.ANALYSIS_ROUTE_ALLOW_ENV, "1")
-
-    assert tla.resolve_default_analysis_route_from_env() == tla.ANALYSIS_ROUTE_DETERMINISTIC
-
-
-def test_default_analysis_route_ignores_invalid_env(monkeypatch):
-    monkeypatch.setenv(tla.ANALYSIS_ROUTE_ENV, "bogus")
-    monkeypatch.setenv(tla.ANALYSIS_ROUTE_ALLOW_ENV, "1")
-
-    assert tla.resolve_default_analysis_route_from_env() == tla.ANALYSIS_ROUTE_AGENT
-
-
 def test_deterministic_category_analysis_command_maps_manifest_names(tmp_path):
     """Deterministic route must invoke the real TraceLens script for manifest category names."""
     cases = {

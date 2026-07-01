@@ -647,25 +647,9 @@ ARCH_BENCHMARK_TIMEOUT_ENV = "TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC"
 ARCH_BENCHMARK_TIMEOUT_FLOOR_S = 600
 
 ANALYSIS_ROUTE_ENV = "HYPERLOOM_TRACE_ANALYSIS_ROUTE"
-ANALYSIS_ROUTE_ALLOW_ENV = "HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS"
 ANALYSIS_ROUTE_DETERMINISTIC = "deterministic"
 ANALYSIS_ROUTE_AGENT = "agent"
 _VALID_ANALYSIS_ROUTES = {ANALYSIS_ROUTE_DETERMINISTIC, ANALYSIS_ROUTE_AGENT}
-
-
-def _truthy_env_value(value: Any) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def resolve_default_analysis_route_from_env() -> str:
-    route = os.environ.get(ANALYSIS_ROUTE_ENV, "").strip().lower()
-    if route == ANALYSIS_ROUTE_DETERMINISTIC:
-        if _truthy_env_value(os.environ.get(ANALYSIS_ROUTE_ALLOW_ENV)):
-            return ANALYSIS_ROUTE_DETERMINISTIC
-        return ANALYSIS_ROUTE_AGENT
-    if route == ANALYSIS_ROUTE_AGENT:
-        return ANALYSIS_ROUTE_AGENT
-    return ANALYSIS_ROUTE_AGENT
 
 
 def _is_safe_litellm_gateway() -> bool:
@@ -5681,7 +5665,9 @@ def main() -> int:
     )
     parser.add_argument("--budget-minutes", type=float, default=60.0)
     parser.add_argument("--dry-run", action="store_true")
-    default_analysis_route = resolve_default_analysis_route_from_env()
+    default_analysis_route = os.environ.get(ANALYSIS_ROUTE_ENV, "").strip().lower() or ANALYSIS_ROUTE_AGENT
+    if default_analysis_route not in _VALID_ANALYSIS_ROUTES:
+        default_analysis_route = ANALYSIS_ROUTE_AGENT
     parser.add_argument(
         "--analysis-route",
         choices=sorted(_VALID_ANALYSIS_ROUTES),
@@ -5696,8 +5682,7 @@ def main() -> int:
             "generate_priority_data) to extract hot kernels directly from "
             "*_metrics.json. A minimal analysis.md is generated from "
             "templates for downstream prompt injection. "
-            "Env: HYPERLOOM_TRACE_ANALYSIS_ROUTE; env-only deterministic "
-            "also requires HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS=1."
+            "Env: HYPERLOOM_TRACE_ANALYSIS_ROUTE."
         ),
     )
     default_llm_orchestrator = os.environ.get(

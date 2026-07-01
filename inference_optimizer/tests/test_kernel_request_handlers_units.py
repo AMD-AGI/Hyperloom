@@ -46,29 +46,6 @@ class TestForgeGemmHelperCoverage:
     def test_truthy_env_value_false(self, value):
         assert krh._truthy_env_value(value) is False
 
-    def test_trace_analysis_route_blocks_env_only_deterministic(self, monkeypatch):
-        monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "deterministic")
-        monkeypatch.delenv("HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS", raising=False)
-
-        assert krh._resolve_trace_analysis_route({}) == "agent"
-
-    def test_trace_analysis_route_allows_env_deterministic_with_opt_in(self, monkeypatch):
-        monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "deterministic")
-        monkeypatch.setenv("HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS", "true")
-
-        assert krh._resolve_trace_analysis_route({}) == "deterministic"
-
-    def test_trace_analysis_route_payload_overrides_env(self, monkeypatch):
-        monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "deterministic")
-        monkeypatch.setenv("HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS", "1")
-
-        assert krh._resolve_trace_analysis_route({"analysis_route": "agent"}) == "agent"
-
-    def test_trace_analysis_route_ignores_invalid_env(self, monkeypatch):
-        monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "bogus")
-
-        assert krh._resolve_trace_analysis_route({}) == ""
-
     def test_resolve_forge_server_log_priority(self, tmp_path):
         state = SharedState()
         baseline = tmp_path / "baseline"

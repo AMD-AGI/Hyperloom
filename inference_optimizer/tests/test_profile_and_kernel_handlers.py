@@ -52,9 +52,6 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
-    tracelens_root = tmp_path / "TraceLens"
-    tracelens_root.mkdir()
-    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
     return make_session_dir()
 
 
@@ -1568,74 +1565,6 @@ async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session
         res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
         # Must return a structured result, never raise AttributeError.
         assert res["status"] in ("ok", "succeeded", "failed")
-
-
-@pytest.mark.asyncio
-async def test_trace_analyze_handler_ignores_env_only_deterministic_route(
-    session_dir,
-    monkeypatch,
-):
-    """An ambient env var must not silently bypass the TraceLens agent route."""
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "deterministic")
-    monkeypatch.delenv("HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS", raising=False)
-
-    captured: dict[str, list[str]] = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "orchestrator_mode": "claude_agent_sdk"}), ""
-
-    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "sglang",
-            "top_k": 5,
-            "dry_run": True,
-        },
-        session_dir=session_dir,
-    )
-
-    assert res["status"] == "ok"
-    assert "--analysis-route" in captured["cmd"]
-    idx = captured["cmd"].index("--analysis-route")
-    assert captured["cmd"][idx + 1] == "agent"
-    assert "deterministic" not in captured["cmd"]
-
-
-@pytest.mark.asyncio
-async def test_trace_analyze_handler_allows_payload_deterministic_route(
-    session_dir,
-    monkeypatch,
-):
-    """Payload-level deterministic requests remain explicit opt-ins."""
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "agent")
-
-    captured: dict[str, list[str]] = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "orchestrator_mode": "deterministic"}), ""
-
-    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "analysis_route": "deterministic",
-            "top_k": 5,
-        },
-        session_dir=session_dir,
-    )
-
-    assert res["status"] == "ok"
-    idx = captured["cmd"].index("--analysis-route")
-    assert captured["cmd"][idx + 1] == "deterministic"
 
 
 @pytest.mark.asyncio
