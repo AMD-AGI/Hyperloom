@@ -1536,6 +1536,36 @@ def _truthy_env_value(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_trace_analysis_route(payload: dict[str, Any]) -> str:
+    """Resolve TraceLens analysis route without ambient env bypassing the agent.
+
+    The deterministic route is a debug/degraded no-LLM path. It must be an
+    explicit coordinator payload request, or the environment must also set
+    ``HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS=1``. This prevents a
+    cluster-level ``HYPERLOOM_TRACE_ANALYSIS_ROUTE=deterministic`` from
+    silently bypassing TraceLens agentic reports for every run (#664).
+    """
+    payload_route = payload.get("analysis_route")
+    if isinstance(payload_route, str):
+        route = payload_route.strip().lower()
+        if route in {"deterministic", "agent"}:
+            return route
+
+    env_route = os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "").strip().lower()
+    if env_route == "deterministic":
+        if _truthy_env_value(os.environ.get("HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS")):
+            return "deterministic"
+        log.warning(
+            "Ignoring HYPERLOOM_TRACE_ANALYSIS_ROUTE=deterministic because "
+            "HYPERLOOM_ALLOW_DETERMINISTIC_TRACE_ANALYSIS is not enabled; "
+            "using TraceLens agent route."
+        )
+        return "agent"
+    if env_route == "agent":
+        return "agent"
+    return ""
+
+
 def _resolve_forge_server_log(state, session_dir: Path) -> str:
     """Find the server log matching the current runtime configuration.
 
@@ -2428,12 +2458,9 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Forward the analysis route switch (deterministic vs agent). Coerce to str
-    # first (mirrors steady_state_mode) so a non-string payload value (e.g. a
-    # bool/list emitted by the LLM) cannot raise AttributeError here.
-    analysis_route = (
-        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
-    )
+    # Forward the analysis route switch (deterministic vs agent) after resolving
+    # whether an ambient env override is allowed to use the deterministic path.
+    analysis_route = _resolve_trace_analysis_route(payload)
     if analysis_route in ("deterministic", "agent"):
         cmd += ["--analysis-route", analysis_route]
     # Post-kernel-opt roofline writes a separate report so it never overwrites
@@ -5565,6 +5592,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     deploy_snapshot_dir = str(verification.get("deploy_snapshot_dir", "") or "")
     deploy_patch_path = str(verification.get("deploy_patch_path", "") or "")
     deploy_repo_root = str(verification.get("deploy_repo_root", "") or "")
+    best_artifact_bundle = dict(verification.get("best_artifact_bundle") or {})
     source_file = str(
         result.get("source_file")
         or (result.get("candidate") or {}).get("source_file")
@@ -5622,6 +5650,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     entry["last_status"] = status
     entry["last_micro_speedup"] = micro_float
     entry["last_artifact_path"] = best_artifact_path
+    entry["last_artifact_bundle"] = best_artifact_bundle
     entry["last_snapshot_dir"] = deploy_snapshot_dir
     entry["last_deploy_patch_path"] = deploy_patch_path
     entry["last_deploy_repo_root"] = deploy_repo_root
@@ -5656,6 +5685,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "compile_passed": verification.get("compile_passed"),
             "correctness_passed": verification.get("correctness_passed"),
             "best_artifact_path": best_artifact_path,
+            "best_artifact_bundle": best_artifact_bundle,
             "deploy_snapshot_dir": deploy_snapshot_dir,
             "deploy_patch_path": deploy_patch_path,
             "deploy_repo_root": deploy_repo_root,

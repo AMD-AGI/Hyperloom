@@ -4466,6 +4466,7 @@ def build_verification(
     deploy_snapshot_dir = ""
     deploy_patch_path = ""
     deploy_repo_root = ""
+    best_artifact_bundle: dict[str, Any] = {}
     if best is not None and artifact_valid:
         bp = best.get("backend_paths") or {}
         winning_patch = str(bp.get("geak_per_task_best_patch") or "")
@@ -4489,6 +4490,16 @@ def build_verification(
                 deploy_snapshot_dir = snap["snapshot_dir"]
                 deploy_patch_path = snap["patch_path"]
                 deploy_repo_root = snap.get("repo_root", "")
+                descriptors = list(snap.get("descriptors") or [])
+                best_artifact_bundle = {
+                    "type": "patch_snapshot",
+                    "snapshot_dir": deploy_snapshot_dir,
+                    "patch_path": deploy_patch_path,
+                    "repo_root": deploy_repo_root,
+                    "descriptors": descriptors,
+                    "write_paths": [d.get("path") for d in descriptors if d.get("op") == "write"],
+                    "delete_paths": [d.get("path") for d in descriptors if d.get("op") == "delete"],
+                }
     correctness_signal = getattr(args, "correctness_passed", None)
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
     if correctness_signal is None and best is not None:
@@ -4573,6 +4584,7 @@ def build_verification(
         "artifact_valid": artifact_valid,
         "artifact_source": artifact_source,
         "artifact_error": "" if artifact_valid else artifact_error,
+        "best_artifact_bundle": best_artifact_bundle,
         "deploy_snapshot_dir": deploy_snapshot_dir,
         "deploy_patch_path": deploy_patch_path,
         "deploy_repo_root": deploy_repo_root,
