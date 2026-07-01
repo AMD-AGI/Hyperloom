@@ -205,6 +205,26 @@ async def test_run_timeout():
         await b.run("hi")
 
 
+# ---- run(): idle timeout tolerates a slow-but-live stream (issue #679) -----
+async def test_run_idle_timeout_allows_slow_but_live_stream():
+    """A model that keeps streaming (gaps < idle budget) must NOT be killed,
+    even when the TOTAL turn wall-clock exceeds ``call_timeout_s``."""
+
+    async def _slow_live(*, prompt, options):
+        for _ in range(4):
+            # Per-message gap (0.03s) stays under the idle budget (0.05s),
+            # but the cumulative time (~0.12s) exceeds it — proving the guard
+            # is idle-based, not a total wall-clock cap.
+            await asyncio.sleep(0.03)
+            yield _Msg(content=[_emit_tool_block()])
+
+    b = _backend()
+    b.sdk_query_factory = _slow_live
+    b.call_timeout_s = 0.05
+    res = await b.run("hi")
+    assert len(res.intents) == 4
+
+
 # ---- run(): conversational session capture --------------------------------
 async def test_run_conversational_session_capture(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC", "60")
