@@ -789,7 +789,7 @@ class GbrainRemoteRecipeClient:
             if not isinstance(hit, Mapping):
                 continue
             slug = str(hit.get("slug") or hit.get("id") or "")
-            if not slug or slug in seen:
+            if not slug or not _is_session_recipe_slug(slug) or slug in seen:
                 continue
             seen.add(slug)
             recipe = self._get_page_recipe(slug)
