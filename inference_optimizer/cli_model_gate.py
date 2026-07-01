@@ -285,12 +285,15 @@ _UNRECOGNIZED_ARCHITECTURES = frozenset({
 #
 # ministral3: Mistral3 multimodal wrapper (Surpem-Supertron2 server.log: vLLM
 # registry raises KeyError('ministral3') for text_config.model_type).
-# qwen3_5_moe_text: Qwen3.6 text decoder wrapper; vLLM/Transformers rejects it
-# with "model type `qwen3_5_moe_text` but Transformers does not recognize this
-# architecture".
+# qwen3_5_moe_text: removed from the blocklist. The original entry assumed the
+# framework did not recognize the Qwen3.5-MoE text decoder, but the current
+# runtime (transformers 5.8.1 + vLLM 0.21.0 rocm722) registers it: AutoConfig
+# resolves Qwen3_5MoeConfig/Qwen3_5MoeTextConfig and vLLM ModelRegistry knows
+# Qwen3_5MoeForConditionalGeneration (+ Qwen3_5MoeMTP). The wrapper carries
+# vision_config and model_type qwen3_5_moe is text-coercible, so it now falls
+# through to the text_coercible degraded-mode path instead.
 _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({
     "ministral3",
-    "qwen3_5_moe_text",
 })
 
 _PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
