@@ -127,8 +127,11 @@ the absence of priors as *unknown*, not as *no contradicting prior*:
   the strict class demands, so blocking them on missing benchmark
   evidence creates a circular deadlock.
 - For **`framework_op`** proposals (`baseline` / `target_analysis` /
-  `recover` / `report` / `session_breakdown`): approve by default;
-  Critic is not a useful gatekeeper for framework-level operations.
+  `recover` / `report` / `session_breakdown` / `framework_pr`): approve
+  by default; Critic is not a useful gatekeeper for framework-level
+  operations. (`framework_pr` is the FRAMEWORK_PR candidate pre-screen
+  gate; the candidate's actual code/config landing is later re-reviewed
+  as a strict `integrate_patch` `patch_landing` proposal.)
 
 ## Action Classes
 
@@ -138,7 +141,7 @@ Every proposal in `judge_bundle.proposals` is classified into one of:
 |---|---|---|
 | `patch_landing` | `integrate`, `integrate_patch`, `apply_patch` | Strict — comparable before/after benchmark + accuracy gate + active-path proof + rollback. Critic is the last gate before `optimization_stack` / `framework_source_roots` mutates. |
 | `evidence_producer` | `explore`, `specialist`, `sweep`, `profile`, `roofline`, `kernel_opt`, `deep_kernel_analysis`, `operator_tuning`, `vendor_kernel_config` | Structural — provenance non-empty (specialist or default_grid), action in current phase's allowed set, no contradicting KB prior. **Default approve when KB priors are silent.** |
-| `framework_op` | `baseline`, `target_analysis`, `recover`, `report`, `session_breakdown` | None — approve by default; Critic is not a useful gatekeeper here. |
+| `framework_op` | `baseline`, `target_analysis`, `recover`, `report`, `session_breakdown`, `framework_pr` | None — approve by default; Critic is not a useful gatekeeper here. (`framework_pr` = FRAMEWORK_PR candidate pre-screen; landing is re-reviewed strictly as `integrate_patch`.) |
 
 Unknown action names fall through to `evidence_producer` (cold-start
 safe). The exact list lives in
@@ -211,9 +214,12 @@ the action will produce.
 
 Return `approve` by default. Critic is not a useful gatekeeper for
 `baseline` / `target_analysis` / `recover` / `report` /
-`session_breakdown`. Only emit a non-`approve` verdict when the
-proposal is structurally malformed (missing required params, wrong
-phase, etc.).
+`session_breakdown` / `framework_pr`. Only emit a non-`approve` verdict
+when the proposal is structurally malformed (missing required params,
+wrong phase, etc.). For `framework_pr` (the FRAMEWORK_PR candidate
+pre-screen) a `reject` means "do not spend a GPU bench on this
+candidate"; the candidate's eventual patch/config landing is re-reviewed
+strictly as an `integrate_patch` proposal.
 
 ### Other verdicts
 

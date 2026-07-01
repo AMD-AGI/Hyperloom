@@ -111,6 +111,16 @@ Write the result to `$CRITIC_WORKDIR/review.json`:
 should be upserted into KB. `topic` should be the slug-friendly handle
 (the runtime calls `slugify_safe`).
 
+The concrete `advise` text may be written either inline on
+`review_verdicts[].advice_text` or as a separate `advice[].body_md`
+entry targeting the same `target_proposal_msg_id` — both are accepted.
+At commit time the runtime merges any matching `advice[]` bodies into
+the verdict's `advice_text` (the verdict's own `advice_text` first, then
+the `advice[]` bodies, joined with a blank line), so the
+`review_verdict` payload always carries the full advisory. The separate
+`advice[]` entries are still broadcast to the Coordinator inbox; the two
+are complementary, not mutually exclusive.
+
 ## Step 3 — Commit
 
 ```bash

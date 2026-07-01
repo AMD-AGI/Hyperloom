@@ -390,6 +390,97 @@ async def test_verdict_for_unknown_proposal_logs_observation(coord):
     assert coord._materialise_calls == []
 
 
+@pytest.mark.asyncio
+async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
+    """advise_fix_plan 2b: the rebroadcast payload and the compact inbox line both flow through the one serializer, carrying the full advisory field set."""
+    from inference_optimizer.orchestrator.coordinator import _format_inbox_event
+    from inference_optimizer.orchestrator.message_bus import Message
+
+    pending = PendingProposal(
+        proposal_msg_id="msg-adv",
+        from_agent="orchestration",
+        action_name="kernel_opt",
+        predicted_gain_pct=2.0,
+        payload={"action_name": "kernel_opt", "params": {}},
+    )
+    coord.state.pending_proposals["msg-adv"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-adv",
+            "verdict": "advise",
+            "reasoning": "proceed with care",
+            # An empty entry must be dropped by the serializer.
+            "required_evidence": ["bench at conc=64", "isolate decode path", ""],
+            "risks": [{"severity": "high", "text": "may regress decode"}],
+            "advice_text": "tune --max-running-requests",
+            "alternative_action": "explore",
+            "notes": ["see kb recipe r12"],
+            "kb_evidence": ["kb://r12"],
+            "packet_evidence": ["pkt://9"],
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    bus_msgs = [m for m in coord.bus.messages if m.topic == "review_verdict"]
+    assert len(bus_msgs) == 1
+    payload = bus_msgs[0].payload
+    assert payload["verdict"] == "advise"
+    assert payload["required_evidence"] == ["bench at conc=64", "isolate decode path"]
+    assert payload["risks"] == [{"severity": "high", "text": "may regress decode"}]
+    assert payload["advice_text"] == "tune --max-running-requests"
+    assert payload["alternative_action"] == "explore"
+    assert payload["notes"] == ["see kb recipe r12"]
+    assert payload["kb_evidence"] == ["kb://r12"]
+    assert payload["packet_evidence"] == ["pkt://9"]
+    # advise materialises like approve.
+    assert len(coord._materialise_calls) == 1
+
+    msg = Message.new("critic", "orchestration", "review_verdict", payload)
+    msg.seq = 5
+    line = _format_inbox_event(msg)
+    assert "\n" not in line
+    assert "verdict='advise'" in line
+    assert "required_evidence[2]=" in line
+    assert "risks=1" in line
+    assert "advice=" in line
+
+
+@pytest.mark.asyncio
+async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
+    """A verdict with no advisory fields rebroadcasts only verdict/reasoning, and the inbox line stays minimal."""
+    from inference_optimizer.orchestrator.coordinator import _format_inbox_event
+    from inference_optimizer.orchestrator.message_bus import Message
+
+    pending = PendingProposal(
+        proposal_msg_id="msg-bare",
+        from_agent="orchestration",
+        action_name="kernel_opt",
+        predicted_gain_pct=2.0,
+        payload={"action_name": "kernel_opt", "params": {}},
+    )
+    coord.state.pending_proposals["msg-bare"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-bare",
+            "verdict": "approve",
+            "reasoning": "looks good",
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    payload = [m for m in coord.bus.messages if m.topic == "review_verdict"][0].payload
+    for key in ("required_evidence", "risks", "advice_text", "notes"):
+        assert key not in payload
+
+    msg = Message.new("critic", "orchestration", "review_verdict", payload)
+    msg.seq = 6
+    line = _format_inbox_event(msg)
+    assert "required_evidence" not in line
+    assert "risks=" not in line
+    assert "advice=" not in line
+
+
 # 4. Critic prompt — OUTPUT PROTOCOL documents the single-verdict shape
 def _critic_prompt_text() -> str:
     from inference_optimizer.orchestrator.action_registry import ActionRegistry

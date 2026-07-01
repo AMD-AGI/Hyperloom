@@ -51,10 +51,7 @@ SEVERITIES = {"blocker", "major", "minor"}
 COORDINATOR_INTENT_TYPES = {
     "review_verdict",
     "send_message",
-    "ask_question",
-    "answer",
     "alert",
-    "update_persona",
 }
 
 

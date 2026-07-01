@@ -19,10 +19,10 @@ The four persistent agent roles and their permitted intents::
     │              │          │ update_state / send_message / ...       │
     │ kernel       │ Claude   │ response (only) / send_message / alert  │
     │ critic       │ Codex    │ review_verdict (only) / send_message /  │
-    │              │ no-tools │ ask_question / answer / update_persona  │
+    │              │ no-tools │ alert                                   │
     │              │ + KB Bash│ KB read/write Bash allowlist            │
-    │ robustness   │ Claude   │ alert / kill_task / force_dispatch /    │
-    │              │          │ prune_branch / escalate_strategy_change │
+    │ robustness   │ Claude   │ alert / kill_task / prune_branch /      │
+    │              │          │ escalate_strategy_change                │
     │              │          │ + always-on tick                        │
     └──────────────┴──────────┴─────────────────────────────────────────┘
 
@@ -60,15 +60,12 @@ DEFAULT_CODEX_API_KEY_ENV = "OPENAI_API_KEY"
 _BASE_INTENTS: frozenset[IntentType] = frozenset(
     {
         IntentType.SEND_MESSAGE,
-        IntentType.ASK_QUESTION,
-        IntentType.ANSWER,
         IntentType.ALERT,
-        IntentType.UPDATE_PERSONA,
     }
 )
 
 
-# Orchestration — only role with REQUEST authority; holds PRUNE_BRANCH + ESCALATE_STRATEGY_CHANGE. FORCE_DISPATCH stays robustness-only.
+# Orchestration — only role with REQUEST authority; holds PRUNE_BRANCH + ESCALATE_STRATEGY_CHANGE.
 _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.PROPOSE_ACTION,
@@ -104,7 +101,6 @@ _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
         IntentType.UPDATE_STATE,  # crash_count / current_action only
         IntentType.DELEGATE,  # only handle actions: accuracy_gate / recover / server_lifecycle
         IntentType.KILL_TASK,
-        IntentType.FORCE_DISPATCH,
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }
