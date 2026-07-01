@@ -27,6 +27,47 @@ SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
 
 
 # §1 Session metadata
+class Recovery(TypedDict, total=False):
+    """Crash / interruption / resume history for one optimization session.
+
+    Surfaces the recovery-relevant signals SharedState already tracks so the
+    breakdown records WHEN a run was interrupted and continued — the exact
+    context behind gaps like an empty ``perfskills_result`` (a tick's in-memory
+    result lost to an external kill before the tick-boundary ``state.save``,
+    then a resume). Without this the breakdown shows only the symptom; here it
+    shows the run did not proceed monotonically.
+
+    Attributes:
+        recovered (bool): True when the run crashed and/or was continued after
+            an interruption (any of the signals below fired).
+        crash_count (int): Monotonic total of Coordinator tick/agent crashes.
+        crash_timestamps (list[str]): ISO UTC timestamps of recent crashes
+            (bounded tail).
+        degraded_mode (bool): Whether the run entered degraded operation.
+        steward_continuation_used (bool): The steward continued the run after an
+            interruption / budget event.
+        resume_pending_revalidation (bool): Accepted stack awaits post-resume
+            revalidation (validated gain not yet re-trusted).
+        steward_infra_failures_total (int): Sum of steward-observed infra
+            failures across rounds.
+        steward_infra_failures_by_round (dict[str, int]): Per-round infra
+            failure counts.
+        last_tick_exception (dict[str, Any] | None): Compact summary of the last
+            Coordinator tick exception (tick / stage / type / message), traceback
+            omitted.
+    """
+
+    recovered: bool
+    crash_count: int
+    crash_timestamps: list[str]
+    degraded_mode: bool
+    steward_continuation_used: bool
+    resume_pending_revalidation: bool
+    steward_infra_failures_total: int
+    steward_infra_failures_by_round: dict[str, int]
+    last_tick_exception: dict[str, Any] | None
+
+
 class SessionMeta(TypedDict, total=False):
     """Identity, timing, and host context for one optimization session.
 
@@ -54,6 +95,7 @@ class SessionMeta(TypedDict, total=False):
             artifacts without re-deriving the path.
         tick_count (int): Number of orchestration ticks executed.
         image (str | None): Fully-qualified container image, or None if unset.
+        recovery (Recovery): Crash / interruption / resume history for the run.
     """
 
     session_id: str  # hyperloom internal id (manifest.session_id)
@@ -71,6 +113,7 @@ class SessionMeta(TypedDict, total=False):
     user_data_path: str  # USER_DATA_PATH root the run wrote under (session_dir nests beneath it)
     tick_count: int
     image: str | None  # container image fully-qualified (or None if not configured)
+    recovery: Recovery  # crash / interruption / resume history
 
 
 # §2 Workload configuration

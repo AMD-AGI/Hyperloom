@@ -806,6 +806,83 @@ def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> b
 
 
 # §1 Session metadata
+def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
+    """Project SharedState's crash / interruption / resume signals.
+
+    SharedState already tracks whether a run crashed, was continued by the
+    steward, entered degraded mode, or has an accepted stack awaiting
+    post-resume revalidation — but none of it reaches the breakdown, so a
+    resumed run reads as if it proceeded monotonically. This folds those
+    signals into the §1 ``session.recovery`` block so a reader can see the run
+    was interrupted and continued (the context behind gaps like an empty
+    ``perfskills_result`` lost to a kill before the tick-boundary save). Pure /
+    best-effort: unparseable fields are skipped, never raised.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` (SharedState-shaped).
+
+    Returns:
+        dict[str, Any]: The ``recovery`` block (see schema ``Recovery``).
+    """
+    crash_count = _to_int(state.get("crash_count")) or 0
+    crash_ts_iso: list[str] = []
+    raw_ts = state.get("crash_timestamps")
+    if isinstance(raw_ts, list):
+        for t in raw_ts:
+            try:
+                crash_ts_iso.append(
+                    datetime.fromtimestamp(float(t), tz=timezone.utc).isoformat()
+                )
+            except (TypeError, ValueError, OSError, OverflowError):
+                continue
+
+    last_exc: dict[str, Any] | None = None
+    lte = state.get("last_tick_exception")
+    if isinstance(lte, dict) and lte:
+        # Drop the (large) traceback; keep the compact postmortem header.
+        last_exc = {
+            "tick": lte.get("tick"),
+            "ts": lte.get("ts"),
+            "stage": lte.get("stage"),
+            "agent": lte.get("agent"),
+            "type": lte.get("type"),
+            "message": (str(lte.get("message") or "")[:500] or None),
+        }
+
+    infra = state.get("steward_infra_failures_by_round")
+    infra_by_round: dict[str, int] = {}
+    infra_total = 0
+    if isinstance(infra, dict):
+        for k, v in infra.items():
+            iv = _to_int(v)
+            if iv is None:
+                continue
+            infra_by_round[str(k)] = iv
+            infra_total += iv
+
+    steward_continuation = bool(state.get("steward_continuation_used"))
+    resume_pending = bool(state.get("resume_pending_revalidation"))
+    degraded = bool(state.get("degraded_mode"))
+    recovered = bool(
+        crash_count > 0
+        or crash_ts_iso
+        or steward_continuation
+        or resume_pending
+        or last_exc
+    )
+    return {
+        "recovered": recovered,
+        "crash_count": crash_count,
+        "crash_timestamps": crash_ts_iso,
+        "degraded_mode": degraded,
+        "steward_continuation_used": steward_continuation,
+        "resume_pending_revalidation": resume_pending,
+        "steward_infra_failures_total": infra_total,
+        "steward_infra_failures_by_round": infra_by_round,
+        "last_tick_exception": last_exc,
+    }
+
+
 def collect_session(
     session_dir: Path,
     state: dict[str, Any],
@@ -872,6 +949,9 @@ def collect_session(
             or ""
         ),
         "tick_count": int(state.get("tick") or 0),
+        # Crash / interruption / resume history so a resumed run is not read as
+        # a clean monotonic one (context behind e.g. an empty perfskills_result).
+        "recovery": _collect_recovery(state),
     }
 
 
