@@ -22,7 +22,6 @@ from robustness_agent.role.envelope import (
     build_delegate,
     build_envelope_dict,
     build_escalate,
-    build_force_dispatch,
     build_heartbeat,
     build_kill_task,
     build_prune_branch,
@@ -96,12 +95,6 @@ def test_kill_task_builder_pins_scope_to_task():
         "reason": "stuck for 10min",
         "scope": "task",
     }
-
-
-def test_force_dispatch_builder():
-    intent = build_force_dispatch("task-456", "high-value blocked")
-    assert intent.type is IntentType.FORCE_DISPATCH
-    assert intent.payload == {"task_id": "task-456", "reason": "high-value blocked"}
 
 
 def test_prune_branch_builder():
@@ -261,7 +254,6 @@ def test_robustness_only_set_matches_design_v06():
     assert ROBUSTNESS_ONLY_INTENTS == frozenset(
         {
             IntentType.KILL_TASK,
-            IntentType.FORCE_DISPATCH,
             IntentType.PRUNE_BRANCH,
             IntentType.ESCALATE_STRATEGY_CHANGE,
         }

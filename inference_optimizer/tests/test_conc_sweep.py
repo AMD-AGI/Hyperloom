@@ -131,6 +131,8 @@ def test_build_grid_two_arms_per_conc():
         "ISL": "1024",
         "OSL": "1024",
         "NUM_PROMPTS": "20",
+        # Accuracy eval is off by default for conc_sweep (concurrency-invariant).
+        "RUN_EVAL": "false",
     }
     optimized = next(v for v in grid if v.name == "optimized_conc16")
     assert optimized.extra_server_args == "--enable-torch-compile"
@@ -140,7 +142,38 @@ def test_build_grid_two_arms_per_conc():
         "ISL": "1024",
         "OSL": "1024",
         "NUM_PROMPTS": "80",
+        "RUN_EVAL": "false",
     }
+
+
+def test_build_grid_disables_eval_by_default(monkeypatch):
+    """Every conc_sweep variant carries RUN_EVAL=false unless opted back in."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL", raising=False)
+    grid = _build_grid(
+        concs=[1, 8],
+        isl=512,
+        osl=512,
+        num_prompts_factor=5,
+        optimized_args="--x",
+        optimized_envs={},
+    )
+    assert grid, "expected a non-empty grid"
+    assert all(v.extra_envs.get("RUN_EVAL") == "false" for v in grid)
+
+
+def test_build_grid_eval_opt_in(monkeypatch):
+    """INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1 re-enables the per-point accuracy gate."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL", "1")
+    grid = _build_grid(
+        concs=[1, 8],
+        isl=512,
+        osl=512,
+        num_prompts_factor=5,
+        optimized_args="--x",
+        optimized_envs={},
+    )
+    assert grid, "expected a non-empty grid"
+    assert all("RUN_EVAL" not in v.extra_envs for v in grid)
 
 
 def test_build_grid_num_prompts_floor():

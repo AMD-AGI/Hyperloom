@@ -8,9 +8,9 @@ The Coordinator accepts intent envelopes of the form
 {"intents": [{"intent_type": "<type>", "payload": {...}}, ...]}
 ```
 
-The Critic normally produces three intent types: ``review_verdict``
-(per proposal), ``send_message`` (heartbeat / ``advice``), and
-``update_persona``. Schema and verdict vocabulary are mirrored from
+The Critic normally produces two intent types: ``review_verdict``
+(per proposal) and ``send_message`` (heartbeat / ``advice``).
+Schema and verdict vocabulary are mirrored from
 ``inference_optimizer/protocol/intent.py`` and ``.../policy.py`` rather than
 imported, so the skill stays a standalone package. Bump
 ``ENVELOPE_SCHEMA_VERSION`` if the Coordinator extends the envelope schema.
@@ -33,10 +33,7 @@ ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset(
     {
         "review_verdict",
         "send_message",
-        "ask_question",
-        "answer",
         "alert",
-        "update_persona",
     }
 )
 
@@ -68,10 +65,7 @@ ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset(
 # PolicyGate enforces. See ``_PAYLOAD_REQUIRED`` in protocol/intent.py.
 _PAYLOAD_REQUIRED: dict[str, tuple[str, ...]] = {
     "send_message": ("topic",),
-    "ask_question": ("topic", "question"),
-    "answer": ("in_reply_to", "answer"),
     "alert": ("severity", "summary"),
-    "update_persona": ("body_md",),
     "review_verdict": ("target_proposal_msg_id", "verdict"),
 }
 

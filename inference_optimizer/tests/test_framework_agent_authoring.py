@@ -53,9 +53,10 @@ class _TasksStub:
             kind=kwargs.get("kind"),
             task_id=f"t-{len(self.created)}",
             params=kwargs.get("params") or {},
+            state="queued",
         )
         self._queued.append(t)
-        return t
+        return t, False
 
 
 def _make_intent(prompt: str, verdict: str):
@@ -87,6 +88,15 @@ class _ApproveCritic:
         )
 
 
+class _BusStub:
+    def __init__(self) -> None:
+        self.messages: list[Any] = []
+
+    async def append_and_seq(self, msg: Any) -> Any:
+        self.messages.append(msg)
+        return msg
+
+
 class _Stub:
     """Binds the Coordinator methods the pump + helpers touch."""
 
@@ -97,7 +107,9 @@ class _Stub:
     _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
     _select_best_framework_agent_candidate = Coordinator._select_best_framework_agent_candidate
     _record_framework_agent_phase_done = Coordinator._record_framework_agent_phase_done
-    _critic_review_framework_agent_candidate = Coordinator._critic_review_framework_agent_candidate
+    _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review
+    _materialize_framework_agent_candidate = Coordinator._materialize_framework_agent_candidate
+    _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
     _discover_next_framework_batch = Coordinator._discover_next_framework_batch
     _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
     _enqueue_framework_agent_authoring_specialist = Coordinator._enqueue_framework_agent_authoring_specialist
@@ -116,9 +128,13 @@ class _Stub:
         self.framework_agent_discover_timeout_sec = 0.0
         self.backends: dict[str, Any] = {"critic": _ApproveCritic()}
         self.state = SimpleNamespace(pending_proposals={})
+        self.bus = _BusStub()
         # Audit verdict the pump's _audit_framework_agent_candidate returns; default
         # unknown (empty recommended_next_step) preserves legacy both-tracks.
         self._audit_verdict: dict[str, Any] = {"recommended_next_step": ""}
+
+    async def _record_observation(self, *_a: Any, **_k: Any) -> None:
+        return None
 
     async def _rank_framework_agent_candidates_llm(
         self, candidates: list[dict[str, Any]]
@@ -162,10 +178,49 @@ def _pump(stub: _Stub) -> None:
     asyncio.run(Coordinator._pump_framework_agent_phase(stub))  # type: ignore[arg-type]
 
 
-def test_pump_dispatches_authoring_specialist_alongside_diff_track(
+def _pump_then_materialize(stub: _Stub) -> None:
+    """Run the pump (resolves audit route + submits a candidate proposal) then materialise it.
+
+    Mirrors the live async gate: the pump submits the candidate carrying its
+    resolved ``audit_step``; an approve verdict materialises it via
+    ``_materialize_framework_agent_candidate``, which performs the apply/author
+    dispatch (the routing that used to live inline in the pump).
+    """
+    asyncio.run(Coordinator._pump_framework_agent_phase(stub))  # type: ignore[arg-type]
+    pendings = [
+        p
+        for p in stub.state.pending_proposals.values()
+        if getattr(p, "action_name", "") == "framework_agent" and not getattr(p, "decided", False)
+    ]
+    for p in pendings:
+        asyncio.run(Coordinator._materialize_framework_agent_candidate(stub, p))  # type: ignore[arg-type]
+        p.decided = True
+
+
+def _materialize(stub: _Stub, *, audit_step: str = "") -> None:
+    from inference_optimizer.orchestrator.coordinator import PendingProposal
+
+    pending = PendingProposal(
+        proposal_msg_id="m-fpr",
+        from_agent="coordinator",
+        action_name="framework_agent",
+        predicted_gain_pct=0.0,
+        payload={
+            "candidate": dict(_CANDIDATE),
+            "framework_agent_candidate_id": _CANDIDATE["pr_url"],
+            "batch_id": "b1",
+            "audit": {},
+            "audit_step": audit_step,
+        },
+    )
+    asyncio.run(Coordinator._materialize_framework_agent_candidate(stub, pending))  # type: ignore[arg-type]
+
+
+def test_pump_submits_candidate_proposal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """The pump submits the candidate as a ``framework_agent`` proposal; no task is created inline."""
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
 
@@ -173,6 +228,20 @@ def test_pump_dispatches_authoring_specialist_alongside_diff_track(
     stub = _Stub(tmp_path, authoring=True)
 
     _pump(stub)
+
+    assert stub.tasks.created == []
+    pendings = [p for p in stub.state.pending_proposals.values() if p.action_name == "framework_agent"]
+    assert len(pendings) == 1
+    assert pendings[0].payload["framework_agent_candidate_id"] == _CANDIDATE["pr_url"]
+
+
+def test_materialize_unknown_route_dispatches_both_tracks(
+    tmp_path: Path,
+):
+    """An approved candidate with an unknown audit route runs the raw-diff + authoring tracks."""
+    stub = _Stub(tmp_path, authoring=True)
+
+    _materialize(stub, audit_step="")
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds.count("framework_agent") == 1
@@ -192,17 +261,12 @@ def test_pump_dispatches_authoring_specialist_alongside_diff_track(
     assert spec["requires_lanes"] == ["research_lane"]
 
 
-def test_pump_authoring_disabled_runs_diff_track_only(
+def test_materialize_authoring_disabled_runs_diff_track_only(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    async def _discover(**_: Any) -> dict[str, Any]:
-        return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
-
-    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
     stub = _Stub(tmp_path, authoring=False)
 
-    _pump(stub)
+    _materialize(stub, audit_step="")
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["framework_agent"]
@@ -210,6 +274,12 @@ def test_pump_authoring_disabled_runs_diff_track_only(
 
 def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True)
+    # Set up a batch with one unprocessed candidate so the signal has a valid target.
+    _CAND_ID = "https://github.com/ROCm/vllm/pull/999"
+    stub.shared_state.framework_agent_batches = [
+        {"batch_id": "b1", "candidates": [{"candidate_id": _CAND_ID}]}
+    ]
+    stub.shared_state.framework_agent_phase_progress = []
 
     # Nothing in flight.
     assert (
@@ -219,8 +289,14 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
         is False
     )
 
-    # A running specialist counts.
-    stub.tasks._running.append(SimpleNamespace(kind="specialist", task_id="s1"))
+    # A running framework-owned specialist for the unprocessed candidate counts.
+    stub.tasks._running.append(
+        SimpleNamespace(
+            kind="specialist",
+            task_id="s1",
+            params={"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID},
+        )
+    )
     assert (
         asyncio.run(
             Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
@@ -229,9 +305,23 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     )
     stub.tasks._running.clear()
 
-    # A queued integrate_patch counts.
+    # A kernel-phase specialist (no framework_agent_authoring) does NOT count.
+    stub.tasks._running.append(SimpleNamespace(kind="specialist", task_id="k1", params={}))
+    assert (
+        asyncio.run(
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
+        )
+        is False
+    )
+    stub.tasks._running.clear()
+
+    # A queued framework-owned integrate_patch for the unprocessed candidate counts.
     stub.tasks._queued.append(
-        SimpleNamespace(kind="integrate_patch", task_id="i1"),
+        SimpleNamespace(
+            kind="integrate_patch",
+            task_id="i1",
+            params={"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID},
+        )
     )
     assert (
         asyncio.run(
@@ -241,15 +331,76 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     )
     stub.tasks._queued.clear()
 
-    # A pending integrate_patch Critic proposal counts.
+    # A bare kernel integrate_patch task (no framework_agent_authoring) does NOT count.
+    stub.tasks._queued.append(
+        SimpleNamespace(kind="integrate_patch", task_id="k2", params={})
+    )
+    assert (
+        asyncio.run(
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
+        )
+        is False
+    )
+    stub.tasks._queued.clear()
+
+    # A pending framework_agent Critic proposal for the unprocessed candidate counts.
     stub.state.pending_proposals = {
-        "m1": SimpleNamespace(action_name="integrate_patch"),
+        "m1": SimpleNamespace(
+            action_name="framework_agent",
+            decided=False,
+            payload={"framework_agent_candidate_id": _CAND_ID},
+        ),
     }
     assert (
         asyncio.run(
             Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is True
+    )
+
+    # A pending framework-owned integrate_patch proposal for the unprocessed candidate counts.
+    stub.state.pending_proposals = {
+        "m2": SimpleNamespace(
+            action_name="integrate_patch",
+            decided=False,
+            payload={"params": {"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID}},
+        ),
+    }
+    assert (
+        asyncio.run(
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
+        )
+        is True
+    )
+
+    # A bare (kernel-style) integrate_patch proposal does NOT count.
+    stub.state.pending_proposals = {
+        "m3": SimpleNamespace(
+            action_name="integrate_patch",
+            decided=False,
+            payload={"params": {}},
+        ),
+    }
+    assert (
+        asyncio.run(
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
+        )
+        is False
+    )
+
+    # A decided proposal does NOT count even if framework-owned.
+    stub.state.pending_proposals = {
+        "m4": SimpleNamespace(
+            action_name="framework_agent",
+            decided=True,
+            payload={"framework_agent_candidate_id": _CAND_ID},
+        ),
+    }
+    assert (
+        asyncio.run(
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
+        )
+        is False
     )
 
 
@@ -531,7 +682,7 @@ def test_pump_audit_direct_apply_dispatches_executor_only(
         "evidence": [],
     }
 
-    _pump(stub)
+    _pump_then_materialize(stub)
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["framework_agent"]  # no specialist
@@ -556,7 +707,7 @@ def test_pump_audit_direct_apply_degrades_to_author_on_wheel(
         "evidence": [],
     }
 
-    _pump(stub)
+    _pump_then_materialize(stub)
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["specialist"]  # degraded to authoring
@@ -581,7 +732,7 @@ def test_pump_audit_skip_low_confidence_downgrades_to_author(
         "evidence": [{"local_file": "vllm/x.py", "symbol": "f", "reason": "maybe"}],
     }
 
-    _pump(stub)
+    _pump_then_materialize(stub)
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["specialist"]  # not skipped
@@ -608,7 +759,7 @@ def test_pump_audit_skip_no_evidence_downgrades_to_author(
         "evidence": [],  # no concrete evidence
     }
 
-    _pump(stub)
+    _pump_then_materialize(stub)
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["specialist"]
@@ -636,7 +787,7 @@ def test_pump_audit_author_dispatches_specialist_only_with_evidence(
         "risks": ["raw diff likely conflicts"],
     }
 
-    _pump(stub)
+    _pump_then_materialize(stub)
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["specialist"]  # no raw-diff executor
@@ -712,7 +863,7 @@ def test_pump_audit_author_with_authoring_disabled_falls_back_to_raw(
         "evidence": [],
     }
 
-    _pump(stub)
+    _pump_then_materialize(stub)
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["framework_agent"]
