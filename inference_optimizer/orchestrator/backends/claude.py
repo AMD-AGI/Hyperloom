@@ -79,6 +79,14 @@ _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC: float = 300.0
 # a literal max_turns=1 trips before any output. Give headroom (tools disallowed).
 _RAW_COMPLETION_MIN_MAX_TURNS: int = 8
 
+# Retry budget amplification (issue #679): the per-attempt idle timeout is a
+# *silence* budget (max gap between streamed SDK messages), not a total
+# wall-clock. A heavy reasoning model (e.g. Kimi-K2.6) that keeps producing
+# output never trips it, but a first attempt that does time out is retried with
+# a progressively larger idle budget (base * multiplier**(attempt-1)) so a
+# genuinely slow gateway is not re-killed at the exact same wall.
+_RETRY_IDLE_TIMEOUT_MULTIPLIER: float = 2.0
+
 
 # Built-in tools disallowed in raw_completion mode so the model produces
 # exactly one text turn (no agentic tool loop).
@@ -153,8 +161,11 @@ class ClaudeBackend:
     # disallows all tools, and returns ``raw_text`` without requiring an
     # emitted intent.
     raw_completion: bool = False
-    # Wall-clock cap for one ``run()`` call; bounds a hung ``claude`` CLI /
-    # unreachable gateway. Env override: ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC``.
+    # Idle (inactivity) timeout for one ``run()`` call: the max wall-clock gap
+    # allowed BETWEEN streamed SDK messages before the turn is aborted. This
+    # bounds a hung ``claude`` CLI / unreachable gateway WITHOUT killing a slow
+    # heavy-reasoning model that is still producing output (issue #679). Env
+    # override: ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC``.
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC",
@@ -227,8 +238,9 @@ class ClaudeBackend:
                 ).strip()
                 == ""
             ):
-                # No explicit operator override -> raise the floor so the
-                # extra tool round-trips don't trip the 120s wall.
+                # No explicit operator override -> raise the idle-timeout floor
+                # so a quiet gap between the extra tool round-trips doesn't trip
+                # the default silence budget.
                 self.call_timeout_s = max(
                     self.call_timeout_s,
                     _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC,
@@ -299,21 +311,31 @@ class ClaudeBackend:
             resume_session_id=resume_session,
         )
 
-        # Timeout guard: an upstream proxy stall must not park the reactor.
+        # Idle-timeout guard (issue #679): an upstream proxy stall must not park
+        # the reactor, but a slow heavy-reasoning model that is still streaming
+        # output must NOT be killed mid-thought. So each attempt bounds the gap
+        # BETWEEN streamed SDK messages (silence budget), not the total turn.
         # Bounded retry/backoff (R6) absorbs transient stalls / blips across a
-        # multi-day run; a per-attempt wall-clock cap still bounds each try.
+        # multi-day run; each retry amplifies the idle budget so a genuinely
+        # slow gateway is not re-killed at the exact same wall.
+        attempt_state = {"n": 0}
+
         async def _one_attempt() -> tuple[Any, ...]:
-            """Run one bounded SDK invocation under the per-attempt timeout.
+            """Run one SDK invocation under an amplified per-attempt idle timeout.
 
             Returns:
                 The collected ``_invoke_and_collect`` result tuple.
 
             Raises:
-                asyncio.TimeoutError: If the attempt exceeds ``call_timeout_s``.
+                asyncio.TimeoutError: If the stream stays idle (no new message)
+                    for longer than this attempt's amplified idle budget.
             """
-            return await asyncio.wait_for(
-                self._invoke_and_collect(full_prompt, options),
-                timeout=self.call_timeout_s,
+            attempt_state["n"] += 1
+            idle_timeout_s = self.call_timeout_s * (
+                _RETRY_IDLE_TIMEOUT_MULTIPLIER ** (attempt_state["n"] - 1)
+            )
+            return await self._invoke_and_collect(
+                full_prompt, options, idle_timeout_s=idle_timeout_s
             )
 
         def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
@@ -352,14 +374,15 @@ class ClaudeBackend:
             self.calls.append(
                 {
                     "warn": (
-                        f"claude SDK call timed out after {self.call_timeout_s:.0f}s "
-                        f"(retries exhausted); treating as no-intent so the reactor "
-                        "pass can proceed"
+                        f"claude SDK stream idle / timed out (no new message for "
+                        f">{self.call_timeout_s:.0f}s, retries exhausted); treating "
+                        "as no-intent so the reactor pass can proceed"
                     ),
                 }
             )
             raise BackendError(
-                f"Claude backend timed out after {self.call_timeout_s:.0f}s (likely upstream proxy stall)"
+                f"Claude backend timed out: stream idle for >{self.call_timeout_s:.0f}s "
+                "(likely upstream proxy stall)"
             ) from exc
         # Capture the SDK session token for the next conversational resume;
         # only overwrite on a non-empty id so a stream without a terminal
@@ -603,7 +626,7 @@ class ClaudeBackend:
             self.calls.append({"stderr": text})
 
     async def _invoke_and_collect(
-        self, prompt: str, options: Any
+        self, prompt: str, options: Any, *, idle_timeout_s: float | None = None
     ) -> tuple[list[Intent], str, int, dict[str, Any], str | None]:
         """Stream SDK messages, collecting intents, raw text, tool counts,
         the latest `ResultMessage.usage` dict, and the SDK ``session_id``.
@@ -614,6 +637,10 @@ class ClaudeBackend:
         Args:
             prompt: The composed prompt to stream to the SDK.
             options: The SDK options object configuring this turn.
+            idle_timeout_s: When set, the max wall-clock allowed to wait for the
+                *next* streamed message before raising ``asyncio.TimeoutError``.
+                Bounds a stalled gateway without capping total turn time, so a
+                slow-but-live reasoning model is never killed (issue #679).
 
         Returns:
             A tuple ``(intents, raw_text, tool_block_count, usage, session_id)``
@@ -626,8 +653,22 @@ class ClaudeBackend:
         tool_block_count = 0
         last_usage: dict[str, Any] = {}
         session_id: str | None = None
+        stream = self.sdk_query_factory(prompt=prompt, options=options)
         try:
-            async for message in self.sdk_query_factory(prompt=prompt, options=options):
+            stream_iter = stream.__aiter__()
+            while True:
+                # Idle timeout: bound only the wait for the NEXT message so a
+                # model that keeps streaming (even slowly) is never killed; a
+                # fully silent gateway trips ``asyncio.TimeoutError``.
+                try:
+                    if idle_timeout_s is not None:
+                        message = await asyncio.wait_for(
+                            stream_iter.__anext__(), timeout=idle_timeout_s
+                        )
+                    else:
+                        message = await stream_iter.__anext__()
+                except StopAsyncIteration:
+                    break
                 # Capture the session token from any message; last seen wins.
                 msg_session = getattr(message, "session_id", None)
                 if isinstance(msg_session, str) and msg_session:
@@ -672,6 +713,15 @@ class ClaudeBackend:
                     )
             else:
                 raise
+        finally:
+            # Best-effort: close the (async-gen) stream so an idle-timeout abort
+            # doesn't leak a half-consumed generator. Errors here are never fatal.
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:  # noqa: BLE001 — cleanup must not mask the turn result
+                    pass
         # Prefer the consolidated ResultMessage text; fall back to TextBlocks.
         raw_text = "".join(result_chunks) or "".join(text_chunks)
         return intents, raw_text, tool_block_count, last_usage, session_id
