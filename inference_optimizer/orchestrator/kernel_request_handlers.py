@@ -1127,6 +1127,18 @@ def _fill_integrate_defaults_from_state(
     return resolved
 
 
+def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
+    """Backfill integrate inputs from a recorded multi-file artifact bundle."""
+    if not isinstance(bundle, dict) or bundle.get("type") != "patch_snapshot":
+        return
+    if not resolved.get("snapshot_dir") and bundle.get("snapshot_dir"):
+        resolved["snapshot_dir"] = str(bundle["snapshot_dir"])
+    if not resolved.get("patch_path") and bundle.get("patch_path"):
+        resolved["patch_path"] = str(bundle["patch_path"])
+    if not resolved.get("kernel_repo") and bundle.get("repo_root"):
+        resolved["kernel_repo"] = str(bundle["repo_root"])
+
+
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
     """Fill integrate inputs from SharedState when Orchestration sends only kernel_id (artifact in ``last_kernel_opt``, source in ``last_trace_analyze``).
 
@@ -1149,6 +1161,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
         # Snapshot deploy: prefer the original patch (manifest) + its byte-exact
         # snapshot dir so the WHOLE multi-file patch lands atomically.
+        _fill_integrate_snapshot_from_bundle(resolved, last_kernel.get("best_artifact_bundle"))
         if not resolved.get("snapshot_dir") and last_kernel.get("deploy_snapshot_dir"):
             resolved["snapshot_dir"] = str(last_kernel["deploy_snapshot_dir"])
             if last_kernel.get("deploy_patch_path") and not resolved.get("patch_path"):
@@ -1169,6 +1182,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     # Multi-KEEP queue fallback: ``last_kernel_opt`` holds only the strongest pending KEEP, so pull patch_path/source_file from the per-kernel ledger for other queued KEEPs.
     if kernel_id:
         attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        _fill_integrate_snapshot_from_bundle(resolved, attempt.get("last_artifact_bundle"))
         if not resolved.get("snapshot_dir") and attempt.get("last_snapshot_dir"):
             resolved["snapshot_dir"] = str(attempt["last_snapshot_dir"])
             if attempt.get("last_deploy_patch_path") and not resolved.get("patch_path"):
@@ -5565,6 +5579,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     deploy_snapshot_dir = str(verification.get("deploy_snapshot_dir", "") or "")
     deploy_patch_path = str(verification.get("deploy_patch_path", "") or "")
     deploy_repo_root = str(verification.get("deploy_repo_root", "") or "")
+    best_artifact_bundle = dict(verification.get("best_artifact_bundle") or {})
     source_file = str(
         result.get("source_file")
         or (result.get("candidate") or {}).get("source_file")
@@ -5622,6 +5637,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     entry["last_status"] = status
     entry["last_micro_speedup"] = micro_float
     entry["last_artifact_path"] = best_artifact_path
+    entry["last_artifact_bundle"] = best_artifact_bundle
     entry["last_snapshot_dir"] = deploy_snapshot_dir
     entry["last_deploy_patch_path"] = deploy_patch_path
     entry["last_deploy_repo_root"] = deploy_repo_root
@@ -5656,6 +5672,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "compile_passed": verification.get("compile_passed"),
             "correctness_passed": verification.get("correctness_passed"),
             "best_artifact_path": best_artifact_path,
+            "best_artifact_bundle": best_artifact_bundle,
             "deploy_snapshot_dir": deploy_snapshot_dir,
             "deploy_patch_path": deploy_patch_path,
             "deploy_repo_root": deploy_repo_root,
