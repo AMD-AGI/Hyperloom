@@ -691,6 +691,73 @@ def test_build_verification_recovers_py_from_worktree(tmp_path):
     assert verification["best_artifact_path"] == str(wt_file)
 
 
+def test_build_verification_records_multi_file_artifact_bundle(tmp_path):
+    """A GEAK multi-file patch exposes the complete deploy snapshot as metadata."""
+    repo = tmp_path / "repo"
+    src = repo / "aiter" / "ops" / "moe.py"
+    bench = repo / "benchmarks" / "bench_moe.py"
+    src.parent.mkdir(parents=True)
+    bench.parent.mkdir(parents=True)
+    src.write_text("def kernel():\n    return 'base'\n", encoding="utf-8")
+    bench.write_text("CASE = 'base'\n", encoding="utf-8")
+
+    worktree = tmp_path / "results" / "round_1" / "worktrees" / "slot_0"
+    wt_src = worktree / "aiter" / "ops" / "moe.py"
+    wt_bench = worktree / "benchmarks" / "bench_moe.py"
+    wt_src.parent.mkdir(parents=True)
+    wt_bench.parent.mkdir(parents=True)
+    wt_src.write_text("def kernel():\n    return 'optimized'\n", encoding="utf-8")
+    wt_bench.write_text("CASE = 'optimized'\n", encoding="utf-8")
+
+    patch = tmp_path / "results" / "round_1" / "parallel_0" / "patch_1.patch"
+    patch.parent.mkdir(parents=True)
+    patch.write_text(
+        "diff --git a/aiter/ops/moe.py b/aiter/ops/moe.py\n"
+        "--- a/aiter/ops/moe.py\n"
+        "+++ b/aiter/ops/moe.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def kernel():\n"
+        "-    return 'base'\n"
+        "+    return 'optimized'\n"
+        "diff --git a/benchmarks/bench_moe.py b/benchmarks/bench_moe.py\n"
+        "--- a/benchmarks/bench_moe.py\n"
+        "+++ b/benchmarks/bench_moe.py\n"
+        "@@ -1 +1 @@\n"
+        "-CASE = 'base'\n"
+        "+CASE = 'optimized'\n",
+        encoding="utf-8",
+    )
+
+    attempt = {
+        "status": "completed",
+        "attempt_id": "geak0",
+        "backend": "geak",
+        "optimized_path": str(patch),
+        "backend_paths": {
+            "geak_per_task_best_patch": str(patch),
+            "geak_per_task_best_worktree": str(worktree),
+        },
+    }
+    verification = ko.build_verification(
+        _args(source_file=str(src), kernel_repo=str(repo)),
+        [attempt],
+        benchmark_available=True,
+    )
+
+    bundle = verification["best_artifact_bundle"]
+    assert verification["deploy_snapshot_dir"]
+    assert bundle["type"] == "patch_snapshot"
+    assert bundle["patch_path"] == str(patch)
+    assert bundle["repo_root"] == str(repo)
+    assert set(bundle["write_paths"]) == {"aiter/ops/moe.py", "benchmarks/bench_moe.py"}
+    assert Path(bundle["snapshot_dir"], "aiter", "ops", "moe.py").read_text(encoding="utf-8") == (
+        "def kernel():\n    return 'optimized'\n"
+    )
+    assert Path(bundle["snapshot_dir"], "benchmarks", "bench_moe.py").read_text(encoding="utf-8") == (
+        "CASE = 'optimized'\n"
+    )
+
+
 # GEAK prompt yaml patcher: rewrites a misleading task_runner.py example to placeholders; pin idempotency + fail-soft.
 
 
