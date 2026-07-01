@@ -49,6 +49,97 @@ def test_compatibility_filter_no_model_path_assumes_compatible(monkeypatch) -> N
     assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
+# -- unsupported_capability_reason (env-flag build probe) -----------------
+def _clear_cap_cache() -> None:
+    gr._CAP_PROBE_CACHE.clear()
+
+
+def test_capability_reason_noop_when_flag_absent(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    _clear_cap_cache()
+    # Probe must NOT even run when the flag isn't set on the variant.
+    monkeypatch.setattr(
+        gr,
+        "_probe_vllm_aiter_shared_expert_unsupported",
+        lambda: (_ for _ in ()).throw(AssertionError("probe should not run")),
+    )
+    assert gr.unsupported_capability_reason(_variant("plain")) is None
+
+
+def test_capability_reason_noop_for_non_vllm_framework(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    _clear_cap_cache()
+    v = _variant("se", envs={"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "1"})
+    assert gr.unsupported_capability_reason(v) is None
+
+
+def test_capability_reason_drops_when_module_missing(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    _clear_cap_cache()
+    monkeypatch.setattr(
+        gr,
+        "_probe_vllm_aiter_shared_expert_unsupported",
+        lambda: "missing module(s): vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe",
+    )
+    v = _variant("se", envs={"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "1"})
+    reason = gr.unsupported_capability_reason(v)
+    assert reason is not None and "rocm_aiter_fused_moe" in reason
+
+
+def test_capability_reason_falsey_flag_not_probed(monkeypatch) -> None:
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    _clear_cap_cache()
+    monkeypatch.setattr(
+        gr,
+        "_probe_vllm_aiter_shared_expert_unsupported",
+        lambda: (_ for _ in ()).throw(AssertionError("probe should not run")),
+    )
+    v = _variant("se", envs={"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "0"})
+    assert gr.unsupported_capability_reason(v) is None
+
+
+def test_probe_caches_ok_and_unsupported(monkeypatch) -> None:
+    _clear_cap_cache()
+    calls = {"n": 0}
+
+    class _Proc:
+        def __init__(self, out: str) -> None:
+            self.stdout = out
+            self.stderr = ""
+
+    def fake_run(*_a, **_k):
+        calls["n"] += 1
+        return _Proc(json.dumps({"status": "ok"}))
+
+    monkeypatch.setattr(gr.subprocess, "run", fake_run)
+    assert gr._probe_vllm_aiter_shared_expert_unsupported() is None
+    # Second call must hit the cache (no second subprocess).
+    assert gr._probe_vllm_aiter_shared_expert_unsupported() is None
+    assert calls["n"] == 1
+
+
+def test_probe_unknown_not_cached(monkeypatch) -> None:
+    _clear_cap_cache()
+
+    class _Proc:
+        stdout = json.dumps({"status": "unknown"})
+        stderr = ""
+
+    monkeypatch.setattr(gr.subprocess, "run", lambda *_a, **_k: _Proc())
+    assert gr._probe_vllm_aiter_shared_expert_unsupported() is None
+    assert "vllm" not in gr._CAP_PROBE_CACHE
+
+
+def test_probe_swallows_subprocess_error(monkeypatch) -> None:
+    _clear_cap_cache()
+
+    def boom(*_a, **_k):
+        raise OSError("no python3")
+
+    monkeypatch.setattr(gr.subprocess, "run", boom)
+    assert gr._probe_vllm_aiter_shared_expert_unsupported() is None
+
+
 # -- apply_runtime_benchmark_overrides ------------------------------------
 def test_runtime_overrides_model_precision_and_gpu_no_framework_agent(monkeypatch) -> None:
     monkeypatch.setenv("PRECISION", "fp8")
