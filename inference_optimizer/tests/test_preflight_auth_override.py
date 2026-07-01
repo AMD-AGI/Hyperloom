@@ -100,10 +100,13 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
         "OPENAI_BASE_URL",
         "https://gateway.example/api/v1/llm-proxy/v1",
     )
+    # A stale 127.0.0.1:4002 ANTHROPIC_BASE_URL is treated as unset and
+    # re-derived from OPENAI_BASE_URL (the only stale-URL force-rewrite path).
     monkeypatch.setenv(
         "ANTHROPIC_BASE_URL",
         "http://127.0.0.1:4002/api/v1/llm-proxy",
     )
+    # Key aliases start unset so SAFE_API_KEY fills them (gap-fill semantics).
     for name in (
         "OPENAI_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
@@ -113,7 +116,7 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
         "LLM_API_KEY",
         "AMD_LLM_API_KEY",
     ):
-        monkeypatch.setenv(name, "old-key")
+        monkeypatch.delenv(name, raising=False)
     for name in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
         monkeypatch.setenv(name, "http://127.0.0.1:4002/api/v1/llm-proxy/v1")
 
@@ -149,6 +152,77 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
     assert "127.0.0.1:4002" not in config_text
     assert '"primaryApiKey": "new-safe-key"' in config_text
     assert '"customApiUrl": "https://gateway.example/api/v1/llm-proxy"' in config_text
+
+
+def test_preflight_keeps_explicit_provider_keys_over_safe_key(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """Plan B: explicit provider keys win; SAFE_API_KEY only fills the gaps."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SAFE_API_KEY", "safe-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    # User-set provider keys for a true dual entrypoint.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-user")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
+    for name in ("ANTHROPIC_AUTH_TOKEN", "OOB_API_KEY", "GEAK_API_KEY", "LLM_API_KEY", "AMD_LLM_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    resolved = cli._preflight()
+
+    # Both base URLs are kept distinct (no derivation collapse).
+    assert resolved == ("https://api.anthropic.com", "https://api.openai.com/v1")
+    # Explicit provider keys are preserved.
+    assert cli.os.environ["OPENAI_API_KEY"] == "sk-openai-user"
+    assert cli.os.environ["ANTHROPIC_API_KEY"] == "sk-ant-user"
+    # Unset aliases are still gap-filled from SAFE_API_KEY.
+    assert cli.os.environ["ANTHROPIC_AUTH_TOKEN"] == "safe-key"
+    assert cli.os.environ["GEAK_API_KEY"] == "safe-key"
+
+
+def test_preflight_claude_config_uses_explicit_anthropic_key_over_safe(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """Dual entry: ~/.claude/config.json primaryApiKey is the explicit ANTHROPIC_API_KEY, not SAFE."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SAFE_API_KEY", "safe-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
+
+    cli._preflight()
+
+    config_text = (tmp_path / ".claude" / "config.json").read_text(encoding="utf-8")
+    assert '"primaryApiKey": "sk-ant-user"' in config_text
+    assert "safe-key" not in config_text
+    assert '"customApiUrl": "https://api.anthropic.com"' in config_text
+
+
+def test_preflight_anthropic_only_backfills_oob_geak_aliases(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """Anthropic-only entry still backfills OOB/GEAK/LLM_API_BASE from the resolved URL."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+
+    resolved = cli._preflight()
+
+    # OpenAI/Codex side reuses the Anthropic URL when no OpenAI URL is set.
+    assert resolved == ("https://api.anthropic.com", "https://api.anthropic.com")
+    for name in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+        assert cli.os.environ[name] == "https://api.anthropic.com"
 
 
 def test_preflight_preserves_operator_geak_tunnel_url(
@@ -535,7 +609,99 @@ def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
 
     assert args.claude_model == "claude-opus-4-7"
     assert "claude-opus-4-7" in catalog
-    assert "confirmed in gateway catalog" in capsys.readouterr().out
+
+
+def test_validate_claude_model_probes_anthropic_url_in_dual_entry(monkeypatch):
+    """Dual entry: the Claude catalog probe targets the Anthropic URL + key, not OpenAI."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
+    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    seen: dict[str, str] = {}
+
+    def _capture(**kw):
+        seen["base_url"] = kw.get("base_url", "")
+        seen["api_key"] = kw.get("api_key", "")
+        return {"claude-opus-4-7", "gpt-5.4"}
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
+    args = _make_args(claude_model="claude-opus-4-7")
+    cli._validate_and_resolve_claude_model(args, None)
+
+    assert seen["base_url"] == "https://api.anthropic.com"
+    assert seen["api_key"] == "sk-ant-user"
+
+
+def test_validate_claude_model_falls_back_to_openai_url_single_gateway(monkeypatch):
+    """Single gateway: with no ANTHROPIC_BASE_URL, the probe uses the OpenAI URL."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("SAFE_API_KEY", "safe-key")
+
+    seen: dict[str, str] = {}
+
+    def _capture(**kw):
+        seen["base_url"] = kw.get("base_url", "")
+        seen["api_key"] = kw.get("api_key", "")
+        return {"claude-opus-4-7", "gpt-5.4"}
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
+    args = _make_args(claude_model="claude-opus-4-7")
+    cli._validate_and_resolve_claude_model(args, None)
+
+    assert seen["base_url"] == "https://gateway.example/v1"
+    assert seen["api_key"] == "safe-key"
+
+
+def test_validate_claude_model_falls_back_to_openai_when_anthropic_probe_fails(monkeypatch):
+    """Dual entry: Anthropic catalog unreachable (native API) → retry OpenAI URL."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-user")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-user")
+
+    probed: list[str] = []
+
+    def _probe(**kw):
+        url = kw.get("base_url", "")
+        probed.append(url)
+        # Native Anthropic has no /models route -> None; OpenAI catalog works.
+        if "anthropic" in url:
+            return None
+        return {"claude-opus-4-7", "gpt-5.4"}
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _probe)
+    args = _make_args(claude_model="claude-opus-4-7")
+    catalog = cli._validate_and_resolve_claude_model(args, None)
+
+    assert probed == ["https://api.anthropic.com", "https://api.openai.com/v1"]
+    assert "claude-opus-4-7" in catalog
+
+
+def test_validate_claude_model_custom_model_warns_when_catalog_unreachable(monkeypatch, capsys):
+    """ALLOW_CUSTOM=1 + catalog unreachable → WARN and proceed (no sys.exit)."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "1")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
+
+    args = _make_args(claude_model="my-org/custom-claude")
+    result = cli._validate_and_resolve_claude_model(args, None)
+
+    assert result is None
+    assert args.claude_model == "my-org/custom-claude"
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "unreachable" in out
 
 
 def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys):
@@ -652,12 +818,26 @@ def test_probe_llm_catalog_returns_none_for_empty_base_url(monkeypatch):
 # _smoke_test_codex_model — WARN-only
 def test_smoke_test_codex_model_warns_when_missing(monkeypatch, capsys):
     args = _make_args(codex_model="gpt-99.9")
-    catalog = {"claude-opus-4-7", "gpt-5.4", "gpt-4.1"}
-    cli._smoke_test_codex_model(args, catalog)
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4", "gpt-4.1"})
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
     out = capsys.readouterr().out
     assert "WARNING" in out
-    assert "gpt-99.9" in out
-    assert "gpt-5.4" in out
+
+
+def test_smoke_test_codex_model_probes_openai_side(monkeypatch, capsys):
+    """Dual entry: Codex smoke probes the OpenAI URL, not the Anthropic one."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    seen: dict[str, str] = {}
+
+    def _capture(**kw):
+        seen["base_url"] = kw.get("base_url", "")
+        return {"gpt-5.4"}
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
+    args = _make_args(codex_model="gpt-5.4", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://api.anthropic.com", "https://api.openai.com/v1"))
+    assert seen["base_url"] == "https://api.openai.com/v1"
 
 
 def test_smoke_test_codex_model_skipped_when_unused(monkeypatch, capsys):
@@ -667,8 +847,12 @@ def test_smoke_test_codex_model_skipped_when_unused(monkeypatch, capsys):
         critic_mock=True,
         kernel_codex=False,
     )
-    catalog = {"claude-opus-4-7"}
-    cli._smoke_test_codex_model(args, catalog)
+
+    def _no_probe(**kw):
+        raise AssertionError("probe should not run when Codex is unused")
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
     out = capsys.readouterr().out
     assert "WARNING" not in out
     assert "gpt-totally-fake" not in out
@@ -682,26 +866,33 @@ def test_smoke_test_codex_model_skipped_when_no_kernel(monkeypatch, capsys):
         kernel_codex=True,
         no_kernel=True,
     )
-    catalog = {"claude-opus-4-7"}
-    cli._smoke_test_codex_model(args, catalog)
+
+    def _no_probe(**kw):
+        raise AssertionError("probe should not run when Codex is unused")
+
+    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
     out = capsys.readouterr().out
     assert "WARNING" not in out
 
 
-def test_smoke_test_codex_model_confirms_when_present(capsys):
+def test_smoke_test_codex_model_confirms_when_present(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4"})
     args = _make_args(codex_model="gpt-5.4", critic_mock=False)
-    catalog = {"claude-opus-4-7", "gpt-5.4"}
-    cli._smoke_test_codex_model(args, catalog)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
     out = capsys.readouterr().out
     assert "confirmed in gateway catalog" in out
     assert "WARNING" not in out
 
 
-def test_smoke_test_codex_model_no_op_on_probe_failure(capsys):
-    """If catalog_ids is None we silently skip; no spurious WARNs."""
+def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
+    """OpenAI-side catalog unreachable → WARN-only (does not block startup)."""
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
     args = _make_args(codex_model="gpt-5.4", critic_mock=False)
-    cli._smoke_test_codex_model(args, None)
-    assert capsys.readouterr().out == ""
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "unreachable" in out
 
 
 # Merged from test_v08_ir3_preflight.py

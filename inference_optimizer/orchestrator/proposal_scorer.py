@@ -175,7 +175,9 @@ class ProposalScorer:
     """Advisory multi-model scorer (see module docstring)."""
 
     models: tuple[str, ...] = DEFAULT_SCORER_MODELS
-    api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
+    # Scorer talks the OpenAI protocol, so prefer the OpenAI-side key/URL; the
+    # AMD single-gateway ANTHROPIC_* vars stay accepted as fallbacks below.
+    api_key_env: str = "OPENAI_API_KEY"
     base_url_env: str = "OPENAI_BASE_URL"
     # 4096 so reasoning raters (e.g. Kimi K2.6) can finish reasoning and still emit the scores JSON.
     max_completion_tokens: int = 4096
@@ -228,7 +230,11 @@ class ProposalScorer:
             from openai import AsyncOpenAI  # type: ignore[import-not-found]
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("openai SDK not installed; run `pip install openai>=1.50`") from exc
-        api_key = os.environ.get(self.api_key_env) or os.environ.get("OPENAI_API_KEY")
+        api_key = (
+            os.environ.get(self.api_key_env)
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        )
         if not api_key:
             raise RuntimeError(f"{self.api_key_env} not set in env (ProposalScorer cannot auth)")
         base_url = (
