@@ -732,13 +732,19 @@ def _apply_patch_no_git(
     except OSError as exc:
         return False, f"cannot read patch file: {exc}", []
 
+    framework_root_resolved = framework_root.resolve()
     backup_root.mkdir(parents=True, exist_ok=True)
     backups: list[dict[str, Any]] = []
     for old, new in patch_file_targets(patch_text):
         target_raw = new if (new and new != _PATCH_DEV_NULL) else old
         if not target_raw or target_raw == _PATCH_DEV_NULL:
             continue
-        target = framework_root / _strip_path_prefix(target_raw, detected_level)
+        rel_target = Path(_strip_path_prefix(target_raw, detected_level))
+        if rel_target.is_absolute() or ".." in rel_target.parts:
+            return False, f"patch target escapes framework root: {target_raw}", backups
+        target = (framework_root_resolved / rel_target).resolve()
+        if not _is_within(target, framework_root_resolved):
+            return False, f"patch target escapes framework root: {target_raw}", backups
         existed = target.exists()
         record: dict[str, Any] = {"target": str(target), "existed": existed, "backup_path": None}
         if existed:
