@@ -16,41 +16,57 @@ from inference_optimizer import cli
 # _validate_credentials
 @pytest.fixture
 def clean_creds_env(monkeypatch):
-    for var in ("SAFE_API_KEY", "OPENAI_BASE_URL"):
+    for var in (
+        "SAFE_API_KEY",
+        "OPENAI_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+    ):
         monkeypatch.delenv(var, raising=False)
     return monkeypatch
 
 
-def test_validate_credentials_passes_when_both_present(clean_creds_env):
+def test_validate_credentials_passes_legacy_single_gateway(clean_creds_env):
+    """Legacy AMD single-gateway pair (SAFE_API_KEY + OPENAI_BASE_URL) still passes."""
     clean_creds_env.setenv("SAFE_API_KEY", "sk-fake")
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     cli._validate_credentials()
 
 
-def test_validate_credentials_exits_2_when_safe_api_key_missing(
-    clean_creds_env,
-    capsys,
-):
-    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
-    with pytest.raises(SystemExit) as exc_info:
-        cli._validate_credentials()
-    assert exc_info.value.code == 2
-    err = capsys.readouterr().err
-    missing_line = err.split("Missing required credential(s):")[1].split("\n")[0]
-    assert "SAFE_API_KEY" in missing_line
-    assert "OPENAI_BASE_URL" not in missing_line
+def test_validate_credentials_passes_anthropic_only_entrypoint(clean_creds_env):
+    """Split entrypoint: only the Anthropic side configured is enough."""
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    clean_creds_env.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+    cli._validate_credentials()
 
 
-def test_validate_credentials_exits_2_when_openai_base_url_missing(
-    clean_creds_env,
-    capsys,
-):
+def test_validate_credentials_passes_openai_key_with_anthropic_url(clean_creds_env):
+    """A URL on one side + a key on the other still satisfies the check."""
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    clean_creds_env.setenv("OPENAI_API_KEY", "sk-openai-fake")
+    cli._validate_credentials()
+
+
+def test_validate_credentials_exits_2_when_no_base_url(clean_creds_env, capsys):
+    """A key without any base URL is rejected."""
     clean_creds_env.setenv("SAFE_API_KEY", "sk-fake")
     with pytest.raises(SystemExit) as exc_info:
         cli._validate_credentials()
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
-    assert "OPENAI_BASE_URL" in err
+    assert "base URL" in err
+
+
+def test_validate_credentials_exits_2_when_no_key(clean_creds_env, capsys):
+    """A base URL without any key is rejected."""
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
+    with pytest.raises(SystemExit) as exc_info:
+        cli._validate_credentials()
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "API key" in err
 
 
 def test_validate_credentials_lists_both_missing(clean_creds_env, capsys):
@@ -58,8 +74,8 @@ def test_validate_credentials_lists_both_missing(clean_creds_env, capsys):
         cli._validate_credentials()
     err = capsys.readouterr().err
     missing_line = err.split("Missing required credential(s):")[1].split("\n")[0]
-    assert "SAFE_API_KEY" in missing_line
-    assert "OPENAI_BASE_URL" in missing_line
+    assert "base URL" in missing_line
+    assert "API key" in missing_line
 
 
 def test_validate_credentials_no_bypass_paths(clean_creds_env):
@@ -68,6 +84,38 @@ def test_validate_credentials_no_bypass_paths(clean_creds_env):
     with pytest.raises(SystemExit) as exc_info:
         cli._validate_credentials()
     assert exc_info.value.code == 2
+
+
+# _resolve_llm_endpoints
+def test_resolve_llm_endpoints_legacy_openai_only(clean_creds_env):
+    """Only OPENAI_BASE_URL: Anthropic base is derived (trailing /v1 stripped)."""
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
+    anthropic_url, openai_url = cli._resolve_llm_endpoints()
+    assert openai_url == "https://gateway.example/v1"
+    assert anthropic_url == "https://gateway.example"
+
+
+def test_resolve_llm_endpoints_anthropic_only_reused_for_openai(clean_creds_env):
+    """Only ANTHROPIC_BASE_URL: the OpenAI/Codex side reuses the same URL."""
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    anthropic_url, openai_url = cli._resolve_llm_endpoints()
+    assert anthropic_url == "https://api.anthropic.com"
+    assert openai_url == "https://api.anthropic.com"
+
+
+def test_resolve_llm_endpoints_both_kept_distinct(clean_creds_env):
+    """Both set: each side is respected as-is (true dual entrypoint)."""
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    anthropic_url, openai_url = cli._resolve_llm_endpoints()
+    assert anthropic_url == "https://api.anthropic.com"
+    assert openai_url == "https://api.openai.com/v1"
+
+
+def test_resolve_llm_endpoints_neither_set_returns_empty(clean_creds_env):
+    anthropic_url, openai_url = cli._resolve_llm_endpoints()
+    assert anthropic_url == ""
+    assert openai_url == ""
 
 
 # _resolve_gpu_type
