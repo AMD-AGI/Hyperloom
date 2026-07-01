@@ -52,6 +52,9 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
+    tracelens_root = tmp_path / "TraceLens"
+    tracelens_root.mkdir()
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
     return make_session_dir()
 
 

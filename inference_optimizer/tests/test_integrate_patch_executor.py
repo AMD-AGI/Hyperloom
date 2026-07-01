@@ -614,3 +614,42 @@ def test_apply_patch_no_git_keep_and_revert(tmp_path: Path) -> None:
     _revert_patches_no_git(backups)
     restored = (framework_root / "src.py").read_text(encoding="utf-8")
     assert restored == original, "revert did not restore original content"
+
+
+def test_apply_patch_no_git_rejects_path_traversal_before_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    framework_root = tmp_path / "fw"
+    framework_root.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("SAFE\n", encoding="utf-8")
+    patch_file = tmp_path / "escape.patch"
+    patch_file.write_text(
+        "diff --git a/../outside.py b/../outside.py\n"
+        "--- a/../outside.py\n"
+        "+++ b/../outside.py\n"
+        "@@ -1 +1 @@\n"
+        "-SAFE\n"
+        "+PWNED\n",
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        # Simulate a patch implementation whose dry-run accepts the target so
+        # this test exercises Hyperloom's own boundary check before real apply.
+        if "--dry-run" in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        raise AssertionError("real patch apply must not run for escaping targets")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ok, err, backups = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
+
+    assert ok is False
+    assert "escapes framework root" in err
+    assert backups == []
+    assert outside.read_text(encoding="utf-8") == "SAFE\n"
+    assert len(calls) == 1
