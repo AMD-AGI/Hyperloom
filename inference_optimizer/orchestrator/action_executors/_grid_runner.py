@@ -2023,6 +2023,14 @@ def _parse_report(workspace: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _run_grid_warmup_enabled() -> bool:
+    """Whether ``run_grid`` should discard a cold warmup round when possible."""
+    raw = os.environ.get("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP")
+    if raw is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    return (raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 def _kill_stale_servers() -> None:
     """Deep-clean any lingering inference server processes + shared memory.
 
@@ -2156,6 +2164,7 @@ def _run_magpie(
     cwd: str,
     result_dir: str | None = None,
     soft_deadline_sec: float | None = None,
+    preclean: bool = True,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
 
@@ -2180,7 +2189,9 @@ def _run_magpie(
         tuple[int, str, str]: ``(returncode, stdout, stderr)``.
     """
     # Pre-clean lingering servers + shared memory (skip under pytest).
-    if not os.environ.get("PYTEST_CURRENT_TEST"):
+    # Disable this for lifecycle re-attach rounds; otherwise the warm server
+    # created by the discarded round is killed immediately before measurement.
+    if preclean and not os.environ.get("PYTEST_CURRENT_TEST"):
         _kill_stale_servers()
 
     env = os.environ.copy()
@@ -2254,6 +2265,8 @@ async def run_grid(
     result_dir: str | None = None,
     soft_deadline_sec: float | None = None,
     server_lifecycle: dict[str, Any] | None = None,
+    warmup_before_measure: bool | None = None,
+    preclean_before_run: bool = True,
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
@@ -2269,6 +2282,11 @@ async def run_grid(
     ``server_lifecycle`` (``{cleanup, pid_dir, port}``) enables Magpie's
     persistent-server reuse so a paired warm round can re-attach to a hot
     server; None keeps the legacy boot-per-variant behaviour.
+    ``warmup_before_measure`` defaults on via
+    ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP``: when no explicit
+    ``server_lifecycle`` is supplied and the YAML supports lifecycle reuse,
+    each variant gets a discarded warmup round followed by the returned hot
+    measurement round.
 
     Args:
         base_yaml_path (Path): Base Magpie YAML templated per variant.
@@ -2287,12 +2305,20 @@ async def run_grid(
             None/0 disables.
         server_lifecycle (dict[str, Any] | None): ``{cleanup, pid_dir, port}``
             enabling persistent-server reuse.
+        warmup_before_measure (bool | None): Whether to auto-run a discarded
+            warmup before returning a measured result. ``None`` resolves from
+            ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP``.
+        preclean_before_run (bool): Whether to pre-clean stale servers before
+            the measured Magpie launch. Reattach rounds must pass ``False``.
 
     Returns:
         list[VariantResult]: Per-variant results for every attempt, in order.
     """
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
+    if warmup_before_measure is None:
+        warmup_before_measure = _run_grid_warmup_enabled()
+    auto_warmup_requested = bool(warmup_before_measure and server_lifecycle is None)
     results: list[VariantResult] = []
 
     # Variant-boundary robustness pulse: a bounded deterministic tick after
@@ -2351,6 +2377,8 @@ async def run_grid(
             if not keep_going_on_failure:
                 break
             continue
+        lifecycle: dict[str, Any] = {"eligible": False}
+        auto_warmup = False
         try:
             cfg_path = _build_variant_yaml(
                 base_yaml_path,
@@ -2392,6 +2420,219 @@ async def run_grid(
             if not keep_going_on_failure:
                 break
             continue
+
+        if auto_warmup_requested:
+            try:
+                from ._server_lifecycle import resolve_lifecycle_params
+
+                lifecycle = resolve_lifecycle_params(cfg_path)
+                auto_warmup = bool(lifecycle.get("eligible"))
+                if auto_warmup:
+                    cfg_path = _build_variant_yaml(
+                        base_yaml_path,
+                        base_extra_args,
+                        variant,
+                        output_subdir=slot,
+                        model_path=model_path,
+                        gpu_type=gpu_type,
+                        benchmark_script=benchmark_script,
+                        server_lifecycle={
+                            "cleanup": True,
+                            "pid_dir": str(slot),
+                            "port": int(lifecycle.get("port") or 0),
+                        },
+                    )
+                else:
+                    log.info(
+                        "grid_runner: warmup-before-measure not eligible (%s); running single measured round.",
+                        lifecycle.get("reason") or "unknown",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "grid_runner: warmup-before-measure eligibility/materialization failed (%r); running single measured round.",
+                    exc,
+                )
+                auto_warmup = False
+
+        warmup_tput: float | None = None
+        if auto_warmup:
+            warmup_slot = slot / "warmup_round"
+            warmup_lifecycle = {
+                "cleanup": False,
+                "pid_dir": str(slot),
+                "port": int(lifecycle.get("port") or 0),
+            }
+            try:
+                warmup_cfg_path = _build_variant_yaml(
+                    base_yaml_path,
+                    base_extra_args,
+                    variant,
+                    output_subdir=warmup_slot,
+                    model_path=model_path,
+                    gpu_type=gpu_type,
+                    benchmark_script=benchmark_script,
+                    server_lifecycle=warmup_lifecycle,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: warmup_yaml_build_error: %r",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    exc,
+                )
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class="warmup_yaml_build_error",
+                    error_summary=repr(exc),
+                    extra_args=variant.extra_server_args,
+                )
+                results.append(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        error=f"warmup_yaml_build_error: {exc!r}",
+                        error_class="warmup_yaml_build_error",
+                        note=variant.note,
+                    )
+                )
+                await _pulse_after_variant(i)
+                if not keep_going_on_failure:
+                    break
+                continue
+
+            warmup_started_unix = time.time()
+            try:
+                warmup_rc, warmup_stdout, warmup_stderr = await asyncio.to_thread(
+                    _run_magpie,
+                    magpie_python=magpie_python,
+                    config_path=warmup_cfg_path,
+                    output_dir=warmup_slot,
+                    timeout_sec=variant_timeout_sec,
+                    cwd=cwd,
+                    result_dir=result_dir,
+                    soft_deadline_sec=None,
+                    preclean=True,
+                )
+            except subprocess.TimeoutExpired as exc:
+                from ._server_lifecycle import teardown_lifecycle_server
+
+                teardown_lifecycle_server(
+                    pid_dir=slot,
+                    framework=str(lifecycle.get("framework") or ""),
+                    port=int(lifecycle.get("port") or 0),
+                )
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: warmup timeout (timeout_sec=%d): %s",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    variant_timeout_sec,
+                    exc,
+                )
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class="warmup_magpie_timeout",
+                    error_summary=str(exc),
+                    extra_args=variant.extra_server_args,
+                )
+                results.append(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        error=f"warmup_timeout: {exc}",
+                        error_class="warmup_magpie_timeout",
+                        note=variant.note,
+                        runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
+                        nonfatal_warnings=["run_grid_warmup_round_failed"],
+                    )
+                )
+                await _pulse_after_variant(i)
+                if not keep_going_on_failure:
+                    break
+                continue
+
+            warmup_candidates = sorted(warmup_slot.glob("benchmark_*"))
+            warmup_workspace = warmup_candidates[-1] if warmup_candidates else warmup_slot
+            warmup_harvested = harvest_leaked_artifacts(
+                warmup_workspace,
+                subprocess_started_unix=warmup_started_unix,
+            )
+            warmup_report = _parse_report(warmup_workspace) if warmup_candidates else None
+            warmup_measurement = extract_benchmark_measurement(
+                warmup_report,
+                workspace=warmup_workspace,
+                subprocess_started_unix=warmup_started_unix,
+            )
+            if warmup_rc != 0 or not warmup_measurement.get("valid_measurement"):
+                from ._server_lifecycle import teardown_lifecycle_server
+
+                teardown_lifecycle_server(
+                    pid_dir=slot,
+                    framework=str(lifecycle.get("framework") or ""),
+                    port=int(lifecycle.get("port") or 0),
+                )
+                warmup_error = (
+                    (warmup_stderr or warmup_stdout)[-2000:]
+                    if warmup_rc != 0
+                    else "warmup benchmark_report missing valid throughput/completed requests"
+                )
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: warmup_round_failed (rc=%s): %s",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    warmup_rc,
+                    warmup_error[:200],
+                )
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class="warmup_round_failed",
+                    error_summary=warmup_error,
+                    extra_args=variant.extra_server_args,
+                )
+                results.append(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        workspace=str(warmup_workspace) if warmup_candidates else None,
+                        report_path=(
+                            str(warmup_workspace / "benchmark_report.json")
+                            if (warmup_workspace / "benchmark_report.json").exists()
+                            else None
+                        ),
+                        raw_result_path=warmup_measurement.get("raw_result_path"),
+                        reported_success=warmup_measurement.get("reported_success"),
+                        returncode=warmup_rc,
+                        error=warmup_error,
+                        error_class="warmup_round_failed",
+                        note=variant.note,
+                        runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
+                        nonfatal_warnings=[
+                            "run_grid_warmup_round_failed",
+                            *[f"harvested_leaked_artifact:{src}" for src, _ in warmup_harvested],
+                        ],
+                    )
+                )
+                await _pulse_after_variant(i)
+                if not keep_going_on_failure:
+                    break
+                continue
+            warmup_tput = warmup_measurement.get("output_throughput")
+            log.info(
+                "grid_runner: variant %s warmup tput=%.1f tok/s discarded; measuring hot round next",
+                variant.name,
+                warmup_tput or 0.0,
+            )
 
         from ._multi_node_env import log_mn_banner
 
@@ -2478,6 +2719,7 @@ async def run_grid(
                 cwd=cwd,
                 result_dir=result_dir,
                 soft_deadline_sec=soft_deadline_sec,
+                preclean=(False if auto_warmup else preclean_before_run),
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks so the variant slot captures whatever
@@ -2523,6 +2765,15 @@ async def run_grid(
             if not keep_going_on_failure:
                 break
             continue
+        finally:
+            if auto_warmup:
+                from ._server_lifecycle import teardown_lifecycle_server
+
+                teardown_lifecycle_server(
+                    pid_dir=slot,
+                    framework=str(lifecycle.get("framework") or ""),
+                    port=int(lifecycle.get("port") or 0),
+                )
 
         # Server-liveness watchdog fired: the variant's server engine/worker
         # bootstrap died but the parent process hung. Record a fast failure
@@ -2754,6 +3005,9 @@ async def run_grid(
             warnings.append("magpie_nonzero_after_valid_measurement")
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
+        if warmup_tput is not None:
+            warnings.append("run_grid_warmup_discarded_first")
+            warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
 
         if not measurement.get("valid_measurement"):
             if rc != 0:
