@@ -91,6 +91,7 @@ from .gpu_pool import (
     GPU_LEASE_TTL_GRACE,
     SpecialistGpuPool,
     resolve_gpu_specialist_devices,
+    resolve_whole_machine_devices,
 )
 from .resource_lock import (
     KNOWN_LANES,
@@ -647,6 +648,19 @@ class Coordinator:
                 int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0),
                 serving_tp=self._resolve_serving_tp(),
             ),
+        )
+        # Item J (framework-family whole-machine GPU): a SEPARATE pool over the
+        # *whole* node (serving cards NOT carved off, no gpu_specialist_capacity
+        # gate). A framework-authoring specialist (perf-framework / enablement)
+        # holds ``gpu_research_lane`` — mutually exclusive with every serving
+        # lane and capacity-1 — so while it runs no serving/bench/profile step
+        # and no other GPU specialist runs, making it safe to lease every card.
+        # It shares the ``gpu_leases`` table with ``gpu_specialist_pool``; the
+        # ``gpu_research_lane`` cap-1 mutex guarantees the two never hold cards
+        # at the same time, so there is no double-allocation across pools.
+        self.framework_gpu_pool = SpecialistGpuPool(
+            self.db,
+            gpu_ids=resolve_whole_machine_devices(),
         )
         # Dispatcher re-scan poll: while awaiting in-flight tasks, re-scan the
         # queue at this cadence so a queued GPU task starts the moment its lane
@@ -3529,6 +3543,9 @@ class Coordinator:
             "source": "coordinator_internal",
             "readonly": False,
             "notes": notes,
+            # Item J: request the whole machine so the authoring specialist can
+            # build + boot its patch in-agent. Empty on multi-node / no-GPU hosts.
+            **self._framework_gpu_params(),
         }
         try:
             await self._warm_specialist_params(params)
@@ -3540,11 +3557,15 @@ class Coordinator:
         idem = f"framework_agent_authoring:{batch_id}:{cand_id}"
         if reauthor_attempt > 0:
             idem = f"{idem}:reauthor:{int(reauthor_attempt)}"
+        # Item J: framework authoring runs on the whole machine (params carry
+        # needs_gpu); add gpu_research_lane + a budget-sourced TTL here since
+        # this internal dispatch bypasses intent_router.
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _spec_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             idempotency_key=idem,
-            requires_lanes=["research_lane"],
+            requires_lanes=lanes,
             allowed_tools=[
                 "Read",
                 "Grep",
@@ -3556,7 +3577,7 @@ class Coordinator:
                 "WebFetch",
             ],
             side_effects=["writes_results", "writes_patches"],
-            lease_ttl_sec=3600,
+            lease_ttl_sec=ttl,
         )
         # Livelock break (cross-resume): if the authoring specialist for this
         # candidate ALREADY exists in a TERMINAL state but the candidate still
@@ -3633,6 +3654,97 @@ class Coordinator:
             gap_cid,
         )
         return spec_tid
+
+    @staticmethod
+    def _coerce_needs_gpu(value: Any) -> bool:
+        """Coerce a params ``needs_gpu`` value (bool | str) to bool.
+
+        Matches the truthy set used by ``intent_router`` / the dispatcher so a
+        JSON-string ``"true"`` and a real ``True`` route identically.
+
+        Args:
+            value: The raw ``needs_gpu`` params value.
+
+        Returns:
+            bool: Whether the specialist requests a GPU lease.
+        """
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    def _framework_gpu_params(self) -> dict[str, Any]:
+        """Return the ``{needs_gpu, gpu_count}`` params for framework authoring.
+
+        Item J: every framework-family authoring specialist (perf-framework and
+        enablement) requests the **whole machine** so it can build → boot →
+        re-classify the failure signature in-agent instead of round-tripping
+        through ``integrate_patch`` for each attempt (ROCm/HIP recompiles are
+        expensive). ``gpu_count`` defaults to the whole-machine pool capacity;
+        the dispatcher routes framework-family tasks to ``framework_gpu_pool``.
+
+        Two hard preconditions gate the request (never a user flag):
+
+        * **single-node** — ``integrate_patch`` / serving is single-node and
+          enablement already no-ops on multi-node, so a whole-machine lease is
+          meaningless across nodes.
+        * **non-empty whole-machine pool** — if no cards are visible (CPU-only
+          host / test env) setting ``needs_gpu`` would deadlock the task in the
+          dispatcher waiting for a lease that can never be granted.
+
+        Returns:
+            dict: ``{"needs_gpu": True, "gpu_count": <n>}`` when both
+            preconditions hold, else ``{}`` (authoring falls back to the
+            research-lane-only, blind-authoring path).
+        """
+        try:
+            from .action_executors._multi_node_env import is_multi_node
+
+            if is_multi_node():
+                return {}
+        except Exception:  # noqa: BLE001 — treat probe failure as single-node
+            log.debug("framework GPU: multi-node probe failed", exc_info=True)
+        cap = int(getattr(self.framework_gpu_pool, "capacity", 0) or 0)
+        if cap <= 0:
+            return {}
+        return {"needs_gpu": True, "gpu_count": cap}
+
+    def _framework_authoring_lanes_ttl(
+        self, params: dict[str, Any], *, base_ttl_sec: int
+    ) -> tuple[list[str], int]:
+        """Resolve lanes + lease TTL for an internally-dispatched framework specialist.
+
+        Framework-authoring specialists (perf-framework + enablement) are created
+        directly via ``create_or_return_existing`` and therefore bypass
+        ``intent_router``. The ``needs_gpu → gpu_research_lane`` wiring that
+        ``intent_router`` applies to LLM-proposed specialists must be replicated
+        here (item J): when ``needs_gpu`` is set the task acquires the
+        serving-exclusive, cap-1 ``gpu_research_lane`` (in addition to
+        ``research_lane`` for LLM-concurrency accounting) and its lease TTL is
+        re-sourced from the GPU wall budget so the lane never expires mid-run and
+        lets serving reclaim the cards (iron law: kill ≤ gpu_lease TTL ≤
+        gpu_research_lane TTL).
+
+        Args:
+            params: The specialist params (checked for ``needs_gpu``).
+            base_ttl_sec: The default lane lease TTL (raised, never lowered, for
+                a GPU task).
+
+        Returns:
+            ``(lanes, ttl_sec)`` — ``["research_lane"]`` (+ ``gpu_research_lane``
+            when GPU) and the (possibly budget-raised) lease TTL.
+        """
+        lanes = ["research_lane"]
+        ttl = int(base_ttl_sec or 0)
+        if self._coerce_needs_gpu(params.get("needs_gpu")):
+            lanes.append("gpu_research_lane")
+            try:
+                ttl = self._gpu_lease_ttl_sec(ttl)
+            except Exception:  # noqa: BLE001 — fall back to the base TTL
+                log.exception(
+                    "framework GPU: gpu_research_lane TTL re-source failed; "
+                    "using base TTL",
+                )
+        return lanes, ttl
 
     def _build_enablement_specialist_params(
         self, launch_log: str, *, attempt: int = 0
@@ -3732,6 +3844,9 @@ class Coordinator:
             "source": "coordinator_internal",
             "readonly": False,
             "notes": notes,
+            # Item J: request the whole machine (build + boot + re-classify in
+            # the isolated worktree). Empty on multi-node / no-GPU hosts.
+            **self._framework_gpu_params(),
         }
 
     def _read_enablement_source_context(
@@ -3932,11 +4047,15 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — best-effort warmup
             log.debug("enablement: warm specialist params failed", exc_info=True)
         idem = f"enablement_authoring:{params.get('enablement_failure_kind', '')}:{attempt}"
+        # Item J: enablement authoring runs on the whole machine (params carry
+        # needs_gpu); add gpu_research_lane + a budget-sourced TTL here since
+        # this internal dispatch bypasses intent_router.
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             idempotency_key=idem,
-            requires_lanes=["research_lane"],
+            requires_lanes=lanes,
             allowed_tools=[
                 "Read",
                 "Grep",
@@ -3948,7 +4067,7 @@ class Coordinator:
                 "WebFetch",
             ],
             side_effects=["writes_results", "writes_patches"],
-            lease_ttl_sec=3600,
+            lease_ttl_sec=ttl,
         )
         state.enablement_dispatched = True
         state.enablement_attempts = attempt + 1
@@ -13373,13 +13492,34 @@ class Coordinator:
                     needs_gpu=needs_gpu,
                 )
                 if needs_gpu:
-                    # Default ``gpu_count`` to the serving TP so a TP-coupled
-                    # comm / decode-at-scale gap is reproducible on the real
-                    # topology (1 card can't bench it). The specialist may still
-                    # ask for fewer (single-card kernel probe) via explicit
-                    # ``gpu_count`` — that wins. Falls back to 1 when serving TP
-                    # is unknown.
-                    default_gpu_count = self._resolve_serving_tp() or 1
+                    # Item J: a framework-family authoring specialist
+                    # (``framework_agent_authoring``) leases the WHOLE machine
+                    # from ``framework_gpu_pool`` — the serving-disjoint carve is
+                    # bypassed (it holds the serving-exclusive gpu_research_lane,
+                    # so no serving runs concurrently) and the
+                    # ``gpu_specialist_capacity=0`` gate does not apply (that cap
+                    # only scopes the EXPLORE serving-disjoint pool). Everything
+                    # else (EXPLORE GPU specialists) is UNCHANGED: it leases from
+                    # the carved ``gpu_specialist_pool`` and defaults gpu_count to
+                    # the serving TP.
+                    is_framework_authoring = bool(
+                        params.get("framework_agent_authoring")
+                    )
+                    if is_framework_authoring:
+                        gpu_pool = self.framework_gpu_pool
+                        # Default to the whole machine; an explicit gpu_count
+                        # still wins (but never exceeds pool capacity, else
+                        # try_acquire can never grant it).
+                        default_gpu_count = gpu_pool.capacity or 1
+                    else:
+                        gpu_pool = self.gpu_specialist_pool
+                        # Default ``gpu_count`` to the serving TP so a TP-coupled
+                        # comm / decode-at-scale gap is reproducible on the real
+                        # topology (1 card can't bench it). The specialist may
+                        # still ask for fewer (single-card kernel probe) via
+                        # explicit ``gpu_count`` — that wins. Falls back to 1 when
+                        # serving TP is unknown.
+                        default_gpu_count = self._resolve_serving_tp() or 1
                     try:
                         gpu_count = int(params.get("gpu_count", default_gpu_count) or default_gpu_count)
                     except (TypeError, ValueError):
@@ -13390,7 +13530,9 @@ class Coordinator:
                     # up to TP so an explicit ``gpu_count=1`` from the prompt
                     # cannot strand a bench specialist on a single card. Pure
                     # microbench / profiling specialists set ``bench=false`` and
-                    # keep their explicit (possibly single-card) count.
+                    # keep their explicit (possibly single-card) count. Framework
+                    # authoring already takes the whole machine, so the floor is a
+                    # no-op there.
                     bench_raw = params.get("bench", False)
                     bench = (
                         bench_raw.strip().lower() in ("1", "true", "yes", "on")
@@ -13416,7 +13558,7 @@ class Coordinator:
                     # and in intent_router) so they cannot drift apart — the cards
                     # are never reclaimed while the agent is still computing.
                     gpu_ttl_sec = self._gpu_lease_ttl_sec(int(task.lease_ttl_sec or 0))
-                    gpu_lease = await self.gpu_specialist_pool.try_acquire(
+                    gpu_lease = await gpu_pool.try_acquire(
                         count=gpu_count,
                         holder_id=task.task_id,
                         task_id=task.task_id,
