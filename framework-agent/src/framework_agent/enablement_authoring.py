@@ -78,6 +78,7 @@ def _render_task_description(
     sig: FailureSignature,
     candidate_refs: Sequence[str],
     allowed_root_hints: Sequence[str],
+    source_context: str = "",
 ) -> str:
     """Render the specialist mandate text for an enablement failure.
 
@@ -86,6 +87,9 @@ def _render_task_description(
         sig: The classified failure signature.
         candidate_refs: Ranked bridging refs (best first).
         allowed_root_hints: Source-root families in scope.
+        source_context: Optional snippet of source lines near the offending
+            site, injected verbatim to ground the authoring sub-agent. Empty
+            omits the block.
 
     Returns:
         str: A multi-line prompt body for the authoring sub-agent.
@@ -97,12 +101,20 @@ def _render_task_description(
     )
     lines.append("")
     lines.append(f"FAILURE CLASS: {sig.kind} (confidence {sig.confidence:.2f}).")
+    if sig.secondary_kinds:
+        lines.append(f"SECONDARY FAILURE CLASSES (also matched): {', '.join(sig.secondary_kinds)}")
     if sig.offending_file:
         lines.append(f"OFFENDING FILE (best guess): {sig.offending_file}")
     if sig.offending_symbol:
         lines.append(f"OFFENDING SYMBOL: {sig.offending_symbol}")
     if sig.raw_excerpt:
         lines.append(f"ERROR EXCERPT: {sig.raw_excerpt}")
+    if source_context.strip():
+        lines.append("")
+        lines.append("SOURCE CONTEXT (near offending site):")
+        lines.append("```")
+        lines.append(source_context.rstrip("\n"))
+        lines.append("```")
     lines.append("")
     if candidate_refs:
         lines.append("CANDIDATE BRIDGING PRs / REFS (most relevant first):")
@@ -124,6 +136,7 @@ def build_mandate(
     *,
     signature: FailureSignature | None = None,
     candidate_refs: Sequence[str] = (),
+    source_context: str = "",
 ) -> EnablementMandate:
     """Build an :class:`EnablementMandate` from a request + candidates.
 
@@ -131,6 +144,8 @@ def build_mandate(
         req: The enablement request.
         signature: Pre-computed signature; defaults to ``req.signature``.
         candidate_refs: Ranked bridging refs to suggest (best first).
+        source_context: Optional source snippet near the offending site to
+            ground the authoring sub-agent (best-effort; empty omits it).
 
     Returns:
         EnablementMandate: The authoring contract, ready to hand to the
@@ -139,7 +154,7 @@ def build_mandate(
     sig = signature if signature is not None else req.signature
     hints: list[str] = [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
     refs = tuple(r for r in candidate_refs if r)
-    task = _render_task_description(req, sig, refs, hints)
+    task = _render_task_description(req, sig, refs, hints, source_context)
     return EnablementMandate(
         framework=req.framework,
         model=req.model,

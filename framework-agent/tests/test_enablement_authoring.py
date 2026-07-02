@@ -64,3 +64,18 @@ def test_empty_candidate_refs_filtered() -> None:
     """Blank refs are dropped."""
     mandate = build_mandate(_req(), candidate_refs=("", "PR:7", ""))
     assert mandate.candidate_refs == ("PR:7",)
+
+
+def test_source_context_rendered_when_provided() -> None:
+    """A non-empty source_context is injected under a SOURCE CONTEXT block."""
+    ctx = "  100| def resolve_arch(name):\n  101|     raise ValueError(name)"
+    mandate = build_mandate(_req(), source_context=ctx)
+    td = mandate.task_description
+    assert "SOURCE CONTEXT (near offending site):" in td
+    assert "raise ValueError(name)" in td
+
+
+def test_source_context_omitted_when_empty() -> None:
+    """No SOURCE CONTEXT block is rendered when context is empty/blank."""
+    mandate = build_mandate(_req(), source_context="   ")
+    assert "SOURCE CONTEXT" not in mandate.task_description
