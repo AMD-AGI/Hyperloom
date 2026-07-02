@@ -809,6 +809,10 @@ ensure_tracelens() {
       # place only after everything succeeds. Publishing before the ref pin (or
       # on a mid-clone crash) would leave an unpinned/half-cloned $TRACELENS_ROOT
       # that a concurrent reader (trace_analyze self-heal) treats as complete (#722).
+      # Keep this temp-clone+pin+atomic-rename in lockstep with the twin
+      # implementations: inference_optimizer/scripts/local_setup.sh
+      # (clone_or_update "atomic") and kernel-agent/tools/tracelens_analysis.py
+      # (_ensure_tracelens_checkout).
       mkdir -p "$(dirname "$TRACELENS_ROOT")"
       _tl_tmp="$(dirname "$TRACELENS_ROOT")/.$(basename "$TRACELENS_ROOT").clone.$$"
       rm -rf "$_tl_tmp"

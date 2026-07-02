@@ -4800,6 +4800,10 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
     We take the shared pod-local ``.install.lock`` next to the open-source root,
     double-check under the lock, then clone into a temp sibling and atomically
     rename into place so a partial clone is never observed.
+
+    Keep this temp-clone+pin+atomic-rename in lockstep with the twin
+    implementations: kernel-agent/scripts/install.sh (ensure_tracelens) and
+    inference_optimizer/scripts/local_setup.sh (clone_or_update "atomic").
     """
     tl_root = Path(tl_root)
     if _tracelens_checkout_complete(tl_root):

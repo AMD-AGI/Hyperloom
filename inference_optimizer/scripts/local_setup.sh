@@ -140,7 +140,9 @@ clone_or_update() {
   # When "atomic", a fresh clone + ref checkout happens in a temp sibling and is
   # renamed into place only after both succeed, so a concurrent reader never
   # sees a half-cloned/unpinned $dest (#722). Used for TraceLens, whose path is
-  # read live by trace_analyze.
+  # read live by trace_analyze. Keep in lockstep with the twin implementations:
+  # kernel-agent/scripts/install.sh (ensure_tracelens) and
+  # kernel-agent/tools/tracelens_analysis.py (_ensure_tracelens_checkout).
   local mode="${5:-}"
 
   if [ -d "${dest}/.git" ]; then
