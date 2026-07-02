@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from inference_optimizer.paths import make_session_dir
+
 
 @pytest.fixture(autouse=True)
 def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
@@ -60,3 +62,17 @@ def seed_target_analysis_marker(session_dir: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+@pytest.fixture
+def session_dir(tmp_path, monkeypatch) -> Path:
+    """A fresh session dir under an isolated ``USER_DATA_PATH``, seeded with the
+    ``no_target_gpu_configured`` target-analysis marker.
+
+    Shared across the test package; individual modules may still shadow it with
+    a local fixture when they need different seeding.
+    """
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    sd = make_session_dir()
+    seed_target_analysis_marker(sd)
+    return sd

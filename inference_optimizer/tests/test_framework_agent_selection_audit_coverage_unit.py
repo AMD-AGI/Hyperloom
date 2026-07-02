@@ -25,18 +25,7 @@ from inference_optimizer.orchestrator import phase_state as ps_mod
 from inference_optimizer.orchestrator.action_executors import framework_agent as fpr_mod
 from inference_optimizer.orchestrator.backends import Backend, MockBackend, ScriptedPlan
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.paths import make_session_dir
 from inference_optimizer.protocol.intent import Intent, IntentType
-
-
-@pytest.fixture
-def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    sd = make_session_dir()
-    from .conftest import seed_target_analysis_marker
-
-    seed_target_analysis_marker(sd)
-    return sd
 
 
 def _heartbeat() -> Intent:
