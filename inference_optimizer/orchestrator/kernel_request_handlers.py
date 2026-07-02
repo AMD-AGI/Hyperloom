@@ -469,13 +469,24 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     """Rebuild the pod-local TraceLens checkout if it vanished mid-run (#722).
 
     Only the installer-managed default path is healed; an explicit
-    ``TRACELENS_ROOT`` override is operator-maintained and must fail fast when
-    missing (mirrors kernel-agent/scripts/install.sh). Best-effort: any failure
-    is swallowed so the caller's normal validation produces the user-facing
-    error.
+    ``TRACELENS_ROOT`` override pointing elsewhere is operator-maintained and
+    must fail fast when missing (mirrors kernel-agent/scripts/install.sh).
+    Best-effort: any failure is swallowed so the caller's normal validation
+    produces the user-facing error.
+
+    NB: the default path is itself persisted as ``TRACELENS_ROOT`` in
+    kernel-agent.env.sh, so "env is set" is NOT a reliable override signal —
+    compare the resolved path against the installer default instead.
     """
-    if os.environ.get("TRACELENS_ROOT"):
-        return  # explicit operator override: never auto-clone
+    from inference_optimizer import paths
+
+    default_root = paths.open_source_root() / "TraceLens"
+    try:
+        is_default = Path(root).resolve() == default_root.resolve()
+    except OSError:
+        is_default = False
+    if not is_default:
+        return  # explicit operator override at a non-default path: never auto-clone
     try:
         tool = _kernel_agent_tool_path("tracelens_analysis.py")
         tools_dir = str(tool.parent)

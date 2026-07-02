@@ -1711,18 +1711,51 @@ class TestTracelensRootResolution:
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
-    def test_selfheal_skips_explicit_override(self, tmp_path, monkeypatch):
-        # Explicit TRACELENS_ROOT is operator-maintained: never auto-clone.
-        monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "operator-tl"))
+    def test_selfheal_skips_non_default_override(self, tmp_path, monkeypatch):
+        # An operator override at a NON-default path is never auto-cloned, even
+        # though TRACELENS_ROOT is set in env.
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        override = tmp_path / "operator-tl"
+        monkeypatch.setenv("TRACELENS_ROOT", str(override))
         called = {"n": 0}
 
         def _fake_ensure(root, *, log_path=None):
             called["n"] += 1
 
-        # If the tool module is importable, ensure it would NOT be invoked.
-        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "x.py")
-        krh._maybe_selfheal_tracelens_root(tmp_path / "operator-tl")
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "x.py")
+        krh._maybe_selfheal_tracelens_root(override)
         assert called["n"] == 0
+
+    def test_selfheal_runs_on_default_path_even_when_env_set(self, tmp_path, monkeypatch):
+        # #722: the default path is persisted as TRACELENS_ROOT in
+        # kernel-agent.env.sh, so "env set" must NOT be treated as an override.
+        # A missing default path must still attempt self-heal.
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        default_root = tmp_path / "podlocal" / "TraceLens"
+        monkeypatch.setenv("TRACELENS_ROOT", str(default_root))
+        called = {"n": 0, "root": None}
+
+        def _fake_ensure(root, *, log_path=None):
+            called["n"] += 1
+            called["root"] = Path(root)
+
+        # Route _kernel_agent_tool_path to a fake module exposing
+        # _ensure_tracelens_checkout so the handler's dynamic import hits it.
+        import sys as _sys
+        import types as _types
+
+        fake_mod = _types.ModuleType("tracelens_analysis")
+        fake_mod._ensure_tracelens_checkout = _fake_ensure  # type: ignore[attr-defined]
+        _sys.modules["tracelens_analysis"] = fake_mod
+        monkeypatch.setattr(
+            krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "tracelens_analysis.py"
+        )
+        try:
+            krh._maybe_selfheal_tracelens_root(default_root)
+        finally:
+            _sys.modules.pop("tracelens_analysis", None)
+        assert called["n"] == 1
+        assert called["root"] == default_root
 
 
 class TestKernelOptArtifactBundleRecording:
