@@ -218,13 +218,20 @@ def test_magpie_dir_is_pod_local_and_decoupled_from_user_data(tmp_path, monkeypa
     # Magpie resolves under the pod-local open-source root (mirrors install.sh),
     # NOT under $USER_DATA_PATH/runtime, so script + runtime agree on one checkout.
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "shared"))
-    monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
+    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
-    monkeypatch.setenv("TMPDIR", str(tmp_path / "podlocal"))
-    expected = tmp_path / "podlocal" / "hyperloom" / "open-source-repos"
+    expected = tmp_path / "podlocal"
     assert paths.open_source_root() == expected
     assert paths.magpie_dir() == expected / "Magpie"
     assert str(tmp_path / "shared") not in str(paths.magpie_dir())
+
+
+def test_open_source_root_defaults_to_opt_hyperloom_not_tmp(monkeypatch):
+    # #722: default must be the non-ephemeral pod-internal dir and must NOT
+    # follow TMPDIR/tmp (a tmp-reaper wiping /tmp mid-run broke trace_analyze).
+    monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
+    monkeypatch.setenv("TMPDIR", "/tmp/should-be-ignored")
+    assert paths.open_source_root() == Path("/opt/hyperloom/open-source-repos")
 
 
 def test_open_source_root_honours_explicit_override(tmp_path, monkeypatch):
@@ -245,9 +252,8 @@ def test_magpie_dir_honours_explicit_override(tmp_path, monkeypatch):
 # same checkout as install.sh even when TRACELENS_ROOT was not inherited.
 def test_tracelens_root_derives_from_open_source_root_when_env_unset(tmp_path, monkeypatch):
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-    monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
-    monkeypatch.setenv("TMPDIR", str(tmp_path / "podlocal"))
-    expected = tmp_path / "podlocal" / "hyperloom" / "open-source-repos" / "TraceLens"
+    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+    expected = tmp_path / "podlocal" / "TraceLens"
     assert paths.tracelens_root() == expected
 
 
