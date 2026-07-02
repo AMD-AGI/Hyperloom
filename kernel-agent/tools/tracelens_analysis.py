@@ -4821,8 +4821,10 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
     with lock_path.open("w") as lock_fh:
         try:
             fcntl.flock(lock_fh, fcntl.LOCK_EX)
-        except OSError:
-            pass
+        except OSError as exc:
+            # Lock unavailable (e.g. NFS without lockd): proceed unlocked. The
+            # atomic temp-clone + os.replace below still avoids a torn checkout.
+            append_log(log_path, f"TraceLens self-heal: flock failed ({exc}); proceeding without lock")
         # Re-check completeness under the lock: a concurrent healer/installer may
         # have finished the checkout while we waited for the lock.
         if _tracelens_checkout_complete(tl_root):

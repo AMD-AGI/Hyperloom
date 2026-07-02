@@ -1771,7 +1771,8 @@ class TestTracelensRootResolution:
 
     def test_selfheal_skips_non_default_override(self, tmp_path, monkeypatch):
         # An operator override at a NON-default path is never auto-cloned, even
-        # though TRACELENS_ROOT is set in env.
+        # though TRACELENS_ROOT is set in env. Inject a counting fake module so a
+        # regression that reaches _ensure_tracelens_checkout would trip the assert.
         monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
         override = tmp_path / "operator-tl"
         monkeypatch.setenv("TRACELENS_ROOT", str(override))
@@ -1780,8 +1781,19 @@ class TestTracelensRootResolution:
         def _fake_ensure(root, *, log_path=None):
             called["n"] += 1
 
-        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "x.py")
-        krh._maybe_selfheal_tracelens_root(override)
+        import sys as _sys
+        import types as _types
+
+        fake_mod = _types.ModuleType("tracelens_analysis")
+        fake_mod._ensure_tracelens_checkout = _fake_ensure  # type: ignore[attr-defined]
+        _sys.modules["tracelens_analysis"] = fake_mod
+        monkeypatch.setattr(
+            krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "tracelens_analysis.py"
+        )
+        try:
+            krh._maybe_selfheal_tracelens_root(override)
+        finally:
+            _sys.modules.pop("tracelens_analysis", None)
         assert called["n"] == 0
 
     def test_selfheal_runs_on_default_path_even_when_env_set(self, tmp_path, monkeypatch):
