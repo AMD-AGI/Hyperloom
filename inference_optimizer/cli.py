@@ -2920,6 +2920,7 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     from .orchestrator.phase_state import (
         PHASE_CLOSE,
         PHASE_EXPLORE,
+        PHASE_FRAMEWORK_AGENT,
         PHASE_KERNEL_AGENT,
         PHASE_PRELUDE,
         PHASE_SWEEP,
@@ -2928,6 +2929,7 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     phase_budget_pct: dict[str, float] = {}
     for cli_field, phase_name in (
         ("phase_budget_prelude_pct", PHASE_PRELUDE),
+        ("phase_budget_framework_pct", PHASE_FRAMEWORK_AGENT),
         ("phase_budget_explore_pct", PHASE_EXPLORE),
         ("phase_budget_kernel_pct", PHASE_KERNEL_AGENT),
         ("phase_budget_sweep_pct", PHASE_SWEEP),
@@ -5321,6 +5323,14 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03.",
+    )
+    opt.add_argument(
+        "--max-minutes-framework-pct",
+        "--phase-budget-framework-pct",
+        dest="phase_budget_framework_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for FRAMEWORK_AGENT. Default: 0.15.",
     )
     opt.add_argument(
         "--max-minutes-explore-pct",
