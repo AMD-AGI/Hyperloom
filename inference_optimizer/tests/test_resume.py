@@ -564,3 +564,116 @@ class TestN24KernelAgentEnvHardFail:
         import os as _os
 
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/custom"
+
+
+# TraceLens root env-propagation regression (issue #722): a stale/placeholder
+# TRACELENS_ROOT inherited by the coordinator must be corrected from the
+# installer-written env file, and unedited template placeholders must be
+# treated as unset, so trace_analyze never falls back to an empty pod-local dir.
+class TestTracelensRootEnvCorrection:
+    @pytest.fixture(autouse=True)
+    def _isolate_env(self, monkeypatch):
+        for var in (
+            "HYPERLOOM_KERNEL_AGENT_ROOT",
+            "KERNEL_AGENT_ENV",
+            "USER_DATA_PATH",
+            "TRACELENS_ROOT",
+            "MAGPIE_PATH",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+    def _write_env_file(self, tmp_path, tracelens_dir):
+        runtime = tmp_path / "runtime"
+        runtime.mkdir(exist_ok=True)
+        (runtime / "kernel-agent.env.sh").write_text(
+            "export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\n"
+            f"export TRACELENS_ROOT='{tracelens_dir}'\n",
+            encoding="utf-8",
+        )
+
+    def test_corrects_invalid_inherited_root_from_env_file(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Root set + inherited TRACELENS_ROOT points nowhere → corrected from file."""
+        from inference_optimizer import cli
+
+        good = tmp_path / "deps" / "TraceLens"
+        good.mkdir(parents=True)
+        self._write_env_file(tmp_path, good)
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "ghost" / "TraceLens"))
+
+        cli._load_kernel_agent_env_fallback()
+
+        import os as _os
+
+        assert _os.environ["TRACELENS_ROOT"] == str(good)
+        assert "TRACELENS_ROOT" in capsys.readouterr().err
+
+    def test_keeps_valid_inherited_root(self, tmp_path, monkeypatch):
+        """A valid inherited TRACELENS_ROOT wins over the env file (env-wins)."""
+        from inference_optimizer import cli
+
+        file_dir = tmp_path / "file" / "TraceLens"
+        file_dir.mkdir(parents=True)
+        inherited = tmp_path / "inherited" / "TraceLens"
+        inherited.mkdir(parents=True)
+        self._write_env_file(tmp_path, file_dir)
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        monkeypatch.setenv("TRACELENS_ROOT", str(inherited))
+
+        cli._load_kernel_agent_env_fallback()
+
+        import os as _os
+
+        assert _os.environ["TRACELENS_ROOT"] == str(inherited)
+
+    def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch):
+        """MAGPIE_PATH is out of scope: a merely-existing non-checkout dir in the
+        env file must NOT be promoted to an explicit MAGPIE_PATH override."""
+        from inference_optimizer import cli
+
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        magpie_dir = tmp_path / "not-a-magpie-checkout"
+        magpie_dir.mkdir()
+        (runtime / "kernel-agent.env.sh").write_text(
+            "export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\n"
+            f"export MAGPIE_PATH='{magpie_dir}'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+
+        cli._load_kernel_agent_env_fallback()
+
+        import os as _os
+
+        assert _os.environ.get("MAGPIE_PATH") is None
+
+    def test_placeholder_path_to_your_is_unset(self):
+        from inference_optimizer import cli
+
+        assert cli._is_placeholder_tracelens_path("/path/to/your/TraceLens") is True
+        assert cli._is_placeholder_tracelens_path("<your-tracelens>") is True
+        assert cli._is_placeholder_tracelens_path("/tmp/hyperloom/TraceLens") is False
+
+    def test_check_root_exits_when_set_but_missing(self, tmp_path, monkeypatch):
+        from inference_optimizer import cli
+
+        monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "ghost"))
+        with pytest.raises(SystemExit) as excinfo:
+            cli._check_tracelens_root_exists()
+        assert excinfo.value.code == 2
+
+    def test_check_root_noop_when_valid_or_unset(self, tmp_path, monkeypatch):
+        from inference_optimizer import cli
+
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+        cli._check_tracelens_root_exists()  # unset → no raise
+        good = tmp_path / "TraceLens"
+        good.mkdir()
+        monkeypatch.setenv("TRACELENS_ROOT", str(good))
+        cli._check_tracelens_root_exists()  # valid → no raise
