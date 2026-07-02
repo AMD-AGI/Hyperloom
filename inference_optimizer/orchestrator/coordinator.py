@@ -4896,16 +4896,26 @@ class Coordinator:
         self._record_phase_entry_evidence(
             gemm_tuning={"status": "running", "source": "kernel_entry_auto"},
         )
+        run_gemm_tuning_handler = None
         try:
             from .kernel_request_handlers import run_gemm_tuning_handler
 
-            result = await run_gemm_tuning_handler(
-                {
-                    "task_id": "kernel_entry_gemm_tuning",
-                    "reason": "kernel_entry_auto",
-                },
-                session_dir=self.session_dir,
-            )
+            if self._bf16_dense_gemm_fallback_pending():
+                log.info(
+                    "KERNEL entry: resuming pending bf16 dense GEMM fallback "
+                    "after prior forge fp8 no-candidate result"
+                )
+                result = await self._run_bf16_dense_gemm_fallback(
+                    run_gemm_tuning_handler
+                )
+            else:
+                result = await run_gemm_tuning_handler(
+                    {
+                        "task_id": "kernel_entry_gemm_tuning",
+                        "reason": "kernel_entry_auto",
+                    },
+                    session_dir=self.session_dir,
+                )
         except Exception as exc:  # noqa: BLE001
             log.exception("KERNEL entry GEMM tuning failed")
             result = {
@@ -4915,6 +4925,21 @@ class Coordinator:
                 "error": repr(exc),
             }
         await self._handle_gemm_tuning_result(result)
+
+        if (
+            run_gemm_tuning_handler is not None
+            and self._should_run_bf16_dense_gemm_fallback(result)
+            and str(result.get("decision") or "").strip().upper() != "KEEP"
+        ):
+            log.info(
+                "KERNEL entry: forge fp8 GEMM tuning found no candidate; "
+                "trying bf16 dense fallback"
+            )
+            result = await self._run_bf16_dense_gemm_fallback(
+                run_gemm_tuning_handler
+            )
+            await self._handle_gemm_tuning_result(result)
+
         status = str(result.get("status") or "unknown")
         await self.bus.append_and_seq(
             Message.new(
@@ -4943,6 +4968,128 @@ class Coordinator:
         await self._maybe_reprofile_for_kernel()
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
+
+    async def _run_bf16_dense_gemm_fallback(
+        self,
+        run_gemm_tuning_handler: Callable[..., Any],
+    ) -> dict[str, Any]:
+        """Run the single bf16 dense fallback and stamp retry provenance."""
+        payload = {
+            "task_id": "kernel_entry_gemm_tuning_bf16_fallback",
+            "reason": "fp8_no_improvement_bf16_fallback",
+            "precision": "bf16",
+            "tuner": "sglang_dense_bf16",
+        }
+        try:
+            result = await run_gemm_tuning_handler(
+                payload,
+                session_dir=self.session_dir,
+            )
+            if not isinstance(result, dict):
+                result = {
+                    "status": "failed",
+                    "decision": "REVERT",
+                    "error": "non-dict bf16 fallback result",
+                }
+        except Exception as exc:  # noqa: BLE001
+            log.exception("KERNEL entry GEMM bf16 fallback failed")
+            result = {
+                "status": "failed",
+                "decision": "REVERT",
+                "error_class": exc.__class__.__name__,
+                "error": repr(exc),
+            }
+        result.setdefault("task_id", payload["task_id"])
+        result.setdefault("reason", payload["reason"])
+        result.setdefault("source", payload["reason"])
+        result.setdefault("backend", "forge")
+        result.setdefault("precision", "bf16")
+        result.setdefault("framework", getattr(self.shared_state, "framework", ""))
+        return result
+
+    def _should_run_bf16_dense_gemm_fallback(self, result: dict[str, Any]) -> bool:
+        """Return True when a forge fp8 run should try bf16 dense GEMM tuning.
+
+        Recent production runs showed the automatic KERNEL-entry GEMM step can
+        stop after a single fp8 a8w8/a8w8_blockscale no-op. Historical wins came
+        from a follow-up ``sglang_dense_bf16`` run, so make that fallback
+        deterministic when the fp8 tuner produced no E2E-validatable candidate.
+        """
+        if not isinstance(result, dict):
+            return False
+        if str(result.get("backend") or "").strip().lower() != "forge":
+            return False
+        if str(result.get("precision") or "").strip().lower() != "fp8":
+            return False
+        framework = str(
+            result.get("framework") or getattr(self.shared_state, "framework", "") or ""
+        ).strip().lower()
+        if framework != "sglang":
+            return False
+        if str(result.get("micro_decision") or "").strip().lower() != "no_improvement":
+            return False
+        if result.get("recommended_env") or result.get("extra_envs"):
+            return False
+        for tuner in result.get("tuners_run") or []:
+            if not isinstance(tuner, dict):
+                continue
+            if str(tuner.get("status") or "").strip().lower() != "ok":
+                continue
+            try:
+                improved = int(tuner.get("improved_shapes") or 0)
+            except (TypeError, ValueError):
+                improved = 0
+            if improved > 0 and str(tuner.get("env_var") or "").strip() and str(
+                tuner.get("env_value") or ""
+            ).strip():
+                return False
+        return True
+
+    def _bf16_dense_gemm_fallback_pending(self) -> bool:
+        """Return True when a recorded fp8 no-op still needs its bf16 retry."""
+        last = getattr(self.shared_state, "last_gemm_tuning", {}) or {}
+        return (
+            self._should_run_bf16_dense_gemm_fallback(last)
+            and not self._bf16_dense_gemm_fallback_attempted()
+        )
+
+    def _bf16_dense_gemm_fallback_attempted(self) -> bool:
+        """Detect whether the bf16 dense fallback has already been attempted."""
+        attempts: list[Any] = []
+        last = getattr(self.shared_state, "last_gemm_tuning", {}) or {}
+        if isinstance(last, dict):
+            attempts.append(last)
+        attempts.extend(getattr(self.shared_state, "gemm_tuning_attempts", None) or [])
+        return any(
+            self._is_bf16_dense_gemm_fallback_attempt(entry)
+            for entry in attempts
+            if isinstance(entry, dict)
+        )
+
+    @staticmethod
+    def _is_bf16_dense_gemm_fallback_attempt(entry: dict[str, Any]) -> bool:
+        """Identify the fallback attempt across old and newly stamped records."""
+        markers = {
+            "kernel_entry_gemm_tuning_bf16_fallback",
+            "fp8_no_improvement_bf16_fallback",
+        }
+        for key in ("task_id", "reason", "source"):
+            if str(entry.get(key) or "").strip() in markers:
+                return True
+        if "kernel_entry_gemm_tuning_bf16_fallback" in str(
+            entry.get("workspace") or ""
+        ):
+            return True
+        if str(entry.get("precision") or "").strip().lower() != "bf16":
+            return False
+        if str(entry.get("tuner") or "").strip() == "sglang_dense_bf16":
+            return True
+        for tuner in entry.get("tuners_run") or []:
+            if not isinstance(tuner, dict):
+                continue
+            if str(tuner.get("tuner") or "").strip() == "sglang_dense_bf16":
+                return True
+        return False
 
     @staticmethod
     def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
@@ -9884,6 +10031,8 @@ class Coordinator:
             return False
         last = getattr(ss, "last_gemm_tuning", {}) or {}
         status = str(last.get("status") or "").strip().lower()
+        if self._bf16_dense_gemm_fallback_pending():
+            return True
         return status not in {
             "ok",
             "succeeded",
