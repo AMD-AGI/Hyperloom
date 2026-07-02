@@ -161,6 +161,251 @@ class TestPromoteGemmTuningKeep:
         assert len(coord.shared_state.optimization_stack) == 1
 
 
+class TestBf16DenseFallback:
+    def test_fallback_predicate_requires_forge_sglang_fp8_no_candidate(self, tmp_path):
+        coord = _coord(tmp_path, framework="sglang")
+
+        assert coord._should_run_bf16_dense_gemm_fallback(
+            {
+                "backend": "forge",
+                "precision": "fp8",
+                "framework": "sglang",
+                "micro_decision": "no_improvement",
+                "tuners_run": [
+                    {
+                        "status": "no_improvement",
+                        "tuner": "a8w8",
+                        "improved_shapes": 0,
+                    }
+                ],
+            }
+        )
+
+    def test_fallback_predicate_skips_existing_candidate(self, tmp_path):
+        coord = _coord(tmp_path, framework="sglang")
+
+        assert not coord._should_run_bf16_dense_gemm_fallback(
+            {
+                "backend": "forge",
+                "precision": "fp8",
+                "framework": "sglang",
+                "micro_decision": "candidate",
+                "recommended_env": {"AITER_CONFIG_GEMM_A8W8": "/tmp/tuned.csv"},
+                "tuners_run": [
+                    {
+                        "status": "ok",
+                        "tuner": "a8w8",
+                        "improved_shapes": 4,
+                        "env_var": "AITER_CONFIG_GEMM_A8W8",
+                        "env_value": "/tmp/tuned.csv",
+                    }
+                ],
+            }
+        )
+
+    def test_fallback_predicate_skips_candidate_reverted_by_e2e(self, tmp_path):
+        coord = _coord(tmp_path, framework="sglang")
+
+        assert not coord._should_run_bf16_dense_gemm_fallback(
+            {
+                "backend": "forge",
+                "precision": "fp8",
+                "framework": "sglang",
+                "micro_decision": "candidate_no_e2e_gain",
+                "e2e_validated": True,
+                "e2e_results": {"kept": [], "reverted": [{"tuner": "a8w8"}]},
+            }
+        )
+
+    def test_fallback_pending_resumes_terminal_fp8_no_candidate(
+        self, tmp_path, monkeypatch
+    ):
+        coord = _coord(
+            tmp_path,
+            framework="sglang",
+            precision="fp8",
+            last_gemm_tuning={
+                "status": "ok",
+                "decision": "REVERT",
+                "backend": "forge",
+                "precision": "fp8",
+                "framework": "sglang",
+                "micro_decision": "no_improvement",
+                "tuners_run": [{"status": "no_improvement", "tuner": "a8w8"}],
+            },
+        )
+        monkeypatch.setattr(krh_mod, "_resolve_gemm_tuning_backend", lambda _p: "forge")
+
+        assert coord._bf16_dense_gemm_fallback_pending() is True
+        assert coord._gemm_tuning_required_before_kernel_opt() is True
+
+        coord.shared_state.gemm_tuning_attempts.append(
+            {
+                "status": "complete",
+                "decision": "REVERT",
+                "backend": "forge",
+                "precision": "bf16",
+                "workspace": str(
+                    tmp_path / "runs/gemm_tuning/kernel_entry_gemm_tuning_bf16_fallback"
+                ),
+                "tuners_run": [{"tuner": "sglang_dense_bf16"}],
+            }
+        )
+
+        assert coord._bf16_dense_gemm_fallback_pending() is False
+        assert coord._gemm_tuning_required_before_kernel_opt() is False
+
+    @pytest.mark.asyncio
+    async def test_kernel_entry_runs_bf16_dense_fallback_after_fp8_no_improvement(
+        self, tmp_path, monkeypatch
+    ):
+        coord = _coord(tmp_path, framework="sglang")
+        coord.bus = type(
+            "Bus",
+            (),
+            {"append_and_seq": staticmethod(lambda *_args, **_kwargs: None)},
+        )()
+
+        async def _append_and_seq(*_args, **_kwargs):
+            return None
+
+        coord.bus.append_and_seq = _append_and_seq
+        coord._kernel_enabled = lambda: True
+        coord._perfskills_enabled = lambda: False
+        coord._gemm_tuning_required_before_kernel_opt = lambda: True
+        coord._record_phase_entry_evidence = lambda **_kwargs: None
+        coord._should_continue_kernel_after_gemm = lambda: False
+
+        async def _noop(*_args, **_kwargs):
+            return None
+
+        coord._maybe_reprofile_for_kernel = _noop
+
+        calls: list[dict] = []
+        responses = [
+            {
+                "status": "ok",
+                "decision": "REVERT",
+                "backend": "forge",
+                "engine": "forge",
+                "precision": "fp8",
+                "framework": "sglang",
+                "micro_decision": "no_improvement",
+                "tuners_run": [
+                    {
+                        "status": "no_improvement",
+                        "tuner": "a8w8",
+                        "improved_shapes": 0,
+                    }
+                ],
+            },
+            {
+                "status": "ok",
+                "decision": "REVERT",
+                "backend": "forge",
+                "engine": "forge",
+                "precision": "bf16",
+                "framework": "sglang",
+                "micro_decision": "no_improvement",
+            },
+        ]
+
+        async def _fake_run_gemm(payload, *, session_dir):
+            assert session_dir == tmp_path
+            calls.append(payload)
+            return dict(responses[len(calls) - 1])
+
+        monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
+
+        await coord._on_enter_kernel(from_phase="EXPLORE")
+
+        assert [c["task_id"] for c in calls] == [
+            "kernel_entry_gemm_tuning",
+            "kernel_entry_gemm_tuning_bf16_fallback",
+        ]
+        assert calls[1]["precision"] == "bf16"
+        assert calls[1]["tuner"] == "sglang_dense_bf16"
+        assert coord.shared_state.last_gemm_tuning["precision"] == "bf16"
+
+    @pytest.mark.asyncio
+    async def test_kernel_entry_resumes_pending_bf16_fallback_without_rerunning_fp8(
+        self, tmp_path, monkeypatch
+    ):
+        coord = _coord(
+            tmp_path,
+            framework="sglang",
+            precision="fp8",
+            last_gemm_tuning={
+                "status": "ok",
+                "decision": "REVERT",
+                "backend": "forge",
+                "precision": "fp8",
+                "framework": "sglang",
+                "micro_decision": "no_improvement",
+                "tuners_run": [{"status": "no_improvement", "tuner": "a8w8"}],
+            },
+        )
+        coord.bus = type("Bus", (), {})()
+
+        async def _append_and_seq(*_args, **_kwargs):
+            return None
+
+        async def _noop(*_args, **_kwargs):
+            return None
+
+        coord.bus.append_and_seq = _append_and_seq
+        coord._kernel_enabled = lambda: True
+        coord._perfskills_enabled = lambda: False
+        coord._record_phase_entry_evidence = lambda **_kwargs: None
+        coord._should_continue_kernel_after_gemm = lambda: False
+        coord._maybe_reprofile_for_kernel = _noop
+        monkeypatch.setattr(krh_mod, "_resolve_gemm_tuning_backend", lambda _p: "forge")
+
+        calls: list[dict] = []
+
+        async def _fake_run_gemm(payload, *, session_dir):
+            assert session_dir == tmp_path
+            calls.append(payload)
+            return {
+                "status": "ok",
+                "decision": "REVERT",
+                "backend": "forge",
+                "engine": "forge",
+                "precision": "bf16",
+                "framework": "sglang",
+                "micro_decision": "no_improvement",
+            }
+
+        monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
+
+        await coord._on_enter_kernel(from_phase="EXPLORE")
+
+        assert [c["task_id"] for c in calls] == [
+            "kernel_entry_gemm_tuning_bf16_fallback"
+        ]
+        assert calls[0]["precision"] == "bf16"
+        assert coord.shared_state.last_gemm_tuning["task_id"] == (
+            "kernel_entry_gemm_tuning_bf16_fallback"
+        )
+        assert coord._bf16_dense_gemm_fallback_pending() is False
+
+    @pytest.mark.asyncio
+    async def test_bf16_fallback_failure_is_recorded_as_attempt(self, tmp_path):
+        coord = _coord(tmp_path, framework="sglang")
+
+        async def _raise(*_args, **_kwargs):
+            raise RuntimeError("fallback boom")
+
+        result = await coord._run_bf16_dense_gemm_fallback(_raise)
+
+        assert result["status"] == "failed"
+        assert result["decision"] == "REVERT"
+        assert result["task_id"] == "kernel_entry_gemm_tuning_bf16_fallback"
+        assert result["source"] == "fp8_no_improvement_bf16_fallback"
+        assert result["precision"] == "bf16"
+        assert coord._is_bf16_dense_gemm_fallback_attempt(result) is True
+
+
 def _eligible_coord(tmp_path, monkeypatch, **overrides):
     """Coordinator wired for a CK-switch-eligible forge workload.
 
