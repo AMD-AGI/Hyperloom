@@ -13862,13 +13862,13 @@ class Coordinator:
         audit_extras: dict[str, Any] = {}
         if task_kind == "baseline":
             tput = result.get("output_throughput")
+            warmup_anchor = result.get("warmup_round_tput")
             if isinstance(tput, (int, float)) and tput > 0:
                 # Baseline's conclusion contract is the hot measure round:
                 # BaselineExecutor already discards the cold first round and
                 # returns the second round as ``output_throughput``. Keep the
                 # discarded value only as an audit field so leaderboard/report
                 # gain math never mixes cold-before with hot-after.
-                warmup_anchor = result.get("warmup_round_tput")
                 if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
                     self.shared_state.baseline_tput = float(tput)
                     self.shared_state.baseline_cold_tput = float(warmup_anchor)
