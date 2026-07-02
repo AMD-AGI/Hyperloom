@@ -464,6 +464,13 @@ class SharedState:
     # by disabling cuda-graph capture (framework-correct flag injected by the
     # BaselineExecutor). Set on failure, consumed by BaselineExecutor.
     baseline_eager_fallback: bool = False
+    # Enablement path (framework-agent): when baseline cannot even launch, the
+    # captured launch/traceback text is stashed here so the FRAMEWORK pump can
+    # classify the failure and dispatch an enablement_specialist authoring task
+    # (gated on RUNNABILITY, not throughput). ``enablement_dispatched`` guards
+    # the one-shot dispatch so the pump does not re-enqueue every tick.
+    enablement_launch_log: str = ""
+    enablement_dispatched: bool = False
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.

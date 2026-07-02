@@ -1433,6 +1433,68 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
+        # Stage 5 (enablement): RUNNABILITY gate, not throughput. An enablement
+        # patch makes a previously non-bootable (model, backend) combo *run*;
+        # there is no baseline throughput to beat. The bench IS the launch
+        # probe — a positive ``output_throughput`` means the server booted and
+        # served at least one request. Decide KEEP/REVERT via
+        # ``framework_agent.enablement.runnable_decision`` (probe-only; a
+        # minimal-correctness check is out of scope for now).
+        if params.get("enablement"):
+            from framework_agent.enablement import runnable_decision
+
+            new_tput = bench_result.get("output_throughput")
+            booted = isinstance(new_tput, (int, float)) and new_tput > 0
+            probe_timed_out = bool(gate_evidence.get("timed_out"))
+            runs, run_reason = runnable_decision(
+                probe_returncode=0 if booted else 1,
+                correctness_ok=None,
+                probe_timed_out=probe_timed_out,
+            )
+            if not runs:
+                artifacts_reverted = self._revert_artifacts(applied_artifacts)
+                reverted = self._revert_patches(framework_root, applied)
+                await self._maybe_write_framework_kb_record(
+                    done_payload=done_payload,
+                    outcome="reverted_smoke_fail",
+                    tps_delta_pct=0.0,
+                    extra=extra,
+                )
+                return _with_stash_restore(framework_root, stash_state, stash_note, {
+                    "status": "reverted",
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "artifacts_reverted": artifacts_reverted,
+                    "config_changes_applied": {},
+                    "output_throughput": new_tput,
+                    "enablement": True,
+                    "runnable": False,
+                    "reason": f"enablement not runnable: {run_reason}",
+                    "bench_result": bench_result,
+                    "workspace": str(output_root),
+                })
+            await self._maybe_write_framework_kb_record(
+                done_payload=done_payload,
+                outcome="integrated",
+                tps_delta_pct=0.0,
+                extra=extra,
+            )
+            return _with_stash_restore(framework_root, stash_state, stash_note, {
+                "status": "kept",
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [str(p) for p in applied],
+                "patches_reverted": [],
+                "artifacts_applied": applied_artifacts,
+                "config_changes_applied": config_changes_applied,
+                "output_throughput": new_tput,
+                "enablement": True,
+                "runnable": True,
+                "reason": f"enablement runnable: {run_reason}",
+                "bench_result": bench_result,
+                "workspace": str(output_root),
+            })
+
         # Stage 5: KEEP / REVERT decision.
         # The Coordinator seeds ``base_tput`` per-dispatch, but a direct
         # invocation (resume path / test / external caller) may bypass that and

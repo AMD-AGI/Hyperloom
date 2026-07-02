@@ -562,6 +562,62 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
     assert result["patches_applied"] == []
 
 
+# 4b. Enablement runnable gate (framework-ref1): the bench is the launch probe;
+# a positive throughput means the server booted -> KEEP; else -> REVERT. The
+# perf/accuracy KEEP gate is bypassed for enablement-tagged integrations.
+async def _run_enablement_integrate(tmp_path: Path, monkeypatch, *, booted: bool):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-en", patch_contents=[_VALID_PATCH])
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    async def _fake_bench(**_kwargs):
+        bench_result = {"output_throughput": 137.0 if booted else 0.0}
+        return bench_result, {"accuracy_pass": None, "timed_out": False}
+
+    async def _noop_kb(**_kwargs):
+        return None
+
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
+    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
+
+    ctx = _make_ctx(
+        "t-int-en",
+        {
+            "specialist_task_id": "t-spec-en",
+            "framework_source_root": str(repo),
+            "enablement": True,
+            "enable_stack_rebench": False,
+        },
+    )
+    return await executor(ctx), repo
+
+
+@pytest.mark.asyncio
+async def test_enablement_keeps_when_server_boots(tmp_path: Path, monkeypatch):
+    result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True)
+    assert result["status"] == "kept"
+    assert result["enablement"] is True
+    assert result["runnable"] is True
+    assert len(result["patches_applied"]) == 1
+    # The patch stays applied on a runnable KEEP.
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_reverts_when_still_not_runnable(tmp_path: Path, monkeypatch):
+    result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=False)
+    assert result["status"] == "reverted"
+    assert result["enablement"] is True
+    assert result["runnable"] is False
+    assert result["patches_applied"] == []
+    # REVERT rolls the tree back to its original content.
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
 # 5. CLI registration
 def test_integrate_patch_executor_imports_clean():
     """The real executor module must import without side effects."""

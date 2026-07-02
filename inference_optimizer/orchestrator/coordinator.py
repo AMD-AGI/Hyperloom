@@ -140,6 +140,34 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
 DEFAULT_FRAMEWORK_MAX_CANDIDATES: int = 8
 
 
+def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
+    """Extract launch/traceback text from a failed baseline result payload.
+
+    Feeds ``framework_agent.enablement.classify_failure``. Concatenates the
+    most likely error-bearing fields (``error`` / ``stderr`` / ``log_tail`` /
+    ``traceback`` / ``reason``) so a "can't even boot" baseline failure becomes
+    classifiable text. Returns ``""`` when nothing usable is present.
+
+    Args:
+        result_payload: The failed task's result dict (``None`` treated empty).
+
+    Returns:
+        str: Concatenated, trimmed launch-log text (may be ``""``).
+    """
+    if not isinstance(result_payload, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
+        val = result_payload.get(key)
+        if isinstance(val, str) and val.strip():
+            parts.append(val.strip())
+        elif isinstance(val, (list, tuple)):
+            joined = "\n".join(str(x) for x in val if str(x).strip())
+            if joined.strip():
+                parts.append(joined.strip())
+    return "\n".join(parts).strip()
+
+
 def _framework_config_levers_from_done(
     done_payload: dict[str, Any] | None,
 ) -> dict[str, str]:
@@ -2901,6 +2929,16 @@ class Coordinator:
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
+        # Enablement lane: when the baseline could not even launch, dispatch a
+        # one-shot enablement_specialist (runnable-gated authoring) before the
+        # perf PR-discovery loop. Guarded/one-shot via ``enablement_dispatched``.
+        try:
+            enablement_tid = await self._maybe_enqueue_enablement_specialist()
+        except Exception:  # noqa: BLE001 — never wedge the perf pump
+            log.exception("ENABLEMENT: enqueue failed")
+            enablement_tid = ""
+        if enablement_tid:
+            return
         if bool(getattr(state, "framework_agent_phase_done", False)):
             return
         # Skip if a framework task is already queued or running.
@@ -3593,6 +3631,139 @@ class Coordinator:
             cand_id,
             batch_id,
             gap_cid,
+        )
+        return spec_tid
+
+    def _build_enablement_specialist_params(
+        self, launch_log: str
+    ) -> dict[str, Any] | None:
+        """Build enablement-specialist params from a captured launch failure.
+
+        Pure/side-effect-free: classifies the failure, plans bridging discovery,
+        and renders the authoring mandate via
+        ``framework_agent.enablement_authoring.build_mandate`` (the single source
+        of the enablement prompt). Returns ``None`` when the failure is not
+        actionable (``UNKNOWN``) so the caller falls back to the normal
+        baseline-failure gates.
+
+        Args:
+            launch_log: Captured launch / traceback text.
+
+        Returns:
+            dict | None: Specialist task params (tagged ``enablement`` +
+            ``framework_agent_authoring``) or ``None``.
+        """
+        text = (launch_log or "").strip()
+        if not text:
+            return None
+        from framework_agent.enablement import EnablementRequest, classify_failure
+        from framework_agent.enablement_authoring import build_mandate
+        from framework_agent.enablement_discovery import build_search_plan
+        from framework_agent.repo_map import repo_url_for_framework
+
+        state = self.shared_state
+        framework = (getattr(state, "framework", "") or "").strip().lower()
+        model = (getattr(state, "model_name", "") or "").strip()
+        repo_url = repo_url_for_framework(framework)
+
+        signature = classify_failure(text)
+        if not signature.is_actionable:
+            return None
+        req = EnablementRequest(
+            framework=framework,
+            model=model or "(target model)",
+            repo_url=repo_url,
+            launch_log=text,
+            gpu_type=(getattr(state, "gpu_type", "") or "").strip().lower(),
+        )
+        plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
+        mandate = build_mandate(req, signature=signature)
+        gap_cid = f"gap.enablement.{signature.kind}"
+        return {
+            "domain": "enablement_specialist",
+            "gap_canonical_id": gap_cid,
+            "gap_symptom": (
+                f"{framework or '?'} cannot launch {model or 'the target model'}: "
+                f"{signature.kind}"
+            ),
+            "gap_layer": "framework",
+            "gap_evidence": {"model": model, "failure_kind": signature.kind},
+            "framework": framework,
+            # Reuse the FRAMEWORK authoring machinery (pump inflight tracking +
+            # specialist->integrate_patch bridge) but tag the objective so the
+            # integrate gate uses the runnable_decision (boot) gate, not perf.
+            "framework_agent_authoring": True,
+            "enablement": True,
+            "enablement_failure_kind": signature.kind,
+            "enablement_search_repos": list(plan.repos),
+            "launch_probe": req.launch_probe,
+            "source": "coordinator_internal",
+            "readonly": False,
+            "notes": mandate.task_description,
+        }
+
+    async def _maybe_enqueue_enablement_specialist(self) -> str:
+        """Dispatch one enablement_specialist when baseline cannot launch.
+
+        Fires at most once per session (``enablement_dispatched`` guard): when a
+        baseline has failed to boot (no measured throughput) and the captured
+        launch log classifies to an actionable failure, an authoring specialist
+        is enqueued to bridge the ``(model, backend)`` combo into a runnable
+        state. Reuses the FRAMEWORK authoring specialist dispatch (autosubmit →
+        Critic → integrate_patch → runnable gate → KEEP/REVERT). No-op on
+        multi-node (integrate_patch is single-node only).
+
+        Returns:
+            str: The dispatched specialist ``task_id`` (empty when skipped).
+        """
+        state = self.shared_state
+        if bool(getattr(state, "enablement_dispatched", False)):
+            return ""
+        if float(getattr(state, "baseline_tput", 0.0) or 0.0) > 0:
+            return ""
+        if int(getattr(state, "baseline_failure_streak", 0) or 0) < 1:
+            return ""
+        launch_log = str(getattr(state, "enablement_launch_log", "") or "")
+        params = self._build_enablement_specialist_params(launch_log)
+        if params is None:
+            return ""
+        from .action_executors._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return ""
+        try:
+            await self._warm_specialist_params(params)
+        except Exception:  # noqa: BLE001 — best-effort warmup
+            log.debug("enablement: warm specialist params failed", exc_info=True)
+        idem = f"enablement_authoring:{params.get('enablement_failure_kind', '')}"
+        spec_task, _existing = await self.tasks.create_or_return_existing(
+            kind="specialist",
+            params=params,
+            idempotency_key=idem,
+            requires_lanes=["research_lane"],
+            allowed_tools=[
+                "Read",
+                "Grep",
+                "Glob",
+                "Write",
+                "Edit",
+                "Bash",
+                "WebSearch",
+                "WebFetch",
+            ],
+            side_effects=["writes_results", "writes_patches"],
+            lease_ttl_sec=3600,
+        )
+        state.enablement_dispatched = True
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("enablement: save after dispatch failed", exc_info=True)
+        spec_tid = str(getattr(spec_task, "task_id", "") or "")
+        log.info(
+            "ENABLEMENT: dispatched authoring specialist kind=%s task=%s",
+            params.get("enablement_failure_kind"),
+            spec_tid,
         )
         return spec_tid
 
@@ -11972,6 +12143,15 @@ class Coordinator:
                     integrate_params["framework_agent_candidate_id"] = fa_cand
                 if fa_batch:
                     integrate_params["framework_batch_id"] = fa_batch
+            # Enablement passthrough: an enablement authoring specialist is gated
+            # on RUNNABILITY (server boots), not throughput. Propagate the marker
+            # (+ optional launch probe) so integrate_patch applies the
+            # runnable_decision gate instead of the perf KEEP gate.
+            if bool(spec_params.get("enablement")):
+                integrate_params["enablement"] = True
+                probe = str(spec_params.get("launch_probe") or "").strip()
+                if probe:
+                    integrate_params["launch_probe"] = probe
         except Exception:  # noqa: BLE001 — provenance passthrough is best-effort
             log.debug(
                 "FRAMEWORK: authoring provenance passthrough failed for task=%s",
@@ -12650,6 +12830,14 @@ class Coordinator:
                     "disable-cuda-graph fallback for the next baseline retry",
                     task.task_id,
                 )
+            # Enablement capture: stash the launch/traceback text so the
+            # FRAMEWORK pump can classify a "can't even boot" failure and
+            # dispatch an enablement_specialist. Fast arg errors are excluded
+            # (deterministic mis-config, not a bridgeable enablement gap).
+            if err_class != "fast_exit_arg_error":
+                launch_log = _extract_enablement_launch_log(result_payload)
+                if launch_log:
+                    self.shared_state.enablement_launch_log = launch_log
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
