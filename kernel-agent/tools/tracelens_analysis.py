@@ -4753,6 +4753,23 @@ _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
 _TRACELENS_REF_DEFAULT = "35bbb6380cf69a2655ee28260b02b5f2dc481744"
 
 
+def _default_tracelens_root() -> Path:
+    """Installer-managed default checkout path (mirrors install.sh /
+    inference_optimizer.paths.open_source_root)."""
+    base = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT") or "/opt/hyperloom/open-source-repos"
+    return Path(base) / "TraceLens"
+
+
+def _is_default_tracelens_root(tl_root: Path) -> bool:
+    """True when tl_root is the installer-managed default (not an operator
+    override). Only the default path is self-healed (#722); an explicit
+    --tracelens-root / TRACELENS_ROOT is operator-maintained and fails fast."""
+    try:
+        return Path(tl_root).resolve() == _default_tracelens_root().resolve()
+    except OSError:
+        return False
+
+
 def _tracelens_checkout_complete(tl_root: Path) -> bool:
     """A checkout is usable only if it is a git tree, not a half-done clone.
 
@@ -5963,10 +5980,10 @@ def main() -> int:
             # Internal extension is opt-in (non-empty --tracelens-internal-root / env).
             internal_root_arg = (args.tracelens_internal_root or "").strip()
             tl_internal_root: Path | None = Path(internal_root_arg) if internal_root_arg else None
-            if not tl_root.exists():
-                # #722: the pod-local checkout can vanish mid-run (concurrent
-                # install rm+re-clone). Self-heal instead of dying; only raise
-                # if the rebuild itself fails (e.g. no network).
+            if not tl_root.exists() and _is_default_tracelens_root(tl_root):
+                # #722: the installer-managed pod-local checkout can vanish
+                # mid-run (concurrent install rm+re-clone). Self-heal only the
+                # default path; an explicit operator override fails fast below.
                 _ensure_tracelens_checkout(tl_root, log_path=log_path)
             if not tl_root.exists():
                 raise FileNotFoundError(

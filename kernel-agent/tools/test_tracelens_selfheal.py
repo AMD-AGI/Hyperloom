@@ -93,6 +93,16 @@ def test_selfheal_rebuilds_half_cloned_tree_without_git(tl_module, tmp_path, mon
     assert (tl_root / "marker.txt").exists()
 
 
+def test_is_default_tracelens_root_distinguishes_override(tl_module, tmp_path, monkeypatch):
+    """Only the installer-managed default path is self-healed; an operator
+    override path is not (mirrors handler / install.sh semantics)."""
+    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+    default_root = tmp_path / "podlocal" / "TraceLens"
+    override_root = tmp_path / "operator" / "TraceLens"
+    assert tl_module._is_default_tracelens_root(default_root) is True
+    assert tl_module._is_default_tracelens_root(override_root) is False
+
+
 def test_selfheal_raises_and_cleans_up_when_ref_unpinnable(tl_module, tmp_path, monkeypatch):
     """A non-HEAD ref that cannot be fetched must raise (never ship an
     unpinned default HEAD) and leave no target or temp dir behind."""

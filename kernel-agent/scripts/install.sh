@@ -805,17 +805,23 @@ ensure_tracelens() {
     elif [ "$DRY_RUN" -eq 1 ]; then
       log "would: git clone --depth 1 ${TRACELENS_REPO} ${TRACELENS_ROOT}"
     else
-      # Clone into a temp sibling then atomically rename into place so a
-      # concurrent reader (trace_analyze self-heal) never observes a
-      # half-cloned $TRACELENS_ROOT (#722).
+      # Clone AND pin the ref inside a temp sibling, then atomically rename into
+      # place only after everything succeeds. Publishing before the ref pin (or
+      # on a mid-clone crash) would leave an unpinned/half-cloned $TRACELENS_ROOT
+      # that a concurrent reader (trace_analyze self-heal) treats as complete (#722).
       mkdir -p "$(dirname "$TRACELENS_ROOT")"
       _tl_tmp="$(dirname "$TRACELENS_ROOT")/.$(basename "$TRACELENS_ROOT").clone.$$"
       rm -rf "$_tl_tmp"
-      run git clone --depth 1 "$TRACELENS_REPO" "$_tl_tmp"
+      if ! git clone --depth 1 "$TRACELENS_REPO" "$_tl_tmp" \
+        || ! git -C "$_tl_tmp" fetch --depth 1 origin "$TRACELENS_REF" \
+        || ! git -C "$_tl_tmp" checkout -q FETCH_HEAD; then
+        rm -rf "$_tl_tmp"
+        die "TraceLens clone/pin to ${TRACELENS_REF} failed; refusing to publish an unpinned checkout at ${TRACELENS_ROOT}"
+      fi
       mv "$_tl_tmp" "$TRACELENS_ROOT"
     fi
-  fi
-  if [ -z "${_tracelens_root_was_set:-}" ] && [ -d "$TRACELENS_ROOT/.git" ]; then
+  elif [ -z "${_tracelens_root_was_set:-}" ] && [ -d "$TRACELENS_ROOT/.git" ]; then
+    # Existing default checkout: realign to the pinned ref in place.
     if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
       run git -C "$TRACELENS_ROOT" fetch --depth 1 origin "$TRACELENS_REF"
       run git -C "$TRACELENS_ROOT" checkout -q FETCH_HEAD

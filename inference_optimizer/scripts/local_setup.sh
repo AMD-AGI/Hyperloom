@@ -136,6 +136,11 @@ clone_or_update() {
   local repo="$2"
   local dest="$3"
   local ref="${4:-}"
+  # When "atomic", a fresh clone + ref checkout happens in a temp sibling and is
+  # renamed into place only after both succeed, so a concurrent reader never
+  # sees a half-cloned/unpinned $dest (#722). Used for TraceLens, whose path is
+  # read live by trace_analyze.
+  local mode="${5:-}"
 
   if [ -d "${dest}/.git" ]; then
     if [ "$CHECK_ONLY" -eq 1 ]; then
@@ -158,8 +163,25 @@ clone_or_update() {
   fi
 
   log "${name}: clone ${repo} -> ${dest}"
-  if [ "$DRY_RUN" -eq 0 ]; then
-    mkdir -p "$(dirname "$dest")"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would: git clone ${repo} ${dest}${ref:+ (checkout ${ref})}"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")"
+  if [ "$mode" = "atomic" ]; then
+    local tmp ok=1
+    tmp="$(dirname "$dest")/.$(basename "$dest").clone.$$"
+    rm -rf "$tmp"
+    git clone "$repo" "$tmp" || ok=0
+    if [ "$ok" -eq 1 ] && [ -n "$ref" ]; then
+      git -C "$tmp" checkout "$ref" || ok=0
+    fi
+    if [ "$ok" -eq 0 ]; then
+      rm -rf "$tmp"
+      die "${name}: clone/checkout ${ref:-default} failed; refusing to publish a partial checkout at ${dest}"
+    fi
+    mv "$tmp" "$dest"
+    return 0
   fi
   run git clone "$repo" "$dest"
   if [ -n "$ref" ]; then
@@ -231,7 +253,9 @@ resolve_tracelens() {
     :
   else
     TRACELENS_ROOT="${_open_source_root}/TraceLens"
-    clone_or_update "TraceLens" "$TRACELENS_REPO" "$TRACELENS_ROOT" "$TRACELENS_REF"
+    # Atomic: TraceLens is read live by trace_analyze; never publish a
+    # half-cloned/unpinned tree at $TRACELENS_ROOT (#722).
+    clone_or_update "TraceLens" "$TRACELENS_REPO" "$TRACELENS_ROOT" "$TRACELENS_REF" atomic
     export TRACELENS_ROOT
     log "TRACELENS_ROOT: ${TRACELENS_ROOT}"
   fi
