@@ -760,8 +760,11 @@ you want to wind down sooner.
 
   request{target_agent: 'kernel_agent', kind: 'run_gemm_tuning', params={}}
 
-  Only when `last_gemm_tuning` is empty (the Coordinator also auto-runs it at
-  KERNEL entry; eligibility is decided backend-side).
+  Usually only when `last_gemm_tuning` is empty (the Coordinator also auto-runs
+  it at KERNEL entry; eligibility is decided backend-side). Exception: if the
+  last forge FP8 attempt reports `micro_decision='no_improvement'` with no
+  E2E-validatable candidates, one `precision='bf16', tuner='sglang_dense_bf16'`
+  fallback is allowed.
 
 ### `kernel_opt` — payload for `run_optimization`
 
