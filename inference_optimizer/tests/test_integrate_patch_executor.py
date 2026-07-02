@@ -562,9 +562,9 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
     assert result["patches_applied"] == []
 
 
-# 4b. Enablement runnable gate (framework-ref1): the bench is the launch probe;
-# a positive throughput means the server booted -> KEEP; else -> REVERT. The
-# perf/accuracy KEEP gate is bypassed for enablement-tagged integrations.
+# 4b. Enablement runnable gate: the bench is the launch probe; a positive
+# throughput means the server booted -> KEEP; else -> REVERT. The perf/accuracy
+# KEEP gate is bypassed for enablement-tagged integrations.
 async def _run_enablement_integrate(
     tmp_path: Path,
     monkeypatch,

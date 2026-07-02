@@ -2,15 +2,11 @@
 
 """Enablement-oriented bridging discovery: which repos to scout and how to rank.
 
-Given a :class:`framework_agent.enablement.FailureSignature`, this module
-decides (1) *which repos* to search for an enabling PR — the serving framework
-plus, when opted in, the ROCm / HIP / aiter bridge repos — and (2) *how to
-rank* candidate PR titles for *enablement* intent ("enable / support / add /
-fix / port to ROCm") rather than the perf intent the existing
-:mod:`framework_agent.keywords` ranker targets.
-
-Pure-Python, no network: it produces a search *plan* and a title *ranker*;
-the actual PR enumeration is done by the existing ``sources`` layer.
+Given a :class:`framework_agent.enablement.FailureSignature`, produces (1) the
+repos to search for an enabling PR (the serving framework plus the ROCm / HIP /
+aiter bridge repos) and (2) a ranker for candidate PR titles by enablement
+intent ("enable / support / add / fix / port to ROCm"). Pure-Python, no
+network.
 """
 
 from __future__ import annotations
@@ -24,9 +20,7 @@ from .keywords import extract_keywords, score_title_with_anti_signal
 from .repo_map import bridge_repo_urls
 
 
-# Words in a PR title that signal it *enables* something previously broken,
-# as opposed to merely tuning perf. Used as a positive boost on top of the
-# gap-keyword overlap score.
+# Words in a PR title that signal it enables something previously broken.
 ENABLEMENT_INTENT_TERMS: frozenset[str] = frozenset(
     {
         "enable",
@@ -48,8 +42,8 @@ ENABLEMENT_INTENT_TERMS: frozenset[str] = frozenset(
     }
 )
 
-# Per-kind seed keywords appended to the auto-extracted set so discovery has
-# signal even when the log is terse. Keys are failure ``kind`` ids.
+# Per-kind seed keywords appended to the auto-extracted set. Keys are failure
+# ``kind`` ids.
 _KIND_SEED_KEYWORDS: dict[str, tuple[str, ...]] = {
     "missing_model_arch": ("model", "architecture", "support", "add"),
     "unsupported_dtype": ("dtype", "fp8", "quant", "support"),
@@ -104,9 +98,8 @@ def build_search_plan(
 ) -> EnablementSearchPlan:
     """Build the repo set + ranking keywords for an enablement failure.
 
-    The framework repo is always included, plus the bridge repos (ROCm / HIP /
-    aiter) for the signature's ``bridge_layer`` — cross-layer source edits are
-    a first-class, default-on capability of the enablement path.
+    Includes the framework repo plus the bridge repos (ROCm / HIP / aiter) for
+    the signature's ``bridge_layer``.
 
     Args:
         signature: The classified failure.
@@ -140,10 +133,9 @@ def score_enablement_title(
 ) -> float:
     """Rank a candidate PR title for enablement relevance.
 
-    Combines the anti-signal-aware gap-keyword overlap (reusing
-    :func:`framework_agent.keywords.score_title_with_anti_signal` so wrong-axis
-    PRs are still demoted) with a boost for enablement-intent words
-    (:data:`ENABLEMENT_INTENT_TERMS`).
+    Combines the anti-signal-aware gap-keyword overlap
+    (:func:`framework_agent.keywords.score_title_with_anti_signal`) with a boost
+    for enablement-intent words (:data:`ENABLEMENT_INTENT_TERMS`).
 
     Args:
         title: The PR title.

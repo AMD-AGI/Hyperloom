@@ -543,13 +543,9 @@ def _focus_enablement_specialist(
 ) -> list[str]:
     """Build the enablement-specialist focus by delegating to ``build_mandate``.
 
-    ``framework_agent.enablement_authoring.build_mandate`` is the SINGLE source
-    of the enablement mandate (goal + allowed source roots + patch invariants).
-    This template does not restate that prose; it classifies the failure carried
-    in ``gap_symptom`` / ``gap_evidence`` and renders the mandate's
-    ``task_description`` verbatim. When the Coordinator dispatches with a fuller
-    mandate in ``notes`` (concrete signature + ranked candidate PRs), that adds
-    the case-specific detail on top of this generic scaffold.
+    Classifies the failure carried in ``gap_symptom`` / ``gap_evidence`` and
+    renders the mandate's ``task_description`` verbatim from
+    ``framework_agent.enablement_authoring.build_mandate``.
 
     Args:
         inp: Assembled prompt inputs for the current dispatch.

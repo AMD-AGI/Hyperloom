@@ -24,15 +24,8 @@ _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
 KNOWN_FRAMEWORKS: frozenset[str] = frozenset(_FRAMEWORK_TO_REPO_URL.keys())
 
 
-# Enablement bridging repos: layers *below* the serving framework where a
-# "make it run" patch may need to land (ROCm / HIP / aiter). Keyed by the
-# ``bridge_layer`` field of ``framework_agent.enablement.FailureSignature``.
-#
-# Deliberately kept SEPARATE from ``_FRAMEWORK_TO_REPO_URL`` (serving
-# frameworks only): these are not serving frameworks, so they must not leak
-# into ``KNOWN_FRAMEWORKS`` / framework validation. The enablement discovery
-# step unions the framework's own repo with the bridge repos for the failure
-# signature's layer.
+# Enablement bridging repos (ROCm / HIP / aiter), keyed by the ``bridge_layer``
+# field of ``framework_agent.enablement.FailureSignature``.
 _BRIDGE_LAYER_TO_REPO_URLS: dict[str, tuple[str, ...]] = {
     "rocm_hip": (
         "https://github.com/ROCm/aiter.git",
@@ -46,18 +39,11 @@ _BRIDGE_LAYER_TO_REPO_URLS: dict[str, tuple[str, ...]] = {
 def bridge_repo_urls(bridge_layer: str) -> tuple[str, ...]:
     """Return the bridging repo URLs to scout for a failure's ``bridge_layer``.
 
-    Enablement failures at the ``rocm_hip`` / ``build`` layers often need a
-    fix in ROCm / HIP / aiter rather than the framework itself. This maps the
-    ``bridge_layer`` classified by :func:`framework_agent.enablement.classify_failure`
-    to the repos worth searching for an enabling PR.
-
     The lookup is case-insensitive and whitespace-tolerant.
 
     Args:
         bridge_layer (str): The ``bridge_layer`` tag (e.g. ``"rocm_hip"``,
-            ``"build"``). ``"framework"`` returns ``()`` because the caller
-            already holds the framework repo via
-            :func:`repo_url_for_framework`.
+            ``"build"``). ``"framework"`` returns ``()``.
 
     Returns:
         tuple[str, ...]: Bridge repo URLs (empty for ``"framework"`` /

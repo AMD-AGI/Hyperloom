@@ -136,26 +136,18 @@ def resolve_gpu_specialist_devices(
 def resolve_whole_machine_devices() -> list[int]:
     """Resolve the full set of GPU ids on this node — **no** serving carve.
 
-    Item J (framework-family whole-machine GPU): a framework-authoring
-    specialist (perf-framework or enablement) holds ``gpu_research_lane``, which
-    is mutually exclusive with every serving lane
-    (:data:`resource_lock.LANE_CONFLICTS`). While it holds that lane no
-    serving / benchmark / profile step can run, so the (now-idle) serving cards
-    are safe to lease too. This resolver therefore returns *every* visible card
-    and, unlike :func:`resolve_gpu_specialist_devices`, does **not**:
+    Returns *every* visible card and, unlike
+    :func:`resolve_gpu_specialist_devices`, does **not**:
 
-    * subtract the ``serving_tp`` cards (no serving runs concurrently), nor
-    * gate on ``gpu_specialist_capacity`` (that cap only scopes the
-      EXPLORE serving-disjoint specialist pool; the whole-machine pool is
-      always available to framework authoring).
+    * subtract the ``serving_tp`` cards, nor
+    * gate on ``gpu_specialist_capacity``.
 
-    Precedence mirrors :func:`resolve_gpu_specialist_devices` for the id source:
+    Id-source precedence mirrors :func:`resolve_gpu_specialist_devices`:
 
     1. ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` — explicit operator pool
        (used verbatim, uncapped here).
     2. The process visible-device mask (``ROCR_VISIBLE_DEVICES`` →
-       ``HIP``/``CUDA``) — used verbatim so the leased ids match what is written
-       into the sub-agent's ``ROCR_VISIBLE_DEVICES``.
+       ``HIP``/``CUDA``) — used verbatim.
     3. No mask set → ``range(detect_gpu_count())`` (the machine's detected GPU
        count, probed lazily via ``rocm-smi`` only in this branch).
 
@@ -169,9 +161,7 @@ def resolve_whole_machine_devices() -> list[int]:
     mask_ids, mask_present = _visible_device_mask()
     if mask_present:
         return mask_ids
-    # No mask: fall back to the detected machine GPU count. Imported lazily
-    # because ``policy`` imports this module (avoid an import cycle) and to keep
-    # the ``rocm-smi`` probe out of the common mask-set path.
+    # No mask: fall back to the detected machine GPU count. Imported lazily.
     from .policy import detect_gpu_count
 
     return list(range(max(0, int(detect_gpu_count() or 0))))

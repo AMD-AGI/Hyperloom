@@ -61,13 +61,13 @@ by the outer runtime (Hyperloom / TBO / etc.), not by this package.
 
 ## Two objectives: perf optimisation vs enablement
 
-The package now serves two distinct objectives, gated differently:
+The package serves two distinct objectives, gated differently:
 
-- **Perf** (original) — discover / audit / apply an existing PR and KEEP it
-  only if throughput improves. Patch authoring for perf is still owned by the
+- **Perf** — discover / audit / apply an existing PR and KEEP it
+  only if throughput improves. Patch authoring for perf is owned by the
   Hyperloom `specialist → integrate_patch` path; this package does the
   discovery + static audit + git-apply/bench execution.
-- **Enablement** (new, opt-in) — make a currently **non-runnable**
+- **Enablement** (opt-in) — make a currently **non-runnable**
   `(model, backend)` combo *run at all*. This path DOES author bridging
   patches (via the `enablement_specialist` domain / `SpecialistRunner`
   worktree authoring) and is gated on **runnability** (server boots + minimal

@@ -7,8 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-# Fenced ```json block — identical across every backend that extracts an
-# envelope, so it lives here once rather than per-module.
+# Fenced ```json block matcher; group(1) captures the enclosed object.
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
@@ -30,11 +29,9 @@ def extract_first_json_with_key(
 ) -> dict[str, Any] | None:
     """Pull the first JSON object carrying *required_key* out of a model reply.
 
-    Prefers a fenced ```json block (least ambiguous), then falls back to the
-    bare top-level object matched by *bare_re*, trimming trailing prose from the
-    right until ``json.loads`` accepts a candidate. Shared body for the
-    per-backend ``_extract_*`` helpers, which differ only in *required_key* and
-    the bare-object regex.
+    Prefers a fenced ```json block, then falls back to the bare top-level
+    object matched by *bare_re*, trimming trailing prose from the right until
+    ``json.loads`` accepts a candidate.
 
     Args:
         text: Raw model reply that may contain a fenced or bare JSON object.

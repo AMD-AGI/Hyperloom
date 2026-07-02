@@ -1,23 +1,21 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Item J (framework-stage2.md §P1.5): framework-family authoring specialists
-lease the *whole machine* on demand.
+"""Tests that framework-family authoring specialists lease the whole machine.
 
 A framework-authoring specialist (perf-framework or enablement) holds the
-serving-exclusive, cap-1 ``gpu_research_lane``, so while it runs no
-serving/bench/profile step (and no other GPU specialist) runs — making it safe
-to lease every visible card. This is distinct from an EXPLORE GPU specialist,
-which leases from the serving-disjoint carved ``gpu_specialist_pool``.
+serving-exclusive, cap-1 ``gpu_research_lane`` and leases every visible card,
+distinct from an EXPLORE GPU specialist, which leases from the carved
+``gpu_specialist_pool``.
 
-The four assertions mirror the doc:
+The suite checks:
 
 1. framework authoring params (perf & enablement) carry ``needs_gpu`` +
    whole-machine ``gpu_count``;
 2. dispatch for the framework family leases the whole machine even when
    ``gpu_specialist_capacity=0``;
-3. holding ``gpu_research_lane`` serializes the serving lanes (mutex works);
-4. the EXPLORE GPU-specialist path is unchanged (still serving-disjoint carve,
-   still gated by ``gpu_specialist_capacity``).
+3. holding ``gpu_research_lane`` serializes the serving lanes (mutex);
+4. the EXPLORE GPU-specialist path is unchanged (carved pool, still gated by
+   ``gpu_specialist_capacity``).
 """
 
 from __future__ import annotations
@@ -241,8 +239,7 @@ async def test_framework_family_defaults_gpu_count_to_whole_machine(
 @pytest.mark.asyncio
 async def test_gpu_research_lane_mutexes_serving_lanes(tmp_path, monkeypatch):
     """While a framework GPU task holds gpu_research_lane, the serving lanes
-    (benchmark / profile / server_lifecycle) cannot be acquired — the exact
-    exclusivity item J relies on to safely hand over the whole machine."""
+    (benchmark / profile / server_lifecycle) cannot be acquired."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     held = await coord.locks.try_acquire_many(
         ["gpu_research_lane"],
@@ -313,7 +310,7 @@ async def test_explore_gpu_specialist_still_gated_by_capacity(tmp_path, monkeypa
 @pytest.mark.asyncio
 async def test_explore_gpu_specialist_uses_carved_pool(tmp_path, monkeypatch):
     """With capacity>0 and no serving carve, an EXPLORE GPU specialist leases
-    from the carved pool (gpu_count=1 → a single card), unchanged by item J."""
+    from the carved pool (gpu_count=1 → a single card)."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=4)
     assert coord.gpu_specialist_pool.capacity == 4
     probe = _GpuProbe()

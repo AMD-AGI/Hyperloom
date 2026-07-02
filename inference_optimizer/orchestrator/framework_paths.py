@@ -41,12 +41,8 @@ _INSTALL_GLOB_PARENTS: tuple[Path, ...] = (
 # aiter device sources often live in the sibling ``aiter_meta`` package.
 _AITER_META_CSRC_ROOT = "/aiter_meta/csrc/"
 
-# ROCm / HIP source roots for the *enablement* path (making a previously
-# non-runnable (model, backend) combo boot by patching below the framework).
-# Kept as a distinct tuple from ``_DEFAULT_SOURCE_ROOTS`` for readability, but
-# always merged into the allowlist: the enablement objective is a first-class,
-# default-on capability (no opt-in gate). ``aiter`` already ships in
-# ``_DEFAULT_SOURCE_ROOTS``; these add /opt/rocm + HIP headers/sources.
+# ROCm / HIP source roots for the enablement path, always merged into the
+# allowlist.
 _ROCM_HIP_SOURCE_ROOTS: tuple[str, ...] = (
     "/opt/rocm/",
 )
@@ -55,8 +51,7 @@ _ROCM_HIP_SOURCE_ROOTS: tuple[str, ...] = (
 def resolve_rocm_hip_source_roots() -> tuple[str, ...]:
     """Return the ROCm/HIP source roots for the enablement path.
 
-    Always included in :func:`resolve_source_file_allowlist` so an enablement
-    specialist can bridge below the framework layer without any opt-in flag.
+    Always included in :func:`resolve_source_file_allowlist`.
 
     Returns:
         tuple[str, ...]: :data:`_ROCM_HIP_SOURCE_ROOTS`.

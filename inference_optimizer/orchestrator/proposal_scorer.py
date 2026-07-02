@@ -68,7 +68,7 @@ Rules:
 """.strip()
 
 
-# Bare top-level "scores" object; the fenced form lives in _json_io.
+# Bare top-level "scores" object.
 _BARE_JSON_RE = re.compile(r"(\{.*?\"scores\".*\})", re.DOTALL)
 
 

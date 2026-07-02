@@ -100,7 +100,7 @@ Rules (mirror SKILL.md Hard Rules + Approve Standard):
 """.strip()
 
 
-# Bare {...} carrying "review_verdicts"; the fenced form lives in _json_io.
+# Bare {...} carrying "review_verdicts".
 _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 
 
@@ -156,7 +156,7 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
             raise BackendError("commit-review invocation missing --review path")
         extra_args = ["--review", str(call.review_path)]
 
-    # AGENTS.md §Exit codes: 0 success; 2 adapter bug (host → needs_review).
+    # Exit codes: 0 success; 2 adapter bug (host → needs_review).
     invoke_runtime_cli(
         call,
         module="runtime.cli",

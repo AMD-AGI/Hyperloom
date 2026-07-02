@@ -464,23 +464,20 @@ class SharedState:
     # by disabling cuda-graph capture (framework-correct flag injected by the
     # BaselineExecutor). Set on failure, consumed by BaselineExecutor.
     baseline_eager_fallback: bool = False
-    # Enablement path (framework-agent): when baseline cannot even launch, the
-    # captured launch/traceback text is stashed here so the FRAMEWORK pump can
-    # classify the failure and dispatch an enablement_specialist authoring task
-    # (gated on RUNNABILITY, not throughput). ``enablement_dispatched`` is an
-    # *in-flight* guard (an authoring attempt is queued/running) so the pump
-    # does not double-enqueue every tick; it is cleared when the attempt REVERTs
-    # so the next tick can retry with the next bridging candidate. Retries are
-    # bounded only by the run's wall-clock deadline (no count cap):
-    # ``enablement_attempts`` counts dispatches (drives candidate rotation +
-    # idempotency), and ``enablement_succeeded`` is the terminal KEEP guard.
+    # Enablement path (framework-agent) state.
+    # ``enablement_launch_log``: captured launch/traceback text when baseline
+    #   cannot launch.
+    # ``enablement_dispatched``: in-flight guard that an authoring attempt is
+    #   queued/running; cleared when the attempt REVERTs.
+    # ``enablement_attempts``: number of dispatches (drives candidate rotation
+    #   and idempotency).
+    # ``enablement_succeeded``: terminal KEEP guard.
     enablement_launch_log: str = ""
     enablement_dispatched: bool = False
     enablement_attempts: int = 0
     enablement_succeeded: bool = False
-    # Dedup guard: launch-log hashes already recorded as needs_human_review
-    # (UNKNOWN / non-actionable failures) so the pump writes at most one review
-    # record per distinct failure log.
+    # Launch-log hashes already recorded as needs_human_review (UNKNOWN /
+    # non-actionable failures); at most one review record per distinct log.
     enablement_human_review_logged: list = field(default_factory=list)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""

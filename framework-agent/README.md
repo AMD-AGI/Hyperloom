@@ -44,9 +44,7 @@ run* rather than *is it faster*:
 
 Editing ROCm/HIP source (`/opt/rocm`) is a **default-on** part of the
 enablement path — the IO-side allowlist always surfaces those roots (alongside
-the always-allowed `aiter`). See
-[`../framework_ref1_design.md`](../framework_ref1_design.md) for the full
-design.
+the always-allowed `aiter`).
 
 ## Quick start
 

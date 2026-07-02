@@ -649,15 +649,10 @@ class Coordinator:
                 serving_tp=self._resolve_serving_tp(),
             ),
         )
-        # Item J (framework-family whole-machine GPU): a SEPARATE pool over the
-        # *whole* node (serving cards NOT carved off, no gpu_specialist_capacity
-        # gate). A framework-authoring specialist (perf-framework / enablement)
-        # holds ``gpu_research_lane`` — mutually exclusive with every serving
-        # lane and capacity-1 — so while it runs no serving/bench/profile step
-        # and no other GPU specialist runs, making it safe to lease every card.
-        # It shares the ``gpu_leases`` table with ``gpu_specialist_pool``; the
-        # ``gpu_research_lane`` cap-1 mutex guarantees the two never hold cards
-        # at the same time, so there is no double-allocation across pools.
+        # Framework-authoring pool over the whole node (serving cards not carved
+        # off, no gpu_specialist_capacity gate). Shares the ``gpu_leases`` table
+        # with ``gpu_specialist_pool``; the cap-1 ``gpu_research_lane`` mutex
+        # serializes the two so they never hold cards at the same time.
         self.framework_gpu_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_whole_machine_devices(),
@@ -2943,9 +2938,9 @@ class Coordinator:
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        # Enablement lane: when the baseline could not even launch, dispatch a
-        # one-shot enablement_specialist (runnable-gated authoring) before the
-        # perf PR-discovery loop. Guarded/one-shot via ``enablement_dispatched``.
+        # When the baseline could not launch, dispatch a one-shot
+        # enablement_specialist before the perf PR-discovery loop. Guarded via
+        # ``enablement_dispatched``.
         try:
             enablement_tid = await self._maybe_enqueue_enablement_specialist()
         except Exception:  # noqa: BLE001 — never wedge the perf pump
@@ -3543,8 +3538,7 @@ class Coordinator:
             "source": "coordinator_internal",
             "readonly": False,
             "notes": notes,
-            # Item J: request the whole machine so the authoring specialist can
-            # build + boot its patch in-agent. Empty on multi-node / no-GPU hosts.
+            # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
         }
         try:
@@ -3557,9 +3551,8 @@ class Coordinator:
         idem = f"framework_agent_authoring:{batch_id}:{cand_id}"
         if reauthor_attempt > 0:
             idem = f"{idem}:reauthor:{int(reauthor_attempt)}"
-        # Item J: framework authoring runs on the whole machine (params carry
-        # needs_gpu); add gpu_research_lane + a budget-sourced TTL here since
-        # this internal dispatch bypasses intent_router.
+        # Add gpu_research_lane + a budget-sourced TTL: this internal dispatch
+        # bypasses intent_router.
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _spec_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
@@ -3675,26 +3668,12 @@ class Coordinator:
     def _framework_gpu_params(self) -> dict[str, Any]:
         """Return the ``{needs_gpu, gpu_count}`` params for framework authoring.
 
-        Item J: every framework-family authoring specialist (perf-framework and
-        enablement) requests the **whole machine** so it can build → boot →
-        re-classify the failure signature in-agent instead of round-tripping
-        through ``integrate_patch`` for each attempt (ROCm/HIP recompiles are
-        expensive). ``gpu_count`` defaults to the whole-machine pool capacity;
-        the dispatcher routes framework-family tasks to ``framework_gpu_pool``.
-
-        Two hard preconditions gate the request (never a user flag):
-
-        * **single-node** — ``integrate_patch`` / serving is single-node and
-          enablement already no-ops on multi-node, so a whole-machine lease is
-          meaningless across nodes.
-        * **non-empty whole-machine pool** — if no cards are visible (CPU-only
-          host / test env) setting ``needs_gpu`` would deadlock the task in the
-          dispatcher waiting for a lease that can never be granted.
+        ``gpu_count`` defaults to the whole-machine pool capacity.
 
         Returns:
-            dict: ``{"needs_gpu": True, "gpu_count": <n>}`` when both
-            preconditions hold, else ``{}`` (authoring falls back to the
-            research-lane-only, blind-authoring path).
+            dict: ``{"needs_gpu": True, "gpu_count": <n>}`` on single-node hosts
+            with a non-empty whole-machine pool, else ``{}`` (authoring falls
+            back to the research-lane-only path).
         """
         try:
             from .action_executors._multi_node_env import is_multi_node
@@ -3713,16 +3692,9 @@ class Coordinator:
     ) -> tuple[list[str], int]:
         """Resolve lanes + lease TTL for an internally-dispatched framework specialist.
 
-        Framework-authoring specialists (perf-framework + enablement) are created
-        directly via ``create_or_return_existing`` and therefore bypass
-        ``intent_router``. The ``needs_gpu → gpu_research_lane`` wiring that
-        ``intent_router`` applies to LLM-proposed specialists must be replicated
-        here (item J): when ``needs_gpu`` is set the task acquires the
-        serving-exclusive, cap-1 ``gpu_research_lane`` (in addition to
-        ``research_lane`` for LLM-concurrency accounting) and its lease TTL is
-        re-sourced from the GPU wall budget so the lane never expires mid-run and
-        lets serving reclaim the cards (iron law: kill ≤ gpu_lease TTL ≤
-        gpu_research_lane TTL).
+        When ``needs_gpu`` is set the task acquires the cap-1
+        ``gpu_research_lane`` (in addition to ``research_lane``) and its lease
+        TTL is re-sourced from the GPU wall budget.
 
         Args:
             params: The specialist params (checked for ``needs_gpu``).
@@ -3797,8 +3769,8 @@ class Coordinator:
         )
         plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
         candidate_refs = self._discover_enablement_candidate_refs(req, plan)
-        # Retry rotation: lead with a different candidate each attempt so a
-        # reverted bridge is not re-tried first. Deterministic left-rotation.
+        # Lead with a different candidate each attempt (deterministic
+        # left-rotation).
         if candidate_refs and attempt:
             n = len(candidate_refs)
             k = attempt % n
@@ -3828,24 +3800,22 @@ class Coordinator:
             "gap_layer": "framework",
             "gap_evidence": {"model": model, "failure_kind": signature.kind},
             "framework": framework,
-            # Reuse the FRAMEWORK authoring machinery (pump inflight tracking +
-            # specialist->integrate_patch bridge) but tag the objective so the
-            # integrate gate uses the runnable_decision (boot) gate, not perf.
+            # Reuse the FRAMEWORK authoring machinery; the enablement tag routes
+            # the integrate gate to runnable_decision rather than the perf gate.
             "framework_agent_authoring": True,
             "enablement": True,
             "enablement_attempt": attempt,
             "enablement_failure_kind": signature.kind,
             "enablement_search_repos": list(plan.repos),
-            # Serialized pre-patch failure signature: integrate_patch replays it
-            # against the post-patch failure to catch "same error persists".
+            # Pre-patch failure signature, replayed by integrate_patch against
+            # the post-patch failure.
             "enablement_before_signature": signature.to_dict(),
             "enablement_candidate_refs": list(candidate_refs),
             "launch_probe": req.launch_probe,
             "source": "coordinator_internal",
             "readonly": False,
             "notes": notes,
-            # Item J: request the whole machine (build + boot + re-classify in
-            # the isolated worktree). Empty on multi-node / no-GPU hosts.
+            # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
         }
 
@@ -3939,8 +3909,7 @@ class Coordinator:
         from framework_agent.sources import enumerate_candidates
 
         max_candidates = int(getattr(req, "max_search_candidates", 5) or 5)
-        # Gate primus_cortex on a configured URL (mirrors phase-discover): when
-        # unset, enumerate would raise before falling through to GitHub.
+        # Only search primus_cortex when its URL is configured.
         primus_url = str(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
         if primus_url:
             search_modes = ["primus_cortex", "github"]
@@ -3996,10 +3965,8 @@ class Coordinator:
     async def _maybe_enqueue_enablement_specialist(self) -> str:
         """Dispatch an enablement_specialist when baseline cannot launch.
 
-        Retries until the combo runs or the **run wall-clock deadline** passes —
-        there is no attempt-count cap, because an un-enabled ``(model, backend)``
-        blocks every downstream measurement, so the enablement loop is allowed to
-        consume the run's remaining budget. Guards:
+        Retries until the combo runs or the run wall-clock deadline passes (no
+        attempt-count cap). Guards:
 
         * ``enablement_succeeded`` — terminal: a prior attempt was KEPT.
         * ``enablement_dispatched`` — an authoring attempt is in flight; cleared
@@ -4007,11 +3974,9 @@ class Coordinator:
           with the next bridging candidate (``enablement_attempts`` rotates it).
         * run deadline passed — stop dispatching new work near the close.
 
-        When the captured log classifies to ``UNKNOWN`` (non-actionable), no
-        authoring is dispatched; instead a one-shot ``needs_human_review`` record
-        is emitted (deduped per distinct log). Reuses the FRAMEWORK authoring
-        specialist dispatch (autosubmit → Critic → integrate_patch → runnable
-        gate → KEEP/REVERT). No-op on multi-node (integrate_patch is single-node).
+        When the captured log classifies to ``UNKNOWN``, no authoring is
+        dispatched; a one-shot ``needs_human_review`` record is emitted (deduped
+        per distinct log). No-op on multi-node.
 
         Returns:
             str: The dispatched specialist ``task_id`` (empty when skipped).
@@ -4025,8 +3990,7 @@ class Coordinator:
             return ""
         if int(getattr(state, "baseline_failure_streak", 0) or 0) < 1:
             return ""
-        # Wall-clock gate: stop opening new enablement attempts once the run
-        # deadline has passed (the closing phase needs the remaining budget).
+        # Stop opening new enablement attempts once the run deadline has passed.
         deadline = getattr(self, "_run_deadline", None)
         if deadline is not None and time.monotonic() >= float(deadline):
             return ""
@@ -4034,8 +3998,8 @@ class Coordinator:
         attempt = int(getattr(state, "enablement_attempts", 0) or 0)
         params = self._build_enablement_specialist_params(launch_log, attempt=attempt)
         if params is None:
-            # F: a non-blank log that classifies to UNKNOWN is not silently
-            # dropped — record it for human review (once per distinct log).
+            # A non-blank log that classifies to UNKNOWN is recorded for human
+            # review, once per distinct log.
             await self._maybe_record_enablement_human_review(launch_log)
             return ""
         from .action_executors._multi_node_env import is_multi_node
@@ -4047,9 +4011,8 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — best-effort warmup
             log.debug("enablement: warm specialist params failed", exc_info=True)
         idem = f"enablement_authoring:{params.get('enablement_failure_kind', '')}:{attempt}"
-        # Item J: enablement authoring runs on the whole machine (params carry
-        # needs_gpu); add gpu_research_lane + a budget-sourced TTL here since
-        # this internal dispatch bypasses intent_router.
+        # Add gpu_research_lane + a budget-sourced TTL: this internal dispatch
+        # bypasses intent_router.
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _existing = await self.tasks.create_or_return_existing(
             kind="specialist",
@@ -5530,13 +5493,13 @@ class Coordinator:
 
     @staticmethod
     def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
-        """Extract Hyperloom's bench 口径 for the PerfSkills handoff.
+        """Extract Hyperloom's bench measurement protocol for the PerfSkills handoff.
 
         Reads the materialized baseline recipe's ``benchmark.envs`` (the exact
         knobs Magpie benched with) and falls back to the process env. Returns
         only the keys that resolve so absent values leave PerfSkills on its own
-        standalone defaults. Never raises — 口径 propagation must not block the
-        KERNEL_AGENT phase.
+        standalone defaults. Never raises — measurement-protocol propagation must
+        not block the KERNEL_AGENT phase.
         """
         envs: dict[str, Any] = {}
         try:
@@ -5647,7 +5610,7 @@ class Coordinator:
             "osl": int(getattr(state, "osl", 0) or int(os.environ.get("OSL", "1024"))),
             "conc": int(getattr(state, "conc", 0) or int(os.environ.get("CONC", "64"))),
         }
-        # Bench 口径 (measurement protocol): forward the SAME knobs Hyperloom
+        # Bench measurement protocol: forward the SAME knobs Hyperloom
         # actually benched with so PerfSkills' internal e2e measures identically.
         # Without this PerfSkills falls back to its own standalone defaults
         # (e.g. RANDOM_RANGE_RATIO=1 fixed-length vs Hyperloom's 0 variable-length)
@@ -5671,7 +5634,7 @@ class Coordinator:
             "raw_baseline_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
             "exp_root": str(self.session_dir / "perfskills"),
             # Align PerfSkills' bench CLIENT to Hyperloom's exact one (InferenceX
-            # benchmark_serving.py) so final/sweep numbers are cross-harness 可比.
+            # benchmark_serving.py) so final/sweep numbers are cross-harness comparable.
             "bench_client": "auto",
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
             # Pin the serving / optimization GPU set so PerfSkills never guesses:
@@ -12556,10 +12519,8 @@ class Coordinator:
                     integrate_params["framework_agent_candidate_id"] = fa_cand
                 if fa_batch:
                     integrate_params["framework_batch_id"] = fa_batch
-            # Enablement passthrough: an enablement authoring specialist is gated
-            # on RUNNABILITY (server boots), not throughput. Propagate the marker
-            # (+ optional launch probe) so integrate_patch applies the
-            # runnable_decision gate instead of the perf KEEP gate.
+            # Propagate the enablement marker (+ optional launch probe) so
+            # integrate_patch applies the runnable_decision gate.
             if bool(spec_params.get("enablement")):
                 integrate_params["enablement"] = True
                 probe = str(spec_params.get("launch_probe") or "").strip()
@@ -13248,10 +13209,8 @@ class Coordinator:
                     "disable-cuda-graph fallback for the next baseline retry",
                     task.task_id,
                 )
-            # Enablement capture: stash the launch/traceback text so the
-            # FRAMEWORK pump can classify a "can't even boot" failure and
-            # dispatch an enablement_specialist. Fast arg errors are excluded
-            # (deterministic mis-config, not a bridgeable enablement gap).
+            # Stash the launch/traceback text for the FRAMEWORK pump to classify
+            # and dispatch an enablement_specialist. Fast arg errors are excluded.
             if err_class != "fast_exit_arg_error":
                 launch_log = _extract_enablement_launch_log(result_payload)
                 if launch_log:
@@ -13492,47 +13451,30 @@ class Coordinator:
                     needs_gpu=needs_gpu,
                 )
                 if needs_gpu:
-                    # Item J: a framework-family authoring specialist
-                    # (``framework_agent_authoring``) leases the WHOLE machine
-                    # from ``framework_gpu_pool`` — the serving-disjoint carve is
-                    # bypassed (it holds the serving-exclusive gpu_research_lane,
-                    # so no serving runs concurrently) and the
-                    # ``gpu_specialist_capacity=0`` gate does not apply (that cap
-                    # only scopes the EXPLORE serving-disjoint pool). Everything
-                    # else (EXPLORE GPU specialists) is UNCHANGED: it leases from
-                    # the carved ``gpu_specialist_pool`` and defaults gpu_count to
-                    # the serving TP.
+                    # A framework-authoring specialist leases the whole machine
+                    # from ``framework_gpu_pool``; every other GPU specialist
+                    # leases from the carved ``gpu_specialist_pool``.
                     is_framework_authoring = bool(
                         params.get("framework_agent_authoring")
                     )
                     if is_framework_authoring:
                         gpu_pool = self.framework_gpu_pool
                         # Default to the whole machine; an explicit gpu_count
-                        # still wins (but never exceeds pool capacity, else
-                        # try_acquire can never grant it).
+                        # still wins (capped at pool capacity).
                         default_gpu_count = gpu_pool.capacity or 1
                     else:
                         gpu_pool = self.gpu_specialist_pool
-                        # Default ``gpu_count`` to the serving TP so a TP-coupled
-                        # comm / decode-at-scale gap is reproducible on the real
-                        # topology (1 card can't bench it). The specialist may
-                        # still ask for fewer (single-card kernel probe) via
-                        # explicit ``gpu_count`` — that wins. Falls back to 1 when
-                        # serving TP is unknown.
+                        # Default ``gpu_count`` to the serving TP; an explicit
+                        # ``gpu_count`` wins. Falls back to 1 when serving TP is
+                        # unknown.
                         default_gpu_count = self._resolve_serving_tp() or 1
                     try:
                         gpu_count = int(params.get("gpu_count", default_gpu_count) or default_gpu_count)
                     except (TypeError, ValueError):
                         gpu_count = default_gpu_count
-                    # A bench / E2E-capable specialist (``bench=true``) starts
-                    # a real TP-sharded server on its leased cards, which is
-                    # impossible with fewer than the serving TP. Floor gpu_count
-                    # up to TP so an explicit ``gpu_count=1`` from the prompt
-                    # cannot strand a bench specialist on a single card. Pure
-                    # microbench / profiling specialists set ``bench=false`` and
-                    # keep their explicit (possibly single-card) count. Framework
-                    # authoring already takes the whole machine, so the floor is a
-                    # no-op there.
+                    # A bench-capable specialist (``bench=true``) floors
+                    # gpu_count up to the serving TP; microbench / profiling
+                    # specialists (``bench=false``) keep their explicit count.
                     bench_raw = params.get("bench", False)
                     bench = (
                         bench_raw.strip().lower() in ("1", "true", "yes", "on")
@@ -13845,10 +13787,9 @@ class Coordinator:
                             "FRAMEWORK authored-outcome bridge failed for task=%s",
                             task.task_id,
                         )
-                # Enablement retry re-arm (D): a reverted enablement patch clears
-                # the in-flight guard so the next FRAMEWORK pump tick retries with
-                # the next bridging candidate; a kept patch is terminal. Runs
-                # independent of the FRAMEWORK-phase authored-outcome gate above.
+                # A reverted enablement patch clears the in-flight guard so the
+                # next FRAMEWORK pump tick retries with the next bridging
+                # candidate; a kept patch is terminal.
                 try:
                     self._maybe_rearm_enablement(getattr(result, "result", None))
                 except Exception:  # noqa: BLE001 — defensive

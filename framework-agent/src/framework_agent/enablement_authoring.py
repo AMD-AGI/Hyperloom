@@ -2,21 +2,14 @@
 
 """Enablement authoring mandate: the contract handed to the patch-authoring sub-agent.
 
-The actual patch synthesis is executed by Hyperloom's existing
-``SpecialistRunner`` (an LLM sub-agent writing into an isolated git worktree,
-gated by ``specialist_patch_safety`` and ``integrate_patch``). This module does
-**not** re-implement that machinery — it builds the *mandate* that parameterises
-it for the enablement objective:
+Builds the mandate that parameterises patch authoring for the enablement
+objective:
 
-* which source roots the patch may touch (framework always; ROCm/HIP only when
-  explicitly opted in),
-* a focused ``task_description`` derived from the failure signature and the
-  ranked bridging candidates,
+* which source roots the patch may touch,
+* a ``task_description`` derived from the failure signature and the ranked
+  bridging candidates,
 * the invariants the authored patch must satisfy (grounded diff, no fabricated
-  numbers, runnable-gate — not perf-gate).
-
-Keeping this as a pure, testable function means the coordinator wiring (Task #6)
-is a thin adapter: classify → discover → ``build_mandate`` → dispatch specialist.
+  numbers, runnable-gate).
 """
 
 from __future__ import annotations
@@ -27,15 +20,11 @@ from typing import Sequence
 from .enablement import EnablementRequest, FailureSignature
 
 
-# Source-root families the authored patch may target. Both the framework's
-# own source tree and the ROCm/HIP/aiter tree are always in scope (mirrors
-# ``framework_paths.resolve_rocm_hip_source_roots`` on the IO side, which is
-# always merged into the allowlist).
+# Source-root families the authored patch may target.
 _FRAMEWORK_ROOT_HINT = "the serving-framework source tree (e.g. sglang / vllm / atom)"
 _ROCM_HIP_ROOT_HINT = "the ROCm / HIP / aiter source tree (/opt/rocm, aiter)"
 
-# Invariants every enablement patch must respect. Surfaced verbatim into the
-# specialist prompt so the sub-agent cannot silently drop them.
+# Invariants every enablement patch must respect.
 ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "The patch MUST be a valid unified diff that applies cleanly "
     "(`git apply --check` must pass) against the live source tree.",

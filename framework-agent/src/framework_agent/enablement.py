@@ -2,19 +2,10 @@
 
 """Enablement failure-signature classifier.
 
-The enablement path answers a different question than the perf path: not
-"is this candidate faster?" but "why does this ``(model, backend)`` combo
-fail to *run at all*, and where would a bridging patch land?".
-
-This module is the deterministic, GPU-free front door to that path. It parses
-a server-launch log / Python traceback / build error into a structured
+Parses a server-launch log / Python traceback / build error into a structured
 :class:`FailureSignature` — a failure ``kind`` plus the offending file/symbol
-a downstream authoring sub-agent should target. It performs **no** network,
-LLM, or filesystem access, so it is fully unit-testable.
-
-See ``framework_ref1_design.md`` §2 for the taxonomy rationale and its
-relationship to the existing ``static_recon_specialist`` (which handles the
-orthogonal "runs but a fast path is silently disabled" case).
+a downstream authoring sub-agent should target. Performs no network, LLM, or
+filesystem access.
 """
 
 from __future__ import annotations
@@ -26,8 +17,7 @@ from typing import Any, Callable, Pattern
 
 
 # --- Failure kinds ---------------------------------------------------------
-# Stable string ids (not an Enum) so they serialize verbatim into JSON
-# summaries and downstream KB entries without an encoder shim.
+# String ids for each failure kind.
 
 MISSING_MODEL_ARCH = "missing_model_arch"
 UNSUPPORTED_DTYPE = "unsupported_dtype"
@@ -38,10 +28,7 @@ NOT_IMPLEMENTED = "not_implemented"
 CAPABILITY_DISABLED = "capability_disabled"
 UNKNOWN = "unknown"
 
-# Ordered most-specific → least-specific. ``classify_failure`` returns the
-# first rule that matches, so ambiguous text (e.g. an ImportError whose real
-# cause is a missing HIP symbol) resolves to the more actionable bridging
-# layer first.
+# Ordered most-specific to least-specific.
 FAILURE_KINDS: tuple[str, ...] = (
     MISSING_MODEL_ARCH,
     HIP_KERNEL_MISSING,
@@ -74,9 +61,7 @@ class FailureSignature:
             (``"framework"``, ``"rocm_hip"``, ``"build"``, or ``""``).
         secondary_kinds: Other failure kinds whose rules also matched, most
             specific first (excludes the primary ``kind``). Empty when only one
-            rule matched. Lets a downstream authoring sub-agent see stacked
-            errors (e.g. an ImportError masking a HIP undefined symbol) without
-            losing the more-actionable primary classification.
+            rule matched.
     """
 
     kind: str
@@ -127,7 +112,6 @@ def _grp(match: re.Match[str]) -> str:
     return ""
 
 
-# Each pattern's first capture group (when present) is the offending symbol.
 _RULES: tuple[_Rule, ...] = (
     _Rule(
         kind=MISSING_MODEL_ARCH,
@@ -209,20 +193,17 @@ _RULES: tuple[_Rule, ...] = (
 )
 
 
-# Last Python traceback frame: File "<path>", line N, in <func>
 _TB_FRAME = re.compile(r'File "([^"]+)", line \d+, in (\S+)')
-# Inline path mention (e.g. compiler errors: /path/to/file.cpp:123:4)
 _INLINE_PATH = re.compile(r"([/\w.\-]+\.(?:py|cpp|cc|cu|hip|h|hpp|cuh))(?::\d+)?")
 
 
 def _extract_offending_file(text: str, *, near: int | None = None) -> str:
     """Return the most relevant source file from a traceback / build log.
 
-    When ``near`` is given, prefer the traceback frame / inline path *closest to
-    (and at or before) that offset* — i.e. nearest the rule hit that elected the
-    primary kind. Otherwise (or when no frame precedes ``near``) fall back to the
-    *last* Python traceback frame (closest to the raise site), then the last
-    inline source-path mention. Returns ``""`` when nothing matches.
+    When ``near`` is given, prefer the traceback frame / inline path closest to
+    (and at or before) that offset. Otherwise fall back to the last Python
+    traceback frame, then the last inline source-path mention. Returns ``""``
+    when nothing matches.
 
     Args:
         text: The raw log / traceback text.
@@ -302,17 +283,11 @@ def _collect_hits(text: str) -> list[_RuleHit]:
 def classify_failure(log_text: str) -> FailureSignature:
     """Classify a launch/import/build failure into a :class:`FailureSignature`.
 
-    Scans the ordered :data:`_RULES` table and collects **every** rule that
-    matches, then elects a *primary* by ``(rule-order weight × match
-    proximity)`` — rule order is the dominant term (the table is most-specific
-    first, so e.g. a HIP undefined-symbol beats a generic import_error) with the
-    earliest match position as a tiebreaker. The remaining matched kinds are
-    surfaced as :attr:`FailureSignature.secondary_kinds` so stacked errors are
-    not lost. Confidence is nudged up slightly when multiple rules corroborate.
-    Returns an :data:`UNKNOWN` signature (``confidence=0.0``) when nothing
-    matches.
-
-    This is pure text analysis — no network, LLM, or filesystem access.
+    Collects every rule in :data:`_RULES` that matches, elects a primary by
+    ``(rule_index, match_start)``, and surfaces the remaining matched kinds as
+    :attr:`FailureSignature.secondary_kinds`. Confidence rises slightly with
+    each corroborating rule. Returns an :data:`UNKNOWN` signature
+    (``confidence=0.0``) when nothing matches.
 
     Args:
         log_text: Raw server-launch stderr/stdout, Python traceback, or
@@ -336,9 +311,6 @@ def classify_failure(log_text: str) -> FailureSignature:
         )
 
     text_len = max(len(text), 1)
-    # Score: rule specificity dominates (rank in FAILURE_KINDS order), with the
-    # match's proximity to the start of the text as a fine tiebreaker. Lower is
-    # better on both axes, so we minimize (rule_index, match_start).
     primary = min(hits, key=lambda h: (h.rule_index, h.match.start()))
     secondary = tuple(
         h.rule.kind for h in sorted(hits, key=lambda h: h.rule_index) if h.rule.kind != primary.rule.kind
@@ -348,7 +320,6 @@ def classify_failure(log_text: str) -> FailureSignature:
     if primary.rule.symbol_from is not None:
         symbol = primary.rule.symbol_from(primary.match)
 
-    # Multiple corroborating rules raise confidence a touch, capped at 1.0.
     confidence = min(1.0, primary.rule.confidence + 0.02 * len(secondary))
 
     return FailureSignature(
@@ -368,10 +339,6 @@ def classify_failure(log_text: str) -> FailureSignature:
 @dataclass(frozen=True)
 class EnablementRequest:
     """Top-level request describing a non-runnable ``(model, backend)`` combo.
-
-    Mirrors the shape of :class:`framework_agent.models.ExploreRequest` but is
-    gated on *runnability* rather than throughput — there is no baseline
-    throughput because the combo does not run yet.
 
     Attributes:
         framework: Serving framework (``sglang`` / ``vllm`` / ``atom`` ...).
@@ -452,16 +419,10 @@ def runnable_decision(
 ) -> tuple[bool, str]:
     """Decide whether an enablement patch made the combo *run*.
 
-    The enablement analogue of
-    :func:`framework_agent.decision.winner_decision`: the gate is **runnability**,
-    not throughput. A patch is KEPT only when the launch probe now exits 0 (and
-    did not time out) and, when a correctness check was run, it passed.
-
-    Short-circuits on the first failing condition; the reason is always set for
-    audit. As defence-in-depth, when both ``before_signature`` and
-    ``after_signature`` are supplied, the *same* actionable failure re-appearing
-    after the patch is treated as "not fixed" even if the probe superficially
-    returned 0.
+    Returns KEEP only when the launch probe now exits 0 (and did not time out)
+    and, when a correctness check was run, it passed. When both
+    ``before_signature`` and ``after_signature`` are supplied, the same
+    actionable failure re-appearing after the patch returns REVERT.
 
     Args:
         probe_returncode: Launch-probe exit code; ``None`` if the probe did not

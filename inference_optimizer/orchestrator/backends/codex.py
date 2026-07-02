@@ -62,7 +62,7 @@ For Critic specifically: when reviewing a proposal, emit
 """.strip()
 
 
-# Bare top-level {...} carrying "intents"; the fenced form lives in _json_io.
+# Bare top-level {...} carrying "intents".
 _BARE_JSON_RE = re.compile(r"(\{.*?\"intents\".*\})", re.DOTALL)
 
 
