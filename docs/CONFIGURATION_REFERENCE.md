@@ -87,6 +87,21 @@ read them when invoked standalone.
 | `HIP_VISIBLE_DEVICES` | inherited | Standard HIP visible-device mask.                                   |
 | `RUN_EVAL`        | `true`      | Runs the accuracy eval step inside the workload runner by default. Set to `false`/`0`/`no`/`off` to disable; disabling emits a warning. |
 
+### Warm-throughput measurement controls
+
+These controls keep the baseline, explore/grid candidates, validation, and
+integrate-patch measurements on the same hot measure-round basis when
+single-node server lifecycle reuse is available. Leave them enabled together for
+normal leaderboard/gain runs. If you opt out of any one of them for debugging,
+treat the session as a measurement-mode experiment and re-run `baseline` before
+comparing gains with normal sessions.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN` | `1` | Baseline runs a discarded cold warmup round, then records the hot second-round throughput as `baseline_tput`; the discarded first round is retained as `baseline_cold_tput` for audit. Set to `0`/`false`/`no`/`off` for the legacy single-round baseline. |
+| `INFERENCE_OPTIMIZER_RUN_GRID_WARMUP` | `1` outside pytest | `run_grid` performs the same discarded-warmup + hot-measure flow when no explicit `server_lifecycle` was supplied and the Magpie YAML is lifecycle-eligible. This covers shared grid users such as validation, sweep, and integrate-patch. Set to `0`/`false`/`no`/`off` only when deliberately measuring cold single rounds. |
+| `INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION` | `1` | Explore uses a discarded warmup before the decision round when lifecycle reuse is eligible, so candidate KEEP/REVERT math is compared against the hot `baseline_tput` contract. Set to `0`/`false`/`no`/`off` to force the legacy cold decision path. |
+
 ---
 
 ## 5. Kernel-opt backend selection
