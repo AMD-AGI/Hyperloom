@@ -21,7 +21,9 @@ fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 # Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
 # so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
-HYPERLOOM_DEPS_ROOT="${HYPERLOOM_DEPS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}}"
+# Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
+# /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
+HYPERLOOM_DEPS_ROOT="${HYPERLOOM_DEPS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}}"
 _open_source_root="${HYPERLOOM_DEPS_ROOT}"
 LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}"
 
@@ -31,12 +33,13 @@ INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
 TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
 # TraceLens v0.7.0 integration (#474): head of release/hyperloom_integration_v0.7.0.
 TRACELENS_REF="${TRACELENS_REF:-35bbb6380cf69a2655ee28260b02b5f2dc481744}"
-# Preferred container-local checkout for the public repo when operators install
-# TraceLens manually. The internal extension is private: Hyperloom keeps NO
-# repo URL, ref, or default path for it. It is used only when an operator
-# explicitly sets TRACELENS_INTERNAL_ROOT to an existing checkout
-# (open-source-only otherwise). There is no separate on/off toggle.
-TRACELENS_DEFAULT_ROOT="${TRACELENS_DEFAULT_ROOT:-/workspace/TraceLens}"
+# Optional operator hint for a pre-existing manual checkout. Left EMPTY by
+# default: the pod-local ${_open_source_root}/TraceLens is the sole implicit
+# default (resolved in resolve_tracelens), so a stale /workspace/TraceLens is
+# never silently adopted, which would bypass the /opt clone+pin path (#722).
+# The internal extension is private: Hyperloom keeps NO repo URL, ref, or
+# default path for it; used only when TRACELENS_INTERNAL_ROOT is set.
+TRACELENS_DEFAULT_ROOT="${TRACELENS_DEFAULT_ROOT:-}"
 
 usage() {
   cat <<'EOF'
@@ -89,6 +92,13 @@ done
 
 # Re-sync after arg parsing: --deps-root may have changed HYPERLOOM_DEPS_ROOT.
 _open_source_root="${HYPERLOOM_DEPS_ROOT}"
+# Export the canonical open-source-root key so a same-shell `install.sh` /
+# optimize invocation that did NOT source local-setup.env.sh still resolves the
+# SAME default TraceLens path (install.sh / paths / handler / tool read only
+# HYPERLOOM_OPEN_SOURCE_ROOT). Without this, a --deps-root / HYPERLOOM_DEPS_ROOT
+# override would leave those consumers on /opt and mis-classify managed vs
+# override (#722).
+export HYPERLOOM_OPEN_SOURCE_ROOT="${_open_source_root}"
 
 log() { echo "[local-setup] $*"; }
 warn() { echo "[local-setup WARN] $*" >&2; }
@@ -134,30 +144,83 @@ clone_or_update() {
   local repo="$2"
   local dest="$3"
   local ref="${4:-}"
+  # When "atomic", a fresh clone + ref checkout happens in a temp sibling and is
+  # renamed into place only after both succeed, so a concurrent reader never
+  # sees a half-cloned/unpinned $dest (#722). Used for TraceLens, whose path is
+  # read live by trace_analyze. Keep in lockstep with the twin implementations:
+  # kernel-agent/scripts/install.sh (ensure_tracelens) and
+  # kernel-agent/tools/tracelens_analysis.py (_ensure_tracelens_checkout).
+  local mode="${5:-}"
 
   if [ -d "${dest}/.git" ]; then
     if [ "$CHECK_ONLY" -eq 1 ]; then
       log "${name}: existing checkout ${dest}"
       return 0
     fi
-    run git -C "$dest" fetch --all --tags --prune
     if [ -n "$ref" ]; then
-      run git -C "$dest" checkout "$ref"
-      run git -C "$dest" pull --ff-only || true
+      # Realign to $ref via the shallow SHA-aware fetch used by
+      # kernel-agent/scripts/install.sh (ensure_tracelens): `fetch origin <ref>`
+      # + detached FETCH_HEAD checkout works for both a branch name and a raw
+      # commit SHA on a real (shallow) GitHub remote, unlike `checkout <sha>`
+      # which needs the object already present locally (#722 / PR#789).
+      run git -C "$dest" fetch --depth 1 origin "$ref"
+      run git -C "$dest" checkout -q FETCH_HEAD
+    else
+      run git -C "$dest" fetch --all --tags --prune
     fi
     return 0
   fi
 
   if [ -e "$dest" ]; then
-    die "${name} destination exists but is not a git checkout: ${dest}"
+    # atomic mode targets the installer-MANAGED default checkout (TraceLens,
+    # read live by trace_analyze): a dir without .git is a half-done/crashed
+    # clone, so drop it and rebuild, matching kernel-agent/scripts/install.sh
+    # (ensure_tracelens) and tracelens_analysis.py (_ensure_tracelens_checkout).
+    # Non-atomic deps keep the fail-fast guard so an operator path is never
+    # silently wiped (#722 / PR#789).
+    if [ "$mode" = "atomic" ]; then
+      if [ "$DRY_RUN" -eq 1 ]; then
+        log "would: rm -rf ${dest} (incomplete, not a git repo) then clone"
+      elif [ "$CHECK_ONLY" -eq 1 ]; then
+        warn "${name}: checkout at ${dest} is not a git repo (check-only, skipping rebuild)"
+        return 0
+      else
+        warn "${name}: checkout at ${dest} is not a git repo; rebuilding"
+        rm -rf "$dest"
+      fi
+    else
+      die "${name} destination exists but is not a git checkout: ${dest}"
+    fi
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
     die "${name} checkout missing: ${dest}"
   fi
 
   log "${name}: clone ${repo} -> ${dest}"
-  if [ "$DRY_RUN" -eq 0 ]; then
-    mkdir -p "$(dirname "$dest")"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would: git clone ${repo} ${dest}${ref:+ (checkout ${ref})}"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")"
+  if [ "$mode" = "atomic" ]; then
+    local tmp ok=1
+    tmp="$(dirname "$dest")/.$(basename "$dest").clone.$$"
+    rm -rf "$tmp"
+    git clone "$repo" "$tmp" || ok=0
+    if [ "$ok" -eq 1 ] && [ -n "$ref" ]; then
+      # Pin via shallow SHA-aware fetch + detached FETCH_HEAD, matching the twin
+      # implementations (install.sh ensure_tracelens, tracelens_analysis.py):
+      # `checkout <sha>` needs the object present locally, which a shallow clone
+      # may lack; `fetch origin <ref>` works for a branch name or raw SHA (#722).
+      git -C "$tmp" fetch --depth 1 origin "$ref" || ok=0
+      [ "$ok" -eq 1 ] && { git -C "$tmp" checkout -q FETCH_HEAD || ok=0; }
+    fi
+    if [ "$ok" -eq 0 ]; then
+      rm -rf "$tmp"
+      die "${name}: clone/checkout ${ref:-default} failed; refusing to publish a partial checkout at ${dest}"
+    fi
+    mv "$tmp" "$dest"
+    return 0
   fi
   run git clone "$repo" "$dest"
   if [ -n "$ref" ]; then
@@ -224,12 +287,66 @@ _resolve_existing_checkout() {
   return 1
 }
 
+# Normalized (placeholder-stripped) TRACELENS_ROOT from env or .env; empty when
+# unset or a historical "\" / whitespace placeholder. Mirrors the cleaning in
+# _resolve_existing_checkout so the "explicit override?" decision cannot be
+# fooled by a placeholder that later gets discarded (#722 / PR#789).
+_normalized_tracelens_root_value() {
+  local value="${TRACELENS_ROOT:-}"
+  if [ -z "$value" ]; then
+    value="$(_read_dotenv_var TRACELENS_ROOT || true)"
+  fi
+  _is_placeholder_path_value "$value" && value=""
+  printf '%s' "$value"
+}
+
+# Canonicalize a path (resolve symlinks/.. , strip trailing slash) so the
+# default-vs-override comparison matches the Python side's Path.resolve(); a
+# trailing-slash / symlinked spelling of the default must not read as override.
+# Empty input yields empty output; unresolvable paths fall back to the trimmed
+# literal so a not-yet-cloned default still compares correctly (#722 / PR#789).
+# Keep in lockstep with the twin helper in kernel-agent/scripts/install.sh.
+_canonicalize_path() {
+  local p="${1:-}"
+  [ -z "$p" ] && return 0
+  readlink -f -- "$p" 2>/dev/null || printf '%s' "${p%/}"
+}
+
 resolve_tracelens() {
-  if _resolve_existing_checkout TRACELENS_ROOT "$TRACELENS_DEFAULT_ROOT"; then
+  # An EXPLICIT override (TRACELENS_ROOT via env/.env, or an explicitly-set
+  # TRACELENS_DEFAULT_ROOT) is operator-maintained: adopt it as-is, never
+  # re-pin. The IMPLICIT pod-local default (${_open_source_root}/TraceLens) is
+  # installer-managed: always run clone_or_update so an existing checkout is
+  # fetched/checked out to TRACELENS_REF (not left on a stale SHA) and a missing
+  # one is atomically cloned+pinned (#722 / PR#789).
+  _normalize_trace_env_roots
+  local _explicit="" _default_root _norm_root _norm_default_root
+  # Explicit override ONLY when a placeholder-stripped, canonicalized path
+  # (TRACELENS_ROOT or TRACELENS_DEFAULT_ROOT) points OUTSIDE the pod-local
+  # default. The default path — even when re-exported into env/.env or spelled
+  # out via TRACELENS_DEFAULT_ROOT — stays installer-managed so a stale checkout
+  # is still realigned to TRACELENS_REF, not silently adopted (#722 / PR#789).
+  # Matches the path-based override test in kernel-agent/scripts/install.sh and
+  # the handler/tool.
+  _default_root="$(_canonicalize_path "${_open_source_root}/TraceLens")"
+  _norm_root="$(_canonicalize_path "$(_normalized_tracelens_root_value)")"
+  _norm_default_root=""
+  if ! _is_placeholder_path_value "${TRACELENS_DEFAULT_ROOT:-}"; then
+    _norm_default_root="$(_canonicalize_path "${TRACELENS_DEFAULT_ROOT:-}")"
+  fi
+  if { [ -n "$_norm_root" ] && [ "$_norm_root" != "$_default_root" ]; } \
+     || { [ -n "$_norm_default_root" ] && [ "$_norm_default_root" != "$_default_root" ]; }; then
+    _explicit=1
+  fi
+  if [ -n "$_explicit" ] && _resolve_existing_checkout TRACELENS_ROOT \
+       "${TRACELENS_DEFAULT_ROOT:-${_open_source_root}/TraceLens}"; then
     :
   else
     TRACELENS_ROOT="${_open_source_root}/TraceLens"
-    clone_or_update "TraceLens" "$TRACELENS_REPO" "$TRACELENS_ROOT" "$TRACELENS_REF"
+    # Atomic: TraceLens is read live by trace_analyze; never publish a
+    # half-cloned/unpinned tree at $TRACELENS_ROOT (#722). clone_or_update
+    # realigns an existing checkout to $TRACELENS_REF.
+    clone_or_update "TraceLens" "$TRACELENS_REPO" "$TRACELENS_ROOT" "$TRACELENS_REF" atomic
     export TRACELENS_ROOT
     log "TRACELENS_ROOT: ${TRACELENS_ROOT}"
   fi
@@ -306,6 +423,12 @@ write_local_env() {
     write_export USER_DATA_PATH "$USER_DATA_PATH"
     write_export HYPERLOOM_RUNTIME_DIR "$HYPERLOOM_RUNTIME_DIR"
     write_export HYPERLOOM_DEPS_ROOT "$HYPERLOOM_DEPS_ROOT"
+    # Also export the canonical open-source-root key so install.sh /
+    # inference_optimizer.paths / the handler / the tool resolve the SAME
+    # default TraceLens path when this env file is sourced. Without it, a
+    # --deps-root / HYPERLOOM_DEPS_ROOT override would leave those consumers on
+    # /opt/hyperloom/open-source-repos and mis-classify managed vs override (#722).
+    write_export HYPERLOOM_OPEN_SOURCE_ROOT "$_open_source_root"
     write_export OOB_SRC "$OOB_SRC"
     write_export INFERENCEX_PATH "$INFERENCEX_PATH"
     write_export TRACELENS_ROOT "$TRACELENS_ROOT"
