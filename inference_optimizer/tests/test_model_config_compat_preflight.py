@@ -365,9 +365,11 @@ def test_detect_pure_nested_ministral3_blocked(tmp_path):
     assert reason is not None and "ministral3" in reason
 
 
-def test_detect_nested_qwen3_5_moe_text_unrecognized_blocked(tmp_path):
-    # Qwen3.6 wrapper exposes text_config.model_type=qwen3_5_moe_text; vLLM/
-    # Transformers rejects that nested type during ModelConfig validation.
+def test_detect_nested_qwen3_5_moe_text_not_blocked(tmp_path):
+    # The Qwen3.6 wrapper exposes text_config.model_type=qwen3_5_moe_text. The
+    # current runtime registers Qwen3_5MoeConfig/Qwen3_5MoeTextConfig and vLLM
+    # ModelRegistry knows Qwen3_5MoeForConditionalGeneration, so the nested type
+    # is no longer gated and falls through to the text_coercible degraded path.
     m = tmp_path / "wrapper_nested_qwen3_5_moe_text"
     _write_config(
         m,
@@ -379,8 +381,7 @@ def test_detect_nested_qwen3_5_moe_text_unrecognized_blocked(tmp_path):
             "vocab_size": 151936,
         },
     )
-    reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None and "qwen3_5_moe_text" in reason
+    assert cli._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_top_level_qwen3_5_moe_not_blocked(tmp_path):
