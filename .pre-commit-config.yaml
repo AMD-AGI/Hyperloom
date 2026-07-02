@@ -1,0 +1,55 @@
+# Pre-commit: single local front door for the CI static-analysis gates.
+#
+# Scope note: this wires the *check-only* hooks (no ``ruff-format``). The
+# repo-wide ``ruff format`` reflow (~170 files) is deferred to its own
+# mechanical PR; enable the ``ruff-format`` hook here once that lands so
+# formatting is enforced at authoring time.
+#
+# Install locally with::
+#
+#     pip install pre-commit && pre-commit install
+#
+# Run against everything once (baseline) with::
+#
+#     pre-commit run --all-files
+#
+# Hooks default to changed files only, so the existing lint backlog does not
+# block commits while it is drained; new/changed lines are gated immediately.
+repos:
+  # Ruff: same rule set as ``[tool.ruff]`` / ``[tool.ruff.lint]`` and the
+  # ``lint.yml`` CI job (E/F/W). Check only -- formatting is deferred (see note).
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff
+        args: ["--force-exclude"]
+
+  # Bandit: reads ``[tool.bandit]`` (skips B101, excludes test trees). The
+  # ``bandit[toml]`` extra is required to parse the config from pyproject.
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.9.4
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml"]
+        additional_dependencies: ["bandit[toml]"]
+
+  # ShellCheck: most hits are SC2086 (unquoted expansions) -- fast to fix.
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.11.0
+    hooks:
+      - id: shellcheck
+
+  # yamllint: ``relaxed`` preset + line-length disabled keeps the existing
+  # backlog from blocking commits while still flagging genuine YAML errors.
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        args: ["-d", "{extends: relaxed, rules: {line-length: disable}}"]
+
+  # actionlint: lints ``.github/workflows`` -- run locally so the workflow-lint
+  # error the audit hit (actionlint did not complete in CI) surfaces early.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
