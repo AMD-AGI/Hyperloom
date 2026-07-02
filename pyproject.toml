@@ -283,6 +283,17 @@ pytest_ci_args = [
 # enforcement (``--cov-fail-under=0`` + no ``coverage report --fail-under`` gate).
 relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 
+# Bandit security linter. ``B101`` (assert_used) is skipped repo-wide: the vast
+# majority of hits are test assertions and intentional runtime invariants, not
+# security defects. Test trees are excluded so bandit reports only first-party
+# source findings. Genuine findings (weak hash B324, string-built SQL B608,
+# hardcoded-credential B105/B106) are reviewed and annotated with ``# nosec``
+# plus a reason where legitimate. CI gating on medium+ severity is added in a
+# follow-up ratchet, not here.
+[tool.bandit]
+skips = ["B101"]
+exclude_dirs = ["*/tests/*", "*/test/*", "slides", "build", ".venv"]
+
 # Pylint: minimal defaults for local runs; CI passes ``--errors-only`` so only
 # fatal/error-severity messages are reported there (see ``lint.yml``).
 [tool.pylint.main]
@@ -333,8 +344,6 @@ ignore = ["E501", "E741"]
 # Tests routinely re-import inside function bodies (E402), redefine fixtures
 # (F811), and bind setup values they assert on indirectly (F841).
 "**/tests/**/*.py" = ["F811", "E402", "F841"]
-# CLI dispatchers use string forward-refs to keep startup cheap
-"inference_optimizer/cli.py" = ["F821"]  # remove after fixing the 5 real ones first
 # Modules that intentionally place imports after a module docstring + early
 # constants / conditional setup (lazy or ordering-sensitive imports).
 "inference_optimizer/orchestrator/coordinator.py" = ["E402"]
