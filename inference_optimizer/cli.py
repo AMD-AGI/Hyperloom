@@ -947,17 +947,27 @@ def _validate_credentials() -> None:
 
 
 def _is_placeholder_tracelens_path(value: str) -> bool:
-    """Treat .env.template's bare ``\\`` and whitespace-only values as unset.
+    """Treat unedited .env.template placeholders as unset.
+
+    Covers the bare ``\\`` / whitespace-only values plus common literal
+    placeholders (``/path/to/your/TraceLens``, ``<your-...>``) an operator
+    forgot to replace, so the pod-local fallback / installer value wins.
 
     Args:
         value (str): The candidate TraceLens path value.
 
     Returns:
-        bool: ``True`` when the value is blank or the bare backslash
-            placeholder.
+        bool: ``True`` when the value is blank or an unedited placeholder.
     """
     stripped = value.strip()
-    return stripped in ("", "\\")
+    if stripped in ("", "\\"):
+        return True
+    low = stripped.lower()
+    if "/path/to/" in low or "path/to/your" in low:
+        return True
+    if "<" in stripped and ">" in stripped:
+        return True
+    return False
 
 
 def _load_dotenv_fallback() -> None:
@@ -1006,32 +1016,102 @@ def _load_dotenv_fallback() -> None:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
 
 
-def _load_kernel_agent_env_fallback() -> None:
-    """If ``HYPERLOOM_KERNEL_AGENT_ROOT`` is unset, auto-source the
-    kernel-agent env file produced by ``inference_optimizer/scripts/
-    install.sh`` at ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``
-    (overridable via ``$KERNEL_AGENT_ENV``).
+# kernel-agent env vars that MUST resolve to an existing checkout. Unlike
+# ordinary vars (env-wins no-clobber), a stale/invalid inherited value for
+# these is CORRECTED from the installer-written env file so trace_analyze does
+# not fall back to an empty pod-local dir (issue #722). Scoped to TRACELENS_ROOT
+# only: MAGPIE_PATH is deliberately excluded because a merely-existing dir that
+# is not a Magpie checkout would flip the downstream preflight into the
+# explicit-override branch and hard-fail auto-clone.
+_KERNEL_AGENT_PATH_VARS: tuple[str, ...] = ("TRACELENS_ROOT",)
 
-    Must source before any orchestrator import (trace_analyze reads HYPERLOOM_KERNEL_AGENT_ROOT at module load).
-    Hard-fail contract: looks only at $KERNEL_AGENT_ENV or $USER_DATA_PATH/runtime/kernel-agent.env.sh (no
-    parent-dir fallback); sys.exit(2) if missing/0-vars/still-unset; skip when the var is already set.
+
+def _parse_env_assignments(text: str) -> dict[str, str]:
+    """Parse ``[export] KEY=VALUE`` shell assignments into a dict (first wins)."""
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        out.setdefault(key, value)
+    return out
+
+
+def _correct_kernel_agent_path_vars(file_vars: dict[str, str], env_path: Path) -> None:
+    """Overwrite invalid inherited path-class vars with the env file's value.
+
+    Only fires when the inherited value is unset/non-existent AND the file value
+    points at an existing dir; a valid inherited value keeps env-wins semantics.
     """
-    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
-        return
+    for key in _KERNEL_AGENT_PATH_VARS:
+        file_val = file_vars.get(key)
+        if not file_val or not Path(file_val).is_dir():
+            continue
+        current = os.environ.get(key, "")
+        if current == file_val or (current and Path(current).is_dir()):
+            continue
+        print(
+            f"Preflight: WARNING — {key}={current or '(unset)'} does not point "
+            f"at an existing checkout; correcting to {file_val} from {env_path} "
+            f"(installer-written value wins for path vars).",
+            file=sys.stderr,
+        )
+        os.environ[key] = file_val
+
+
+def _load_kernel_agent_env_fallback() -> None:
+    """Auto-source the installer-written kernel-agent env file
+    (``$KERNEL_AGENT_ENV`` or ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``).
+
+    Must source before any orchestrator import (trace_analyze reads
+    HYPERLOOM_KERNEL_AGENT_ROOT at module load). When HYPERLOOM_KERNEL_AGENT_ROOT
+    is already set, bootstrapping is skipped but the env file is still consulted
+    to CORRECT a stale/invalid inherited TRACELENS_ROOT — the fix for issue
+    #722 where a bad inherited TRACELENS_ROOT survived. Hard-fail contract
+    (root unset only): sys.exit(2) if missing/0-vars/still-unset.
+    """
     candidate = os.environ.get("KERNEL_AGENT_ENV")
     if not candidate:
         user_data = os.environ.get("USER_DATA_PATH")
-        if not user_data:
-            print(
-                "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
-                "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
-                "resolve kernel-agent.env.sh. Run "
-                "inference_optimizer/scripts/install.sh and export "
-                "USER_DATA_PATH=/path/to/sessions first.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
+        if user_data:
+            candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
+
+    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
+        # Root is set: no bootstrap needed, but still correct invalid path vars
+        # from the env file when resolvable. Silent no-op otherwise.
+        if not candidate:
+            return
+        env_path = Path(candidate)
+        if not env_path.is_file():
+            return
+        try:
+            text = env_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        _correct_kernel_agent_path_vars(_parse_env_assignments(text), env_path)
+        return
+
+    if not candidate:
+        print(
+            "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
+            "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
+            "resolve kernel-agent.env.sh. Run "
+            "inference_optimizer/scripts/install.sh and export "
+            "USER_DATA_PATH=/path/to/sessions first.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     env_path = Path(candidate)
     if not env_path.is_file():
         print(
@@ -1048,7 +1128,6 @@ def _load_kernel_agent_env_fallback() -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    loaded = 0
     try:
         text = env_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -1057,24 +1136,13 @@ def _load_kernel_agent_env_fallback() -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if not key:
-            continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
+    file_vars = _parse_env_assignments(text)
+    loaded = 0
+    for key, value in file_vars.items():
         if key not in os.environ:
             os.environ[key] = value
             loaded += 1
+    _correct_kernel_agent_path_vars(file_vars, env_path)
     if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
         print(
             f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
@@ -1241,6 +1309,27 @@ def _check_tracelens_cli() -> None:
         f"  bash $REPO_ROOT/inference_optimizer/scripts/install.sh\n"
         f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
         f"then retry `inference_optimizer optimize`. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def _check_tracelens_root_exists() -> None:
+    """Hard-gate an explicitly set ``TRACELENS_ROOT`` at preflight (issue #722).
+
+    An operator-supplied TRACELENS_ROOT that points at a missing checkout (stale
+    path or unedited template placeholder) otherwise only surfaces ~10h later in
+    trace_analyze. Unset is fine (pod-local fallback handled downstream).
+    """
+    override = os.environ.get("TRACELENS_ROOT")
+    if not override or Path(override).is_dir():
+        return
+    print(
+        f"ERROR: TRACELENS_ROOT={override} does not point at an existing "
+        f"TraceLens checkout. It was likely inherited from a stale shell or an "
+        f"unedited .env template. Re-run inference_optimizer/scripts/install.sh "
+        f"and source $KERNEL_AGENT_ENV, point TRACELENS_ROOT at a real checkout, "
+        f"or unset it to use the pod-local default. Refusing to start.",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -2033,6 +2122,9 @@ def _preflight(
     enable_roofline = getattr(args, "enable_roofline", True) if args else True
     if _tracelens_required_at_preflight(no_kernel, enable_roofline):
         _check_tracelens_cli()
+        # Fail fast on a stale/placeholder TRACELENS_ROOT before the Coordinator
+        # starts, rather than ~10h later in trace_analyze (issue #722).
+        _check_tracelens_root_exists()
     else:
         _missing_tl = [n for n in _TRACELENS_REQUIRED_CLIS if shutil.which(n) is None]
         if _missing_tl:
