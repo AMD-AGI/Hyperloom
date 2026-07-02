@@ -439,6 +439,48 @@ def test_run_conc_sweep_happy_path_writes_reports(
     assert not final_json_path.exists()
 
 
+def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch,
+):
+    """On MI325X/MI308X conc-sweep must select the mi300x runner script, like
+    every other executor — not state.gpu_type's real type (issue: sglang_mi325x.sh
+    is not shipped by Magpie, so the real type would fail every variant)."""
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    state.gpu_type = "mi325x"
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+
+    seen: dict[str, str] = {}
+
+    def _fake_materialize(src, out_dir, **kw):
+        seen["materialize_gpu"] = kw.get("gpu_type")
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        seen["run_grid_gpu"] = kw.get("gpu_type")
+        return [
+            _fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid
+        ]
+
+    with (
+        patch(
+            "inference_optimizer.orchestrator.conc_sweep.run_grid",
+            side_effect=_fake_run_grid,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+            side_effect=_fake_materialize,
+        ),
+    ):
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[1]))
+
+    assert seen["materialize_gpu"] == "mi300x"
+    assert seen["run_grid_gpu"] == "mi300x"
+
+
 def test_run_conc_sweep_optimized_oom_yields_failed_pair(
     session_dir: Path,
     baseline_yaml: Path,
