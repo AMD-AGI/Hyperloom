@@ -292,7 +292,7 @@ relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 # follow-up ratchet, not here.
 [tool.bandit]
 skips = ["B101"]
-exclude_dirs = ["*/tests", "*/test", "slides", "build", ".venv"]
+exclude_dirs = ["*/tests/*", "*/test/*", "slides", "build", ".venv"]
 
 # Pylint: minimal defaults for local runs; CI passes ``--errors-only`` so only
 # fatal/error-severity messages are reported there (see ``lint.yml``).
