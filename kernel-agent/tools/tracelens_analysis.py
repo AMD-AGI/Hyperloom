@@ -4774,7 +4774,11 @@ def _tracelens_checkout_complete(tl_root: Path) -> bool:
     """A checkout is usable only if it is a git tree, not a half-done clone.
 
     Guards against reading an installer's in-progress direct clone (the dir
-    exists but ``.git`` is not yet populated).
+    exists but ``.git`` is not yet populated). ``.exists()`` (not ``is_dir()``)
+    on purpose: ``.git`` is a plain file in a submodule/worktree checkout. We do
+    not validate the tree beyond presence — a corrupt ``.git`` still surfaces
+    later at the git/pip step; the common half-clone case (no ``.git``) is what
+    this gate catches (#722/PR#789 follow-up #6).
     """
     return (tl_root / ".git").exists()
 

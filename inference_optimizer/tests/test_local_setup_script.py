@@ -323,6 +323,49 @@ def test_local_setup_placeholder_dotenv_still_realigns_default_checkout(tmp_path
     assert head == pin_sha, f"default checkout not realigned despite placeholder: {head} != {pin_sha}"
 
 
+def test_local_setup_rebuilds_incomplete_default_checkout(tmp_path: Path) -> None:
+    # #722/PR#789: a MANAGED default checkout that exists but is NOT a git tree
+    # (half-done/crashed clone, no .git) must be dropped and rebuilt+pinned via
+    # the atomic path, not abort. Mirrors kernel-agent/scripts/install.sh
+    # (ensure_tracelens) and tracelens_analysis.py (_ensure_tracelens_checkout);
+    # previously clone_or_update die'd on "destination exists but is not a git
+    # checkout" and local_setup.sh could not self-repair the default path.
+    remotes = tmp_path / "remotes"
+    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
+    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
+    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
+    _allow_sha_fetch(tracelens_public)
+    pin_sha = subprocess.run(
+        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    # Pre-create the pod-local default checkout as an incomplete tree (no .git).
+    default_root = tmp_path / "deps" / "TraceLens"
+    default_root.mkdir(parents=True)
+    (default_root / "partial").write_text("half\n", encoding="utf-8")
+
+    result = _run_local_setup(
+        tmp_path,
+        env={
+            "KERNEL_FORGE_REPO": str(forge),
+            "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
+            "TRACELENS_REPO": str(tracelens_public),
+            "TRACELENS_REF": pin_sha,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    # Rebuilt: now a real git checkout pinned to TRACELENS_REF, stale tree gone.
+    assert (default_root / ".git").exists()
+    assert not (default_root / "partial").exists()
+    head = subprocess.run(
+        ["git", "-C", str(default_root), "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    assert head == pin_sha, f"incomplete default not rebuilt+pinned: {head} != {pin_sha}"
+
+
 def test_local_setup_realigns_default_checkout_when_env_holds_default_path(tmp_path: Path) -> None:
     # #722/PR#789 regression: a prior run re-exports TRACELENS_ROOT=<default> into
     # env/.env. That is NOT an operator override — a default checkout on a stale

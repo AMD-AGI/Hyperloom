@@ -172,7 +172,25 @@ clone_or_update() {
   fi
 
   if [ -e "$dest" ]; then
-    die "${name} destination exists but is not a git checkout: ${dest}"
+    # atomic mode targets the installer-MANAGED default checkout (TraceLens,
+    # read live by trace_analyze): a dir without .git is a half-done/crashed
+    # clone, so drop it and rebuild, matching kernel-agent/scripts/install.sh
+    # (ensure_tracelens) and tracelens_analysis.py (_ensure_tracelens_checkout).
+    # Non-atomic deps keep the fail-fast guard so an operator path is never
+    # silently wiped (#722 / PR#789).
+    if [ "$mode" = "atomic" ]; then
+      if [ "$DRY_RUN" -eq 1 ]; then
+        log "would: rm -rf ${dest} (incomplete, not a git repo) then clone"
+      elif [ "$CHECK_ONLY" -eq 1 ]; then
+        warn "${name}: checkout at ${dest} is not a git repo (check-only, skipping rebuild)"
+        return 0
+      else
+        warn "${name}: checkout at ${dest} is not a git repo; rebuilding"
+        rm -rf "$dest"
+      fi
+    else
+      die "${name} destination exists but is not a git checkout: ${dest}"
+    fi
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
     die "${name} checkout missing: ${dest}"

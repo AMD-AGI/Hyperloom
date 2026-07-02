@@ -216,6 +216,45 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
 
 ---
 
+## TraceLens root dangling after the /tmp → /opt default move (#722)
+
+**Symptom.** On a pod provisioned before #722, `trace_analyze` still fails
+with `TraceLens root not found` (or `incomplete (not a git checkout)`) even
+after a tmp-reaper wipe, and the runtime never self-heals it.
+
+**Cause.** The open-source deps default moved from the ephemeral
+`${TMPDIR:-/tmp}/hyperloom/open-source-repos` to the pod-internal
+`/opt/hyperloom/open-source-repos`. A stale `kernel-agent.env.sh` (or `.env`)
+that still pins `TRACELENS_ROOT` to the old `/tmp/...` path is treated as an
+**explicit operator override**: self-heal is scoped to the installer-managed
+default only, so a non-default `/tmp` path is never auto-re-cloned and fails
+fast once `/tmp` is reaped.
+
+**Fix.** Pick one:
+
+1. **Re-run the installer (preferred).** Drop the stale pin so the default is
+   re-resolved to `/opt`, then reinstall:
+   ```bash
+   # remove any hard-coded old /tmp TRACELENS_ROOT from env/.env first
+   unset TRACELENS_ROOT
+   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   ```
+   The installer rewrites `kernel-agent.env.sh` with the `/opt` default and
+   clones+pins TraceLens there.
+2. **Point the deps root at a writable dir** if the pod runs as non-root or
+   `/opt` is read-only (the installer `mkdir -p`s the root, so it must be
+   writable):
+   ```bash
+   export HYPERLOOM_OPEN_SOURCE_ROOT="$USER_DATA_PATH/open-source-repos"
+   unset TRACELENS_ROOT
+   bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
+   ```
+3. **Keep an operator checkout** only if you deliberately maintain one — set
+   `TRACELENS_ROOT` to that path. It is adopted as-is (no clone, no SHA pin,
+   no self-heal), so you own keeping it present and on the right ref.
+
+---
+
 ## Cursor backend gets HTTP 401 (separate from auth-proxy)
 
 **Symptom.** The OOB `cursor` backend specifically returns 401 even
