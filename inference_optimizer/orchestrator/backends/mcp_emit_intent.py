@@ -11,7 +11,6 @@ forwarding to Claude.
 
 from __future__ import annotations
 
-import importlib
 import logging
 from typing import Any, Callable
 
@@ -20,6 +19,7 @@ from ...protocol.intent import (
     IntentValidationError,
     _PAYLOAD_REQUIRED,  # type: ignore[attr-defined]
 )
+from .mcp_context_tools import _resolve_sdk
 
 
 log = logging.getLogger(__name__)
@@ -123,25 +123,6 @@ async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
             "is_error": True,
         }
     return {"content": [{"type": "text", "text": "ok"}]}
-
-
-def _resolve_sdk(sdk_module: Any | None) -> Any | None:
-    """Return the provided SDK module or import ``claude_agent_sdk``.
-
-    Args:
-        sdk_module (Any | None): An explicit SDK module override (used by
-            tests); when ``None`` the real ``claude_agent_sdk`` is imported.
-
-    Returns:
-        Any | None: The resolved SDK module, or ``None`` if the override is
-        absent and the SDK cannot be imported.
-    """
-    if sdk_module is not None:
-        return sdk_module
-    try:
-        return importlib.import_module("claude_agent_sdk")
-    except ImportError:
-        return None
 
 
 def build_emit_intent_server(
