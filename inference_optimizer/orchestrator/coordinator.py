@@ -55,6 +55,9 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # Floor on the per-repo framework-PR discover timeout so a slow repo still gets a
 # usable budget even when the phase timeout is spread thin across many repos.
 _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
+# Sentinel returned by _rank_framework_agent_candidates_llm / _select_best_framework_agent_candidate
+# when the ranker explicitly signals that no candidate is applicable.
+_FRAMEWORK_AGENT_NONE_APPLICABLE: object = object()
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
 _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # Default resume-drift floor (%): a re-measured current_best below this fraction
@@ -2940,7 +2943,11 @@ class Coordinator:
                 _r = await self.tasks.running()
             except Exception:  # noqa: BLE001 — defensive
                 _q, _r = [], []
-            if any(getattr(t, "kind", "") in ("specialist", "integrate_patch") for t in (*_q, *_r)):
+            if any(
+                getattr(t, "kind", "") in ("specialist", "integrate_patch")
+                and bool((getattr(t, "params", None) or {}).get("framework_agent_authoring"))
+                for t in (*_q, *_r)
+            ):
                 return
             # Proposal-window guard: the task check above misses the interval
             # between a specialist completing (config-lever / patch deliverable)
@@ -2960,6 +2967,14 @@ class Coordinator:
         # Pick the most promising un-dispatched candidate (agent-ranked), or
         # request a new batch if exhausted.
         next_candidate = await self._select_best_framework_agent_candidate()
+        if next_candidate is _FRAMEWORK_AGENT_NONE_APPLICABLE:
+            self._record_framework_agent_phase_done(
+                reason="no_applicable_candidates",
+                failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
+            )
+            state.framework_agent_phase_done = True
+            state.save(self.session_dir)
+            return
         if next_candidate is None:
             # Hold the phase open while authored patches are still benched/critic-reviewed (gains must land before plateau judge); gated by authoring flag.
             # Only wait when the pump itself discovered a PR batch to author against:
@@ -2993,6 +3008,14 @@ class Coordinator:
                 state.save(self.session_dir)
                 return
             next_candidate = await self._select_best_framework_agent_candidate()
+            if next_candidate is _FRAMEWORK_AGENT_NONE_APPLICABLE:
+                self._record_framework_agent_phase_done(
+                    reason="no_applicable_candidates",
+                    failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
+                )
+                state.framework_agent_phase_done = True
+                state.save(self.session_dir)
+                return
             if next_candidate is None:
                 self._record_framework_agent_phase_done(
                     reason="discover_returned_no_new_candidates",
@@ -3037,6 +3060,30 @@ class Coordinator:
                 _cand_id_log,
             )
             audit_step = "author_via_specialist"
+        # G4: a candidate that belongs to a different concrete framework cannot
+        # be direct-applied into this session's source tree. Downgrade to
+        # authoring so the idea can still be ported. ``aiter`` is shared across
+        # frameworks and is never treated as a mismatch.
+        if audit_step == "direct_framework":
+            session_fw = str(getattr(state, "framework", "") or "").strip().lower()
+            cand_fw = str(next_candidate.get("framework") or "").strip().lower()
+            if not cand_fw:
+                repo_token = str(
+                    next_candidate.get("repo") or next_candidate.get("discovered_repo_url") or ""
+                ).lower()
+                for _fw_tok in ("sglang", "vllm", "atom"):
+                    if f"/{_fw_tok}" in repo_token or repo_token.endswith(_fw_tok):
+                        cand_fw = _fw_tok
+                        break
+            if cand_fw and cand_fw != "aiter" and session_fw and cand_fw != session_fw:
+                log.info(
+                    "FRAMEWORK: direct_apply downgraded to authoring "
+                    "(candidate framework=%s differs from session framework=%s) candidate=%s",
+                    cand_fw,
+                    session_fw,
+                    _cand_id_log,
+                )
+                audit_step = "author_via_specialist"
         # Submit the candidate as a proposal; the async Critic verdict drives
         # the apply/author enqueue or the critic_denied row on a later tick.
         await self._submit_framework_agent_candidate_for_review(
@@ -3046,29 +3093,54 @@ class Coordinator:
         )
 
     async def _framework_agent_authoring_inflight(self) -> bool:
-        """True while a FRAMEWORK-authored patch is still in flight (specialist/integrate_patch task or pending integrate_patch proposal); pump waits before advancing.
+        """True while a FRAMEWORK-authored patch for an unprocessed candidate is still in flight.
+
+        Counts only items with the ``framework_agent_authoring`` provenance marker whose candidate
+        is still unprocessed (no terminal progress row yet). A KERNEL-phase specialist/integrate or
+        an orphaned stale proposal therefore never pins the pump.
 
         Returns:
-            ``True`` if a specialist/integrate_patch task is queued or running,
-            or an integrate_patch proposal is pending Critic review; else
-            ``False``.
+            ``True`` if a framework-owned specialist/integrate_patch task is queued or running,
+            or a framework-owned undecided proposal targets an unprocessed candidate; else ``False``.
         """
+        unprocessed_ids = {
+            str(c.get("candidate_id") or c.get("pr_url") or c.get("ref") or "")
+            for c in self._unprocessed_framework_agent_candidates()
+        }
         try:
             queued = await self.tasks.queued()
             running = await self.tasks.running()
         except Exception:  # noqa: BLE001 — defensive
             queued, running = [], []
         for t in (*queued, *running):
-            if getattr(t, "kind", "") in ("specialist", "integrate_patch"):
+            if getattr(t, "kind", "") not in ("specialist", "integrate_patch"):
+                continue
+            params = getattr(t, "params", None) or {}
+            if not params.get("framework_agent_authoring"):
+                continue
+            cand_id = str(params.get("framework_agent_candidate_id") or "")
+            if not cand_id or cand_id in unprocessed_ids:
                 return True
         # An authored patch awaiting Critic review or a candidate awaiting its
-        # pre-screen verdict both keep the phase from exiting early.
+        # pre-screen verdict both keep the phase from exiting early — but only
+        # while the proposal targets a still-unprocessed candidate.
         try:
             for p in self.state.pending_proposals.values():
                 if getattr(p, "decided", False):
                     continue
-                if getattr(p, "action_name", "") in ("integrate_patch", "framework_agent"):
-                    return True
+                action = getattr(p, "action_name", "")
+                payload = getattr(p, "payload", None) or {}
+                if action == "framework_agent":
+                    cand_id = str(payload.get("framework_agent_candidate_id") or "")
+                    if not cand_id or cand_id in unprocessed_ids:
+                        return True
+                elif action == "integrate_patch":
+                    iparams = payload.get("params") or {}
+                    if not iparams.get("framework_agent_authoring"):
+                        continue
+                    cand_id = str(iparams.get("framework_agent_candidate_id") or "")
+                    if not cand_id or cand_id in unprocessed_ids:
+                        return True
         except Exception:  # noqa: BLE001 — defensive
             pass
         return False
@@ -3597,6 +3669,8 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — ranking is advisory; never wedge the pump
             log.debug("FRAMEWORK: agent candidate ranking failed", exc_info=True)
             chosen = None
+        if chosen is _FRAMEWORK_AGENT_NONE_APPLICABLE:
+            return _FRAMEWORK_AGENT_NONE_APPLICABLE  # type: ignore[return-value]
         if chosen is not None:
             return chosen
         # Deterministic fallback: discovery order.
@@ -3660,7 +3734,9 @@ class Coordinator:
             "Prefer PRs that target this model's architecture/precision/GPU and "
             "the serving hot path (MoE/FP8/attention/GEMM/KV-cache/scheduling). "
             "Deprioritize PRs scoped to unrelated models, archs, or GPUs. "
-            'Reply with ONLY compact JSON: {"candidate_id": "<id>", "reason": "<short>"}.'
+            "If NO candidate is applicable to this workload, reply "
+            '{"applicable": false, "reason": "<short>"}. '
+            'Otherwise reply {"candidate_id": "<id>", "reason": "<short>"}.'
         )
         prompt = "\n".join(ctx_lines)
 
@@ -3705,6 +3781,16 @@ class Coordinator:
             end = text.rfind("}")
             if start != -1 and end != -1 and end > start:
                 obj = _json.loads(text[start : end + 1])
+                # Explicit "none applicable" signal — only when the key is present
+                # and its value is exactly false (avoid false positives from
+                # truthy/missing values).
+                if obj.get("applicable") is False:
+                    reason = str(obj.get("reason") or "").strip()
+                    log.info(
+                        "FRAMEWORK: ranker signalled no applicable candidate reason=%s",
+                        reason[:160],
+                    )
+                    return _FRAMEWORK_AGENT_NONE_APPLICABLE  # type: ignore[return-value]
                 chosen_id = str(obj.get("candidate_id") or "").strip()
                 reason = str(obj.get("reason") or "").strip()
         except Exception:  # noqa: BLE001
@@ -4636,15 +4722,15 @@ class Coordinator:
                     or ""
                 ),
                 "batch_id": str(
-                    params.get("framework_agent_batch_id")
-                    or spec_params.get("framework_agent_batch_id")
+                    params.get("framework_batch_id")
+                    or spec_params.get("framework_batch_id")
                     or ""
                 ),
                 "title": str(spec_params.get("gap_symptom") or ""),
                 "framework": str(spec_params.get("framework") or ""),
                 "gap_canonical_id": str(spec_params.get("gap_canonical_id") or ""),
             }
-            raw_audit = spec_params.get("framework_agent_audit")
+            raw_audit = spec_params.get("framework_audit")
             audit = raw_audit if isinstance(raw_audit, dict) else {}
         else:
             return
@@ -4813,16 +4899,26 @@ class Coordinator:
         self._record_phase_entry_evidence(
             gemm_tuning={"status": "running", "source": "kernel_entry_auto"},
         )
+        run_gemm_tuning_handler = None
         try:
             from .kernel_request_handlers import run_gemm_tuning_handler
 
-            result = await run_gemm_tuning_handler(
-                {
-                    "task_id": "kernel_entry_gemm_tuning",
-                    "reason": "kernel_entry_auto",
-                },
-                session_dir=self.session_dir,
-            )
+            if self._bf16_dense_gemm_fallback_pending():
+                log.info(
+                    "KERNEL entry: resuming pending bf16 dense GEMM fallback "
+                    "after prior forge fp8 no-candidate result"
+                )
+                result = await self._run_bf16_dense_gemm_fallback(
+                    run_gemm_tuning_handler
+                )
+            else:
+                result = await run_gemm_tuning_handler(
+                    {
+                        "task_id": "kernel_entry_gemm_tuning",
+                        "reason": "kernel_entry_auto",
+                    },
+                    session_dir=self.session_dir,
+                )
         except Exception as exc:  # noqa: BLE001
             log.exception("KERNEL entry GEMM tuning failed")
             result = {
@@ -4832,6 +4928,21 @@ class Coordinator:
                 "error": repr(exc),
             }
         await self._handle_gemm_tuning_result(result)
+
+        if (
+            run_gemm_tuning_handler is not None
+            and self._should_run_bf16_dense_gemm_fallback(result)
+            and str(result.get("decision") or "").strip().upper() != "KEEP"
+        ):
+            log.info(
+                "KERNEL entry: forge fp8 GEMM tuning found no candidate; "
+                "trying bf16 dense fallback"
+            )
+            result = await self._run_bf16_dense_gemm_fallback(
+                run_gemm_tuning_handler
+            )
+            await self._handle_gemm_tuning_result(result)
+
         status = str(result.get("status") or "unknown")
         await self.bus.append_and_seq(
             Message.new(
@@ -4860,6 +4971,128 @@ class Coordinator:
         await self._maybe_reprofile_for_kernel()
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
+
+    async def _run_bf16_dense_gemm_fallback(
+        self,
+        run_gemm_tuning_handler: Callable[..., Any],
+    ) -> dict[str, Any]:
+        """Run the single bf16 dense fallback and stamp retry provenance."""
+        payload = {
+            "task_id": "kernel_entry_gemm_tuning_bf16_fallback",
+            "reason": "fp8_no_improvement_bf16_fallback",
+            "precision": "bf16",
+            "tuner": "sglang_dense_bf16",
+        }
+        try:
+            result = await run_gemm_tuning_handler(
+                payload,
+                session_dir=self.session_dir,
+            )
+            if not isinstance(result, dict):
+                result = {
+                    "status": "failed",
+                    "decision": "REVERT",
+                    "error": "non-dict bf16 fallback result",
+                }
+        except Exception as exc:  # noqa: BLE001
+            log.exception("KERNEL entry GEMM bf16 fallback failed")
+            result = {
+                "status": "failed",
+                "decision": "REVERT",
+                "error_class": exc.__class__.__name__,
+                "error": repr(exc),
+            }
+        result.setdefault("task_id", payload["task_id"])
+        result.setdefault("reason", payload["reason"])
+        result.setdefault("source", payload["reason"])
+        result.setdefault("backend", "forge")
+        result.setdefault("precision", "bf16")
+        result.setdefault("framework", getattr(self.shared_state, "framework", ""))
+        return result
+
+    def _should_run_bf16_dense_gemm_fallback(self, result: dict[str, Any]) -> bool:
+        """Return True when a forge fp8 run should try bf16 dense GEMM tuning.
+
+        Recent production runs showed the automatic KERNEL-entry GEMM step can
+        stop after a single fp8 a8w8/a8w8_blockscale no-op. Historical wins came
+        from a follow-up ``sglang_dense_bf16`` run, so make that fallback
+        deterministic when the fp8 tuner produced no E2E-validatable candidate.
+        """
+        if not isinstance(result, dict):
+            return False
+        if str(result.get("backend") or "").strip().lower() != "forge":
+            return False
+        if str(result.get("precision") or "").strip().lower() != "fp8":
+            return False
+        framework = str(
+            result.get("framework") or getattr(self.shared_state, "framework", "") or ""
+        ).strip().lower()
+        if framework != "sglang":
+            return False
+        if str(result.get("micro_decision") or "").strip().lower() != "no_improvement":
+            return False
+        if result.get("recommended_env") or result.get("extra_envs"):
+            return False
+        for tuner in result.get("tuners_run") or []:
+            if not isinstance(tuner, dict):
+                continue
+            if str(tuner.get("status") or "").strip().lower() != "ok":
+                continue
+            try:
+                improved = int(tuner.get("improved_shapes") or 0)
+            except (TypeError, ValueError):
+                improved = 0
+            if improved > 0 and str(tuner.get("env_var") or "").strip() and str(
+                tuner.get("env_value") or ""
+            ).strip():
+                return False
+        return True
+
+    def _bf16_dense_gemm_fallback_pending(self) -> bool:
+        """Return True when a recorded fp8 no-op still needs its bf16 retry."""
+        last = getattr(self.shared_state, "last_gemm_tuning", {}) or {}
+        return (
+            self._should_run_bf16_dense_gemm_fallback(last)
+            and not self._bf16_dense_gemm_fallback_attempted()
+        )
+
+    def _bf16_dense_gemm_fallback_attempted(self) -> bool:
+        """Detect whether the bf16 dense fallback has already been attempted."""
+        attempts: list[Any] = []
+        last = getattr(self.shared_state, "last_gemm_tuning", {}) or {}
+        if isinstance(last, dict):
+            attempts.append(last)
+        attempts.extend(getattr(self.shared_state, "gemm_tuning_attempts", None) or [])
+        return any(
+            self._is_bf16_dense_gemm_fallback_attempt(entry)
+            for entry in attempts
+            if isinstance(entry, dict)
+        )
+
+    @staticmethod
+    def _is_bf16_dense_gemm_fallback_attempt(entry: dict[str, Any]) -> bool:
+        """Identify the fallback attempt across old and newly stamped records."""
+        markers = {
+            "kernel_entry_gemm_tuning_bf16_fallback",
+            "fp8_no_improvement_bf16_fallback",
+        }
+        for key in ("task_id", "reason", "source"):
+            if str(entry.get(key) or "").strip() in markers:
+                return True
+        if "kernel_entry_gemm_tuning_bf16_fallback" in str(
+            entry.get("workspace") or ""
+        ):
+            return True
+        if str(entry.get("precision") or "").strip().lower() != "bf16":
+            return False
+        if str(entry.get("tuner") or "").strip() == "sglang_dense_bf16":
+            return True
+        for tuner in entry.get("tuners_run") or []:
+            if not isinstance(tuner, dict):
+                continue
+            if str(tuner.get("tuner") or "").strip() == "sglang_dense_bf16":
+                return True
+        return False
 
     @staticmethod
     def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
@@ -9804,6 +10037,8 @@ class Coordinator:
             return False
         last = getattr(ss, "last_gemm_tuning", {}) or {}
         status = str(last.get("status") or "").strip().lower()
+        if self._bf16_dense_gemm_fallback_pending():
+            return True
         return status not in {
             "ok",
             "succeeded",

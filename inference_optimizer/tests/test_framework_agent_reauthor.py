@@ -232,11 +232,11 @@ async def test_authoring_integrate_patch_reauthors_and_records_old_task(
         return SimpleNamespace(
             params={
                 "framework_agent_candidate_id": _CANDIDATE["candidate_id"],
-                "framework_agent_batch_id": "batch-1",
+                "framework_batch_id": "batch-1",
                 "gap_symptom": "perf: speed up moe",
                 "framework": "sglang",
                 "gap_canonical_id": "gap.x",
-                "framework_agent_audit": {"recommended_next_step": "author_via_specialist"},
+                "framework_audit": {"recommended_next_step": "author_via_specialist"},
             }
         )
 

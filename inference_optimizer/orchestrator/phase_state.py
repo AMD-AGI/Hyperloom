@@ -1912,7 +1912,7 @@ def _framework_agent_consecutive_no_keep(state: Any) -> int:
         # plateau gate must only see the CURRENT cycle's rows. A boundary marker
         # appended at reloop (_apply_macro_cycle_reloop) stops the streak walk so
         # a prior cycle's trailing no-KEEP rows cannot instantly re-plateau the
-        # next cycle's FRAMEWORK_AGENT (observed: cycle 1 plateaued the same tick it
+        # next cycle's FRAMEWORK (observed: cycle 1 plateaued the same tick it
         # selected its first candidate).
         if status == "cycle_boundary":
             break

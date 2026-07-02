@@ -274,6 +274,12 @@ def test_materialize_authoring_disabled_runs_diff_track_only(
 
 def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True)
+    # Set up a batch with one unprocessed candidate so the signal has a valid target.
+    _CAND_ID = "https://github.com/ROCm/vllm/pull/999"
+    stub.shared_state.framework_agent_batches = [
+        {"batch_id": "b1", "candidates": [{"candidate_id": _CAND_ID}]}
+    ]
+    stub.shared_state.framework_agent_phase_progress = []
 
     # Nothing in flight.
     assert (
@@ -283,8 +289,14 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
         is False
     )
 
-    # A running specialist counts.
-    stub.tasks._running.append(SimpleNamespace(kind="specialist", task_id="s1"))
+    # A running framework-owned specialist for the unprocessed candidate counts.
+    stub.tasks._running.append(
+        SimpleNamespace(
+            kind="specialist",
+            task_id="s1",
+            params={"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID},
+        )
+    )
     assert (
         asyncio.run(
             Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
@@ -293,9 +305,23 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     )
     stub.tasks._running.clear()
 
-    # A queued integrate_patch counts.
+    # A kernel-phase specialist (no framework_agent_authoring) does NOT count.
+    stub.tasks._running.append(SimpleNamespace(kind="specialist", task_id="k1", params={}))
+    assert (
+        asyncio.run(
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
+        )
+        is False
+    )
+    stub.tasks._running.clear()
+
+    # A queued framework-owned integrate_patch for the unprocessed candidate counts.
     stub.tasks._queued.append(
-        SimpleNamespace(kind="integrate_patch", task_id="i1"),
+        SimpleNamespace(
+            kind="integrate_patch",
+            task_id="i1",
+            params={"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID},
+        )
     )
     assert (
         asyncio.run(
@@ -305,15 +331,76 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     )
     stub.tasks._queued.clear()
 
-    # A pending integrate_patch Critic proposal counts.
+    # A bare kernel integrate_patch task (no framework_agent_authoring) does NOT count.
+    stub.tasks._queued.append(
+        SimpleNamespace(kind="integrate_patch", task_id="k2", params={})
+    )
+    assert (
+        asyncio.run(
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
+        )
+        is False
+    )
+    stub.tasks._queued.clear()
+
+    # A pending framework_agent Critic proposal for the unprocessed candidate counts.
     stub.state.pending_proposals = {
-        "m1": SimpleNamespace(action_name="integrate_patch"),
+        "m1": SimpleNamespace(
+            action_name="framework_agent",
+            decided=False,
+            payload={"framework_agent_candidate_id": _CAND_ID},
+        ),
     }
     assert (
         asyncio.run(
             Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
         )
         is True
+    )
+
+    # A pending framework-owned integrate_patch proposal for the unprocessed candidate counts.
+    stub.state.pending_proposals = {
+        "m2": SimpleNamespace(
+            action_name="integrate_patch",
+            decided=False,
+            payload={"params": {"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID}},
+        ),
+    }
+    assert (
+        asyncio.run(
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
+        )
+        is True
+    )
+
+    # A bare (kernel-style) integrate_patch proposal does NOT count.
+    stub.state.pending_proposals = {
+        "m3": SimpleNamespace(
+            action_name="integrate_patch",
+            decided=False,
+            payload={"params": {}},
+        ),
+    }
+    assert (
+        asyncio.run(
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
+        )
+        is False
+    )
+
+    # A decided proposal does NOT count even if framework-owned.
+    stub.state.pending_proposals = {
+        "m4": SimpleNamespace(
+            action_name="framework_agent",
+            decided=True,
+            payload={"framework_agent_candidate_id": _CAND_ID},
+        ),
+    }
+    assert (
+        asyncio.run(
+            Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
+        )
+        is False
     )
 
 

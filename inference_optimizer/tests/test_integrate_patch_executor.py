@@ -14,10 +14,13 @@ import pytest
 
 from inference_optimizer.orchestrator.action_executors.integrate_patch import (
     IntegratePatchExecutor,
+    _apply_patch_no_git,
     _git_apply,
     _git_apply_reverse,
+    _is_git_tree,
     _resolve_framework_root,
     _resolve_patch_paths,
+    _revert_patches_no_git,
 )
 from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 from inference_optimizer.orchestrator.task_registry import Task
@@ -566,3 +569,87 @@ def test_integrate_patch_executor_imports_clean():
 
     assert hasattr(ip_mod, "IntegratePatchExecutor")
     assert callable(ip_mod.IntegratePatchExecutor)
+
+
+# 6. git-free backup-based apply/revert
+_NOGIT_PATCH = """\
+--- a/src.py
++++ b/src.py
+@@ -1,2 +1,2 @@
+ def f():
+-    return 1
++    return 42
+"""
+
+
+def test_is_git_tree_non_git(tmp_path: Path) -> None:
+    assert _is_git_tree(tmp_path) is False
+
+
+def test_is_git_tree_git_repo(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    assert _is_git_tree(tmp_path) is True
+
+
+def test_apply_patch_no_git_keep_and_revert(tmp_path: Path) -> None:
+    framework_root = tmp_path / "fw"
+    framework_root.mkdir()
+    original = "def f():\n    return 1\n"
+    (framework_root / "src.py").write_text(original, encoding="utf-8")
+
+    patch_file = tmp_path / "change.patch"
+    patch_file.write_text(_NOGIT_PATCH, encoding="utf-8")
+    backup_root = tmp_path / "backups"
+
+    ok, err, backups = _apply_patch_no_git(framework_root, patch_file, backup_root)
+    pytest.importorskip("subprocess")  # ensure patch CLI available; skip gracefully if not
+    if not ok:
+        pytest.skip(f"patch CLI unavailable or patch failed: {err}")
+
+    patched = (framework_root / "src.py").read_text(encoding="utf-8")
+    assert "return 42" in patched, "patch was not applied"
+    assert any(r["backup_path"] for r in backups), "backup was not created"
+
+    # Revert restores original content.
+    _revert_patches_no_git(backups)
+    restored = (framework_root / "src.py").read_text(encoding="utf-8")
+    assert restored == original, "revert did not restore original content"
+
+
+def test_apply_patch_no_git_rejects_path_traversal_before_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    framework_root = tmp_path / "fw"
+    framework_root.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("SAFE\n", encoding="utf-8")
+    patch_file = tmp_path / "escape.patch"
+    patch_file.write_text(
+        "diff --git a/../outside.py b/../outside.py\n"
+        "--- a/../outside.py\n"
+        "+++ b/../outside.py\n"
+        "@@ -1 +1 @@\n"
+        "-SAFE\n"
+        "+PWNED\n",
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        # Simulate a patch implementation whose dry-run accepts the target so
+        # this test exercises Hyperloom's own boundary check before real apply.
+        if "--dry-run" in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        raise AssertionError("real patch apply must not run for escaping targets")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ok, err, backups = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
+
+    assert ok is False
+    assert "escapes framework root" in err
+    assert backups == []
+    assert outside.read_text(encoding="utf-8") == "SAFE\n"
+    assert len(calls) == 1

@@ -176,7 +176,7 @@ def test_prepare_review_framework_op_emits_empty_approve_requires(reviewer):
 
 
 def test_classify_framework_agent_is_framework_op():
-    """FRAMEWORK_PR pre-screen candidates classify as framework_op (no extra approve_requires)."""
+    """FRAMEWORK pre-screen candidates classify as framework_op (no extra approve_requires)."""
     from runtime.decision_reviewer import (
         _APPROVE_REQUIRES_BY_CLASS,
         ACTION_CLASS_FRAMEWORK_OP,
