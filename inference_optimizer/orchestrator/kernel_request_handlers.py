@@ -451,16 +451,25 @@ def _resolve_tracelens_root() -> Path:
 
 
 def _tracelens_root_error(root: Path) -> str | None:
-    """Validate that the resolved TraceLens root exists on disk.
+    """Validate that the resolved TraceLens root is a usable git checkout.
+
+    A directory that exists but lacks ``.git`` (e.g. an installer's half-done
+    clone) is NOT usable and must be reported so a non-default override fails
+    fast and a default path is self-healed (#722/PR#789).
 
     Returns:
-        str | None: A human-readable error when the checkout is missing, or
-            ``None`` when it is present and usable.
+        str | None: A human-readable error when the checkout is missing or
+            incomplete, or ``None`` when it is a usable git checkout.
     """
     if not root.is_dir():
         return (
             f"TraceLens root not found: {root}; run kernel-agent/scripts/install.sh "
             "or set TRACELENS_ROOT to an existing checkout"
+        )
+    if not (root / ".git").exists():
+        return (
+            f"TraceLens root incomplete (not a git checkout): {root}; "
+            "run kernel-agent/scripts/install.sh or set TRACELENS_ROOT to a valid checkout"
         )
     return None
 

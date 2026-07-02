@@ -1682,13 +1682,22 @@ class TestTracelensRootResolution:
         assert krh._resolve_tracelens_root() == expected
 
     def test_root_error_none_when_present(self, tmp_path):
-        (tmp_path / "tl").mkdir()
-        assert krh._tracelens_root_error(tmp_path / "tl") is None
+        tl = tmp_path / "tl"
+        (tl / ".git").mkdir(parents=True)  # a usable git checkout
+        assert krh._tracelens_root_error(tl) is None
 
     def test_root_error_message_when_missing(self, tmp_path):
         err = krh._tracelens_root_error(tmp_path / "ghost")
         assert err is not None
         assert "TraceLens root not found" in err
+
+    def test_root_error_message_when_incomplete(self, tmp_path):
+        # Dir exists but is not a git checkout (no .git) -> unusable.
+        tl = tmp_path / "tl"
+        tl.mkdir()
+        err = krh._tracelens_root_error(tl)
+        assert err is not None
+        assert "incomplete" in err
 
     def test_trace_analyze_handler_selfheals_default_root_then_fails_if_unrecovered(
         self, tmp_path, monkeypatch
@@ -1736,6 +1745,27 @@ class TestTracelensRootResolution:
             krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
         )
         assert called["n"] == 1  # self-heal attempted despite the dir existing
+        assert out["status"] == "failed"
+        assert out["error_class"] == "tracelens_root_missing"
+
+    def test_trace_analyze_handler_failfast_on_incomplete_override(self, tmp_path, monkeypatch):
+        # #722/PR#789: a NON-default operator override that exists but is
+        # incomplete (dir present, no .git) must fail fast — never adopted as
+        # usable, never auto-cloned.
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        override = tmp_path / "operator-tl"
+        override.mkdir()
+        (override / "partial").write_text("half", encoding="utf-8")  # no .git
+        monkeypatch.setenv("TRACELENS_ROOT", str(override))
+        heal_called = {"n": 0}
+        monkeypatch.setattr(
+            krh, "_maybe_selfheal_tracelens_root",
+            lambda *_a, **_k: heal_called.__setitem__("n", heal_called["n"] + 1),
+        )
+        out = asyncio.run(
+            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
+        )
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 

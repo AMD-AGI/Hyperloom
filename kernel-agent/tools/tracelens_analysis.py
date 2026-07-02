@@ -5994,6 +5994,14 @@ def main() -> int:
                 raise FileNotFoundError(
                     f"TraceLens root not found: {tl_root} (set TRACELENS_ROOT or pass --tracelens-root)"
                 )
+            # A dir that exists but is not a git checkout (e.g. an operator
+            # override at a half-cloned path, or a default path self-heal could
+            # not repair) is unusable — fail fast rather than running on it.
+            if not _tracelens_checkout_complete(tl_root):
+                raise FileNotFoundError(
+                    f"TraceLens root incomplete (not a git checkout): {tl_root} "
+                    "(set TRACELENS_ROOT or pass --tracelens-root to a valid checkout)"
+                )
             if tl_internal_root is not None and not tl_internal_root.exists():
                 append_log(
                     log_path,
