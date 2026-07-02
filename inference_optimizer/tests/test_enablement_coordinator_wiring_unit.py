@@ -66,6 +66,9 @@ def _fake_self(**state_kw):
     # Source-context read is best-effort grounding; stub to empty so the builder
     # path stays pure (no filesystem dependency in these unit tests).
     fake._read_enablement_source_context = lambda _sig: ""
+    # Item J whole-machine GPU request is exercised in its own suite; here the
+    # fake has no GPU pool, so it degrades to the research-lane-only path.
+    fake._framework_gpu_params = lambda: {}
     return fake
 
 
@@ -195,6 +198,13 @@ def _enqueue_self(**state_kw):
         Coordinator._discover_enablement_candidate_refs, fake
     )
     fake._read_enablement_source_context = lambda _sig: ""
+    # Item J helpers (whole-machine GPU) are covered in their own suite; the fake
+    # has no GPU pool → no needs_gpu, so dispatch stays on research_lane only.
+    fake._framework_gpu_params = lambda: {}
+    fake._framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (
+        ["research_lane"],
+        base_ttl_sec,
+    )
     fake._maybe_record_enablement_human_review = types.MethodType(
         Coordinator._maybe_record_enablement_human_review, fake
     )

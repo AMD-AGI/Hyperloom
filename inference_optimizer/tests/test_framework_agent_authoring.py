@@ -120,6 +120,15 @@ class _Stub:
     _framework_agent_audit_skip_confident = staticmethod(Coordinator._framework_agent_audit_skip_confident)
     _framework_agent_roots_have_git = staticmethod(Coordinator._framework_agent_roots_have_git)
     _pump_framework_agent_phase = Coordinator._pump_framework_agent_phase
+    # Item J: the authoring dispatch consults these. The stub has no GPU pool,
+    # so ``_framework_gpu_params`` degrades to ``{}`` and the authoring task
+    # stays on research_lane only (asserted below) — the real whole-machine GPU
+    # behaviour is covered in test_framework_whole_machine_gpu.py.
+    _coerce_needs_gpu = staticmethod(Coordinator._coerce_needs_gpu)
+    _framework_authoring_lanes_ttl = Coordinator._framework_authoring_lanes_ttl
+
+    def _framework_gpu_params(self) -> dict[str, Any]:
+        return {}
 
     def __init__(self, tmp_path: Path, *, authoring: bool = True) -> None:
         self.session_dir = tmp_path
