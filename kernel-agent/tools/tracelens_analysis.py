@@ -5984,10 +5984,11 @@ def main() -> int:
             # Internal extension is opt-in (non-empty --tracelens-internal-root / env).
             internal_root_arg = (args.tracelens_internal_root or "").strip()
             tl_internal_root: Path | None = Path(internal_root_arg) if internal_root_arg else None
-            if not tl_root.exists() and _is_default_tracelens_root(tl_root):
-                # #722: the installer-managed pod-local checkout can vanish
-                # mid-run (concurrent install rm+re-clone). Self-heal only the
-                # default path; an explicit operator override fails fast below.
+            if not _tracelens_checkout_complete(tl_root) and _is_default_tracelens_root(tl_root):
+                # #722: the installer-managed pod-local checkout can vanish or be
+                # left incomplete mid-run (concurrent install rm+re-clone). Self-
+                # heal the default path when missing OR incomplete (no .git);
+                # an explicit operator override fails fast below.
                 _ensure_tracelens_checkout(tl_root, log_path=log_path)
             if not tl_root.exists():
                 raise FileNotFoundError(

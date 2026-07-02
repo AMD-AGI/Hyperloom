@@ -252,16 +252,26 @@ _resolve_existing_checkout() {
 }
 
 resolve_tracelens() {
-  # Implicit default is the pod-local /opt checkout; an operator may point
-  # TRACELENS_DEFAULT_ROOT at a pre-existing manual checkout. A stale
-  # /workspace/TraceLens is NOT probed unless explicitly named (#722).
-  local _tl_default="${TRACELENS_DEFAULT_ROOT:-${_open_source_root}/TraceLens}"
-  if _resolve_existing_checkout TRACELENS_ROOT "$_tl_default"; then
+  # An EXPLICIT override (TRACELENS_ROOT via env/.env, or an explicitly-set
+  # TRACELENS_DEFAULT_ROOT) is operator-maintained: adopt it as-is, never
+  # re-pin. The IMPLICIT pod-local default (${_open_source_root}/TraceLens) is
+  # installer-managed: always run clone_or_update so an existing checkout is
+  # fetched/checked out to TRACELENS_REF (not left on a stale SHA) and a missing
+  # one is atomically cloned+pinned (#722 / PR#789).
+  _normalize_trace_env_roots
+  local _explicit=""
+  if [ -n "${TRACELENS_ROOT:-}" ] || [ -n "$(_read_dotenv_var TRACELENS_ROOT || true)" ] \
+     || [ -n "${TRACELENS_DEFAULT_ROOT:-}" ]; then
+    _explicit=1
+  fi
+  if [ -n "$_explicit" ] && _resolve_existing_checkout TRACELENS_ROOT \
+       "${TRACELENS_DEFAULT_ROOT:-${_open_source_root}/TraceLens}"; then
     :
   else
     TRACELENS_ROOT="${_open_source_root}/TraceLens"
     # Atomic: TraceLens is read live by trace_analyze; never publish a
-    # half-cloned/unpinned tree at $TRACELENS_ROOT (#722).
+    # half-cloned/unpinned tree at $TRACELENS_ROOT (#722). clone_or_update
+    # realigns an existing checkout to $TRACELENS_REF.
     clone_or_update "TraceLens" "$TRACELENS_REPO" "$TRACELENS_ROOT" "$TRACELENS_REF" atomic
     export TRACELENS_ROOT
     log "TRACELENS_ROOT: ${TRACELENS_ROOT}"

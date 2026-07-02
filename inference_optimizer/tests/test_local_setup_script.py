@@ -227,6 +227,50 @@ def test_local_setup_ignores_stale_default_checkout_without_override(tmp_path: P
     assert str(stale) not in env_text
 
 
+def test_local_setup_realigns_default_checkout_on_wrong_commit(tmp_path: Path) -> None:
+    # #722/PR#789 regression: an implicit-default checkout that already exists
+    # but sits on the WRONG commit must be fetched/checked out to TRACELENS_REF,
+    # not silently adopted at its stale SHA.
+    remotes = tmp_path / "remotes"
+    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
+    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
+    # TraceLens source with two commits; pin target is the second (HEAD).
+    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "v1\n"})
+    old_sha = subprocess.run(
+        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    (tracelens_public / "README.md").write_text("v2\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tracelens_public), "commit", "-aqm", "v2"], check=True)
+    pin_sha = subprocess.run(
+        ["git", "-C", str(tracelens_public), "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    # Pre-create the pod-local default checkout stuck on the OLD commit.
+    default_root = tmp_path / "deps" / "TraceLens"
+    default_root.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "clone", "-q", str(tracelens_public), str(default_root)], check=True)
+    subprocess.run(["git", "-C", str(default_root), "checkout", "-q", old_sha], check=True)
+
+    result = _run_local_setup(
+        tmp_path,
+        env={
+            "KERNEL_FORGE_REPO": str(forge),
+            "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
+            "TRACELENS_REPO": str(tracelens_public),
+            "TRACELENS_REF": pin_sha,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    head = subprocess.run(
+        ["git", "-C", str(default_root), "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    assert head == pin_sha, f"default checkout not realigned: {head} != {pin_sha}"
+
+
 def test_local_setup_honours_explicit_tracelens_default_root(tmp_path: Path) -> None:
     # Operators can still point TRACELENS_DEFAULT_ROOT at a pre-existing manual
     # checkout; that path wins over the pod-local clone.

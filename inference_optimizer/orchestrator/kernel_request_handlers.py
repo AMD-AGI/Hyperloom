@@ -2412,7 +2412,10 @@ async def trace_analyze_handler(
     # not have sourced kernel-agent.env.sh). If the installer-managed checkout
     # vanished mid-run (#722), self-heal it before the fail-fast validation.
     tracelens_root = _resolve_tracelens_root()
-    if _tracelens_root_error(tracelens_root):
+    # Self-heal when the checkout is missing OR incomplete (exists but no .git,
+    # e.g. a concurrent install's half-done clone). Gating only on is_dir()
+    # would let an incomplete default checkout bypass self-heal (#722/PR#789).
+    if not (tracelens_root / ".git").exists():
         _maybe_selfheal_tracelens_root(tracelens_root, log=log)
     tl_err = _tracelens_root_error(tracelens_root)
     if tl_err:

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -1708,6 +1709,33 @@ class TestTracelensRootResolution:
             krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
         )
         assert called["n"] == 1  # self-heal was attempted
+        assert out["status"] == "failed"
+        assert out["error_class"] == "tracelens_root_missing"
+
+    def test_trace_analyze_handler_selfheals_incomplete_default_root(self, tmp_path, monkeypatch):
+        # #722/PR#789: a default checkout that EXISTS but is incomplete (dir
+        # present, no .git) must still trigger self-heal — gating on is_dir()
+        # alone would skip it.
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        # Create an incomplete default checkout: the dir exists but has no .git.
+        incomplete = tmp_path / "podlocal" / "TraceLens"
+        incomplete.mkdir(parents=True)
+        (incomplete / "partial").write_text("half", encoding="utf-8")
+        called = {"n": 0}
+
+        def _fake_heal(root, *, log=None):
+            called["n"] += 1
+            # Simulate an unrecoverable heal so the handler fail-fasts here
+            # instead of proceeding to launch the real tool subprocess.
+            shutil.rmtree(root, ignore_errors=True)
+
+        monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
+        out = asyncio.run(
+            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
+        )
+        assert called["n"] == 1  # self-heal attempted despite the dir existing
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
