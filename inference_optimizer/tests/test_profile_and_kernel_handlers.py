@@ -53,7 +53,9 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     tracelens_root = tmp_path / "TraceLens"
-    tracelens_root.mkdir()
+    # A usable checkout needs .git (#722/PR#789 completeness gate); a bare dir
+    # is now treated as an incomplete override and fails fast.
+    (tracelens_root / ".git").mkdir(parents=True)
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
     return make_session_dir()
 
