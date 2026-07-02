@@ -16,7 +16,21 @@ def test_is_legacy_session():
 def test_phase_for_event_known():
     assert lc._phase_for_event("baseline", "") == "PRELUDE"
     assert lc._phase_for_event("sweep", "") == "SWEEP"
-    assert lc._phase_for_event("kernel_opt", "") == "KERNEL"
+    # Canonical v2 phase name is KERNEL_AGENT (renamed from legacy "KERNEL").
+    assert lc._phase_for_event("kernel_opt", "") == "KERNEL_AGENT"
+    assert lc._phase_for_event("select_kernels", "") == "KERNEL_AGENT"
+    assert lc._phase_for_event("integrate", "") == "KERNEL_AGENT"
+
+
+def test_action_phase_values_are_canonical():
+    # Every reconstructed phase label must match a canonical PHASE_NAMES entry,
+    # otherwise legacy-session segments render with names the dashboard/state
+    # machine do not recognise. Guards against future step-name renames.
+    from inference_optimizer.orchestrator.phase_state import PHASE_NAMES
+
+    for action, phase in lc._ACTION_PHASE.items():
+        assert phase in PHASE_NAMES, f"{action!r} -> non-canonical phase {phase!r}"
+    assert lc._DEFAULT_PHASE in PHASE_NAMES
 
 
 def test_phase_for_event_neutral_inherits():
