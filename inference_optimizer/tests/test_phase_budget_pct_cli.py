@@ -22,6 +22,7 @@ import pytest
 from inference_optimizer import cli
 from inference_optimizer.orchestrator.phase_state import (
     DEFAULT_PHASE_BUDGET_PCT,
+    PHASE_FRAMEWORK_AGENT,
     PHASE_KERNEL_AGENT,
     normalize_budget_pct,
 )
@@ -58,10 +59,38 @@ def test_kernel_pct_key_is_canonical_phase_name() -> None:
     assert PHASE_KERNEL_AGENT in raw
 
 
+@pytest.mark.parametrize(
+    "flag",
+    ["--max-minutes-framework-pct", "--phase-budget-framework-pct"],
+)
+def test_framework_pct_override_reaches_framework_agent(flag: str) -> None:
+    """FRAMEWORK_AGENT is a budgeted phase, so both flag spellings must parse
+    and survive normalize_budget_pct as FRAMEWORK_AGENT."""
+    args = _parse_optimize([flag, "0.42"])
+    raw = cli._build_phase_budget_pct(args)
+    assert raw.get(PHASE_FRAMEWORK_AGENT) == pytest.approx(0.42)
+
+    normalized = normalize_budget_pct(raw)
+    assert normalized[PHASE_FRAMEWORK_AGENT] == pytest.approx(0.42)
+    # Regression guard: value must not silently fall back to the default.
+    assert normalized[PHASE_FRAMEWORK_AGENT] != pytest.approx(
+        DEFAULT_PHASE_BUDGET_PCT[PHASE_FRAMEWORK_AGENT]
+    )
+
+
+def test_framework_pct_key_is_canonical_phase_name() -> None:
+    """The override key must be the canonical phase name, not the legacy alias."""
+    args = _parse_optimize(["--phase-budget-framework-pct", "0.2"])
+    raw = cli._build_phase_budget_pct(args)
+    assert "FRAMEWORK" not in raw
+    assert PHASE_FRAMEWORK_AGENT in raw
+
+
 def test_all_phase_budget_pct_spellings_parse() -> None:
     """Every phase accepts both the legacy and the phase-budget spelling."""
     argv = [
         "--phase-budget-prelude-pct", "0.05",
+        "--phase-budget-framework-pct", "0.20",
         "--phase-budget-explore-pct", "0.30",
         "--phase-budget-kernel-pct", "0.40",
         "--phase-budget-sweep-pct", "0.15",
@@ -70,6 +99,7 @@ def test_all_phase_budget_pct_spellings_parse() -> None:
     args = _parse_optimize(argv)
     normalized = normalize_budget_pct(cli._build_phase_budget_pct(args))
     assert normalized["PRELUDE"] == pytest.approx(0.05)
+    assert normalized[PHASE_FRAMEWORK_AGENT] == pytest.approx(0.20)
     assert normalized["EXPLORE"] == pytest.approx(0.30)
     assert normalized[PHASE_KERNEL_AGENT] == pytest.approx(0.40)
     assert normalized["SWEEP"] == pytest.approx(0.15)
