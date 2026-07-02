@@ -119,14 +119,23 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         parts.append(f"_Showing last {len(rounds)} of {len(journal)} rounds (detail_level={detail_level})._")
         parts.append("")
 
+    from .... import framework_registry
+
+    fw = (breakdown.get("workload") or {}).get("framework_name")
     headers = ["name", "outcome", "gain_vs_base", "tput", "reject_reason", "status"]
     for entry in rounds:
         phase = entry.get("phase") or "?"
         round_id = entry.get("round_id") or "—"
         rd = entry.get("round_decision") or {}
+        base_ref = entry.get("baseline_ref_tput")
+        base_ref_disp = (
+            framework_registry.format_primary_metric(fw, base_ref, precision=2)
+            if isinstance(base_ref, (int, float))
+            else "—"
+        )
         parts.append(
             f"**{phase}** round `{round_id}` "
-            f"(base={entry.get('baseline_ref_tput') or '—'} tok/s/gpu, "
+            f"(base={base_ref_disp}, "
             f"ts={entry.get('ts') or '—'})"
         )
         parts.append(
