@@ -101,6 +101,11 @@ log = logging.getLogger(__name__)
 
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # grid noise floor; KEEP is re-confirmed by a stack rebench
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 long workload
+# Absolute minimal-correctness floor for the enablement runnable gate. There is
+# no baseline to regress against, so any accuracy strictly above this counts as
+# "not garbage" (a booted-but-broken combo scores ~0.0). Strict thresholds are
+# a follow-up; this is a smoke floor only.
+ENABLEMENT_ACCURACY_FLOOR = 0.0
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
 
 
@@ -1433,23 +1438,60 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # Stage 5 (enablement): RUNNABILITY gate, not throughput. An enablement
-        # patch makes a previously non-bootable (model, backend) combo *run*;
-        # there is no baseline throughput to beat. The bench IS the launch
-        # probe — a positive ``output_throughput`` means the server booted and
-        # served at least one request. Decide KEEP/REVERT via
-        # ``framework_agent.enablement.runnable_decision`` (probe-only; a
-        # minimal-correctness check is out of scope for now).
+        # Stage 5 (enablement): RUNNABILITY + minimal-correctness gate, not
+        # throughput. An enablement patch makes a previously non-bootable
+        # (model, backend) combo *run*; there is no baseline throughput to beat.
+        # The bench IS the launch probe — a positive ``output_throughput`` means
+        # the server booted and served at least one request. Correctness is an
+        # *absolute* floor (there is no baseline to regress against): eval must
+        # produce an accuracy above ``ENABLEMENT_ACCURACY_FLOOR`` to count as
+        # verified. Three states:
+        #   * accuracy > floor      -> correctness_ok=True  (KEEP, verified)
+        #   * accuracy <= floor/NaN -> correctness_ok=False (REVERT, boots but
+        #                              output is garbage)
+        #   * accuracy is None      -> correctness_ok=None  (KEEP but provisional
+        #                              / boot-only; eval never produced a score)
+        # As defence-in-depth the post-patch failure signature is re-classified
+        # and compared to the pre-patch one: the same actionable failure
+        # re-appearing means "not fixed" even if the probe superficially passed.
         if params.get("enablement"):
-            from framework_agent.enablement import runnable_decision
+            import math as _math
+
+            from framework_agent.enablement import (
+                FailureSignature,
+                classify_failure,
+                runnable_decision,
+            )
 
             new_tput = bench_result.get("output_throughput")
             booted = isinstance(new_tput, (int, float)) and new_tput > 0
             probe_timed_out = bool(gate_evidence.get("timed_out"))
+
+            enablement_accuracy = gate_evidence.get("enablement_accuracy")
+            correctness_ok: bool | None
+            if isinstance(enablement_accuracy, (int, float)) and not _math.isnan(float(enablement_accuracy)):
+                correctness_ok = float(enablement_accuracy) > ENABLEMENT_ACCURACY_FLOOR
+            elif isinstance(enablement_accuracy, float) and _math.isnan(enablement_accuracy):
+                correctness_ok = False
+            else:
+                # None (or non-numeric): eval never produced a score -> provisional.
+                correctness_ok = None
+
+            after_signature = classify_failure(str(bench_result.get("error") or ""))
+            before_signature: FailureSignature | None = None
+            raw_before = params.get("enablement_before_signature")
+            if isinstance(raw_before, dict):
+                try:
+                    before_signature = FailureSignature(**raw_before)
+                except (TypeError, ValueError):
+                    before_signature = None
+
             runs, run_reason = runnable_decision(
                 probe_returncode=0 if booted else 1,
-                correctness_ok=None,
+                correctness_ok=correctness_ok,
                 probe_timed_out=probe_timed_out,
+                before_signature=before_signature,
+                after_signature=after_signature,
             )
             if not runs:
                 artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -1470,10 +1512,18 @@ class IntegratePatchExecutor:
                     "output_throughput": new_tput,
                     "enablement": True,
                     "runnable": False,
+                    "correctness_verified": correctness_ok is True,
                     "reason": f"enablement not runnable: {run_reason}",
                     "bench_result": bench_result,
                     "workspace": str(output_root),
                 })
+            provisional = correctness_ok is None
+            reason = f"enablement runnable: {run_reason}"
+            if provisional:
+                reason += (
+                    " (provisional: booted but eval produced no accuracy; "
+                    "correctness not verified)"
+                )
             await self._maybe_write_framework_kb_record(
                 done_payload=done_payload,
                 outcome="integrated",
@@ -1490,7 +1540,9 @@ class IntegratePatchExecutor:
                 "output_throughput": new_tput,
                 "enablement": True,
                 "runnable": True,
-                "reason": f"enablement runnable: {run_reason}",
+                "correctness_verified": correctness_ok is True,
+                "provisional": provisional,
+                "reason": reason,
                 "bench_result": bench_result,
                 "workspace": str(output_root),
             })
@@ -1997,18 +2049,42 @@ class IntegratePatchExecutor:
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
             )
 
-        return bench, {"accuracy_pass": accuracy_pass}
+        # Enablement path: the gate is *absolute* minimal correctness, not a
+        # baseline regression (there is no baseline). Surface the raw accuracy
+        # (float / None) so the enablement branch can apply an absolute floor.
+        enablement_accuracy: float | None = None
+        if bool(params.get("enablement")) and bench.get("status") == "succeeded":
+            try:
+                eval_results = parse_eval_results(
+                    bench["workspace"],
+                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                )
+                acc = eval_results.get("accuracy")
+                if isinstance(acc, (int, float)):
+                    enablement_accuracy = float(acc)
+            except Exception:  # noqa: BLE001 — eval may not produce a result
+                log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
+
+        return bench, {"accuracy_pass": accuracy_pass, "enablement_accuracy": enablement_accuracy}
 
     @staticmethod
     def _framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
         """Force ``RUN_EVAL=true`` for framework-authored source patches (G2).
 
-        Only forces when a comparable baseline accuracy exists
-        (``accuracy_baseline > 0``): if the run never produced a baseline
-        accuracy (e.g. eval is globally disabled), there is nothing to gate
-        against, so we must NOT force eval on the candidate (don't override an
-        operator's ``RUN_EVAL=false`` nor add a needless eval-failure surface);
-        the materializer's default RUN_EVAL handling applies instead.
+        Two independent triggers:
+
+        * **Enablement** (``params["enablement"]``): there is no baseline (the
+          combo does not run yet), so the gate is *absolute minimal
+          correctness*, not a regression comparison. Force ``RUN_EVAL=true``
+          unconditionally so ``_bench_patch`` can obtain a raw accuracy to feed
+          the runnable gate.
+        * **Perf framework authoring**: only forces when a comparable baseline
+          accuracy exists (``accuracy_baseline > 0``): if the run never produced
+          a baseline accuracy (e.g. eval is globally disabled), there is nothing
+          to gate against, so we must NOT force eval on the candidate (don't
+          override an operator's ``RUN_EVAL=false`` nor add a needless
+          eval-failure surface); the materializer's default RUN_EVAL handling
+          applies instead.
 
         Generic EXPLORE integrate_patch is untouched (returns ``None``).
 
@@ -2016,9 +2092,12 @@ class IntegratePatchExecutor:
             params: The integrate_patch task params.
 
         Returns:
-            ``{"RUN_EVAL": "true"}`` for framework-authored patches that have a
-            positive baseline accuracy to compare against, else ``None``.
+            ``{"RUN_EVAL": "true"}`` for enablement patches, or for
+            framework-authored perf patches that have a positive baseline
+            accuracy to compare against; else ``None``.
         """
+        if bool(params.get("enablement")):
+            return {"RUN_EVAL": "true"}
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
         try:
             baseline = float(params.get("accuracy_baseline") or 0.0)

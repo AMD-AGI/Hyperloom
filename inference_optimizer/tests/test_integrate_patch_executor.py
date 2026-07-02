@@ -565,7 +565,15 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
 # 4b. Enablement runnable gate (framework-ref1): the bench is the launch probe;
 # a positive throughput means the server booted -> KEEP; else -> REVERT. The
 # perf/accuracy KEEP gate is bypassed for enablement-tagged integrations.
-async def _run_enablement_integrate(tmp_path: Path, monkeypatch, *, booted: bool):
+async def _run_enablement_integrate(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    booted: bool,
+    enablement_accuracy=None,
+    bench_error: str = "",
+    before_signature=None,
+):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -575,8 +583,15 @@ async def _run_enablement_integrate(tmp_path: Path, monkeypatch, *, booted: bool
     executor = IntegratePatchExecutor(session_dir=session_dir)
 
     async def _fake_bench(**_kwargs):
-        bench_result = {"output_throughput": 137.0 if booted else 0.0}
-        return bench_result, {"accuracy_pass": None, "timed_out": False}
+        bench_result = {
+            "output_throughput": 137.0 if booted else 0.0,
+            "error": bench_error,
+        }
+        return bench_result, {
+            "accuracy_pass": None,
+            "enablement_accuracy": enablement_accuracy,
+            "timed_out": False,
+        }
 
     async def _noop_kb(**_kwargs):
         return None
@@ -584,24 +599,27 @@ async def _run_enablement_integrate(tmp_path: Path, monkeypatch, *, booted: bool
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
     monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
-    ctx = _make_ctx(
-        "t-int-en",
-        {
-            "specialist_task_id": "t-spec-en",
-            "framework_source_root": str(repo),
-            "enablement": True,
-            "enable_stack_rebench": False,
-        },
-    )
+    params = {
+        "specialist_task_id": "t-spec-en",
+        "framework_source_root": str(repo),
+        "enablement": True,
+        "enable_stack_rebench": False,
+    }
+    if before_signature is not None:
+        params["enablement_before_signature"] = before_signature
+    ctx = _make_ctx("t-int-en", params)
     return await executor(ctx), repo
 
 
 @pytest.mark.asyncio
 async def test_enablement_keeps_when_server_boots(tmp_path: Path, monkeypatch):
+    # No eval accuracy produced -> KEEP but provisional (boot-only).
     result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True)
     assert result["status"] == "kept"
     assert result["enablement"] is True
     assert result["runnable"] is True
+    assert result["provisional"] is True
+    assert result["correctness_verified"] is False
     assert len(result["patches_applied"]) == 1
     # The patch stays applied on a runnable KEEP.
     assert (repo / "src.py").read_text().endswith("return 2\n")
@@ -615,6 +633,67 @@ async def test_enablement_reverts_when_still_not_runnable(tmp_path: Path, monkey
     assert result["runnable"] is False
     assert result["patches_applied"] == []
     # REVERT rolls the tree back to its original content.
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_keeps_verified_when_accuracy_above_floor(tmp_path: Path, monkeypatch):
+    """Booted + eval accuracy above the absolute floor -> KEEP, non-provisional."""
+    result, repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=0.42
+    )
+    assert result["status"] == "kept"
+    assert result["runnable"] is True
+    assert result["correctness_verified"] is True
+    assert result["provisional"] is False
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_reverts_when_accuracy_zero(tmp_path: Path, monkeypatch):
+    """Booted but eval accuracy == floor (garbage output) -> REVERT."""
+    result, repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=0.0
+    )
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert result["correctness_verified"] is False
+    assert result["patches_applied"] == []
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_reverts_when_accuracy_nan(tmp_path: Path, monkeypatch):
+    """Booted but NaN accuracy -> REVERT (treated as garbage, not provisional)."""
+    result, _repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=float("nan")
+    )
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+
+
+@pytest.mark.asyncio
+async def test_enablement_reverts_when_same_failure_persists(tmp_path: Path, monkeypatch):
+    """Booted, but the same actionable failure re-appears post-patch -> REVERT."""
+    before = {
+        "kind": "hip_kernel_missing",
+        "offending_file": "",
+        "offending_symbol": "",
+        "raw_excerpt": "",
+        "confidence": 0.85,
+        "bridge_layer": "rocm_hip",
+    }
+    result, repo = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=True,
+        enablement_accuracy=0.5,
+        bench_error="hipErrorNoBinaryForGpu: no kernel image is available",
+        before_signature=before,
+    )
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert "persists" in result["reason"]
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
