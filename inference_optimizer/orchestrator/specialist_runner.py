@@ -12,7 +12,6 @@ outcome for the audit trail.
 
 from __future__ import annotations
 
-import asyncio
 import enum
 import json
 import logging
