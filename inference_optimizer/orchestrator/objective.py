@@ -171,7 +171,11 @@ class TargetGainObjective(Objective):
 
 @dataclass
 class TargetTputObjective(Objective):
-    """Reach an absolute tok/s/GPU number (progress against best-so-far tput, not baseline)."""
+    """Reach an absolute per-GPU throughput number (progress against best-so-far tput, not baseline).
+
+    The unit is framework-dependent: tok/s/GPU for serving frameworks, img/s
+    for scriptable xDiT (surfaced elsewhere as the equivalent e2el_mean_ms).
+    """
 
     target_tput_per_gpu: float
 
@@ -204,7 +208,8 @@ class TargetTputObjective(Objective):
             state (SharedState): Current shared optimization state.
 
         Returns:
-            float: Current throughput in tok/s/GPU, or 0.0 if none is available.
+            float: Current throughput per GPU (tok/s for serving, img/s for
+            scriptable xDiT), or 0.0 if none is available.
         """
         cb = state.current_best or {}
         v = cb.get("tput") if isinstance(cb, dict) else None
@@ -233,7 +238,8 @@ class TargetTputObjective(Objective):
             state (SharedState): Current shared optimization state.
 
         Returns:
-            float: Non-negative tok/s/GPU still required to reach the target.
+            float: Non-negative per-GPU throughput still required to reach the
+            target (tok/s for serving, img/s for scriptable xDiT).
         """
         return max(0.0, self.target_tput_per_gpu - self._current_tput(state))
 
@@ -317,7 +323,8 @@ class TargetBaselineObjective(Objective):
             state (SharedState): Current shared optimization state.
 
         Returns:
-            float: Current throughput in tok/s, or 0.0 if none is available.
+            float: Current throughput per GPU (tok/s for serving, img/s for
+            scriptable xDiT), or 0.0 if none is available.
         """
         cb = state.current_best or {}
         v = cb.get("tput") if isinstance(cb, dict) else None

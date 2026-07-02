@@ -357,7 +357,11 @@ def _print_final_summary(
     print(f"  stop_reason          : {stop_reason}")
     print(f"  session_id           : {state.session_id}")
     print(f"  model                : {state.model_name}")
-    print(f"  baseline_tput        : {state.baseline_tput:.1f} tok/s/GPU")
+    from . import framework_registry
+
+    print(
+        f"  baseline             : {framework_registry.format_primary_metric(state.framework, state.baseline_tput)}"
+    )
     if session_dir is not None and stop_reason == "baseline_failed":
         failure_summary = _read_failure_summary(session_dir)
         if failure_summary and failure_summary.get("root_cause"):
@@ -466,12 +470,14 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 
     Used as the fallback ``target_summary`` when the operator did not pass an
     explicit ``--target-summary``. The phrasing depends on which target flag is
-    set: ``--target-gain`` (percentage), ``--target-tput`` (tok/s/GPU), or
-    neither (open-ended optimization within the time budget).
+    set: ``--target-gain`` (percentage), ``--target-tput`` (tok/s/GPU for
+    serving; for scriptable xDiT the target throughput is img/s and is shown as
+    the equivalent per-image latency e2el_mean_ms), or neither (open-ended
+    optimization within the time budget).
 
     Args:
         args (argparse.Namespace): Parsed ``optimize`` arguments (reads ``model``,
-            ``target_gain``, ``target_tput``, ``max_hours``).
+            ``target_gain``, ``target_tput``, ``max_hours``, ``framework``).
 
     Returns:
         str: A one-sentence description of the run's objective.
@@ -483,9 +489,14 @@ def _default_target_summary(args: argparse.Namespace) -> str:
             f"{args.max_hours}h."
         )
     if args.target_tput:
+        from . import framework_registry
+
+        target = framework_registry.format_primary_metric(
+            getattr(args, "framework", None), args.target_tput
+        )
         return (
             f"Establish baseline on {Path(args.model).name} then reach "
-            f"{args.target_tput} tok/s/GPU within {args.max_hours}h."
+            f"{target} within {args.max_hours}h."
         )
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
