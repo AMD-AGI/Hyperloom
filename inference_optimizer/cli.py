@@ -2909,6 +2909,25 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     )
 
 
+# Phases that still sit upstream of EXPLORE, so a resume may retroactively
+# honour --no-explore. Includes the legacy "FRAMEWORK" name for sessions
+# persisted before the FRAMEWORK -> FRAMEWORK_AGENT rename (commit 33ac6ccc).
+_PRE_EXPLORE_PHASES: frozenset[str] = frozenset({"", "PRELUDE", "FRAMEWORK", "FRAMEWORK_AGENT"})
+
+
+def _resume_can_disable_explore(cur_phase: str) -> bool:
+    """Whether ``--no-explore`` may still disable EXPLORE for a resumed session.
+
+    Args:
+        cur_phase (str): The persisted ``state.phase``; case/whitespace-insensitive.
+
+    Returns:
+        bool: ``True`` when the phase is upstream of EXPLORE (EXPLORE not yet
+        entered), so the flag can be honoured retroactively.
+    """
+    return (cur_phase or "").strip().upper() in _PRE_EXPLORE_PHASES
+
+
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
@@ -3250,9 +3269,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         elif bool(getattr(args, "no_explore", False)):
             # Honour --no-explore on resume only before EXPLORE is entered.
             # Phases preceding EXPLORE are PRELUDE and FRAMEWORK_AGENT (the
-            # latter renamed from the legacy "FRAMEWORK" in commit 33ac6ccc).
+            # latter renamed from the legacy "FRAMEWORK" in commit 33ac6ccc,
+            # which persisted sessions may still carry).
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
-            if cur_phase in ("", "PRELUDE", "FRAMEWORK_AGENT"):
+            if _resume_can_disable_explore(cur_phase):
                 state.explore_enabled = False
                 print(f"  explore phase         : DISABLING for resume (--no-explore + phase={cur_phase or 'PRELUDE'})")
             else:
