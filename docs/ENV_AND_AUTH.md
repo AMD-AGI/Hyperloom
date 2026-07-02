@@ -16,7 +16,7 @@ Hyperloom needs at most three classes of secrets:
    and `install.sh` provision the dependency paths when they are unset.
    `TRACELENS_ROOT` is optional: leave it unset to let `install.sh`
    auto-clone the public repo into the pod-local open-source checkout
-   root (`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}`);
+   root (`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}`);
    export it only as an explicit operator override.
 
 Everything else (GEAK keys, OOB Claude/Codex keys, Anthropic / OpenAI
@@ -131,7 +131,7 @@ verifies the runtime dependencies.
 | `REPO_ROOT`        | Always                                             | `$(pwd)` if invoked from the repo root | This Hyperloom checkout. Locates `inference_optimizer/`, `kernel-agent/`, `.env`, skills, scripts.            |
 | `OOB_SRC`          | OOB kernel-opt backends (claude / codex / cursor)  | none                   | Path to the `OOB/` subdirectory of the [KernelForge](https://github.com/AMD-AGI/KernelForge) clone.            |
 | `INFERENCEX_PATH`  | Baseline comparison, target analysis               | none                   | Path to the [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) repo.                    |
-| `TRACELENS_ROOT`   | Profile & kernel detection                         | `${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens` (auto-clone) | When unset, `kernel-agent/scripts/install.sh` clones [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) into the pod-local open-source checkout root and pins it to a fixed SHA. Export it to point at a pre-existing checkout you maintain as an operator override — this skips both the clone and the SHA pin. |
+| `TRACELENS_ROOT`   | Profile & kernel detection                         | `${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens` (auto-clone) | When unset, `kernel-agent/scripts/install.sh` clones [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) into the pod-local open-source checkout root and pins it to a fixed SHA. Export it to point at a pre-existing checkout you maintain as an operator override — this skips both the clone and the SHA pin. |
 | `TRACELENS_INTERNAL_ROOT` (optional) | Internal extension (roofline gap, MI355+ MAF) | none | Path to your own internal TraceLens extension checkout (internal users only; self-provided). Unset => open-source-only. Hyperloom never clones it. |
 | `USER_DATA_PATH`   | Session artefacts (logs, runs, mirrors, breakdown) | `/workspace/hyperloom` | Writable directory. Replaces the retired `INFERENCE_OPTIMIZER_SESSION_DIR` and `WORKSPACE_PATH` variables.    |
 
