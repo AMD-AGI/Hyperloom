@@ -57,10 +57,29 @@ def _fake_self(**state_kw):
         model_name=state_kw.get("model_name", "zai-org/GLM-5"),
         gpu_type=state_kw.get("gpu_type", "mi300x"),
     )
-    return types.SimpleNamespace(shared_state=state)
+    fake = types.SimpleNamespace(shared_state=state)
+    # Bind the real discovery method so the builder path is exercised; tests
+    # that don't want the network stub the low-level enumerate_candidates.
+    fake._discover_enablement_candidate_refs = types.MethodType(
+        Coordinator._discover_enablement_candidate_refs, fake
+    )
+    return fake
 
 
-def test_build_params_actionable_failure_tags_enablement():
+def _stub_enumerate(monkeypatch, cands):
+    """Patch ``sources.enumerate_candidates`` to return ``cands`` (or raise)."""
+    import framework_agent.sources as src
+
+    def _fake_enum(_req):
+        if isinstance(cands, Exception):
+            raise cands
+        return list(cands)
+
+    monkeypatch.setattr(src, "enumerate_candidates", _fake_enum)
+
+
+def test_build_params_actionable_failure_tags_enablement(monkeypatch):
+    _stub_enumerate(monkeypatch, [])
     fake = _fake_self()
     params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
@@ -69,10 +88,42 @@ def test_build_params_actionable_failure_tags_enablement():
     assert params["framework_agent_authoring"] is True
     assert params["enablement"] is True
     assert params["enablement_failure_kind"] == "missing_model_arch"
+    # The pre-patch signature is serialized for the runnable-gate replay.
+    assert params["enablement_before_signature"]["kind"] == "missing_model_arch"
     # The notes body is the single-source mandate rendered by build_mandate.
     assert "RUNNABILITY" in params["notes"]
     assert "git apply --check" in params["notes"]
     assert "GLM-5" in params["notes"]
+
+
+def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch):
+    from framework_agent.models import Candidate
+
+    cands = [
+        Candidate(ref="PR:1", repo="r", title="minor perf tweak", html_url="http://x/1"),
+        Candidate(
+            ref="PR:2",
+            repo="r",
+            title="Add support to enable GLM architecture on ROCm",
+            html_url="http://x/2",
+        ),
+    ]
+    _stub_enumerate(monkeypatch, cands)
+    fake = _fake_self()
+    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    assert params is not None
+    # Enablement-intent PR ranks first and its html_url is threaded through.
+    assert params["enablement_candidate_refs"][0] == "http://x/2"
+    assert "http://x/2" in params["notes"]
+
+
+def test_build_params_degrades_gracefully_when_discovery_raises(monkeypatch):
+    _stub_enumerate(monkeypatch, RuntimeError("network down"))
+    fake = _fake_self()
+    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    assert params is not None
+    # Discovery failure -> repos-only mandate, no candidate refs.
+    assert params["enablement_candidate_refs"] == []
 
 
 def test_build_params_none_for_unknown_failure():
@@ -119,9 +170,12 @@ def _enqueue_self(**state_kw):
         session_dir="/tmp/session",
         _warm_specialist_params=_warm,
     )
-    # Bind the real param builder so the gate exercises the full path.
+    # Bind the real param builder + discovery so the gate exercises the full path.
     fake._build_enablement_specialist_params = types.MethodType(
         Coordinator._build_enablement_specialist_params, fake
+    )
+    fake._discover_enablement_candidate_refs = types.MethodType(
+        Coordinator._discover_enablement_candidate_refs, fake
     )
     return fake
 
@@ -131,6 +185,7 @@ async def test_enqueue_dispatches_once_when_baseline_unrunnable(monkeypatch):
     from inference_optimizer.orchestrator.action_executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self()
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert tid == "spec-1"

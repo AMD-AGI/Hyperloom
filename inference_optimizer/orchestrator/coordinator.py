@@ -3639,8 +3639,9 @@ class Coordinator:
     ) -> dict[str, Any] | None:
         """Build enablement-specialist params from a captured launch failure.
 
-        Pure/side-effect-free: classifies the failure, plans bridging discovery,
-        and renders the authoring mandate via
+        Classifies the failure, plans bridging discovery, runs a **best-effort**
+        candidate-PR enumeration (network; fully exception-guarded, degrades to
+        repos-only), and renders the authoring mandate via
         ``framework_agent.enablement_authoring.build_mandate`` (the single source
         of the enablement prompt). Returns ``None`` when the failure is not
         actionable (``UNKNOWN``) so the caller falls back to the normal
@@ -3677,7 +3678,8 @@ class Coordinator:
             gpu_type=(getattr(state, "gpu_type", "") or "").strip().lower(),
         )
         plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
-        mandate = build_mandate(req, signature=signature)
+        candidate_refs = self._discover_enablement_candidate_refs(req, plan)
+        mandate = build_mandate(req, signature=signature, candidate_refs=candidate_refs)
         gap_cid = f"gap.enablement.{signature.kind}"
         return {
             "domain": "enablement_specialist",
@@ -3696,11 +3698,96 @@ class Coordinator:
             "enablement": True,
             "enablement_failure_kind": signature.kind,
             "enablement_search_repos": list(plan.repos),
+            # Serialized pre-patch failure signature: integrate_patch replays it
+            # against the post-patch failure to catch "same error persists".
+            "enablement_before_signature": signature.to_dict(),
+            "enablement_candidate_refs": list(candidate_refs),
             "launch_probe": req.launch_probe,
             "source": "coordinator_internal",
             "readonly": False,
             "notes": mandate.task_description,
         }
+
+    def _discover_enablement_candidate_refs(
+        self, req: Any, plan: Any
+    ) -> tuple[str, ...]:
+        """Best-effort enumerate + rank bridging PRs for an enablement failure.
+
+        Enumerates candidate PRs across every repo in ``plan.repos`` (framework
+        + opted-in ROCm/HIP/aiter bridge repos) via the ``sources`` layer, then
+        ranks each :class:`framework_agent.models.Candidate` with
+        ``score_enablement_title`` (per-Candidate so the ref/html_url is
+        preserved — ``rank_titles`` only scores bare strings) and returns the
+        top ``req.max_search_candidates`` refs (``html_url`` preferred).
+
+        Network + git; **fully exception-guarded**: any failure degrades to an
+        empty tuple so the mandate falls back to repos-only.
+
+        Args:
+            req: The :class:`framework_agent.enablement.EnablementRequest`.
+            plan: The :class:`framework_agent.enablement_discovery.EnablementSearchPlan`.
+
+        Returns:
+            tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
+        """
+        from framework_agent.enablement_discovery import score_enablement_title
+        from framework_agent.models import Candidate, ExploreRequest
+        from framework_agent.sources import enumerate_candidates
+
+        max_candidates = int(getattr(req, "max_search_candidates", 5) or 5)
+        # Gate primus_cortex on a configured URL (mirrors phase-discover): when
+        # unset, enumerate would raise before falling through to GitHub.
+        primus_url = str(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
+        if primus_url:
+            search_modes = ["primus_cortex", "github"]
+            primus_block: dict[str, Any] = {"primus_cortex": {"base_url": primus_url}}
+        else:
+            search_modes = ["github"]
+            primus_block = {}
+
+        collected: list[Candidate] = []
+        for repo in plan.repos:
+            try:
+                explore_req = ExploreRequest.from_dict(
+                    {
+                        "framework": getattr(req, "framework", "") or "sglang",
+                        "repo_url": repo,
+                        "work_dir": str(getattr(req, "work_dir", "/tmp/framework-agent")),
+                        "baseline": {"throughput": 1.0},
+                        "search_perf_prs": True,
+                        "search_modes": search_modes,
+                        "keywords": list(plan.keywords),
+                        "pr_states": ["open"],
+                        "max_search_candidates": max_candidates,
+                        **primus_block,
+                    }
+                )
+                collected.extend(enumerate_candidates(explore_req))
+            except Exception:  # noqa: BLE001 — discovery is best-effort
+                log.debug(
+                    "enablement: candidate discovery failed for repo=%s",
+                    repo,
+                    exc_info=True,
+                )
+                continue
+
+        if not collected:
+            return ()
+        ranked = sorted(
+            collected,
+            key=lambda c: score_enablement_title(getattr(c, "title", "") or "", plan),
+            reverse=True,
+        )
+        refs: list[str] = []
+        seen: set[str] = set()
+        for cand in ranked:
+            ref = str(getattr(cand, "html_url", "") or getattr(cand, "ref", "") or "").strip()
+            if ref and ref not in seen:
+                seen.add(ref)
+                refs.append(ref)
+            if len(refs) >= max_candidates:
+                break
+        return tuple(refs)
 
     async def _maybe_enqueue_enablement_specialist(self) -> str:
         """Dispatch one enablement_specialist when baseline cannot launch.
@@ -12152,6 +12239,11 @@ class Coordinator:
                 probe = str(spec_params.get("launch_probe") or "").strip()
                 if probe:
                     integrate_params["launch_probe"] = probe
+                # Forward the pre-patch failure signature so the runnable gate
+                # can detect the same actionable failure re-appearing post-patch.
+                before_sig = spec_params.get("enablement_before_signature")
+                if isinstance(before_sig, dict):
+                    integrate_params["enablement_before_signature"] = before_sig
         except Exception:  # noqa: BLE001 — provenance passthrough is best-effort
             log.debug(
                 "FRAMEWORK: authoring provenance passthrough failed for task=%s",
