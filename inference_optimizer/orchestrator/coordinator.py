@@ -6896,7 +6896,8 @@ class Coordinator:
             gp = list(getattr(state, "gain_per_stack_entry", []) or [])
             gp.append(round(measured_gain, 3))
             state.gain_per_stack_entry = gp
-            # Cumulative gain from absolute tput/baseline (stack is superposition, not additive deltas). Single-round basis (matches explore/sweep + baseline anchor).
+            # Cumulative gain is absolute tput vs baseline, not additive stack
+            # deltas. Both sides use the hot measure-round contract.
             total_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
             state.cumulative_gain = round(total_gain, 3)
             state.cumulative_gain_validated = round(total_gain, 3)
