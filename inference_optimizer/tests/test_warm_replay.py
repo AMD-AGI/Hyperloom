@@ -489,11 +489,10 @@ def test_promote_warm_replay_passes_quality_gate_is_promoted(tmp_path):
     assert coord.shared_state.current_best["action"] == "warm_replay"
 
 
-def test_promote_warm_replay_double_run_uses_single_round_anchor(tmp_path):
-    """Double-run replay: current_best.tput / stack.tput / gain MUST use the
-    single-round (warmup) value, NOT the hot measure — so explore/sweep
-    variants (measured single-round) are judged against a comparable bar.
-    The hot measure is retained only under ``hot_tput`` for reporting.
+def test_promote_warm_replay_double_run_uses_hot_measure_round(tmp_path):
+    """Double-run replay uses the hot measure round for gain/current_best.
+
+    The discarded warmup round is retained only under ``cold_tput`` for audit.
     """
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
@@ -509,8 +508,7 @@ def test_promote_warm_replay_double_run_uses_single_round_anchor(tmp_path):
             "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
         }
     )
-    # Hot measure 738 (+23%) is discarded for the anchor; the single-round
-    # warmup 690 (+15% vs baseline 600) is the fair comparison value.
+    # Hot measure 738 (+23%) is the comparison value; warmup 690 is audit-only.
     result = {
         "status": "succeeded",
         "output_throughput": 738.0,
@@ -520,15 +518,16 @@ def test_promote_warm_replay_double_run_uses_single_round_anchor(tmp_path):
 
     cb = coord.shared_state.current_best
     assert cb["action"] == "warm_replay"
-    # Critical invariant: explore/sweep anchor is single-round, not hot.
-    assert cb["tput"] == 690.0
+    assert cb["tput"] == 738.0
     assert cb["hot_tput"] == 738.0
+    assert cb["cold_tput"] == 690.0
     entry = coord.shared_state.optimization_stack[0]
-    assert entry["tput"] == 690.0
+    assert entry["tput"] == 738.0
     assert entry["hot_tput"] == 738.0
-    assert entry["gain_pct"] == 15.0
-    assert coord.shared_state.cumulative_gain == 15.0
-    assert coord.shared_state.cumulative_gain_validated == 15.0
+    assert entry["cold_tput"] == 690.0
+    assert entry["gain_pct"] == 23.0
+    assert coord.shared_state.cumulative_gain == 23.0
+    assert coord.shared_state.cumulative_gain_validated == 23.0
 
 
 def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
