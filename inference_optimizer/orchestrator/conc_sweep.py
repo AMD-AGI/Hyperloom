@@ -483,8 +483,15 @@ async def run_conc_sweep(
 
     # Re-materialize (idempotent) in case we fell back to the shipped asset.
     resolved_model = str(getattr(state, "model_path", "") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
-    resolved_gpu = (
-        str(getattr(state, "gpu_type", "") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
+    # Mirror the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py
+    # canonicalizes mi325x/mi308x -> mi300x), fall back to state.gpu_type, then
+    # canonicalize through _gpu_runner_type so the selected Magpie script is a
+    # shipped runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.
+    from ..cli_model_gate import _gpu_runner_type
+
+    resolved_gpu = _gpu_runner_type(
+        os.environ.get("GPU_TYPE", "").strip().lower()
+        or str(getattr(state, "gpu_type", "") or "").strip().lower()
     )
     try:
         base_yaml_path = materialize_config_with_envs(
