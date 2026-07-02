@@ -129,6 +129,46 @@ def _resolve_magpie_python() -> str:
     return "/opt/venv/bin/python"
 
 
+def _resolve_probe_python() -> str:
+    """Resolve the interpreter a build-accuracy probe must use.
+
+    A capability probe (e.g. :func:`_probe_vllm_aiter_shared_expert_unsupported`)
+    only produces a correct drop decision when it inspects the SAME framework
+    install the benchmark server actually loads. The server runs ``vllm serve``
+    (the ``vllm`` console-script's own venv), while Magpie itself runs under
+    ``_resolve_magpie_python()``; a bare ``python3`` off ``$PATH`` may be a third,
+    unrelated venv, so probing it can misreport (false ``unsupported`` -> a
+    usable variant is dropped and a ``capability_unsupported`` row is written
+    back that teaches the LLM to avoid a working flag).
+
+    Resolution order (bare ``python3`` is deliberately NOT a fallback):
+    1. ``_resolve_magpie_python()`` — the interpreter that runs the benchmark
+       harness; on a single-venv install this is also the vLLM venv.
+    2. The interpreter behind the ``vllm`` executable (``<venv>/bin/python``
+       alongside ``shutil.which("vllm")``) when it exists on disk — the venv
+       that literally serves the model.
+    3. ``_resolve_magpie_python()``'s own canonical fallback
+       (``/opt/venv/bin/python``) is the last resort via step 1.
+
+    Returns:
+        str: Path to the interpreter the probe should invoke.
+    """
+    magpie_python = _resolve_magpie_python()
+    # Prefer the harness interpreter; on a single-venv box it already IS the
+    # vLLM venv, so no extra resolution is needed.
+    if magpie_python and magpie_python != "/opt/venv/bin/python":
+        return magpie_python
+    # magpie_python fell through to the canonical default — try to pin the venv
+    # that actually backs ``vllm serve`` so a Frankenbuild (server on /opt/venv,
+    # PATH python3 elsewhere) is probed against the real server source.
+    vllm_exe = shutil.which("vllm")
+    if vllm_exe:
+        vllm_python = os.path.join(os.path.dirname(vllm_exe), "python")
+        if os.path.exists(vllm_python):
+            return vllm_python
+    return magpie_python
+
+
 def _resolve_session_dir() -> Path:
     """Resolve the active session_dir for executors that need an output root.
 
@@ -580,7 +620,7 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
         return cached  # type: ignore[return-value]
     try:
         proc = subprocess.run(
-            ["python3", "-c", _AITER_SHARED_EXPERT_PROBE_SCRIPT],
+            [_resolve_probe_python(), "-c", _AITER_SHARED_EXPERT_PROBE_SCRIPT],
             capture_output=True,
             text=True,
             timeout=30,

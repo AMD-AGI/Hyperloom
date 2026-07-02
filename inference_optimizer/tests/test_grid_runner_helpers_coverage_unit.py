@@ -140,6 +140,54 @@ def test_probe_swallows_subprocess_error(monkeypatch) -> None:
     assert gr._probe_vllm_aiter_shared_expert_unsupported() is None
 
 
+# -- _resolve_probe_python / probe interpreter selection ------------------
+def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
+    # The harness interpreter (single-venv install) is used directly and no
+    # vllm-exe resolution is attempted.
+    monkeypatch.setattr(gr, "_resolve_magpie_python", lambda: "/srv/venv/bin/python")
+    monkeypatch.setattr(
+        gr.shutil, "which", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("which() should not be called"))
+    )
+    assert gr._resolve_probe_python() == "/srv/venv/bin/python"
+
+
+def test_resolve_probe_python_falls_back_to_vllm_venv(monkeypatch) -> None:
+    # magpie_python fell through to the canonical default -> pin the venv that
+    # actually backs ``vllm serve``.
+    monkeypatch.setattr(gr, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
+    monkeypatch.setattr(gr.shutil, "which", lambda name: "/other/venv/bin/vllm" if name == "vllm" else None)
+    monkeypatch.setattr(gr.os.path, "exists", lambda p: p == "/other/venv/bin/python")
+    assert gr._resolve_probe_python() == "/other/venv/bin/python"
+
+
+def test_resolve_probe_python_no_bare_python3_fallback(monkeypatch) -> None:
+    # With no resolvable vllm exe, fall back to the canonical magpie default —
+    # never a bare "python3".
+    monkeypatch.setattr(gr, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
+    monkeypatch.setattr(gr.shutil, "which", lambda *_a, **_k: None)
+    assert gr._resolve_probe_python() == "/opt/venv/bin/python"
+
+
+def test_probe_invokes_resolved_interpreter(monkeypatch) -> None:
+    # The capability probe must run under the resolved interpreter, not "python3".
+    _clear_cap_cache()
+    monkeypatch.setattr(gr, "_resolve_probe_python", lambda: "/srv/venv/bin/python")
+    seen: dict = {}
+
+    class _Proc:
+        stdout = json.dumps({"status": "ok"})
+        stderr = ""
+
+    def fake_run(cmd, *_a, **_k):
+        seen["cmd"] = list(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(gr.subprocess, "run", fake_run)
+    gr._probe_vllm_aiter_shared_expert_unsupported()
+    assert seen["cmd"][0] == "/srv/venv/bin/python"
+    assert seen["cmd"][0] != "python3"
+
+
 # -- apply_runtime_benchmark_overrides ------------------------------------
 def test_runtime_overrides_model_precision_and_gpu_no_framework_agent(monkeypatch) -> None:
     monkeypatch.setenv("PRECISION", "fp8")
