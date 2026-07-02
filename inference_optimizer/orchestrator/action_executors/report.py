@@ -372,6 +372,7 @@ def _build_summary_dict(
         "model_name": state.model_name,
         "model_path": state.model_path,
         "model_class": state.model_class,
+        "framework": state.framework,
         "stop_reason": state.stop_reason,
         "baseline_tput": state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
@@ -458,11 +459,22 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
+    # Per-framework primary metric: serving reports throughput (tok/s/GPU),
+    # scriptable xDiT reports per-image latency (e2el_mean_ms) instead of a
+    # reciprocal-of-latency value mislabeled as tok/s/GPU.
+    from ... import framework_registry
+
+    _fw = summary.get("framework")
     lines.append("## Throughput")
     lines.append("")
-    lines.append(f"- baseline_tput        : `{summary['baseline_tput']:.1f}` tok/s/GPU")
+    lines.append(
+        f"- baseline            : `{framework_registry.format_primary_metric(_fw, summary['baseline_tput'])}`"
+    )
     if cb_tput is not None:
-        lines.append(f"- current_best        : `{cb_tput:.1f}` tok/s/GPU (action=`{cb.get('action', '?')}`)")
+        lines.append(
+            f"- current_best        : `{framework_registry.format_primary_metric(_fw, cb_tput)}` "
+            f"(action=`{cb.get('action', '?')}`)"
+        )
     # Per-round sum — informational, not end-to-end deliverable.
     lines.append(f"- cumulative_gain     : `{summary['cumulative_gain']:.2f}%`  *(per-round sum — informational only)*")
     # Validated gain — always printed so the report never quotes only the
