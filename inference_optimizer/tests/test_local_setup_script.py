@@ -37,6 +37,7 @@ _HOST_LEAK_VARS = (
     "OOB_SRC",
     "INFERENCEX_PATH",
     "TRACELENS_ROOT",
+    "TRACELENS_DEFAULT_ROOT",
     "TRACELENS_INTERNAL_ROOT",
     "SAFE_API_KEY",
     "OPENAI_BASE_URL",
@@ -195,6 +196,62 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
     env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
     assert f"export OOB_SRC='{existing_oob}'" in env_text
     assert not (tmp_path / "deps" / "KernelForge").exists()
+
+
+def test_local_setup_ignores_stale_default_checkout_without_override(tmp_path: Path) -> None:
+    # #722 regression: with no TRACELENS_ROOT / TRACELENS_DEFAULT_ROOT override,
+    # a stale pre-existing checkout outside the pod-local deps root must NOT be
+    # adopted — resolution goes to ${deps}/TraceLens via the /opt clone+pin path.
+    remotes = tmp_path / "remotes"
+    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
+    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
+    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
+    # A stale checkout that the old implicit /workspace/TraceLens default would
+    # have silently adopted.
+    stale = _git_repo(tmp_path / "stale" / "TraceLens", {"README.md": "stale\n"})
+
+    result = _run_local_setup(
+        tmp_path,
+        env={
+            "KERNEL_FORGE_REPO": str(forge),
+            "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
+            "TRACELENS_REPO": str(tracelens_public),
+            "TRACELENS_REF": "HEAD",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
+    assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
+    assert str(stale) not in env_text
+
+
+def test_local_setup_honours_explicit_tracelens_default_root(tmp_path: Path) -> None:
+    # Operators can still point TRACELENS_DEFAULT_ROOT at a pre-existing manual
+    # checkout; that path wins over the pod-local clone.
+    remotes = tmp_path / "remotes"
+    forge = _git_repo(remotes / "KernelForge", {"OOB/README.md": "oob\n"})
+    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
+    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
+    manual = _git_repo(tmp_path / "manual" / "TraceLens", {"README.md": "manual\n"})
+
+    result = _run_local_setup(
+        tmp_path,
+        env={
+            "KERNEL_FORGE_REPO": str(forge),
+            "INFERENCEX_REPO": str(inferencex),
+            "INFERENCEX_REF": "HEAD",
+            "TRACELENS_REPO": str(tracelens_public),
+            "TRACELENS_REF": "HEAD",
+            "TRACELENS_DEFAULT_ROOT": str(manual),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
+    assert f"export TRACELENS_ROOT='{manual}'" in env_text
+    assert not (tmp_path / "deps" / "TraceLens").exists()
 
 
 def test_local_setup_fails_for_missing_explicit_dependency_path(tmp_path: Path) -> None:

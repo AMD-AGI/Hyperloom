@@ -33,12 +33,13 @@ INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
 TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
 # TraceLens v0.7.0 integration (#474): head of release/hyperloom_integration_v0.7.0.
 TRACELENS_REF="${TRACELENS_REF:-35bbb6380cf69a2655ee28260b02b5f2dc481744}"
-# Preferred container-local checkout for the public repo when operators install
-# TraceLens manually. The internal extension is private: Hyperloom keeps NO
-# repo URL, ref, or default path for it. It is used only when an operator
-# explicitly sets TRACELENS_INTERNAL_ROOT to an existing checkout
-# (open-source-only otherwise). There is no separate on/off toggle.
-TRACELENS_DEFAULT_ROOT="${TRACELENS_DEFAULT_ROOT:-/workspace/TraceLens}"
+# Optional operator hint for a pre-existing manual checkout. Left EMPTY by
+# default: the pod-local ${_open_source_root}/TraceLens is the sole implicit
+# default (resolved in resolve_tracelens), so a stale /workspace/TraceLens is
+# never silently adopted, which would bypass the /opt clone+pin path (#722).
+# The internal extension is private: Hyperloom keeps NO repo URL, ref, or
+# default path for it; used only when TRACELENS_INTERNAL_ROOT is set.
+TRACELENS_DEFAULT_ROOT="${TRACELENS_DEFAULT_ROOT:-}"
 
 usage() {
   cat <<'EOF'
@@ -249,7 +250,11 @@ _resolve_existing_checkout() {
 }
 
 resolve_tracelens() {
-  if _resolve_existing_checkout TRACELENS_ROOT "$TRACELENS_DEFAULT_ROOT"; then
+  # Implicit default is the pod-local /opt checkout; an operator may point
+  # TRACELENS_DEFAULT_ROOT at a pre-existing manual checkout. A stale
+  # /workspace/TraceLens is NOT probed unless explicitly named (#722).
+  local _tl_default="${TRACELENS_DEFAULT_ROOT:-${_open_source_root}/TraceLens}"
+  if _resolve_existing_checkout TRACELENS_ROOT "$_tl_default"; then
     :
   else
     TRACELENS_ROOT="${_open_source_root}/TraceLens"
