@@ -167,6 +167,49 @@ _CHECKLIST: tuple[ChecklistEntry, ...] = (
         source_dirs=("vllm/model_executor/layers/fused_moe/",),
         evidence=("vllm#46419",),
     ),
+    ChecklistEntry(
+        id="rocm.moe.shared_expert_fusion",
+        applies_when={"gpu": "rocm", "precision": "mxfp8"},
+        detect=(
+            "For MoE models with always-on shared experts (n_shared_experts / "
+            "num_shared_experts in config.json), grep whether the shared expert "
+            "still runs as a separate dense MLP per layer. "
+            "In vLLM: check vllm/model_executor/models/ for a `shared_experts` "
+            "forward call outside FusedMoE, and vllm/model_executor/layers/fused_moe/ "
+            "for whether n_shared_experts is passed to FusedMoE or handled separately. "
+            "In SGLang: check python/sglang/srt/models/ and python/sglang/srt/layers/moe/ "
+            "for equivalent separate shared-expert execution. "
+            "Anti-signatures (do NOT proceed): expert parallelism enabled, "
+            "non-uniform precision between shared and routed experts, "
+            "prefill-only or high-concurrency-only workload."
+        ),
+        consequence=(
+            "A separate shared-expert MLP adds one extra GEMM launch per MoE layer "
+            "during decode. At low-to-medium concurrency this makes decode launch-bound, "
+            "degrading throughput significantly (validated: up to +20-30% at concurrency 1, "
+            "+6-11% at concurrency 64 on MiniMax-M3 MXFP8 MI355X)."
+        ),
+        bridge=(
+            "Fold the shared expert into the routed grouped-GEMM path as an always-selected "
+            "extra expert slot: (1) append shared expert ids to the router top-k selection, "
+            "(2) pass n_shared_experts to FusedMoE so it adjusts expert count, "
+            "(3) load shared expert weights into the routed expert weight tensor at the end, "
+            "(4) handle MXFP8 native MoE bin count to match actual weight rows. "
+            "A/B gate with <FUSE_FLAG>=0 vs 1 (confirm actual env-flag name from the "
+            "framework build or generated patch; do not treat env-only no-op as KEEP). "
+            "Require accuracy gate; check for routed scale compensation to avoid "
+            "double-counting shared expert output. "
+            "Reference: vLLM PR #46545, upstream MiniMax-M3 shared-expert fusion."
+        ),
+        domain_hint="freeform",
+        source_dirs=(
+            "vllm/model_executor/layers/fused_moe/",
+            "vllm/model_executor/models/",
+            "python/sglang/srt/layers/moe/",
+            "python/sglang/srt/models/",
+        ),
+        evidence=("vllm#46545", "MiniMax-M3-shared-expert-fusion-MI355X-mxfp8"),
+    ),
 )
 
 
@@ -311,9 +354,32 @@ def checklist_as_dicts(entries: list[ChecklistEntry]) -> list[dict[str, object]]
     return out
 
 
+def filter_entries_for_model(
+    entries: list[ChecklistEntry], model_info: dict
+) -> list[ChecklistEntry]:
+    """Filter checklist entries based on model metadata.
+
+    Currently gates ``rocm.moe.shared_expert_fusion`` on
+    ``model_info["has_shared_expert"]`` so the entry does not appear for
+    ROCm + MXFP8 runs whose model has no always-on shared expert.
+
+    Args:
+        entries: Candidate entries (typically from :func:`entries_for`).
+        model_info: The session ``model_info`` dict (may be empty).
+
+    Returns:
+        Filtered list; entries not requiring model-level gating pass through
+        unchanged.
+    """
+    if model_info.get("has_shared_expert"):
+        return list(entries)
+    return [e for e in entries if e.id != "rocm.moe.shared_expert_fusion"]
+
+
 __all__ = [
     "ChecklistEntry",
     "entries_for",
+    "filter_entries_for_model",
     "source_hint_directories_for",
     "render_checklist_for_prompt",
     "checklist_as_dicts",
