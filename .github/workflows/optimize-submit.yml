@@ -8,8 +8,7 @@ name: SaFE Optimize Submit
 #
 # Three-stage pipeline:
 #   1. prepare    (ubuntu-latest)  — pick model source by priority:
-#                                    models > candidates_file (+ batch slice)
-#                                    > hf_top (live HF API).
+#                                    models > candidates_file (+ batch slice).
 #                                    Emits matrix JSON for stage 2.
 #   2. optimize   (matrix, hyperloom-4hhzn) — one model per parallel job.
 #                                    Each job pre-pulls its own repo to
@@ -31,7 +30,6 @@ name: SaFE Optimize Submit
 #   • Single/few models      : `-f models='Qwen/Qwen2.5-7B-Instruct ...'`
 #   • Reproducible batch run : `-f candidates_file=ci/candidates/hf_downloads_gt100_rotate_2026-06-17.json
 #                              -f batch_index=0 -f batch_size=130`
-#   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
   # No schedule of its own: this is the shared EXECUTION ENGINE. The per-pool
@@ -50,7 +48,7 @@ on:
     # https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
     # https://github.blog/changelog/2025-12-04-actions-workflow-dispatch-workflows-now-support-25-inputs/
     inputs:
-      # ── Model source (priority: models > candidates_file > legacy hf_top) ──────
+      # ── Model source (priority: models > candidates_file) ──────
       models:
         description: 'Explicit HF repo IDs (space-separated). HIGHEST priority.'
         required: false
@@ -131,11 +129,13 @@ on:
         type: choice
         options: [local, claw]
       framework:
-        description: 'Serving framework override forwarded to optimize_submit.py as --framework. Leave empty to auto-detect from the model config.'
+        # Free-form string (not a ``choice``): a choice input cannot offer an
+        # empty option for the "auto-detect" default, so this stays a string.
+        # Valid values today: sglang | vllm. Empty keeps the script's
+        # auto-detect (the Submit step only passes --framework when non-empty).
+        description: 'Serving framework override (sglang|vllm) forwarded to optimize_submit.py as --framework. Leave empty to auto-detect from the model config.'
         required: false
         default: ''
-        type: choice
-        options: ['', sglang, vllm]
       gpu_type:
         description: 'GPU type tag (overrides SaFE backend default MI355X). Leave empty to use script default (MI300X for core42).'
         required: false
@@ -238,7 +238,6 @@ jobs:
       # schedule so the real clock is used.
       INPUT_CRON_NOW:        ${{ github.event_name == 'schedule' && '' || github.event.inputs.cron_now }}
       INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '240' || github.event.inputs.batch_size }}
-      INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
       # Schedule does NOT exclude leaderboard-known models so the pool keeps
       # cycling. Active-workflow exclusion is ON (same as optimize-tiny) so
@@ -975,7 +974,10 @@ jobs:
   # ── Stage 3: aggregate summary ───────────────────────────────────────────────
   summarize:
     name: Build summary
-    needs: optimize
+    # Depends on both prepare (for the ``count`` guard below) and optimize.
+    # ``optimize`` already needs ``prepare``, so listing both here only makes
+    # ``needs.prepare.outputs`` reachable in this job's ``if`` expression.
+    needs: [prepare, optimize]
     if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
     # Run on the self-hosted hyperloom-4hhzn runner (a K8s pod in the
     # core42-hyperloom namespace) so the Publish step can reach the
@@ -1126,7 +1128,6 @@ jobs:
           WEBHOOK_URL:    ${{ secrets.WEBHOOK_URL }}
           DASHBOARD_URL:  ${{ secrets.HYPERLOOM_DASHBOARD_URL }}
           INPUT_MODELS:   ${{ github.event.inputs.models }}
-          INPUT_HF_TOP:   ${{ github.event.inputs.hf_top }}
           # Perf-leaderboard publish counts (from the previous step) so
           # send_webhook.py can render "X/N sent to perf-leaderboard" in
           # the card footer.

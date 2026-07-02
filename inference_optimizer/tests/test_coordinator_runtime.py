@@ -10,7 +10,6 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator import coordinator
 from inference_optimizer.orchestrator.action_executors import (
     _multi_node_server_lifecycle,
     report_executor,
