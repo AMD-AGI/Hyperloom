@@ -3121,6 +3121,9 @@ class Coordinator:
             cand_id = str(params.get("framework_agent_candidate_id") or "")
             if not cand_id or cand_id in unprocessed_ids:
                 return True
+        # An authored patch awaiting Critic review or a candidate awaiting its
+        # pre-screen verdict both keep the phase from exiting early — but only
+        # while the proposal targets a still-unprocessed candidate.
         try:
             for p in self.state.pending_proposals.values():
                 if getattr(p, "decided", False):
@@ -8444,6 +8447,9 @@ class Coordinator:
                 model_class=str(getattr(state, "model_class", "") or ""),
                 gpu_type=str(getattr(state, "gpu_type", "") or ""),
                 precision=str(getattr(state, "precision", "") or ""),
+            )
+            _entries = _src_recon.filter_entries_for_model(
+                _entries, dict(getattr(state, "model_info", None) or {})
             )
             _rendered = _src_recon.render_checklist_for_prompt(_entries)
             if _rendered:
