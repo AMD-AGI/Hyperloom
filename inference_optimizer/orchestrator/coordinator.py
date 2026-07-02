@@ -1873,6 +1873,73 @@ class Coordinator:
         await self._record_observation("coordinator", "observation", {"kind": "resume_consistency", **report})
         return report
 
+    async def _resume_reenter_kernel_if_needed(self) -> None:
+        """Idempotently re-fire the KERNEL_AGENT entry hook on resume.
+
+        Phase-entry side effects (the PerfSkills delegation + its ``result.json``
+        crash-recovery) are bound to a phase *transition* via
+        ``_on_phase_entered``; a resume only restores ``phase`` from state.json
+        and never re-enters the current phase. Without this, a session that
+        crashed mid ``KERNEL_AGENT`` sits idle until the phase budget cap fires,
+        then hands SWEEP an empty result — the whole delegation is silently lost.
+
+        General across every crash timing (not case-by-case): the decision is
+        driven purely by whether THIS KERNEL phase's history row already carries
+        a ``perfskills`` completion record, so it self-classifies:
+
+          * completed-this-phase → only re-arm (+persist) the ``skip_to_sweep``
+            hint the delegation sets, so the phase machine winds down to SWEEP
+            with no e2e re-run;
+          * not-completed → re-enter ``_on_enter_kernel``; its own entry guard
+            promotes an existing OK ``result.json`` (crash-before-handback) and
+            re-runs the e2e only when there is genuinely nothing to recover
+            (run_e2e itself then continues from the pinned eval_dir on disk).
+
+        No-op unless resumed while parked in ``KERNEL_AGENT`` with the PerfSkills
+        backend selected.
+        """
+        if not self._resumed_from.get("is_resume"):
+            return
+        state = self.shared_state
+        if (state.phase or "").strip().upper() != _phase_state.PHASE_KERNEL_AGENT:
+            return
+        if not (self._kernel_enabled() and self._perfskills_enabled()):
+            return
+        history = state.phase_history or []
+        row = history[-1] if history else {}
+        evidence = row.get("evidence") if isinstance(row, dict) else {}
+        completed_this_phase = isinstance(evidence, dict) and isinstance(
+            evidence.get("perfskills"), dict
+        )
+        if completed_this_phase:
+            # The delegation landed during this phase but the SWEEP transition
+            # never persisted (crash between the hook and the next tick). Re-arm
+            # the wind-down hint + persist so the phase machine advances.
+            cur = str(getattr(state, "pending_escalate_hint", "") or "").strip()
+            if cur != _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP:
+                state.set_pending_escalate_hint(
+                    _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP
+                )
+                try:
+                    state.save(self.session_dir)
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "resume: save after re-arming skip_to_sweep failed"
+                    )
+                log.info(
+                    "resume: KERNEL PerfSkills already completed this phase; "
+                    "re-armed skip_to_sweep hint (lost before SWEEP transition)."
+                )
+            return
+        log.info(
+            "resume: re-entering KERNEL PerfSkills delegation (no completion "
+            "evidence on the current phase row); recover-from-disk or re-run."
+        )
+        try:
+            await self._on_enter_kernel(from_phase="resume")
+        except Exception:  # noqa: BLE001 — resume re-entry must never kill the session
+            log.exception("resume: KERNEL re-entry hook failed")
+
     def _replay_keep_from_result(self, kind: str, result: dict[str, Any]) -> bool:
         """Replay a recorded KEEP delegated-result into current_best/stack.
 
@@ -5236,6 +5303,18 @@ class Coordinator:
             "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
             "raw_baseline_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
             "exp_root": str(self.session_dir / "perfskills"),
+            # Pin a stable, macro-cycle-scoped eval_dir so a resumed / re-entered
+            # KERNEL reuses the SAME on-disk workflow artifacts (continue-from-disk)
+            # instead of minting a fresh timestamped dir every invocation. Scoping
+            # by macro_cycle keeps multi-cycle correct: a NEW cycle's KERNEL gets
+            # its own dir and runs fresh, while a same-cycle resume lands back on
+            # the in-progress dir (so run_e2e's terminal-marker short-circuit and
+            # its disk-recovery both target exactly this cycle's work).
+            "eval_dir": str(
+                self.session_dir
+                / "perfskills"
+                / f"e2e_cycle{int(getattr(state, 'macro_cycle', 0) or 0)}"
+            ),
             # Align PerfSkills' bench CLIENT to Hyperloom's exact one (InferenceX
             # benchmark_serving.py) so final/sweep numbers are cross-harness 可比.
             "bench_client": "auto",
@@ -5287,8 +5366,11 @@ class Coordinator:
             if runner_timeout_s is not None:
                 evidence["runner_timeout_s"] = runner_timeout_s
             self._record_phase_entry_evidence(perfskills=evidence)
-            state.save(self.session_dir)
+            # Set the wind-down hint BEFORE the durable save so a crash between
+            # here and the next tick's SWEEP transition cannot lose it
+            # (set_pending_escalate_hint is in-memory only).
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+            state.save(self.session_dir)
 
         def _finish_skip(result: dict[str, Any]) -> None:
             """Record a (failed/skipped) PerfSkills outcome + wind down to SWEEP.
@@ -5304,8 +5386,9 @@ class Coordinator:
                 "error_class": result.get("error_class"),
                 "error": (str(result.get("error") or "")[:500] or None),
             })
-            state.save(self.session_dir)
+            # Persist the wind-down hint durably (see _promote_recovered_result).
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+            state.save(self.session_dir)
 
         # Crash-recovery: a validated result.json written before the coordinator
         # crashed (handback never reached state.save) must be promoted on resume.
@@ -5465,8 +5548,11 @@ class Coordinator:
             },
             priority=1,
         ))
-        # KERNEL is a one-shot under PerfSkills: wind down to SWEEP.
+        # KERNEL is a one-shot under PerfSkills: wind down to SWEEP. Persist the
+        # hint so a crash before the next tick's SWEEP transition doesn't lose it
+        # (set_pending_escalate_hint is in-memory only).
         state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+        state.save(self.session_dir)
 
     def _perfskills_win_already_recorded(self) -> bool:
         """Whether a PerfSkills e2e win is already in this session's state.
@@ -8912,6 +8998,10 @@ class Coordinator:
             return
         await self.replay_for_resume()
         await self._resume_consistency_pass()
+        # Re-fire the KERNEL delegation hook when resuming parked in KERNEL_AGENT
+        # (phase-entry side effects are bound to transitions, not resume). Runs
+        # after the consistency pass so current_best/stack are already rebuilt.
+        await self._resume_reenter_kernel_if_needed()
 
     async def _pump_framework_agent_phase_safely(self, *, caller: str) -> None:
         """Best-effort FRAMEWORK pump wrapper shared by tick and run.
