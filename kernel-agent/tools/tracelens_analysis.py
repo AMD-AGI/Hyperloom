@@ -4747,6 +4747,69 @@ def run_command(
     return proc.returncode
 
 
+# Defaults kept in sync with kernel-agent/scripts/install.sh (TRACELENS_REPO /
+# TRACELENS_REF). Overridable via env so a run can pin its own SHA.
+_TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
+_TRACELENS_REF_DEFAULT = "35bbb6380cf69a2655ee28260b02b5f2dc481744"
+
+
+def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
+    """Idempotently rebuild the TraceLens checkout if it vanished mid-run (#722).
+
+    The optimizer's trace_analyze subprocess reads ``TRACELENS_ROOT`` long
+    after install time; the pod-local checkout can disappear when a concurrent
+    install rm+re-clones it (installs hold the same lock, this reader does not).
+    We take the shared pod-local ``.install.lock`` next to the open-source root,
+    double-check under the lock, then clone into a temp sibling and atomically
+    rename into place so a partial clone is never observed.
+    """
+    tl_root = Path(tl_root)
+    if tl_root.exists():
+        return
+    repo = os.environ.get("TRACELENS_REPO") or _TRACELENS_REPO_DEFAULT
+    ref = os.environ.get("TRACELENS_REF") or _TRACELENS_REF_DEFAULT
+    # .install.lock lives at the open-source root (parent of TraceLens/), the
+    # same path both installers lock; missing parents are created first.
+    lock_dir = tl_root.parent
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / ".install.lock"
+    append_log(log_path, f"TraceLens root missing; self-healing checkout at {tl_root}")
+    import fcntl
+
+    with lock_path.open("w") as lock_fh:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        except OSError:
+            pass
+        # Double-check under the lock: a concurrent healer may have rebuilt it.
+        if tl_root.exists():
+            append_log(log_path, "TraceLens checkout rebuilt by a concurrent healer; reusing")
+            return
+        tmp_dir = tl_root.parent / f".{tl_root.name}.heal.{uuid.uuid4().hex[:8]}"
+        rc = run_command(
+            ["git", "clone", "--depth", "1", repo, str(tmp_dir)],
+            cwd=None,
+            log_path=log_path,
+            timeout_s=600,
+        )
+        if rc != 0:
+            raise FileNotFoundError(
+                f"TraceLens root not found and self-heal clone failed (repo={repo}); "
+                f"tried to rebuild at {tl_root}"
+            )
+        if ref and ref != "HEAD":
+            run_command(
+                ["git", "-C", str(tmp_dir), "fetch", "--depth", "1", "origin", ref],
+                cwd=None, log_path=log_path, timeout_s=600,
+            )
+            run_command(
+                ["git", "-C", str(tmp_dir), "checkout", "-q", "FETCH_HEAD"],
+                cwd=None, log_path=log_path, timeout_s=120,
+            )
+        os.replace(tmp_dir, tl_root)
+        append_log(log_path, f"TraceLens checkout self-healed at {tl_root}")
+
+
 def roofline_match_key(name: str) -> str:
     """Normalize trace and rocprof names enough to join roofline data.
 
@@ -5859,6 +5922,11 @@ def main() -> int:
             # Internal extension is opt-in (non-empty --tracelens-internal-root / env).
             internal_root_arg = (args.tracelens_internal_root or "").strip()
             tl_internal_root: Path | None = Path(internal_root_arg) if internal_root_arg else None
+            if not tl_root.exists():
+                # #722: the pod-local checkout can vanish mid-run (concurrent
+                # install rm+re-clone). Self-heal instead of dying; only raise
+                # if the rebuild itself fails (e.g. no network).
+                _ensure_tracelens_checkout(tl_root, log_path=log_path)
             if not tl_root.exists():
                 raise FileNotFoundError(
                     f"TraceLens root not found: {tl_root} (set TRACELENS_ROOT or pass --tracelens-root)"

@@ -1676,9 +1676,8 @@ class TestTracelensRootResolution:
 
     def test_resolve_derives_from_open_source_root_when_env_unset(self, tmp_path, monkeypatch):
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
-        monkeypatch.setenv("TMPDIR", str(tmp_path / "podlocal"))
-        expected = tmp_path / "podlocal" / "hyperloom" / "open-source-repos" / "TraceLens"
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        expected = tmp_path / "podlocal" / "TraceLens"
         assert krh._resolve_tracelens_root() == expected
 
     def test_root_error_none_when_present(self, tmp_path):

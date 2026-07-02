@@ -1,0 +1,77 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""#722 — TraceLens self-heal at the trace_analyze use-site.
+
+The optimizer's ``trace_analyze`` subprocess reads ``TRACELENS_ROOT`` long
+after install time. When the pod-local checkout vanishes mid-run (a
+concurrent install rm+re-clones it, or /tmp is reaped), the use-site must
+idempotently re-clone it under a shared flock instead of dying with
+``FileNotFoundError``.
+"""
+from __future__ import annotations
+
+import importlib.util
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+TOOLS_DIR = Path(__file__).resolve().parent
+TL_PATH = TOOLS_DIR / "tracelens_analysis.py"
+
+
+@pytest.fixture(scope="module")
+def tl_module():
+    mod_name = "tracelens_analysis_selfheal_under_test"
+    spec = importlib.util.spec_from_file_location(mod_name, TL_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    # Register before exec so dataclass annotation resolution can find the
+    # module in sys.modules (cls.__module__ lookup) during import.
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _make_source_repo(path: Path) -> str:
+    """Create a tiny git repo that stands in for AMD-AGI/TraceLens."""
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    (path / "marker.txt").write_text("tracelens-source\n", encoding="utf-8")
+    env_args = ["-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run(["git", *env_args, "-C", str(path), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", *env_args, "-C", str(path), "commit", "-q", "-m", "init"],
+        check=True,
+    )
+    return str(path)
+
+
+def test_selfheal_reclones_when_root_missing(tl_module, tmp_path, monkeypatch):
+    """RED: a missing TRACELENS_ROOT must be rebuilt, not raise."""
+    source = _make_source_repo(tmp_path / "src" / "TraceLens")
+    tl_root = tmp_path / "open-source-repos" / "TraceLens"
+    log_path = tmp_path / "run.log"
+
+    monkeypatch.setenv("TRACELENS_REPO", source)
+    monkeypatch.setenv("TRACELENS_REF", "HEAD")
+
+    assert not tl_root.exists()
+    tl_module._ensure_tracelens_checkout(tl_root, log_path=log_path)
+    assert tl_root.exists()
+    assert (tl_root / "marker.txt").exists()
+
+
+def test_selfheal_is_idempotent_when_present(tl_module, tmp_path, monkeypatch):
+    """An existing checkout is left untouched (no re-clone)."""
+    source = _make_source_repo(tmp_path / "src" / "TraceLens")
+    tl_root = tmp_path / "open-source-repos" / "TraceLens"
+    log_path = tmp_path / "run.log"
+    monkeypatch.setenv("TRACELENS_REPO", source)
+    monkeypatch.setenv("TRACELENS_REF", "HEAD")
+
+    tl_module._ensure_tracelens_checkout(tl_root, log_path=log_path)
+    (tl_root / "sentinel").write_text("keep", encoding="utf-8")
+    tl_module._ensure_tracelens_checkout(tl_root, log_path=log_path)
+    # Idempotent: existing tree (and our sentinel) preserved, not wiped.
+    assert (tl_root / "sentinel").exists()

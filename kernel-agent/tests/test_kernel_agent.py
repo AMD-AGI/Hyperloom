@@ -224,7 +224,7 @@ class KernelAgentToolTests(unittest.TestCase):
         # Open-source deps default to a pod-local base, decoupled from USER_DATA_PATH,
         # with HYPERLOOM_OPEN_SOURCE_ROOT as an optional override.
         self.assertIn(
-            '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"',
+            '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"',
             install_text,
         )
         self.assertIn('MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"', install_text)

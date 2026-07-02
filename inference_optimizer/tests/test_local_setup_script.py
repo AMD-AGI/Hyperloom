@@ -231,12 +231,13 @@ def test_local_setup_dry_run_does_not_write_or_leak_secret(tmp_path: Path) -> No
 
 def test_local_setup_deps_root_stays_pod_local_under_session_dir(tmp_path: Path) -> None:
     # Deps root must NOT follow --session-dir: it stays on a pod-local base
-    # (TMPDIR) so a shared session tree never collocates concurrent checkouts.
+    # so a shared session tree never collocates concurrent checkouts. The base
+    # is a non-ephemeral pod-internal dir (NOT /tmp) after #722.
     session_dir = tmp_path / "custom-session"
-    tmpdir = tmp_path / "podlocal"
-    tmpdir.mkdir()
+    deps_base = tmp_path / "podlocal"
+    deps_base.mkdir()
     env = _clean_base_env()
-    env["TMPDIR"] = str(tmpdir)
+    env["HYPERLOOM_OPEN_SOURCE_ROOT"] = str(deps_base)
     result = subprocess.run(
         ["bash", str(SCRIPT), "--dry-run", "--session-dir", str(session_dir)],
         cwd=REPO_ROOT,
@@ -247,7 +248,7 @@ def test_local_setup_deps_root_stays_pod_local_under_session_dir(tmp_path: Path)
         check=False,
     )
 
-    expected_deps = tmpdir / "hyperloom" / "open-source-repos"
+    expected_deps = deps_base
     assert result.returncode == 0, result.stderr + result.stdout
     assert f"HYPERLOOM_DEPS_ROOT={expected_deps}" in result.stdout
     assert str(session_dir / "runtime" / "open-source-repos") not in result.stdout
@@ -387,7 +388,7 @@ def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
 def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
     # Both deps pinned to a full 40-char SHA, operator-overridable; immune to HEAD drift (bugs.md §C #1).
     text = IO_INSTALL.read_text(encoding="utf-8")
-    assert '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"' in text
+    assert '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"' in text
     assert 'MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"' in text
     assert 'INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX}"' in text
     assert "export HYPERLOOM_OPEN_SOURCE_ROOT" not in text

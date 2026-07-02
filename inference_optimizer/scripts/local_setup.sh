@@ -21,7 +21,9 @@ fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 # Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
 # so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
-HYPERLOOM_DEPS_ROOT="${HYPERLOOM_DEPS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}}"
+# Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
+# /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
+HYPERLOOM_DEPS_ROOT="${HYPERLOOM_DEPS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}}"
 _open_source_root="${HYPERLOOM_DEPS_ROOT}"
 LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}"
 
