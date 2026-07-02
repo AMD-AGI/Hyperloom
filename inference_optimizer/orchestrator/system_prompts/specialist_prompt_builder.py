@@ -538,6 +538,48 @@ def _focus_static_recon_specialist(
     ]
 
 
+def _focus_enablement_specialist(
+    inp: SpecialistPromptInputs,
+) -> list[str]:
+    """Build the enablement-specialist focus by delegating to ``build_mandate``.
+
+    ``framework_agent.enablement_authoring.build_mandate`` is the SINGLE source
+    of the enablement mandate (goal + allowed source roots + patch invariants).
+    This template does not restate that prose; it classifies the failure carried
+    in ``gap_symptom`` / ``gap_evidence`` and renders the mandate's
+    ``task_description`` verbatim. When the Coordinator dispatches with a fuller
+    mandate in ``notes`` (concrete signature + ranked candidate PRs), that adds
+    the case-specific detail on top of this generic scaffold.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        Prompt lines rendered from the enablement mandate.
+    """
+    from framework_agent.enablement import EnablementRequest
+    from framework_agent.enablement_authoring import build_mandate
+
+    model = str((inp.gap_evidence or {}).get("model") or "").strip()
+    req = EnablementRequest(
+        framework=(inp.framework or "").strip().lower(),
+        model=model or "(target model)",
+        repo_url="",
+        launch_log=inp.gap_symptom or "",
+        gpu_type=(inp.gpu_type or "").strip().lower(),
+    )
+    mandate = build_mandate(req)
+    lines = [
+        "You are the **enablement specialist** — an AUTHORING sub-agent whose",
+        "single deliverable is a bridging patch that makes a currently",
+        "non-runnable (model, backend) combo *boot and pass a minimal",
+        "inference*. The gate is RUNNABILITY, not throughput.",
+        "",
+    ]
+    lines.extend(mandate.task_description.splitlines())
+    return lines
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "kernel_switch_specialist": _focus_kernel_switch_specialist,
@@ -547,6 +589,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "pr_intel_specialist": _focus_pr_intel_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
     "static_recon_specialist": _focus_static_recon_specialist,
+    "enablement_specialist": _focus_enablement_specialist,
 }
 
 

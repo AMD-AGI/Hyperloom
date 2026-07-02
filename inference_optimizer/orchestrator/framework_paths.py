@@ -41,6 +41,28 @@ _INSTALL_GLOB_PARENTS: tuple[Path, ...] = (
 # aiter device sources often live in the sibling ``aiter_meta`` package.
 _AITER_META_CSRC_ROOT = "/aiter_meta/csrc/"
 
+# ROCm / HIP source roots for the *enablement* path (making a previously
+# non-runnable (model, backend) combo boot by patching below the framework).
+# Kept as a distinct tuple from ``_DEFAULT_SOURCE_ROOTS`` for readability, but
+# always merged into the allowlist: the enablement objective is a first-class,
+# default-on capability (no opt-in gate). ``aiter`` already ships in
+# ``_DEFAULT_SOURCE_ROOTS``; these add /opt/rocm + HIP headers/sources.
+_ROCM_HIP_SOURCE_ROOTS: tuple[str, ...] = (
+    "/opt/rocm/",
+)
+
+
+def resolve_rocm_hip_source_roots() -> tuple[str, ...]:
+    """Return the ROCm/HIP source roots for the enablement path.
+
+    Always included in :func:`resolve_source_file_allowlist` so an enablement
+    specialist can bridge below the framework layer without any opt-in flag.
+
+    Returns:
+        tuple[str, ...]: :data:`_ROCM_HIP_SOURCE_ROOTS`.
+    """
+    return _ROCM_HIP_SOURCE_ROOTS
+
 # Minimal static fallbacks when importlib/glob find nothing (image defaults).
 _STATIC_PATCH_FALLBACK_ROOTS: tuple[str, ...] = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
@@ -230,6 +252,7 @@ def resolve_source_file_allowlist() -> tuple[str, ...]:
         _DEFAULT_SOURCE_ROOTS,
         _discover_installed_framework_roots(),
         env_roots,
+        resolve_rocm_hip_source_roots(),
     )
 
 
@@ -296,6 +319,7 @@ def summarise_framework_root_discovery(roots: str) -> str:
 __all__ = [
     "probe_framework_source_roots_for_env",
     "resolve_patch_target_roots",
+    "resolve_rocm_hip_source_roots",
     "resolve_source_file_allowlist",
     "summarise_framework_root_discovery",
 ]

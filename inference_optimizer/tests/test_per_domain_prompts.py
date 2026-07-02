@@ -46,10 +46,10 @@ def test_every_domain_has_focus_template():
 
 
 def test_specialist_domains_m5_covers_all_active_domains():
-    """The M5 active set covers the full catalogue (eight entries: seven legacy
-    domains + the static_recon_specialist added in explore-opt-5)."""
+    """The M5 active set covers the full catalogue (nine entries: seven legacy
+    domains + static_recon_specialist + enablement_specialist)."""
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
-    assert len(SPECIALIST_DOMAINS_M5) == 8
+    assert len(SPECIALIST_DOMAINS_M5) == 9
 
 
 # 2. Per-domain content checks — each template mentions its signature
@@ -172,6 +172,19 @@ def test_static_recon_specialist_renders_seed_checklist_and_model_info():
     assert "rocm.fp8.cutlass_only_guard" in text
     assert "seed checklist" in text
     assert "attention=gqa" in text
+
+
+def test_enablement_specialist_mentions_runnability_and_authoring():
+    """The enablement focus (rendered from build_mandate) must steer patch authoring gated on runnability, not perf."""
+    text = _build("enablement_specialist")
+    for marker in (
+        "enablement specialist",
+        "authoring",
+        "runnability",
+        "git apply --check",
+        "boot",
+    ):
+        assert marker.lower() in text.lower(), f"missing {marker!r}"
 
 
 # 3. SpecialistRunner no longer marks any domain as "generic template"
@@ -321,9 +334,9 @@ def _valid_done_payload(
 
 
 # 1. specialist_domains catalogue
-def test_specialist_domains_catalogue_has_eight_entries():
-    """Eight entries: seven legacy domains + static_recon_specialist (explore-opt-5)."""
-    assert len(SPECIALIST_DOMAINS) == 8
+def test_specialist_domains_catalogue_has_nine_entries():
+    """Nine entries: seven legacy domains + static_recon_specialist + enablement_specialist."""
+    assert len(SPECIALIST_DOMAINS) == 9
     assert SPECIALIST_DOMAIN_KEYS == frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 
