@@ -340,7 +340,7 @@ def test_kernel_opt_summary_line_prints_totals(tmp_path: Path, monkeypatch, caps
     assert "kernel_optimization_summary.json" in out
 
 
-def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
+def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, monkeypatch, capsys) -> None:
     from inference_optimizer import reference_script
 
     assert cb._resolve_reference_recipe(_args(reference_script="")) == ("", {}, "", "")
