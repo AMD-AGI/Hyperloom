@@ -39,8 +39,11 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     warnings: list[str] = []
     decisions: list[Decision] = []
 
+    from .... import framework_registry
+
+    fw = (breakdown.get("workload") or {}).get("framework_name")
     if tput:
-        facts.append(f"Baseline throughput: {float(tput):.2f} tok/s/gpu.")
+        facts.append(f"Baseline: {framework_registry.format_primary_metric(fw, tput, precision=2)}.")
         decisions.append(
             Decision(
                 kind="attempted",

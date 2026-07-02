@@ -17,7 +17,9 @@ Fields::
     model_type          str   — config.json ``model_type``; stamped into
                                 the recipe-snapshot ``extras`` as a KB tag
     target_summary      str   — set by `target_analysis` action
-    baseline_tput       float — tok/s/GPU after `baseline` action
+    baseline_tput       float — primary throughput after `baseline` action;
+                                tok/s/GPU for serving frameworks, img/s for
+                                scriptable xDiT (displayed as e2el_mean_ms)
     baseline_accuracy   float — GSM8K score after `baseline`
     current_best        dict  — {action: str, tput: float, accuracy: float}
     cumulative_gain     float — % over baseline
@@ -3155,8 +3157,10 @@ class SharedState:
             if bool(getattr(self, "resume_pending_revalidation", False))
             else ""
         )
+        from .. import framework_registry
+
         lines = [
-            f"baseline  : {self.baseline_tput} tok/s/GPU",
+            f"baseline  : {framework_registry.format_primary_metric(self.framework, self.baseline_tput)}",
             f"current   : {self._format_current_best_for_mission()}",
             f"gain      : per-round-sum={self.cumulative_gain:.2f}% "
             f"validated={self.cumulative_gain_validated:.2f}%{validated_age}",
@@ -3180,9 +3184,17 @@ class SharedState:
         """
         if not isinstance(self.current_best, dict) or not self.current_best:
             return "(none)"
+        from .. import framework_registry
+
+        cb_tput = self.current_best.get("tput")
+        perf = (
+            framework_registry.format_primary_metric(self.framework, cb_tput)
+            if isinstance(cb_tput, (int, float))
+            else "?"
+        )
         return (
             f"action={self.current_best.get('action', '?')} "
-            f"tput={self.current_best.get('tput', '?')} "
+            f"perf={perf} "
             f"variant={self.current_best.get('variant_name', '?')}"
         )
 
