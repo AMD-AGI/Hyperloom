@@ -3635,7 +3635,7 @@ class Coordinator:
         return spec_tid
 
     def _build_enablement_specialist_params(
-        self, launch_log: str
+        self, launch_log: str, *, attempt: int = 0
     ) -> dict[str, Any] | None:
         """Build enablement-specialist params from a captured launch failure.
 
@@ -3647,8 +3647,14 @@ class Coordinator:
         actionable (``UNKNOWN``) so the caller falls back to the normal
         baseline-failure gates.
 
+        On a retry (``attempt > 0``) the ranked candidate list is *rotated* so a
+        different bridging PR leads, and the mandate notes flag that prior
+        attempts reverted — steering the sub-agent toward a different bridge.
+
         Args:
             launch_log: Captured launch / traceback text.
+            attempt: Zero-based dispatch index; drives candidate rotation and a
+                retry hint in the mandate.
 
         Returns:
             dict | None: Specialist task params (tagged ``enablement`` +
@@ -3679,7 +3685,26 @@ class Coordinator:
         )
         plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
         candidate_refs = self._discover_enablement_candidate_refs(req, plan)
-        mandate = build_mandate(req, signature=signature, candidate_refs=candidate_refs)
+        # Retry rotation: lead with a different candidate each attempt so a
+        # reverted bridge is not re-tried first. Deterministic left-rotation.
+        if candidate_refs and attempt:
+            n = len(candidate_refs)
+            k = attempt % n
+            candidate_refs = candidate_refs[k:] + candidate_refs[:k]
+        source_context = self._read_enablement_source_context(signature)
+        mandate = build_mandate(
+            req,
+            signature=signature,
+            candidate_refs=candidate_refs,
+            source_context=source_context,
+        )
+        notes = mandate.task_description
+        if attempt:
+            notes = (
+                f"RETRY (attempt {attempt + 1}): a previous enablement patch for this "
+                f"failure was REVERTED (did not make the combo runnable). Try a DIFFERENT "
+                f"bridging approach / candidate than before.\n\n" + notes
+            )
         gap_cid = f"gap.enablement.{signature.kind}"
         return {
             "domain": "enablement_specialist",
@@ -3696,6 +3721,7 @@ class Coordinator:
             # integrate gate uses the runnable_decision (boot) gate, not perf.
             "framework_agent_authoring": True,
             "enablement": True,
+            "enablement_attempt": attempt,
             "enablement_failure_kind": signature.kind,
             "enablement_search_repos": list(plan.repos),
             # Serialized pre-patch failure signature: integrate_patch replays it
@@ -3705,8 +3731,71 @@ class Coordinator:
             "launch_probe": req.launch_probe,
             "source": "coordinator_internal",
             "readonly": False,
-            "notes": mandate.task_description,
+            "notes": notes,
         }
+
+    def _read_enablement_source_context(
+        self, signature: Any, *, window: int = 12
+    ) -> str:
+        """Best-effort read a small source window near the offending site.
+
+        Resolves ``signature.offending_file`` against the framework/ROCm source
+        allowlist, then returns ``window`` lines centred on the first occurrence
+        of ``offending_symbol`` (or the file head when the symbol is absent).
+        Fully exception-guarded: any failure returns ``""`` so the mandate
+        degrades to the no-context form (G is grounding, never a hard dependency).
+
+        Args:
+            signature: The classified :class:`FailureSignature`.
+            window: Total number of lines to return around the hit.
+
+        Returns:
+            str: A ``file:line`` header + snippet, or ``""``.
+        """
+        offending_file = str(getattr(signature, "offending_file", "") or "").strip()
+        if not offending_file:
+            return ""
+        symbol = str(getattr(signature, "offending_symbol", "") or "").strip()
+        try:
+            from pathlib import Path
+
+            candidates: list[Path] = []
+            p = Path(offending_file)
+            if p.is_absolute():
+                candidates.append(p)
+            else:
+                from .framework_paths import resolve_source_file_allowlist
+
+                for root in resolve_source_file_allowlist():
+                    candidates.append(Path(str(root)) / offending_file)
+                    # Also try matching by basename under each root is too broad;
+                    # keep it to the joined relative path only.
+            target: Path | None = next((c for c in candidates if c.is_file()), None)
+            if target is None:
+                return ""
+            lines = target.read_text(errors="replace").splitlines()
+            if not lines:
+                return ""
+            hit = 0
+            if symbol:
+                for i, ln in enumerate(lines):
+                    if symbol in ln:
+                        hit = i
+                        break
+            half = max(1, window // 2)
+            start = max(0, hit - half)
+            end = min(len(lines), start + window)
+            snippet = "\n".join(
+                f"{n + 1:>5}| {lines[n]}" for n in range(start, end)
+            )
+            return f"# {target} (lines {start + 1}-{end})\n{snippet}"
+        except Exception:  # noqa: BLE001 — grounding is best-effort
+            log.debug(
+                "enablement: source-context read failed for %s",
+                offending_file,
+                exc_info=True,
+            )
+            return ""
 
     def _discover_enablement_candidate_refs(
         self, req: Any, plan: Any
@@ -3790,29 +3879,49 @@ class Coordinator:
         return tuple(refs)
 
     async def _maybe_enqueue_enablement_specialist(self) -> str:
-        """Dispatch one enablement_specialist when baseline cannot launch.
+        """Dispatch an enablement_specialist when baseline cannot launch.
 
-        Fires at most once per session (``enablement_dispatched`` guard): when a
-        baseline has failed to boot (no measured throughput) and the captured
-        launch log classifies to an actionable failure, an authoring specialist
-        is enqueued to bridge the ``(model, backend)`` combo into a runnable
-        state. Reuses the FRAMEWORK authoring specialist dispatch (autosubmit →
-        Critic → integrate_patch → runnable gate → KEEP/REVERT). No-op on
-        multi-node (integrate_patch is single-node only).
+        Retries until the combo runs or the **run wall-clock deadline** passes —
+        there is no attempt-count cap, because an un-enabled ``(model, backend)``
+        blocks every downstream measurement, so the enablement loop is allowed to
+        consume the run's remaining budget. Guards:
+
+        * ``enablement_succeeded`` — terminal: a prior attempt was KEPT.
+        * ``enablement_dispatched`` — an authoring attempt is in flight; cleared
+          on REVERT by :meth:`_maybe_rearm_enablement` so the next tick retries
+          with the next bridging candidate (``enablement_attempts`` rotates it).
+        * run deadline passed — stop dispatching new work near the close.
+
+        When the captured log classifies to ``UNKNOWN`` (non-actionable), no
+        authoring is dispatched; instead a one-shot ``needs_human_review`` record
+        is emitted (deduped per distinct log). Reuses the FRAMEWORK authoring
+        specialist dispatch (autosubmit → Critic → integrate_patch → runnable
+        gate → KEEP/REVERT). No-op on multi-node (integrate_patch is single-node).
 
         Returns:
             str: The dispatched specialist ``task_id`` (empty when skipped).
         """
         state = self.shared_state
+        if bool(getattr(state, "enablement_succeeded", False)):
+            return ""
         if bool(getattr(state, "enablement_dispatched", False)):
             return ""
         if float(getattr(state, "baseline_tput", 0.0) or 0.0) > 0:
             return ""
         if int(getattr(state, "baseline_failure_streak", 0) or 0) < 1:
             return ""
+        # Wall-clock gate: stop opening new enablement attempts once the run
+        # deadline has passed (the closing phase needs the remaining budget).
+        deadline = getattr(self, "_run_deadline", None)
+        if deadline is not None and time.monotonic() >= float(deadline):
+            return ""
         launch_log = str(getattr(state, "enablement_launch_log", "") or "")
-        params = self._build_enablement_specialist_params(launch_log)
+        attempt = int(getattr(state, "enablement_attempts", 0) or 0)
+        params = self._build_enablement_specialist_params(launch_log, attempt=attempt)
         if params is None:
+            # F: a non-blank log that classifies to UNKNOWN is not silently
+            # dropped — record it for human review (once per distinct log).
+            await self._maybe_record_enablement_human_review(launch_log)
             return ""
         from .action_executors._multi_node_env import is_multi_node
 
@@ -3822,7 +3931,7 @@ class Coordinator:
             await self._warm_specialist_params(params)
         except Exception:  # noqa: BLE001 — best-effort warmup
             log.debug("enablement: warm specialist params failed", exc_info=True)
-        idem = f"enablement_authoring:{params.get('enablement_failure_kind', '')}"
+        idem = f"enablement_authoring:{params.get('enablement_failure_kind', '')}:{attempt}"
         spec_task, _existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
@@ -3842,17 +3951,115 @@ class Coordinator:
             lease_ttl_sec=3600,
         )
         state.enablement_dispatched = True
+        state.enablement_attempts = attempt + 1
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.debug("enablement: save after dispatch failed", exc_info=True)
         spec_tid = str(getattr(spec_task, "task_id", "") or "")
         log.info(
-            "ENABLEMENT: dispatched authoring specialist kind=%s task=%s",
+            "ENABLEMENT: dispatched authoring specialist kind=%s attempt=%d task=%s",
             params.get("enablement_failure_kind"),
+            attempt + 1,
             spec_tid,
         )
         return spec_tid
+
+    async def _maybe_record_enablement_human_review(self, launch_log: str) -> None:
+        """Record a one-shot ``needs_human_review`` for an UNKNOWN launch failure.
+
+        The enablement path only dispatches authoring for *actionable* failure
+        signatures; a non-blank log that classifies to ``UNKNOWN`` used to be
+        silently dropped (diff diff-gap #5). Instead, emit a single observation
+        (deduped per distinct log via a stored hash) carrying the classified
+        signature (``raw_excerpt`` + ``offending_file``) so an operator can pick
+        it up. No sub-agent is dispatched.
+
+        Args:
+            launch_log: The captured launch / traceback text.
+        """
+        text = (launch_log or "").strip()
+        if not text:
+            return
+        import hashlib
+
+        from framework_agent.enablement import classify_failure
+
+        signature = classify_failure(text)
+        if signature.is_actionable:
+            return
+        digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()
+        state = self.shared_state
+        seen = getattr(state, "enablement_human_review_logged", None)
+        if not isinstance(seen, list):
+            seen = []
+            state.enablement_human_review_logged = seen
+        if digest in seen:
+            return
+        seen.append(digest)
+        framework = (getattr(state, "framework", "") or "").strip().lower()
+        model = (getattr(state, "model_name", "") or "").strip()
+        try:
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "enablement_needs_human_review",
+                    "applicability": "needs_human_review",
+                    "framework": framework,
+                    "model": model,
+                    "failure_kind": signature.kind,
+                    "signature": signature.to_dict(),
+                    "reason": (
+                        "baseline launch failure did not match any actionable "
+                        "enablement signature; needs human triage"
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            log.debug("enablement: human-review record failed", exc_info=True)
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("enablement: save after human-review failed", exc_info=True)
+        log.info(
+            "ENABLEMENT: recorded needs_human_review for UNKNOWN failure kind=%s",
+            signature.kind,
+        )
+
+    def _maybe_rearm_enablement(self, res: dict[str, Any] | None) -> None:
+        """Re-arm or terminate the enablement retry loop from an integrate outcome.
+
+        Called on every ``integrate_patch`` completion. For an enablement patch:
+        a ``kept`` status is terminal (sets ``enablement_succeeded``); a
+        ``reverted`` status clears the in-flight guard so the next FRAMEWORK pump
+        tick re-dispatches with the next bridging candidate
+        (``enablement_attempts`` already advanced at dispatch). Other statuses
+        (apply/bench failures) are treated like a revert so the loop keeps
+        trying within the wall-clock budget.
+
+        Args:
+            res: The integrate_patch result dict (may be ``None`` / non-dict).
+        """
+        if not isinstance(res, dict) or not res.get("enablement"):
+            return
+        state = self.shared_state
+        status = str(res.get("status") or "")
+        if status == "kept":
+            state.enablement_succeeded = True
+        else:
+            # Reverted / failed: clear the in-flight guard so the pump retries.
+            state.enablement_dispatched = False
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("enablement: save after rearm failed", exc_info=True)
+        log.info(
+            "ENABLEMENT: rearm from integrate status=%s succeeded=%s next_attempt=%d",
+            status,
+            bool(getattr(state, "enablement_succeeded", False)),
+            int(getattr(state, "enablement_attempts", 0) or 0),
+        )
 
     def _unprocessed_framework_agent_candidates(self) -> list[dict[str, Any]]:
         """Return all not-yet-processed candidates in the latest batch (order preserved).
@@ -13496,6 +13703,17 @@ class Coordinator:
                             "FRAMEWORK authored-outcome bridge failed for task=%s",
                             task.task_id,
                         )
+                # Enablement retry re-arm (D): a reverted enablement patch clears
+                # the in-flight guard so the next FRAMEWORK pump tick retries with
+                # the next bridging candidate; a kept patch is terminal. Runs
+                # independent of the FRAMEWORK-phase authored-outcome gate above.
+                try:
+                    self._maybe_rearm_enablement(getattr(result, "result", None))
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "ENABLEMENT rearm failed for task=%s",
+                        task.task_id,
+                    )
             # Auto-promote succeeded results into CORE_STATE_FIELDS (Coordinator-only writer); promotion needs task-specific invariants beyond no-throw.
             kept = result.state == "succeeded" and self._is_promotable_result(task.kind, result.result or {})
             try:

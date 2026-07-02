@@ -63,6 +63,9 @@ def _fake_self(**state_kw):
     fake._discover_enablement_candidate_refs = types.MethodType(
         Coordinator._discover_enablement_candidate_refs, fake
     )
+    # Source-context read is best-effort grounding; stub to empty so the builder
+    # path stays pure (no filesystem dependency in these unit tests).
+    fake._read_enablement_source_context = lambda _sig: ""
     return fake
 
 
@@ -154,7 +157,13 @@ class _FakeTasks:
 
 def _enqueue_self(**state_kw):
     state = types.SimpleNamespace(
+        framework=state_kw.get("framework", "sglang"),
+        model_name=state_kw.get("model_name", "zai-org/GLM-5"),
+        gpu_type=state_kw.get("gpu_type", "mi300x"),
         enablement_dispatched=state_kw.get("enablement_dispatched", False),
+        enablement_succeeded=state_kw.get("enablement_succeeded", False),
+        enablement_attempts=state_kw.get("enablement_attempts", 0),
+        enablement_human_review_logged=state_kw.get("enablement_human_review_logged", []),
         baseline_tput=state_kw.get("baseline_tput", 0.0),
         baseline_failure_streak=state_kw.get("baseline_failure_streak", 1),
         enablement_launch_log=state_kw.get("enablement_launch_log", _MISSING_ARCH_LOG),
@@ -164,11 +173,19 @@ def _enqueue_self(**state_kw):
     async def _warm(_params):
         return None
 
+    observations: list = []
+
+    async def _record_obs(_source, _topic, payload):
+        observations.append(payload)
+
     fake = types.SimpleNamespace(
         shared_state=state,
         tasks=_FakeTasks(),
         session_dir="/tmp/session",
+        _run_deadline=state_kw.get("run_deadline", None),
         _warm_specialist_params=_warm,
+        _record_observation=_record_obs,
+        observations=observations,
     )
     # Bind the real param builder + discovery so the gate exercises the full path.
     fake._build_enablement_specialist_params = types.MethodType(
@@ -177,11 +194,18 @@ def _enqueue_self(**state_kw):
     fake._discover_enablement_candidate_refs = types.MethodType(
         Coordinator._discover_enablement_candidate_refs, fake
     )
+    fake._read_enablement_source_context = lambda _sig: ""
+    fake._maybe_record_enablement_human_review = types.MethodType(
+        Coordinator._maybe_record_enablement_human_review, fake
+    )
+    fake._maybe_rearm_enablement = types.MethodType(
+        Coordinator._maybe_rearm_enablement, fake
+    )
     return fake
 
 
 @pytest.mark.asyncio
-async def test_enqueue_dispatches_once_when_baseline_unrunnable(monkeypatch):
+async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch):
     from inference_optimizer.orchestrator.action_executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -189,9 +213,111 @@ async def test_enqueue_dispatches_once_when_baseline_unrunnable(monkeypatch):
     fake = _enqueue_self()
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert tid == "spec-1"
+    # In-flight guard set; attempt counter advanced for candidate rotation.
     assert fake.shared_state.enablement_dispatched is True
+    assert fake.shared_state.enablement_attempts == 1
     assert len(fake.tasks.created) == 1
     assert fake.tasks.created[0]["params"]["enablement"] is True
+    assert fake.tasks.created[0]["params"]["enablement_attempt"] == 0
+
+
+@pytest.mark.asyncio
+async def test_enqueue_noop_when_already_succeeded(monkeypatch):
+    from inference_optimizer.orchestrator.action_executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    fake = _enqueue_self(enablement_succeeded=True)
+    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    assert len(fake.tasks.created) == 0
+
+
+@pytest.mark.asyncio
+async def test_enqueue_noop_when_run_deadline_passed(monkeypatch):
+    import time as _time
+
+    from inference_optimizer.orchestrator.action_executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    _stub_enumerate(monkeypatch, [])
+    # Deadline already in the past -> no new enablement work is opened.
+    fake = _enqueue_self(run_deadline=_time.monotonic() - 1.0)
+    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    assert len(fake.tasks.created) == 0
+
+
+@pytest.mark.asyncio
+async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
+    from framework_agent.models import Candidate
+    from inference_optimizer.orchestrator.action_executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    cands = [
+        Candidate(ref="PR:1", repo="r", title="enable GLM arch on ROCm", html_url="http://x/1"),
+        Candidate(ref="PR:2", repo="r", title="add GLM support fix", html_url="http://x/2"),
+    ]
+    _stub_enumerate(monkeypatch, cands)
+    fake = _enqueue_self()
+    # First dispatch.
+    tid1 = await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    assert tid1 == "spec-1"
+    assert fake.shared_state.enablement_attempts == 1
+    first_idem = fake.tasks.created[0]["idempotency_key"]
+
+    # Simulate the authored patch being REVERTED -> re-arm clears in-flight.
+    fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+    assert fake.shared_state.enablement_dispatched is False
+    assert fake.shared_state.enablement_succeeded is False
+
+    # Next tick re-dispatches with a new attempt index + distinct idempotency.
+    tid2 = await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    assert tid2 == "spec-2"
+    assert fake.shared_state.enablement_attempts == 2
+    second_idem = fake.tasks.created[1]["idempotency_key"]
+    assert first_idem != second_idem
+    assert fake.tasks.created[1]["params"]["enablement_attempt"] == 1
+    # Retry mandate flags the prior revert.
+    assert "RETRY" in fake.tasks.created[1]["params"]["notes"]
+
+
+@pytest.mark.asyncio
+async def test_rearm_kept_is_terminal(monkeypatch):
+    fake = _enqueue_self(enablement_dispatched=True)
+    fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
+    assert fake.shared_state.enablement_succeeded is True
+    # A subsequent enqueue attempt is a no-op.
+    from inference_optimizer.orchestrator.action_executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+
+
+@pytest.mark.asyncio
+async def test_rearm_ignores_non_enablement(monkeypatch):
+    fake = _enqueue_self(enablement_dispatched=True)
+    fake._maybe_rearm_enablement({"status": "reverted"})
+    # No enablement marker -> state untouched.
+    assert fake.shared_state.enablement_dispatched is True
+    assert fake.shared_state.enablement_succeeded is False
+
+
+@pytest.mark.asyncio
+async def test_enqueue_records_human_review_for_unknown(monkeypatch):
+    from inference_optimizer.orchestrator.action_executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    fake = _enqueue_self(enablement_launch_log="some totally unrelated noise line")
+    tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    assert tid == ""
+    # No authoring dispatched, but a needs_human_review observation emitted once.
+    assert len(fake.tasks.created) == 0
+    reviews = [o for o in fake.observations if o.get("kind") == "enablement_needs_human_review"]
+    assert len(reviews) == 1
+    assert reviews[0]["applicability"] == "needs_human_review"
+
+    # Same log again -> deduped (no second record).
+    await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    reviews = [o for o in fake.observations if o.get("kind") == "enablement_needs_human_review"]
+    assert len(reviews) == 1
 
 
 @pytest.mark.asyncio
