@@ -6780,19 +6780,16 @@ class Coordinator:
             tput = float(tput_raw) if tput_raw is not None else 0.0
         except (TypeError, ValueError):
             tput = 0.0
-        # ``tput`` (output_throughput) is the HOT measure round; kept only for
-        # reporting (``hot_tput``). The fair comparison value — used for gain,
-        # the stack entry, and current_best.tput (the explore/sweep anchor) —
-        # MUST be the single-fresh-server (warmup) round so it matches the
-        # measurement basis of explore/sweep variants. Fall back to ``tput``
-        # for a single-run replay that has no separate warmup round.
-        single_raw = result.get("warmup_round_tput")
+        # ``tput`` (output_throughput) is the HOT measure round and is the
+        # comparison value for gain/current_best. The discarded warmup round is
+        # retained only for audit so warm-replay does not reintroduce
+        # cold-before/hot-after drift.
+        cold_raw = result.get("warmup_round_tput")
         try:
-            single_round_tput = float(single_raw) if single_raw is not None else 0.0
+            cold_round_tput = float(cold_raw) if cold_raw is not None else 0.0
         except (TypeError, ValueError):
-            single_round_tput = 0.0
-        if single_round_tput <= 0:
-            single_round_tput = tput
+            cold_round_tput = 0.0
+        single_round_tput = tput
         hot_tput = tput
         # Use the baseline_tput captured at enqueue time so a mid-replay baseline rerun can't shift the anchor; fall back to live state.baseline_tput.
         anchor_raw = None
@@ -6872,6 +6869,7 @@ class Coordinator:
                 "extra_envs": warm_envs,
                 "tput": float(single_round_tput),
                 "hot_tput": float(hot_tput),
+                "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
                 "gain_pct": round(measured_gain, 3),
                 "workspace": str(result.get("workspace") or ""),
                 "ts": datetime.now(timezone.utc).isoformat(),
@@ -6907,10 +6905,9 @@ class Coordinator:
             state.current_best = {
                 "action": "warm_replay",
                 "name": "warm_replay",
-                # Single-round anchor (NOT hot) so explore/sweep variants are
-                # judged on a comparable basis; hot kept under hot_tput.
                 "tput": single_round_tput,
                 "hot_tput": hot_tput,
+                "cold_tput": cold_round_tput if cold_round_tput > 0 else None,
                 # Canonical key — matches the current_best shape _lift_to_current_best writes for KEEPs.
                 "extra_server_args": warm_args,
                 "extra_envs": warm_envs,
@@ -13865,34 +13862,22 @@ class Coordinator:
         if task_kind == "baseline":
             tput = result.get("output_throughput")
             if isinstance(tput, (int, float)) and tput > 0:
-                # Fair-comparison anchor for measurement parity.
-                # The baseline cold-start guard runs a warmup round on a
-                # fresh server (discarded for *reporting*) then a measure
-                # round that REUSES the now-hot server — the measure
-                # number (``output_throughput``) is systematically ~10-15%
-                # higher than a single fresh-server round, because an
-                # 8-request client warmup does not fully warm vLLM/SGLang
-                # (graph capture, scheduler, allocator) the way a full
-                # prior benchmark does. Every ``explore`` / ``sweep``
-                # variant, by contrast, RESTARTS the server and runs a
-                # single round, so judging them against the hot measure
-                # number penalizes each variant by that same ~10-15% and
-                # genuinely-good params can never clear the KEEP threshold.
-                # Use the warmup round's single-fresh-server tput as the
-                # comparison ANCHOR (apples-to-apples with variants) when
-                # the double-run captured it; keep the hot number for
-                # ``current_best`` / reporting below.
+                # Baseline's conclusion contract is the hot measure round:
+                # BaselineExecutor already discards the cold first round and
+                # returns the second round as ``output_throughput``. Keep the
+                # discarded value only as an audit field so leaderboard/report
+                # gain math never mixes cold-before with hot-after.
                 warmup_anchor = result.get("warmup_round_tput")
                 if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
-                    self.shared_state.baseline_tput = float(warmup_anchor)
+                    self.shared_state.baseline_tput = float(tput)
+                    self.shared_state.baseline_cold_tput = float(warmup_anchor)
                     self.shared_state.baseline_hot_tput = float(tput)
                     log.info(
-                        "baseline anchor: using single-round warmup tput "
-                        "%.1f as comparison anchor (hot measure %.1f kept "
-                        "for reporting) — measurement parity with explore/"
-                        "sweep variants",
-                        float(warmup_anchor),
+                        "baseline anchor: using hot measure tput %.1f as "
+                        "baseline_tput (discarded cold warmup %.1f kept as "
+                        "baseline_cold_tput)",
                         float(tput),
+                        float(warmup_anchor),
                     )
                 else:
                     self.shared_state.baseline_tput = float(tput)
@@ -13932,21 +13917,20 @@ class Coordinator:
             if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
                 self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
                 changed = True
-            # current_best.tput is the comparison ANCHOR every explore /
-            # sweep variant is judged against (the Coordinator injects it
-            # as ``params['base_tput']`` in _handle_delegate /
-            # _materialize_approved_proposal). It MUST be the fair
-            # single-fresh-server anchor (``baseline_tput``, which the
-            # block above set to the warmup-round number under the
-            # double-run), NOT the hot measure round — otherwise every
-            # cold-restarted variant is judged against an unbeatable hot
-            # baseline and can never KEEP. Keep the hot number under a
-            # separate ``hot_tput`` field for reporting.
+            # current_best.tput follows the same hot baseline contract.
+            # run_grid/explore/integrate_patch measure optimization candidates
+            # on the same warm second-round basis when lifecycle reuse is
+            # available, so the numerator and denominator stay aligned.
             anchor_tput = float(self.shared_state.baseline_tput or 0.0)
             self.shared_state.current_best = {
                 "action": "baseline",
                 "tput": (anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)),
                 "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
+                "cold_tput": (
+                    float(warmup_anchor)
+                    if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0
+                    else None
+                ),
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
@@ -13987,13 +13971,9 @@ class Coordinator:
                         "PRELUDE: warm-recipe history injection failed: %r",
                         exc,
                     )
-                # Step 2 — warm-recipe replay. Anchor the replay gain on the
-                # SINGLE-fresh-server-round baseline (``state.baseline_tput``,
-                # the same anchor explore/sweep variants are judged against),
-                # NOT the hot measure ``tput`` — otherwise warm-replay's gain
-                # and current_best land on the hot basis and every
-                # single-round explore variant is judged against an unbeatable
-                # hot bar (mirrors the baseline-promote invariant).
+                # Step 2 — warm-recipe replay. Anchor replay gain on the hot
+                # baseline_tput contract; candidate replays also return their
+                # hot measure round.
                 try:
                     await self._maybe_enqueue_warm_replay(
                         baseline_tput=float(self.shared_state.baseline_tput or tput),
