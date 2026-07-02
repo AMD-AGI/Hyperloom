@@ -71,6 +71,65 @@ def test_render_checklist_for_prompt_includes_id_and_bridge():
     assert "bridge:" in text
 
 
+# --- shared-expert fusion entry ---------------------------------------------
+
+def test_shared_expert_fusion_entry_in_mxfp8_rocm():
+    """rocm.moe.shared_expert_fusion must appear for ROCm + mxfp8 runs."""
+    ids = [e.id for e in src.entries_for(gpu_type="MI355X", precision="mxfp8")]
+    assert "rocm.moe.shared_expert_fusion" in ids
+
+
+def test_shared_expert_fusion_entry_not_in_fp8():
+    """rocm.moe.shared_expert_fusion must NOT appear for plain fp8 (mxfp8-only entry)."""
+    ids = [e.id for e in src.entries_for(gpu_type="MI300X", precision="fp8")]
+    assert "rocm.moe.shared_expert_fusion" not in ids
+
+
+def test_shared_expert_fusion_source_dirs_include_vllm_and_sglang():
+    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    fusion = next(e for e in entries if e.id == "rocm.moe.shared_expert_fusion")
+    dirs = " ".join(fusion.source_dirs)
+    assert "vllm/model_executor/layers/fused_moe/" in dirs
+    assert "python/sglang/srt/layers/moe/" in dirs
+
+
+def test_filter_entries_for_model_keeps_entry_when_has_shared_expert():
+    """filter_entries_for_model passes the shared-expert entry through when flag is set."""
+    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    filtered = src.filter_entries_for_model(entries, {"has_shared_expert": True})
+    ids = [e.id for e in filtered]
+    assert "rocm.moe.shared_expert_fusion" in ids
+
+
+def test_filter_entries_for_model_removes_entry_when_no_shared_expert():
+    """Core anti-noise assertion: entry is dropped for plain MoE / non-MoE models."""
+    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    for model_info in ({}, {"has_shared_expert": False}, {"is_moe": True}):
+        filtered = src.filter_entries_for_model(entries, model_info)
+        ids = [e.id for e in filtered]
+        assert "rocm.moe.shared_expert_fusion" not in ids, (
+            f"entry leaked through for model_info={model_info}"
+        )
+
+
+def test_filter_entries_for_model_preserves_other_entries():
+    """Other checklist entries must not be affected by the filter."""
+    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    filtered = src.filter_entries_for_model(entries, {})
+    other_ids = {e.id for e in filtered}
+    all_ids = {e.id for e in entries}
+    assert all_ids - {"rocm.moe.shared_expert_fusion"} == other_ids
+
+
+def test_render_checklist_for_prompt_includes_shared_expert_fusion():
+    """render_checklist_for_prompt emits the entry id and bridge text."""
+    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    shared = [e for e in entries if e.id == "rocm.moe.shared_expert_fusion"]
+    text = src.render_checklist_for_prompt(shared)
+    assert "rocm.moe.shared_expert_fusion" in text
+    assert "bridge:" in text
+
+
 # --- domain registration ----------------------------------------------------
 def test_static_recon_domain_registered():
     assert "static_recon_specialist" in SPECIALIST_DOMAIN_KEYS
