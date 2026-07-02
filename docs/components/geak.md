@@ -65,7 +65,7 @@ export OPENAI_API_KEY="YOUR_KEY"
 Hyperloom installs GEAK for you. `inference_optimizer/scripts/install.sh`
 chains into `kernel-agent/scripts/install.sh`, whose `ensure_geak()` step clones
 GEAK under the pod-local open-source checkout root by default
-(`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/GEAK`)
+(`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/GEAK`)
 and pip-installs it. Runtime config is written under
 `$USER_DATA_PATH/runtime/geak-config/local.yaml`. For multi-node runs,
 `inference_optimizer.multi_node install-geak` can pip-install a supplied GEAK

@@ -75,3 +75,36 @@ def test_selfheal_is_idempotent_when_present(tl_module, tmp_path, monkeypatch):
     tl_module._ensure_tracelens_checkout(tl_root, log_path=log_path)
     # Idempotent: existing tree (and our sentinel) preserved, not wiped.
     assert (tl_root / "sentinel").exists()
+
+
+def test_selfheal_rebuilds_half_cloned_tree_without_git(tl_module, tmp_path, monkeypatch):
+    """A dir that exists but lacks .git (installer's in-progress clone) is
+    treated as incomplete and rebuilt."""
+    source = _make_source_repo(tmp_path / "src" / "TraceLens")
+    tl_root = tmp_path / "open-source-repos" / "TraceLens"
+    tl_root.mkdir(parents=True)
+    (tl_root / "partial").write_text("half", encoding="utf-8")  # no .git yet
+    log_path = tmp_path / "run.log"
+    monkeypatch.setenv("TRACELENS_REPO", source)
+    monkeypatch.setenv("TRACELENS_REF", "HEAD")
+
+    tl_module._ensure_tracelens_checkout(tl_root, log_path=log_path)
+    assert (tl_root / ".git").exists()
+    assert (tl_root / "marker.txt").exists()
+
+
+def test_selfheal_raises_and_cleans_up_when_ref_unpinnable(tl_module, tmp_path, monkeypatch):
+    """A non-HEAD ref that cannot be fetched must raise (never ship an
+    unpinned default HEAD) and leave no target or temp dir behind."""
+    source = _make_source_repo(tmp_path / "src" / "TraceLens")
+    tl_root = tmp_path / "open-source-repos" / "TraceLens"
+    log_path = tmp_path / "run.log"
+    monkeypatch.setenv("TRACELENS_REPO", source)
+    monkeypatch.setenv("TRACELENS_REF", "0" * 40)  # nonexistent sha
+
+    with pytest.raises(FileNotFoundError):
+        tl_module._ensure_tracelens_checkout(tl_root, log_path=log_path)
+    assert not tl_root.exists()
+    # No leftover temp/heal dirs in the parent.
+    leftovers = [p.name for p in (tl_root.parent).glob(".TraceLens.*")]
+    assert leftovers == [], leftovers

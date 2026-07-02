@@ -16,7 +16,7 @@ export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens to
-# ${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens
+# ${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens
 # and pin it to a fixed SHA.
 # Only export it to point at a pre-existing checkout you maintain as an
 # explicit operator override — this skips both the clone and the SHA pin.
@@ -27,7 +27,7 @@ export USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 # from the forge path so a separate OOB path no longer needs to be provided.
 export OOB_SRC="${OOB_SRC:-${FORGE_PATH:-/wekafs/KernelForge}/OOB}"
 # INFERENCEX_PATH and MAGPIE_PATH default under
-# ${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/.
+# ${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/.
 # Override only if you share Magpie / InferenceX checkouts across sessions.
 export NODE_TLS_REJECT_UNAUTHORIZED="${NODE_TLS_REJECT_UNAUTHORIZED:-0}"
 export PYTHON="${PYTHON:-$(command -v python3)}"

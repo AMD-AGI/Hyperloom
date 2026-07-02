@@ -1689,17 +1689,40 @@ class TestTracelensRootResolution:
         assert err is not None
         assert "TraceLens root not found" in err
 
-    def test_trace_analyze_handler_fails_fast_when_root_missing(self, tmp_path, monkeypatch):
-        # kernel-agent root present so we reach the TraceLens check.
+    def test_trace_analyze_handler_selfheals_default_root_then_fails_if_unrecovered(
+        self, tmp_path, monkeypatch
+    ):
+        # Default (non-override) root missing: handler must ATTEMPT self-heal
+        # (#722) before the fail-fast. We stub the heal to a no-op so the root
+        # stays missing and the handler still returns the structured error.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
-        monkeypatch.setenv("TMPDIR", str(tmp_path / "no-tracelens-here"))
+        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "no-tracelens-here"))
+        called = {"n": 0}
+
+        def _fake_heal(root, *, log=None):
+            called["n"] += 1
+
+        monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
             krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path)
         )
+        assert called["n"] == 1  # self-heal was attempted
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
+
+    def test_selfheal_skips_explicit_override(self, tmp_path, monkeypatch):
+        # Explicit TRACELENS_ROOT is operator-maintained: never auto-clone.
+        monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "operator-tl"))
+        called = {"n": 0}
+
+        def _fake_ensure(root, *, log_path=None):
+            called["n"] += 1
+
+        # If the tool module is importable, ensure it would NOT be invoked.
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "x.py")
+        krh._maybe_selfheal_tracelens_root(tmp_path / "operator-tl")
+        assert called["n"] == 0
 
 
 class TestKernelOptArtifactBundleRecording:

@@ -205,7 +205,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    explicit operator override — that skips both the clone and the SHA
    pin:
    ```bash
-   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens}"
+   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens}"
    cd "$TRACELENS_ROOT"
    pip install -e .
    TraceLens_generate_perf_report_pytorch_inference --help

@@ -805,8 +805,14 @@ ensure_tracelens() {
     elif [ "$DRY_RUN" -eq 1 ]; then
       log "would: git clone --depth 1 ${TRACELENS_REPO} ${TRACELENS_ROOT}"
     else
+      # Clone into a temp sibling then atomically rename into place so a
+      # concurrent reader (trace_analyze self-heal) never observes a
+      # half-cloned $TRACELENS_ROOT (#722).
       mkdir -p "$(dirname "$TRACELENS_ROOT")"
-      run git clone --depth 1 "$TRACELENS_REPO" "$TRACELENS_ROOT"
+      _tl_tmp="$(dirname "$TRACELENS_ROOT")/.$(basename "$TRACELENS_ROOT").clone.$$"
+      rm -rf "$_tl_tmp"
+      run git clone --depth 1 "$TRACELENS_REPO" "$_tl_tmp"
+      mv "$_tl_tmp" "$TRACELENS_ROOT"
     fi
   fi
   if [ -z "${_tracelens_root_was_set:-}" ] && [ -d "$TRACELENS_ROOT/.git" ]; then

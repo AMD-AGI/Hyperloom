@@ -465,6 +465,33 @@ def _tracelens_root_error(root: Path) -> str | None:
     return None
 
 
+def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
+    """Rebuild the pod-local TraceLens checkout if it vanished mid-run (#722).
+
+    Only the installer-managed default path is healed; an explicit
+    ``TRACELENS_ROOT`` override is operator-maintained and must fail fast when
+    missing (mirrors kernel-agent/scripts/install.sh). Best-effort: any failure
+    is swallowed so the caller's normal validation produces the user-facing
+    error.
+    """
+    if os.environ.get("TRACELENS_ROOT"):
+        return  # explicit operator override: never auto-clone
+    try:
+        tool = _kernel_agent_tool_path("tracelens_analysis.py")
+        tools_dir = str(tool.parent)
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import tracelens_analysis as _tla  # type: ignore[import-not-found]
+
+        heal_log = getattr(log, "warning", None) or (lambda *_a, **_k: None)
+        heal_log("trace_analyze: TraceLens root %s missing; attempting self-heal", root)
+        _tla._ensure_tracelens_checkout(root, log_path=Path(os.devnull))
+    except Exception as exc:  # noqa: BLE001  # heal is best-effort; validation reports the real error
+        _log = getattr(log, "warning", None)
+        if _log:
+            _log("trace_analyze: TraceLens self-heal failed: %s", exc)
+
+
 def _kernel_agent_tool_path(tool_name: str) -> Path:
     """Resolve the absolute path to a kernel-agent shell tool.
 
@@ -2371,8 +2398,11 @@ async def trace_analyze_handler(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
     # Resolve TraceLens root independently of inherited env (the coordinator may
-    # not have sourced kernel-agent.env.sh) and fail fast before launching the tool.
+    # not have sourced kernel-agent.env.sh). If the installer-managed checkout
+    # vanished mid-run (#722), self-heal it before the fail-fast validation.
     tracelens_root = _resolve_tracelens_root()
+    if _tracelens_root_error(tracelens_root):
+        _maybe_selfheal_tracelens_root(tracelens_root, log=log)
     tl_err = _tracelens_root_error(tracelens_root)
     if tl_err:
         return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}

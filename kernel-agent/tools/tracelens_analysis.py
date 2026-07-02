@@ -4753,6 +4753,27 @@ _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
 _TRACELENS_REF_DEFAULT = "35bbb6380cf69a2655ee28260b02b5f2dc481744"
 
 
+def _tracelens_checkout_complete(tl_root: Path) -> bool:
+    """A checkout is usable only if it is a git tree, not a half-done clone.
+
+    Guards against reading an installer's in-progress direct clone (the dir
+    exists but ``.git`` is not yet populated).
+    """
+    return (tl_root / ".git").exists()
+
+
+def _rmtree_quiet(path: Path) -> None:
+    """Best-effort recursive delete; never raises (used on cleanup paths)."""
+    import shutil
+
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
 def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
     """Idempotently rebuild the TraceLens checkout if it vanished mid-run (#722).
 
@@ -4764,7 +4785,7 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
     rename into place so a partial clone is never observed.
     """
     tl_root = Path(tl_root)
-    if tl_root.exists():
+    if _tracelens_checkout_complete(tl_root):
         return
     repo = os.environ.get("TRACELENS_REPO") or _TRACELENS_REPO_DEFAULT
     ref = os.environ.get("TRACELENS_REF") or _TRACELENS_REF_DEFAULT
@@ -4773,7 +4794,7 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
     lock_dir = tl_root.parent
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / ".install.lock"
-    append_log(log_path, f"TraceLens root missing; self-healing checkout at {tl_root}")
+    append_log(log_path, f"TraceLens root missing/incomplete; self-healing checkout at {tl_root}")
     import fcntl
 
     with lock_path.open("w") as lock_fh:
@@ -4781,32 +4802,52 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
             fcntl.flock(lock_fh, fcntl.LOCK_EX)
         except OSError:
             pass
-        # Double-check under the lock: a concurrent healer may have rebuilt it.
-        if tl_root.exists():
-            append_log(log_path, "TraceLens checkout rebuilt by a concurrent healer; reusing")
+        # Re-check completeness under the lock: a concurrent healer/installer may
+        # have finished the checkout while we waited for the lock.
+        if _tracelens_checkout_complete(tl_root):
+            append_log(log_path, "TraceLens checkout completed by a concurrent healer; reusing")
             return
+        # A stale/partial tree (e.g. an installer's half-done direct clone that
+        # crashed) blocks the atomic rename below; move it aside first.
+        if tl_root.exists():
+            stale = tl_root.parent / f".{tl_root.name}.stale.{uuid.uuid4().hex[:8]}"
+            os.replace(tl_root, stale)
+            _rmtree_quiet(stale)
         tmp_dir = tl_root.parent / f".{tl_root.name}.heal.{uuid.uuid4().hex[:8]}"
-        rc = run_command(
-            ["git", "clone", "--depth", "1", repo, str(tmp_dir)],
-            cwd=None,
-            log_path=log_path,
-            timeout_s=600,
-        )
-        if rc != 0:
-            raise FileNotFoundError(
-                f"TraceLens root not found and self-heal clone failed (repo={repo}); "
-                f"tried to rebuild at {tl_root}"
+        try:
+            rc = run_command(
+                ["git", "clone", "--depth", "1", repo, str(tmp_dir)],
+                cwd=None,
+                log_path=log_path,
+                timeout_s=600,
             )
-        if ref and ref != "HEAD":
-            run_command(
-                ["git", "-C", str(tmp_dir), "fetch", "--depth", "1", "origin", ref],
-                cwd=None, log_path=log_path, timeout_s=600,
-            )
-            run_command(
-                ["git", "-C", str(tmp_dir), "checkout", "-q", "FETCH_HEAD"],
-                cwd=None, log_path=log_path, timeout_s=120,
-            )
-        os.replace(tmp_dir, tl_root)
+            if rc != 0:
+                raise FileNotFoundError(
+                    f"TraceLens root not found and self-heal clone failed (repo={repo}); "
+                    f"tried to rebuild at {tl_root}"
+                )
+            # Pin to the requested SHA. A failed fetch/checkout must NOT fall
+            # through to os.replace() with the clone's default HEAD — that would
+            # silently ship an unpinned tree (#722 review).
+            if ref and ref != "HEAD":
+                rc = run_command(
+                    ["git", "-C", str(tmp_dir), "fetch", "--depth", "1", "origin", ref],
+                    cwd=None, log_path=log_path, timeout_s=600,
+                )
+                if rc == 0:
+                    rc = run_command(
+                        ["git", "-C", str(tmp_dir), "checkout", "-q", "FETCH_HEAD"],
+                        cwd=None, log_path=log_path, timeout_s=120,
+                    )
+                if rc != 0:
+                    raise FileNotFoundError(
+                        f"TraceLens self-heal could not pin ref={ref} (repo={repo}); "
+                        f"refusing to install an unpinned checkout at {tl_root}"
+                    )
+            os.replace(tmp_dir, tl_root)
+        except BaseException:
+            _rmtree_quiet(tmp_dir)
+            raise
         append_log(log_path, f"TraceLens checkout self-healed at {tl_root}")
 
 
