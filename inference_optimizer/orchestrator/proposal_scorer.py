@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ._json_io import extract_first_json_with_key
 from .backends.base import parse_call_timeout_env
 from .coordinator_helpers import format_exc_brief
 from .trace.conversation_trace import ConversationRecord, append_conversation
@@ -67,40 +68,13 @@ Rules:
 """.strip()
 
 
-# Match a fenced ```json``` block (preferred) then a bare top-level "scores" object.
-_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+# Bare top-level "scores" object; the fenced form lives in _json_io.
 _BARE_JSON_RE = re.compile(r"(\{.*?\"scores\".*\})", re.DOTALL)
 
 
 def _extract_scores_json(text: str) -> dict[str, Any] | None:
-    """Pull the first valid ``{"scores": {...}}`` object out of a reply.
-
-    Args:
-        text: Raw model reply that may contain a fenced or bare JSON object.
-
-    Returns:
-        The parsed ``{"scores": {...}}`` dict, or ``None`` if none was found.
-    """
-    if not text:
-        return None
-    for m in _FENCED_JSON_RE.finditer(text):
-        try:
-            data = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict) and "scores" in data:
-            return data
-    for m in _BARE_JSON_RE.finditer(text):
-        candidate = m.group(1)
-        for end in range(len(candidate), 0, -1):
-            try:
-                data = json.loads(candidate[:end])
-            except json.JSONDecodeError:
-                continue
-            if isinstance(data, dict) and "scores" in data:
-                return data
-            break  # parsed but wrong shape; don't keep shrinking
-    return None
+    """Pull the first valid ``{"scores": {...}}`` object out of a reply."""
+    return extract_first_json_with_key(text, "scores", _BARE_JSON_RE)
 
 
 def _clip(value: Any, *, limit: int = _MAX_FIELD_CHARS) -> str:
