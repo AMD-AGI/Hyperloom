@@ -139,7 +139,7 @@ def test_specialist_can_invoke_readonly_external_tools_in_explore():
 
 # 4. R5 — Web tools are usable in any phase (no phase restriction)
 @pytest.mark.parametrize("web_tool", sorted(WEB_TOOL_NAMES))
-@pytest.mark.parametrize("phase", ["PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"])
+@pytest.mark.parametrize("phase", ["PRELUDE", "EXPLORE", "KERNEL_AGENT", "SWEEP", "CLOSE"])
 def test_specialist_web_tools_allowed_in_any_phase(
     web_tool: str,
     phase: str,
@@ -150,7 +150,7 @@ def test_specialist_web_tools_allowed_in_any_phase(
 
 def test_specialist_pr_monitor_allowed_in_any_phase():
     """PR Monitor read tools are usable in any phase."""
-    for phase in ("PRELUDE", "FRAMEWORK", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
+    for phase in ("PRELUDE", "FRAMEWORK_AGENT", "EXPLORE", "KERNEL_AGENT", "SWEEP", "CLOSE"):
         gate = _gate(_State(phase=phase))
         for tool in PR_MONITOR_TOOL_NAMES:
             gate.validate_tool_invocation(tool, source_role="specialist")
