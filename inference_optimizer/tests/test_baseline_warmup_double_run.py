@@ -233,6 +233,41 @@ def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir / "variant_00_candidate")
 
 
+def test_run_grid_single_round_when_warmup_disabled(tmp_path, monkeypatch):
+    """``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP=0`` keeps the legacy single-round grid path."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "grid"
+
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = _run(
+            run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant(name="candidate")],
+                output_root=output_dir,
+                magpie_python="/opt/venv/bin/python",
+                variant_timeout_sec=10,
+                gpu_type="mi300x",
+            )
+        )
+
+    assert state["calls"] == 1
+    assert len(results) == 1
+    result = results[0]
+    assert result.status == "succeeded"
+    assert result.output_throughput == pytest.approx(_COLD_TPUT)
+    assert "run_grid_warmup_discarded_first" not in result.nonfatal_warnings
+    assert "server_lifecycle" not in captured[0]["benchmark"]
+
+
 def test_baseline_single_round_when_script_not_builtin(tmp_path):
     """A non-builtin benchmark script falls back to one round even with double-run on."""
     base = tmp_path / "base.yaml"
