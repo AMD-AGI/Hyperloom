@@ -136,6 +136,50 @@ def test_hip_symbol_beats_import_error_ordering() -> None:
     assert sig.kind == HIP_KERNEL_MISSING
 
 
+# --- multi-signature (secondary_kinds) ------------------------------------
+
+
+def test_stacked_import_error_masking_hip_symbol() -> None:
+    """A stacked traceback (ImportError wrapping an undefined HIP symbol) keeps
+    the actionable hip_kernel_missing as primary and surfaces import_error as a
+    secondary kind rather than discarding it."""
+    log = (
+        "Traceback (most recent call last):\n"
+        '  File "/opt/vllm/_custom_ops.py", line 5, in <module>\n'
+        "ImportError: cannot import name '_C' from partially initialized module\n"
+        "The above exception was the direct cause of the following:\n"
+        "ImportError: /opt/vllm/_C.so: undefined symbol: _ZN4aiter8fmha_fwdEv"
+    )
+    sig = classify_failure(log)
+    assert sig.kind == HIP_KERNEL_MISSING
+    assert IMPORT_ERROR in sig.secondary_kinds
+    assert HIP_KERNEL_MISSING not in sig.secondary_kinds
+    # Corroborating rules nudge confidence above the bare rule constant.
+    assert sig.confidence > 0.85
+
+
+def test_single_signature_has_empty_secondary() -> None:
+    """A log matching exactly one rule reports no secondary kinds."""
+    sig = classify_failure("ModuleNotFoundError: No module named 'aiter.ops'")
+    assert sig.kind == IMPORT_ERROR
+    assert sig.secondary_kinds == ()
+
+
+def test_offending_file_prefers_frame_near_primary_hit() -> None:
+    """With two matching rules, the offending file is taken near the primary
+    (earlier, more-specific) hit rather than the last frame overall."""
+    log = (
+        'Traceback (most recent call last):\n'
+        '  File "/opt/vllm/loader.py", line 3, in load\n'
+        "RuntimeError: hipErrorNoBinaryForGpu: no kernel image is available\n"
+        '  File "/opt/vllm/fallback.py", line 9, in retry\n'
+        "ImportError: cannot import name '_C'"
+    )
+    sig = classify_failure(log)
+    assert sig.kind == HIP_KERNEL_MISSING
+    assert sig.offending_file == "/opt/vllm/loader.py"
+
+
 # --- EnablementRequest -----------------------------------------------------
 
 

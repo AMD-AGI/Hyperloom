@@ -72,6 +72,11 @@ class FailureSignature:
             :data:`UNKNOWN`.
         bridge_layer: Where a bridging patch most likely lands
             (``"framework"``, ``"rocm_hip"``, ``"build"``, or ``""``).
+        secondary_kinds: Other failure kinds whose rules also matched, most
+            specific first (excludes the primary ``kind``). Empty when only one
+            rule matched. Lets a downstream authoring sub-agent see stacked
+            errors (e.g. an ImportError masking a HIP undefined symbol) without
+            losing the more-actionable primary classification.
     """
 
     kind: str
@@ -80,6 +85,7 @@ class FailureSignature:
     raw_excerpt: str = ""
     confidence: float = 0.0
     bridge_layer: str = ""
+    secondary_kinds: tuple[str, ...] = ()
 
     @property
     def is_actionable(self) -> bool:
@@ -209,19 +215,29 @@ _TB_FRAME = re.compile(r'File "([^"]+)", line \d+, in (\S+)')
 _INLINE_PATH = re.compile(r"([/\w.\-]+\.(?:py|cpp|cc|cu|hip|h|hpp|cuh))(?::\d+)?")
 
 
-def _extract_offending_file(text: str) -> str:
+def _extract_offending_file(text: str, *, near: int | None = None) -> str:
     """Return the most relevant source file from a traceback / build log.
 
-    Prefers the *last* Python traceback frame (closest to the raise site);
-    falls back to the last inline source-path mention. Returns ``""`` when
-    nothing matches.
+    When ``near`` is given, prefer the traceback frame / inline path *closest to
+    (and at or before) that offset* — i.e. nearest the rule hit that elected the
+    primary kind. Otherwise (or when no frame precedes ``near``) fall back to the
+    *last* Python traceback frame (closest to the raise site), then the last
+    inline source-path mention. Returns ``""`` when nothing matches.
 
     Args:
         text: The raw log / traceback text.
+        near: Optional character offset of the primary rule match; frames at or
+            before it are preferred.
 
     Returns:
         str: A file path, or ``""`` when none is found.
     """
+    if near is not None:
+        for finder in (_TB_FRAME, _INLINE_PATH):
+            before = [m for m in finder.finditer(text) if m.start() <= near]
+            if before:
+                nearest = max(before, key=lambda m: m.start())
+                return nearest.group(1).strip()
     frames = _TB_FRAME.findall(text)
     if frames:
         return frames[-1][0].strip()
@@ -247,13 +263,54 @@ def _excerpt_for(match: re.Match[str], text: str, span: int = 200) -> str:
     return re.sub(r"\s+", " ", raw).strip()
 
 
+@dataclass(frozen=True)
+class _RuleHit:
+    """One rule that matched, with the match used to extract its symbol/excerpt."""
+
+    rule: _Rule
+    match: re.Match[str]
+
+    @property
+    def rule_index(self) -> int:
+        """Position of ``rule`` in :data:`_RULES` (lower == more specific)."""
+        return _RULES.index(self.rule)
+
+
+def _collect_hits(text: str) -> list[_RuleHit]:
+    """Return the first matching pattern per rule, in :data:`_RULES` order.
+
+    At most one hit per rule kind (the first pattern that fires), so a rule is
+    not double-counted when several of its patterns match.
+
+    Args:
+        text: The raw log / traceback text.
+
+    Returns:
+        list[_RuleHit]: Hits ordered as the rules are declared (most specific
+        first); empty when nothing matches.
+    """
+    hits: list[_RuleHit] = []
+    for rule in _RULES:
+        for pat in rule.patterns:
+            m = pat.search(text)
+            if m is not None:
+                hits.append(_RuleHit(rule=rule, match=m))
+                break
+    return hits
+
+
 def classify_failure(log_text: str) -> FailureSignature:
     """Classify a launch/import/build failure into a :class:`FailureSignature`.
 
-    Scans the ordered :data:`_RULES` table and returns the first match,
-    enriching it with the offending file (from the traceback) and symbol
-    (from the matching pattern's first capture group, when any). Returns an
-    :data:`UNKNOWN` signature (``confidence=0.0``) when nothing matches.
+    Scans the ordered :data:`_RULES` table and collects **every** rule that
+    matches, then elects a *primary* by ``(rule-order weight × match
+    proximity)`` — rule order is the dominant term (the table is most-specific
+    first, so e.g. a HIP undefined-symbol beats a generic import_error) with the
+    earliest match position as a tiebreaker. The remaining matched kinds are
+    surfaced as :attr:`FailureSignature.secondary_kinds` so stacked errors are
+    not lost. Confidence is nudged up slightly when multiple rules corroborate.
+    Returns an :data:`UNKNOWN` signature (``confidence=0.0``) when nothing
+    matches.
 
     This is pure text analysis — no network, LLM, or filesystem access.
 
@@ -269,30 +326,39 @@ def classify_failure(log_text: str) -> FailureSignature:
     if not text.strip():
         return FailureSignature(kind=UNKNOWN)
 
-    offending_file = _extract_offending_file(text)
+    hits = _collect_hits(text)
+    if not hits:
+        return FailureSignature(
+            kind=UNKNOWN,
+            offending_file=_extract_offending_file(text),
+            raw_excerpt=re.sub(r"\s+", " ", text[-200:]).strip(),
+            confidence=0.0,
+        )
 
-    for rule in _RULES:
-        for pat in rule.patterns:
-            m = pat.search(text)
-            if m is None:
-                continue
-            symbol = ""
-            if rule.symbol_from is not None:
-                symbol = rule.symbol_from(m)
-            return FailureSignature(
-                kind=rule.kind,
-                offending_file=offending_file,
-                offending_symbol=symbol,
-                raw_excerpt=_excerpt_for(m, text),
-                confidence=rule.confidence,
-                bridge_layer=rule.bridge_layer,
-            )
+    text_len = max(len(text), 1)
+    # Score: rule specificity dominates (rank in FAILURE_KINDS order), with the
+    # match's proximity to the start of the text as a fine tiebreaker. Lower is
+    # better on both axes, so we minimize (rule_index, match_start).
+    primary = min(hits, key=lambda h: (h.rule_index, h.match.start()))
+    secondary = tuple(
+        h.rule.kind for h in sorted(hits, key=lambda h: h.rule_index) if h.rule.kind != primary.rule.kind
+    )
+
+    symbol = ""
+    if primary.rule.symbol_from is not None:
+        symbol = primary.rule.symbol_from(primary.match)
+
+    # Multiple corroborating rules raise confidence a touch, capped at 1.0.
+    confidence = min(1.0, primary.rule.confidence + 0.02 * len(secondary))
 
     return FailureSignature(
-        kind=UNKNOWN,
-        offending_file=offending_file,
-        raw_excerpt=re.sub(r"\s+", " ", text[-200:]).strip(),
-        confidence=0.0,
+        kind=primary.rule.kind,
+        offending_file=_extract_offending_file(text, near=primary.match.start()),
+        offending_symbol=symbol,
+        raw_excerpt=_excerpt_for(primary.match, text),
+        confidence=confidence,
+        bridge_layer=primary.rule.bridge_layer,
+        secondary_kinds=secondary,
     )
 
 
