@@ -48,11 +48,20 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     warnings: list[str] = []
     decisions: list[Decision] = []
 
+    from .... import framework_registry
+
+    fw = (breakdown.get("workload") or {}).get("framework_name")
+    _unit = framework_registry.primary_metric_unit(fw)
     if final_tput:
-        facts.append(f"Final throughput: {float(final_tput):.2f} tok/s/gpu.")
+        facts.append(f"Final: {framework_registry.format_primary_metric(fw, final_tput, precision=2)}.")
     if base_tput and final_tput:
-        delta = float(final_tput) - float(base_tput)
-        facts.append(f"Delta vs baseline: {delta:+.2f} tok/s/gpu.")
+        base_v = framework_registry.primary_metric_value(fw, base_tput)
+        final_v = framework_registry.primary_metric_value(fw, final_tput)
+        if base_v is not None and final_v is not None:
+            # For latency-based metrics (xDiT ms) lower is better, so an
+            # improvement shows as a negative delta; annotate to avoid misreads.
+            note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
+            facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
     if gain_v is not None:
         facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
         decisions.append(
