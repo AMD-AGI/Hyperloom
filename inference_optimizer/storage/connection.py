@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sqlite3
 import threading
 from collections.abc import AsyncIterator, Iterator, Sequence
@@ -21,8 +22,20 @@ from typing import Any
 from .schema import ensure_schema
 
 
+# Journal mode is env-overridable. WAL is the default (crash-safe across
+# checkpoints on local disk, issue #242), but WAL relies on a shared-memory
+# ``-shm`` mapping that networked filesystems (WekaFS / NFS) do not implement
+# correctly, which can corrupt ``coordinator.db`` ("file is not a database").
+# On such mounts set ``INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE=DELETE`` (a plain
+# rollback journal, still durable with synchronous=FULL) to avoid the WAL/shm
+# corruption path.
+_JOURNAL_MODE = (
+    os.environ.get("INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE", "WAL").strip() or "WAL"
+)
+
+
 _PRAGMAS = (
-    "PRAGMA journal_mode = WAL",
+    f"PRAGMA journal_mode = {_JOURNAL_MODE}",
     "PRAGMA synchronous = FULL",
     "PRAGMA foreign_keys = ON",
     "PRAGMA busy_timeout = 30000",

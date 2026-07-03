@@ -132,6 +132,33 @@ def test_t0_anchor_writes_recipe_row_with_arbor_schema(
     assert row.get("tp") == 8
 
 
+def test_t0_anchor_accepts_legacy_framework_extra_attr(
+    kb: RecipeKB,
+    session_dir: Path,
+) -> None:
+    """Legacy ``framework`` attrs should not produce unknown_framework keys."""
+    state = _FakeSharedState(framework_version="0.5.11")
+    state.framework_name = ""
+    run_t0_anchor(
+        kb,
+        state,
+        workload="m",
+        hw="mi300x",
+        extra_attrs={"framework": "sglang"},
+        session_dir=session_dir,
+    )
+
+    cid = recipe_canonical_id(
+        model="m",
+        hardware="mi300x",
+        framework_name="sglang",
+        framework_version="0.5.11",
+        precision="fp8",
+    )
+    assert kb.local.get_recipe(canonical_id=cid) is not None
+    assert "unknown_framework" not in state.warm_start_recipe.get("workload", "")
+
+
 def test_t0_anchor_writes_warm_start_snapshot_to_disk(
     kb: RecipeKB,
     session_dir: Path,

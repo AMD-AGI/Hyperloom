@@ -9,7 +9,7 @@ below.
 
 ## Option A — Hosted UI (PrimusClaw)
 
-1. Open [core42.primus-safe.amd.com/hyperloom](https://core42.primus-safe.amd.com/hyperloom/).
+1. Open [crusoe.primus-safe.amd.com/hyperloom](https://crusoe.primus-safe.amd.com/hyperloom/).
 2. Select **Claw Agent** or **Get Started** to enter PrimusClaw.
 3. Pick the tab that matches your task:
    - **Hyperloom** — end-to-end model performance optimization.
