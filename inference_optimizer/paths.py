@@ -338,9 +338,10 @@ def runtime_dir(session_dir: Path | None = None) -> Path:
 def open_source_root() -> Path:
     """Pod-local base for auto-cloned open-source deps, mirroring the install
     scripts: ``$HYPERLOOM_OPEN_SOURCE_ROOT`` else
-    ``${TMPDIR:-/tmp}/hyperloom/open-source-repos``. Decoupled from
-    ``$USER_DATA_PATH`` so a shared workspace root never collocates concurrent
-    pods' checkouts.
+    ``/opt/hyperloom/open-source-repos``. A pod-internal, non-ephemeral dir
+    (NOT /tmp): a tmp-reaper wiping /tmp mid-run left TRACELENS_ROOT dangling
+    and broke trace_analyze (#722). Decoupled from ``$USER_DATA_PATH`` so a
+    shared workspace root never collocates concurrent pods' checkouts.
 
     Returns:
         The pod-local open-source repos root path.
@@ -348,8 +349,7 @@ def open_source_root() -> Path:
     override = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT")
     if override:
         return Path(override)
-    tmp = os.environ.get("TMPDIR") or "/tmp"
-    return Path(tmp) / "hyperloom" / "open-source-repos"
+    return Path("/opt/hyperloom/open-source-repos")
 
 
 def magpie_dir(session_dir: Path | None = None) -> Path:

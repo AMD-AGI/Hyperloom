@@ -53,7 +53,7 @@ runtime installation is performed by `inference_optimizer/scripts/install.sh`,
 which chains into `kernel-agent/scripts/install.sh` and editable-installs the
 checkout. When `TRACELENS_ROOT` is unset, the installer clones the public repo
 under the pod-local open-source checkout root
-(`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}`).
+(`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}`).
 The optional internal extension (roofline gap / MI355+ MAF data) is enabled by
 setting `TRACELENS_INTERNAL_ROOT`; leave it unset for the open-source-only
 report.

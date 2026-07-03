@@ -444,12 +444,13 @@ class SharedState:
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
-    # Hot-server measure-round tput from the baseline cold-start double-run
-    # (kept for reporting only). ``baseline_tput`` is the single-fresh-server
-    # warmup-round number used as the fair comparison ANCHOR for explore /
-    # sweep variants (which each restart the server + run one round). When
-    # the double-run is disabled / ineligible, this stays 0.0 and
-    # ``baseline_tput`` carries the only measured number.
+    # Discarded first-round tput from the baseline cold-start double-run.
+    # Kept only for audit/debugging; conclusion fields and gain math use the
+    # hot measure-round value in ``baseline_tput``.
+    baseline_cold_tput: float = 0.0
+    # Deprecated mirror of the hot measure-round tput. Kept for readers that
+    # already inspect this field; it should match ``baseline_tput`` whenever
+    # the double-run path is eligible.
     baseline_hot_tput: float = 0.0
     baseline_accuracy: float = 0.0
     # Standalone baseline-arm roofline ceiling computed right after baseline
@@ -942,6 +943,8 @@ class SharedState:
             )
             fact_layer_keys = (
                 "baseline_tput",
+                "baseline_cold_tput",
+                "baseline_hot_tput",
                 "baseline_accuracy",
                 "current_best",
                 "cumulative_gain",
@@ -1471,8 +1474,12 @@ class SharedState:
         Args:
             changes (dict[str, Any]): Field-name -> value mapping to apply;
                 keys not matching a dataclass field are ignored.
-            allow_core (bool): Whether core fields may be written (enforced by
-                PolicyGate upstream; accepted here for call-site parity).
+            allow_core (bool): When False, keys in
+                :data:`policy.CORE_STATE_FIELDS` are dropped (defense in depth:
+                PolicyGate already rejects them upstream, but this ensures a
+                caller reaching here off the intent path still cannot write
+                Coordinator-only fields). When True, all known fields are
+                written (Coordinator/trusted callers).
 
         Returns:
             dict[str, Any]: The subset of ``changes`` actually written to
@@ -1480,9 +1487,22 @@ class SharedState:
         """
         if not changes:
             return {}
+        core_fields: frozenset[str] = frozenset()
+        if not allow_core:
+            # Lazy import to avoid a shared_state <-> policy import cycle; reuse
+            # the single CORE_STATE_FIELDS source of truth rather than a copy.
+            from .policy import CORE_STATE_FIELDS
+
+            core_fields = CORE_STATE_FIELDS
         applied: dict[str, Any] = {}
         for key, value in changes.items():
             if key not in self.__dataclass_fields__:
+                continue
+            if key in core_fields:
+                log.warning(
+                    "apply_changes: dropping core state field %r (allow_core=False)",
+                    key,
+                )
                 continue
             setattr(self, key, value)
             applied[key] = value

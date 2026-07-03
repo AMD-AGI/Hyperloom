@@ -65,6 +65,8 @@ _YAML_KEYWORDS = frozenset(
 )
 
 _TAG_CLEAN = str.maketrans({" ": "-", "\t": "-", "/": "-"})
+_DEFAULT_RECIPE_SLUG_PREFIX = "hyperloom-recipe-kb"
+_RECIPE_SLUG_PREFIX_ENV = "GBRAIN_RECIPE_SLUG_PREFIX"
 
 
 def _tag_value(value: Any) -> str:
@@ -80,6 +82,17 @@ def _tag_value(value: Any) -> str:
         The tag slug, or ``"unknown"`` when the value is empty.
     """
     return str(value or "").strip().lower().translate(_TAG_CLEAN).strip("-") or "unknown"
+
+
+def _recipe_slug_prefix() -> str:
+    """Return the configured gbrain recipe page slug prefix.
+
+    Returns:
+        The normalized ``GBRAIN_RECIPE_SLUG_PREFIX`` value, or the default
+        production recipe namespace when the env is unset.
+    """
+    raw = os.environ.get(_RECIPE_SLUG_PREFIX_ENV, "").strip().strip("/")
+    return raw or _DEFAULT_RECIPE_SLUG_PREFIX
 
 
 def _scalar(value: Any) -> str:
@@ -312,7 +325,7 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "attrs": attrs,
     }
     # Stable slug from the 7-tuple canonical (colons -> path levels).
-    slug = "hyperloom-recipe-kb/" + canonical.replace(":", "/")
+    slug = _recipe_slug_prefix() + "/" + canonical.replace(":", "/")
     body_lines = [
         f"# Recipe {canonical}",
         "",

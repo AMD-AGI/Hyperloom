@@ -22,6 +22,7 @@ import base64
 import datetime
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -771,7 +772,13 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
     """
     extra_env = _parse_kv_list(args.extra_env)
     extra_labels = _parse_kv_list(args.extra_label)
-    env = {**_credential_fanout(), **extra_env}
+    # Dynamo inference pods run sglang/vllm only; they never call an LLM/agent
+    # endpoint, so no *_API_KEY / SAFE_API_KEY / *_BASE_URL is baked into their
+    # container env. GEAK/OOB kernel-opt agents (when used) receive credentials
+    # out-of-band over SSH at invocation time (ssh_runtime._env_prologue), so
+    # dropping the credential fanout here does not affect them. Only operator
+    # --extra-env values are forwarded.
+    env = dict(extra_env)
 
     owner_id = args.owner_id or os.environ.get("WORKLOAD_ID", "").strip() or None
     workspace = args.workspace or os.environ.get("SAFE_WORKSPACE", "").strip()
@@ -1358,9 +1365,9 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
     key_path = state["ssh_key_path"]
     port = int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
     pin = getattr(args, "sglang_version_pin", None) or ""
-    op_args = f"--local --tracelens-root {tracelens_root!r}"
+    op_args = f"--local --tracelens-root {shlex.quote(str(tracelens_root))}"
     if pin:
-        op_args += f" --sglang-version-pin {pin!r}"
+        op_args += f" --sglang-version-pin {shlex.quote(str(pin))}"
     timeout = _poll_timeout_from_args(args)
     per_pod: list[dict] = []
     failures: list[dict] = []
@@ -1439,8 +1446,10 @@ def _dynamo_apply_patch(args: argparse.Namespace) -> int:
     patch_b64 = base64.b64encode(patch_path.read_bytes()).decode("ascii")
     gpu_ips = _dynamo_all_gpu_ips(state)
     op_args = (
-        f"apply --target-path {args.target_path!r} --patch-b64 {patch_b64!r} "
-        f"--backup-dir {args.backup_dir!r} --kernel-id {args.kernel_id!r}"
+        f"apply --target-path {shlex.quote(str(args.target_path))} "
+        f"--patch-b64 {shlex.quote(str(patch_b64))} "
+        f"--backup-dir {shlex.quote(str(args.backup_dir))} "
+        f"--kernel-id {shlex.quote(str(args.kernel_id))}"
     )
     per_node: list[dict] = []
     failures: list[dict] = []
@@ -1489,7 +1498,10 @@ def _dynamo_revert_patch(args: argparse.Namespace) -> int:
     failures: list[dict] = []
     for ip, backup_path in backup_map.items():
         info(f"revert-patch (dynamo): ssh -> {ip}")
-        op_args = f"revert --target-path {args.target_path!r} --backup-path {backup_path!r}"
+        op_args = (
+            f"revert --target-path {shlex.quote(str(args.target_path))} "
+            f"--backup-path {shlex.quote(str(backup_path))}"
+        )
         parsed, tx = _dynamo_ssh_node_op(state, ip, op_args, timeout=args.timeout_sec)
         if parsed and str(parsed.get("status")) in ("restored", "noop_missing_backup"):
             per_node.append({"host": ip, **parsed})
@@ -1530,10 +1542,11 @@ def _dynamo_kernel_bench(args: argparse.Namespace) -> int:
             err(f"--files-b64-json not valid JSON: {exc}")
             return EXIT_CONFIG_ERROR
     op_args = (
-        f"bench --workspace {args.workspace!r} "
-        f"--bench-command {args.bench_command!r} "
-        f"--files-b64-json {(args.files_b64_json or '{}')!r} "
-        f"--result-glob {args.result_glob!r} --timeout-sec {int(args.timeout_sec)}"
+        f"bench --workspace {shlex.quote(str(args.workspace))} "
+        f"--bench-command {shlex.quote(str(args.bench_command))} "
+        f"--files-b64-json {shlex.quote(str(args.files_b64_json or '{}'))} "
+        f"--result-glob {shlex.quote(str(args.result_glob))} "
+        f"--timeout-sec {int(args.timeout_sec)}"
     )
     info(f"kernel-bench (dynamo): ssh -> {ip}")
     parsed, tx = _dynamo_ssh_node_op(
@@ -1612,7 +1625,7 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
                 ip,
                 script,
                 "bash",
-                f"{geak_src!r}",
+                shlex.quote(str(geak_src)),
                 key_path=key,
                 port=port,
                 timeout=_poll_timeout_from_args(args),
@@ -2135,7 +2148,7 @@ def _build_multinode_launch_entrypoint(
                 warn(f"cannot mkdir profile-traces dir {_profiler_path}: {_exc}; pod-side launch will retry the mkdir")
             profiler_dir = str(_profiler_path)
             info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
-    profiler_arg = f"--torch-profiler-dir {profiler_dir!r} " if profiler_dir else ""
+    profiler_arg = f"--torch-profiler-dir {shlex.quote(str(profiler_dir))} " if profiler_dir else ""
     # Expert-parallel size; ep <= 1 emits no flag.
     try:
         ep_val = int(getattr(args, "ep", 1) or 1)
@@ -2177,7 +2190,7 @@ def _build_multinode_launch_entrypoint(
         f"--framework {args.framework!s} --model {args.model!s} "
         f"--tp {args.tp!s} --nnodes {nnodes!s} "
         f"--pid-dir {pid_dir!s} --log-dir {log_dir!s} "
-        f"{ep_arg}{profiler_arg}{pd_args}{wait_flag} --extra-args {extra_args!r}"
+        f"{ep_arg}{profiler_arg}{pd_args}{wait_flag} --extra-args {shlex.quote(str(extra_args))}"
     )
 
 
@@ -2205,16 +2218,16 @@ def _build_multinode_router_entrypoint(
     pid_file = f"{pid_dir.rstrip('/')}/router.pid"
     log_file = f"{log_dir.rstrip('/')}/router.log"
     vllm_router_cmd = (getattr(args, "pd_vllm_router_cmd", "") or "").strip()
-    vrc_arg = f"--vllm-router-cmd {vllm_router_cmd!r} " if vllm_router_cmd else ""
+    vrc_arg = f"--vllm-router-cmd {shlex.quote(str(vllm_router_cmd))} " if vllm_router_cmd else ""
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f"cat > \"$WORK_DIR/launch_router.py\" <<'__MN_ROUTER_PY_EOF__'\n"
         f"{py}__MN_ROUTER_PY_EOF__\n"
         f'python3 "$WORK_DIR/launch_router.py" '
         f"--framework {args.framework!s} "
-        f"--prefill-url {prefill_url!r} --decode-url {decode_url!r} "
+        f"--prefill-url {shlex.quote(str(prefill_url))} --decode-url {shlex.quote(str(decode_url))} "
         f"--public-port {public_port} "
-        f"--pid-file {pid_file!r} --log-file {log_file!r} "
+        f"--pid-file {shlex.quote(str(pid_file))} --log-file {shlex.quote(str(log_file))} "
         f"{vrc_arg}"
     )
 
@@ -2245,10 +2258,10 @@ def _build_multinode_apply_patch_entrypoint(
         f"<<'__MN_KPATCH_PY_EOF__'\n"
         f"{py}__MN_KPATCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" apply '
-        f"--target-path {target_path!r} "
-        f"--patch-b64 {patch_b64!r} "
-        f"--backup-dir {backup_dir!r} "
-        f"--kernel-id {kernel_id!r} "
+        f"--target-path {shlex.quote(str(target_path))} "
+        f"--patch-b64 {shlex.quote(str(patch_b64))} "
+        f"--backup-dir {shlex.quote(str(backup_dir))} "
+        f"--kernel-id {shlex.quote(str(kernel_id))} "
         f"--timeout-sec {int(timeout_sec)}"
     )
 
@@ -2276,8 +2289,8 @@ def _build_multinode_revert_patch_entrypoint(
         f"<<'__MN_KPATCH_PY_EOF__'\n"
         f"{py}__MN_KPATCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" revert '
-        f"--target-path {target_path!r} "
-        f"--backup-map-json {backup_map_json!r} "
+        f"--target-path {shlex.quote(str(target_path))} "
+        f"--backup-map-json {shlex.quote(str(backup_map_json))} "
         f"--timeout-sec {int(timeout_sec)}"
     )
 
@@ -2303,14 +2316,14 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
     py = _read_pod_script("apply_tracelens_patch_multinode.py")
     pin_arg = ""
     if sglang_version_pin:
-        pin_arg = f" --sglang-version-pin {sglang_version_pin!r}"
+        pin_arg = f" --sglang-version-pin {shlex.quote(str(sglang_version_pin))}"
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f'cat > "$WORK_DIR/apply_tracelens_patch_multinode.py" '
         f"<<'__MN_TLPATCH_PY_EOF__'\n"
         f"{py}__MN_TLPATCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/apply_tracelens_patch_multinode.py" '
-        f"--tracelens-root {tracelens_root!r}"
+        f"--tracelens-root {shlex.quote(str(tracelens_root))}"
         f"{pin_arg}"
     )
 
@@ -2341,10 +2354,10 @@ def _build_multinode_kernel_bench_entrypoint(
         f"<<'__MN_KBENCH_PY_EOF__'\n"
         f"{py}__MN_KBENCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/kernel_bench_multinode.py" bench '
-        f"--workspace {workspace!r} "
-        f"--bench-command {bench_command!r} "
-        f"--files-b64-json {files_b64_json!r} "
-        f"--result-glob {result_glob!r} "
+        f"--workspace {shlex.quote(str(workspace))} "
+        f"--bench-command {shlex.quote(str(bench_command))} "
+        f"--files-b64-json {shlex.quote(str(files_b64_json))} "
+        f"--result-glob {shlex.quote(str(result_glob))} "
         f"--timeout-sec {int(timeout_sec)}"
     )
 

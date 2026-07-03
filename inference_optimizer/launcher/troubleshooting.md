@@ -25,7 +25,7 @@ half-created (`.git` exists but `src/` is incomplete) or the filesystem may be
 showing stale metadata. Do not manually clone GEAK, delete only `build/`, or
 edit the checkout in place. Stop any other installer using the same dependency
 root, remove the entire
-`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/GEAK`
+`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/GEAK`
 directory, then rerun the full install so `install.sh` owns the fresh clone.
 Multiple concurrent installs sharing one dependency root also share this
 checkout; avoid running them at the same time.

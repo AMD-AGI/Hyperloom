@@ -31,6 +31,7 @@ from ...protocol.intent import (
 from ...session_paths import allocate_turn_workdir, manifest_path
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from .._json_io import extract_first_json_with_key
 from .base import BackendError, BackendTurnResult, build_chat_messages
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
@@ -99,41 +100,13 @@ Rules (mirror SKILL.md Hard Rules + Approve Standard):
 """.strip()
 
 
-# Fenced ```json``` block first, falling back to bare {...} with "review_verdicts".
-_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+# Bare {...} fallback containing "review_verdicts" (fenced case handled by helper).
 _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 
 
 def _extract_review_json(text: str) -> dict[str, Any] | None:
-    """Pull the first valid review JSON out of a model reply, or ``None``.
-
-    Args:
-        text: The raw model reply that may contain a review JSON object.
-
-    Returns:
-        The first dict containing a ``"review_verdicts"`` key, or ``None`` when
-        no parseable review object is found.
-    """
-    if not text:
-        return None
-    for m in _FENCED_JSON_RE.finditer(text):
-        try:
-            data = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict) and "review_verdicts" in data:
-            return data
-    for m in _BARE_JSON_RE.finditer(text):
-        candidate = m.group(1)
-        for end in range(len(candidate), 0, -1):
-            try:
-                data = json.loads(candidate[:end])
-            except json.JSONDecodeError:
-                continue
-            if isinstance(data, dict) and "review_verdicts" in data:
-                return data
-            break  # parsed but wrong shape; don't keep shrinking
-    return None
+    """Pull the first review JSON (containing ``"review_verdicts"``) from a model reply."""
+    return extract_first_json_with_key(text, "review_verdicts", _BARE_JSON_RE)
 
 
 def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
