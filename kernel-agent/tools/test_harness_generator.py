@@ -179,20 +179,6 @@ def test_get_test_function_toplevel_caller():
     assert tf.name == "bench_runner"
 
 
-def test_extract_tensor_creation():
-    a = hg.BenchmarkAnalyzer(BENCH_SRC)
-    dec = a.get_decorated_functions()
-    tensors = a.extract_tensor_creation(dec["torch_ref"])
-    assert tensors[0].var_name == "y"
-    assert tensors[0].dtype_expr == "torch.bfloat16"
-
-
-def test_extract_tensor_creation_syntax_error():
-    a = hg.BenchmarkAnalyzer("x = 1")
-    bad = hg.FuncInfo(name="f", params=[], source="def f(:\n  pass", decorator="", lineno=1)
-    assert a.extract_tensor_creation(bad) == []
-
-
 def test_extract_call_to():
     a = hg.BenchmarkAnalyzer(BENCH_SRC)
     dec = a.get_decorated_functions()

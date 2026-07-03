@@ -477,10 +477,6 @@ class OpResolver:
             return sgl
         return sgl or vll
 
-    def _select_sources(self, entry: dict[str, Any], framework: str | None) -> list[str]:
-        """Pick the editable source paths, routing to the installed container."""
-        return [m[0] for m in self._select_source_meta(entry, framework)]
-
     def _single(
         self, op_name: str, entry: dict[str, Any], framework: str | None,
     ) -> OpResolution:
@@ -3010,7 +3006,7 @@ def _expand_op_fanout(
     ``--framework``); it disambiguates which container's source to route to when
     both/neither are on disk. Only ``vllm``/``sglang`` are honored (the mapping's
     container keys); any other value (e.g. ``atom``) or an empty/unset value
-    falls through to ``OpResolver._select_sources``' on-disk-presence-then-default
+    falls through to ``OpResolver._select_source_meta``' on-disk-presence-then-default
     ordering.
     """
     framework = (framework or "").strip().lower() or None
