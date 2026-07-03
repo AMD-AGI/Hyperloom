@@ -467,7 +467,11 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
 )
 
 # `source_file` is special: may match :func:`resolve_source_file_allowlist` (framework trees outside session_dir, resolved at check time).
-SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file"})
+# `framework_source_root` is the (optional) integrate_patch/framework_agent git-apply
+# root override; no production path ever sets it (Coordinator relies on allowlist
+# resolution), so gating it here only blocks an LLM-authored override escaping to an
+# arbitrary dir (e.g. "/root") — closes the F003.0 host-write vector under strict_paths.
+SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
 
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
@@ -483,6 +487,37 @@ def _trace_path_allowlist() -> tuple[str, ...]:
 
     root = str(mn_profile_trace_root()).rstrip("/") + "/"
     return (root,)
+
+
+def _resolved_within(value: str, root: str) -> bool:
+    """Return whether ``value`` resolves to or under ``root`` (symlinks resolved).
+
+    Replaces a raw ``str.startswith`` prefix test so that ``..`` traversal and
+    shared-prefix boundary tricks (e.g. ``/x/aiter`` vs ``/x/aiterX``) cannot
+    slip a path past an allowlist root. Legitimate real paths nested under a
+    root are accepted identically to the old prefix check.
+
+    Args:
+        value (str): the candidate path string.
+        root (str): an allowlist root (may carry a trailing slash).
+
+    Returns:
+        bool: True when the resolved ``value`` equals or is nested under the
+            resolved ``root``; False on any resolution error or escape.
+    """
+    try:
+        v = Path(str(value)).resolve()
+        r = Path(str(root)).resolve()
+    except (OSError, RuntimeError):
+        return False
+    try:
+        return v == r or v.is_relative_to(r)
+    except AttributeError:  # pragma: no cover — Python <3.9
+        try:
+            v.relative_to(r)
+            return True
+        except ValueError:
+            return False
 
 
 # Subset of PATH_LIKE_FIELDS that also accept :func:`_trace_path_allowlist` (others stay strictly session-rooted).
@@ -2328,12 +2363,11 @@ class PolicyGate:
             value (str): the path string to test.
 
         Returns:
-            bool: True when ``value`` starts with any prefix returned by
+            bool: True when ``value`` resolves to or under any root returned by
                 :func:`resolve_source_file_allowlist` (the aiter / sglang /
                 vllm source trees); False otherwise.
         """
-        s = str(value)
-        return any(s.startswith(p) for p in resolve_source_file_allowlist())
+        return any(_resolved_within(value, p) for p in resolve_source_file_allowlist())
 
     def _path_in_trace_allowlist(self, value: str) -> bool:
         """Match a value against runtime-resolved trace path prefixes (multi-node shared profile dir outside session_dir).
@@ -2342,11 +2376,10 @@ class PolicyGate:
             value (str): the path string to test.
 
         Returns:
-            bool: True when ``value`` starts with any runtime-resolved trace
-                path prefix, else False.
+            bool: True when ``value`` resolves to or under any runtime-resolved
+                trace path root, else False.
         """
-        s = str(value)
-        return any(s.startswith(p) for p in _trace_path_allowlist())
+        return any(_resolved_within(value, p) for p in _trace_path_allowlist())
 
     def _validate_payload_paths(
         self,
