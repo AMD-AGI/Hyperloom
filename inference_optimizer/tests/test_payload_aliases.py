@@ -13,7 +13,6 @@ from inference_optimizer.compat.payload_aliases import (
     LEGACY_KEY,
     migrate_legacy_key_in_place,
     read_extra_server_args,
-    read_extra_server_args_from_envs,
 )
 
 
@@ -139,28 +138,6 @@ def test_deprecation_stacklevel_points_at_caller():
     )
 
 
-# Envs variant — same contract on the materializer-side dict
-def test_envs_variant_canonical_returned_without_warning():
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        out = read_extra_server_args_from_envs({CANONICAL_KEY: "v"})
-    assert out == "v"
-    assert [w for w in caught if issubclass(w.category, DeprecationWarning)] == []
-
-
-def test_envs_variant_legacy_emits_warning():
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        out = read_extra_server_args_from_envs({LEGACY_KEY: "v"})
-    assert out == "v"
-    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-    assert len(dep_warnings) == 1
-
-
-def test_envs_variant_default():
-    assert read_extra_server_args_from_envs({}, default="z") == "z"
-
-
 # migrate_legacy_key_in_place
 def test_migrate_legacy_only_moves_value_and_returns_true():
     """Legacy key only → copied to canonical, legacy deleted, True."""
@@ -200,7 +177,6 @@ def test_public_api_exports_match_all():
         "CANONICAL_KEY",
         "LEGACY_KEY",
         "read_extra_server_args",
-        "read_extra_server_args_from_envs",
         "migrate_legacy_key_in_place",
     }
     assert set(pa.__all__) == expected
@@ -211,5 +187,4 @@ def test_compat_package_importable():
     from inference_optimizer.compat import payload_aliases as imported
 
     assert callable(imported.read_extra_server_args)
-    assert callable(imported.read_extra_server_args_from_envs)
     assert callable(imported.migrate_legacy_key_in_place)

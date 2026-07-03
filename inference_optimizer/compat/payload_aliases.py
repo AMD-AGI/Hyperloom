@@ -124,34 +124,6 @@ def read_extra_server_args(payload: dict, *, default: str = "") -> str:
     return default
 
 
-def read_extra_server_args_from_envs(envs: dict, *, default: str = "") -> str:
-    """Same contract as :func:`read_extra_server_args` but operates on
-    the ``envs`` dict shape carried by the Magpie YAML materializer.
-
-    The per-framework env names (``EXTRA_SGLANG_ARGS``,
-    ``EXTRA_VLLM_ARGS``, ``EXTRA_ATOM_ARGS``) are **not** renamed —
-    those are the canonical per-framework slots that the Magpie
-    wrapper looks up by name. This helper covers the *payload-surface*
-    field that some materializer call-sites expose alongside the env
-    map (the framework-neutral pre-routing slot).
-
-    Args:
-        envs (dict): Magpie ``envs`` mapping that may carry the canonical or
-            legacy payload-surface key.
-        default (str): Returned when neither key is present (default ``""``).
-
-    Returns:
-        str: The coerced canonical value, the coerced legacy value (with a
-        ``DeprecationWarning``), or ``default`` when neither key is present.
-    """
-    if CANONICAL_KEY in envs:
-        return _coerce_str(envs[CANONICAL_KEY])
-    if LEGACY_KEY in envs:
-        warnings.warn(_DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=3)
-        return _coerce_str(envs[LEGACY_KEY])
-    return default
-
-
 def migrate_legacy_key_in_place(payload: dict) -> bool:
     """One-shot transform helper for persisted payloads (state.json
     rows, KB JSONL records, audit DB rows). Used by the SharedState
@@ -189,6 +161,5 @@ __all__ = [
     "CANONICAL_KEY",
     "LEGACY_KEY",
     "read_extra_server_args",
-    "read_extra_server_args_from_envs",
     "migrate_legacy_key_in_place",
 ]
