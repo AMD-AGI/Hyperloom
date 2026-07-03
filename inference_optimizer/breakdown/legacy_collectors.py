@@ -37,9 +37,11 @@ _ACTION_PHASE: dict[str, str] = {
     "params": "EXPLORE",
     "backends": "EXPLORE",
     "sweep": "SWEEP",
-    "select_kernels": "KERNEL",
-    "kernel_opt": "KERNEL",
-    "integrate": "KERNEL",
+    # Canonical v2 phase is KERNEL_AGENT (renamed from legacy "KERNEL" in
+    # commit 33ac6ccc); values here MUST match phase_state.PHASE_NAMES.
+    "select_kernels": "KERNEL_AGENT",
+    "kernel_opt": "KERNEL_AGENT",
+    "integrate": "KERNEL_AGENT",
 }
 
 # Actions that inherit the active phase rather than open a new segment.

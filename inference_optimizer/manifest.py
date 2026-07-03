@@ -131,19 +131,21 @@ def _git_revision() -> str:
     return _git_revision_at(here)
 
 
-def _git_revision_at(path: Path) -> str:
-    """Best-effort short git SHA at ``path``.
+def _git_capture(path: Path, args: list[str]) -> str:
+    """Best-effort ``git -C <path> <args>`` returning trimmed stdout.
 
     Args:
         path (Path): Directory expected to be (within) a git checkout.
+        args (list[str]): The git subcommand + flags (without the leading
+            ``git -C <path>`` prefix).
 
     Returns:
-        str: Short HEAD SHA, or an empty string when ``path`` is not a checkout
-        or the git invocation fails.
+        str: Trimmed stdout, or an empty string when ``path`` is not a checkout,
+        git returns non-zero, or the invocation fails.
     """
     try:
         out = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
+            ["git", "-C", str(path), *args],
             capture_output=True,
             text=True,
             timeout=2,
@@ -153,30 +155,16 @@ def _git_revision_at(path: Path) -> str:
         return out.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
         return ""
+
+
+def _git_revision_at(path: Path) -> str:
+    """Best-effort short git SHA at ``path`` (empty when not a checkout/fails)."""
+    return _git_capture(path, ["rev-parse", "--short", "HEAD"])
 
 
 def _git_remote_at(path: Path) -> str:
-    """Best-effort ``origin`` remote URL at ``path``.
-
-    Args:
-        path (Path): Directory expected to be (within) a git checkout.
-
-    Returns:
-        str: ``remote.origin.url`` value, or an empty string when unset or the
-        git invocation fails.
-    """
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(path), "config", "--get", "remote.origin.url"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if out.returncode != 0:
-            return ""
-        return out.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
-        return ""
+    """Best-effort ``origin`` remote URL at ``path`` (empty when unset/fails)."""
+    return _git_capture(path, ["config", "--get", "remote.origin.url"])
 
 
 def _path_is_relative_to(path: Path, root: Path) -> bool:
