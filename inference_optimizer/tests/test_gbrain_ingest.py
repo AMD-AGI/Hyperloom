@@ -8,6 +8,7 @@ from typing import Any
 
 from inference_optimizer.recipe_kb.gbrain_ingest import (
     _best_config_split,
+    _recipe_slug_prefix,
     _scalar,
     ingest_local_to_gbrain,
     recipe_to_page,
@@ -97,6 +98,16 @@ def test_recipe_to_page_roundtrips_via_reader() -> None:
         "extra_envs": {"FOO": "1"},
     }
     assert r["body"]["best_throughput"] == 5800.5
+
+
+def test_recipe_to_page_uses_configured_slug_prefix(monkeypatch) -> None:
+    """The ingest write side must use the same prefix env as gbrain reads."""
+    monkeypatch.setenv("GBRAIN_RECIPE_SLUG_PREFIX", "/hyperloom-session-kb/")
+
+    slug, _content = recipe_to_page(_recipe())
+
+    assert _recipe_slug_prefix() == "hyperloom-session-kb"
+    assert slug == "hyperloom-session-kb/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/0_5_11/fp8"
 
 
 def test_best_config_split_unwraps_nested_extra_envs() -> None:
@@ -217,6 +228,7 @@ class _FakeMcp:
 
 def test_ingest_counts_and_gates(monkeypatch) -> None:
     monkeypatch.delenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", raising=False)
+    monkeypatch.setenv("GBRAIN_RECIPE_SLUG_PREFIX", "hyperloom-session-kb")
     recipes = [
         _recipe(),
         _recipe(canonical_id="inference:a:b:c:d:e", best_config={}),  # anchor -> mirror
@@ -231,6 +243,7 @@ def test_ingest_counts_and_gates(monkeypatch) -> None:
     assert stats["skipped_no_config"] == 1  # legacy alias
     assert stats["errors"] == 0
     assert len(mcp.puts) == 3
+    assert all(slug.startswith("hyperloom-session-kb/") for slug in mcp.puts)
 
 
 def test_ingest_dry_run_writes_nothing() -> None:
