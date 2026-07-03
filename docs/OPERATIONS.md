@@ -3,7 +3,7 @@
 > **Audience.** Site reliability and platform engineers self-hosting
 > Hyperloom on their own AMD GPU infrastructure (Kubernetes, bare
 > metal, or a managed PaaS). For the hosted PrimusClaw experience
-> ([core42.primus-safe.amd.com/hyperloom](https://core42.primus-safe.amd.com/hyperloom/))
+> ([crusoe.primus-safe.amd.com/hyperloom](https://crusoe.primus-safe.amd.com/hyperloom/))
 > AMD owns operations; this document does **not** apply.
 
 This page covers Kubernetes sizing, `USER_DATA_PATH` backup and

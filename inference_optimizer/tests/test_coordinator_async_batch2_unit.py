@@ -24,16 +24,6 @@ from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
 
-@pytest.fixture
-def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    sd = make_session_dir()
-    from .conftest import seed_target_analysis_marker
-
-    seed_target_analysis_marker(sd)
-    return sd
-
-
 def _heartbeat() -> Intent:
     return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 

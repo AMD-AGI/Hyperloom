@@ -119,6 +119,26 @@ class TestApplyChanges:
         assert applied == {"model_name": "foo"}
         assert s.model_name == "foo"
 
+    def test_core_field_dropped_when_allow_core_false(self):
+        # Defense in depth: a non-privileged (allow_core=False) changes dict must
+        # not be able to write a Coordinator-only CORE_STATE_FIELDS entry, even
+        # if it reaches apply_changes off the PolicyGate-guarded intent path.
+        s = SharedState()
+        before = s.cumulative_gain  # cumulative_gain is a core field
+        applied = s.apply_changes(
+            {"current_action": "baseline", "cumulative_gain": 999.0},
+            allow_core=False,
+        )
+        assert applied == {"current_action": "baseline"}
+        assert s.current_action == "baseline"
+        assert s.cumulative_gain == before  # core write dropped
+
+    def test_core_field_written_when_allow_core_true(self):
+        s = SharedState()
+        applied = s.apply_changes({"cumulative_gain": 999.0}, allow_core=True)
+        assert applied == {"cumulative_gain": 999.0}
+        assert s.cumulative_gain == 999.0
+
 
 # kernel-patch identity helpers
 

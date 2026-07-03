@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 
+import pytest
+
 from inference_optimizer import cli
 
 
@@ -38,7 +40,31 @@ def test_shared_state_explore_enabled_defaults_true():
     assert SharedState(session_id="t").explore_enabled is True
 
 
-# Resume write-back — mirror the inline cli.py branch logic.
+# Pre-EXPLORE guard — a resume may only retroactively honour --no-explore while
+# the persisted phase is still upstream of EXPLORE. The list MUST include the
+# legacy "FRAMEWORK" name (pre-rename sessions persisted before commit 33ac6ccc)
+# alongside the current "FRAMEWORK_AGENT"; otherwise those resumes silently keep
+# EXPLORE enabled.
+@pytest.mark.parametrize(
+    "phase,expected",
+    [
+        ("", True),
+        ("PRELUDE", True),
+        ("prelude", True),
+        ("FRAMEWORK", True),  # legacy pre-rename phase name
+        ("framework", True),  # case-insensitive
+        ("FRAMEWORK_AGENT", True),
+        ("EXPLORE", False),
+        ("KERNEL_AGENT", False),
+        ("SWEEP", False),
+        ("CLOSE", False),
+    ],
+)
+def test_resume_can_disable_explore(phase: str, expected: bool) -> None:
+    assert cli._resume_can_disable_explore(phase) is expected
+
+
+# Resume write-back — exercises the real cli guard (no mirrored literals).
 class _ResumeStateStub:
     def __init__(self, *, explore_enabled: bool, phase: str) -> None:
         self.explore_enabled = explore_enabled
@@ -51,14 +77,16 @@ class _ArgsStub:
 
 
 def _apply_resume_writeback(state: _ResumeStateStub, args: _ArgsStub) -> str:
-    """Re-implement the resume-branch logic from cli.py for testing."""
+    """Mirror the resume-branch control flow from cli.py, delegating the actual
+    phase check to the real ``cli._resume_can_disable_explore`` helper so this
+    test cannot drift from production."""
     msg = ""
     if not bool(getattr(state, "explore_enabled", True)):
         args.no_explore = True
         msg = "DISABLED_PERSISTED"
     elif bool(getattr(args, "no_explore", False)):
         cur_phase = (getattr(state, "phase", "") or "").strip().upper()
-        if cur_phase in ("", "PRELUDE", "FRAMEWORK_AGENT"):
+        if cli._resume_can_disable_explore(cur_phase):
             state.explore_enabled = False
             msg = "DISABLING_RESUME"
         else:
@@ -75,6 +103,14 @@ def test_resume_writeback_disables_state_when_prelude_and_flag_passed():
 
 def test_resume_writeback_allows_disable_in_framework():
     state = _ResumeStateStub(explore_enabled=True, phase="FRAMEWORK_AGENT")
+    args = _ArgsStub(no_explore=True)
+    assert _apply_resume_writeback(state, args) == "DISABLING_RESUME"
+    assert state.explore_enabled is False
+
+
+def test_resume_writeback_allows_disable_in_legacy_framework():
+    # Pre-rename sessions persist phase="FRAMEWORK"; --no-explore must still win.
+    state = _ResumeStateStub(explore_enabled=True, phase="FRAMEWORK")
     args = _ArgsStub(no_explore=True)
     assert _apply_resume_writeback(state, args) == "DISABLING_RESUME"
     assert state.explore_enabled is False

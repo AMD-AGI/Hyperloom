@@ -31,29 +31,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
-_ANALYSIS_MD_KEYWORDS = (
-    "analysis.md",
-    "saturated",
-    "comm-bound",
-    "memory-bound",
-    "compute-bound",
-    "efficiency",
-    "Top Operations",
-    "Executive Summary",
-    "Recommendations",
-    "snapshot",
-    "rcclAllreduce",
-    "bottleneck",
+from inference_optimizer.scripts._roofline_audit_common import (
+    ANALYSIS_MD_KEYWORDS,
+    cache_hit_rate,
+    count_analysis_md_references,
+    extract_proposed_flags,
+    flatten_discovered_flag_names,
+    safe_load_state,
 )
-
-_FLAG_PATTERN = re.compile(r"--[a-z][a-z0-9_-]+")
 
 
 # ---------------------------------------------------------------------------
@@ -107,112 +97,6 @@ class AuditReport:
     cache_read_input_tokens: int = 0
 
 
-def _safe_load_state(session_dir: Path) -> dict[str, Any] | None:
-    """Load ``state.json`` from a session directory if present and valid.
-
-    Args:
-        session_dir (Path): Session directory expected to contain
-            ``state.json``.
-
-    Returns:
-        dict[str, Any] | None: Parsed state mapping, or ``None`` when missing
-        or unreadable.
-    """
-    p = session_dir / "state.json"
-    if not p.is_file():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
-
-def _flatten_discovered_flag_names(state: dict[str, Any]) -> set[str]:
-    """Collect every discovered flag name across all frameworks.
-
-    Walks ``discovered_flags[framework].{backend_flags,param_flags}`` and
-    unions the flag names.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json`` mapping.
-
-    Returns:
-        set[str]: Set of discovered flag names; empty when none are present.
-    """
-    discovered = state.get("discovered_flags") or {}
-    names: set[str] = set()
-    if not isinstance(discovered, dict):
-        return names
-    for entry in discovered.values():
-        if not isinstance(entry, dict):
-            continue
-        for key in ("backend_flags", "param_flags"):
-            lst = entry.get(key) or []
-            if isinstance(lst, (list, tuple)):
-                names.update(str(f) for f in lst if f)
-    return names
-
-
-def _extract_proposed_flag_names(state: dict[str, Any]) -> list[str]:
-    """Pull every ``--flag-name`` proposed across explore variants.
-
-    Scans ``explore_attempts`` and ``explore_search.tested`` entries for
-    ``extra_server_args`` strings and extracts flag tokens.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json`` mapping.
-
-    Returns:
-        list[str]: Proposed flag names; may contain duplicates.
-    """
-    found: list[str] = []
-    attempts = state.get("explore_attempts") or []
-    if isinstance(attempts, list):
-        for entry in attempts:
-            if not isinstance(entry, dict):
-                continue
-            args = str(entry.get("extra_server_args") or "")
-            if args:
-                found.extend(_FLAG_PATTERN.findall(args))
-    sub = state.get("explore_search") or {}
-    tested = sub.get("tested") if isinstance(sub, dict) else None
-    if isinstance(tested, dict):
-        for snap in tested.values():
-            if isinstance(snap, dict):
-                args = str(snap.get("extra_server_args") or "")
-                if args:
-                    found.extend(_FLAG_PATTERN.findall(args))
-    return found
-
-
-def _count_analysis_md_references(state: dict[str, Any]) -> int:
-    """Count prune reasons and explore notes grounded on analysis.md.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json`` mapping.
-
-    Returns:
-        int: Number of ``pruned_families`` reasons plus ``explore_attempts``
-        notes that contain at least one analysis.md grounding keyword.
-    """
-    count = 0
-    pruned = state.get("pruned_families") or []
-    if isinstance(pruned, list):
-        for entry in pruned:
-            if isinstance(entry, dict):
-                reason = str(entry.get("reason") or "").lower()
-                if any(kw.lower() in reason for kw in _ANALYSIS_MD_KEYWORDS):
-                    count += 1
-    attempts = state.get("explore_attempts") or []
-    if isinstance(attempts, list):
-        for entry in attempts:
-            if isinstance(entry, dict):
-                notes = str(entry.get("notes") or "").lower()
-                if any(kw.lower() in notes for kw in _ANALYSIS_MD_KEYWORDS):
-                    count += 1
-    return count
-
-
 def extract(session_dir: Path) -> AuditReport:
     """Read a session directory and build its decision-quality audit.
 
@@ -227,7 +111,7 @@ def extract(session_dir: Path) -> AuditReport:
         AuditReport: Populated audit report for the session.
     """
     r = AuditReport(session_dir=session_dir)
-    state = _safe_load_state(session_dir)
+    state = safe_load_state(session_dir)
     if state is None:
         r.error = f"state.json not found / unreadable at {session_dir}"
         return r
@@ -251,13 +135,13 @@ def extract(session_dir: Path) -> AuditReport:
     if isinstance(pruned, list):
         r.pruned_families_raw = [p for p in pruned if isinstance(p, dict)]
 
-    r.discovered_flag_names = _flatten_discovered_flag_names(state)
-    r.proposed_flag_names = _extract_proposed_flag_names(state)
+    r.discovered_flag_names = flatten_discovered_flag_names(state)
+    r.proposed_flag_names = extract_proposed_flags(state)
     if r.discovered_flag_names:
         r.hallucinated_flag_names = {f for f in r.proposed_flag_names if f not in r.discovered_flag_names}
         proposed_set = set(r.proposed_flag_names)
         r.untested_flag_names = r.discovered_flag_names - proposed_set
-    r.analysis_md_referenced_count = _count_analysis_md_references(state)
+    r.analysis_md_referenced_count = count_analysis_md_references(state)
 
     cache_metrics = state.get("tick_cache_metrics") or {}
     if isinstance(cache_metrics, dict):
@@ -269,22 +153,6 @@ def extract(session_dir: Path) -> AuditReport:
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
-def _cache_hit_rate(r: AuditReport) -> float:
-    """Compute the prompt-cache read hit rate for an audit report.
-
-    Args:
-        r (AuditReport): Audit report carrying cache token counters.
-
-    Returns:
-        float: ``cache_read / (cache_creation + cache_read)`` in [0, 1], or
-        ``0.0`` when no cache tokens were recorded.
-    """
-    total = r.cache_creation_input_tokens + r.cache_read_input_tokens
-    if total <= 0:
-        return 0.0
-    return r.cache_read_input_tokens / total
-
-
 def _format_roofline_timeline(attempts: list[dict[str, Any]]) -> str:
     """Render roofline action attempts as an indented text table.
 
@@ -327,7 +195,7 @@ def _format_pruned_families(pruned: list[dict[str, Any]]) -> str:
         fam = str(entry.get("family") or "?")
         source = str(entry.get("source") or "?")
         reason = str(entry.get("reason") or "")
-        grounded = any(kw.lower() in reason.lower() for kw in _ANALYSIS_MD_KEYWORDS)
+        grounded = any(kw.lower() in reason.lower() for kw in ANALYSIS_MD_KEYWORDS)
         tag = "yes" if grounded else "no"
         # Truncate reason to 100 chars for readability
         reason_short = reason if len(reason) <= 100 else reason[:97] + "..."
@@ -392,7 +260,7 @@ def render(r: AuditReport) -> str:
     out.append(_format_flag_audit(r))
     out.append("")
     out.append("  --- decision quality criteria (§10.3) ---")
-    cache = _cache_hit_rate(r)
+    cache = cache_hit_rate(r)
     quality: list[tuple[str, bool, str]] = [
         (
             "cache_hit_rate ≥ 50%",
@@ -475,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
             "analysis_md_referenced_count": report.analysis_md_referenced_count,
             "cache_creation_input_tokens": report.cache_creation_input_tokens,
             "cache_read_input_tokens": report.cache_read_input_tokens,
-            "cache_hit_rate": _cache_hit_rate(report),
+            "cache_hit_rate": cache_hit_rate(report),
         }
         print(json.dumps(payload, indent=2, default=str))
     else:
