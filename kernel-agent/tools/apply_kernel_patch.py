@@ -581,6 +581,32 @@ def _contained_dest(repo_root: Path, rel_path: str) -> Path:
     return dest
 
 
+def _within_root(path: Path, root: Path) -> bool:
+    """Return True when ``path`` (symlinks resolved) stays inside ``root``.
+
+    Args:
+        path (Path): candidate path (need not exist).
+        root (Path): the containment root.
+
+    Returns:
+        bool: True when the resolved ``path`` equals or is nested under the
+            resolved ``root``; False on any resolution error or escape.
+    """
+    try:
+        p = path.resolve()
+        r = root.resolve()
+    except (OSError, RuntimeError):
+        return False
+    try:
+        return p == r or p.is_relative_to(r)
+    except AttributeError:  # pragma: no cover — Python <3.9
+        try:
+            p.relative_to(r)
+            return True
+        except ValueError:
+            return False
+
+
 def apply_snapshot(
     *,
     descriptors: list[dict[str, Any]],
@@ -859,6 +885,14 @@ def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]
     backup_path = Path(jit_build_backup.get("backup_path", ""))
     if not src or not backup_path:
         return {"status": "skipped", "reason": "incomplete backup record"}
+    # The manifest is untrusted at revert time; ``src`` is an ``rmtree`` target.
+    # Only the importable aiter jit/build dir is a legitimate destination.
+    expected = _aiter_jit_build_dir()
+    if expected is None or not _within_root(src, expected):
+        return {
+            "status": "skipped",
+            "reason": f"jit/build src {src} is not the importable aiter jit/build dir",
+        }
     if not backup_path.exists():
         return {
             "status": "skipped",
@@ -1120,11 +1154,16 @@ def _restore_aiter_cpp_itfs_cache(cache_backup: dict[str, Any]) -> dict[str, Any
     moved = cache_backup.get("moved") or []
     if not moved:
         return {"status": "skipped", "reason": "nothing was moved"}
+    # ``src`` is an ``rmtree`` target read from an untrusted manifest; only the
+    # aiter cpp_itfs runtime build dir is a legitimate restore location.
+    build_dir = _aiter_cpp_itfs_build_dir()
     restored: list[str] = []
     for entry in moved:
         src = Path(entry.get("src", ""))  # original cache location
         backup_path = Path(entry.get("backup_path", ""))
         if not str(src) or not str(backup_path) or not backup_path.exists():
+            continue
+        if not _within_root(src, build_dir):
             continue
         if src.exists():
             try:

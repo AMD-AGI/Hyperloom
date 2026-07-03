@@ -247,13 +247,17 @@ def test_invalidate_refuses_to_clobber_existing_backup(
 # ---------------------------------------------------------------------------
 # _restore_aiter_cpp_itfs_cache
 # ---------------------------------------------------------------------------
-def test_restore_round_trip(apply_tool, tmp_path: Path) -> None:
+def test_restore_round_trip(apply_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pa_dir = tmp_path / "aiter" / "csrc" / "cpp_itfs" / "pa"
     pa_dir.mkdir(parents=True)
     target = pa_dir / "pa_kernels.cuh"
     target.write_text("// fake\n")
     (pa_dir / "pa_ragged.py").write_text('MD_NAME = "pa_ragged"\n')
 
+    # Restore now requires each recorded src to live under the resolved aiter
+    # cpp_itfs build dir (blocks a forged manifest redirecting the rmtree), so
+    # point $AITER_ROOT_DIR at the synthetic root: build dir == tmp_path/build.
+    monkeypatch.setenv("AITER_ROOT_DIR", str(tmp_path))
     build_dir = tmp_path / "build"
     _make_cache_dir(build_dir, "pa_ragged_HASHA", b"v0")
 
