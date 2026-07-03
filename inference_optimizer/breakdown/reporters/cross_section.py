@@ -263,14 +263,24 @@ def _headline(breakdown: dict[str, Any]) -> str:
         str: A line such as ``"baseline X → final Y tok/s/gpu = +Z% validated
             gain"``, or a fallback message when validated throughput is missing.
     """
+    from ... import framework_registry
+
+    fw = (breakdown.get("workload") or {}).get("framework_name")
     b = (breakdown.get("baseline") or {}).get("throughput_tok_s_per_gpu")
     f = (breakdown.get("final") or {}).get("throughput_tok_s_per_gpu")
     g = (breakdown.get("final") or {}).get("cumulative_gain_pct_validated")
     if b and f and g is not None:
         sign = "+" if g > 0 else ""
-        return f"baseline {b:.2f} → final {f:.2f} tok/s/gpu = {sign}{g:.2f}% validated gain"
+        return (
+            f"baseline {framework_registry.format_primary_metric(fw, b, precision=2)} → "
+            f"final {framework_registry.format_primary_metric(fw, f, precision=2)} "
+            f"= {sign}{g:.2f}% validated gain"
+        )
     if b and not f:
-        return f"baseline {b:.2f} tok/s/gpu (no validated final)"
+        return (
+            f"baseline {framework_registry.format_primary_metric(fw, b, precision=2)} "
+            "(no validated final)"
+        )
     return "no validated throughput recorded"
 
 
