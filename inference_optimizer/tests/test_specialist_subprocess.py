@@ -20,6 +20,8 @@ from typing import Any
 
 import pytest
 
+from .conftest import init_git_repo
+
 from inference_optimizer.orchestrator.specialist_runner import (
     DEFAULT_SPECIALIST_TOOLS,
     SPECIALIST_TOOL_DENYLIST,
@@ -36,34 +38,6 @@ from inference_optimizer.orchestrator.task_registry import Task
 
 
 # Fixtures
-def _init_git_repo(path: Path) -> None:
-    """Initialise a minimal git repo with one commit so ``git worktree add`` can branch off it."""
-    path.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["GIT_AUTHOR_NAME"] = "PR-A2 Test"
-    env["GIT_AUTHOR_EMAIL"] = "pr-a2@test.local"
-    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
-    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
-    subprocess.run(
-        ["git", "init", "-b", "main", str(path)],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    (path / "README.md").write_text("# pr-a2 test repo\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(path), "add", "."],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", "init"],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-
 
 def _make_fake_claude(
     bin_dir: Path,
@@ -215,7 +189,7 @@ exit 3
 @pytest.fixture
 def fake_framework_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     return repo
 
 

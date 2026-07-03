@@ -5196,49 +5196,34 @@ def _build_parser() -> argparse.ArgumentParser:
     # measured runtime and the anchor are both the warm client-only phase (apples-to-apples) and
     # one-time cold-boot / aiter recompile no longer trips the kill.
     # 0 disables (legacy variant_timeout_sec hard cap still applies); overtime kills skip stack rebench.
-    def _env_float_or(default: float, env_var: str) -> float:
-        """Resolve a float CLI default from an environment variable.
+    def _env_num_or(default, env_var: str, cast):
+        """Resolve a numeric CLI default from an environment variable.
 
         Args:
-            default (float): Value to use when the variable is unset or invalid.
+            default: Value to use when the variable is unset or invalid.
             env_var (str): The environment variable name to read.
+            cast: The numeric constructor to apply (``float`` or ``int``).
 
         Returns:
-            float: The parsed env value, or ``default`` on absence / parse error.
+            The parsed env value cast via ``cast``, or ``cast(default)`` on
+            absence / parse error.
         """
         raw = os.environ.get(env_var, "").strip()
         if not raw:
-            return float(default)
+            return cast(default)
         try:
-            return float(raw)
+            return cast(raw)
         except (TypeError, ValueError):
-            return float(default)
-
-    def _env_int_or(default: int, env_var: str) -> int:
-        """Resolve an int CLI default from an environment variable.
-
-        Args:
-            default (int): Value to use when the variable is unset or invalid.
-            env_var (str): The environment variable name to read.
-
-        Returns:
-            int: The parsed env value, or ``default`` on absence / parse error.
-        """
-        raw = os.environ.get(env_var, "").strip()
-        if not raw:
-            return int(default)
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return int(default)
+            return cast(default)
 
     opt.add_argument(
         "--explore-overtime-kill-ratio",
         dest="explore_overtime_kill_ratio",
         type=float,
-        default=_env_float_or(
+        default=_env_num_or(
             2.0,
             "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO",
+            float,
         ),
         help="Per-variant explore overtime kill: each single-variant "
         "Magpie run in the explore loop is reaped once its "
@@ -5260,9 +5245,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--explore-variant-timeout-sec",
         dest="explore_variant_timeout_sec",
         type=int,
-        default=_env_int_or(
+        default=_env_num_or(
             0,
             "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC",
+            int,
         ),
         help="Pin the per-variant hard timeout (seconds) inside the "
         "EXPLORE phase. ``0`` (default) auto-derives from "
@@ -5276,9 +5262,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--explore-variant-timeout-safety-margin",
         dest="explore_variant_timeout_safety_margin",
         type=float,
-        default=_env_float_or(
+        default=_env_num_or(
             0.5,
             "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN",
+            float,
         ),
         help="Headroom (as a fraction of baseline_runtime_sec) added on "
         "top of --explore-overtime-kill-ratio when the EXPLORE hard "

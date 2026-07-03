@@ -6,9 +6,12 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from inference_optimizer.paths import make_session_dir
 
 
 @pytest.fixture(autouse=True)
@@ -60,3 +63,56 @@ def seed_target_analysis_marker(session_dir: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+@pytest.fixture
+def session_dir(tmp_path, monkeypatch) -> Path:
+    """A fresh session dir under an isolated ``USER_DATA_PATH``, seeded with the
+    ``no_target_gpu_configured`` target-analysis marker.
+
+    Shared across the test package; individual modules may still shadow it with
+    a local fixture when they need different seeding.
+    """
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    sd = make_session_dir()
+    seed_target_analysis_marker(sd)
+    return sd
+
+
+def init_git_repo(
+    path: Path,
+    *,
+    seed_file: str = "src.py",
+    seed_text: str = "def f():\n    return 1\n",
+) -> None:
+    """Initialise a minimal git repo with one commit under ``path``.
+
+    Seeds a single tracked file and commits it so ``git worktree add`` and
+    patch application have a base commit to branch from. A fixed non-interactive
+    author identity is used (tests do not assert on it).
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["GIT_AUTHOR_NAME"] = "Hyperloom Test"
+    env["GIT_AUTHOR_EMAIL"] = "hyperloom@test.local"
+    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
+    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    (path / seed_file).write_text(seed_text, encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(path), "add", "."],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "-m", "init"],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
