@@ -445,11 +445,6 @@ class OpResolver:
             ))
         return out
 
-    @classmethod
-    def _container_sources(cls, container: dict[str, Any] | None) -> list[str]:
-        """Editable, patchable source paths for one container (dedup, order-preserving)."""
-        return [m[0] for m in cls._container_source_meta(container)]
-
     def _select_source_meta(
         self, entry: dict[str, Any], framework: str | None,
     ) -> list[tuple[str, str, str]]:
@@ -3625,22 +3620,6 @@ def _resolve_other_bucket_min_gpu_pct() -> float:
         if val is not None and val >= 0:
             return val
     return _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT
-
-
-def _is_other_like_category(category: str) -> bool:
-    """Return whether a category counts as the ``other`` bucket.
-
-    Args:
-        category: Raw or upstream category label.
-
-    Returns:
-        ``True`` if the label (or its normalized upstream form) is an
-        other-like category.
-    """
-    raw_l = str(category or "").strip().lower()
-    if raw_l in _OTHER_LIKE_CATEGORIES:
-        return True
-    return str(normalize_upstream_category(category or "")).strip().lower() in _OTHER_LIKE_CATEGORIES
 
 
 def recover_other_bucket_candidates(

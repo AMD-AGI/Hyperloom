@@ -933,22 +933,6 @@ def _shape_case_from_value(
     }
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Coerce a TraceLens numeric field, returning ``default`` on drift.
-
-    Args:
-        value: The value to coerce to ``float``.
-        default: Fallback returned when ``value`` cannot be parsed.
-
-    Returns:
-        The parsed float, or ``default`` on any failure.
-    """
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, Any]:
     """Expose primary/supplementary serving shapes in machine-readable form.
 
@@ -2888,27 +2872,6 @@ def _forge_output_dir(session_id: str, prompt_file: Path) -> Path:
     return out
 
 
-def _mirror_path_link(run_dir: Path, mirror: Path) -> None:
-    """Create a relative symlink inside the run dir pointing at the mirror.
-
-    Best-effort: failures (unsupported filesystem, existing link) are
-    swallowed so artifact mirroring never breaks a run.
-
-    Args:
-        run_dir (Path): The run directory the symlink is created under.
-        mirror (Path): The target directory the symlink should point at.
-    """
-    try:
-        link_dir = run_dir / mirror.parent.name  # geak / oob
-        link_dir.mkdir(parents=True, exist_ok=True)
-        link = link_dir / mirror.name
-        if link.exists() or link.is_symlink():
-            return
-        link.symlink_to(mirror, target_is_directory=True)
-    except OSError:
-        pass
-
-
 def _git_checkout_fallback(kernel_repo: str, log_path: Path) -> None:
     """Run a best-effort ``git checkout -- .`` to undo rogue agent writes.
 
@@ -3248,23 +3211,6 @@ def invoke_backend(
         # dirty-file state that forge just carefully restored.
         if log_path is not None and backend != "forge":
             _git_checkout_fallback(kernel_repo, log_path)
-
-
-def env_first(*names: str) -> str:
-    """Return the first non-empty environment variable among ``names``.
-
-    Args:
-        *names (str): Environment variable names to check, in priority order.
-
-    Returns:
-        str: The value of the first set, non-empty variable, or an empty
-            string when none are set.
-    """
-    for name in names:
-        value = os.environ.get(name)
-        if value:
-            return value
-    return ""
 
 
 def run_attempt(
