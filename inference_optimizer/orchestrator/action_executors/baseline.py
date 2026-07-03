@@ -2070,10 +2070,12 @@ class BaselineExecutor:
         else:
             log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))
 
+        from ... import framework_registry
+
         log.info(
-            "baseline_executor: %s tput=%.1f tok/s/gpu (output) e2el=%.1fms",
+            "baseline_executor: %s %s (output) e2el=%.1fms",
             "success_with_warning" if warnings else "success",
-            result["output_throughput"] or 0.0,
+            framework_registry.format_primary_metric(eval_framework, result["output_throughput"]),
             result["e2el_mean_ms"] or 0.0,
         )
         return result
