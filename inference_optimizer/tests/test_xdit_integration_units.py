@@ -68,6 +68,17 @@ class TestFormatPrimaryMetric:
     def test_unknown_framework_defaults_to_serving_label(self):
         assert fr.format_primary_metric("rust-burn", 10.0) == "10.0 tok/s/GPU"
 
+    def test_none_or_empty_framework_falls_back_to_serving(self):
+        # A None/empty framework (partial state, missing attr) must not crash
+        # and defaults to the serving unit.
+        assert fr.primary_metric_unit(None) == "tok/s/GPU"
+        assert fr.primary_metric_unit("") == "tok/s/GPU"
+        assert fr.primary_metric_value(None, 12.0) == 12.0
+        assert fr.format_primary_metric(None, 12.0) == "12.0 tok/s/GPU"
+        assert fr.format_primary_metric("", 12.0) == "12.0 tok/s/GPU"
+        # None/0 throughput must not raise on the serving path.
+        assert fr.format_primary_metric(None, None) == "0.0 tok/s/GPU"
+
 
 class TestServerArgsEnvName:
     def test_exact(self):
