@@ -332,6 +332,7 @@ def _fp8_is_block_scale(model_path: str) -> bool:
 
 _MLA_KEYS = ("kv_lora_rank", "qk_rope_head_dim", "qk_nope_head_dim", "q_lora_rank")
 _MOE_EXPERT_KEYS = ("num_experts", "n_routed_experts", "num_local_experts")
+_SHARED_EXPERT_KEYS = ("n_shared_experts", "num_shared_experts", "moe_num_shared_experts")
 # Nested text-tower config keys used by multimodal wrappers (priority order).
 _TEXT_SCOPE_KEYS = ("text_config", "llm_config", "language_config")
 # Base-family tokens for derived/hybrid model_types (longest first).
@@ -530,6 +531,25 @@ def summarize_model_config(model_path: str) -> dict:
         out["num_experts"] = num_experts
     if experts_per_tok > 0:
         out["num_experts_per_tok"] = experts_per_tok
+
+    # Shared-expert detection: only emit when is_moe is also true to avoid
+    # false positives on non-MoE models that happen to carry shared-looking keys.
+    if out["is_moe"]:
+        num_shared = 0
+        for k in _SHARED_EXPERT_KEYS:
+            ns = _to_int(cfg.get(k))
+            if ns:
+                num_shared = ns
+                break
+        shared_evidence = (
+            num_shared > 0
+            or bool(cfg.get("shared_expert_intermediate_size"))
+            or bool(cfg.get("shared_experts"))
+        )
+        if shared_evidence:
+            out["has_shared_expert"] = True
+            if num_shared > 0:
+                out["num_shared_experts"] = num_shared
 
     quant = _derive_quantization(cfg)
     if quant:

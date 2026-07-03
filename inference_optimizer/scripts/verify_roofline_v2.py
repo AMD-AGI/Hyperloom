@@ -27,12 +27,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from inference_optimizer.scripts._roofline_audit_common import (
+    ANALYSIS_MD_KEYWORDS,
+    cache_hit_rate,
+    count_analysis_md_references,
+    extract_proposed_flags,
+    flatten_discovered_flag_names,
+    safe_load_state,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -70,45 +78,6 @@ class SessionMetrics:
     hallucinated_flag_count: int = 0
     discovered_flag_names: set[str] = field(default_factory=set)
     prune_branch_count_orchestration: int = 0
-
-
-# Keywords the LLM is likely to quote from analysis.md when grounding
-# a PRUNE_BRANCH reason or propose-action note. The LLM is instructed
-# to quote the report; we count how often that happened.
-_ANALYSIS_MD_KEYWORDS = (
-    "analysis.md",
-    "saturated",
-    "comm-bound",
-    "memory-bound",
-    "compute-bound",
-    "efficiency",
-    "Top Operations",
-    "Executive Summary",
-    "Recommendations",
-    "snapshot",
-    "rcclAllreduce",
-    "bottleneck",
-)
-
-
-def _safe_load_state(session_dir: Path) -> dict[str, Any] | None:
-    """Load ``state.json`` from a session directory if present and valid.
-
-    Args:
-        session_dir (Path): Hyperloom session directory expected to contain
-            a ``state.json`` file.
-
-    Returns:
-        dict[str, Any] | None: Parsed JSON state mapping, or ``None`` when the
-        file is missing or cannot be read/parsed as JSON.
-    """
-    p = session_dir / "state.json"
-    if not p.is_file():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -182,69 +151,6 @@ def _count_action_attempts(state: dict[str, Any], action: str) -> int:
     return len(attempts) if isinstance(attempts, list) else 0
 
 
-def _flatten_discovered_flag_names(state: dict[str, Any]) -> set[str]:
-    """Collect every discovered flag name across all frameworks.
-
-    Walks ``discovered_flags[framework].{backend_flags,param_flags}`` and
-    unions the flag names into a single set.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json`` mapping.
-
-    Returns:
-        set[str]: Set of discovered flag names; empty when none are present.
-    """
-    discovered = state.get("discovered_flags") or {}
-    names: set[str] = set()
-    if not isinstance(discovered, dict):
-        return names
-    for entry in discovered.values():
-        if not isinstance(entry, dict):
-            continue
-        for key in ("backend_flags", "param_flags"):
-            lst = entry.get(key) or []
-            if isinstance(lst, (list, tuple)):
-                names.update(str(f) for f in lst if f)
-    return names
-
-
-_FLAG_PATTERN = re.compile(r"--[a-z][a-z0-9_-]+")
-
-
-def _extract_proposed_flags(state: dict[str, Any]) -> list[str]:
-    """Pull every ``--flag-name`` proposed across explore variants.
-
-    Scans ``explore_attempts`` and ``explore_search.tested`` entries for
-    ``extra_server_args`` strings and extracts flag tokens from each.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json`` mapping.
-
-    Returns:
-        list[str]: Flag names proposed by the LLM; may contain duplicates.
-    """
-    found: list[str] = []
-    attempts = state.get("explore_attempts") or []
-    if isinstance(attempts, list):
-        for entry in attempts:
-            if not isinstance(entry, dict):
-                continue
-            args = str(entry.get("extra_server_args") or "")
-            if args:
-                found.extend(_FLAG_PATTERN.findall(args))
-    # Also walk explore_search.tested for fingerprints that may not
-    # have ended up in attempts (idempotency short-circuits).
-    sub = state.get("explore_search") or {}
-    tested = sub.get("tested") if isinstance(sub, dict) else None
-    if isinstance(tested, dict):
-        for snap in tested.values():
-            if isinstance(snap, dict):
-                args = str(snap.get("extra_server_args") or "")
-                if args:
-                    found.extend(_FLAG_PATTERN.findall(args))
-    return found
-
-
 def _count_orchestration_prune_branch(state: dict[str, Any]) -> int:
     """Count `pruned_families` entries with source="orchestration".
 
@@ -270,46 +176,6 @@ def _count_orchestration_prune_branch(state: dict[str, Any]) -> int:
     return count
 
 
-def _count_analysis_md_references(state: dict[str, Any]) -> int:
-    """Scan PRUNE_BRANCH reasons + propose-action notes for keywords
-    that indicate the LLM grounded its decision on the cached
-    analysis.md (per §8.7 orchestration.md guidance).
-
-    Sources:
-    * `pruned_families[*].reason` (orchestration-sourced)
-    * `attempts_history` entries' `notes` field (when present)
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json`` mapping.
-
-    Returns:
-        int: Count of reason/notes strings that contain at least one
-        analysis.md grounding keyword.
-    """
-    count = 0
-    pruned = state.get("pruned_families") or []
-    if isinstance(pruned, list):
-        for entry in pruned:
-            if not isinstance(entry, dict):
-                continue
-            reason = str(entry.get("reason") or "")
-            for kw in _ANALYSIS_MD_KEYWORDS:
-                if kw.lower() in reason.lower():
-                    count += 1
-                    break
-    attempts = state.get("explore_attempts") or []
-    if isinstance(attempts, list):
-        for entry in attempts:
-            if not isinstance(entry, dict):
-                continue
-            notes = str(entry.get("notes") or "")
-            for kw in _ANALYSIS_MD_KEYWORDS:
-                if kw.lower() in notes.lower():
-                    count += 1
-                    break
-    return count
-
-
 def extract(session_dir: Path) -> SessionMetrics:
     """Read a session directory and derive its comparison metrics.
 
@@ -325,7 +191,7 @@ def extract(session_dir: Path) -> SessionMetrics:
         SessionMetrics: Populated metrics for the session.
     """
     m = SessionMetrics(session_dir=session_dir)
-    state = _safe_load_state(session_dir)
+    state = safe_load_state(session_dir)
     if state is None:
         m.error = f"state.json not found / unreadable at {session_dir}"
         return m
@@ -357,11 +223,11 @@ def extract(session_dir: Path) -> SessionMetrics:
         m.analysis_md_text = str(cached_ta.get("analysis_md_text") or "")
 
     # Decision quality
-    m.discovered_flag_names = _flatten_discovered_flag_names(state)
-    proposed = _extract_proposed_flags(state)
+    m.discovered_flag_names = flatten_discovered_flag_names(state)
+    proposed = extract_proposed_flags(state)
     if m.discovered_flag_names:
         m.hallucinated_flag_count = sum(1 for f in proposed if f not in m.discovered_flag_names)
-    m.analysis_md_referenced_count = _count_analysis_md_references(state)
+    m.analysis_md_referenced_count = count_analysis_md_references(state)
 
     # Cache metrics — the backend surfaces these to backend.calls
     # per-call. Coordinator does not aggregate to SharedState. For now
@@ -379,22 +245,6 @@ def extract(session_dir: Path) -> SessionMetrics:
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
-def _cache_hit_rate(m: SessionMetrics) -> float:
-    """Compute the prompt-cache read hit rate for a session.
-
-    Args:
-        m (SessionMetrics): Session metrics carrying cache token counters.
-
-    Returns:
-        float: ``cache_read / (cache_creation + cache_read)`` in [0, 1], or
-        ``0.0`` when no cache tokens were recorded.
-    """
-    total = m.cache_creation_input_tokens + m.cache_read_input_tokens
-    if total <= 0:
-        return 0.0
-    return m.cache_read_input_tokens / total
-
-
 def _format_action_seq(stack: list[dict[str, Any]]) -> str:
     """Render an optimization stack as a compact ``kind:variant`` sequence.
 
@@ -432,8 +282,8 @@ def render(baseline: SessionMetrics, exp: SessionMetrics) -> str:
     """
     delta_gain = exp.cumulative_gain_validated_pct - baseline.cumulative_gain_validated_pct
     delta_wall = exp.wall_clock_min - baseline.wall_clock_min
-    exp_cache = _cache_hit_rate(exp)
-    base_cache = _cache_hit_rate(baseline)
+    exp_cache = cache_hit_rate(exp)
+    base_cache = cache_hit_rate(baseline)
 
     out: list[str] = []
     out.append("=" * 72)
@@ -630,14 +480,14 @@ def main(argv: list[str] | None = None) -> int:
                 "cumulative_gain_validated_pct": baseline.cumulative_gain_validated_pct,
                 "wall_clock_min": baseline.wall_clock_min,
                 "roofline_action_count": baseline.roofline_action_count,
-                "cache_hit_rate": _cache_hit_rate(baseline),
+                "cache_hit_rate": cache_hit_rate(baseline),
             },
             "exp": {
                 "session_dir": str(exp.session_dir),
                 "cumulative_gain_validated_pct": exp.cumulative_gain_validated_pct,
                 "wall_clock_min": exp.wall_clock_min,
                 "roofline_action_count": exp.roofline_action_count,
-                "cache_hit_rate": _cache_hit_rate(exp),
+                "cache_hit_rate": cache_hit_rate(exp),
                 "analysis_md_referenced_count": exp.analysis_md_referenced_count,
                 "hallucinated_flag_count": exp.hallucinated_flag_count,
                 "snapshot_id": exp.snapshot_id,

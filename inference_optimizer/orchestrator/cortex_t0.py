@@ -935,7 +935,13 @@ def run_t0_anchor(
     # Backfill operator-tracing metadata; T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
     _extra: Mapping[str, Any] = extra_attrs if isinstance(extra_attrs, Mapping) else {}
     _model_class = str(_extra.get("model_class") or "").strip()
-    _framework = str(_extra.get("framework_name") or "").strip()
+    _framework = str(
+        _extra.get("framework_name")
+        or _extra.get("framework")
+        or getattr(shared_state, "framework", "")
+        or os.environ.get("FRAMEWORK", "")
+        or ""
+    ).strip()
     _precision = str(getattr(shared_state, "precision", "") or "").strip()
     fp: Mapping[str, Any] = stack_fingerprint if isinstance(stack_fingerprint, Mapping) else {}
     # framework_version: SharedState > stack_fingerprint > importlib auto-detect.
