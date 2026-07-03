@@ -5,8 +5,6 @@
 > (`README.md`, `inference_optimizer/SKILL.md`, `kernel-agent/SKILL.md`,
 > `robustness-agent/SKILL.md`) appears to contradict this page, this page
 > wins. Please open an issue against the contradicting file.
->
-> 中文版：[ENV_AND_AUTH.zh-CN.md](ENV_AND_AUTH.zh-CN.md)
 
 Hyperloom needs at most three classes of configuration:
 
