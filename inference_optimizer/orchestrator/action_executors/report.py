@@ -372,7 +372,7 @@ def _build_summary_dict(
         "model_name": state.model_name,
         "model_path": state.model_path,
         "model_class": state.model_class,
-        "framework": state.framework,
+        "framework": getattr(state, "framework", "") or "",
         "stop_reason": state.stop_reason,
         "baseline_tput": state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
