@@ -360,7 +360,7 @@ def _print_final_summary(
     from . import framework_registry
 
     print(
-        f"  baseline             : {framework_registry.format_primary_metric(state.framework, state.baseline_tput)}"
+        f"  baseline             : {framework_registry.format_primary_metric(getattr(state, 'framework', ''), state.baseline_tput)}"
     )
     if session_dir is not None and stop_reason == "baseline_failed":
         failure_summary = _read_failure_summary(session_dir)
