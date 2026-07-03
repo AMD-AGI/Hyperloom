@@ -862,10 +862,21 @@ def write_minimal_final_report(
         )[:600]
         return f"- **{label}** (`{ts}`): `{body}`"
 
+    from .. import framework_registry
+
     current_best = state.current_best or {}
     cb_action = current_best.get("action") or "-"
     cb_tput = current_best.get("tput")
-    cb_tput_s = f"{cb_tput:.2f}" if isinstance(cb_tput, (int, float)) else "-"
+    # Framework-aware primary metric: serving shows tok/s/GPU, scriptable xDiT
+    # shows the equivalent per-image latency e2el_mean_ms (ms).
+    baseline_metric_s = framework_registry.format_primary_metric(
+        state.framework, state.baseline_tput, precision=2
+    )
+    cb_metric_s = (
+        framework_registry.format_primary_metric(state.framework, cb_tput, precision=2)
+        if isinstance(cb_tput, (int, float))
+        else "-"
+    )
     last_sweep = state.last_sweep or {}
     if last_sweep:
         sw_grid = last_sweep.get("grid_size", 0)
@@ -890,8 +901,8 @@ def write_minimal_final_report(
         f"- gpu_type       : `{state.gpu_type or '-'}`",
         f"- phase (last)   : `{state.phase or '-'}`",
         f"- stop_reason    : `{state.stop_reason or '-'}`",
-        f"- baseline_tput  : `{state.baseline_tput:.2f}`",
-        f"- current_best   : `{cb_action}` @ `{cb_tput_s}` tok/s",
+        f"- baseline       : `{baseline_metric_s}`",
+        f"- current_best   : `{cb_action}` @ `{cb_metric_s}`",
         f"- cumul_gain     : `{state.cumulative_gain:.2f}%` (validated `{state.cumulative_gain_validated:.2f}%`)",
         f"- stack_entries  : `{len(state.optimization_stack or [])}`",
         f"- sweep summary  : {sw_line}",
