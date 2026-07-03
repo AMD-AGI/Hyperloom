@@ -83,40 +83,22 @@ def _read_bool_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _read_int_env(name: str, default: int) -> int:
-    """Read an integer environment variable, falling back on errors.
+def _read_num_env(name: str, default, cast):
+    """Read a numeric environment variable, falling back on errors.
 
     Args:
         name (str): The environment variable name.
-        default (int): Value returned when unset, blank or unparsable.
+        default: Value returned when unset, blank or unparsable.
+        cast: Numeric constructor to apply (``int`` or ``float``).
 
     Returns:
-        int: The parsed integer, or ``default``.
+        The value parsed via ``cast``, or ``default``.
     """
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return default
     try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def _read_float_env(name: str, default: float) -> float:
-    """Read a float environment variable, falling back on errors.
-
-    Args:
-        name (str): The environment variable name.
-        default (float): Value returned when unset, blank or unparsable.
-
-    Returns:
-        float: The parsed float, or ``default``.
-    """
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        return float(raw)
+        return cast(raw)
     except ValueError:
         return default
 
@@ -190,9 +172,9 @@ class KBWriter:
         self.read_enabled = _read_bool_env("KB_READ_ENABLED", True)
         self._time_fn = time_fn
 
-        self._breaker_threshold = max(1, _read_int_env("CRITIC_KB_BREAKER_THRESHOLD", _DEFAULT_BREAKER_THRESHOLD))
+        self._breaker_threshold = max(1, _read_num_env("CRITIC_KB_BREAKER_THRESHOLD", _DEFAULT_BREAKER_THRESHOLD, int))
         self._breaker_cooldown = max(
-            0.0, _read_float_env("CRITIC_KB_BREAKER_COOLDOWN_SECONDS", _DEFAULT_BREAKER_COOLDOWN_SECONDS)
+            0.0, _read_num_env("CRITIC_KB_BREAKER_COOLDOWN_SECONDS", _DEFAULT_BREAKER_COOLDOWN_SECONDS, float)
         )
         self._consecutive_failures = 0
         self._unreachable_until = 0.0
