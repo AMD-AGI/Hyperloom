@@ -3589,35 +3589,21 @@ def _scan_all_benchmark_reports(session_dir: Path) -> Iterable[Path]:
     return sorted(runs.rglob("benchmark_*/benchmark_report.json"))
 
 
-def _scan_torch_traces(session_dir: Path) -> list[Path]:
-    """Find all ``torch_trace*`` directories under ``runs/``.
+def _scan_run_dirs(session_dir: Path, pattern: str) -> list[Path]:
+    """Find all directories matching ``pattern`` under ``runs/``, sorted.
 
     Args:
         session_dir (Path): Absolute session root.
+        pattern (str): ``rglob`` pattern (e.g. ``torch_trace*`` /
+            ``system_profile*``).
 
     Returns:
-        list[Path]: Matching trace directories, sorted. Empty when none exist.
+        list[Path]: Matching directories, sorted. Empty when none exist.
     """
     runs = session_dir / "runs"
     if not runs.exists():
         return []
-    return sorted(p for p in runs.rglob("torch_trace*") if p.is_dir())
-
-
-def _scan_system_profiles(session_dir: Path) -> list[Path]:
-    """Find all ``system_profile*`` directories under ``runs/``.
-
-    Args:
-        session_dir (Path): Absolute session root.
-
-    Returns:
-        list[Path]: Matching profile directories, sorted. Empty when none
-        exist.
-    """
-    runs = session_dir / "runs"
-    if not runs.exists():
-        return []
-    return sorted(p for p in runs.rglob("system_profile*") if p.is_dir())
+    return sorted(p for p in runs.rglob(pattern) if p.is_dir())
 
 
 def _scan_server_logs(session_dir: Path) -> list[Path]:
@@ -3839,8 +3825,8 @@ def collect_telemetry(
     return {
         "baseline_report_path": _rel(baseline_report, session_dir) if baseline_report else None,
         "profile_report_paths": [_rel(p, session_dir) or str(p) for p in profile_reports],
-        "torch_trace_paths": [_rel(p, session_dir) or str(p) for p in _scan_torch_traces(session_dir)],
-        "system_profile_paths": [_rel(p, session_dir) or str(p) for p in _scan_system_profiles(session_dir)],
+        "torch_trace_paths": [_rel(p, session_dir) or str(p) for p in _scan_run_dirs(session_dir, "torch_trace*")],
+        "system_profile_paths": [_rel(p, session_dir) or str(p) for p in _scan_run_dirs(session_dir, "system_profile*")],
         "server_log_paths": [_rel(p, session_dir) or str(p) for p in _scan_server_logs(session_dir)],
         "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
         # per-lane occupancy / capacity summary from the leases DB.

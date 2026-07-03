@@ -63,6 +63,49 @@ from _paths import workspace_root
 
 
 # ---------------------------------------------------------------------------
+# Kernel-candidate pool size (issue #667).
+#
+# ``--top-k`` caps how many analysis.md p-items / hot kernels are written into
+# ``kernel_candidates.json``. Historically this defaulted to 10, which capped
+# the candidate POOL at candidate-build time -- *before* the dispatch layer's
+# own narrowing (source-fn grouping into ``task_groups[]``, op-fanout dedup,
+# and the per-group dispatch attempt cap) had a chance to run. A tight
+# build-time cap disproportionately drops GEAK-editable ops (rmsnorm,
+# add_rmsnorm, mha_batch_prefill, fused RoPE/reshape) while non-editable ops
+# (asm ``fmoe_g1u1`` with a compiled ``.co``, hipblaslt ``aten::mm``) consume
+# the top slots.
+#
+# The two caps are now decoupled: candidate-building uses a large pool by
+# default so the dispatch layer -- which already groups/dedups and caps
+# attempts -- is the real budget gate. Override via
+# ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K`` (this standalone tool) or the
+# ``top_k`` request param on the orchestrator side. A value of ``0`` (or
+# negative) means "no build-time cap".
+_DEFAULT_KERNEL_CANDIDATES_TOP_K = 100
+
+
+def _default_top_k() -> int:
+    """Resolve the default kernel-candidate pool size.
+
+    Reads ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K`` when set (``0``/negative =>
+    unbounded pool, represented internally as a very large cap), otherwise
+    falls back to :data:`_DEFAULT_KERNEL_CANDIDATES_TOP_K`.
+
+    Returns:
+        The candidate-build-time cap (a large number when unbounded).
+    """
+    raw = os.environ.get("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "").strip()
+    if not raw:
+        return _DEFAULT_KERNEL_CANDIDATES_TOP_K
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_KERNEL_CANDIDATES_TOP_K
+    # 0 / negative => no build-time cap (dispatch layer owns the budget).
+    return val if val > 0 else 1_000_000
+
+
+# ---------------------------------------------------------------------------
 # Dict-first op -> .cu resolver (ground-truth ``op_to_source.json``).
 #
 # TraceLens emits only a CPU op name, a ``.py`` launcher, and (assumed) a device
@@ -4747,6 +4790,137 @@ def run_command(
     return proc.returncode
 
 
+# Defaults kept in sync with kernel-agent/scripts/install.sh (TRACELENS_REPO /
+# TRACELENS_REF). Overridable via env so a run can pin its own SHA.
+_TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
+_TRACELENS_REF_DEFAULT = "35bbb6380cf69a2655ee28260b02b5f2dc481744"
+
+
+def _default_tracelens_root() -> Path:
+    """Installer-managed default checkout path (mirrors install.sh /
+    inference_optimizer.paths.open_source_root)."""
+    base = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT") or "/opt/hyperloom/open-source-repos"
+    return Path(base) / "TraceLens"
+
+
+def _is_default_tracelens_root(tl_root: Path) -> bool:
+    """True when tl_root is the installer-managed default (not an operator
+    override). Only the default path is self-healed (#722); an explicit
+    --tracelens-root / TRACELENS_ROOT is operator-maintained and fails fast."""
+    try:
+        return Path(tl_root).resolve() == _default_tracelens_root().resolve()
+    except OSError:
+        return False
+
+
+def _tracelens_checkout_complete(tl_root: Path) -> bool:
+    """A checkout is usable only if it is a git tree, not a half-done clone.
+
+    Guards against reading an installer's in-progress direct clone (the dir
+    exists but ``.git`` is not yet populated). ``.exists()`` (not ``is_dir()``)
+    on purpose: ``.git`` is a plain file in a submodule/worktree checkout. We do
+    not validate the tree beyond presence — a corrupt ``.git`` still surfaces
+    later at the git/pip step; the common half-clone case (no ``.git``) is what
+    this gate catches (#722/PR#789 follow-up #6).
+    """
+    return (tl_root / ".git").exists()
+
+
+def _rmtree_quiet(path: Path) -> None:
+    """Best-effort recursive delete; never raises (used on cleanup paths)."""
+    import shutil
+
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
+    """Idempotently rebuild the TraceLens checkout if it vanished mid-run (#722).
+
+    The optimizer's trace_analyze subprocess reads ``TRACELENS_ROOT`` long
+    after install time; the pod-local checkout can disappear when a concurrent
+    install rm+re-clones it (installs hold the same lock, this reader does not).
+    We take the shared pod-local ``.install.lock`` next to the open-source root,
+    double-check under the lock, then clone into a temp sibling and atomically
+    rename into place so a partial clone is never observed.
+
+    Keep this temp-clone+pin+atomic-rename in lockstep with the twin
+    implementations: kernel-agent/scripts/install.sh (ensure_tracelens) and
+    inference_optimizer/scripts/local_setup.sh (clone_or_update "atomic").
+    """
+    tl_root = Path(tl_root)
+    if _tracelens_checkout_complete(tl_root):
+        return
+    repo = os.environ.get("TRACELENS_REPO") or _TRACELENS_REPO_DEFAULT
+    ref = os.environ.get("TRACELENS_REF") or _TRACELENS_REF_DEFAULT
+    # .install.lock lives at the open-source root (parent of TraceLens/), the
+    # same path both installers lock; missing parents are created first.
+    lock_dir = tl_root.parent
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / ".install.lock"
+    append_log(log_path, f"TraceLens root missing/incomplete; self-healing checkout at {tl_root}")
+    import fcntl
+
+    with lock_path.open("w") as lock_fh:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        except OSError as exc:
+            # Lock unavailable (e.g. NFS without lockd): proceed unlocked. The
+            # atomic temp-clone + os.replace below still avoids a torn checkout.
+            append_log(log_path, f"TraceLens self-heal: flock failed ({exc}); proceeding without lock")
+        # Re-check completeness under the lock: a concurrent healer/installer may
+        # have finished the checkout while we waited for the lock.
+        if _tracelens_checkout_complete(tl_root):
+            append_log(log_path, "TraceLens checkout completed by a concurrent healer; reusing")
+            return
+        # A stale/partial tree (e.g. an installer's half-done direct clone that
+        # crashed) blocks the atomic rename below; move it aside first.
+        if tl_root.exists():
+            stale = tl_root.parent / f".{tl_root.name}.stale.{uuid.uuid4().hex[:8]}"
+            os.replace(tl_root, stale)
+            _rmtree_quiet(stale)
+        tmp_dir = tl_root.parent / f".{tl_root.name}.heal.{uuid.uuid4().hex[:8]}"
+        try:
+            rc = run_command(
+                ["git", "clone", "--depth", "1", repo, str(tmp_dir)],
+                cwd=None,
+                log_path=log_path,
+                timeout_s=600,
+            )
+            if rc != 0:
+                raise FileNotFoundError(
+                    f"TraceLens root not found and self-heal clone failed (repo={repo}); "
+                    f"tried to rebuild at {tl_root}"
+                )
+            # Pin to the requested SHA. A failed fetch/checkout must NOT fall
+            # through to os.replace() with the clone's default HEAD — that would
+            # silently ship an unpinned tree (#722 review).
+            if ref and ref != "HEAD":
+                rc = run_command(
+                    ["git", "-C", str(tmp_dir), "fetch", "--depth", "1", "origin", ref],
+                    cwd=None, log_path=log_path, timeout_s=600,
+                )
+                if rc == 0:
+                    rc = run_command(
+                        ["git", "-C", str(tmp_dir), "checkout", "-q", "FETCH_HEAD"],
+                        cwd=None, log_path=log_path, timeout_s=120,
+                    )
+                if rc != 0:
+                    raise FileNotFoundError(
+                        f"TraceLens self-heal could not pin ref={ref} (repo={repo}); "
+                        f"refusing to install an unpinned checkout at {tl_root}"
+                    )
+            os.replace(tmp_dir, tl_root)
+        except BaseException:
+            _rmtree_quiet(tmp_dir)
+            raise
+        append_log(log_path, f"TraceLens checkout self-healed at {tl_root}")
+
+
 def roofline_match_key(name: str) -> str:
     """Normalize trace and rocprof names enough to join roofline data.
 
@@ -5606,7 +5780,16 @@ def main() -> int:
     parser.add_argument("--session-id", default="")
     parser.add_argument("--model-name", default="")
     parser.add_argument("--framework", default="")
-    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=_default_top_k(),
+        help="Kernel-candidate POOL size written to kernel_candidates.json "
+        "(issue #667). Defaults to a large pool so the dispatch layer "
+        "(source-fn grouping + op dedup + attempt cap) owns the real "
+        "budget. Override the default via HYPERLOOM_KERNEL_CANDIDATES_TOP_K "
+        "(0 or negative = no build-time cap).",
+    )
     parser.add_argument("--target-platform", default="MI355X")
     parser.add_argument("--analysis-mode", default="default")
     parser.add_argument("--runtime-env", default="local")
@@ -5859,9 +6042,23 @@ def main() -> int:
             # Internal extension is opt-in (non-empty --tracelens-internal-root / env).
             internal_root_arg = (args.tracelens_internal_root or "").strip()
             tl_internal_root: Path | None = Path(internal_root_arg) if internal_root_arg else None
+            if not _tracelens_checkout_complete(tl_root) and _is_default_tracelens_root(tl_root):
+                # #722: the installer-managed pod-local checkout can vanish or be
+                # left incomplete mid-run (concurrent install rm+re-clone). Self-
+                # heal the default path when missing OR incomplete (no .git);
+                # an explicit operator override fails fast below.
+                _ensure_tracelens_checkout(tl_root, log_path=log_path)
             if not tl_root.exists():
                 raise FileNotFoundError(
                     f"TraceLens root not found: {tl_root} (set TRACELENS_ROOT or pass --tracelens-root)"
+                )
+            # A dir that exists but is not a git checkout (e.g. an operator
+            # override at a half-cloned path, or a default path self-heal could
+            # not repair) is unusable — fail fast rather than running on it.
+            if not _tracelens_checkout_complete(tl_root):
+                raise FileNotFoundError(
+                    f"TraceLens root incomplete (not a git checkout): {tl_root} "
+                    "(set TRACELENS_ROOT or pass --tracelens-root to a valid checkout)"
                 )
             if tl_internal_root is not None and not tl_internal_root.exists():
                 append_log(

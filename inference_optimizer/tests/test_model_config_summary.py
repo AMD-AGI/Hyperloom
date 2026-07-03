@@ -351,3 +351,109 @@ def test_model_family(tmp_path: Path, model_type, arches, name, expected_family)
     # The model dir name carries the name hint (path basename drives llama gen).
     out = summarize_model_config(str(_write_config(tmp_path / name.replace("/", "_"), payload)))
     assert out.get("model_family", "") == expected_family
+
+
+# ---------------------------------------------------------------------------
+# Shared-expert detection
+# ---------------------------------------------------------------------------
+
+def test_shared_expert_detected_via_n_shared_experts(tmp_path: Path) -> None:
+    """MiniMax-M3 / DeepSeek-style: n_shared_experts key emits has_shared_expert."""
+    m = _write_config(
+        tmp_path / "m",
+        {
+            "model_type": "deepseek_v3",
+            "num_experts": 256,
+            "n_routed_experts": 256,
+            "num_experts_per_tok": 8,
+            "n_shared_experts": 1,
+        },
+    )
+    out = summarize_model_config(str(m))
+    assert out["is_moe"] is True
+    assert out["has_shared_expert"] is True
+    assert out["num_shared_experts"] == 1
+
+
+def test_shared_expert_detected_via_num_shared_experts(tmp_path: Path) -> None:
+    """Alternate key num_shared_experts also triggers detection."""
+    m = _write_config(
+        tmp_path / "m",
+        {
+            "model_type": "qwen2_moe",
+            "num_experts": 64,
+            "num_experts_per_tok": 4,
+            "num_shared_experts": 2,
+        },
+    )
+    out = summarize_model_config(str(m))
+    assert out["is_moe"] is True
+    assert out["has_shared_expert"] is True
+    assert out["num_shared_experts"] == 2
+
+
+def test_shared_expert_detected_via_shared_expert_intermediate_size(tmp_path: Path) -> None:
+    """Qwen-MoE style: shared_expert_intermediate_size without an explicit count."""
+    m = _write_config(
+        tmp_path / "m",
+        {
+            "model_type": "qwen2_moe",
+            "num_experts": 64,
+            "num_experts_per_tok": 4,
+            "shared_expert_intermediate_size": 4096,
+        },
+    )
+    out = summarize_model_config(str(m))
+    assert out["is_moe"] is True
+    assert out["has_shared_expert"] is True
+    # num_shared_experts not known from this key alone — should not be emitted
+    assert "num_shared_experts" not in out
+
+
+def test_plain_moe_without_shared_expert_does_not_emit(tmp_path: Path) -> None:
+    """Pure routed MoE (Mixtral-style) must not emit shared-expert fields."""
+    m = _write_config(
+        tmp_path / "m",
+        {
+            "model_type": "mixtral",
+            "num_experts": 8,
+            "num_experts_per_tok": 2,
+        },
+    )
+    out = summarize_model_config(str(m))
+    assert out["is_moe"] is True
+    assert "has_shared_expert" not in out
+    assert "num_shared_experts" not in out
+
+
+def test_non_moe_with_shared_marker_does_not_emit(tmp_path: Path) -> None:
+    """A non-MoE model with a shared-looking key must not trigger fusion hint."""
+    m = _write_config(
+        tmp_path / "m",
+        {
+            "model_type": "llama",
+            "n_shared_experts": 1,  # anomalous field on a non-MoE model
+        },
+    )
+    out = summarize_model_config(str(m))
+    assert out["is_moe"] is False
+    assert "has_shared_expert" not in out
+
+
+def test_shared_expert_via_nested_text_config(tmp_path: Path) -> None:
+    """Multimodal wrapper: shared-expert fields inside text_config are detected."""
+    m = _write_config(
+        tmp_path / "m",
+        {
+            "model_type": "multimodal_wrapper",
+            "text_config": {
+                "model_type": "deepseek_v3",
+                "num_experts": 256,
+                "n_shared_experts": 1,
+            },
+        },
+    )
+    out = summarize_model_config(str(m))
+    assert out["is_moe"] is True
+    assert out["has_shared_expert"] is True
+    assert out["num_shared_experts"] == 1

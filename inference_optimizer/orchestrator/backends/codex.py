@@ -15,7 +15,6 @@ real credentials or network.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -26,6 +25,7 @@ from ...protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
+from .._json_io import extract_first_json_with_key
 from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env
 
 
@@ -61,47 +61,13 @@ For Critic specifically: when reviewing a proposal, emit
 """.strip()
 
 
-# Prefer a fenced ```json block, falling back to a bare top-level {...}.
-_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+# Bare top-level {...} fallback containing "intents" (fenced case handled by helper).
 _BARE_JSON_RE = re.compile(r"(\{.*?\"intents\".*\})", re.DOTALL)
 
 
 def _extract_envelope(text: str) -> dict | None:
-    """Pull the first valid JSON envelope out of a model reply.
-
-    Prefers a fenced ```json block (least ambiguous), then falls back to a bare
-    top-level object containing ``"intents"``, progressively trimming trailing
-    prose until ``json.loads`` accepts the candidate.
-
-    Args:
-        text (str): The raw model reply that may contain a JSON envelope.
-
-    Returns:
-        dict | None: The first dict envelope containing an ``"intents"`` key, or
-        ``None`` when no parseable envelope is found.
-    """
-    if not text:
-        return None
-    for m in _FENCED_JSON_RE.finditer(text):
-        try:
-            data = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict) and "intents" in data:
-            return data
-    # Bare JSON fallback: shrink from the right until json.loads accepts it
-    # (handles trailing prose without a fence).
-    for m in _BARE_JSON_RE.finditer(text):
-        candidate = m.group(1)
-        for end in range(len(candidate), 0, -1):
-            try:
-                data = json.loads(candidate[:end])
-            except json.JSONDecodeError:
-                continue
-            if isinstance(data, dict) and "intents" in data:
-                return data
-            break  # parsed but wrong shape; don't keep shrinking
-    return None
+    """Pull the first JSON envelope (containing ``"intents"``) from a model reply."""
+    return extract_first_json_with_key(text, "intents", _BARE_JSON_RE)
 
 
 @dataclass

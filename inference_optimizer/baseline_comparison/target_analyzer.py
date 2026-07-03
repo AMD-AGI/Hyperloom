@@ -287,51 +287,35 @@ def analyze(
     )
     now = _iso_utc_now()
 
-    if not canonical_model:
+    def _skip(status: str, reason: str, warning: str) -> BaselineSummary:
+        """Persist and return a no-data summary (skipped / no_match cases)."""
         summary = BaselineSummary(
             query=query,
             fetched_at=now,
             row_count=0,
             best=None,
-            status="skipped",
-            reason="model_mapping_miss",
-            warning=(f"model name mapping miss for {model_path!r}; no display name found"),
+            status=status,
+            reason=reason,
+            warning=warning,
             source=LLM_AUTHORED_SOURCE,
         )
         _persist(summary, session_dir=session_dir)
         return summary
 
+    if not canonical_model:
+        return _skip("skipped", "model_mapping_miss",
+                     f"model name mapping miss for {model_path!r}; no display name found")
+
     if not query.gpu:
-        summary = BaselineSummary(
-            query=query,
-            fetched_at=now,
-            row_count=0,
-            best=None,
-            status="skipped",
-            reason="no_target_gpu_configured",
-            warning="compare_against_gpu is empty",
-            source=LLM_AUTHORED_SOURCE,
-        )
-        _persist(summary, session_dir=session_dir)
-        return summary
+        return _skip("skipped", "no_target_gpu_configured", "compare_against_gpu is empty")
 
     target = research_hints.load_competitor_target(Path(session_dir))
     rows = list((target or {}).get("per_conc") or [])
     points = [p for p in (_target_row_to_point(r) for r in rows) if p is not None]
 
     if not points:
-        summary = BaselineSummary(
-            query=query,
-            fetched_at=now,
-            row_count=0,
-            best=None,
-            status="no_match",
-            reason="no_competitor_target",
-            warning=("no sourced competitor_target.json available (research scout disabled or produced no targets)"),
-            source=LLM_AUTHORED_SOURCE,
-        )
-        _persist(summary, session_dir=session_dir)
-        return summary
+        return _skip("no_match", "no_competitor_target",
+                     "no sourced competitor_target.json available (research scout disabled or produced no targets)")
 
     all_points = _dedup_by_conc(points)
     best = max(points, key=lambda p: p.tput_per_gpu)

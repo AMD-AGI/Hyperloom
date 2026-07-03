@@ -121,8 +121,8 @@ def test_policy_allows_integrate_patch_on_advise():
     gate.validate_intent("orchestration", intent)
 
 
-def test_policy_bypass_critic_overrides_gate():
-    """``params.bypass_critic=True`` skips the gate entirely."""
+def test_policy_bypass_critic_env_only(monkeypatch):
+    """In-band ``params.bypass_critic`` is ignored; only the out-of-band operator env overrides."""
     s = SharedState()
     s.record_specialist_patch_verdict("t-spec-6", "reject")
     s.phase = "EXPLORE"
@@ -133,7 +133,12 @@ def test_policy_bypass_critic_overrides_gate():
             "bypass_critic": True,
         }
     )
-    # Critic gate bypassed; phase check still applies.
+    # In-band flag must NOT bypass the gate (LLM cannot self-approve).
+    monkeypatch.delenv("HYPERLOOM_BYPASS_CRITIC", raising=False)
+    with pytest.raises(PolicyDenied):
+        gate.validate_intent("orchestration", intent)
+    # Out-of-band operator override still works.
+    monkeypatch.setenv("HYPERLOOM_BYPASS_CRITIC", "1")
     gate.validate_intent("orchestration", intent)
 
 
@@ -261,8 +266,8 @@ async def test_executor_proceeds_when_verdict_is_approve(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_executor_bypass_critic_skips_short_circuit(tmp_path: Path):
-    """``params.bypass_critic=True`` overrides the executor-side defense too."""
+async def test_executor_bypass_critic_env_only(tmp_path: Path, monkeypatch):
+    """Out-of-band ``HYPERLOOM_BYPASS_CRITIC=1`` overrides the executor defense; in-band flag does not."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     _write_specialist_workspace_with_patch(session_dir, "t-spec-z")
@@ -278,6 +283,7 @@ async def test_executor_bypass_critic_skips_short_circuit(tmp_path: Path):
         params={
             "specialist_task_id": "t-spec-z",
             "framework_source_root": str(tmp_path / "framework"),
+            # In-band flag must be ignored by the executor defense.
             "bypass_critic": True,
             "apply_only": True,
         },
@@ -285,6 +291,11 @@ async def test_executor_bypass_critic_skips_short_circuit(tmp_path: Path):
         requires_lanes=tuple(),
     )
     ctx = RunnerContext(task=task, lease=None, extra={"shared_state": state})
+
+    # The out-of-band operator env override skips the recorded-'reject'
+    # short-circuit (the in-band params.bypass_critic is ignored; that the
+    # in-band flag no longer bypasses the gate is asserted at the policy layer
+    # in test_policy_bypass_critic_env_only).
+    monkeypatch.setenv("HYPERLOOM_BYPASS_CRITIC", "1")
     result = await executor(ctx)
-    # bypass_critic skipped the short-circuit; status just must not be 'rejected_by_critic'.
     assert result["status"] != "rejected_by_critic"

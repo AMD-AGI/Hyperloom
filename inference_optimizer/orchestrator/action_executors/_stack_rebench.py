@@ -46,6 +46,7 @@ async def measure_stack_rebench(
     result_dir: str | None = None,
     magpie_python: str | None = None,
     server_lifecycle: dict[str, Any] | None = None,
+    preclean_before_run: bool = True,
 ) -> StackRebenchResult:
     """Run ``variant`` once on the stack and grade it against the floor."""
     output_slot.mkdir(parents=True, exist_ok=True)
@@ -61,6 +62,7 @@ async def measure_stack_rebench(
         result_dir=result_dir,
         magpie_python=magpie_python,
         server_lifecycle=server_lifecycle,
+        preclean_before_run=preclean_before_run,
     )
     rb = results[0] if results else None
     tput: float | None = None
