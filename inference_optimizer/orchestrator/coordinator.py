@@ -4036,7 +4036,7 @@ class Coordinator:
 
         The enablement path only dispatches authoring for *actionable* failure
         signatures; a non-blank log that classifies to ``UNKNOWN`` used to be
-        silently dropped (diff diff-gap #5). Instead, emit a single observation
+        silently dropped. Instead, emit a single observation
         (deduped per distinct log via a stored hash) carrying the classified
         signature (``raw_excerpt`` + ``offending_file``) so an operator can pick
         it up. No sub-agent is dispatched.
