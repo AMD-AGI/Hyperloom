@@ -30,12 +30,12 @@ ci/
 pip install -r requirements.txt
 
 # Dry run: generate prompts only, do not execute
-HARBOR_PREFIX=harbor.core42.example-internal-host.invalid/proxy \
+HARBOR_PREFIX=harbor.crusoe.example-internal-host.invalid/proxy \
 KERNEL_OPT_WORKSPACE=core42-sandbox \
   python orchestrator.py --dry-run
 
 # Actual execution (single model)
-HARBOR_PREFIX=harbor.core42.example-internal-host.invalid/proxy \
+HARBOR_PREFIX=harbor.crusoe.example-internal-host.invalid/proxy \
 KERNEL_OPT_WORKSPACE=core42-sandbox \
 CLAW_API_KEY=ak-xxx \
   python orchestrator.py --models qwen3.5-bf16-mi355x-sglang --output-dir ./results
@@ -48,7 +48,7 @@ python orchestrator.py --trigger manual --output-dir ./results
 
 | Variable | Required | Description |
 |------|------|------|
-| `HARBOR_PREFIX` | Yes | Image registry prefix, for example `harbor.core42.example-internal-host.invalid/proxy` |
+| `HARBOR_PREFIX` | Yes | Image registry prefix, for example `harbor.crusoe.example-internal-host.invalid/proxy` |
 | `KERNEL_OPT_WORKSPACE` | Yes | Workspace used for kernel optimization (shared by GEAK + OOB), for example `core42-sandbox` |
 | `CLAW_API_KEY` | Yes | SaFE API key (with `ak-` prefix) |
 | `WEBHOOK_URL` | No | Notification webhook (compatible with Slack / Teams Incoming Webhook) |
@@ -89,7 +89,7 @@ Settings → Secrets and variables → Actions → New repository secret:
 
 | Secret | Value |
 |--------|---|
-| `HARBOR_PREFIX` | `harbor.core42.example-internal-host.invalid/proxy` |
+| `HARBOR_PREFIX` | `harbor.crusoe.example-internal-host.invalid/proxy` |
 | `KERNEL_OPT_WORKSPACE` | `core42-sandbox` |
 | `CLAW_API_KEY` | `ak-xxx` |
 | `WEBHOOK_URL` | Teams/Slack Incoming Webhook URL (optional) |

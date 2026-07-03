@@ -241,3 +241,34 @@ def test_force_restart_local_cluster_runs_fd_preflight_before_ray_start(monkeypa
     )
     assert "ray_start" in kinds
     assert kinds.index("setrlimit") < kinds.index("ray_start")
+
+
+def test_ensure_ray_cluster_binds_dashboard_to_loopback(monkeypatch):
+    """The local head must bind the dashboard/jobs API to loopback, not 0.0.0.0,
+    so the unauthenticated Ray Jobs endpoint is not exposed on the pod network."""
+    events: list = []
+    fake = _FakeResource(soft=1048576, hard=1048576, events=events)
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    _install_fake_ray_start(monkeypatch, events)
+
+    ray_runtime.ensure_ray_cluster()
+
+    starts = [cmd for kind, cmd in events if kind == "ray_start"]
+    assert starts, "ray start was not invoked"
+    assert "--dashboard-host=127.0.0.1" in starts[0]
+    assert "--dashboard-host=0.0.0.0" not in starts[0]
+
+
+def test_force_restart_local_cluster_binds_dashboard_to_loopback(monkeypatch):
+    """``force_restart_local_cluster`` must also bind the dashboard to loopback."""
+    events: list = []
+    fake = _FakeResource(soft=1048576, hard=1048576, events=events)
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    _install_fake_ray_start(monkeypatch, events)
+
+    ray_runtime.force_restart_local_cluster()
+
+    starts = [cmd for kind, cmd in events if kind == "ray_start"]
+    assert starts, "ray start was not invoked"
+    assert "--dashboard-host=127.0.0.1" in starts[0]
+    assert "--dashboard-host=0.0.0.0" not in starts[0]

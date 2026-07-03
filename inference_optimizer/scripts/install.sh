@@ -106,7 +106,9 @@ KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
 # so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
-_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"
+# Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
+# /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
+_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
 FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/framework-agent}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"

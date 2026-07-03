@@ -20,17 +20,6 @@ from inference_optimizer.orchestrator.backends import (
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.task_registry import Task
 from inference_optimizer.protocol.intent import Intent, IntentType
-from inference_optimizer.paths import make_session_dir
-
-
-@pytest.fixture
-def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    sd = make_session_dir()
-    from .conftest import seed_target_analysis_marker
-
-    seed_target_analysis_marker(sd)
-    return sd
 
 
 def _heartbeat() -> Intent:
@@ -72,12 +61,15 @@ async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator)
             "workspace": "/tmp/ws",
         },
     )
-    # warmup anchor wins as the comparison baseline; hot number kept separately
-    assert coord.shared_state.baseline_tput == 900.0
+    # Hot measure round is the conclusion baseline; cold warmup is audit-only.
+    assert coord.shared_state.baseline_tput == 1000.0
+    assert coord.shared_state.baseline_cold_tput == 900.0
     assert coord.shared_state.baseline_hot_tput == 1000.0
     assert coord.shared_state.baseline_failure_streak == 0
     assert coord.shared_state.baseline_arg_error_streak == 0
     assert coord.shared_state.current_best["action"] == "baseline"
+    assert coord.shared_state.current_best["tput"] == 1000.0
+    assert coord.shared_state.current_best["cold_tput"] == 900.0
 
 
 @pytest.mark.asyncio

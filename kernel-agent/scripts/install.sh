@@ -63,7 +63,9 @@ KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
 # so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
-_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"
+# Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
+# /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
+_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/hyperloom}"
 # MAGPIE_PATH is the single override shared with the Python runtime; a standalone
 # run never clones upstream Magpie when MAGPIE_PATH is set.
@@ -111,7 +113,28 @@ TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
 TRACELENS_REF="35bbb6380cf69a2655ee28260b02b5f2dc481744"
-_tracelens_root_was_set="${TRACELENS_ROOT:+1}"
+# Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
+# The persistent kernel-agent env re-exports the resolved default path, so a
+# presence-only check (${VAR:+1}) would misclassify it as an override and skip
+# the managed clone/realign, leaving a missing/stale default un-self-healed
+# across reruns (#722). Compare against the default path, not env presence.
+# Canonicalize a path (resolve symlinks/.. , strip trailing slash) so the
+# default-vs-override comparison matches the Python side's Path.resolve();
+# unresolvable paths fall back to the trimmed literal so a not-yet-cloned
+# default still compares correctly (#722 / PR#789).
+# Keep in lockstep with the twin helper in
+# inference_optimizer/scripts/local_setup.sh.
+_canonicalize_path() {
+  local p="${1:-}"
+  [ -z "$p" ] && return 0
+  readlink -f -- "$p" 2>/dev/null || printf '%s' "${p%/}"
+}
+_tracelens_default_root="$(_canonicalize_path "${_open_source_root}/TraceLens")"
+_tracelens_root_was_set=""
+if [ -n "${TRACELENS_ROOT:-}" ] \
+   && [ "$(_canonicalize_path "${TRACELENS_ROOT}")" != "${_tracelens_default_root}" ]; then
+  _tracelens_root_was_set=1
+fi
 TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 # Writable mirror when the optional internal extension is on a read-only mount.
@@ -788,26 +811,53 @@ _tracelens_internal_enabled() {
 
 ensure_tracelens() {
   if [ -n "${_tracelens_root_was_set:-}" ]; then
-    if [ ! -d "$TRACELENS_ROOT" ]; then
+    # Operator override: never auto-clone, but still fail fast when the checkout
+    # is missing OR an incomplete non-git tree (a half-done clone lacking .git),
+    # mirroring the handler/tool completeness check (#722 / PR#789).
+    if [ ! -d "$TRACELENS_ROOT/.git" ]; then
       if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
-        warn "TraceLens root not found: $TRACELENS_ROOT"
+        warn "TraceLens root not found or not a git checkout: $TRACELENS_ROOT"
       else
-        die "TraceLens root not found: $TRACELENS_ROOT"
+        die "TraceLens root not found or not a git checkout: $TRACELENS_ROOT"
       fi
     fi
   elif [ ! -d "$TRACELENS_ROOT/.git" ]; then
-    if [ -e "$TRACELENS_ROOT" ]; then
-      warn "TraceLens checkout at ${TRACELENS_ROOT} is not a git repo; preserving existing tree"
-    elif [ "$CHECK_ONLY" -eq 1 ]; then
-      warn "TraceLens checkout missing at ${TRACELENS_ROOT} (check-only mode, skipping clone)"
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+      warn "TraceLens checkout missing/incomplete at ${TRACELENS_ROOT} (check-only mode, skipping clone)"
     elif [ "$DRY_RUN" -eq 1 ]; then
+      [ -e "$TRACELENS_ROOT" ] && log "would: rm -rf ${TRACELENS_ROOT} (incomplete, not a git repo)"
       log "would: git clone --depth 1 ${TRACELENS_REPO} ${TRACELENS_ROOT}"
     else
+      # An existing dir without .git is a half-done/incomplete clone (e.g. a
+      # crashed installer). On this installer-managed default path, drop it and
+      # rebuild so it never lingers as an unusable tree that trace_analyze's
+      # self-heal would treat as complete (#722/PR#789) — matches
+      # _ensure_tracelens_checkout, which moves aside and re-clones.
+      if [ -e "$TRACELENS_ROOT" ]; then
+        warn "TraceLens checkout at ${TRACELENS_ROOT} is not a git repo; rebuilding"
+        rm -rf "$TRACELENS_ROOT"
+      fi
+      # Clone AND pin the ref inside a temp sibling, then atomically rename into
+      # place only after everything succeeds. Publishing before the ref pin (or
+      # on a mid-clone crash) would leave an unpinned/half-cloned $TRACELENS_ROOT
+      # that a concurrent reader (trace_analyze self-heal) treats as complete (#722).
+      # Keep this temp-clone+pin+atomic-rename in lockstep with the twin
+      # implementations: inference_optimizer/scripts/local_setup.sh
+      # (clone_or_update "atomic") and kernel-agent/tools/tracelens_analysis.py
+      # (_ensure_tracelens_checkout).
       mkdir -p "$(dirname "$TRACELENS_ROOT")"
-      run git clone --depth 1 "$TRACELENS_REPO" "$TRACELENS_ROOT"
+      _tl_tmp="$(dirname "$TRACELENS_ROOT")/.$(basename "$TRACELENS_ROOT").clone.$$"
+      rm -rf "$_tl_tmp"
+      if ! git clone --depth 1 "$TRACELENS_REPO" "$_tl_tmp" \
+        || ! git -C "$_tl_tmp" fetch --depth 1 origin "$TRACELENS_REF" \
+        || ! git -C "$_tl_tmp" checkout -q FETCH_HEAD; then
+        rm -rf "$_tl_tmp"
+        die "TraceLens clone/pin to ${TRACELENS_REF} failed; refusing to publish an unpinned checkout at ${TRACELENS_ROOT}"
+      fi
+      mv "$_tl_tmp" "$TRACELENS_ROOT"
     fi
-  fi
-  if [ -z "${_tracelens_root_was_set:-}" ] && [ -d "$TRACELENS_ROOT/.git" ]; then
+  elif [ -z "${_tracelens_root_was_set:-}" ] && [ -d "$TRACELENS_ROOT/.git" ]; then
+    # Existing default checkout: realign to the pinned ref in place.
     if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
       run git -C "$TRACELENS_ROOT" fetch --depth 1 origin "$TRACELENS_REF"
       run git -C "$TRACELENS_ROOT" checkout -q FETCH_HEAD
