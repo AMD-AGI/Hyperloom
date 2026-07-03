@@ -74,8 +74,8 @@ One OpenAI-compatible endpoint serves both Claude and GPT models
 
 | Variable           | Issuer                              | Where to obtain                                                                                       | Format              |
 |--------------------|-------------------------------------|-------------------------------------------------------------------------------------------------------|---------------------|
-| `SAFE_API_KEY`     | AMD LiteLLM gateway (typical)         | [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway)                                     | `ak-...`            |
-| `OPENAI_BASE_URL`  | Same gateway                        | `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1` (default for hosted SaFE)                  | URL ending in `/v1` |
+| `SAFE_API_KEY`     | AMD LiteLLM gateway (typical)         | [LLM Gateway](https://crusoe.primus-safe.amd.com/litellm-gateway)                                     | `ak-...`            |
+| `OPENAI_BASE_URL`  | Same gateway                        | `https://crusoe.primus-safe.amd.com/api/v1/llm-proxy/v1` (default for hosted SaFE)                  | URL ending in `/v1` |
 
 Preflight derives `ANTHROPIC_BASE_URL` from `OPENAI_BASE_URL`, points
 `~/.claude/config.json` `customApiUrl` at the upstream gateway, and
@@ -103,7 +103,7 @@ One-off (no disk write):
 
 ```bash
 export SAFE_API_KEY=ak-your-safe-apikey
-export OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
+export OPENAI_BASE_URL=https://crusoe.primus-safe.amd.com/api/v1/llm-proxy/v1
 ```
 
 ### 2.2 Split entrypoints (native Anthropic + OpenAI)
@@ -274,7 +274,7 @@ litellm config) directly.
 
 ## 6. Hosted mode (PrimusClaw)
 
-When you launch through the [Hyperloom UI](https://core42.primus-safe.amd.com/hyperloom/),
+When you launch through the [Hyperloom UI](https://crusoe.primus-safe.amd.com/hyperloom/),
 **you do not need to set any of the variables above by hand**. The
 sandbox initializer binds your LLM Gateway key as `SAFE_API_KEY`,
 populates the path env from sandbox defaults, and runs install/preflight
