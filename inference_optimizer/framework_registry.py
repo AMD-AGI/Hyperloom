@@ -197,6 +197,80 @@ def throughput_unit(framework: str | None) -> str:
     return _spec_or_default(framework).throughput_unit
 
 
+def primary_metric_unit(framework: str | None) -> str:
+    """Return the human-readable unit for a session's primary display metric.
+
+    Serving frameworks display token throughput (``tok/s/GPU``). Scriptable
+    image frameworks (e.g. xDiT) display the per-image end-to-end latency
+    ``e2el_mean_ms`` in milliseconds instead of a reciprocal-of-latency value.
+
+    Args:
+        framework (str | None): Framework name; matched case-insensitively.
+
+    Returns:
+        str: ``"ms"`` for scriptable xDiT, else ``"tok/s/GPU"``.
+    """
+    return "ms" if is_scriptable(framework) else "tok/s/GPU"
+
+
+def primary_metric_value(
+    framework: str | None, tput_per_gpu: float | int | None
+) -> float | None:
+    """Convert stored per-GPU throughput into the value shown for ``framework``.
+
+    Scriptable image frameworks (xDiT) store throughput as ``img/s``
+    (``1 / latency``); the displayed metric is the equivalent per-image latency
+    ``e2el_mean_ms = 1000 / img_per_s``. Serving frameworks display the stored
+    throughput unchanged.
+
+    Args:
+        framework (str | None): Framework name; matched case-insensitively.
+        tput_per_gpu (float | int | None): Per-GPU throughput as stored in
+            state (``tok/s`` for serving, ``img/s`` for scriptable xDiT).
+
+    Returns:
+        float | None: The value to display, or ``None`` when it is undefined
+        (non-positive throughput for a scriptable framework).
+    """
+    tput = float(tput_per_gpu or 0.0)
+    if is_scriptable(framework):
+        return (1000.0 / tput) if tput > 0 else None
+    return tput
+
+
+def format_primary_metric(
+    framework: str | None, tput_per_gpu: float | int | None, *, precision: int = 1
+) -> str:
+    """Format a session's primary performance metric for human-readable display.
+
+    Serving frameworks report token throughput, so the value is shown as
+    ``"<tput> tok/s/GPU"``. Scriptable image frameworks (e.g. xDiT) are
+    server-less and measure a single-stream, per-image end-to-end latency; their
+    ``output_throughput`` is merely ``1 / latency`` (img/s). Rendering that
+    reciprocal as ``tok/s/GPU`` is misleading (there is no comparable token
+    stream), so instead surface the equivalent per-image latency
+    ``e2el_mean_ms`` — derived exactly as ``1000 / img_per_s`` — in
+    milliseconds.
+
+    Args:
+        framework (str | None): Session framework name; matched
+            case-insensitively.
+        tput_per_gpu (float | int | None): Per-GPU throughput as stored in
+            state (``tok/s`` for serving, ``img/s`` for scriptable xDiT).
+        precision (int): Number of decimals to render (default 1).
+
+    Returns:
+        str: A display string such as ``"123.4 tok/s/GPU"`` (serving) or
+        ``"6440.0 ms"`` (xDiT ``e2el_mean_ms``). Returns ``"n/a ms"`` /
+        ``"0.0 tok/s/GPU"`` for non-positive inputs.
+    """
+    unit = primary_metric_unit(framework)
+    value = primary_metric_value(framework, tput_per_gpu)
+    if value is None:
+        return f"n/a {unit}"
+    return f"{value:.{precision}f} {unit}"
+
+
 def supports_server_reuse(framework: str | None) -> bool:
     """Return whether ``framework`` supports the server_lifecycle reuse path.
 

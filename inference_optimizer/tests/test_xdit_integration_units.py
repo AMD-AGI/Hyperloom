@@ -49,6 +49,37 @@ class TestFrameworkRegistry:
         assert fr.is_scriptable("rust-burn") is False
 
 
+class TestFormatPrimaryMetric:
+    def test_serving_shows_tok_s_per_gpu(self):
+        assert fr.format_primary_metric("sglang", 123.4) == "123.4 tok/s/GPU"
+        assert fr.format_primary_metric("vllm", 0.0) == "0.0 tok/s/GPU"
+
+    def test_xdit_shows_e2el_mean_ms_not_tok_s(self):
+        # xDiT throughput is img/s (1/latency); display the equivalent
+        # per-image latency e2el_mean_ms = 1000 / img_per_s.
+        out = fr.format_primary_metric("xdit", 0.15528)
+        assert out == "6440.0 ms"
+        assert "tok/s" not in out
+
+    def test_xdit_non_positive_is_na_ms(self):
+        assert fr.format_primary_metric("xdit", 0.0) == "n/a ms"
+        assert fr.format_primary_metric("xdit", None) == "n/a ms"
+
+    def test_unknown_framework_defaults_to_serving_label(self):
+        assert fr.format_primary_metric("rust-burn", 10.0) == "10.0 tok/s/GPU"
+
+    def test_none_or_empty_framework_falls_back_to_serving(self):
+        # A None/empty framework (partial state, missing attr) must not crash
+        # and defaults to the serving unit.
+        assert fr.primary_metric_unit(None) == "tok/s/GPU"
+        assert fr.primary_metric_unit("") == "tok/s/GPU"
+        assert fr.primary_metric_value(None, 12.0) == 12.0
+        assert fr.format_primary_metric(None, 12.0) == "12.0 tok/s/GPU"
+        assert fr.format_primary_metric("", 12.0) == "12.0 tok/s/GPU"
+        # None/0 throughput must not raise on the serving path.
+        assert fr.format_primary_metric(None, None) == "0.0 tok/s/GPU"
+
+
 class TestServerArgsEnvName:
     def test_exact(self):
         assert gr.server_args_env_name("xdit") == "EXTRA_XDIT_ARGS"
