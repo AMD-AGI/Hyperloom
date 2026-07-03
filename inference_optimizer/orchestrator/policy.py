@@ -467,7 +467,11 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
 )
 
 # `source_file` is special: may match :func:`resolve_source_file_allowlist` (framework trees outside session_dir, resolved at check time).
-SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file"})
+# `framework_source_root` is the (optional) integrate_patch/framework_agent git-apply
+# root override; no production path ever sets it (Coordinator relies on allowlist
+# resolution), so gating it here only blocks an LLM-authored override escaping to an
+# arbitrary dir (e.g. "/root") — closes the arbitrary-host-write vector under strict_paths.
+SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
 
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
@@ -483,6 +487,37 @@ def _trace_path_allowlist() -> tuple[str, ...]:
 
     root = str(mn_profile_trace_root()).rstrip("/") + "/"
     return (root,)
+
+
+def _resolved_within(value: str, root: str) -> bool:
+    """Return whether ``value`` resolves to or under ``root`` (symlinks resolved).
+
+    Replaces a raw ``str.startswith`` prefix test so that ``..`` traversal and
+    shared-prefix boundary tricks (e.g. ``/x/aiter`` vs ``/x/aiterX``) cannot
+    slip a path past an allowlist root. Legitimate real paths nested under a
+    root are accepted identically to the old prefix check.
+
+    Args:
+        value (str): the candidate path string.
+        root (str): an allowlist root (may carry a trailing slash).
+
+    Returns:
+        bool: True when the resolved ``value`` equals or is nested under the
+            resolved ``root``; False on any resolution error or escape.
+    """
+    try:
+        v = Path(str(value)).resolve()
+        r = Path(str(root)).resolve()
+    except (OSError, RuntimeError):
+        return False
+    try:
+        return v == r or v.is_relative_to(r)
+    except AttributeError:  # pragma: no cover — Python <3.9
+        try:
+            v.relative_to(r)
+            return True
+        except ValueError:
+            return False
 
 
 # Subset of PATH_LIKE_FIELDS that also accept :func:`_trace_path_allowlist` (others stay strictly session-rooted).
@@ -600,6 +635,16 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # (report.py) and must reflect the real preflight verdict, not LLM intent.
         "degraded_mode",
         "model_warnings",
+        # Kernel-opt ledgers + Critic patch-verdict store: Coordinator/kernel-agent
+        # are the sole writers (record_trace_analyze / record_kernel_opt /
+        # record_specialist_patch_verdict). Locked so an LLM update_state cannot
+        # launder attacker-chosen snapshot_dir/repo_root/source_file/test_command
+        # into the integrate path, or forge its own Critic approval.
+        "specialist_patch_verdicts",
+        "last_trace_analyze",
+        "last_kernel_opt",
+        "last_kernel_opt_dispatch_skip",
+        "kernel_opt_attempts",
     }
 )
 
@@ -828,7 +873,7 @@ class PolicyGate:
             self._validate_specialist_dispatch(role, payload)
             self._validate_phase_action(role, action_name, intent_kind="delegate")
             return
-        # ``integrate_patch`` requires a non-reject Critic verdict (``bypass_critic=True`` overrides, audit-visible).
+        # ``integrate_patch`` requires a non-reject Critic verdict (operator env HYPERLOOM_BYPASS_CRITIC=1 overrides out-of-band; in-band bypass_critic ignored).
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
             self._validate_integrate_patch_critic_gate(payload)
         # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed (concurrent sweeps crash both vllm engines).
@@ -1595,18 +1640,17 @@ class PolicyGate:
         self,
         payload: dict[str, Any],
     ) -> None:
-        """PR-A7: enforce ``integrate_patch_requires_critic_verdict`` (needs specialist_task_id + permissive verdict, unless ``params.bypass_critic=True``).
+        """PR-A7: enforce ``integrate_patch_requires_critic_verdict`` (needs specialist_task_id + permissive verdict, unless operator sets ``HYPERLOOM_BYPASS_CRITIC=1``).
 
         Args:
             payload (dict[str, Any]): the integrate_patch intent payload
-                carrying ``params`` with ``specialist_task_id`` and optional
-                ``bypass_critic``.
+                carrying ``params`` with ``specialist_task_id``.
 
         Raises:
             PolicyDenied: when ``params`` is malformed, ``specialist_task_id``
                 is missing, no Critic verdict is on record, or the verdict is
-                not in :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS` (and no
-                bypass).
+                not in :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS` (and the
+                operator has not set ``HYPERLOOM_BYPASS_CRITIC=1``).
         """
         params = payload.get("params") or {}
         if not isinstance(params, dict):
@@ -1626,9 +1670,23 @@ class PolicyGate:
                     "the patches you want to apply."
                 ),
             )
-        bypass = bool(params.get("bypass_critic"))
+        # The bypass must come from an out-of-band operator channel the LLM
+        # cannot author. An in-band params.bypass_critic is deliberately ignored:
+        # otherwise the same untrusted principal that wrote the patch could also
+        # skip its own Critic review (self-approval). Operators set
+        # HYPERLOOM_BYPASS_CRITIC=1 in the launcher env for an explicit override.
+        bypass = os.environ.get("HYPERLOOM_BYPASS_CRITIC") == "1"
         if bypass:
             return
+        if params.get("bypass_critic"):
+            # An LLM-authored in-band bypass is ignored (self-approval blocked);
+            # log it so the attempted override is visible in ops logs.
+            log.warning(
+                "integrate_patch: in-band params.bypass_critic ignored; Critic gate "
+                "enforced for specialist_task_id=%r (operator override is "
+                "HYPERLOOM_BYPASS_CRITIC=1, out-of-band only).",
+                sid,
+            )
         ss = getattr(self, "shared_state", None)
         verdict = ""
         if ss is not None:
@@ -1645,8 +1703,9 @@ class PolicyGate:
                     "Wait for the Critic to emit a "
                     "review_verdict{target_proposal_msg_id=<patch "
                     "proposal>, verdict=approve|reject|...} for this "
-                    "specialist, or override with "
-                    "params.bypass_critic=True. The Critic verdict "
+                    "specialist. An operator may override out-of-band with "
+                    "HYPERLOOM_BYPASS_CRITIC=1 (in-band bypass_critic is "
+                    "ignored). The Critic verdict "
                     "is recorded on SharedState.specialist_patch_verdicts."
                 ),
             )
@@ -1661,9 +1720,9 @@ class PolicyGate:
                     "Either ask the Critic to re-review (next "
                     "review_verdict overwrites this one), drop the "
                     "patch (specialist_done.patches_written=[]), or "
-                    "set params.bypass_critic=True to force "
-                    "integration with an explicit operator audit "
-                    "trail."
+                    "have an operator set HYPERLOOM_BYPASS_CRITIC=1 "
+                    "out-of-band to force integration with an explicit "
+                    "operator audit trail (in-band bypass_critic is ignored)."
                 ),
             )
 
@@ -2313,12 +2372,11 @@ class PolicyGate:
             value (str): the path string to test.
 
         Returns:
-            bool: True when ``value`` starts with any prefix returned by
+            bool: True when ``value`` resolves to or under any root returned by
                 :func:`resolve_source_file_allowlist` (the aiter / sglang /
                 vllm source trees); False otherwise.
         """
-        s = str(value)
-        return any(s.startswith(p) for p in resolve_source_file_allowlist())
+        return any(_resolved_within(value, p) for p in resolve_source_file_allowlist())
 
     def _path_in_trace_allowlist(self, value: str) -> bool:
         """Match a value against runtime-resolved trace path prefixes (multi-node shared profile dir outside session_dir).
@@ -2327,11 +2385,10 @@ class PolicyGate:
             value (str): the path string to test.
 
         Returns:
-            bool: True when ``value`` starts with any runtime-resolved trace
-                path prefix, else False.
+            bool: True when ``value`` resolves to or under any runtime-resolved
+                trace path root, else False.
         """
-        s = str(value)
-        return any(s.startswith(p) for p in _trace_path_allowlist())
+        return any(_resolved_within(value, p) for p in _trace_path_allowlist())
 
     def _validate_payload_paths(
         self,
