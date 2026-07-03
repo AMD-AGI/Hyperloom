@@ -401,6 +401,28 @@ class RooflineExecutor:
                     trace_path,
                 )
                 continue
+            # Op count == 0: the torch-profiler active window captured no ops
+            # (metadata-only trace). The steady-state splitter yields no
+            # execution_details.csv and roofline REVERTs with an empty snapshot.
+            # Re-profile rather than cache an empty snapshot; if every attempt
+            # is zero-ops, fail with an accurate message. The most common cause
+            # (LLM start_step applied to a scriptable/diffusion run) is fixed at
+            # window-computation time, so a re-profile self-heals a transient.
+            if bool((profile_result.get("trace_health") or {}).get("zero_ops")):
+                last_phase = "profile_zero_ops"
+                last_error = (
+                    "profile produced a metadata-only trace (PyTorch Profiler "
+                    "Op count == 0); the active capture window never overlapped "
+                    "execution — re-profile needed"
+                )
+                log.warning(
+                    "roofline profile attempt %d/%d: zero-ops trace (%s); "
+                    "re-profiling",
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
+                    trace_path,
+                )
+                continue
             # Success
             if attempt > 1:
                 log.info(
