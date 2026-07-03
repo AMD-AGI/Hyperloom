@@ -24,14 +24,8 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 | **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | Local recipe KB and optional Cortex KB setup |
 | **[`session_breakdown.json` Integration](docs/INTEGRATION_SESSION_BREAKDOWN.md)** | Stable contract for downstream consumers (`claw-stats-service`, dashboards) |
 | **[Operations & Self-Host Runbook](docs/OPERATIONS.md)** | k8s sizing, `USER_DATA_PATH` backup, disaster recovery |
-| **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Auth-proxy 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
+| **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Gateway 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
 | **[Upgrading](docs/UPGRADING.md)** | Per-version migration steps (companion to [`CHANGELOG.md`](CHANGELOG.md)) |
-
----
-
-## Prerequisites
-
-Bind your **[LLM Gateway](https://llm.amd.com/)** key to **[Hyperloom](https://core42.primus-safe.amd.com/hyperloom/)** to obtain your `AK_YOUR_API_KEY`. This key is required for both the Hyperloom UI and the local optimization workflow — it provides access to TraceLens, GEAK, and OOB services.
 
 ---
 
@@ -43,7 +37,7 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 - **Data flywheel** — every optimization run feeds results back through Minio storage and Langfuse observability, creating a closed feedback loop that continuously improves the agent's knowledge base and scoring heuristics.
 - **Full Skills support** — sandboxes load optimization Skills on demand, giving the agent the same profiling, kernel-rewrite, and domain-specific capabilities at cloud scale.
 
-1. Go to **[core42.primus-safe.amd.com/hyperloom](https://core42.primus-safe.amd.com/hyperloom/)**
+1. Go to **[crusoe.primus-safe.amd.com/hyperloom](https://crusoe.primus-safe.amd.com/hyperloom/)**
 2. Select **Claw Agent** or **Get Started** from the landing page to enter PrimusClaw
    <p align="center"><img width="500" alt="Hyperloom Landing" src="slides/hyperloom_landing.png" /></p>
 3. Hyperloom (tab): End-to-end Model Performance Optimization
@@ -72,9 +66,9 @@ You need an AMD GPU machine that supports MI300X or MI355X, using an SGLang or v
 The SGLang images are available from two sources — pick the one that matches your environment:
 
 - **Public Docker Hub** (`primussafe/sglang:<tag>`) — pull directly from anywhere with `docker pull`. Use these refs when running `docker run` on your own GPU machine. Browse all available tags at **[hub.docker.com/r/primussafe/sglang/tags](https://hub.docker.com/r/primussafe/sglang/tags)**.
-- **Self-hosted Harbor registry** (`harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:<tag>`) — AMD's internal mirror hosted in the Core42 data center, reachable from our Primus-SaFE platform running there. Use this prefix when selecting an image for a SaFE Authoring Pod.
+- **Self-hosted Harbor registry** (`harbor.crusoe.primus-safe.amd.com/proxy/primussafe/sglang:<tag>`) — AMD's internal mirror hosted in the crusoe data center, reachable from our Primus-SaFE platform running there. Use this prefix when selecting an image for a SaFE Authoring Pod.
 
-Example images (Harbor refs for the SaFE Authoring Pod path; drop the `harbor.core42.primus-safe.amd.com/proxy/` prefix to get the public Docker Hub ref):
+Example images (Harbor refs for the SaFE Authoring Pod path; drop the `harbor.crusoe.primus-safe.amd.com/proxy/` prefix to get the public Docker Hub ref):
 
 - SGLang MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
 - SGLang MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
@@ -85,7 +79,7 @@ Example images (Harbor refs for the SaFE Authoring Pod path; drop the `harbor.co
 
 Choose one environment:
 
-- **Recommended — SaFE Authoring Pod**: create an Authoring Pod on [Primus-SaFE Authoring](https://core42.primus-safe.amd.com/authoring), select one of the SGLang or vLLM images above, and wait for the Pod to become ready.
+- **Recommended — SaFE Authoring Pod**: create an Authoring Pod on [Primus-SaFE Authoring](https://crusoe.primus-safe.amd.com/authoring), select one of the SGLang or vLLM images above, and wait for the Pod to become ready.
 - **Your own GPU machine**: start a long-running ROCm inference container that can access the GPU. The container name, workspace path, model path, and image version in the example below can all be changed for your environment.
 
 Minimal Docker example for your own GPU machine:
@@ -103,7 +97,7 @@ docker run -d \
   tail -f /dev/null
 ```
 
-> This example uses the public Docker Hub ref (`primussafe/sglang:...`) since it runs on your own GPU machine. Inside Primus-SaFE, use the `harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:...` mirror instead.
+> This example uses the public Docker Hub ref (`primussafe/sglang:...`) since it runs on your own GPU machine. Inside Primus-SaFE, use the `harbor.crusoe.primus-safe.amd.com/proxy/primussafe/sglang:...` mirror instead.
 
 If Hyperloom is already cloned on the host, you can mount that checkout directly into the container, for example by replacing `-v /path/to/workspace:/workspace` with `-v /path/on/host/Hyperloom:/workspace/Hyperloom`. Then open `/workspace/Hyperloom` after attaching Cursor to the container; you do not need to clone Hyperloom again inside the container.
 
@@ -150,7 +144,7 @@ Edit `.env`:
 
 ```env
 SAFE_API_KEY=ak-your-safe-apikey
-OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
+OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
 # Optional: set only if you installed the internal extension (enables roofline
 # gap / MI355+ MAF). Leave unset for the open-source-only report.
 # TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
@@ -163,14 +157,53 @@ OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `SAFE_API_KEY` | LLM gateway auth key | `ak-your-safe-apikey` |
-| `OPENAI_BASE_URL` | LLM gateway endpoint | `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1` |
+| `OPENAI_BASE_URL` | LLM gateway endpoint | `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1` |
 | `TRACELENS_INTERNAL_ROOT` (optional, internal users) | Path to your own internal TraceLens extension checkout (`pip install -e .`; rehydration module). Hyperloom never clones it. Set only to enable the internal extension; unset => open-source-only. | (self-provided) |
 | `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to auto-drop cursor; the default `forge,geak,claude,codex,cursor` ladder then runs as `forge,geak,claude,codex`. | `crsr_xxxxxxxxxxxx` |
 | `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK or OOB configuration is needed.
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK or OOB configuration is needed.
 
-> If HTTPS requests to `core42.primus-safe.amd.com` or the AMD LLM Gateway fail with a certificate verification error inside the container, install the AMD certificate bundle manually. This is most common when running on your own GPU server or a custom container image:
+> The table above is the single-gateway (AMD LiteLLM) default: one OpenAI-compatible endpoint serves both Claude and GPT models. The two setups below are alternatives — pick one; do not mix them with the single-gateway block above.
+
+<details>
+<summary><b>Split Anthropic + OpenAI entrypoints</b> (Claude and GPT live on different vendors/gateways)</summary>
+
+Set each side explicitly instead of `SAFE_API_KEY`.
+
+```env
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=sk-...
+```
+
+Set the models (`CLAUDE_MODEL` maps to the Anthropic side, `CODEX_MODEL` to the OpenAI side):
+
+```env
+INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
+CLAUDE_MODEL=orchestration-model-id-on-the-anthropic-side
+CODEX_MODEL=model-id-on-the-openai-side
+```
+
+</details>
+
+<details>
+<summary><b>Non-AMD / self-hosted gateway + custom models</b> (Vultr, TensorWave, on-prem, etc.)</summary>
+
+Point the base URL / key at your own LiteLLM-compatible gateway and pin the models it serves:
+
+```env
+OPENAI_BASE_URL=https://your-gateway/v1
+SAFE_API_KEY=your-gateway-key
+INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
+CLAUDE_MODEL=your-gateway-orchestration-model
+CODEX_MODEL=your-gateway-kernel-model
+```
+
+</details>
+
+> If HTTPS requests to `global.primus-safe.amd.com` or the AMD LLM Gateway fail with a certificate verification error inside the container, install the AMD certificate bundle manually. This is most common when running on your own GPU server or a custom container image:
 >
 > ```bash
 > curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash
@@ -312,7 +345,7 @@ All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best conc
 
 ## Hosted Tier — Limits & Pricing
 
-The hosted [Hyperloom UI / PrimusClaw](https://core42.primus-safe.amd.com/hyperloom/)
+The hosted [Hyperloom UI / PrimusClaw](https://crusoe.primus-safe.amd.com/hyperloom/)
 is operated by AMD on shared infrastructure. Defaults for the public
 PrimusClaw tier:
 
@@ -328,7 +361,7 @@ PrimusClaw tier:
 Pricing for the hosted tier is currently **free for AMD-internal users
 and approved AMD partners** via Primus-SaFE. Public / enterprise
 pricing is under active definition by the BRAIN team; reach out via
-the [Hyperloom support form](https://core42.primus-safe.amd.com/hyperloom/)
+the [Hyperloom support form](https://crusoe.primus-safe.amd.com/hyperloom/)
 or open an issue if your organization needs a quote.
 
 For higher limits, dedicated capacity, or air-gapped deployment, self-host
