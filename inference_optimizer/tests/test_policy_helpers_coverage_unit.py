@@ -140,7 +140,12 @@ def test_path_in_source_allowlist(monkeypatch) -> None:
     g = _gate(None)
     monkeypatch.setattr(pol, "resolve_source_file_allowlist", lambda: ("/srv/sglang/",))
     assert g._path_in_source_allowlist("/srv/sglang/foo.py") is True
+    assert g._path_in_source_allowlist("/srv/sglang/sub/foo.py") is True
     assert g._path_in_source_allowlist("/other/foo.py") is False
+    # Traversal and shared-prefix boundary must NOT slip past (was accepted by
+    # the old raw startswith check).
+    assert g._path_in_source_allowlist("/srv/sglang/../etc/passwd") is False
+    assert g._path_in_source_allowlist("/srv/sglangX/foo.py") is False
 
 
 def test_path_in_trace_allowlist(monkeypatch) -> None:
@@ -148,6 +153,8 @@ def test_path_in_trace_allowlist(monkeypatch) -> None:
     monkeypatch.setattr(pol, "_trace_path_allowlist", lambda: ("/shared/profile/",))
     assert g._path_in_trace_allowlist("/shared/profile/run.json.gz") is True
     assert g._path_in_trace_allowlist("/elsewhere/run.json.gz") is False
+    assert g._path_in_trace_allowlist("/shared/profile/../secret") is False
+    assert g._path_in_trace_allowlist("/shared/profileX/run.json.gz") is False
 
 
 # -- _check_freeform_task_description -------------------------------------
