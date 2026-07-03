@@ -121,6 +121,15 @@ when both are set, each is kept as-is. Claude CLI auth uses
 `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) in preference to any
 shared key. GEAK and OOB Codex inherit the OpenAI-side URL and key.
 
+To pin models (`CLAUDE_MODEL` on the Anthropic side, `CODEX_MODEL` on the
+OpenAI side):
+
+```bash
+export INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
+export CLAUDE_MODEL=orchestration-model-id-on-the-anthropic-side
+export CODEX_MODEL=model-id-on-the-openai-side
+```
+
 ### 2.3 Non-AMD / self-hosted gateway (#340)
 
 Point `OPENAI_BASE_URL` and `SAFE_API_KEY` (or the split keys above) at
