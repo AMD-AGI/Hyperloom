@@ -2456,8 +2456,6 @@ async def trace_analyze_handler(
         str(trace_input),
         "--session-id",
         str(payload.get("session_id") or session_dir.name),
-        "--top-k",
-        str(payload.get("top_k", 10)),
         "--workspace-path",
         workspace_path,
         # Pass the resolved root explicitly so the tool never depends on the
@@ -2465,6 +2463,13 @@ async def trace_analyze_handler(
         "--tracelens-root",
         str(tracelens_root),
     ]
+    # Kernel-candidate POOL size (issue #667): only forward --top-k when the
+    # request explicitly overrides it. Otherwise let tracelens_analysis.py apply
+    # its own large-pool default (env: HYPERLOOM_KERNEL_CANDIDATES_TOP_K) so the
+    # candidate-build cap and the dispatch-side budget (source-fn grouping + op
+    # dedup + attempt cap) stay decoupled and share a single source of truth.
+    if payload.get("top_k") is not None:
+        cmd += ["--top-k", str(payload.get("top_k"))]
     if model_name:
         cmd += ["--model-name", str(model_name)]
     if framework:
