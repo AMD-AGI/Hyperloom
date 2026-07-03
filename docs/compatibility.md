@@ -35,7 +35,7 @@ image is supplied.
 
 Pick the image that matches your environment. Public Docker Hub refs
 (`primussafe/sglang:<tag>`) are used on your own GPU machine; the
-`harbor.core42.primus-safe.amd.com/proxy/` prefix is the internal mirror used
+`harbor.crusoe.primus-safe.amd.com/proxy/` prefix is the internal mirror used
 inside Primus-SaFE.
 
 | Image | GPU |

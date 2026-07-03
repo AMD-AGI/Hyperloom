@@ -30,6 +30,7 @@ from .isolation import (
 )
 from .logging_setup import get_logger, stage_log
 from .models import Candidate, CandidateResult, ExploreRequest, Finding, PrFilter
+from .runtime.tools_api import _metric_float
 from .shell import render_template, run_command
 from .sources import primus_cortex
 from .sources._shared import _repo_slug
@@ -393,24 +394,6 @@ def _load_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _metric_float(data: dict[str, Any], *keys: str) -> float | None:
-    """Return the first int/float value among ``keys`` in ``data``.
-
-    Args:
-        data (dict[str, Any]): The metric mapping to read.
-        *keys (str): Candidate keys, probed in order.
-
-    Returns:
-        float | None: The first numeric value found as a float, or ``None``
-            when no key holds an int/float.
-    """
-    for key in keys:
-        value = data.get(key)
-        if isinstance(value, (int, float)):
-            return float(value)
-    return None
-
-
 def _resolve_output_path(template: str, variables: dict[str, str]) -> Path:
     """Render a path template using the candidate's variable bag.
 
@@ -566,8 +549,8 @@ def _evaluate_candidate(req: ExploreRequest, variables: dict[str, str]) -> tuple
     accuracy_template = req.outputs.get("accuracy_json", "{candidate_dir}/accuracy.json")
     benchmark = _load_json(_resolve_output_path(benchmark_template, variables))
     accuracy = _load_json(_resolve_output_path(accuracy_template, variables))
-    throughput = _metric_float(benchmark, "throughput", "output_throughput", "tput")
-    acc = _metric_float(accuracy, "accuracy", "gsm8k", "exact_match", "score")
+    throughput = _metric_float(benchmark, ("throughput", "output_throughput", "tput"))
+    acc = _metric_float(accuracy, ("accuracy", "gsm8k", "exact_match", "score"))
     completed = str(benchmark.get("completed") or benchmark.get("Completed") or "")
     return throughput, acc, completed
 
