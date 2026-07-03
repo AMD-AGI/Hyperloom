@@ -35,20 +35,8 @@ from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from inference_optimizer.paths import make_session_dir
 from inference_optimizer.session_paths import target_baseline_json
 from inference_optimizer.storage import SqliteConnection
-
-
-# fixtures
-@pytest.fixture
-def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    sd = make_session_dir()
-    from .conftest import seed_target_analysis_marker
-
-    seed_target_analysis_marker(sd)
-    return sd
 
 
 def _heartbeat() -> Intent:
