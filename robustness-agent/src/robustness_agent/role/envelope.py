@@ -254,8 +254,8 @@ class Intent:
 class BackendTurnResult:
     """Mirror of upstream ``backends.base.BackendTurnResult``.
 
-    The Coordinator inspects ``intents`` and ignores the rest in
-    P0-3 / P0-4. ``raw_text`` is recorded for debugging only.
+    The Coordinator inspects ``intents`` and ignores the rest.
+    ``raw_text`` is recorded for debugging only.
     """
 
     intents: list[Intent] = field(default_factory=list)

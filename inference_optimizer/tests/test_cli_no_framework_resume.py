@@ -1,7 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Cover the --no-framework-agent env default + resume write-back semantics
-introduced by the P2.c+d fix."""
+"""Cover the --no-framework-agent env default + resume write-back semantics."""
 
 from __future__ import annotations
 
@@ -11,7 +10,7 @@ import pytest
 from inference_optimizer import cli
 
 
-# Parser default (P2.c) — env honored when flag not passed.
+# Parser default — env honored when flag not passed.
 def _parse_optimize(argv: list[str]) -> object:
     """Helper: run the cli parser, return the parsed args namespace."""
     parser = cli._build_parser()
@@ -37,7 +36,7 @@ def test_no_framework_agent_explicit_flag_overrides_env_unset(monkeypatch: pytes
     assert getattr(args, "no_framework_agent") is True
 
 
-# Resume write-back (P2.d) — exercise just the branch logic, not the full
+# Resume write-back — exercise just the branch logic, not the full
 # CLI session-resume orchestration which needs a real session dir.
 class _ResumeStateStub:
     """Mirrors the SharedState fields the resume write-back branch reads/writes."""
@@ -66,7 +65,7 @@ def _apply_resume_writeback(state: _ResumeStateStub, args: _ArgsStub) -> str:
         cur_phase = (getattr(state, "phase", "") or "").strip().upper()
         if cur_phase in ("", "PRELUDE"):
             state.framework_agent_phase_enabled = False
-            # P2-g: persist immediately so a clean resume keeps the toggle on disk.
+            # Persist immediately so a clean resume keeps the toggle on disk.
             state.save("session_dir")
             msg = "DISABLING_RESUME"
         else:

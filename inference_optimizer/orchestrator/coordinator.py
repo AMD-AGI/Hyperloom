@@ -8924,7 +8924,7 @@ class Coordinator:
             log.exception("FRAMEWORK pump (%s) failed", caller)
 
     async def tick(self, n: int = 1) -> None:
-        """Run exactly ``n`` reactor passes for every agent (P0-3/P0-5/P1-4 tests); dispatcher pumps at pass end, lazy resume replay on tick 1.
+        """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1.
 
         Args:
             n: Number of full reactor+dispatcher passes to run (default 1).

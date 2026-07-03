@@ -111,7 +111,7 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
     """Mixed subprocess_nonzero + fast_exit_arg_error failures must still
     fast-fail once 3 total baseline failures accrue — neither per-class streak
     reaches its own threshold, so the combined backstop is what stops the run
-    (P5: otherwise the session burns the whole budget -> time_exhausted)."""
+    (otherwise the session burns the whole budget -> time_exhausted)."""
     def _task() -> Task:
         return Task(
             task_id="bl-mixed", kind="baseline", state="running",
