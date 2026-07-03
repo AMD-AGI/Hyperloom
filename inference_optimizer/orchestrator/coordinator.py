@@ -55,9 +55,6 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # Floor on the per-repo framework-PR discover timeout so a slow repo still gets a
 # usable budget even when the phase timeout is spread thin across many repos.
 _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
-# Sentinel returned by _rank_framework_agent_candidates_llm / _select_best_framework_agent_candidate
-# when the ranker explicitly signals that no candidate is applicable.
-_FRAMEWORK_AGENT_NONE_APPLICABLE: object = object()
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
 _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # Default resume-drift floor (%): a re-measured current_best below this fraction
@@ -3014,14 +3011,6 @@ class Coordinator:
         # Pick the most promising un-dispatched candidate (agent-ranked), or
         # request a new batch if exhausted.
         next_candidate = await self._select_best_framework_agent_candidate()
-        if next_candidate is _FRAMEWORK_AGENT_NONE_APPLICABLE:
-            self._record_framework_agent_phase_done(
-                reason="no_applicable_candidates",
-                failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
-            )
-            state.framework_agent_phase_done = True
-            state.save(self.session_dir)
-            return
         if next_candidate is None:
             # Hold the phase open while authored patches are still benched/critic-reviewed (gains must land before plateau judge); gated by authoring flag.
             # Only wait when the pump itself discovered a PR batch to author against:
@@ -3055,14 +3044,6 @@ class Coordinator:
                 state.save(self.session_dir)
                 return
             next_candidate = await self._select_best_framework_agent_candidate()
-            if next_candidate is _FRAMEWORK_AGENT_NONE_APPLICABLE:
-                self._record_framework_agent_phase_done(
-                    reason="no_applicable_candidates",
-                    failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
-                )
-                state.framework_agent_phase_done = True
-                state.save(self.session_dir)
-                return
             if next_candidate is None:
                 self._record_framework_agent_phase_done(
                     reason="discover_returned_no_new_candidates",
@@ -4213,8 +4194,6 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — ranking is advisory; never wedge the pump
             log.debug("FRAMEWORK: agent candidate ranking failed", exc_info=True)
             chosen = None
-        if chosen is _FRAMEWORK_AGENT_NONE_APPLICABLE:
-            return _FRAMEWORK_AGENT_NONE_APPLICABLE  # type: ignore[return-value]
         if chosen is not None:
             return chosen
         # Deterministic fallback: discovery order.
@@ -4275,12 +4254,11 @@ class Coordinator:
             ctx_lines.append(f"{i}. id={cid} repo={repo} title={title!r}{extra}")
         ctx_lines.append("")
         ctx_lines.append(
-            "Prefer PRs that target this model's architecture/precision/GPU and "
-            "the serving hot path (MoE/FP8/attention/GEMM/KV-cache/scheduling). "
-            "Deprioritize PRs scoped to unrelated models, archs, or GPUs. "
-            "If NO candidate is applicable to this workload, reply "
-            '{"applicable": false, "reason": "<short>"}. '
-            'Otherwise reply {"candidate_id": "<id>", "reason": "<short>"}.'
+            "Prefer PRs from this session's own framework repo, especially those "
+            "targeting the serving hot path (MoE/FP8/attention/GEMM/KV-cache/scheduling). "
+            "A cross-framework PR is acceptable when it carries transferable high-value "
+            "serving tech worth porting. Always choose exactly ONE candidate; reply "
+            '{"candidate_id": "<id>", "reason": "<short>"}.'
         )
         prompt = "\n".join(ctx_lines)
 
@@ -4325,16 +4303,6 @@ class Coordinator:
             end = text.rfind("}")
             if start != -1 and end != -1 and end > start:
                 obj = _json.loads(text[start : end + 1])
-                # Explicit "none applicable" signal — only when the key is present
-                # and its value is exactly false (avoid false positives from
-                # truthy/missing values).
-                if obj.get("applicable") is False:
-                    reason = str(obj.get("reason") or "").strip()
-                    log.info(
-                        "FRAMEWORK: ranker signalled no applicable candidate reason=%s",
-                        reason[:160],
-                    )
-                    return _FRAMEWORK_AGENT_NONE_APPLICABLE  # type: ignore[return-value]
                 chosen_id = str(obj.get("candidate_id") or "").strip()
                 reason = str(obj.get("reason") or "").strip()
         except Exception:  # noqa: BLE001

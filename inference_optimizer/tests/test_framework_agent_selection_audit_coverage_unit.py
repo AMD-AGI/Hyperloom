@@ -827,15 +827,13 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ranker "none applicable" sentinel propagation
+# Lenient ranker: an "applicable: false" reply never vetoes the phase
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_ranker_none_applicable_propagates_to_select(
+async def test_ranker_applicable_false_falls_back_to_discovery_order(
     coord: Coordinator, monkeypatch
 ) -> None:
-    from inference_optimizer.orchestrator.coordinator import _FRAMEWORK_AGENT_NONE_APPLICABLE
-
     cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
     monkeypatch.setattr(coord, "_unprocessed_framework_agent_candidates", lambda: cands)
     _install_ranker(
@@ -844,50 +842,4 @@ async def test_ranker_none_applicable_propagates_to_select(
         _FakeClient('{"applicable": false, "reason": "all off-arch"}'),
     )
     result = await coord._select_best_framework_agent_candidate()
-    assert result is _FRAMEWORK_AGENT_NONE_APPLICABLE
-
-
-@pytest.mark.asyncio
-async def test_pump_stamps_no_applicable_candidates_on_sentinel(
-    coord: Coordinator, monkeypatch
-) -> None:
-    import types as _types
-
-    from inference_optimizer.orchestrator.coordinator import _FRAMEWORK_AGENT_NONE_APPLICABLE
-
-    _enter_fpr(coord)
-    coord.shared_state.framework_agent_batches = [
-        {"batch_id": "bx", "candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}
-    ]
-    coord.shared_state.framework_agent_phase_progress = []
-
-    # Stub tasks so the pump's early-return guards pass without a real DB.
-    _empty_tasks = _types.SimpleNamespace(
-        queued=lambda: ([]).__class__.__new__(list) or [],
-        running=lambda: [],
-    )
-
-    async def _empty_list():
-        return []
-
-    _empty_tasks.queued = _empty_list
-    _empty_tasks.running = _empty_list
-    monkeypatch.setattr(coord, "tasks", _empty_tasks)
-
-    # No pending proposals so the framework_agent proposal guard passes.
-    coord.state.pending_proposals = {}
-
-    async def _none_applicable(_cands):
-        return _FRAMEWORK_AGENT_NONE_APPLICABLE
-
-    monkeypatch.setattr(coord, "_rank_framework_agent_candidates_llm", _none_applicable)
-
-    from inference_optimizer.orchestrator.coordinator import Coordinator as _C
-
-    await _C._pump_framework_agent_phase(coord)  # type: ignore[arg-type]
-
-    assert coord.shared_state.framework_agent_phase_done is True
-    history = coord.shared_state.phase_history
-    done_rows = [e for e in history if e.get("event") == "framework_agent_phase_done"]
-    assert done_rows, "expected a phase_done history row"
-    assert done_rows[-1]["reason"] == "no_applicable_candidates"
+    assert result is cands[0]
