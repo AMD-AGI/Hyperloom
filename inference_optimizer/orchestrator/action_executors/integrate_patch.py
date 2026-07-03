@@ -1365,6 +1365,13 @@ class IntegratePatchExecutor:
         # The override is out-of-band only (HYPERLOOM_BYPASS_CRITIC=1); an
         # in-band params.bypass_critic is ignored so an LLM cannot self-approve.
         if shared_state is not None and os.environ.get("HYPERLOOM_BYPASS_CRITIC") != "1":
+            if params.get("bypass_critic"):
+                log.warning(
+                    "integrate_patch executor: in-band bypass_critic ignored; "
+                    "enforcing Critic verdict for specialist_task_id=%r (operator "
+                    "override is HYPERLOOM_BYPASS_CRITIC=1, out-of-band only).",
+                    specialist_task_id,
+                )
             try:
                 recorded = shared_state.get_specialist_patch_verdict(
                     specialist_task_id,

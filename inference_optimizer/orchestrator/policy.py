@@ -470,7 +470,7 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
 # `framework_source_root` is the (optional) integrate_patch/framework_agent git-apply
 # root override; no production path ever sets it (Coordinator relies on allowlist
 # resolution), so gating it here only blocks an LLM-authored override escaping to an
-# arbitrary dir (e.g. "/root") — closes the F003.0 host-write vector under strict_paths.
+# arbitrary dir (e.g. "/root") — closes the arbitrary-host-write vector under strict_paths.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
 
 
@@ -1678,6 +1678,15 @@ class PolicyGate:
         bypass = os.environ.get("HYPERLOOM_BYPASS_CRITIC") == "1"
         if bypass:
             return
+        if params.get("bypass_critic"):
+            # An LLM-authored in-band bypass is ignored (self-approval blocked);
+            # log it so the attempted override is visible in ops logs.
+            log.warning(
+                "integrate_patch: in-band params.bypass_critic ignored; Critic gate "
+                "enforced for specialist_task_id=%r (operator override is "
+                "HYPERLOOM_BYPASS_CRITIC=1, out-of-band only).",
+                sid,
+            )
         ss = getattr(self, "shared_state", None)
         verdict = ""
         if ss is not None:

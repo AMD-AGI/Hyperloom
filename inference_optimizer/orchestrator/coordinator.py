@@ -12480,6 +12480,17 @@ class Coordinator:
             action_name (str | None): Explicit action name override; falls back
                 to ``intent.payload['action_name']``.
         """
+        # Surface every PolicyGate denial in the standard process log (not just
+        # on the bus) so security rejections — including the newly-gated
+        # framework_source_root / CORE-field / path-containment checks — are
+        # observable in ops logs. Denials are exceptional, so this is not noisy.
+        log.warning(
+            "PolicyGate denied intent: source=%s type=%s rule=%s reason=%s",
+            source,
+            intent.type.value,
+            denied.rule,
+            str(denied),
+        )
         await self.bus.append_and_seq(
             Message.new(
                 "coordinator",

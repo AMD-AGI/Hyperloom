@@ -545,7 +545,7 @@ def test_policy_source_file_outside_allowlist_denied(tmp_path):
 
 
 def test_policy_framework_source_root_outside_allowlist_denied(tmp_path):
-    # F003.0: an LLM-authored framework_source_root override escaping the source
+    # An LLM-authored framework_source_root override escaping the source
     # allowlist (e.g. "/root") must be rejected under strict_paths.
     gate = _gate(tmp_path)
     intent = Intent(

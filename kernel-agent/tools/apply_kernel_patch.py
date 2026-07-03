@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import py_compile
 import re
@@ -19,6 +20,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+log = logging.getLogger(__name__)
 
 
 COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".hip"}
@@ -889,6 +892,13 @@ def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]
     # Only the importable aiter jit/build dir is a legitimate destination.
     expected = _aiter_jit_build_dir()
     if expected is None or not _within_root(src, expected):
+        log.warning(
+            "revert: skipping jit/build restore; recorded src %s does not match the "
+            "importable aiter jit/build dir %s (aiter reinstalled/relocated, cross-process "
+            "resume, or a forged manifest). jit/build left invalidated; next import re-JITs.",
+            src,
+            expected,
+        )
         return {
             "status": "skipped",
             "reason": f"jit/build src {src} is not the importable aiter jit/build dir",
@@ -1164,6 +1174,13 @@ def _restore_aiter_cpp_itfs_cache(cache_backup: dict[str, Any]) -> dict[str, Any
         if not str(src) or not str(backup_path) or not backup_path.exists():
             continue
         if not _within_root(src, build_dir):
+            log.warning(
+                "revert: skipping cpp_itfs cache restore; recorded src %s is outside the "
+                "aiter cpp_itfs build dir %s ($AITER_ROOT_DIR/$HOME differ across "
+                "apply/revert, or a forged manifest). Cache left invalidated; next call recompiles.",
+                src,
+                build_dir,
+            )
             continue
         if src.exists():
             try:
