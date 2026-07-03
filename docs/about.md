@@ -5,7 +5,7 @@ LLM inference optimization on AMD GPUs.
 
 ## Blog
 
-- [Hyperloom UI (PrimusClaw)](https://core42.example-internal-host.invalid/hyperloom/) —
+- [Hyperloom UI (PrimusClaw)](https://crusoe.example-internal-host.invalid/hyperloom/) —
   the hosted online mode.
 - [ROCm Blogs — LLM inference optimization](https://rocm.blogs.amd.com/blog/tag/llm.html)
   — AMD's official blog stream covering ROCm inference optimization.
@@ -39,7 +39,7 @@ by the MIT license above; review and comply with each tool's individual license.
   describing Hyperloom's tree-search orchestration and its
   Orchestrator / Specialist / Critic architecture.
 - [Hyperloom repository](https://github.com/AMD-AGI/Hyperloom)
-- [Hyperloom UI (PrimusClaw)](https://core42.example-internal-host.invalid/hyperloom/)
+- [Hyperloom UI (PrimusClaw)](https://crusoe.example-internal-host.invalid/hyperloom/)
 - [Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX) — full
   sweeps, patches, configs, and reproduction scripts for the key benchmark
   results.

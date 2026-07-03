@@ -1387,79 +1387,30 @@ def _coerce_dict(item: Any) -> dict[str, Any] | None:
     return None
 
 
-def _normalise_findings(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce findings into arbor ``{description, measured_impact}`` dicts.
-
-    Args:
-        items (list[Any] | None): Findings as dicts or dataclasses;
-            uncoercible entries are skipped.
-
-    Returns:
-        list[dict[str, Any]]: One ``{description, measured_impact}``
-            dict per coercible finding.
-    """
+def _normalise_str_dicts(items: list[Any] | None, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Coerce each item to ``{k: str(d.get(k) or "")}`` for *keys*; skip uncoercible entries."""
     out: list[dict[str, Any]] = []
     for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append(
-            {
-                "description": str(d.get("description") or ""),
-                "measured_impact": str(d.get("measured_impact") or ""),
-            }
-        )
+        out.append({k: str(d.get(k) or "") for k in keys})
     return out
+
+
+def _normalise_findings(items: list[Any] | None) -> list[dict[str, Any]]:
+    """Coerce findings into arbor ``{description, measured_impact}`` dicts."""
+    return _normalise_str_dicts(items, ("description", "measured_impact"))
 
 
 def _normalise_failures(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce failures into arbor ``{description, reason}`` dicts.
-
-    Args:
-        items (list[Any] | None): Failures as dicts or dataclasses;
-            uncoercible entries are skipped.
-
-    Returns:
-        list[dict[str, Any]]: One ``{description, reason}`` dict per
-            coercible failure.
-    """
-    out: list[dict[str, Any]] = []
-    for it in items or []:
-        d = _coerce_dict(it)
-        if d is None:
-            continue
-        out.append(
-            {
-                "description": str(d.get("description") or ""),
-                "reason": str(d.get("reason") or ""),
-            }
-        )
-    return out
+    """Coerce failures into arbor ``{description, reason}`` dicts."""
+    return _normalise_str_dicts(items, ("description", "reason"))
 
 
 def _normalise_gaps(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce gaps into arbor ``{description, metrics}`` dicts.
-
-    Args:
-        items (list[Any] | None): Gaps as dicts or dataclasses;
-            uncoercible entries are skipped.
-
-    Returns:
-        list[dict[str, Any]]: One ``{description, metrics}`` dict per
-            coercible gap.
-    """
-    out: list[dict[str, Any]] = []
-    for it in items or []:
-        d = _coerce_dict(it)
-        if d is None:
-            continue
-        out.append(
-            {
-                "description": str(d.get("description") or ""),
-                "metrics": str(d.get("metrics") or ""),
-            }
-        )
-    return out
+    """Coerce gaps into arbor ``{description, metrics}`` dicts."""
+    return _normalise_str_dicts(items, ("description", "metrics"))
 
 
 def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
@@ -1497,28 +1448,8 @@ def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
 
 
 def _normalise_pitfalls(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce pitfalls into arbor ``{description, severity}`` dicts.
-
-    Args:
-        items (list[Any] | None): Pitfalls as dicts or dataclasses;
-            uncoercible entries are skipped.
-
-    Returns:
-        list[dict[str, Any]]: One ``{description, severity}`` dict per
-            coercible pitfall.
-    """
-    out: list[dict[str, Any]] = []
-    for it in items or []:
-        d = _coerce_dict(it)
-        if d is None:
-            continue
-        out.append(
-            {
-                "description": str(d.get("description") or ""),
-                "severity": str(d.get("severity") or ""),
-            }
-        )
-    return out
+    """Coerce pitfalls into arbor ``{description, severity}`` dicts."""
+    return _normalise_str_dicts(items, ("description", "severity"))
 
 
 def _normalise_lessons(items: list[Any] | None) -> list[dict[str, Any]]:

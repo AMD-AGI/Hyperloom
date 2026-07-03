@@ -50,6 +50,11 @@ def _mcp() -> grc._GbrainMcp:
     return grc._GbrainMcp("http://gbrain.test", "tok", 2.0)
 
 
+def _slug(name: str) -> str:
+    """Build a default recipe slug for fake gbrain pages."""
+    return f"hyperloom-recipe-kb/{name}"
+
+
 # -- _GbrainMcp.call envelope parsing -------------------------------------
 def test_mcp_call_transport_error(monkeypatch) -> None:
     def _boom(req, timeout=None):
@@ -374,8 +379,8 @@ def test_get_recipe_validation() -> None:
 def test_search_updated_since_and_order(monkeypatch) -> None:
     c = _client(
         {
-            "r1": _recipe_page("Qwen3-32B", "mi300x", "2026-01-01T00:00:00Z"),
-            "r2": _recipe_page("Qwen3-32B", "mi355x", "2026-03-01T00:00:00Z"),
+            _slug("r1"): _recipe_page("Qwen3-32B", "mi300x", "2026-01-01T00:00:00Z"),
+            _slug("r2"): _recipe_page("Qwen3-32B", "mi355x", "2026-03-01T00:00:00Z"),
         }
     )
     # updated_since filters out the older row
@@ -396,10 +401,11 @@ def test_search_metric_filter() -> None:
 
 
 def test_label_search_uses_page_search_before_scan() -> None:
-    c = _client({"r1": _recipe_page("target", "mi300x", "t1")})
+    slug = _slug("r1")
+    c = _client({slug: _recipe_page("target", "mi300x", "t1")})
     c._mcp = _FakeMcp(  # type: ignore[assignment]
-        {"r1": _recipe_page("target", "mi300x", "t1")},
-        search_slugs=["r1"],
+        {slug: _recipe_page("target", "mi300x", "t1")},
+        search_slugs=[slug],
     )
 
     rows = c.search(label_match={"model": "target"}, limit=1)
@@ -409,11 +415,34 @@ def test_label_search_uses_page_search_before_scan() -> None:
     assert [tool for tool, _ in c._mcp.calls] == ["search", "get_page"]  # type: ignore[union-attr]
 
 
+def test_label_search_filters_slugs_by_configured_prefix() -> None:
+    c = _client(
+        {
+            "hyperloom-session-kb/old": _recipe_page("target", "mi300x", "t1"),
+            "hyperloom-recipe-kb/new": _recipe_page("target", "mi300x", "t2"),
+        }
+    )
+    c._mcp = _FakeMcp(  # type: ignore[assignment]
+        {
+            "hyperloom-session-kb/old": _recipe_page("target", "mi300x", "t1"),
+            "hyperloom-recipe-kb/new": _recipe_page("target", "mi300x", "t2"),
+        },
+        search_slugs=["hyperloom-session-kb/old", "hyperloom-recipe-kb/new"],
+    )
+
+    rows = c.search(label_match={"model": "target"}, limit=1)
+
+    assert len(rows) == 1
+    assert rows[0]["updated_at"] == "t2"
+    assert [tool for tool, _ in c._mcp.calls] == ["search", "get_page"]  # type: ignore[union-attr]
+    assert c._mcp.calls[1][1]["slug"] == "hyperloom-recipe-kb/new"  # type: ignore[union-attr]
+
+
 def test_list_recent_returns_rows() -> None:
     c = _client(
         {
-            "r1": _recipe_page("m1", "mi300x", "2026-01-01T00:00:00Z"),
-            "r2": _recipe_page("m2", "mi355x", "2026-02-01T00:00:00Z"),
+            _slug("r1"): _recipe_page("m1", "mi300x", "2026-01-01T00:00:00Z"),
+            _slug("r2"): _recipe_page("m2", "mi355x", "2026-02-01T00:00:00Z"),
         }
     )
     rows = c.list_recent(limit=10)

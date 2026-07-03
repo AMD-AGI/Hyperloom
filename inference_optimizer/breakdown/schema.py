@@ -1391,8 +1391,8 @@ class PhaseSegment(TypedDict, total=False):
     the entry evidence and the events that fell within the segment window.
 
     Attributes:
-        phase (str): Phase name (``PRELUDE`` / ``FRAMEWORK`` / ``EXPLORE`` /
-            ``KERNEL`` / ``SWEEP`` / ``CLOSE``).
+        phase (str): Phase name (``PRELUDE`` / ``FRAMEWORK_AGENT`` /
+            ``EXPLORE`` / ``KERNEL_AGENT`` / ``SWEEP`` / ``CLOSE``).
         from_phase (str): Previous phase (empty for the first segment).
         entered_ts (str): ISO UTC timestamp of entry.
         entered_unix (float | None): Unix time of entry, or None.

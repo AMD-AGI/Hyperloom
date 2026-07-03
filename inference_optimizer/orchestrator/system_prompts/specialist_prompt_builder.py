@@ -485,17 +485,33 @@ def _focus_static_recon_specialist(
             "",
         ]
     model_info_line = ""
+    shared_expert_advisory: list[str] = []
     if inp.model_info:
         try:
             attn = str(inp.model_info.get("attention_type") or "").strip()
             is_moe = bool(inp.model_info.get("is_moe"))
             quant = str(inp.model_info.get("quantization") or "").strip()
-            model_info_line = (
-                "Model features: "
-                f"attention={attn or '?'} moe={is_moe} quant={quant or '?'}."
-            )
+            has_shared = bool(inp.model_info.get("has_shared_expert"))
+            num_shared = inp.model_info.get("num_shared_experts")
+            features = f"attention={attn or '?'} moe={is_moe}"
+            if has_shared:
+                n_str = str(int(num_shared)) if num_shared is not None else "?"
+                features += f" shared_expert=True n_shared={n_str}"
+            features += f" quant={quant or '?'}."
+            model_info_line = f"Model features: {features}"
+            if has_shared:
+                shared_expert_advisory = [
+                    "**Shared-expert fusion advisory**: this model has always-on shared "
+                    "experts. Confirm whether the shared expert still runs as a separate "
+                    "dense MLP per layer. If yes, investigate folding it into the routed "
+                    "grouped-GEMM path as an always-selected extra expert slot (code-path "
+                    "bridge, not just an env flag). Known caveat: expert parallelism (EP) "
+                    "is unsupported until the expert-map behaviour is explicitly handled.",
+                    "",
+                ]
         except Exception:  # noqa: BLE001 — advisory rendering only
             model_info_line = ""
+            shared_expert_advisory = []
     return [
         "You are the **static-recon specialist** — a read-only reconnaissance",
         "agent. You do NOT benchmark, apply patches, build a worktree, or",
@@ -505,6 +521,7 @@ def _focus_static_recon_specialist(
         "are silently disabled in the LIVE framework source.",
         "",
         *( [model_info_line, ""] if model_info_line else [] ),
+        *shared_expert_advisory,
         *checklist_lines,
         "**How to hunt (read the LIVE source under the source roots / hint",
         "directories in Section 7):**",

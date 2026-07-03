@@ -25,6 +25,7 @@ from inference_optimizer.recipe_kb.gbrain_remote_client import (
 )
 
 _ARGS_KEY = "extra_server_args"
+_RECIPE_SLUG_PREFIX = "hyperloom-recipe-kb"
 
 
 class _Spec:
@@ -199,7 +200,7 @@ def _gbrain_dispatcher(local: LocalRecipeStore) -> RecipeKB:
         enabled=True,
     )
     client._mcp = _FakeMcp(  # type: ignore[assignment]
-        {f"recipe/{i}": s.gbrain_page() for i, s in enumerate(SPECS)}
+        {f"{_RECIPE_SLUG_PREFIX}/recipe/{i}": s.gbrain_page() for i, s in enumerate(SPECS)}
     )
     return RecipeKB(local=local, remote=client)
 

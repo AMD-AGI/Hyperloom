@@ -33,6 +33,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from ._row_utils import coerce_optional_int as _coerce_optional_int
+
 log = logging.getLogger(__name__)
 
 
@@ -45,23 +47,6 @@ _TOKEN_KEYS: tuple[str, ...] = (
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
 )
-
-
-def _coerce_optional_int(value: Any) -> int | None:
-    """Coerce a value to ``int`` or ``None`` if it cannot be parsed.
-
-    Args:
-        value: Arbitrary value to convert.
-
-    Returns:
-        The integer value, or ``None`` on failure.
-    """
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | None:

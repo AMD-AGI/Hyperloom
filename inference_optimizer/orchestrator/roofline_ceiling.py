@@ -604,23 +604,22 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
     )
 
 
-def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
-    """``(gpu, precision)`` → vendor dense peak TFLOPS; 0.0 on miss (safe-degrade signal → T_cmp unavailable, fall back to T_mem).
-
-    Args:
-        gpu_type: GPU type key (matched case-insensitively).
-        precision_tag: Precision key to look up.
-
-    Returns:
-        The vendor dense peak TFLOPS, or ``0.0`` on miss.
-    """
-    spec = HW_SPECS.get((gpu_type or "").strip().lower())
+def _resolve_tflops(
+    specs: dict[str, dict[str, Any]], gpu_type: str | None, precision_tag: str | None
+) -> float:
+    """``(gpu, precision)`` → TFLOPS from *specs*' ``peak_tflops`` table (case-insensitive); 0.0 on any miss."""
+    spec = specs.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
     table = spec.get("peak_tflops")
     if not isinstance(table, dict) or not precision_tag:
         return 0.0
     return float(table.get(str(precision_tag).strip().lower(), 0.0))
+
+
+def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
+    """``(gpu, precision)`` → vendor dense peak TFLOPS; 0.0 on miss (safe-degrade signal → T_cmp unavailable, fall back to T_mem)."""
+    return _resolve_tflops(HW_SPECS, gpu_type, precision_tag)
 
 
 # Model metadata extraction.
@@ -1241,22 +1240,8 @@ HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
 
 
 def _resolve_achievable_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
-    """Max-achievable TFLOPS from ``HW_SPECS_ACHIEVABLE``; 0.0 on miss.
-
-    Args:
-        gpu_type: GPU type key (matched case-insensitively).
-        precision_tag: Precision key to look up.
-
-    Returns:
-        The max-achievable TFLOPS, or ``0.0`` on miss.
-    """
-    spec = HW_SPECS_ACHIEVABLE.get((gpu_type or "").strip().lower())
-    if spec is None:
-        return 0.0
-    table = spec.get("peak_tflops")
-    if not isinstance(table, dict) or not precision_tag:
-        return 0.0
-    return float(table.get(str(precision_tag).strip().lower(), 0.0))
+    """Max-achievable TFLOPS from ``HW_SPECS_ACHIEVABLE``; 0.0 on miss."""
+    return _resolve_tflops(HW_SPECS_ACHIEVABLE, gpu_type, precision_tag)
 
 
 import dataclasses as _dc
