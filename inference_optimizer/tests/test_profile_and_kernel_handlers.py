@@ -1635,6 +1635,66 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
 
 
 @pytest.mark.asyncio
+async def test_trace_analyze_handler_omits_top_k_when_not_requested(
+    session_dir,
+    monkeypatch,
+):
+    """Issue #667: without an explicit ``top_k`` the handler must NOT pass
+    ``--top-k`` so tracelens_analysis.py applies its own large-pool default
+    (candidate-build cap decoupled from the dispatch-side budget)."""
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "deterministic",
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] in ("ok", "succeeded", "failed")
+    assert "--top-k" not in captured["cmd"]
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_forwards_explicit_top_k(
+    session_dir,
+    monkeypatch,
+):
+    """Issue #667: an explicit ``top_k`` request param is still forwarded to
+    the tool as ``--top-k <n>`` (operator/LLM override path)."""
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "deterministic",
+            "top_k": 20,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] in ("ok", "succeeded", "failed")
+    cmd = captured["cmd"]
+    assert "--top-k" in cmd
+    assert cmd[cmd.index("--top-k") + 1] == "20"
+
+
+@pytest.mark.asyncio
 async def test_trace_analyze_handler_records_bypass_discovery_failed(
     session_dir,
     monkeypatch,
