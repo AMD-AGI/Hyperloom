@@ -89,49 +89,36 @@ def _merge_phase_timeline(
     return base
 
 
-def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
-    """Read ``state.json`` as a plain dict; empty dict + warning when missing.
+def _load_json(session_dir: Path, filename: str, warnings: list[str]) -> dict[str, Any]:
+    """Read ``<filename>`` from the session dir as a dict; ``{}`` + warning on failure.
 
     Args:
         session_dir: The hyperloom session directory.
-        warnings: Accumulator appended to when the file is missing or
-            unparseable.
+        filename: File to read (e.g. ``state.json`` / ``manifest.json``).
+        warnings: Accumulator appended to when the file is missing or unparseable.
 
     Returns:
-        The parsed ``state.json`` contents, or an empty dict on any failure.
+        The parsed JSON contents, or an empty dict on any failure.
     """
-    state_path = session_dir / "state.json"
-    if not state_path.exists():
-        warnings.append(f"state.json missing at {state_path}")
+    path = session_dir / filename
+    if not path.exists():
+        warnings.append(f"{filename} missing at {path}")
         return {}
     try:
-        return json.loads(state_path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
-        warnings.append(f"failed to parse state.json: {exc!r}")
+        warnings.append(f"failed to parse {filename}: {exc!r}")
         return {}
+
+
+def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
+    """Read ``state.json`` as a plain dict; empty dict + warning when missing."""
+    return _load_json(session_dir, "state.json", warnings)
 
 
 def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
-    """Read ``manifest.json`` as a plain dict.
-
-    Args:
-        session_dir (Path): The hyperloom session directory.
-        warnings (list[str]): Accumulator appended to when the file is missing
-            or unparseable.
-
-    Returns:
-        dict[str, Any]: The parsed ``manifest.json`` contents, or an empty
-            dict on any failure.
-    """
-    manifest_path = session_dir / "manifest.json"
-    if not manifest_path.exists():
-        warnings.append(f"manifest.json missing at {manifest_path}")
-        return {}
-    try:
-        return json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"failed to parse manifest.json: {exc!r}")
-        return {}
+    """Read ``manifest.json`` as a plain dict; empty dict + warning when missing."""
+    return _load_json(session_dir, "manifest.json", warnings)
 
 
 _ROOFLINE_NUMERIC_FIELDS = (
