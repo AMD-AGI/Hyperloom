@@ -544,6 +544,26 @@ def test_policy_source_file_outside_allowlist_denied(tmp_path):
     assert exc.value.rule == "source_file_not_allowlisted"
 
 
+def test_policy_framework_source_root_outside_allowlist_denied(tmp_path):
+    # An LLM-authored framework_source_root override escaping the source
+    # allowlist (e.g. "/root") must be rejected under strict_paths.
+    gate = _gate(tmp_path)
+    intent = Intent(
+        type=IntentType.REQUEST,
+        payload={
+            "target_agent": "kernel_agent",
+            "kind": "trace_analyze",
+            "params": {
+                "trace_input": str(tmp_path / "runs" / "x.json.gz"),
+                "framework_source_root": "/root",
+            },
+        },
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", intent)
+    assert exc.value.rule == "source_file_not_allowlisted"
+
+
 def test_policy_strict_off_skips_path_check(tmp_path):
     gate = _gate(tmp_path, strict=False)
     intent = Intent(
