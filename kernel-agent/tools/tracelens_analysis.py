@@ -63,6 +63,49 @@ from _paths import workspace_root
 
 
 # ---------------------------------------------------------------------------
+# Kernel-candidate pool size (issue #667).
+#
+# ``--top-k`` caps how many analysis.md p-items / hot kernels are written into
+# ``kernel_candidates.json``. Historically this defaulted to 10, which capped
+# the candidate POOL at candidate-build time -- *before* the dispatch layer's
+# own narrowing (source-fn grouping into ``task_groups[]``, op-fanout dedup,
+# and the per-group dispatch attempt cap) had a chance to run. A tight
+# build-time cap disproportionately drops GEAK-editable ops (rmsnorm,
+# add_rmsnorm, mha_batch_prefill, fused RoPE/reshape) while non-editable ops
+# (asm ``fmoe_g1u1`` with a compiled ``.co``, hipblaslt ``aten::mm``) consume
+# the top slots.
+#
+# The two caps are now decoupled: candidate-building uses a large pool by
+# default so the dispatch layer -- which already groups/dedups and caps
+# attempts -- is the real budget gate. Override via
+# ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K`` (this standalone tool) or the
+# ``top_k`` request param on the orchestrator side. A value of ``0`` (or
+# negative) means "no build-time cap".
+_DEFAULT_KERNEL_CANDIDATES_TOP_K = 100
+
+
+def _default_top_k() -> int:
+    """Resolve the default kernel-candidate pool size.
+
+    Reads ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K`` when set (``0``/negative =>
+    unbounded pool, represented internally as a very large cap), otherwise
+    falls back to :data:`_DEFAULT_KERNEL_CANDIDATES_TOP_K`.
+
+    Returns:
+        The candidate-build-time cap (a large number when unbounded).
+    """
+    raw = os.environ.get("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "").strip()
+    if not raw:
+        return _DEFAULT_KERNEL_CANDIDATES_TOP_K
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_KERNEL_CANDIDATES_TOP_K
+    # 0 / negative => no build-time cap (dispatch layer owns the budget).
+    return val if val > 0 else 1_000_000
+
+
+# ---------------------------------------------------------------------------
 # Dict-first op -> .cu resolver (ground-truth ``op_to_source.json``).
 #
 # TraceLens emits only a CPU op name, a ``.py`` launcher, and (assumed) a device
@@ -5737,7 +5780,16 @@ def main() -> int:
     parser.add_argument("--session-id", default="")
     parser.add_argument("--model-name", default="")
     parser.add_argument("--framework", default="")
-    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=_default_top_k(),
+        help="Kernel-candidate POOL size written to kernel_candidates.json "
+        "(issue #667). Defaults to a large pool so the dispatch layer "
+        "(source-fn grouping + op dedup + attempt cap) owns the real "
+        "budget. Override the default via HYPERLOOM_KERNEL_CANDIDATES_TOP_K "
+        "(0 or negative = no build-time cap).",
+    )
     parser.add_argument("--target-platform", default="MI355X")
     parser.add_argument("--analysis-mode", default="default")
     parser.add_argument("--runtime-env", default="local")
