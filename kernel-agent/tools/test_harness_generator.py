@@ -224,7 +224,7 @@ def test_dim_names():
 
 
 def test_default_configs():
-    all_c, unpack, cfg_str = hg._default_configs()
+    all_c, unpack, _ = hg._default_configs()
     assert "torch.bfloat16" in all_c
     assert unpack == "M, N, dtype = cfg"
 
@@ -240,7 +240,7 @@ def test_build_configs_from_shapes():
             {"call_num": 2, "shape": "(512, 128) fp16"},
         ]
     }
-    all_c, unpack, cfg_str = hg._build_configs(candidate)
+    all_c, unpack, _ = hg._build_configs(candidate)
     assert "torch.bfloat16" in all_c
     assert "M, N, dtype = cfg" == unpack
     # Scaling expands to >= 6 configs.

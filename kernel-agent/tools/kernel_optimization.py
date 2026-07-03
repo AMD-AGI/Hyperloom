@@ -2900,6 +2900,19 @@ def _git_checkout_fallback(kernel_repo: str, log_path: Path) -> None:
         append_log(log_path, f"[git-fallback] failed: {type(exc).__name__}: {exc}")
 
 
+def _merge_rocprof_before(result: dict[str, Any], rocprof_before: dict[str, Any]) -> None:
+    """Copy pre-optimization rocprof metadata into a backend result."""
+    if not rocprof_before:
+        return
+    result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
+    if rocprof_before.get("reason"):
+        result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
+    if rocprof_before.get("json_path"):
+        result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
+    if rocprof_before.get("txt_path"):
+        result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
+
+
 def invoke_backend(
     backend: str,
     prompt_file: Path,
@@ -3048,14 +3061,7 @@ def invoke_backend(
                 _restore_env(previous_env)
             result["stdout"] = result.get("stdout_tail", "")
             result["output_dir"] = str(out_dir)
-            if rocprof_before:
-                result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
-                if rocprof_before.get("reason"):
-                    result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
-                if rocprof_before.get("json_path"):
-                    result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
-                if rocprof_before.get("txt_path"):
-                    result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
+            _merge_rocprof_before(result, rocprof_before)
             # Surface GEAK partial outputs so a SIGTERM'd attempt with patches is still promoted to "partial".
             final_report = out_dir / "final_report.json"
             if final_report.is_file():
@@ -3155,14 +3161,7 @@ def invoke_backend(
             result["output_dir"] = str(out_dir)
             if common_test_command:
                 result["test_command"] = common_test_command
-            if rocprof_before:
-                result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
-                if rocprof_before.get("reason"):
-                    result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
-                if rocprof_before.get("json_path"):
-                    result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
-                if rocprof_before.get("txt_path"):
-                    result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
+            _merge_rocprof_before(result, rocprof_before)
             return result
         if backend == "forge":
             # Kernel-Forge autonomous-loop backend. Runs entirely inside a git
@@ -3186,14 +3185,7 @@ def invoke_backend(
             result["output_dir"] = str(out_dir)
             if common_test_command:
                 result["test_command"] = common_test_command
-            if rocprof_before:
-                result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
-                if rocprof_before.get("reason"):
-                    result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
-                if rocprof_before.get("json_path"):
-                    result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
-                if rocprof_before.get("txt_path"):
-                    result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
+            _merge_rocprof_before(result, rocprof_before)
             return result
         return {
             "returncode": 2,
