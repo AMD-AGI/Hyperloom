@@ -80,7 +80,7 @@ git clone -b fix/ccache-298-on-322 \
 | Kernel repo under optimization | `/sgl-workspace/aiter` | the repo whose `.cu` / `.py` kernels get rewritten |
 | Serving stack | sglang (or vllm) | for the E2E A/B |
 | GPUs | 8× MI300X (gfx942) | v4 runs 1 kernel per GPU in parallel |
-| Model gateway | core42 gateway; `GEAK_USER=<you>@amd.com`, `ANTHROPIC_CUSTOM_HEADERS` | otherwise HTTP 400 (see your env setup script) |
+| Model gateway | global gateway; `GEAK_USER=<you>@amd.com`, `ANTHROPIC_CUSTOM_HEADERS` | otherwise HTTP 400 (see your env setup script) |
 
 **Always clean stray processes before a run** (zombies hold GPU memory and skew
 latency). Critically, kill not just the orchestrators but also the **compiler-probe
