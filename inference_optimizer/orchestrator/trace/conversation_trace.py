@@ -35,6 +35,11 @@ from typing import Any
 
 from .._time import now_iso
 from ...session_paths import conversations_path
+from ._row_utils import (
+    coerce_optional_int as _coerce_optional_int,
+    coerce_optional_str as _coerce_optional_str,
+    validate_closed_row,
+)
 from .llm_trace import VALID_COMPONENTS
 
 log = logging.getLogger(__name__)
@@ -114,38 +119,6 @@ def redact_secrets(text: str) -> str:
 _now_iso = now_iso
 
 
-def _coerce_optional_str(value: Any) -> str | None:
-    """Coerce a value to a non-empty stripped string or ``None``.
-
-    Args:
-        value: Arbitrary value to normalize.
-
-    Returns:
-        The stripped string, or ``None`` if it is empty or ``None``.
-    """
-    if value is None:
-        return None
-    s = str(value).strip()
-    return s or None
-
-
-def _coerce_optional_int(value: Any) -> int | None:
-    """Coerce a value to ``int`` or ``None`` if it cannot be parsed.
-
-    Args:
-        value: Arbitrary value to convert.
-
-    Returns:
-        The integer value, or ``None`` on failure.
-    """
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _coerce_text(value: Any) -> str:
     """Normalize a prompt / response field to a (possibly empty) string.
 
@@ -205,28 +178,14 @@ class ConversationRecord:
 
 
 def _validate_row(row: dict[str, Any]) -> None:
-    """Fail fast if ``row`` deviates from the closed schema.
-
-    Args:
-        row: A serialized conversation row dict.
-
-    Raises:
-        ConversationRowError: If the row has extra/missing fields, an empty
-            ``session_id``, or an unknown ``component``.
-    """
-    keys = set(row.keys())
-    extra = sorted(keys - _ROW_FIELDS)
-    missing = sorted(_ROW_FIELDS - keys)
-    if extra or missing:
-        raise ConversationRowError(f"conversations row violates closed schema: extra={extra!r} missing={missing!r}")
-    session_id = row.get("session_id")
-    if not isinstance(session_id, str) or not session_id.strip():
-        raise ConversationRowError(f"conversations row requires a non-empty 'session_id'; got {session_id!r}")
-    component = row.get("component")
-    if component not in VALID_COMPONENTS:
-        raise ConversationRowError(
-            f"conversations row 'component'={component!r} is not one of {sorted(VALID_COMPONENTS)!r}"
-        )
+    """Fail fast if ``row`` deviates from the conversations closed schema."""
+    validate_closed_row(
+        row,
+        fields=_ROW_FIELDS,
+        valid_components=VALID_COMPONENTS,
+        error_cls=ConversationRowError,
+        label="conversations",
+    )
 
 
 def append_conversation(

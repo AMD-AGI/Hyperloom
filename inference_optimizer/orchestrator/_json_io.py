@@ -1,4 +1,4 @@
-"""Shared safe-JSON read helper with one precise swallowed-exception set."""
+"""Shared safe-JSON helpers with one precise swallowed-exception set."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-# Fenced ```json block matcher; group(1) captures the enclosed object.
+# Fenced ```json``` block; shared by every model-reply extractor.
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 

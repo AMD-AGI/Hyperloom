@@ -15,7 +15,6 @@ real credentials or network.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -62,7 +61,7 @@ For Critic specifically: when reviewing a proposal, emit
 """.strip()
 
 
-# Bare top-level {...} carrying "intents".
+# Bare top-level {...} fallback carrying "intents" (fenced case handled by helper).
 _BARE_JSON_RE = re.compile(r"(\{.*?\"intents\".*\})", re.DOTALL)
 
 

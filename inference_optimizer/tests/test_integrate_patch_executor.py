@@ -5,12 +5,13 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from .conftest import init_git_repo
 
 from inference_optimizer.orchestrator.action_executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -27,33 +28,6 @@ from inference_optimizer.orchestrator.task_registry import Task
 
 
 # Helpers
-def _init_git_repo(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["GIT_AUTHOR_NAME"] = "PR-A4 Test"
-    env["GIT_AUTHOR_EMAIL"] = "pr-a4@test.local"
-    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
-    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
-    subprocess.run(
-        ["git", "init", "-b", "main", str(path)],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    (path / "src.py").write_text("def f():\n    return 1\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(path), "add", "."],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", "init"],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-
 
 _VALID_PATCH = """\
 diff --git a/src.py b/src.py
@@ -227,7 +201,7 @@ def test_resolve_patch_paths_respects_empty_done_list(tmp_path: Path):
 # 2. git apply primitives
 def test_git_apply_succeeds_on_valid_patch(tmp_path: Path):
     repo = tmp_path / "repo"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch = tmp_path / "valid.patch"
     patch.write_text(_VALID_PATCH, encoding="utf-8")
     ok, err = _git_apply(repo, patch)
@@ -237,7 +211,7 @@ def test_git_apply_succeeds_on_valid_patch(tmp_path: Path):
 
 def test_git_apply_fails_on_bad_patch(tmp_path: Path):
     repo = tmp_path / "repo"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch = tmp_path / "bad.patch"
     patch.write_text(_BAD_PATCH, encoding="utf-8")
     ok, err = _git_apply(repo, patch)
@@ -247,7 +221,7 @@ def test_git_apply_fails_on_bad_patch(tmp_path: Path):
 
 def test_git_apply_reverse_rolls_back(tmp_path: Path):
     repo = tmp_path / "repo"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     patch = tmp_path / "valid.patch"
     patch.write_text(_VALID_PATCH, encoding="utf-8")
     _git_apply(repo, patch)
@@ -278,7 +252,7 @@ def _deep_prefix_patch(depth: int) -> str:
 
 def test_git_apply_auto_detects_deep_p_level(tmp_path: Path):
     repo = tmp_path / "repo"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     # ``b/d0/.../d6/src.py`` needs -p7 (1 for ``b/`` + 6 for d0..d5).
     patch = tmp_path / "deep.patch"
     patch.write_text(_deep_prefix_patch(6), encoding="utf-8")
@@ -294,7 +268,7 @@ def test_git_apply_auto_detects_deep_p_level(tmp_path: Path):
 # 3. Framework root resolution
 def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path):
     repo = tmp_path / "repo"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     root = _resolve_framework_root(str(repo))
     assert root is not None
     assert root.samefile(repo)
@@ -319,7 +293,7 @@ async def test_executor_apply_only_succeeds(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     workspace = _write_specialist_workspace(
         session_dir,
         "t-spec-1",
@@ -349,7 +323,7 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     workspace = _write_specialist_workspace(
         session_dir,
         "t-spec-2",
@@ -379,7 +353,7 @@ async def test_executor_missing_target_preflight_short_circuits(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     _write_specialist_workspace(
         session_dir,
         "t-spec-miss",
@@ -420,7 +394,7 @@ async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     _write_specialist_workspace(
         session_dir,
         "t-spec-mn",
@@ -464,7 +438,7 @@ async def test_executor_single_node_guard_not_triggered(tmp_path: Path, monkeypa
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     _write_specialist_workspace(
         session_dir,
         "t-spec-sn",

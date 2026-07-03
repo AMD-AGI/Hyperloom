@@ -100,7 +100,7 @@ Rules (mirror SKILL.md Hard Rules + Approve Standard):
 """.strip()
 
 
-# Bare {...} carrying "review_verdicts".
+# Bare {...} fallback carrying "review_verdicts" (fenced case handled by helper).
 _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 
 

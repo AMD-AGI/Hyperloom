@@ -118,21 +118,17 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
 }
 
 
-def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``action_name`` is in the phase allowlist (R1; unknown phase → deny).
-
-    Args:
-        action_name (str): Candidate action name; stripped before comparison.
-        phase (str): Phase name; stripped and upper-cased before lookup.
-
-    Returns:
-        bool: True when ``action_name`` is allowed in ``phase``; False for an
-        unknown phase or a non-member action.
-    """
-    allowed = PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper())
-    if allowed is None:
+def _action_in_phase_map(action_name: str, phase: str, mapping: dict[str, frozenset[str]]) -> bool:
+    """Return True iff stripped ``action_name`` is a member of ``mapping[phase]`` (unknown phase → deny)."""
+    actions = mapping.get((phase or "").strip().upper())
+    if actions is None:
         return False
-    return (action_name or "").strip() in allowed
+    return (action_name or "").strip() in actions
+
+
+def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
+    """Return True iff ``action_name`` is in the phase allowlist (R1; unknown phase → deny)."""
+    return _action_in_phase_map(action_name, phase, PHASE_ALLOWED_ACTIONS)
 
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
@@ -157,20 +153,8 @@ PHASE_LLM_PROPOSABLE_ACTIONS: dict[str, frozenset[str]] = {
 
 
 def is_action_llm_proposable_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``action_name`` is LLM-proposable in ``phase`` (unknown → deny).
-
-    Args:
-        action_name (str): Candidate action name; stripped before comparison.
-        phase (str): Phase name; stripped and upper-cased before lookup.
-
-    Returns:
-        bool: True when ``action_name`` is LLM-proposable in ``phase``; False
-        for an unknown phase or a non-member action.
-    """
-    proposable = PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper())
-    if proposable is None:
-        return False
-    return (action_name or "").strip() in proposable
+    """Return True iff ``action_name`` is LLM-proposable in ``phase`` (unknown → deny)."""
+    return _action_in_phase_map(action_name, phase, PHASE_LLM_PROPOSABLE_ACTIONS)
 
 
 def llm_proposable_actions_for(phase: str) -> tuple[str, ...]:
