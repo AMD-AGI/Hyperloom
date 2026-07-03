@@ -155,3 +155,39 @@ def test_build_trajectory_digest_with_dead_clusters(tmp_path):
     assert "exhausted_directions" in result
     assert "--disable-radix" in result
     assert "non-promoting attempts" in result
+
+
+def test_load_journal_entries_swallows_errors(tmp_path, monkeypatch):
+    """A Journal.load_or_create failure yields an empty entry list (L52-53)."""
+    import inference_optimizer.orchestrator.trajectory_reviewer as tr
+
+    def boom(*_a, **_k):
+        raise RuntimeError("journal unreadable")
+
+    monkeypatch.setattr(tr.Journal, "load_or_create", boom)
+    assert tr._load_journal_entries(tmp_path, _FakeState()) == []
+
+
+def test_build_trajectory_digest_snaps_without_direction_returns_empty(tmp_path):
+    """Snapshots present but no dominant direction + no dead/stall -> "" (L167-168)."""
+    # A snapshot dict that dominant_direction cannot resolve to a lever, with
+    # no stall and no exhausted clusters, produces no lines -> empty string.
+    state = _FakeState(
+        macro_cycle=0,
+        explore_search={"winners_history": [{"cycle": 0}]},
+        roofline_snapshots=[{"unknown_field": 1}],
+    )
+    result = build_trajectory_digest(tmp_path, state)
+    assert result == ""
+
+
+def test_build_trajectory_digest_outer_exception_returns_empty(tmp_path, monkeypatch):
+    """An unexpected error inside the digest builder is swallowed (L171-173)."""
+    import inference_optimizer.orchestrator.trajectory_reviewer as tr
+
+    def boom(*_a, **_k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(tr, "_exhausted_clusters", boom)
+    state = _FakeState(macro_cycle=1, explore_search={})
+    assert build_trajectory_digest(tmp_path, state) == ""

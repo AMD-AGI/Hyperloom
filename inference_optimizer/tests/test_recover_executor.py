@@ -884,3 +884,243 @@ class TestWorkspaceHelpers:
             _BadPath,
         )
         RecoverExecutor()._write_result_json(target, {"state": "x"})
+
+
+# ===========================================================================
+# Additional focused branch coverage
+# ===========================================================================
+
+
+import inference_optimizer.orchestrator.action_executors.recover as recmod  # noqa: E402
+
+
+class TestWriteResultJsonOSError:
+    def test_oserror_on_write_text_is_swallowed(self, tmp_path, monkeypatch):
+        """mkdir succeeds but write_text raises OSError -> logged + swallowed (lines 347-348)."""
+        target = tmp_path / "ws"
+
+        real_write_text = Path.write_text
+
+        def _boom(self, *args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", _boom)
+        # Must not raise.
+        RecoverExecutor()._write_result_json(target, {"state": "x"})
+        # Directory was created before the failing write.
+        assert target.is_dir()
+        monkeypatch.setattr(Path, "write_text", real_write_text)
+
+
+class TestSessionGpuIdsEmptyTokens:
+    def test_empty_and_whitespace_tokens_are_skipped(self, monkeypatch):
+        """Blank tokens between commas are skipped (line 121)."""
+        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,,  ,1, 2 ")
+        assert _session_gpu_ids() == [0, 1, 2]
+
+    def test_only_empty_tokens_returns_none(self, monkeypatch):
+        """A value of only separators yields no ids -> None."""
+        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", " , , ")
+        assert _session_gpu_ids() is None
+
+
+class TestIsMultiNodeSandbox:
+    def test_true_when_is_multi_node_true(self, monkeypatch):
+        import inference_optimizer.orchestrator.action_executors._multi_node_env as mne
+
+        monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+        assert recmod._is_multi_node_sandbox() is True
+
+    def test_false_when_is_multi_node_false(self, monkeypatch):
+        import inference_optimizer.orchestrator.action_executors._multi_node_env as mne
+
+        monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+        assert recmod._is_multi_node_sandbox() is False
+
+    def test_exception_defaults_to_single_node(self, monkeypatch):
+        """A failure in is_multi_node() is swallowed -> single-node (lines 156-158)."""
+        import inference_optimizer.orchestrator.action_executors._multi_node_env as mne
+
+        def _boom():
+            raise RuntimeError("cannot determine node topology")
+
+        monkeypatch.setattr(mne, "is_multi_node", _boom)
+        assert recmod._is_multi_node_sandbox() is False
+
+
+class TestMultiNodeShortCircuit:
+    @pytest.mark.asyncio
+    async def test_cpu_only_sandbox_short_circuits_to_success(self, tmp_path, monkeypatch):
+        """Multi-node sandbox skips local probes and returns cpu_only success (lines 214-236)."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        monkeypatch.setattr(recmod, "_is_multi_node_sandbox", lambda: True)
+        exe = RecoverExecutor()
+
+        # Guard: none of the local GPU boundaries may be touched.
+        monkeypatch.setattr(
+            exe,
+            "_probe_gpu_free_mb",
+            lambda: pytest.fail("must not probe GPUs in multi-node sandbox"),
+        )
+        monkeypatch.setattr(
+            exe,
+            "_discover_stale_pids",
+            lambda: pytest.fail("must not kill in multi-node sandbox"),
+        )
+
+        out = await exe(
+            _ctx(
+                workspace,
+                params={"reason": "gpu_memory_leaked", "force_gpu_cleanup": True},
+            )
+        )
+        assert out["state"] == "succeeded"
+        assert out["cpu_only_sandbox"] is True
+        assert out["killed_pids"] == []
+        assert out["pre_free_mb_per_gpu"] == []
+        assert out["mid_free_mb_per_gpu"] == []
+        assert out["post_free_mb_per_gpu"] == []
+        assert out["gpureset_attempted"] is False
+        assert out["gpureset_result"] == {}
+        assert out["reason"] == "gpu_memory_leaked"
+        assert out["force_gpu_cleanup"] is True
+        assert out["workspace"] == str(workspace)
+        assert out["result_path"] == str(workspace / "result.json")
+        persisted = json.loads((workspace / "result.json").read_text())
+        assert persisted["cpu_only_sandbox"] is True
+        assert persisted["state"] == "succeeded"
+
+    @pytest.mark.asyncio
+    async def test_cpu_only_sandbox_without_workspace(self, monkeypatch):
+        """Multi-node short-circuit with no workspace omits the on-disk audit keys."""
+        monkeypatch.setattr(recmod, "_is_multi_node_sandbox", lambda: True)
+        exe = RecoverExecutor()
+        out = await exe(_ctx(workspace=None, params={"force_gpu_cleanup": False}))
+        assert out["state"] == "succeeded"
+        assert out["cpu_only_sandbox"] is True
+        assert "workspace" not in out
+        assert "result_path" not in out
+
+
+class TestParseRocmSmiCsvEdgeCases:
+    def test_blank_cells_line_is_skipped(self):
+        """A line that splits to all-empty cells doesn't crash (line 416 guard)."""
+        text = (
+            "device,VRAM Total Memory (B),VRAM Total Used Memory (B)\n"
+            ",,\n"
+            "card0,206158430208,5242880\n"
+        )
+        rows = RecoverExecutor._parse_rocm_smi_vram_csv(text)
+        assert [r["gpu_id"] for r in rows] == [0]
+
+    def test_card_with_non_integer_index_is_skipped(self):
+        """``cardX`` where X is not an int is skipped (lines 424-425)."""
+        text = (
+            "device,VRAM Total Memory (B),VRAM Total Used Memory (B)\n"
+            "cardX,206158430208,5242880\n"
+            "card2,206158430208,5242880\n"
+        )
+        rows = RecoverExecutor._parse_rocm_smi_vram_csv(text)
+        assert [r["gpu_id"] for r in rows] == [2]
+
+
+class TestKillStaleOwnersNoneSignalled:
+    def test_all_sigterm_fail_returns_empty(self, monkeypatch):
+        """If every SIGTERM fails to deliver, no wait/KILL and returns [] (line 484)."""
+        exe = RecoverExecutor()
+        monkeypatch.setattr(
+            exe,
+            "_discover_stale_pids",
+            lambda: [{"pid": 111, "cmd": "EngineCore", "pattern": "EngineCore"}],
+        )
+        # Every signal delivery fails (dead / forbidden).
+        monkeypatch.setattr(exe, "_send_signal", lambda pid, sig: False)
+        # Sleep + alive-check must never run when nothing was TERMed.
+        monkeypatch.setattr(
+            recmod.time,
+            "sleep",
+            lambda _s: pytest.fail("must not wait when nothing was signalled"),
+        )
+        monkeypatch.setattr(
+            exe,
+            "_pid_alive",
+            lambda pid: pytest.fail("must not re-check when nothing was signalled"),
+        )
+        assert exe._kill_stale_owners() == []
+
+
+class TestDiscoverStalePidsBranches:
+    def test_pgrep_timeout_is_skipped(self, monkeypatch):
+        """A pgrep TimeoutExpired for a pattern is logged + skipped (lines 515-517)."""
+        monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
+
+        def _boom(cmd, *a, **k):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=3.0)
+
+        monkeypatch.setattr(recmod.subprocess, "run", _boom)
+        ex = RecoverExecutor()
+        ex.OWNER_PATTERNS = ("sglang.launch_server",)
+        assert ex._discover_stale_pids() == []
+
+    def test_nonzero_nonone_returncode_is_skipped(self, monkeypatch):
+        """pgrep exit code not in (0, 1) is treated as an error and skipped (line 519)."""
+        monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
+        monkeypatch.setattr(
+            recmod.subprocess,
+            "run",
+            lambda *a, **k: _ProcResult(returncode=2, stdout="9999 sglang.launch_server x"),
+        )
+        ex = RecoverExecutor()
+        ex.OWNER_PATTERNS = ("sglang.launch_server",)
+        assert ex._discover_stale_pids() == []
+
+    def test_blank_and_single_token_lines_skipped(self, monkeypatch):
+        """Blank lines and single-token lines (no cmd) are skipped (lines 523, 526)."""
+        monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
+        # Leading blank line, a single-token line (only pid), then a good match.
+        out = "\n   \n12345\n5001 sglang.launch_server --port 8000\n"
+        monkeypatch.setattr(
+            recmod.subprocess,
+            "run",
+            lambda *a, **k: _ProcResult(returncode=0, stdout=out),
+        )
+        ex = RecoverExecutor()
+        ex.OWNER_PATTERNS = ("sglang.launch_server",)
+        found = ex._discover_stale_pids()
+        assert [o["pid"] for o in found] == [5001]
+
+    def test_non_integer_pid_token_skipped(self, monkeypatch):
+        """A non-integer pid field is skipped (lines 529-530)."""
+        monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
+        out = "notapid sglang.launch_server foo\n7000 sglang.launch_server bar\n"
+        monkeypatch.setattr(
+            recmod.subprocess,
+            "run",
+            lambda *a, **k: _ProcResult(returncode=0, stdout=out),
+        )
+        ex = RecoverExecutor()
+        ex.OWNER_PATTERNS = ("sglang.launch_server",)
+        found = ex._discover_stale_pids()
+        assert [o["pid"] for o in found] == [7000]
+
+    def test_pattern_not_in_cmd_is_skipped(self, monkeypatch):
+        """Defence-in-depth substring check drops permissive-regex false positives."""
+        monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
+        # pgrep returns a row whose cmd does NOT literally contain the pattern.
+        out = "8000 python some_other_process --flag\n"
+        monkeypatch.setattr(
+            recmod.subprocess,
+            "run",
+            lambda *a, **k: _ProcResult(returncode=0, stdout=out),
+        )
+        ex = RecoverExecutor()
+        ex.OWNER_PATTERNS = ("sglang.launch_server",)
+        assert ex._discover_stale_pids() == []
+
+
+class TestPidAliveTrue:
+    def test_pid_alive_returns_true_when_kill_succeeds(self, monkeypatch):
+        """os.kill(pid, 0) not raising -> process alive (line 578)."""
+        monkeypatch.setattr(recmod.os, "kill", lambda pid, sig: None)
+        assert RecoverExecutor._pid_alive(1) is True
