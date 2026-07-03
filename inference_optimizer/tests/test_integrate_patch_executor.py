@@ -551,7 +551,7 @@ async def _run_enablement_integrate(
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
-    _init_git_repo(repo)
+    init_git_repo(repo)
     _write_specialist_workspace(session_dir, "t-spec-en", patch_contents=[_VALID_PATCH])
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
