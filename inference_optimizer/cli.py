@@ -947,17 +947,27 @@ def _validate_credentials() -> None:
 
 
 def _is_placeholder_tracelens_path(value: str) -> bool:
-    """Treat .env.template's bare ``\\`` and whitespace-only values as unset.
+    """Treat unedited .env.template placeholders as unset.
+
+    Covers the bare ``\\`` / whitespace-only values plus common literal
+    placeholders (``/path/to/your/TraceLens``, ``<your-...>``) an operator
+    forgot to replace, so the pod-local fallback / installer value wins.
 
     Args:
         value (str): The candidate TraceLens path value.
 
     Returns:
-        bool: ``True`` when the value is blank or the bare backslash
-            placeholder.
+        bool: ``True`` when the value is blank or an unedited placeholder.
     """
     stripped = value.strip()
-    return stripped in ("", "\\")
+    if stripped in ("", "\\"):
+        return True
+    low = stripped.lower()
+    if "/path/to/" in low or "path/to/your" in low:
+        return True
+    if "<" in stripped and ">" in stripped:
+        return True
+    return False
 
 
 def _load_dotenv_fallback() -> None:
@@ -1006,32 +1016,102 @@ def _load_dotenv_fallback() -> None:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
 
 
-def _load_kernel_agent_env_fallback() -> None:
-    """If ``HYPERLOOM_KERNEL_AGENT_ROOT`` is unset, auto-source the
-    kernel-agent env file produced by ``inference_optimizer/scripts/
-    install.sh`` at ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``
-    (overridable via ``$KERNEL_AGENT_ENV``).
+# kernel-agent env vars that MUST resolve to an existing checkout. Unlike
+# ordinary vars (env-wins no-clobber), a stale/invalid inherited value for
+# these is CORRECTED from the installer-written env file so trace_analyze does
+# not fall back to an empty pod-local dir (issue #722). Scoped to TRACELENS_ROOT
+# only: MAGPIE_PATH is deliberately excluded because a merely-existing dir that
+# is not a Magpie checkout would flip the downstream preflight into the
+# explicit-override branch and hard-fail auto-clone.
+_KERNEL_AGENT_PATH_VARS: tuple[str, ...] = ("TRACELENS_ROOT",)
 
-    Must source before any orchestrator import (trace_analyze reads HYPERLOOM_KERNEL_AGENT_ROOT at module load).
-    Hard-fail contract: looks only at $KERNEL_AGENT_ENV or $USER_DATA_PATH/runtime/kernel-agent.env.sh (no
-    parent-dir fallback); sys.exit(2) if missing/0-vars/still-unset; skip when the var is already set.
+
+def _parse_env_assignments(text: str) -> dict[str, str]:
+    """Parse ``[export] KEY=VALUE`` shell assignments into a dict (first wins)."""
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        out.setdefault(key, value)
+    return out
+
+
+def _correct_kernel_agent_path_vars(file_vars: dict[str, str], env_path: Path) -> None:
+    """Overwrite invalid inherited path-class vars with the env file's value.
+
+    Only fires when the inherited value is unset/non-existent AND the file value
+    points at an existing dir; a valid inherited value keeps env-wins semantics.
     """
-    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
-        return
+    for key in _KERNEL_AGENT_PATH_VARS:
+        file_val = file_vars.get(key)
+        if not file_val or not Path(file_val).is_dir():
+            continue
+        current = os.environ.get(key, "")
+        if current == file_val or (current and Path(current).is_dir()):
+            continue
+        print(
+            f"Preflight: WARNING — {key}={current or '(unset)'} does not point "
+            f"at an existing checkout; correcting to {file_val} from {env_path} "
+            f"(installer-written value wins for path vars).",
+            file=sys.stderr,
+        )
+        os.environ[key] = file_val
+
+
+def _load_kernel_agent_env_fallback() -> None:
+    """Auto-source the installer-written kernel-agent env file
+    (``$KERNEL_AGENT_ENV`` or ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``).
+
+    Must source before any orchestrator import (trace_analyze reads
+    HYPERLOOM_KERNEL_AGENT_ROOT at module load). When HYPERLOOM_KERNEL_AGENT_ROOT
+    is already set, bootstrapping is skipped but the env file is still consulted
+    to CORRECT a stale/invalid inherited TRACELENS_ROOT — the fix for issue
+    #722 where a bad inherited TRACELENS_ROOT survived. Hard-fail contract
+    (root unset only): sys.exit(2) if missing/0-vars/still-unset.
+    """
     candidate = os.environ.get("KERNEL_AGENT_ENV")
     if not candidate:
         user_data = os.environ.get("USER_DATA_PATH")
-        if not user_data:
-            print(
-                "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
-                "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
-                "resolve kernel-agent.env.sh. Run "
-                "inference_optimizer/scripts/install.sh and export "
-                "USER_DATA_PATH=/path/to/sessions first.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
+        if user_data:
+            candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
+
+    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
+        # Root is set: no bootstrap needed, but still correct invalid path vars
+        # from the env file when resolvable. Silent no-op otherwise.
+        if not candidate:
+            return
+        env_path = Path(candidate)
+        if not env_path.is_file():
+            return
+        try:
+            text = env_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        _correct_kernel_agent_path_vars(_parse_env_assignments(text), env_path)
+        return
+
+    if not candidate:
+        print(
+            "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
+            "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
+            "resolve kernel-agent.env.sh. Run "
+            "inference_optimizer/scripts/install.sh and export "
+            "USER_DATA_PATH=/path/to/sessions first.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     env_path = Path(candidate)
     if not env_path.is_file():
         print(
@@ -1048,7 +1128,6 @@ def _load_kernel_agent_env_fallback() -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    loaded = 0
     try:
         text = env_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -1057,24 +1136,13 @@ def _load_kernel_agent_env_fallback() -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if not key:
-            continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
+    file_vars = _parse_env_assignments(text)
+    loaded = 0
+    for key, value in file_vars.items():
         if key not in os.environ:
             os.environ[key] = value
             loaded += 1
+    _correct_kernel_agent_path_vars(file_vars, env_path)
     if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
         print(
             f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
@@ -1241,6 +1309,27 @@ def _check_tracelens_cli() -> None:
         f"  bash $REPO_ROOT/inference_optimizer/scripts/install.sh\n"
         f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
         f"then retry `inference_optimizer optimize`. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def _check_tracelens_root_exists() -> None:
+    """Hard-gate an explicitly set ``TRACELENS_ROOT`` at preflight (issue #722).
+
+    An operator-supplied TRACELENS_ROOT that points at a missing checkout (stale
+    path or unedited template placeholder) otherwise only surfaces ~10h later in
+    trace_analyze. Unset is fine (pod-local fallback handled downstream).
+    """
+    override = os.environ.get("TRACELENS_ROOT")
+    if not override or Path(override).is_dir():
+        return
+    print(
+        f"ERROR: TRACELENS_ROOT={override} does not point at an existing "
+        f"TraceLens checkout. It was likely inherited from a stale shell or an "
+        f"unedited .env template. Re-run inference_optimizer/scripts/install.sh "
+        f"and source $KERNEL_AGENT_ENV, point TRACELENS_ROOT at a real checkout, "
+        f"or unset it to use the pod-local default. Refusing to start.",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -2033,6 +2122,9 @@ def _preflight(
     enable_roofline = getattr(args, "enable_roofline", True) if args else True
     if _tracelens_required_at_preflight(no_kernel, enable_roofline):
         _check_tracelens_cli()
+        # Fail fast on a stale/placeholder TRACELENS_ROOT before the Coordinator
+        # starts, rather than ~10h later in trace_analyze (issue #722).
+        _check_tracelens_root_exists()
     else:
         _missing_tl = [n for n in _TRACELENS_REQUIRED_CLIS if shutil.which(n) is None]
         if _missing_tl:
@@ -2909,6 +3001,57 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     )
 
 
+# Phases that still sit upstream of EXPLORE, so a resume may retroactively
+# honour --no-explore. Includes the legacy "FRAMEWORK" name for sessions
+# persisted before the FRAMEWORK -> FRAMEWORK_AGENT rename (commit 33ac6ccc).
+_PRE_EXPLORE_PHASES: frozenset[str] = frozenset({"", "PRELUDE", "FRAMEWORK", "FRAMEWORK_AGENT"})
+
+
+def _resume_can_disable_explore(cur_phase: str) -> bool:
+    """Whether ``--no-explore`` may still disable EXPLORE for a resumed session.
+
+    Args:
+        cur_phase (str): The persisted ``state.phase``; case/whitespace-insensitive.
+
+    Returns:
+        bool: ``True`` when the phase is upstream of EXPLORE (EXPLORE not yet
+        entered), so the flag can be honoured retroactively.
+    """
+    return (cur_phase or "").strip().upper() in _PRE_EXPLORE_PHASES
+
+
+def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
+    """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
+
+    Keys MUST be the canonical phase names from
+    :mod:`inference_optimizer.orchestrator.phase_state`; otherwise
+    :func:`normalize_budget_pct` silently drops the entry and the phase falls
+    back to its library default.
+    """
+    from .orchestrator.phase_state import (
+        PHASE_CLOSE,
+        PHASE_EXPLORE,
+        PHASE_FRAMEWORK_AGENT,
+        PHASE_KERNEL_AGENT,
+        PHASE_PRELUDE,
+        PHASE_SWEEP,
+    )
+
+    phase_budget_pct: dict[str, float] = {}
+    for cli_field, phase_name in (
+        ("phase_budget_prelude_pct", PHASE_PRELUDE),
+        ("phase_budget_framework_pct", PHASE_FRAMEWORK_AGENT),
+        ("phase_budget_explore_pct", PHASE_EXPLORE),
+        ("phase_budget_kernel_pct", PHASE_KERNEL_AGENT),
+        ("phase_budget_sweep_pct", PHASE_SWEEP),
+        ("phase_budget_close_pct", PHASE_CLOSE),
+    ):
+        val = getattr(args, cli_field, None)
+        if val is not None:
+            phase_budget_pct[phase_name] = float(val)
+    return phase_budget_pct
+
+
 def _export_workload_envs_for_optimize(
     args: argparse.Namespace,
     *,
@@ -3217,8 +3360,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print("  explore phase         : DISABLED (persisted from original run)")
         elif bool(getattr(args, "no_explore", False)):
             # Honour --no-explore on resume only before EXPLORE is entered.
+            # Phases preceding EXPLORE are PRELUDE and FRAMEWORK_AGENT (the
+            # latter renamed from the legacy "FRAMEWORK" in commit 33ac6ccc,
+            # which persisted sessions may still carry).
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
-            if cur_phase in ("", "PRELUDE", "FRAMEWORK"):
+            if _resume_can_disable_explore(cur_phase):
                 state.explore_enabled = False
                 print(f"  explore phase         : DISABLING for resume (--no-explore + phase={cur_phase or 'PRELUDE'})")
             else:
@@ -3656,17 +3802,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
 
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
-    phase_budget_pct: dict[str, float] = {}
-    for cli_field, phase_name in (
-        ("phase_budget_prelude_pct", "PRELUDE"),
-        ("phase_budget_explore_pct", "EXPLORE"),
-        ("phase_budget_kernel_pct", "KERNEL"),
-        ("phase_budget_sweep_pct", "SWEEP"),
-        ("phase_budget_close_pct", "CLOSE"),
-    ):
-        val = getattr(args, cli_field, None)
-        if val is not None:
-            phase_budget_pct[phase_name] = float(val)
+    phase_budget_pct = _build_phase_budget_pct(args)
 
     # When kernel is disabled, strip it from the role registry (no tick / no backend expectation).
     role_registry = None
@@ -5290,29 +5426,43 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # phase budget percentages
     # Each phase claims a fraction of the wall-clock budget (caps; may exit earlier). Sum need not equal 1.0.
+    # Both spellings are accepted for every phase: the legacy ``--max-minutes-*-pct``
+    # and the newer ``--phase-budget-*-pct`` (matches the ``phase_budget_*`` dest).
     opt.add_argument(
         "--max-minutes-prelude-pct",
+        "--phase-budget-prelude-pct",
         dest="phase_budget_prelude_pct",
         type=float,
         default=None,
         help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03.",
     )
     opt.add_argument(
+        "--max-minutes-framework-pct",
+        "--phase-budget-framework-pct",
+        dest="phase_budget_framework_pct",
+        type=float,
+        default=None,
+        help="Wall-clock budget cap for FRAMEWORK_AGENT. Default: 0.15.",
+    )
+    opt.add_argument(
         "--max-minutes-explore-pct",
+        "--phase-budget-explore-pct",
         dest="phase_budget_explore_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for EXPLORE. Default: 0.45.",
+        help="Wall-clock budget cap for EXPLORE. Default: 0.375.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
+        "--phase-budget-kernel-pct",
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL. Default: 0.38.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.305.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
+        "--phase-budget-sweep-pct",
         dest="phase_budget_sweep_pct",
         type=float,
         default=None,
@@ -5320,6 +5470,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--max-minutes-close-pct",
+        "--phase-budget-close-pct",
         dest="phase_budget_close_pct",
         type=float,
         default=None,

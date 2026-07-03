@@ -26,6 +26,33 @@ import tracelens_analysis as tla  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
 
+def test_default_top_k_uses_large_pool_by_default(monkeypatch):
+    """Issue #667: the candidate-build pool defaults to a large value, not 10."""
+    monkeypatch.delenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", raising=False)
+    assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
+    assert tla._default_top_k() > 10
+
+
+def test_default_top_k_env_override(monkeypatch):
+    """Issue #667: HYPERLOOM_KERNEL_CANDIDATES_TOP_K overrides the pool size."""
+    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "25")
+    assert tla._default_top_k() == 25
+
+
+def test_default_top_k_zero_means_unbounded(monkeypatch):
+    """Issue #667: 0/negative disables the build-time cap (huge internal cap)."""
+    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "0")
+    assert tla._default_top_k() >= 1_000_000
+    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "-5")
+    assert tla._default_top_k() >= 1_000_000
+
+
+def test_default_top_k_invalid_falls_back(monkeypatch):
+    """Issue #667: a non-integer env value falls back to the default pool."""
+    monkeypatch.setenv("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "not-an-int")
+    assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
+
+
 def test_deterministic_category_analysis_command_maps_manifest_names(tmp_path):
     """Deterministic route must invoke the real TraceLens script for manifest category names."""
     cases = {

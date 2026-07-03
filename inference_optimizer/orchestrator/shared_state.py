@@ -442,12 +442,13 @@ class SharedState:
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
-    # Hot-server measure-round tput from the baseline cold-start double-run
-    # (kept for reporting only). ``baseline_tput`` is the single-fresh-server
-    # warmup-round number used as the fair comparison ANCHOR for explore /
-    # sweep variants (which each restart the server + run one round). When
-    # the double-run is disabled / ineligible, this stays 0.0 and
-    # ``baseline_tput`` carries the only measured number.
+    # Discarded first-round tput from the baseline cold-start double-run.
+    # Kept only for audit/debugging; conclusion fields and gain math use the
+    # hot measure-round value in ``baseline_tput``.
+    baseline_cold_tput: float = 0.0
+    # Deprecated mirror of the hot measure-round tput. Kept for readers that
+    # already inspect this field; it should match ``baseline_tput`` whenever
+    # the double-run path is eligible.
     baseline_hot_tput: float = 0.0
     baseline_accuracy: float = 0.0
     # Standalone baseline-arm roofline ceiling computed right after baseline
@@ -955,6 +956,8 @@ class SharedState:
             )
             fact_layer_keys = (
                 "baseline_tput",
+                "baseline_cold_tput",
+                "baseline_hot_tput",
                 "baseline_accuracy",
                 "current_best",
                 "cumulative_gain",

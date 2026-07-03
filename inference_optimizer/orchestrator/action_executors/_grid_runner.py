@@ -129,6 +129,46 @@ def _resolve_magpie_python() -> str:
     return "/opt/venv/bin/python"
 
 
+def _resolve_probe_python() -> str:
+    """Resolve the interpreter a build-accuracy probe must use.
+
+    A capability probe (e.g. :func:`_probe_vllm_aiter_shared_expert_unsupported`)
+    only produces a correct drop decision when it inspects the SAME framework
+    install the benchmark server actually loads. The server runs ``vllm serve``
+    (the ``vllm`` console-script's own venv), while Magpie itself runs under
+    ``_resolve_magpie_python()``; a bare ``python3`` off ``$PATH`` may be a third,
+    unrelated venv, so probing it can misreport (false ``unsupported`` -> a
+    usable variant is dropped and a ``capability_unsupported`` row is written
+    back that teaches the LLM to avoid a working flag).
+
+    Resolution order (bare ``python3`` is deliberately NOT a fallback):
+    1. ``_resolve_magpie_python()`` — the interpreter that runs the benchmark
+       harness; on a single-venv install this is also the vLLM venv.
+    2. The interpreter behind the ``vllm`` executable (``<venv>/bin/python``
+       alongside ``shutil.which("vllm")``) when it exists on disk — the venv
+       that literally serves the model.
+    3. ``_resolve_magpie_python()``'s own canonical fallback
+       (``/opt/venv/bin/python``) is the last resort via step 1.
+
+    Returns:
+        str: Path to the interpreter the probe should invoke.
+    """
+    magpie_python = _resolve_magpie_python()
+    # Prefer the harness interpreter; on a single-venv box it already IS the
+    # vLLM venv, so no extra resolution is needed.
+    if magpie_python and magpie_python != "/opt/venv/bin/python":
+        return magpie_python
+    # magpie_python fell through to the canonical default — try to pin the venv
+    # that actually backs ``vllm serve`` so a Frankenbuild (server on /opt/venv,
+    # PATH python3 elsewhere) is probed against the real server source.
+    vllm_exe = shutil.which("vllm")
+    if vllm_exe:
+        vllm_python = os.path.join(os.path.dirname(vllm_exe), "python")
+        if os.path.exists(vllm_python):
+            return vllm_python
+    return magpie_python
+
+
 def _resolve_session_dir() -> Path:
     """Resolve the active session_dir for executors that need an output root.
 
@@ -506,6 +546,129 @@ def _probe_sglang_help_text() -> str:
         str: The sglang ``--help`` text, or ``""`` on failure.
     """
     return _probe_server_help_text("sglang")
+
+
+# ── Env-flag capability probe (build-accurate, not version-string based) ──
+# A serving env flag can be *defined* in the framework build yet still crash
+# the server at engine init because the code path it activates imports a module
+# that this particular build did not package (e.g. the vLLM ``+rocm722`` wheel
+# defines ``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS`` but its aiter
+# shared-expert router lazily imports ``...fused_moe.rocm_aiter_fused_moe``,
+# which was moved to ``...fused_moe.experts.rocm_aiter_moe`` in 0.22+ and is
+# absent from that wheel). Knowing the flag *name* exists (envs.py) does not
+# tell us the flag *works*; only the installed build does. We probe the build
+# directly instead of maintaining a version→flag table (which would misfire
+# since the flag name is identical across 0.21 and 0.24).
+_UNSET = object()
+
+# Sentinel-cached probe result, keyed by framework. Value is ``None`` (flag
+# usable / not applicable) or a reason string (flag would crash the server).
+_CAP_PROBE_CACHE: dict[str, str | None] = {}
+
+# Subprocess probe: locate the installed vLLM package WITHOUT executing its
+# heavy ``__init__`` (``find_spec('vllm')`` resolves the top-level package
+# without importing it), read the aiter shared-expert router source, extract the
+# ``fused_moe.*`` modules it imports, and verify each resolves to a real file in
+# THIS build. Prints a single JSON line; any failure => ``status=unknown`` so
+# the caller conservatively does NOT drop the variant.
+_AITER_SHARED_EXPERT_PROBE_SCRIPT = (
+    "import importlib.util as u, os, re, json\n"
+    "def go():\n"
+    "    try:\n"
+    "        spec = u.find_spec('vllm')\n"
+    "    except Exception:\n"
+    "        return {'status': 'unknown'}\n"
+    "    if not spec or not spec.origin:\n"
+    "        return {'status': 'unknown'}\n"
+    "    vdir = os.path.dirname(spec.origin)\n"
+    "    router = os.path.join(vdir, 'model_executor', 'layers', 'fused_moe',\n"
+    "                          'router', 'aiter_shared_routed_fused_moe_router.py')\n"
+    "    if not os.path.exists(router):\n"
+    "        return {'status': 'unknown'}\n"
+    "    try:\n"
+    "        text = open(router, encoding='utf-8').read()\n"
+    "    except Exception:\n"
+    "        return {'status': 'unknown'}\n"
+    "    mods = re.findall(r'from\\s+(vllm\\.model_executor\\.layers\\.fused_moe\\.[A-Za-z0-9_.]+)\\s+import', text)\n"
+    "    missing = []\n"
+    "    for m in sorted(set(mods)):\n"
+    "        rel = m[len('vllm.'):].replace('.', os.sep)\n"
+    "        if not (os.path.exists(os.path.join(vdir, rel + '.py'))\n"
+    "                or os.path.exists(os.path.join(vdir, rel, '__init__.py'))):\n"
+    "            missing.append(m)\n"
+    "    return {'status': 'unsupported', 'missing': missing} if missing else {'status': 'ok'}\n"
+    "print(json.dumps(go()))\n"
+)
+
+
+def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
+    """Return a drop reason if the installed vLLM build can't honour the aiter
+    shared-expert fusion flag, else ``None``.
+
+    Build-accurate: checks that every ``fused_moe.*`` module the installed
+    aiter shared-expert router imports actually exists on disk. Best-effort —
+    ``unknown`` results (vLLM absent / router absent / probe error) return
+    ``None`` (do NOT drop) and are NOT cached so a transient failure re-probes.
+    Definitive ``ok`` / ``unsupported`` results are cached for the session.
+
+    Returns:
+        str | None: A human-readable reason when the flag would crash the
+        server on this build, else ``None``.
+    """
+    cached = _CAP_PROBE_CACHE.get("vllm", _UNSET)
+    if cached is not _UNSET:
+        return cached  # type: ignore[return-value]
+    try:
+        proc = subprocess.run(
+            [_resolve_probe_python(), "-c", _AITER_SHARED_EXPERT_PROBE_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+        payload = json.loads(lines[-1]) if lines else {}
+    except Exception:  # noqa: BLE001 — best-effort probe, never crash the grid
+        return None
+    status = payload.get("status")
+    if status == "ok":
+        _CAP_PROBE_CACHE["vllm"] = None
+        return None
+    if status == "unsupported":
+        missing = ", ".join(payload.get("missing") or []) or "(unknown module)"
+        reason = (
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS enabled but the installed "
+            "vLLM build's aiter shared-expert router imports missing module(s): "
+            f"{missing}. Flag unusable on this build (server crashes at engine "
+            "init); upgrade vLLM to a build that ships the module."
+        )
+        _CAP_PROBE_CACHE["vllm"] = reason
+        return reason
+    return None  # unknown => conservative, do not drop or cache
+
+
+def unsupported_capability_reason(variant: "GridVariant") -> str | None:
+    """Return a drop reason if a variant sets an env flag the installed
+    framework build cannot honour, else ``None``.
+
+    Mirrors :func:`xdit_blacklist_reason`: pure per-variant inspection plus a
+    cached build probe. Conservative — returns ``None`` (do NOT drop) whenever
+    the probe cannot positively confirm the flag is broken.
+
+    Args:
+        variant (GridVariant): The candidate variant to inspect.
+
+    Returns:
+        str | None: A human-readable reason when the variant should be
+        fast-failed before booting a server, else ``None``.
+    """
+    fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
+    if fw != "vllm":
+        return None
+    envs = {str(k): str(v) for k, v in (getattr(variant, "extra_envs", None) or {}).items()}
+    val = envs.get("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS")
+    if val is None or not _is_truthy_env(val):
+        return None
+    return _probe_vllm_aiter_shared_expert_unsupported()
 
 
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
@@ -1860,6 +2023,14 @@ def _parse_report(workspace: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _run_grid_warmup_enabled() -> bool:
+    """Whether ``run_grid`` should discard a cold warmup round when possible."""
+    raw = os.environ.get("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP")
+    if raw is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    return (raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 def _kill_stale_servers() -> None:
     """Deep-clean any lingering inference server processes + shared memory.
 
@@ -1993,6 +2164,7 @@ def _run_magpie(
     cwd: str,
     result_dir: str | None = None,
     soft_deadline_sec: float | None = None,
+    preclean: bool = True,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
 
@@ -2017,7 +2189,9 @@ def _run_magpie(
         tuple[int, str, str]: ``(returncode, stdout, stderr)``.
     """
     # Pre-clean lingering servers + shared memory (skip under pytest).
-    if not os.environ.get("PYTEST_CURRENT_TEST"):
+    # Disable this for lifecycle re-attach rounds; otherwise the warm server
+    # created by the discarded round is killed immediately before measurement.
+    if preclean and not os.environ.get("PYTEST_CURRENT_TEST"):
         _kill_stale_servers()
 
     env = os.environ.copy()
@@ -2091,6 +2265,8 @@ async def run_grid(
     result_dir: str | None = None,
     soft_deadline_sec: float | None = None,
     server_lifecycle: dict[str, Any] | None = None,
+    warmup_before_measure: bool | None = None,
+    preclean_before_run: bool = True,
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
@@ -2106,6 +2282,11 @@ async def run_grid(
     ``server_lifecycle`` (``{cleanup, pid_dir, port}``) enables Magpie's
     persistent-server reuse so a paired warm round can re-attach to a hot
     server; None keeps the legacy boot-per-variant behaviour.
+    ``warmup_before_measure`` defaults on via
+    ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP``: when no explicit
+    ``server_lifecycle`` is supplied and the YAML supports lifecycle reuse,
+    each variant gets a discarded warmup round followed by the returned hot
+    measurement round.
 
     Args:
         base_yaml_path (Path): Base Magpie YAML templated per variant.
@@ -2124,12 +2305,20 @@ async def run_grid(
             None/0 disables.
         server_lifecycle (dict[str, Any] | None): ``{cleanup, pid_dir, port}``
             enabling persistent-server reuse.
+        warmup_before_measure (bool | None): Whether to auto-run a discarded
+            warmup before returning a measured result. ``None`` resolves from
+            ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP``.
+        preclean_before_run (bool): Whether to pre-clean stale servers before
+            the measured Magpie launch. Reattach rounds must pass ``False``.
 
     Returns:
         list[VariantResult]: Per-variant results for every attempt, in order.
     """
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
+    if warmup_before_measure is None:
+        warmup_before_measure = _run_grid_warmup_enabled()
+    auto_warmup_requested = bool(warmup_before_measure and server_lifecycle is None)
     results: list[VariantResult] = []
 
     # Variant-boundary robustness pulse: a bounded deterministic tick after
@@ -2152,6 +2341,44 @@ async def run_grid(
 
     for i, variant in enumerate(grid):
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
+        # Capability fast-fail: drop a variant whose env flag the installed
+        # framework build cannot honour BEFORE booting a (doomed) server. Turns
+        # a ~multi-minute server-boot crash into a sub-second skip while still
+        # recording the failure in the ledger so the LLM learns not to re-pick
+        # it. See ``unsupported_capability_reason``.
+        cap_reason = unsupported_capability_reason(variant)
+        if cap_reason:
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: capability_unsupported: %s",
+                i + 1,
+                len(grid),
+                variant.name,
+                cap_reason,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="capability_unsupported",
+                error_summary=cap_reason,
+                extra_args=variant.extra_server_args,
+            )
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    error=cap_reason,
+                    error_class="capability_unsupported",
+                    note=variant.note,
+                )
+            )
+            await _pulse_after_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
+        lifecycle: dict[str, Any] = {"eligible": False}
+        auto_warmup = False
         try:
             cfg_path = _build_variant_yaml(
                 base_yaml_path,
@@ -2193,6 +2420,219 @@ async def run_grid(
             if not keep_going_on_failure:
                 break
             continue
+
+        if auto_warmup_requested:
+            try:
+                from ._server_lifecycle import resolve_lifecycle_params
+
+                lifecycle = resolve_lifecycle_params(cfg_path)
+                auto_warmup = bool(lifecycle.get("eligible"))
+                if auto_warmup:
+                    cfg_path = _build_variant_yaml(
+                        base_yaml_path,
+                        base_extra_args,
+                        variant,
+                        output_subdir=slot,
+                        model_path=model_path,
+                        gpu_type=gpu_type,
+                        benchmark_script=benchmark_script,
+                        server_lifecycle={
+                            "cleanup": True,
+                            "pid_dir": str(slot),
+                            "port": int(lifecycle.get("port") or 0),
+                        },
+                    )
+                else:
+                    log.info(
+                        "grid_runner: warmup-before-measure not eligible (%s); running single measured round.",
+                        lifecycle.get("reason") or "unknown",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "grid_runner: warmup-before-measure eligibility/materialization failed (%r); running single measured round.",
+                    exc,
+                )
+                auto_warmup = False
+
+        warmup_tput: float | None = None
+        if auto_warmup:
+            warmup_slot = slot / "warmup_round"
+            warmup_lifecycle = {
+                "cleanup": False,
+                "pid_dir": str(slot),
+                "port": int(lifecycle.get("port") or 0),
+            }
+            try:
+                warmup_cfg_path = _build_variant_yaml(
+                    base_yaml_path,
+                    base_extra_args,
+                    variant,
+                    output_subdir=warmup_slot,
+                    model_path=model_path,
+                    gpu_type=gpu_type,
+                    benchmark_script=benchmark_script,
+                    server_lifecycle=warmup_lifecycle,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: warmup_yaml_build_error: %r",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    exc,
+                )
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class="warmup_yaml_build_error",
+                    error_summary=repr(exc),
+                    extra_args=variant.extra_server_args,
+                )
+                results.append(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        error=f"warmup_yaml_build_error: {exc!r}",
+                        error_class="warmup_yaml_build_error",
+                        note=variant.note,
+                    )
+                )
+                await _pulse_after_variant(i)
+                if not keep_going_on_failure:
+                    break
+                continue
+
+            warmup_started_unix = time.time()
+            try:
+                warmup_rc, warmup_stdout, warmup_stderr = await asyncio.to_thread(
+                    _run_magpie,
+                    magpie_python=magpie_python,
+                    config_path=warmup_cfg_path,
+                    output_dir=warmup_slot,
+                    timeout_sec=variant_timeout_sec,
+                    cwd=cwd,
+                    result_dir=result_dir,
+                    soft_deadline_sec=None,
+                    preclean=True,
+                )
+            except subprocess.TimeoutExpired as exc:
+                from ._server_lifecycle import teardown_lifecycle_server
+
+                teardown_lifecycle_server(
+                    pid_dir=slot,
+                    framework=str(lifecycle.get("framework") or ""),
+                    port=int(lifecycle.get("port") or 0),
+                )
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: warmup timeout (timeout_sec=%d): %s",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    variant_timeout_sec,
+                    exc,
+                )
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class="warmup_magpie_timeout",
+                    error_summary=str(exc),
+                    extra_args=variant.extra_server_args,
+                )
+                results.append(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        error=f"warmup_timeout: {exc}",
+                        error_class="warmup_magpie_timeout",
+                        note=variant.note,
+                        runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
+                        nonfatal_warnings=["run_grid_warmup_round_failed"],
+                    )
+                )
+                await _pulse_after_variant(i)
+                if not keep_going_on_failure:
+                    break
+                continue
+
+            warmup_candidates = sorted(warmup_slot.glob("benchmark_*"))
+            warmup_workspace = warmup_candidates[-1] if warmup_candidates else warmup_slot
+            warmup_harvested = harvest_leaked_artifacts(
+                warmup_workspace,
+                subprocess_started_unix=warmup_started_unix,
+            )
+            warmup_report = _parse_report(warmup_workspace) if warmup_candidates else None
+            warmup_measurement = extract_benchmark_measurement(
+                warmup_report,
+                workspace=warmup_workspace,
+                subprocess_started_unix=warmup_started_unix,
+            )
+            if warmup_rc != 0 or not warmup_measurement.get("valid_measurement"):
+                from ._server_lifecycle import teardown_lifecycle_server
+
+                teardown_lifecycle_server(
+                    pid_dir=slot,
+                    framework=str(lifecycle.get("framework") or ""),
+                    port=int(lifecycle.get("port") or 0),
+                )
+                warmup_error = (
+                    (warmup_stderr or warmup_stdout)[-2000:]
+                    if warmup_rc != 0
+                    else "warmup benchmark_report missing valid throughput/completed requests"
+                )
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: warmup_round_failed (rc=%s): %s",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    warmup_rc,
+                    warmup_error[:200],
+                )
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class="warmup_round_failed",
+                    error_summary=warmup_error,
+                    extra_args=variant.extra_server_args,
+                )
+                results.append(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        workspace=str(warmup_workspace) if warmup_candidates else None,
+                        report_path=(
+                            str(warmup_workspace / "benchmark_report.json")
+                            if (warmup_workspace / "benchmark_report.json").exists()
+                            else None
+                        ),
+                        raw_result_path=warmup_measurement.get("raw_result_path"),
+                        reported_success=warmup_measurement.get("reported_success"),
+                        returncode=warmup_rc,
+                        error=warmup_error,
+                        error_class="warmup_round_failed",
+                        note=variant.note,
+                        runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
+                        nonfatal_warnings=[
+                            "run_grid_warmup_round_failed",
+                            *[f"harvested_leaked_artifact:{src}" for src, _ in warmup_harvested],
+                        ],
+                    )
+                )
+                await _pulse_after_variant(i)
+                if not keep_going_on_failure:
+                    break
+                continue
+            warmup_tput = warmup_measurement.get("output_throughput")
+            log.info(
+                "grid_runner: variant %s warmup tput=%.1f tok/s discarded; measuring hot round next",
+                variant.name,
+                warmup_tput or 0.0,
+            )
 
         from ._multi_node_env import log_mn_banner
 
@@ -2279,6 +2719,7 @@ async def run_grid(
                 cwd=cwd,
                 result_dir=result_dir,
                 soft_deadline_sec=soft_deadline_sec,
+                preclean=(False if auto_warmup else preclean_before_run),
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks so the variant slot captures whatever
@@ -2324,6 +2765,15 @@ async def run_grid(
             if not keep_going_on_failure:
                 break
             continue
+        finally:
+            if auto_warmup:
+                from ._server_lifecycle import teardown_lifecycle_server
+
+                teardown_lifecycle_server(
+                    pid_dir=slot,
+                    framework=str(lifecycle.get("framework") or ""),
+                    port=int(lifecycle.get("port") or 0),
+                )
 
         # Server-liveness watchdog fired: the variant's server engine/worker
         # bootstrap died but the parent process hung. Record a fast failure
@@ -2555,6 +3005,9 @@ async def run_grid(
             warnings.append("magpie_nonzero_after_valid_measurement")
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
+        if warmup_tput is not None:
+            warnings.append("run_grid_warmup_discarded_first")
+            warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
 
         if not measurement.get("valid_measurement"):
             if rc != 0:

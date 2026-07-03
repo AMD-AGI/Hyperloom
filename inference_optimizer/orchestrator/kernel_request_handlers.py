@@ -451,18 +451,65 @@ def _resolve_tracelens_root() -> Path:
 
 
 def _tracelens_root_error(root: Path) -> str | None:
-    """Validate that the resolved TraceLens root exists on disk.
+    """Validate that the resolved TraceLens root is a usable git checkout.
+
+    A directory that exists but lacks ``.git`` (e.g. an installer's half-done
+    clone) is NOT usable and must be reported so a non-default override fails
+    fast and a default path is self-healed (#722/PR#789).
 
     Returns:
-        str | None: A human-readable error when the checkout is missing, or
-            ``None`` when it is present and usable.
+        str | None: A human-readable error when the checkout is missing or
+            incomplete, or ``None`` when it is a usable git checkout.
     """
     if not root.is_dir():
         return (
             f"TraceLens root not found: {root}; run kernel-agent/scripts/install.sh "
             "or set TRACELENS_ROOT to an existing checkout"
         )
+    if not (root / ".git").exists():
+        return (
+            f"TraceLens root incomplete (not a git checkout): {root}; "
+            "run kernel-agent/scripts/install.sh or set TRACELENS_ROOT to a valid checkout"
+        )
     return None
+
+
+def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
+    """Rebuild the pod-local TraceLens checkout if it vanished mid-run (#722).
+
+    Only the installer-managed default path is healed; an explicit
+    ``TRACELENS_ROOT`` override pointing elsewhere is operator-maintained and
+    must fail fast when missing (mirrors kernel-agent/scripts/install.sh).
+    Best-effort: any failure is swallowed so the caller's normal validation
+    produces the user-facing error.
+
+    NB: the default path is itself persisted as ``TRACELENS_ROOT`` in
+    kernel-agent.env.sh, so "env is set" is NOT a reliable override signal —
+    compare the resolved path against the installer default instead.
+    """
+    from inference_optimizer import paths
+
+    default_root = paths.open_source_root() / "TraceLens"
+    try:
+        is_default = Path(root).resolve() == default_root.resolve()
+    except OSError:
+        is_default = False
+    if not is_default:
+        return  # explicit operator override at a non-default path: never auto-clone
+    try:
+        tool = _kernel_agent_tool_path("tracelens_analysis.py")
+        tools_dir = str(tool.parent)
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import tracelens_analysis as _tla  # type: ignore[import-not-found]
+
+        heal_log = getattr(log, "warning", None) or (lambda *_a, **_k: None)
+        heal_log("trace_analyze: TraceLens root %s missing; attempting self-heal", root)
+        _tla._ensure_tracelens_checkout(root, log_path=Path(os.devnull))
+    except Exception as exc:  # noqa: BLE001  # heal is best-effort; validation reports the real error
+        _log = getattr(log, "warning", None)
+        if _log:
+            _log("trace_analyze: TraceLens self-heal failed: %s", exc)
 
 
 def _kernel_agent_tool_path(tool_name: str) -> Path:
@@ -1127,6 +1174,18 @@ def _fill_integrate_defaults_from_state(
     return resolved
 
 
+def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
+    """Backfill integrate inputs from a recorded multi-file artifact bundle."""
+    if not isinstance(bundle, dict) or bundle.get("type") != "patch_snapshot":
+        return
+    if not resolved.get("snapshot_dir") and bundle.get("snapshot_dir"):
+        resolved["snapshot_dir"] = str(bundle["snapshot_dir"])
+    if not resolved.get("patch_path") and bundle.get("patch_path"):
+        resolved["patch_path"] = str(bundle["patch_path"])
+    if not resolved.get("kernel_repo") and bundle.get("repo_root"):
+        resolved["kernel_repo"] = str(bundle["repo_root"])
+
+
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
     """Fill integrate inputs from SharedState when Orchestration sends only kernel_id (artifact in ``last_kernel_opt``, source in ``last_trace_analyze``).
 
@@ -1149,6 +1208,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
         # Snapshot deploy: prefer the original patch (manifest) + its byte-exact
         # snapshot dir so the WHOLE multi-file patch lands atomically.
+        _fill_integrate_snapshot_from_bundle(resolved, last_kernel.get("best_artifact_bundle"))
         if not resolved.get("snapshot_dir") and last_kernel.get("deploy_snapshot_dir"):
             resolved["snapshot_dir"] = str(last_kernel["deploy_snapshot_dir"])
             if last_kernel.get("deploy_patch_path") and not resolved.get("patch_path"):
@@ -1169,6 +1229,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     # Multi-KEEP queue fallback: ``last_kernel_opt`` holds only the strongest pending KEEP, so pull patch_path/source_file from the per-kernel ledger for other queued KEEPs.
     if kernel_id:
         attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        _fill_integrate_snapshot_from_bundle(resolved, attempt.get("last_artifact_bundle"))
         if not resolved.get("snapshot_dir") and attempt.get("last_snapshot_dir"):
             resolved["snapshot_dir"] = str(attempt["last_snapshot_dir"])
             if attempt.get("last_deploy_patch_path") and not resolved.get("patch_path"):
@@ -2357,8 +2418,14 @@ async def trace_analyze_handler(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
     # Resolve TraceLens root independently of inherited env (the coordinator may
-    # not have sourced kernel-agent.env.sh) and fail fast before launching the tool.
+    # not have sourced kernel-agent.env.sh). If the installer-managed checkout
+    # vanished mid-run (#722), self-heal it before the fail-fast validation.
     tracelens_root = _resolve_tracelens_root()
+    # Self-heal when the checkout is missing OR incomplete (exists but no .git,
+    # e.g. a concurrent install's half-done clone). Gating only on is_dir()
+    # would let an incomplete default checkout bypass self-heal (#722/PR#789).
+    if not (tracelens_root / ".git").exists():
+        _maybe_selfheal_tracelens_root(tracelens_root, log=log)
     tl_err = _tracelens_root_error(tracelens_root)
     if tl_err:
         return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
@@ -2389,8 +2456,6 @@ async def trace_analyze_handler(
         str(trace_input),
         "--session-id",
         str(payload.get("session_id") or session_dir.name),
-        "--top-k",
-        str(payload.get("top_k", 10)),
         "--workspace-path",
         workspace_path,
         # Pass the resolved root explicitly so the tool never depends on the
@@ -2398,6 +2463,13 @@ async def trace_analyze_handler(
         "--tracelens-root",
         str(tracelens_root),
     ]
+    # Kernel-candidate POOL size (issue #667): only forward --top-k when the
+    # request explicitly overrides it. Otherwise let tracelens_analysis.py apply
+    # its own large-pool default (env: HYPERLOOM_KERNEL_CANDIDATES_TOP_K) so the
+    # candidate-build cap and the dispatch-side budget (source-fn grouping + op
+    # dedup + attempt cap) stay decoupled and share a single source of truth.
+    if payload.get("top_k") is not None:
+        cmd += ["--top-k", str(payload.get("top_k"))]
     if model_name:
         cmd += ["--model-name", str(model_name)]
     if framework:
@@ -5565,6 +5637,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     deploy_snapshot_dir = str(verification.get("deploy_snapshot_dir", "") or "")
     deploy_patch_path = str(verification.get("deploy_patch_path", "") or "")
     deploy_repo_root = str(verification.get("deploy_repo_root", "") or "")
+    best_artifact_bundle = dict(verification.get("best_artifact_bundle") or {})
     source_file = str(
         result.get("source_file")
         or (result.get("candidate") or {}).get("source_file")
@@ -5622,6 +5695,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     entry["last_status"] = status
     entry["last_micro_speedup"] = micro_float
     entry["last_artifact_path"] = best_artifact_path
+    entry["last_artifact_bundle"] = best_artifact_bundle
     entry["last_snapshot_dir"] = deploy_snapshot_dir
     entry["last_deploy_patch_path"] = deploy_patch_path
     entry["last_deploy_repo_root"] = deploy_repo_root
@@ -5656,6 +5730,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "compile_passed": verification.get("compile_passed"),
             "correctness_passed": verification.get("correctness_passed"),
             "best_artifact_path": best_artifact_path,
+            "best_artifact_bundle": best_artifact_bundle,
             "deploy_snapshot_dir": deploy_snapshot_dir,
             "deploy_patch_path": deploy_patch_path,
             "deploy_repo_root": deploy_repo_root,

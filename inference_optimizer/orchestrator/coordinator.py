@@ -3149,6 +3149,9 @@ class Coordinator:
             cand_id = str(params.get("framework_agent_candidate_id") or "")
             if not cand_id or cand_id in unprocessed_ids:
                 return True
+        # An authored patch awaiting Critic review or a candidate awaiting its
+        # pre-screen verdict both keep the phase from exiting early — but only
+        # while the proposal targets a still-unprocessed candidate.
         try:
             for p in self.state.pending_proposals.values():
                 if getattr(p, "decided", False):
@@ -5411,16 +5414,26 @@ class Coordinator:
         self._record_phase_entry_evidence(
             gemm_tuning={"status": "running", "source": "kernel_entry_auto"},
         )
+        run_gemm_tuning_handler = None
         try:
             from .kernel_request_handlers import run_gemm_tuning_handler
 
-            result = await run_gemm_tuning_handler(
-                {
-                    "task_id": "kernel_entry_gemm_tuning",
-                    "reason": "kernel_entry_auto",
-                },
-                session_dir=self.session_dir,
-            )
+            if self._bf16_dense_gemm_fallback_pending():
+                log.info(
+                    "KERNEL entry: resuming pending bf16 dense GEMM fallback "
+                    "after prior forge fp8 no-candidate result"
+                )
+                result = await self._run_bf16_dense_gemm_fallback(
+                    run_gemm_tuning_handler
+                )
+            else:
+                result = await run_gemm_tuning_handler(
+                    {
+                        "task_id": "kernel_entry_gemm_tuning",
+                        "reason": "kernel_entry_auto",
+                    },
+                    session_dir=self.session_dir,
+                )
         except Exception as exc:  # noqa: BLE001
             log.exception("KERNEL entry GEMM tuning failed")
             result = {
@@ -5430,6 +5443,21 @@ class Coordinator:
                 "error": repr(exc),
             }
         await self._handle_gemm_tuning_result(result)
+
+        if (
+            run_gemm_tuning_handler is not None
+            and self._should_run_bf16_dense_gemm_fallback(result)
+            and str(result.get("decision") or "").strip().upper() != "KEEP"
+        ):
+            log.info(
+                "KERNEL entry: forge fp8 GEMM tuning found no candidate; "
+                "trying bf16 dense fallback"
+            )
+            result = await self._run_bf16_dense_gemm_fallback(
+                run_gemm_tuning_handler
+            )
+            await self._handle_gemm_tuning_result(result)
+
         status = str(result.get("status") or "unknown")
         await self.bus.append_and_seq(
             Message.new(
@@ -5458,6 +5486,128 @@ class Coordinator:
         await self._maybe_reprofile_for_kernel()
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
+
+    async def _run_bf16_dense_gemm_fallback(
+        self,
+        run_gemm_tuning_handler: Callable[..., Any],
+    ) -> dict[str, Any]:
+        """Run the single bf16 dense fallback and stamp retry provenance."""
+        payload = {
+            "task_id": "kernel_entry_gemm_tuning_bf16_fallback",
+            "reason": "fp8_no_improvement_bf16_fallback",
+            "precision": "bf16",
+            "tuner": "sglang_dense_bf16",
+        }
+        try:
+            result = await run_gemm_tuning_handler(
+                payload,
+                session_dir=self.session_dir,
+            )
+            if not isinstance(result, dict):
+                result = {
+                    "status": "failed",
+                    "decision": "REVERT",
+                    "error": "non-dict bf16 fallback result",
+                }
+        except Exception as exc:  # noqa: BLE001
+            log.exception("KERNEL entry GEMM bf16 fallback failed")
+            result = {
+                "status": "failed",
+                "decision": "REVERT",
+                "error_class": exc.__class__.__name__,
+                "error": repr(exc),
+            }
+        result.setdefault("task_id", payload["task_id"])
+        result.setdefault("reason", payload["reason"])
+        result.setdefault("source", payload["reason"])
+        result.setdefault("backend", "forge")
+        result.setdefault("precision", "bf16")
+        result.setdefault("framework", getattr(self.shared_state, "framework", ""))
+        return result
+
+    def _should_run_bf16_dense_gemm_fallback(self, result: dict[str, Any]) -> bool:
+        """Return True when a forge fp8 run should try bf16 dense GEMM tuning.
+
+        Recent production runs showed the automatic KERNEL-entry GEMM step can
+        stop after a single fp8 a8w8/a8w8_blockscale no-op. Historical wins came
+        from a follow-up ``sglang_dense_bf16`` run, so make that fallback
+        deterministic when the fp8 tuner produced no E2E-validatable candidate.
+        """
+        if not isinstance(result, dict):
+            return False
+        if str(result.get("backend") or "").strip().lower() != "forge":
+            return False
+        if str(result.get("precision") or "").strip().lower() != "fp8":
+            return False
+        framework = str(
+            result.get("framework") or getattr(self.shared_state, "framework", "") or ""
+        ).strip().lower()
+        if framework != "sglang":
+            return False
+        if str(result.get("micro_decision") or "").strip().lower() != "no_improvement":
+            return False
+        if result.get("recommended_env") or result.get("extra_envs"):
+            return False
+        for tuner in result.get("tuners_run") or []:
+            if not isinstance(tuner, dict):
+                continue
+            if str(tuner.get("status") or "").strip().lower() != "ok":
+                continue
+            try:
+                improved = int(tuner.get("improved_shapes") or 0)
+            except (TypeError, ValueError):
+                improved = 0
+            if improved > 0 and str(tuner.get("env_var") or "").strip() and str(
+                tuner.get("env_value") or ""
+            ).strip():
+                return False
+        return True
+
+    def _bf16_dense_gemm_fallback_pending(self) -> bool:
+        """Return True when a recorded fp8 no-op still needs its bf16 retry."""
+        last = getattr(self.shared_state, "last_gemm_tuning", {}) or {}
+        return (
+            self._should_run_bf16_dense_gemm_fallback(last)
+            and not self._bf16_dense_gemm_fallback_attempted()
+        )
+
+    def _bf16_dense_gemm_fallback_attempted(self) -> bool:
+        """Detect whether the bf16 dense fallback has already been attempted."""
+        attempts: list[Any] = []
+        last = getattr(self.shared_state, "last_gemm_tuning", {}) or {}
+        if isinstance(last, dict):
+            attempts.append(last)
+        attempts.extend(getattr(self.shared_state, "gemm_tuning_attempts", None) or [])
+        return any(
+            self._is_bf16_dense_gemm_fallback_attempt(entry)
+            for entry in attempts
+            if isinstance(entry, dict)
+        )
+
+    @staticmethod
+    def _is_bf16_dense_gemm_fallback_attempt(entry: dict[str, Any]) -> bool:
+        """Identify the fallback attempt across old and newly stamped records."""
+        markers = {
+            "kernel_entry_gemm_tuning_bf16_fallback",
+            "fp8_no_improvement_bf16_fallback",
+        }
+        for key in ("task_id", "reason", "source"):
+            if str(entry.get(key) or "").strip() in markers:
+                return True
+        if "kernel_entry_gemm_tuning_bf16_fallback" in str(
+            entry.get("workspace") or ""
+        ):
+            return True
+        if str(entry.get("precision") or "").strip().lower() != "bf16":
+            return False
+        if str(entry.get("tuner") or "").strip() == "sglang_dense_bf16":
+            return True
+        for tuner in entry.get("tuners_run") or []:
+            if not isinstance(tuner, dict):
+                continue
+            if str(tuner.get("tuner") or "").strip() == "sglang_dense_bf16":
+                return True
+        return False
 
     @staticmethod
     def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
@@ -7145,19 +7295,16 @@ class Coordinator:
             tput = float(tput_raw) if tput_raw is not None else 0.0
         except (TypeError, ValueError):
             tput = 0.0
-        # ``tput`` (output_throughput) is the HOT measure round; kept only for
-        # reporting (``hot_tput``). The fair comparison value — used for gain,
-        # the stack entry, and current_best.tput (the explore/sweep anchor) —
-        # MUST be the single-fresh-server (warmup) round so it matches the
-        # measurement basis of explore/sweep variants. Fall back to ``tput``
-        # for a single-run replay that has no separate warmup round.
-        single_raw = result.get("warmup_round_tput")
+        # ``tput`` (output_throughput) is the HOT measure round and is the
+        # comparison value for gain/current_best. The discarded warmup round is
+        # retained only for audit so warm-replay does not reintroduce
+        # cold-before/hot-after drift.
+        cold_raw = result.get("warmup_round_tput")
         try:
-            single_round_tput = float(single_raw) if single_raw is not None else 0.0
+            cold_round_tput = float(cold_raw) if cold_raw is not None else 0.0
         except (TypeError, ValueError):
-            single_round_tput = 0.0
-        if single_round_tput <= 0:
-            single_round_tput = tput
+            cold_round_tput = 0.0
+        single_round_tput = tput
         hot_tput = tput
         # Use the baseline_tput captured at enqueue time so a mid-replay baseline rerun can't shift the anchor; fall back to live state.baseline_tput.
         anchor_raw = None
@@ -7237,6 +7384,7 @@ class Coordinator:
                 "extra_envs": warm_envs,
                 "tput": float(single_round_tput),
                 "hot_tput": float(hot_tput),
+                "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
                 "gain_pct": round(measured_gain, 3),
                 "workspace": str(result.get("workspace") or ""),
                 "ts": datetime.now(timezone.utc).isoformat(),
@@ -7263,7 +7411,8 @@ class Coordinator:
             gp = list(getattr(state, "gain_per_stack_entry", []) or [])
             gp.append(round(measured_gain, 3))
             state.gain_per_stack_entry = gp
-            # Cumulative gain from absolute tput/baseline (stack is superposition, not additive deltas). Single-round basis (matches explore/sweep + baseline anchor).
+            # Cumulative gain is absolute tput vs baseline, not additive stack
+            # deltas. Both sides use the hot measure-round contract.
             total_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
             state.cumulative_gain = round(total_gain, 3)
             state.cumulative_gain_validated = round(total_gain, 3)
@@ -7272,10 +7421,9 @@ class Coordinator:
             state.current_best = {
                 "action": "warm_replay",
                 "name": "warm_replay",
-                # Single-round anchor (NOT hot) so explore/sweep variants are
-                # judged on a comparable basis; hot kept under hot_tput.
                 "tput": single_round_tput,
                 "hot_tput": hot_tput,
+                "cold_tput": cold_round_tput if cold_round_tput > 0 else None,
                 # Canonical key — matches the current_best shape _lift_to_current_best writes for KEEPs.
                 "extra_server_args": warm_args,
                 "extra_envs": warm_envs,
@@ -8812,6 +8960,9 @@ class Coordinator:
                 model_class=str(getattr(state, "model_class", "") or ""),
                 gpu_type=str(getattr(state, "gpu_type", "") or ""),
                 precision=str(getattr(state, "precision", "") or ""),
+            )
+            _entries = _src_recon.filter_entries_for_model(
+                _entries, dict(getattr(state, "model_info", None) or {})
             )
             _rendered = _src_recon.render_checklist_for_prompt(_entries)
             if _rendered:
@@ -10399,6 +10550,8 @@ class Coordinator:
             return False
         last = getattr(ss, "last_gemm_tuning", {}) or {}
         status = str(last.get("status") or "").strip().lower()
+        if self._bf16_dense_gemm_fallback_pending():
+            return True
         return status not in {
             "ok",
             "succeeded",
@@ -14258,35 +14411,23 @@ class Coordinator:
         audit_extras: dict[str, Any] = {}
         if task_kind == "baseline":
             tput = result.get("output_throughput")
+            warmup_anchor = result.get("warmup_round_tput")
             if isinstance(tput, (int, float)) and tput > 0:
-                # Fair-comparison anchor for measurement parity.
-                # The baseline cold-start guard runs a warmup round on a
-                # fresh server (discarded for *reporting*) then a measure
-                # round that REUSES the now-hot server — the measure
-                # number (``output_throughput``) is systematically ~10-15%
-                # higher than a single fresh-server round, because an
-                # 8-request client warmup does not fully warm vLLM/SGLang
-                # (graph capture, scheduler, allocator) the way a full
-                # prior benchmark does. Every ``explore`` / ``sweep``
-                # variant, by contrast, RESTARTS the server and runs a
-                # single round, so judging them against the hot measure
-                # number penalizes each variant by that same ~10-15% and
-                # genuinely-good params can never clear the KEEP threshold.
-                # Use the warmup round's single-fresh-server tput as the
-                # comparison ANCHOR (apples-to-apples with variants) when
-                # the double-run captured it; keep the hot number for
-                # ``current_best`` / reporting below.
-                warmup_anchor = result.get("warmup_round_tput")
+                # Baseline's conclusion contract is the hot measure round:
+                # BaselineExecutor already discards the cold first round and
+                # returns the second round as ``output_throughput``. Keep the
+                # discarded value only as an audit field so leaderboard/report
+                # gain math never mixes cold-before with hot-after.
                 if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
-                    self.shared_state.baseline_tput = float(warmup_anchor)
+                    self.shared_state.baseline_tput = float(tput)
+                    self.shared_state.baseline_cold_tput = float(warmup_anchor)
                     self.shared_state.baseline_hot_tput = float(tput)
                     log.info(
-                        "baseline anchor: using single-round warmup tput "
-                        "%.1f as comparison anchor (hot measure %.1f kept "
-                        "for reporting) — measurement parity with explore/"
-                        "sweep variants",
-                        float(warmup_anchor),
+                        "baseline anchor: using hot measure tput %.1f as "
+                        "baseline_tput (discarded cold warmup %.1f kept as "
+                        "baseline_cold_tput)",
                         float(tput),
+                        float(warmup_anchor),
                     )
                 else:
                     self.shared_state.baseline_tput = float(tput)
@@ -14326,21 +14467,20 @@ class Coordinator:
             if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
                 self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
                 changed = True
-            # current_best.tput is the comparison ANCHOR every explore /
-            # sweep variant is judged against (the Coordinator injects it
-            # as ``params['base_tput']`` in _handle_delegate /
-            # _materialize_approved_proposal). It MUST be the fair
-            # single-fresh-server anchor (``baseline_tput``, which the
-            # block above set to the warmup-round number under the
-            # double-run), NOT the hot measure round — otherwise every
-            # cold-restarted variant is judged against an unbeatable hot
-            # baseline and can never KEEP. Keep the hot number under a
-            # separate ``hot_tput`` field for reporting.
+            # current_best.tput follows the same hot baseline contract.
+            # run_grid/explore/integrate_patch measure optimization candidates
+            # on the same warm second-round basis when lifecycle reuse is
+            # available, so the numerator and denominator stay aligned.
             anchor_tput = float(self.shared_state.baseline_tput or 0.0)
             self.shared_state.current_best = {
                 "action": "baseline",
                 "tput": (anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)),
                 "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
+                "cold_tput": (
+                    float(warmup_anchor)
+                    if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0
+                    else None
+                ),
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
@@ -14381,13 +14521,9 @@ class Coordinator:
                         "PRELUDE: warm-recipe history injection failed: %r",
                         exc,
                     )
-                # Step 2 — warm-recipe replay. Anchor the replay gain on the
-                # SINGLE-fresh-server-round baseline (``state.baseline_tput``,
-                # the same anchor explore/sweep variants are judged against),
-                # NOT the hot measure ``tput`` — otherwise warm-replay's gain
-                # and current_best land on the hot basis and every
-                # single-round explore variant is judged against an unbeatable
-                # hot bar (mirrors the baseline-promote invariant).
+                # Step 2 — warm-recipe replay. Anchor replay gain on the hot
+                # baseline_tput contract; candidate replays also return their
+                # hot measure round.
                 try:
                     await self._maybe_enqueue_warm_replay(
                         baseline_tput=float(self.shared_state.baseline_tput or tput),

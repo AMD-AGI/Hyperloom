@@ -262,9 +262,12 @@ def test_detect_deepseek_v4_unrecognized_blocked(tmp_path):
     assert reason is not None and "not recognized" in reason
 
 
-def test_detect_glm_moe_dsa_unrecognized_blocked(tmp_path):
-    # zai-org-GLM-5.1: Transformers does not recognize glm_moe_dsa →
-    # ModelConfig ValidationError during server init (any GPU).
+def test_detect_glm_moe_dsa_now_recognized(tmp_path):
+    # zai-org GLM-5.x (glm_moe_dsa): the current stack (transformers 5.12.1 +
+    # vLLM 0.24.0) registers it (AutoConfig resolves GlmMoeDsaConfig, vLLM
+    # ModelRegistry registers GlmMoeDsaForCausalLM; gfx942 sparse-MLA falls back
+    # to Triton via vllm-project/vllm#45782). It was removed from the
+    # unrecognized blocklist, so it is no longer fail-fasted by the gate.
     m = tmp_path / "glm_moe_dsa"
     _write_config(
         m,
@@ -273,7 +276,7 @@ def test_detect_glm_moe_dsa_unrecognized_blocked(tmp_path):
         max_position_embeddings=131072,
     )
     reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None and "not recognized" in reason
+    assert reason is None
 
 
 def test_detect_gemma4_now_recognized(tmp_path):
@@ -363,11 +366,11 @@ def test_detect_pure_nested_ministral3_blocked(tmp_path):
 
 
 def test_detect_nested_qwen3_5_moe_text_not_blocked(tmp_path):
-    # Qwen3.5 MoE wrapper exposes text_config.model_type=qwen3_5_moe_text. The
-    # current runtime (transformers 5.12.1 + vLLM 0.24.0) registers both
-    # qwen3_5_moe and qwen3_5_moe_text, and vLLM lists
-    # Qwen3_5MoeForConditionalGeneration as a supported arch, so the pre-flight
-    # gate must NOT block it (previously a stale false-positive blocklist entry).
+    # The Qwen3.5-MoE wrapper exposes text_config.model_type=qwen3_5_moe_text.
+    # The current runtime registers Qwen3_5MoeConfig/Qwen3_5MoeTextConfig and
+    # vLLM ModelRegistry knows Qwen3_5MoeForConditionalGeneration, so the nested
+    # type is no longer gated and falls through to the text_coercible degraded
+    # path.
     m = tmp_path / "wrapper_nested_qwen3_5_moe_text"
     _write_config(
         m,
@@ -379,8 +382,7 @@ def test_detect_nested_qwen3_5_moe_text_not_blocked(tmp_path):
             "vocab_size": 151936,
         },
     )
-    reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is None
+    assert cli._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_top_level_qwen3_5_moe_not_blocked(tmp_path):
