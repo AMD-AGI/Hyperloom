@@ -24,7 +24,7 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 | **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | Local recipe KB and optional Cortex KB setup |
 | **[`session_breakdown.json` Integration](docs/INTEGRATION_SESSION_BREAKDOWN.md)** | Stable contract for downstream consumers (`claw-stats-service`, dashboards) |
 | **[Operations & Self-Host Runbook](docs/OPERATIONS.md)** | k8s sizing, `USER_DATA_PATH` backup, disaster recovery |
-| **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Auth-proxy 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
+| **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Gateway 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
 | **[Upgrading](docs/UPGRADING.md)** | Per-version migration steps (companion to [`CHANGELOG.md`](CHANGELOG.md)) |
 
 ---
@@ -169,6 +169,45 @@ OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
 | `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 
 > `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.primus-safe.amd.com/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK or OOB configuration is needed.
+
+> The table above is the single-gateway (AMD LiteLLM) default: one OpenAI-compatible endpoint serves both Claude and GPT models. The two setups below are alternatives — pick one; do not mix them with the single-gateway block above.
+
+<details>
+<summary><b>Split Anthropic + OpenAI entrypoints</b> (Claude and GPT live on different vendors/gateways)</summary>
+
+Set each side explicitly instead of `SAFE_API_KEY`.
+
+```env
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=sk-...
+```
+
+Set the models (`CLAUDE_MODEL` maps to the Anthropic side, `CODEX_MODEL` to the OpenAI side):
+
+```env
+INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
+CLAUDE_MODEL=orchestration-model-id-on-the-anthropic-side
+CODEX_MODEL=model-id-on-the-openai-side
+```
+
+</details>
+
+<details>
+<summary><b>Non-AMD / self-hosted gateway + custom models</b> (Vultr, TensorWave, on-prem, etc.)</summary>
+
+Point the base URL / key at your own LiteLLM-compatible gateway and pin the models it serves:
+
+```env
+OPENAI_BASE_URL=https://your-gateway/v1
+SAFE_API_KEY=your-gateway-key
+INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
+CLAUDE_MODEL=your-gateway-orchestration-model
+CODEX_MODEL=your-gateway-kernel-model
+```
+
+</details>
 
 > If HTTPS requests to `core42.primus-safe.amd.com` or the AMD LLM Gateway fail with a certificate verification error inside the container, install the AMD certificate bundle manually. This is most common when running on your own GPU server or a custom container image:
 >
