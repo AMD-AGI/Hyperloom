@@ -12,7 +12,7 @@ page summarizes the entry points and links to the detailed guides.
 ## Prerequisites
 
 Bind your [LLM Gateway](https://llm.amd.com/) key to
-[Hyperloom](https://core42.example-internal-host.invalid/hyperloom/) to obtain your API
+[Hyperloom](https://crusoe.example-internal-host.invalid/hyperloom/) to obtain your API
 key. This key provides access to TraceLens, GEAK, and OOB services for both the
 UI and the local workflow.
 
@@ -20,7 +20,7 @@ UI and the local workflow.
 
 The fastest path, with no local GPU setup:
 
-1. Go to [core42.example-internal-host.invalid/hyperloom](https://core42.example-internal-host.invalid/hyperloom/).
+1. Go to [crusoe.example-internal-host.invalid/hyperloom](https://crusoe.example-internal-host.invalid/hyperloom/).
 2. Select **Claw Agent** or **Get Started** to enter PrimusClaw.
 3. Choose the **Hyperloom**, **TraceLens-only**, or **GEAK-only** tab for your task.
 
