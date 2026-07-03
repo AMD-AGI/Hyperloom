@@ -1472,8 +1472,12 @@ class SharedState:
         Args:
             changes (dict[str, Any]): Field-name -> value mapping to apply;
                 keys not matching a dataclass field are ignored.
-            allow_core (bool): Whether core fields may be written (enforced by
-                PolicyGate upstream; accepted here for call-site parity).
+            allow_core (bool): When False, keys in
+                :data:`policy.CORE_STATE_FIELDS` are dropped (defense in depth:
+                PolicyGate already rejects them upstream, but this ensures a
+                caller reaching here off the intent path still cannot write
+                Coordinator-only fields). When True, all known fields are
+                written (Coordinator/trusted callers).
 
         Returns:
             dict[str, Any]: The subset of ``changes`` actually written to
@@ -1481,9 +1485,22 @@ class SharedState:
         """
         if not changes:
             return {}
+        core_fields: frozenset[str] = frozenset()
+        if not allow_core:
+            # Lazy import to avoid a shared_state <-> policy import cycle; reuse
+            # the single CORE_STATE_FIELDS source of truth rather than a copy.
+            from .policy import CORE_STATE_FIELDS
+
+            core_fields = CORE_STATE_FIELDS
         applied: dict[str, Any] = {}
         for key, value in changes.items():
             if key not in self.__dataclass_fields__:
+                continue
+            if key in core_fields:
+                log.warning(
+                    "apply_changes: dropping core state field %r (allow_core=False)",
+                    key,
+                )
                 continue
             setattr(self, key, value)
             applied[key] = value

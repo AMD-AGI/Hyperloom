@@ -193,7 +193,11 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     # inherits a high enough ceiling and does not abort / zombie at the
     # container default (1024).
     ensure_fd_limit(log_path=log_path)
-    cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=0.0.0.0"]
+    # Bind the dashboard/jobs API to loopback: this is a local single-node head
+    # (oob/geak local Ray), so nothing off-box needs :8265. GCS (:6379) is
+    # unaffected, so local ray.init(address="auto") still works. Avoids exposing
+    # the unauthenticated Ray Jobs RCE surface on the pod network.
+    cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         cmd.append(f"--num-gpus={num_gpus}")
     if log_path is not None:
@@ -268,7 +272,9 @@ def force_restart_local_cluster(
     # the raylet abort on startup / linger as a zombie).
     ensure_fd_limit(log_path=log_path)
     stop_cmd = ["ray", "stop", "--force"]
-    start_cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=0.0.0.0"]
+    # Bind the dashboard/jobs API to loopback (see ensure_ray_cluster): local
+    # single-node head; GCS (:6379) is unaffected so ray.init still works.
+    start_cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         start_cmd.append(f"--num-gpus={num_gpus}")
     if log_path is not None:

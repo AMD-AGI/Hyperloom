@@ -195,7 +195,11 @@ def test_restore_moves_backup_back(apply_tool, tmp_path: Path) -> None:
     assert invalidate["status"] == "ok"
     assert not fake_jit_build.exists()
 
-    restore = apply_tool._restore_aiter_jit_build(invalidate)
+    # Restore now requires the recorded src to be the importable aiter jit/build
+    # dir (blocks a forged manifest redirecting the rmtree); point the resolver
+    # at the synthetic layout.
+    with patch.object(apply_tool, "_aiter_jit_build_dir", return_value=fake_jit_build):
+        restore = apply_tool._restore_aiter_jit_build(invalidate)
     assert restore["status"] == "ok"
     assert restore["restored_to"] == str(fake_jit_build)
     assert (fake_jit_build / "module_a" / "a.so").read_bytes() == b"so_a"
@@ -229,7 +233,8 @@ def test_restore_clears_regenerated_dir_first(
     (fake_jit_build / "module_new").mkdir()
     (fake_jit_build / "module_new" / "v1.so").write_bytes(b"v1")
 
-    restore = apply_tool._restore_aiter_jit_build(invalidate)
+    with patch.object(apply_tool, "_aiter_jit_build_dir", return_value=fake_jit_build):
+        restore = apply_tool._restore_aiter_jit_build(invalidate)
     assert restore["status"] == "ok"
     assert (fake_jit_build / "module_old" / "v0.so").read_bytes() == b"v0"
     assert not (fake_jit_build / "module_new").exists(), "regenerated jit/build/ must be cleared before restore"
@@ -251,14 +256,15 @@ def test_restore_skips_when_backup_path_missing(
     """If the backup vanished between apply and revert, restore must skip cleanly."""
     fake_src = tmp_path / "aiter_root" / "aiter" / "jit" / "build"
     fake_backup = tmp_path / "backup" / "jit_build"
-    out = apply_tool._restore_aiter_jit_build(
-        {
-            "status": "ok",
-            "src": str(fake_src),
-            "backup_path": str(fake_backup),
-            "moved_at": "2026-05-24T00:00:00Z",
-        }
-    )
+    with patch.object(apply_tool, "_aiter_jit_build_dir", return_value=fake_src):
+        out = apply_tool._restore_aiter_jit_build(
+            {
+                "status": "ok",
+                "src": str(fake_src),
+                "backup_path": str(fake_backup),
+                "moved_at": "2026-05-24T00:00:00Z",
+            }
+        )
     assert out["status"] == "skipped"
     assert "missing" in out["reason"]
 
@@ -324,7 +330,10 @@ def test_apply_then_revert_roundtrip_invalidates_and_restores_jit_cache(
     assert (backup_jit_build / "module_moe_ck2stages_b16_b16_silu_no" / "kernel.so").is_file()
     assert "v1" in target.read_text()
 
-    revert = apply_tool.revert_kernel_patch(result["manifest_path"])
+    # Revert restores jit/build only to the importable aiter jit/build dir; keep
+    # the resolver pointed at the synthetic layout for the revert too.
+    with patch.object(apply_tool, "_aiter_jit_build_dir", return_value=jit_build):
+        revert = apply_tool.revert_kernel_patch(result["manifest_path"])
     assert revert["status"] == "ok"
     assert "v0" in target.read_text()
     assert (jit_build / "module_moe_ck2stages_b16_b16_silu_no" / "kernel.so").read_bytes() == b"v0"
