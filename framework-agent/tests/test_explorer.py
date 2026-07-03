@@ -132,8 +132,8 @@ def test_passes_filter_include_paths_hit() -> None:
 
 def test_metric_float_returns_first_numeric_key() -> None:
     """_metric_float returns the first numeric value found among keys."""
-    assert ex._metric_float({"a": "no", "b": 12}, "a", "b") == 12.0
-    assert ex._metric_float({"a": "no"}, "a", "missing") is None
+    assert ex._metric_float({"a": "no", "b": 12}, ("a", "b")) == 12.0
+    assert ex._metric_float({"a": "no"}, ("a", "missing")) is None
 
 
 # ---------------------------------------------------------------------------
